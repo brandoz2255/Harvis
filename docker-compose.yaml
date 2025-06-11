@@ -1,0 +1,74 @@
+
+version: "3.8"
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama:/root/.ollama
+    # ---- GPU magic --------------------------------------------------
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - OLLAMA_FLASH_ATTENTION=1
+    networks: # Add this section for networking
+      - ollama-n8n-network
+    tty: true
+    restart: unless-stopped
+
+  webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: openwebui
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+    ports:
+      - "3000:8080"
+    depends_on:
+      - ollama
+    networks: # Add this section for networking
+      - ollama-n8n-network
+    restart: unless-stopped
+
+  n8n:
+    image: n8nio/n8n
+    container_name: n8n
+    ports:
+      - "5678:5678" # Default n8n UI port
+    environment:
+      # Set the n8n host, adjust if you access n8n from a specific domain
+      - N8N_HOST=${N8N_HOST:-localhost}
+      - N8N_PORT=5678
+      - WEBHOOK_URL=http://${N8N_HOST:-localhost}:5678/ # Important for webhooks if you use them
+      - N8N_PROTOCOL=http
+      - N8N_SMTP_SERVER= # Optional: For email sending in n8n
+      # Database configuration (optional but highly recommended for persistence)
+      # - DB_TYPE=postgresjs
+      # - DB_POSTGRESJS_HOST=your_postgres_host
+      # - DB_POSTGRESJS_PORT=5432
+      # - DB_POSTGRESJS_DATABASE=n8n
+      # - DB_POSTGRESJS_USER=n8n
+      # - DB_POSTGRESJS_PASSWORD=your_password
+    volumes:
+      - n8n_data:/home/node/.n8n # Persist n8n data (workflows, credentials)
+    depends_on:
+      - ollama # Ensure Ollama is up before n8n starts
+    networks: # Ensure n8n is on the same network as Ollama
+      - ollama-n8n-network
+    restart: unless-stopped
+
+volumes:
+  ollama:
+  n8n_data: # Define the volume for n8n
+
+networks:
+  ollama-n8n-network: # Define the custom bridge network
+    driver: bridge
