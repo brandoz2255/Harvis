@@ -9,3 +9,4 @@ torchaudio>=2.0.0
 safetensors>=0.5.3
 TTS>=0.22.0
 cython>=3.0.0 
+chatterbox-tts
