@@ -72,20 +72,31 @@ def load_stt_model(force_cpu=False):
             logger.error(f"Error loading STT model: {str(e)}")
             raise
     return stt_pipeline
-
 def load_tts_model(force_cpu=False):
     global tts_model, DEVICE
+    
+    # If the user checks "Force CPU Mode", we will still respect that for TTS.
+    # However, we remove the automatic fallback from CUDA to CPU.
     tts_device = "cpu" if force_cpu else DEVICE
+
+    # If the app is intended for GPU-only and no GPU is found, it's better to fail early.
+    if tts_device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA is selected, but no CUDA-enabled GPU is available. Please check your setup.")
+
     if tts_model is None:
         try:
             logger.info(f"Loading TTS model on {tts_device}")
             tts_model = ChatterboxTTS.from_pretrained(device=tts_device)
         except Exception as e:
-            logger.error(f"Error loading TTS model on {tts_device}: {str(e)}")
-            if not force_cpu and tts_device == "cuda":
-                logger.info("Attempting to fall back to CPU for TTS...")
-                return load_tts_model(force_cpu=True)
-            raise
+            # --- MODIFICATION START ---
+            # The original code had a fallback mechanism here.
+            # We are removing it as requested. If a CUDA error (or any other error)
+            # occurs, we will now log it as a fatal error and re-raise it,
+            # which will stop the TTS generation process.
+            logger.error(f"FATAL: Could not load TTS model on {tts_device}. Error: {str(e)}")
+            raise e
+            # --- MODIFICATION END ---
+            
     return tts_model
 
 def generate_speech(text, model, audio_prompt=None, exaggeration=0.5, temperature=0.8, cfg_weight=0.5):
@@ -179,7 +190,7 @@ def transcribe_and_chat(audio_path, history, selected_model, audio_prompt, exagg
     new_history, audio_response = chat_with_voice(
         transcription, history, selected_model, audio_prompt, exaggeration, temperature, cfg_weight
     )
-    return new_history, audio_response, transcription, ""
+    return new_history, audio_response, transcription, None
 
 
 with gr.Blocks(theme=gr.themes.Soft()) as demo:
@@ -264,7 +275,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
         )
 
     # Event Handling Logic
-    voice_input.stream(
+    voice_input.stop_recording(
         transcribe_and_chat,
         inputs=[voice_input, chatbot, model_selector, audio_prompt, exaggeration, temperature, cfg_weight, force_cpu],
         outputs=[chatbot, audio_output, msg, voice_input]
@@ -286,3 +297,4 @@ if __name__ == "__main__":
         logger.info("For detailed CUDA error tracking, consider running with: CUDA_LAUNCH_BLOCKING=1")
     
     demo.queue().launch(debug=True)
+
