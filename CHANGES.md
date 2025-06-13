@@ -37,4 +37,3 @@ This file documents the key improvements and additions made to the project.
 1. Test the application thoroughly, especially the CUDA error handling and fallback mechanisms
 2. Review all logging output for completeness and usefulness
 3. Consider adding more detailed error messages or status indicators in the web UI
-
