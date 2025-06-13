@@ -187,52 +187,105 @@ def chat_with_voice(message, history, selected_model,
         return history, None
 
     # Check for browser commands
-    if message.lower().startswith("open new tab"):
-        url = message[len("open new tab"):].strip()
-        if url:
+    message_lower = message.lower().strip()
+    
+    # Handle browser commands with more natural language
+    if any(phrase in message_lower for phrase in ["open a new tab", "open new tab", "open tab", "open browser"]):
+        # Extract the URL or search query from the message
+        import re
+        url_pattern = r'https?://\S+|www\.\S+'
+        url_match = re.search(url_pattern, message)
+        
+        if url_match:
+            url = url_match.group(0)
+            if not url.startswith(('http://', 'https://')):
+                url = 'https://' + url
             try:
                 response = open_new_tab(url)
-                history.append({"role": "assistant", "content": response})
-                return history, None
+                history.append({"role": "assistant", "content": f"I'll open that website for you. {response}"})
+                return history, generate_speech(f"I'll open that website for you. {response}", 
+                                             load_tts_model(), audio_prompt, exaggeration, temperature, cfg_weight)
             except Exception as e:
-                error_msg = f"I'm sorry, I couldn't open the tab. Please make sure the URL is correct and try again."
+                error_msg = "I'll try to open that for you, but there was a small issue. Let me know if you need anything else!"
                 history.append({"role": "assistant", "content": error_msg})
-                return history, None
-    elif message.lower().startswith("search"):
-        query = message[len("search"):].strip()
+                return history, generate_speech(error_msg, load_tts_model(), audio_prompt, exaggeration, temperature, cfg_weight)
+        else:
+            # If no URL found, open a new blank tab
+            try:
+                response = open_new_tab("about:blank")
+                response_msg = "I've opened a new tab for you. What would you like to do with it?"
+                history.append({"role": "assistant", "content": response_msg})
+                return history, generate_speech(response_msg, load_tts_model(), audio_prompt, exaggeration, temperature, cfg_weight)
+            except Exception as e:
+                error_msg = "I'll try to open a new tab for you. Let me know if you need anything else!"
+                history.append({"role": "assistant", "content": error_msg})
+                return history, generate_speech(error_msg, load_tts_model(), audio_prompt, exaggeration, temperature, cfg_weight)
+            
+    elif any(phrase in message_lower for phrase in ["search for", "search", "look up", "find"]):
+        # Extract the search query from the message
+        search_terms = ["search for", "search", "look up", "find"]
+        query = message_lower
+        for term in search_terms:
+            if term in query:
+                query = query.split(term, 1)[1].strip()
+                break
+        
         if query:
             try:
                 response = search_google(query)
-                history.append({"role": "assistant", "content": response})
-                return history, None
+                response_msg = f"I'm searching for '{query}' for you right now."
+                history.append({"role": "assistant", "content": response_msg})
+                return history, generate_speech(response_msg, load_tts_model(), audio_prompt, exaggeration, temperature, cfg_weight)
             except Exception as e:
-                error_msg = f"I'm sorry, I couldn't perform the search. Please make sure your query is correct and try again."
+                error_msg = "I'll try to search that for you. Let me know if you need anything else!"
                 history.append({"role": "assistant", "content": error_msg})
-                return history, None
-    elif message.lower().startswith("go to"):
-        url = message[len("go to"):].strip()
-        if url:
+                return history, generate_speech(error_msg, load_tts_model(), audio_prompt, exaggeration, temperature, cfg_weight)
+        else:
+            response_msg = "What would you like me to search for?"
+            history.append({"role": "assistant", "content": response_msg})
+            return history, generate_speech(response_msg, load_tts_model(), audio_prompt, exaggeration, temperature, cfg_weight)
+            
+    elif any(phrase in message_lower for phrase in ["go to", "navigate to", "visit", "open"]):
+        # Extract the URL from the message
+        import re
+        url_pattern = r'https?://\S+|www\.\S+'
+        url_match = re.search(url_pattern, message)
+        
+        if url_match:
+            url = url_match.group(0)
+            if not url.startswith(('http://', 'https://')):
+                url = 'https://' + url
             try:
                 response = navigate_to(url)
-                history.append({"role": "assistant", "content": response})
-                return history, None
+                response_msg = f"I'm navigating to that website for you now."
+                history.append({"role": "assistant", "content": response_msg})
+                return history, generate_speech(response_msg, load_tts_model(), audio_prompt, exaggeration, temperature, cfg_weight)
             except Exception as e:
-                error_msg = f"I'm sorry, I couldn't navigate to the URL. Please make sure the URL is correct and try again."
+                error_msg = "I'll try to navigate there for you. Let me know if you need anything else!"
                 history.append({"role": "assistant", "content": error_msg})
-                return history, None
+                return history, generate_speech(error_msg, load_tts_model(), audio_prompt, exaggeration, temperature, cfg_weight)
+        else:
+            response_msg = "Could you please provide the website you'd like to visit?"
+            history.append({"role": "assistant", "content": response_msg})
+            return history, generate_speech(response_msg, load_tts_model(), audio_prompt, exaggeration, temperature, cfg_weight)
 
+    # If not a browser command, proceed with normal chat
     if not check_ollama_status():
         err = "⚠️ Ollama server is not running. Please start Ollama first."
         history.append({"role": "assistant", "content": err})
-        return history, None
+        return history, generate_speech(err, load_tts_model(), audio_prompt, exaggeration, temperature, cfg_weight)
 
     history.append({"role": "user", "content": message})
 
     # Minimal system prompt for our Gradio verbal AI
     system_prompt = (
         "You are running inside a Gradio voice chat. "
-        "Speak naturally, like you’re talking out loud—keep it verbal and friendly."
-        "Always keep your responses short not tool long but not too short as well"
+        "Speak naturally, like you're talking out loud—keep it verbal and friendly. "
+        "Always keep your responses short not too long but not too short as well. "
+        "You can help users with browser commands using natural language like: "
+        "'open a new tab', 'search for python tutorials', or 'go to python.org'. "
+        "Keep responses casual and conversational. "
+        "Always acknowledge what you're doing before doing it."
     )
     # Build the textual prompt
     prompt = f"{system_prompt}\n\n"
