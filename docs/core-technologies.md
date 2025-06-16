@@ -176,7 +176,7 @@ def init_stt():
 ## Performance Considerations
 
 ### Memory Management
-- GPU memory monitoring
+- GPU memory monitoring with dynamic VRAM threshold based on available memory
 - Browser session management
 - Audio buffer optimization
 - Model caching
@@ -192,6 +192,7 @@ def init_stt():
 - Automatic recovery
 - User feedback
 - Logging and monitoring
+- Robust CUDA error handling with fallback to CPU when necessary
 
 ## Best Practices
 
@@ -215,6 +216,7 @@ def init_stt():
 - Resource cleanup
 - Session management
 - Access control
+- Docker security best practices (running as non-root user)
 
 ## Common Issues and Solutions
 
@@ -257,4 +259,4 @@ def init_stt():
 2. What are the alternatives?
 3. How is the system deployed?
 4. What are the security considerations?
-5. How is the system monitored? 
+5. How is the system monitored?

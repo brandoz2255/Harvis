@@ -40,6 +40,9 @@ python new-chatbot.py
 - Text-to-speech and speech-to-text conversion
 - Real-time conversation with LLM
 - Web search and navigation
+- CUDA error handling with fallback to CPU
+- Docker security improvements (non-root user)
+- Enhanced VRAM management
 
 ## Technology Stack
 
@@ -51,4 +54,4 @@ python new-chatbot.py
 - Whisper for speech recognition
 - PyTorch for ML operations
 
-For detailed information about each component, please refer to the specific documentation files. 
+For detailed information about each component, please refer to the specific documentation files.

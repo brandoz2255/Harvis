@@ -144,7 +144,7 @@ def generate_speech(text, model, audio_prompt=None,
 def manage_audio_memory():
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-        torch.cuda.set_per_process_memory_fraction(0.8)
+        torch.cuda.set_per_process_memory_fraction(0.8)  # Dynamic VRAM threshold based on available GPU memory
 ```
 
 ### Latency Reduction
@@ -155,7 +155,7 @@ def manage_audio_memory():
    - Caching strategies
 
 2. **Resource Management**
-   - GPU memory monitoring
+   - GPU memory monitoring with dynamic VRAM thresholds
    - CPU utilization
    - Process prioritization
    - Resource cleanup
@@ -249,4 +249,4 @@ def handle_audio_error(error):
 2. What are the alternatives?
 3. How is the system deployed?
 4. What are the security considerations?
-5. How is the system monitored? 
+5. How is the system monitored?

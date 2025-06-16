@@ -11,6 +11,7 @@ The AI Voice Assistant is a sophisticated application that combines multiple cut
 3. Implement real-time speech-to-text and text-to-speech conversion
 4. Provide a seamless user experience with minimal latency
 5. Demonstrate practical applications of modern AI technologies
+6. Implement robust error handling for CUDA operations with fallback to CPU when necessary
 
 ## Key Components
 
@@ -18,6 +19,7 @@ The AI Voice Assistant is a sophisticated application that combines multiple cut
 - Speech-to-text conversion using Whisper
 - Text-to-speech synthesis using Chatterbox TTS
 - Real-time audio processing and streaming
+- Dynamic VRAM threshold based on available GPU memory
 
 ### 2. AI Integration
 - Local LLM processing using Ollama
@@ -42,7 +44,7 @@ The AI Voice Assistant is a sophisticated application that combines multiple cut
    - Background processing for non-blocking operations
 
 2. **Resource Optimization**
-   - GPU memory management for ML models
+   - GPU memory management for ML models with dynamic VRAM threshold
    - Efficient browser session handling
    - Optimized audio buffer management
 
@@ -50,6 +52,7 @@ The AI Voice Assistant is a sophisticated application that combines multiple cut
    - Graceful degradation of services
    - User-friendly error messages
    - Automatic recovery mechanisms
+   - Robust CUDA error handling with fallback to CPU when necessary
 
 4. **Natural Language Processing**
    - Context maintenance in conversations
@@ -107,10 +110,12 @@ This project demonstrates:
    - System integration
    - Audio processing
    - Web automation
+   - CUDA error handling with fallback mechanisms
+   - Docker security best practices (running as non-root user)
 
 2. **Soft Skills**
    - Project management
    - Problem-solving
    - Technical documentation
    - System design
-   - User experience consideration 
+   - User experience consideration

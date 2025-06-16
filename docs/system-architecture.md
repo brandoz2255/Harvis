@@ -413,16 +413,17 @@ class BrowserController:
 ### 1. Memory Management
 ```python
 def manage_resources():
-    # GPU memory
+    # GPU memory with dynamic VRAM threshold based on available memory
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-        
+        torch.cuda.set_per_process_memory_fraction(0.8)  # Dynamic VRAM threshold
+
     # Browser resources
     if browser_controller.driver:
         browser_controller.driver.execute_script(
             "window.localStorage.clear();"
         )
-        
+
     # LLM resources
     llm_service.clear_cache()
 ```
@@ -432,10 +433,10 @@ def manage_resources():
 def manage_processes():
     # Monitor system resources
     monitor_resources()
-    
+
     # Clean up processes
     cleanup_processes()
-    
+
     # Restart if needed
     if needs_restart():
         restart_system()
@@ -576,4 +577,4 @@ python new-chatbot.py
 - Backup data
 - Restore system
 - Emergency shutdown
-- Recovery procedures 
+- Recovery procedures

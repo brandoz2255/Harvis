@@ -117,6 +117,56 @@ def _init_driver(headless: bool = False, proxy: Optional[str] = None):
         logger.error(f"Failed to initialize Firefox WebDriver: {e}")
         raise
 
+def clear_browser_cache():
+    """Clear the browser cache."""
+    try:
+        driver = _init_driver()
+        # Open about:preferences page for clearing cache via UI (Firefox method)
+        driver.get("about:preferences#privacy")
+
+        # Wait for page to load
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.ID, "clear-data-dialog"))
+        )
+
+        # Click the 'Clear Data' button
+        clear_data_button = driver.find_element(By.XPATH, "//button[contains(@id, 'clear-data-dialog')]")
+        _random_delay()
+        clear_data_button.click()
+
+        # Wait for dialog to open and select all data types
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.ID, "clearDataDialog"))
+        )
+
+        # Select cache checkbox if present (it might already be selected)
+        try:
+            cache_checkbox = driver.find_element(By.XPATH, "//label[@for='cache']")
+            _random_delay()
+            if not cache_checkbox.get_attribute("aria-checked") == "true":
+                cache_checkbox.click()
+        except:
+            pass  # Cache checkbox might not be found or already checked
+
+        # Click the clear button
+        confirm_button = driver.find_element(By.XPATH, "//button[@id='clearDataDialog']//*[contains(text(), 'Clear')]")
+        _random_delay()
+        confirm_button.click()
+
+        # Wait for clearing to complete and close preferences tab
+        WebDriverWait(driver, 10).until_not(
+            EC.presence_of_element_located((By.ID, "clear-data-dialog"))
+        )
+
+        driver.close()  # Close the preferences tab
+
+        logger.info("Successfully cleared browser cache")
+        return "✅ Browser cache has been cleared"
+    except Exception as e:
+        error_msg = f"Failed to clear browser cache: {str(e)}"
+        logger.error(error_msg)
+        return f"❌ Error clearing browser cache: {error_msg}"
+
 def open_new_tab(url: str, headless: bool = False, proxy: Optional[str] = None) -> str:
     """Open URL in a new tab with CAPTCHA handling."""
     if not url:
@@ -230,6 +280,10 @@ def execute_nlp_browser_command(command: str, headless: bool = False, proxy: Opt
         if not url.startswith(('http://', 'https://')):
             url = 'https://' + url
         return open_new_tab(url, headless=headless, proxy=proxy)
+
+    # Check for clear browser cache commands
+    if "clear browser cache" in command_lower or "hey clear browser cache" in command_lower:
+        return clear_browser_cache()
 
     # Check for open tab commands
     for pattern in open_tab_patterns:

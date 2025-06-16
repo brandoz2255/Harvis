@@ -9,6 +9,22 @@ import re
 from transformers import pipeline
 from chatterbox.tts import ChatterboxTTS, punc_norm
 from browser import execute_nlp_browser_command  # Import the new NLP command function
+from os_ops import (
+    open_terminal,
+    execute_command,
+    list_files,
+    create_file,
+    delete_file,
+    move_file,
+    check_battery_status
+)
+from browser import (
+    open_new_tab,
+    search_google,
+    navigate_to,
+    clear_browser_cache,
+    execute_nlp_browser_command
+)
 
 # NOTE: This application requires the 'ffmpeg' command-line tool for audio processing.
 # Please install it using your system's package manager (e.g., `sudo apt install ffmpeg`).
@@ -200,6 +216,8 @@ def is_browser_command(message):
         r'^(?:please\s+)?(?:can\s+you\s+)?(?:open|launch|start)\s+(?:a\s+)?(?:new\s+)?(?:browser\s+)?(?:tab|window)',
         r'^(?:please\s+)?(?:can\s+you\s+)?(?:search|look\s+up|find)\s+(?:for\s+)?(?:information\s+about\s+)?',
         r'^(?:please\s+)?(?:can\s+you\s+)?(?:go\s+to|navigate\s+to|visit|open)\s+(?:the\s+)?(?:website\s+)?(?:at\s+)?',
+        r'^clear browser cache$',
+        r'^hey clear browser cache$'
     ]
 
     # Check if the message matches any browser command pattern
@@ -238,162 +256,444 @@ def extract_search_query(message):
 def chat_with_voice(message, history, selected_model,
                     audio_prompt=None, exaggeration=0.5,
                     temperature=0.8, cfg_weight=0.5):
-    if not message.strip():
-        return history, None
-
-    # First, check if this is actually a browser command
-    if is_browser_command(message):
-        try:
-            response = execute_nlp_browser_command(message)
-            response_msg = f"I'll perform that action for you: {response}"
-            history.append({"role": "assistant", "content": response_msg})
-            return history, generate_speech(response_msg, load_tts_model(),
-                                         audio_prompt, exaggeration, temperature, cfg_weight)
-        except Exception as e:
-            error_msg = f"I'm sorry, I couldn't perform that action. Please try again with a different command."
-            history.append({"role": "assistant", "content": error_msg})
-            return history, generate_speech(error_msg, load_tts_model(),
-                                         audio_prompt, exaggeration, temperature, cfg_weight)
-
-    # If not a browser command, proceed with normal chat
+    """Process voice input and generate voice response."""
     try:
-        response = requests.post(
-            f"{OLLAMA_URL}/api/generate",
-            json={
-                "model": selected_model,
-                "prompt": message,
-                "stream": False
-            }
-        )
-        if response.ok:
-            response_text = response.json().get("response", "").strip()
-            history.append({"role": "assistant", "content": response_text})
-            return history, generate_speech(response_text, load_tts_model(),
-                                         audio_prompt, exaggeration, temperature, cfg_weight)
+        # Initialize command processor
+        processor = CommandProcessor()
+        
+        # Check if it's a browser command
+        if is_browser_command(message):
+            response = processor.process_command(message)
+        else:
+            # Process with Ollama
+            try:
+                r = requests.post(
+                    f"{OLLAMA_URL}/api/generate",
+                    json={
+                        "model": selected_model,
+                        "prompt": message,
+                        "stream": False
+                    }
+                )
+                if not r.ok:
+                    raise RuntimeError(f"Ollama API error: {r.status_code} - {r.text}")
+                response = r.json()["response"]
+            except Exception as e:
+                logger.error(f"Ollama error: {e}")
+                response = "I'm sorry, I couldn't process that request. Please try again."
+
+        # Generate speech for the response
+        try:
+            wait_for_vram()
+            tts = load_tts_model()
+            sr, audio = generate_speech(
+                response,
+                tts,
+                audio_prompt=audio_prompt,
+                exaggeration=exaggeration,
+                temperature=temperature,
+                cfg_weight=cfg_weight
+            )
+            
+            # Save audio to temporary file
+            temp_audio = "temp_response.wav"
+            sf.write(temp_audio, audio, sr)
+            
+            return response, history + [[message, response]], temp_audio
+            
+        except Exception as e:
+            logger.error(f"TTS error: {e}")
+            return response, history + [[message, response]], None
+            
     except Exception as e:
-        logger.error(f"Error in chat: {e}")
-        error_msg = "I'm having trouble processing your request. Could you please try again?"
-        history.append({"role": "assistant", "content": error_msg})
-        return history, generate_speech(error_msg, load_tts_model(),
-                                     audio_prompt, exaggeration, temperature, cfg_weight)
+        error_msg = f"Error in chat_with_voice: {str(e)}"
+        logger.error(error_msg)
+        return f"❌ {error_msg}", history + [[message, f"❌ {error_msg}"]], None
 
 # ─── Transcribe & Chat (Voice) ──────────────────────────────────────────────────
 def transcribe_and_chat(audio_path, history,
                         selected_model, audio_prompt,
                         exaggeration, temperature,
                         cfg_weight, force_cpu):
-    if audio_path is None:
-        return history, None, "Please record your voice first.", None
-
-    logger.info(f"Received audio file: {audio_path}")
+    """Transcribe audio input and generate voice response."""
     try:
-        stt = load_stt_model(force_cpu=force_cpu)
-        transcription = stt(audio_path)["text"]
-        logger.info(f"Transcription: {transcription}")
-
-        # Check for browser commands in voice input
-        if is_browser_command(transcription):
-            try:
-                response = execute_nlp_browser_command(transcription)
-                history.append({"role": "assistant", "content": response})
-                return history, None, response, None
-            except Exception as e:
-                error_msg = f"I'm sorry, I couldn't perform that action. Please try again with a different command."
-                history.append({"role": "assistant", "content": error_msg})
-                return history, None, error_msg, None
-
+        # Load STT model and transcribe
+        stt = load_stt_model(force_cpu)
+        result = stt(audio_path)
+        message = result["text"].strip()
+        
+        if not message:
+            return "I couldn't understand what you said. Could you please try again?", history, None
+            
+        # Process the transcribed message
+        return chat_with_voice(
+            message,
+            history,
+            selected_model,
+            audio_prompt,
+            exaggeration,
+            temperature,
+            cfg_weight
+        )
+        
     except Exception as e:
-        logger.error(f"STT Error: {e}")
-        if "ffmpeg" in str(e).lower():
-            err = "[STT Error: `ffmpeg` not found; install it.]"
-        else:
-            err = f"[STT Error: {e}]"
-        return history, None, err, None
+        error_msg = f"Error in transcribe_and_chat: {str(e)}"
+        logger.error(error_msg)
+        return f"❌ {error_msg}", history + [[None, f"❌ {error_msg}"]], None
 
-    new_history, audio_resp = chat_with_voice(
-        transcription, history, selected_model,
-        audio_prompt, exaggeration, temperature, cfg_weight
-    )
-    return new_history, audio_resp, transcription, None
+def create_interface():
+    """Create the Gradio interface."""
+    with gr.Blocks(title="Voice-Enabled AI Assistant") as demo:
+        gr.Markdown("# 🎙️ Voice-Enabled AI Assistant")
+        gr.Markdown("""
+        This assistant can:
+        - Process voice commands for OS operations
+        - Control browser automation
+        - Have natural conversations
+        - Respond with voice
+        
+        Just click the microphone button and speak!
+        
+        Type 'help' or 'show commands' to see available commands.
+        """)
+        
+        with gr.Row():
+            with gr.Column(scale=2):
+                chatbot = gr.Chatbot(
+                    [],
+                    elem_id="chatbot",
+                    height=600
+                )
+                with gr.Row():
+                    with gr.Column(scale=4):
+                        msg = gr.Textbox(
+                            show_label=False,
+                            placeholder="Type your message here... (Type 'help' to see commands)",
+                            container=False
+                        )
+                    with gr.Column(scale=1):
+                        submit = gr.Button("Send")
+                
+                with gr.Row():
+                    audio_input = gr.Audio(
+                        source="microphone",
+                        type="filepath",
+                        label="Voice Input"
+                    )
+                    audio_output = gr.Audio(
+                        label="Voice Response",
+                        type="filepath"
+                    )
+            
+            with gr.Column(scale=1):
+                with gr.Group():
+                    gr.Markdown("### Settings")
+                    selected_model = gr.Dropdown(
+                        choices=[],
+                        label="Ollama Model",
+                        value=DEFAULT_MODEL
+                    )
+                    audio_prompt = gr.Audio(
+                        source="upload",
+                        type="filepath",
+                        label="Voice Style (Optional)"
+                    )
+                    with gr.Accordion("Advanced Settings", open=False):
+                        exaggeration = gr.Slider(
+                            minimum=0.0,
+                            maximum=1.0,
+                            value=0.5,
+                            step=0.1,
+                            label="Voice Exaggeration"
+                        )
+                        temperature = gr.Slider(
+                            minimum=0.1,
+                            maximum=1.0,
+                            value=0.8,
+                            step=0.1,
+                            label="Temperature"
+                        )
+                        cfg_weight = gr.Slider(
+                            minimum=0.1,
+                            maximum=1.0,
+                            value=0.5,
+                            step=0.1,
+                            label="CFG Weight"
+                        )
+                        force_cpu = gr.Checkbox(
+                            label="Force CPU for STT",
+                            value=False
+                        )
+                
+                with gr.Group():
+                    gr.Markdown("### Status")
+                    status = gr.Textbox(
+                        label="System Status",
+                        value="Initializing...",
+                        interactive=False
+                    )
+                    update_btn = gr.Button("🔄 Update Model List")
+                
+                with gr.Group():
+                    gr.Markdown("### Quick Commands")
+                    with gr.Row():
+                        help_btn = gr.Button("📋 Show Commands")
+                        clear_btn = gr.Button("🗑️ Clear Chat")
+        
+        def update_models():
+            models, error = fetch_ollama_models()
+            if error:
+                return gr.Dropdown.update(choices=[DEFAULT_MODEL], value=DEFAULT_MODEL), error
+            return gr.Dropdown.update(choices=models, value=models[0] if models else DEFAULT_MODEL), "✅ Models updated"
+        
+        def text_submit(message, history, *args):
+            if not message.strip():
+                return history, None
+            response, new_history, audio = chat_with_voice(message, history, *args)
+            return new_history, audio
+        
+        def show_help(history):
+            processor = CommandProcessor()
+            help_text = processor._handle_help("help")
+            return history + [[None, help_text]]
+        
+        # Set up event handlers
+        submit.click(
+            text_submit,
+            [msg, chatbot, selected_model, audio_prompt, exaggeration, temperature, cfg_weight],
+            [chatbot, audio_output]
+        ).then(
+            lambda: "",
+            None,
+            msg
+        )
+        
+        audio_input.change(
+            transcribe_and_chat,
+            [audio_input, chatbot, selected_model, audio_prompt, exaggeration, temperature, cfg_weight, force_cpu],
+            [chatbot, audio_output]
+        )
+        
+        update_btn.click(
+            update_models,
+            None,
+            [selected_model, status]
+        )
+        
+        help_btn.click(
+            show_help,
+            [chatbot],
+            [chatbot]
+        )
+        
+        clear_btn.click(
+            lambda: [],
+            None,
+            [chatbot]
+        )
+        
+        # Initial model list update
+        demo.load(
+            update_models,
+            None,
+            [selected_model, status]
+        )
+    
+    return demo
 
-# ─── Gradio App Definition ─────────────────────────────────────────────────────
-with gr.Blocks(theme=gr.themes.Soft()) as demo:
-    gr.Markdown("""
-    # 🗣️ Voice Chat with Ollama
-    Talk to an LLM with voice or text! Ensure Ollama is running and models are pulled.
-    """)
+class CommandProcessor:
+    def __init__(self):
+        self.os_commands = {
+            "open terminal": self._handle_open_terminal,
+            "execute": self._handle_execute_command,
+            "list files": self._handle_list_files,
+            "create file": self._handle_create_file,
+            "delete file": self._handle_delete_file,
+            "move file": self._handle_move_file,
+            "battery": self._handle_battery_status,
+            "help": self._handle_help
+        }
+        
+        self.browser_commands = {
+            "open": self._handle_open_url,
+            "search": self._handle_search,
+            "navigate": self._handle_navigate,
+            "clear cache": self._handle_clear_cache
+        }
+        
+        self.command_history = []
+        self.max_history = 100
 
-    initial_models, error_msg = fetch_ollama_models()
+    def process_command(self, command: str) -> str:
+        """
+        Process a verbal command and route it to the appropriate handler.
+        
+        Args:
+            command (str): The verbal command to process
+            
+        Returns:
+            str: Response from the executed command
+        """
+        try:
+            command = command.lower().strip()
+            
+            # Add to command history
+            self.command_history.append(command)
+            if len(self.command_history) > self.max_history:
+                self.command_history.pop(0)
+            
+            # Check for help command first
+            if command == "help" or command == "show commands":
+                return self._handle_help(command)
+            
+            # Check for OS commands first
+            for cmd_key, handler in self.os_commands.items():
+                if cmd_key in command:
+                    return handler(command)
+            
+            # Then check for browser commands
+            for cmd_key, handler in self.browser_commands.items():
+                if cmd_key in command:
+                    return handler(command)
+            
+            # If no specific command is found, try browser NLP command
+            return execute_nlp_browser_command(command)
+            
+        except Exception as e:
+            error_msg = f"Error processing command: {str(e)}"
+            logger.error(error_msg)
+            return f"❌ {error_msg}"
 
-    with gr.Row():
-        with gr.Column(scale=3):
-            chatbot = gr.Chatbot(height=400, label="Conversation", type="messages")
-        with gr.Column(scale=1):
-            gr.Markdown("### Model Selection")
-            model_status = gr.Markdown("" if not error_msg else f"⚠️ {error_msg}")
-            model_selector = gr.Dropdown(
-                choices=initial_models,
-                value=initial_models[0] if initial_models else None,
-                label="Select AI Model",
-                interactive=True,
-            )
-            refresh = gr.Button("🔄 Refresh Models")
-            def update_models():
-                models, err = fetch_ollama_models()
-                status = "" if not err else f"⚠️ {err}"
-                return models, models[0] if models else None, status
-            refresh.click(update_models,
-                          outputs=[model_selector, model_selector, model_status])
+    def _handle_help(self, command: str) -> str:
+        """Show available commands and their usage."""
+        help_text = "🤖 Available Commands:\n\n"
+        
+        help_text += "📁 OS Commands:\n"
+        help_text += "- 'open terminal' - Opens a new terminal window\n"
+        help_text += "- 'execute <command>' - Runs a shell command\n"
+        help_text += "- 'list files [in <directory>]' - Lists files in a directory\n"
+        help_text += "- 'create file <path> [with content <text>]' - Creates a new file\n"
+        help_text += "- 'delete file <path>' - Deletes a file\n"
+        help_text += "- 'move file <source> to <destination>' - Moves or renames a file\n"
+        help_text += "- 'battery' - Shows battery status\n\n"
+        
+        help_text += "🌐 Browser Commands:\n"
+        help_text += "- 'open <url>' - Opens a URL in a new tab\n"
+        help_text += "- 'search <query>' - Performs a Google search\n"
+        help_text += "- 'navigate to <url>' - Navigates to a URL\n"
+        help_text += "- 'clear cache' - Clears browser cache\n\n"
+        
+        help_text += "💡 Other Features:\n"
+        help_text += "- Natural language conversation\n"
+        help_text += "- Voice input and output\n"
+        help_text += "- Command history tracking\n"
+        
+        return help_text
 
-            with gr.Accordion("Advanced Voice Settings", open=False):
-                audio_prompt = gr.Audio(sources=["upload"],
-                                        type="filepath",
-                                        label="Voice Reference (Optional)")
-                force_cpu = gr.Checkbox(label="Force CPU Mode", value=False)
-                exaggeration = gr.Slider(0.25, 2, value=0.5, step=0.05,
-                                        label="Voice Exaggeration")
-                temperature = gr.Slider(0.05, 5, value=0.8, step=0.05,
-                                       label="Temperature")
-                cfg_weight = gr.Slider(0.0, 1, value=0.5, step=0.05,
-                                       label="CFG/Pace Weight")
+    def _handle_open_terminal(self, command: str) -> str:
+        """Handle terminal opening commands."""
+        # Extract optional command to run
+        cmd = command.replace("open terminal", "").strip()
+        if cmd:
+            return open_terminal(cmd)
+        return open_terminal()
 
-    gr.Markdown("---")
-    with gr.Row():
-        with gr.Column():
-            gr.Markdown("### 🎤 Voice Input")
-            voice_input = gr.Audio(sources=["microphone"],
-                                   type="filepath",
-                                   label="Record Your Message")
-        with gr.Column():
-            gr.Markdown("### ⌨️ Text Input")
-            msg = gr.Textbox(placeholder="Type here or use voice...",
-                             label="Type your message")
+    def _handle_execute_command(self, command: str) -> str:
+        """Handle command execution."""
+        # Extract the actual command after "execute"
+        cmd = command.replace("execute", "").strip()
+        if not cmd:
+            return "❌ Please specify a command to execute"
+        return execute_command(cmd)
 
-    audio_output = gr.Audio(label="AI Voice Response", autoplay=True)
-    clear = gr.ClearButton(components=[chatbot, msg, audio_output, voice_input],
-                           value="Clear Conversation")
+    def _handle_list_files(self, command: str) -> str:
+        """Handle file listing commands."""
+        # Extract directory if specified
+        parts = command.split("in")
+        directory = parts[1].strip() if len(parts) > 1 else "."
+        return list_files(directory)
 
-    voice_input.stop_recording(
-        fn=transcribe_and_chat,
-        inputs=[voice_input, chatbot,
-                model_selector, audio_prompt,
-                exaggeration, temperature,
-                cfg_weight, force_cpu],
-        outputs=[chatbot, audio_output, msg, voice_input]
-    )
+    def _handle_create_file(self, command: str) -> str:
+        """Handle file creation commands."""
+        # Extract file path and content
+        parts = command.replace("create file", "").strip().split("with content")
+        if not parts[0].strip():
+            return "❌ Please specify a file path"
+        path = parts[0].strip()
+        content = parts[1].strip() if len(parts) > 1 else ""
+        return create_file(path, content)
 
-    def text_submit(message, history, *args):
-        new_hist, audio_out = chat_with_voice(message, history, *args)
-        return "", new_hist, audio_out
+    def _handle_delete_file(self, command: str) -> str:
+        """Handle file deletion commands."""
+        path = command.replace("delete file", "").strip()
+        if not path:
+            return "❌ Please specify a file to delete"
+        return delete_file(path)
 
-    msg.submit(text_submit,
-               inputs=[msg, chatbot,
-                       model_selector, audio_prompt,
-                       exaggeration, temperature,
-                       cfg_weight],
-               outputs=[msg, chatbot, audio_output])
+    def _handle_move_file(self, command: str) -> str:
+        """Handle file move/rename commands."""
+        parts = command.replace("move file", "").strip().split("to")
+        if len(parts) != 2:
+            return "❌ Invalid move command format. Use: move file <source> to <destination>"
+        src = parts[0].strip()
+        dest = parts[1].strip()
+        if not src or not dest:
+            return "❌ Please specify both source and destination paths"
+        return move_file(src, dest)
+
+    def _handle_battery_status(self, command: str) -> str:
+        """Handle battery status check."""
+        return check_battery_status()
+
+    def _handle_open_url(self, command: str) -> str:
+        """Handle URL opening commands."""
+        url = command.replace("open", "").strip()
+        if not url:
+            return "❌ Please specify a URL to open"
+        return open_new_tab(url)
+
+    def _handle_search(self, command: str) -> str:
+        """Handle search commands."""
+        query = command.replace("search", "").strip()
+        if not query:
+            return "❌ Please specify a search query"
+        return search_google(query)
+
+    def _handle_navigate(self, command: str) -> str:
+        """Handle navigation commands."""
+        url = command.replace("navigate", "").strip()
+        if not url:
+            return "❌ Please specify a URL to navigate to"
+        return navigate_to(url)
+
+    def _handle_clear_cache(self, command: str) -> str:
+        """Handle cache clearing commands."""
+        return clear_browser_cache()
+
+def main():
+    processor = CommandProcessor()
+    print("🤖 Chatbot initialized. Type 'exit' to quit.")
+    
+    while True:
+        try:
+            command = input("\nEnter your command: ").strip()
+            if command.lower() == 'exit':
+                print("Goodbye! 👋")
+                break
+                
+            response = processor.process_command(command)
+            print(f"\n{response}")
+            
+        except KeyboardInterrupt:
+            print("\nGoodbye! 👋")
+            break
+        except Exception as e:
+            logger.error(f"Error in main loop: {str(e)}")
+            print(f"❌ An error occurred: {str(e)}")
 
 if __name__ == "__main__":
     if os.environ.get("CUDA_LAUNCH_BLOCKING") != "1":
         logger.info("Run with CUDA_LAUNCH_BLOCKING=1 for detailed CUDA errors.")
+    demo = create_interface()
     demo.queue().launch(debug=True)
+    main()

@@ -454,4 +454,4 @@ def cleanup_resources():
 3. **CAPTCHA Handling**
    - Automated solving
    - Better detection
-   - Improved recovery 
+   - Improved recovery

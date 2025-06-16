@@ -149,13 +149,16 @@ class ConversationContext:
 def handle_llm_error(error):
     """Handle LLM-related errors."""
     logger.error(f"LLM error: {error}")
-    
+
     if "connection" in str(error).lower():
         return retry_connection()
     elif "model" in str(error).lower():
         return reload_model()
     elif "timeout" in str(error).lower():
         return retry_with_timeout()
+    elif "cuda" in str(error).lower():
+        # Fallback to CPU if CUDA error occurs
+        return switch_to_cpu()
     else:
         return fallback_response()
 ```
@@ -331,4 +334,4 @@ def manage_llm_resources():
     # Clear conversation history
     if 'context' in globals():
         context.history.clear()
-``` 
+```
