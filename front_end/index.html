@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Screen Sharing Demo</title>
+    <style>
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            text-align: center;
+        }
+        #videoElement {
+            width: 100%;
+            max-width: 800px;
+            margin: 20px 0;
+            border: 1px solid #ccc;
+            display: none;
+        }
+        .button {
+            padding: 10px 20px;
+            font-size: 16px;
+            cursor: pointer;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            margin: 10px;
+        }
+        .button:hover {
+            background-color: #45a049;
+        }
+        .button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        #commentary {
+            margin: 20px 0;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            background-color: #f9f9f9;
+            display: none;
+        }
+        .controls {
+            margin: 20px 0;
+        }
+        .commentary-toggle {
+            background-color: #2196F3;
+        }
+        .commentary-toggle:hover {
+            background-color: #1976D2;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Screen Sharing Demo</h1>
+        <div class="controls">
+            <button id="startButton" class="button">Start Sharing</button>
+            <button id="stopButton" class="button" disabled>Stop Sharing</button>
+            <button id="commentaryButton" class="button commentary-toggle" disabled>Toggle Commentary</button>
+        </div>
+        <video id="videoElement" autoplay></video>
+        <div id="commentary"></div>
+    </div>
+
+    <script>
+        const videoElement = document.getElementById('videoElement');
+        const startButton = document.getElementById('startButton');
+        const stopButton = document.getElementById('stopButton');
+        const commentaryButton = document.getElementById('commentaryButton');
+        const commentaryDiv = document.getElementById('commentary');
+        let mediaStream = null;
+        let commentaryEnabled = false;
+        let lastCommentaryTime = 0;
+        const COMMENTARY_INTERVAL = 30000; // 30 seconds between automatic commentaries
+
+        // Function to analyze screen content
+        async function analyzeScreenContent() {
+            if (!mediaStream || !commentaryEnabled) return;
+
+            try {
+                // Create a canvas to capture the current frame
+                const canvas = document.createElement('canvas');
+                canvas.width = videoElement.videoWidth;
+                canvas.height = videoElement.videoHeight;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(videoElement, 0, 0);
+
+                // Convert the frame to base64
+                const imageData = canvas.toDataURL('image/jpeg', 0.8);
+
+                // Send to backend for analysis
+                const response = await fetch('/analyze-screen', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ image: imageData })
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    if (data.commentary) {
+                        commentaryDiv.textContent = data.commentary;
+                        commentaryDiv.style.display = 'block';
+                    }
+                }
+            } catch (error) {
+                console.error('Error analyzing screen:', error);
+            }
+        }
+
+        // Function to handle manual commentary request
+        async function requestCommentary() {
+            if (!mediaStream) {
+                commentaryDiv.textContent = "No screen is currently being shared.";
+                commentaryDiv.style.display = 'block';
+                return;
+            }
+            await analyzeScreenContent();
+        }
+
+        startButton.addEventListener('click', async () => {
+            try {
+                // Request screen sharing
+                mediaStream = await navigator.mediaDevices.getDisplayMedia({
+                    video: {
+                        cursor: 'always'
+                    },
+                    audio: false
+                });
+
+                // Display the screen share
+                videoElement.srcObject = mediaStream;
+                videoElement.style.display = 'block';
+
+                // Update button states
+                startButton.disabled = true;
+                stopButton.disabled = false;
+                commentaryButton.disabled = false;
+
+                // Handle when user stops sharing through browser UI
+                mediaStream.getVideoTracks()[0].addEventListener('ended', () => {
+                    stopSharing();
+                });
+
+                // Start periodic commentary if enabled
+                if (commentaryEnabled) {
+                    startPeriodicCommentary();
+                }
+
+            } catch (err) {
+                console.error('Error accessing screen:', err);
+                alert('Error accessing screen: ' + err.message);
+            }
+        });
+
+        stopButton.addEventListener('click', stopSharing);
+
+        commentaryButton.addEventListener('click', () => {
+            commentaryEnabled = !commentaryEnabled;
+            commentaryButton.textContent = commentaryEnabled ? 'Disable Commentary' : 'Enable Commentary';
+            
+            if (commentaryEnabled && mediaStream) {
+                startPeriodicCommentary();
+                requestCommentary(); // Get initial commentary
+            } else {
+                stopPeriodicCommentary();
+                commentaryDiv.style.display = 'none';
+            }
+        });
+
+        function startPeriodicCommentary() {
+            stopPeriodicCommentary(); // Clear any existing interval
+            lastCommentaryTime = Date.now();
+            setInterval(() => {
+                if (Date.now() - lastCommentaryTime >= COMMENTARY_INTERVAL) {
+                    analyzeScreenContent();
+                    lastCommentaryTime = Date.now();
+                }
+            }, 5000); // Check every 5 seconds
+        }
+
+        function stopPeriodicCommentary() {
+            if (window.commentaryInterval) {
+                clearInterval(window.commentaryInterval);
+            }
+        }
+
+        function stopSharing() {
+            if (mediaStream) {
+                mediaStream.getTracks().forEach(track => track.stop());
+                videoElement.srcObject = null;
+                videoElement.style.display = 'none';
+                startButton.disabled = false;
+                stopButton.disabled = true;
+                commentaryButton.disabled = true;
+                commentaryDiv.style.display = 'none';
+                stopPeriodicCommentary();
+                mediaStream = null;
+            }
+        }
+
+        // Add keyboard shortcut for commentary (Ctrl/Cmd + C)
+        document.addEventListener('keydown', (e) => {
+            if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
+                e.preventDefault();
+                if (mediaStream) {
+                    requestCommentary();
+                }
+            }
+        });
+    </script>
+</body>
+</html> 
