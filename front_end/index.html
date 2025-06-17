@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Assistant</title>
+    <title>Jarvis Assistant</title>
     <style>
         .container {
             max-width: 800px;
@@ -130,40 +130,60 @@
         const COMMENTARY_INTERVAL = 30000; // 30 seconds between automatic commentaries
         let chatHistory = [];
 
-        // Function to analyze screen content
+        // Function to analyze screen content with retry logic
         async function analyzeScreenContent() {
             if (!mediaStream || !commentaryEnabled) return;
 
-            try {
-                const canvas = document.createElement('canvas');
-                canvas.width = videoElement.videoWidth;
-                canvas.height = videoElement.videoHeight;
-                const ctx = canvas.getContext('2d');
-                ctx.drawImage(videoElement, 0, 0);
+            const maxRetries = 3;
+            let retryCount = 0;
 
-                const imageData = canvas.toDataURL('image/jpeg', 0.8);
+            while (retryCount < maxRetries) {
+                try {
+                    const canvas = document.createElement('canvas');
+                    canvas.width = videoElement.videoWidth;
+                    canvas.height = videoElement.videoHeight;
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(videoElement, 0, 0);
 
-                const response = await fetch('/analyze-screen', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({ image: imageData })
-                });
+                    const imageData = canvas.toDataURL('image/jpeg', 0.8);
 
-                if (response.ok) {
-                    const data = await response.json();
-                    if (data.commentary) {
-                        commentaryDiv.textContent = data.commentary;
+                    const response = await fetch('http://localhost:8000/analyze-screen', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Accept': 'application/json',
+                            'Origin': window.location.origin
+                        },
+                        credentials: 'include',
+                        body: JSON.stringify({ image: imageData })
+                    });
+
+                    if (response.ok) {
+                        const data = await response.json();
+                        if (data.commentary) {
+                            commentaryDiv.textContent = data.commentary;
+                            commentaryDiv.style.display = 'block';
+                        }
+                        break; // Success, exit retry loop
+                    } else {
+                        const errorText = await response.text();
+                        console.error('Error from API:', errorText);
+                        if (retryCount === maxRetries - 1) {
+                            commentaryDiv.textContent = "Sorry, I'm having trouble analyzing the screen right now.";
+                            commentaryDiv.style.display = 'block';
+                        }
+                    }
+                } catch (error) {
+                    console.error('Error analyzing screen:', error);
+                    if (retryCount === maxRetries - 1) {
+                        commentaryDiv.textContent = "Sorry, I'm having trouble connecting to the server.";
                         commentaryDiv.style.display = 'block';
                     }
-                } else {
-                    console.error('Error from API:', await response.text());
-                    commentaryDiv.textContent = "Sorry, I'm having trouble analyzing the screen right now.";
-                    commentaryDiv.style.display = 'block';
                 }
-            } catch (error) {
-                console.error('Error analyzing screen:', error);
+                retryCount++;
+                if (retryCount < maxRetries) {
+                    await new Promise(resolve => setTimeout(resolve, 1000 * retryCount)); // Exponential backoff
+                }
             }
         }
 
@@ -186,7 +206,7 @@
             chatMessages.scrollTop = chatMessages.scrollHeight;
         }
 
-        // Function to send a chat message
+        // Function to send a chat message with retry logic
         async function sendMessage() {
             const message = chatInput.value.trim();
             if (!message) return;
@@ -194,41 +214,59 @@
             addMessage(message, true);
             chatInput.value = '';
 
-            try {
-                const response = await fetch('/chat', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                        message: message,
-                        history: chatHistory,
-                        model: 'mistral'
-                    })
-                });
+            const maxRetries = 3;
+            let retryCount = 0;
 
-                if (response.ok) {
-                    const data = await response.json();
-                    chatHistory = data.history;
-                    
-                    // Add assistant's response
-                    const lastMessage = data.history[data.history.length - 1];
-                    if (lastMessage && lastMessage.assistant) {
-                        addMessage(lastMessage.assistant);
-                    }
+            while (retryCount < maxRetries) {
+                try {
+                    const response = await fetch('http://localhost:8000/chat', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Accept': 'application/json',
+                            'Origin': window.location.origin
+                        },
+                        credentials: 'include',
+                        body: JSON.stringify({
+                            message: message,
+                            history: chatHistory,
+                            model: 'mistral'
+                        })
+                    });
 
-                    // Play audio if available
-                    if (data.audio_path) {
-                        const audio = new Audio(`/audio/${data.audio_path}`);
-                        await audio.play();
+                    if (response.ok) {
+                        const data = await response.json();
+                        chatHistory = data.history;
+                        
+                        // Add assistant's response
+                        const lastMessage = data.history[data.history.length - 1];
+                        if (lastMessage && lastMessage.assistant) {
+                            addMessage(lastMessage.assistant);
+                        }
+
+                        // Play audio if available
+                        if (data.audio_path) {
+                            const audio = new Audio(`http://localhost:8000/audio/${data.audio_path}`);
+                            await audio.play();
+                        }
+                        break; // Success, exit retry loop
+                    } else {
+                        const errorText = await response.text();
+                        console.error('Error from API:', errorText);
+                        if (retryCount === maxRetries - 1) {
+                            addMessage("Sorry, I'm having trouble processing your message right now.");
+                        }
                     }
-                } else {
-                    console.error('Error from API:', await response.text());
-                    addMessage("Sorry, I'm having trouble processing your message right now.");
+                } catch (error) {
+                    console.error('Error sending message:', error);
+                    if (retryCount === maxRetries - 1) {
+                        addMessage("Sorry, I'm having trouble connecting to the server.");
+                    }
                 }
-            } catch (error) {
-                console.error('Error sending message:', error);
-                addMessage("Sorry, I'm having trouble connecting to the server.");
+                retryCount++;
+                if (retryCount < maxRetries) {
+                    await new Promise(resolve => setTimeout(resolve, 1000 * retryCount)); // Exponential backoff
+                }
             }
         }
 

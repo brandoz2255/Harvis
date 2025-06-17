@@ -42,6 +42,52 @@ services:
     image: n8nio/n8n
     container_name: n8n
     ports:
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama:/root/.ollama
+    # ---- GPU magic --------------------------------------------------
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - OLLAMA_FLASH_ATTENTION=1
+    networks: # Add this section for networking
+      - ollama-n8n-network
+    tty: true
+    restart: unless-stopped
+    
+  nginx:
+    image: nginx:alpine
+    container_name: nginx-proxy
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - webui
+      - ollama
+      - n8n
+      - agent-zero-run
+    networks:
+      - ollama-n8n-network
+    restart: unless-stopped
+
+  webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: openwebui
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+    ports:
       - "5678:5678" # Default n8n UI port
     environment:
       # Set the n8n host, adjust if you access n8n from a specific domain
