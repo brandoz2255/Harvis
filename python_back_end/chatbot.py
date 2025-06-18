@@ -8,7 +8,7 @@ import soundfile as sf
 import re
 from transformers import pipeline
 from chatterbox.tts import ChatterboxTTS, punc_norm
-from browser import open_new_tab, search_google, navigate_to, extract_number_from_text, is_valid_domain  # Import only necessary functions
+# Only import what's needed for the chat functionality
 
 # NOTE: This application requires the 'ffmpeg' command-line tool for audio processing.
 # Please install it using your system's package manager (e.g., `sudo apt install ffmpeg`).

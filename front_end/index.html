@@ -113,7 +113,6 @@
             </div>
         </div>
     </div>
-
     <script>
         const videoElement = document.getElementById('videoElement');
         const startButton = document.getElementById('startButton');
@@ -123,14 +122,13 @@
         const chatMessages = document.getElementById('chatMessages');
         const chatInput = document.getElementById('chatInput');
         const sendButton = document.getElementById('sendButton');
-        
+
         let mediaStream = null;
         let commentaryEnabled = false;
         let lastCommentaryTime = 0;
-        const COMMENTARY_INTERVAL = 30000; // 30 seconds between automatic commentaries
+        const COMMENTARY_INTERVAL = 30000;
         let chatHistory = [];
 
-        // Function to analyze screen content with retry logic
         async function analyzeScreenContent() {
             if (!mediaStream || !commentaryEnabled) return;
 
@@ -147,12 +145,11 @@
 
                     const imageData = canvas.toDataURL('image/jpeg', 0.8);
 
-                    const response = await fetch('http://localhost:8000/analyze-screen', {
+                    const response = await fetch('/api/analyze-screen', {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
-                            'Accept': 'application/json',
-                            'Origin': window.location.origin
+                            'Accept': 'application/json'
                         },
                         credentials: 'include',
                         body: JSON.stringify({ image: imageData })
@@ -164,7 +161,7 @@
                             commentaryDiv.textContent = data.commentary;
                             commentaryDiv.style.display = 'block';
                         }
-                        break; // Success, exit retry loop
+                        break;
                     } else {
                         const errorText = await response.text();
                         console.error('Error from API:', errorText);
@@ -182,12 +179,11 @@
                 }
                 retryCount++;
                 if (retryCount < maxRetries) {
-                    await new Promise(resolve => setTimeout(resolve, 1000 * retryCount)); // Exponential backoff
+                    await new Promise(resolve => setTimeout(resolve, 1000 * retryCount));
                 }
             }
         }
 
-        // Function to handle manual commentary request
         async function requestCommentary() {
             if (!mediaStream) {
                 commentaryDiv.textContent = "No screen is currently being shared.";
@@ -197,7 +193,6 @@
             await analyzeScreenContent();
         }
 
-        // Function to add a message to the chat
         function addMessage(message, isUser = false) {
             const messageDiv = document.createElement('div');
             messageDiv.className = `message ${isUser ? 'user-message' : 'assistant-message'}`;
@@ -206,7 +201,6 @@
             chatMessages.scrollTop = chatMessages.scrollHeight;
         }
 
-        // Function to send a chat message with retry logic
         async function sendMessage() {
             const message = chatInput.value.trim();
             if (!message) return;
@@ -219,12 +213,11 @@
 
             while (retryCount < maxRetries) {
                 try {
-                    const response = await fetch('http://localhost:8000/chat', {
+                    const response = await fetch('/api/chat', {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
-                            'Accept': 'application/json',
-                            'Origin': window.location.origin
+                            'Accept': 'application/json'
                         },
                         credentials: 'include',
                         body: JSON.stringify({
@@ -237,19 +230,17 @@
                     if (response.ok) {
                         const data = await response.json();
                         chatHistory = data.history;
-                        
-                        // Add assistant's response
+
                         const lastMessage = data.history[data.history.length - 1];
                         if (lastMessage && lastMessage.assistant) {
                             addMessage(lastMessage.assistant);
                         }
 
-                        // Play audio if available
                         if (data.audio_path) {
-                            const audio = new Audio(`http://localhost:8000/audio/${data.audio_path}`);
+                            const audio = new Audio(`/api/audio/${data.audio_path}`);
                             await audio.play();
                         }
-                        break; // Success, exit retry loop
+                        break;
                     } else {
                         const errorText = await response.text();
                         console.error('Error from API:', errorText);
@@ -265,12 +256,11 @@
                 }
                 retryCount++;
                 if (retryCount < maxRetries) {
-                    await new Promise(resolve => setTimeout(resolve, 1000 * retryCount)); // Exponential backoff
+                    await new Promise(resolve => setTimeout(resolve, 1000 * retryCount));
                 }
             }
         }
 
-        // Event Listeners
         startButton.addEventListener('click', async () => {
             try {
                 mediaStream = await navigator.mediaDevices.getDisplayMedia({
@@ -303,7 +293,7 @@
         commentaryButton.addEventListener('click', () => {
             commentaryEnabled = !commentaryEnabled;
             commentaryButton.textContent = commentaryEnabled ? 'Disable Commentary' : 'Enable Commentary';
-            
+
             if (commentaryEnabled && mediaStream) {
                 startPeriodicCommentary();
                 requestCommentary();
@@ -323,7 +313,7 @@
         function startPeriodicCommentary() {
             stopPeriodicCommentary();
             lastCommentaryTime = Date.now();
-            setInterval(() => {
+            window.commentaryInterval = setInterval(() => {
                 if (Date.now() - lastCommentaryTime >= COMMENTARY_INTERVAL) {
                     analyzeScreenContent();
                     lastCommentaryTime = Date.now();
@@ -334,6 +324,7 @@
         function stopPeriodicCommentary() {
             if (window.commentaryInterval) {
                 clearInterval(window.commentaryInterval);
+                window.commentaryInterval = null;
             }
         }
 
@@ -351,7 +342,6 @@
             }
         }
 
-        // Add keyboard shortcut for commentary (Ctrl/Cmd + C)
         document.addEventListener('keydown', (e) => {
             if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
                 e.preventDefault();
@@ -361,5 +351,7 @@
             }
         });
     </script>
+
+   
 </body>
 </html> 

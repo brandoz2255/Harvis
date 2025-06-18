@@ -2,11 +2,10 @@ import base64
 import io
 from PIL import Image
 import torch
-from transformers import pipeline
+from transformers.pipelines import pipeline
 import logging
 import json
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 # Set up logging
@@ -14,15 +13,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
-
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # Initialize the image analysis model
 try:
@@ -32,8 +22,8 @@ except Exception as e:
     logger.error(f"Error loading image analysis model: {e}")
     image_to_text = None
 
-def analyze_image(image_data):
-    """Analyze the image and generate commentary."""
+def analyze_image(image_data: str) -> str:
+    """Analyze the image and return a commentary."""
     try:
         # Remove the data URL prefix if present
         if ',' in image_data:
@@ -46,24 +36,26 @@ def analyze_image(image_data):
         # Generate caption
         if image_to_text:
             result = image_to_text(image)
-            caption = result[0]['generated_text']
+            if isinstance(result, list) and len(result) > 0 and isinstance(result[0], dict):
+                caption = result[0].get('generated_text', '')
+                if caption:
+                    # Add some context to make it more conversational
+                    commentary = f"I see {caption.lower()}"
+                    
+                    # Add some variety to the commentary
+                    prefixes = [
+                        "Looking at your screen, ",
+                        "I notice that ",
+                        "On your screen, ",
+                        "I can see that ",
+                        "Currently, "
+                    ]
+                    
+                    import random
+                    commentary = random.choice(prefixes) + commentary
+                    return commentary
             
-            # Add some context to make it more conversational
-            commentary = f"I see {caption.lower()}"
-            
-            # Add some variety to the commentary
-            prefixes = [
-                "Looking at your screen, ",
-                "I notice that ",
-                "On your screen, ",
-                "I can see that ",
-                "Currently, "
-            ]
-            
-            import random
-            commentary = random.choice(prefixes) + commentary
-            
-            return commentary
+            return "I'm having trouble analyzing the screen content right now."
         else:
             return "I'm having trouble analyzing the screen content right now."
             
