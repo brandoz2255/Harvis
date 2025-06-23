@@ -12,21 +12,19 @@ import io
 from PIL import Image
 import torch
 import soundfile as sf
-from transformers.pipelines import pipeline
+from transformers import pipeline
 import logging
-from chatbot import (
-    chat_with_voice,
-    transcribe_and_chat,
-    load_tts_model,
-    generate_speech
-)
+import requests
+import re
+
+from chatterbox_tts import load_tts_model, generate_speech
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Get the absolute path to the project root directory
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 FRONTEND_DIR = os.path.join(PROJECT_ROOT, "front_end")
 
 # Initialize FastAPI app
@@ -56,11 +54,26 @@ except Exception as e:
     logger.error(f"Error loading image analysis model: {e}")
     image_to_text = None
 
+# ─── Configuration ──────────────────────────────────────────────────────────────
+OLLAMA_URL = "http://ollama:11434"
+DEFAULT_MODEL = "mistral"
+JARVES_PROMPT = """You are "Harvis (Pronounced Harvis)", a voice-first local assistant. Reply in under 25 spoken-style words, 
+sprinkling brief Spanish when natural. Begin each answer with a short verbal acknowledgment (e.g., "Claro," "¡Por supuesto!", "Right away"), 
+then immediately run the requested command via the host system. After execution, return a concise verbal status or result; 
+if silent completion is better, say nothing. Never output code blocks, markdown, or explanations—just compact, conversational responses.
+
+You have full voice interaction capabilities including:
+- Opening browser tabs ("abre una nueva pestaña con...")
+- Searching the web ("busca información sobre...")
+- Navigating to websites ("llévame a...")
+
+Always respond as if you are speaking directly to the user, keeping responses brief and natural."""
+
 # === Pydantic Models ===
 class ChatRequest(BaseModel):
     message: str
     history: List[Dict[str, Any]] = []
-    model: str = "mistral"
+    model: str = DEFAULT_MODEL
     audio_prompt: Optional[str] = None
     exaggeration: float = 0.5
     temperature: float = 0.8
@@ -69,45 +82,101 @@ class ChatRequest(BaseModel):
 class ScreenAnalysisRequest(BaseModel):
     image: str
 
-# === Routes ===
+# ─── Helper Functions ───────────────────────────────────────────────────────────
+def is_browser_command(text: str) -> bool:
+    """Determine if the text is a browser command."""
+    browser_patterns = [
+        r'^(?:open|launch|go\s+to|navigate\s+to|take\s+me\s+to|visit)\s+',
+        r'^(?:abre|abrír|navega\s+a|llévame\s+a|visita)\s+',
+        r'^(?:search|look\s+up|google|find)\s+(?:for\s+)?',
+        r'^(?:busca|buscar|encuentra|investigar?)\s+(?:sobre\s+)?',
+        r'^(?:open|create)\s+(?:\d+\s+)?(?:new\s+)?tabs?',
+        r'^(?:abre|crea)\s+(?:\d+\s+)?(?:nueva[s]?\s+)?pestaña[s]?'
+    ]
+    text_lower = text.lower().strip()
+    return any(re.match(pattern, text_lower) for pattern in browser_patterns)
 
-@app.get("/api/")
+# === Routes ===
+@app.get("/")
 async def root():
     index_path = os.path.join(FRONTEND_DIR, "index.html")
     if os.path.exists(index_path):
         return FileResponse(index_path)
     raise HTTPException(status_code=404, detail="Frontend files not found")
 
+@app.post("/chat")
+async def chat_legacy(request: ChatRequest):
+    """Legacy endpoint that mirrors /api/chat functionality for backward compatibility"""
+    return await chat(request)
+
 @app.post("/api/chat")
 async def chat(request: ChatRequest):
     try:
-        # Use the chat_with_voice function from chatbot.py
         history = request.history + [{"role": "user", "content": request.message}]
-        audio_path = None
+        
+        if is_browser_command(request.message):
+            try:
+                from trash.browser import smart_url_handler, search_google, open_new_tab
 
-        # Call chat_with_voice to get the response and audio
-        new_history, (sample_rate, wav_data) = chat_with_voice(
-            request.message,
-            history,
-            request.model,
+                result = smart_url_handler(request.message)
+
+                if isinstance(result, dict) and result.get("type") == "search":
+                    response_text = search_google(result["query"])
+                else:
+                    response_text = open_new_tab(result)
+            except Exception as e:
+                logger.error(f"Browser command error: {e}")
+                response_text = "¡Ay! Had trouble with that browser action. ¿Intentamos de nuevo?"
+        else:
+            enhanced_prompt = f"""You are "Jarves (Pronounced Harves)", a voice-first local assistant.
+Reply in under 25 spoken-style words, sprinkling brief Spanish when natural.
+Begin each answer with a short verbal acknowledgment (e.g., "Claro," "¡Por supuesto!", "Right away").
+
+IMPORTANT: Only use browser commands when explicitly asked to:
+- Open websites ("abre una pestaña con...")
+- Search the web ("busca información sobre...")
+- Navigate ("llévame a...")
+
+For all other questions, just have a natural conversation.
+Current user message: {request.message}"""
+
+            response = requests.post(
+                f"{OLLAMA_URL}/api/generate",
+                json={
+                    "model": request.model,
+                    "prompt": request.message,
+                    "system": enhanced_prompt,
+                    "stream": False
+                }
+            )
+            
+            if response.ok:
+                response_text = response.json().get("response", "").strip()
+            else:
+                raise HTTPException(status_code=response.status_code, detail=response.text)
+
+        new_history = history + [{"role": "assistant", "content": response_text}]
+        
+        tts = load_tts_model()
+        sample_rate, wav_data = generate_speech(
+            response_text,
+            tts,
             request.audio_prompt,
             request.exaggeration,
             request.temperature,
             request.cfg_weight
         )
 
-        # Save the audio to a file if needed
-        if wav_data is not None:
-            temp_dir = tempfile.gettempdir()
-            filename = f"response_{uuid.uuid4()}.wav"
-            filepath = os.path.join(temp_dir, filename)
-            sf.write(filepath, wav_data, sample_rate)
-            audio_path = filename
+        temp_dir = tempfile.gettempdir()
+        filename = f"response_{uuid.uuid4()}.wav"
+        filepath = os.path.join(temp_dir, filename)
+        sf.write(filepath, wav_data, sample_rate)
 
         return {
             "history": new_history,
-            "audio_path": audio_path
+            "audio_path": filename
         }
+
     except Exception as e:
         logger.error(f"Error in chat endpoint: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -159,7 +228,6 @@ async def analyze_screen(request: ScreenAnalysisRequest):
     except Exception as e:
         logger.error(f"Error in analyze-screen endpoint: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 # === Main entry ===
 if __name__ == "__main__":

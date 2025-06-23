@@ -18,7 +18,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ─── Configuration ──────────────────────────────────────────────────────────────
-OLLAMA_URL    = "http://ollama:11434"
+OLLAMA_URL    = "http://ollama:11434"  # Using Docker service name
 DEFAULT_MODEL = "mistral"
 DEVICE        = "cuda" if torch.cuda.is_available() else "cpu"
 

@@ -18,8 +18,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ─── Configuration ──────────────────────────────────────────────────────────────
-OLLAMA_URL    = "http://localhost:11434"
-DEFAULT_MODEL = "mistral"
+OLLAMA_URL    = "http://ollama:11434"
+DEFAULT_MODEL = "gemma3:1b"
 DEVICE        = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Jarves system prompt

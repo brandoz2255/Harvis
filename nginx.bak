@@ -1,0 +1,81 @@
+events {}
+
+http {
+    # Map allowed origins dynamically
+    map $http_origin $cors_origin {
+        default "";
+        "http://localhost:9000" "$http_origin";
+        "http://localhost:8000" "$http_origin";
+        "http://127.0.0.1:9000" "$http_origin";
+        "http://127.0.0.1:8080" "$http_origin";
+        "http://localhost:5173" "$http_origin"; # Vite or dev server support
+    }
+
+    server {
+        listen 80;
+
+        # Global CORS headers (applied everywhere)
+        add_header 'Access-Control-Allow-Origin' $cors_origin always;
+        add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS, PUT, DELETE' always;
+        add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization' always;
+        add_header 'Access-Control-Allow-Credentials' 'true' always;
+        add_header 'Access-Control-Expose-Headers' 'Content-Length,Content-Range' always;
+
+        # ==== Handle frontend ====
+        location / {
+            proxy_pass http://frontend:80;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        # ==== Handle FastAPI backend ====
+        location /api/ {
+            if ($request_method = 'OPTIONS') {
+                add_header 'Access-Control-Allow-Origin' $cors_origin always;
+                add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS, PUT, DELETE' always;
+                add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization' always;
+                add_header 'Access-Control-Allow-Credentials' 'true' always;
+                add_header 'Access-Control-Expose-Headers' 'Content-Length,Content-Range' always;
+                return 204;
+            }
+
+            proxy_pass http://backend:8000/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        # ==== Proxy to Ollama ====
+        location /ollama/ {
+            rewrite ^/ollama/(.*)$ /$1 break;
+            proxy_pass http://ollama:11434/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        # ==== Proxy to n8n ====
+        location /n8n/ {
+            rewrite ^/n8n/(.*)$ /$1 break;
+            proxy_pass http://n8n:5678/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        # ==== Proxy to Agent Zero ====
+        location /agent-zero-run/ {
+            rewrite ^/agent-zero-run/(.*)$ /$1 break;
+            proxy_pass http://agent-zero-run:5000/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+    }
+}

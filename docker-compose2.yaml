@@ -1,0 +1,57 @@
+# Thiss is for use at a Desktop or laptop enviroment 
+
+version: "3.9"
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: python_back_end/Dockerfile
+    container_name: backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./python_back_end:/app
+    # GPU love (optional—kill if you’re on CPU)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - PYTHONPATH=/app
+      - NVIDIA_VISIBLE_DEVICES=all
+      - OLLAMA_FLASH_ATTENTION=1
+    networks:
+      - ollama-n8n-network
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./front_end
+      dockerfile: Dockerfile
+    container_name: frontend
+    networks:
+      - ollama-n8n-network
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    container_name: nginx-proxy
+    ports:
+      - "9000:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - frontend
+      - backend
+    networks:
+      - ollama-n8n-network
+    restart: unless-stopped
+
+networks:
+  ollama-n8n-network:
+    name: ollama-n8n-network
+    driver: bridge
