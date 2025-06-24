@@ -12,7 +12,7 @@ torch
 transformers
 chatterbox-tts
 soundfile
-
+git+https://github.com/openai/whisper.git
 # For image processing and HTTP requests
 Pillow
 requests

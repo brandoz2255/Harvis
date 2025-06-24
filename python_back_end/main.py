@@ -230,6 +230,15 @@ async def mic_chat(file: UploadFile = File(...)):
         logger.exception("Mic chat failed")
         raise HTTPException(500, str(e))
 
+# ─── Warmup ────────────────────────────────────────────────────────
+try:
+    logger.info("Preloading TTS and Whisper and BLIP…")
+    _ = load_tts_model()
+    _ = whisper.load_model("base")
+    _ = pipeline("image-to-text", model="Salesforce/blip-image-captioning-base", device=device)
+except Exception as e:
+    logger.error("Preload failed: %s", e)
+
 # ─── Dev entry-point -----------------------------------------------------------
 if __name__ == "__main__":
     uvicorn.run(

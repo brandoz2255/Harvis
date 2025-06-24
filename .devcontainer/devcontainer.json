@@ -5,8 +5,7 @@
 
   // 🧩 Join Ollama network so you can talk to it via "http://ollama:11434"
   "runArgs": [
-    "--network=ollama-n8n-network",
-     "--gpus=all"
+    "--network=ollama-n8n-network"
   ],
 
   // 📦 Mount volume for Ollama model sharing

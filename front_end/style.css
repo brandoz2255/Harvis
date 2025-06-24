@@ -97,6 +97,14 @@
   padding: 20px;
 }
 
+.voice-box {
+  margin-top: 20px;
+  padding: 12px;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  background: #f7f7f7;
+}
+
 /* Generic button */
 .button {
   padding: 10px 20px;

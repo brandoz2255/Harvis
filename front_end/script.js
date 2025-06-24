@@ -11,6 +11,10 @@ const chatMessages   = document.getElementById("chatMessages");
 const chatInput      = document.getElementById("chatInput");
 const sendButton     = document.getElementById("sendButton");
 
+const voiceBox       = document.getElementById("voiceBox");
+const replayBtn      = document.getElementById("replayButton");
+const ttsAudio       = document.getElementById("ttsAudio");
+
 // ─── State ─────────────────────────────────────────────────────────────────────
 let mediaStream = null;
 let commentaryEnabled = false;
@@ -64,16 +68,30 @@ async function sendMessage() {
         addMessage(msg.content, msg.role === "user");
       }
 
-      // Play TTS with visual indicator
+      // TTS handling + UI voice box
       if (data.audio_path) {
         const lastMsg = chatHistory.at(-1);
         if (lastMsg?.content) {
           commentaryDiv.innerHTML = `🔊 ${lastMsg.content}`;
           commentaryDiv.style.display = "block";
         }
-        const audio = new Audio(data.audio_path);   // NOTE: absolute /audio/ URL
-        await audio.play().catch(console.error);
+
+        const audioURL = data.audio_path;
+        ttsAudio.src = audioURL;
+        voiceBox.style.display = "block";
+
+        try {
+          await ttsAudio.play();
+        } catch (err) {
+          console.warn("Autoplay blocked. Use Replay button.");
+        }
+
+        replayBtn.onclick = () => {
+          ttsAudio.currentTime = 0;
+          ttsAudio.play();
+        };
       }
+
       return; // success
     } catch (err) {
       console.error("Chat attempt %d failed: %s", attempt + 1, err);
@@ -95,7 +113,7 @@ async function analyzeScreen() {
 
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const res   = await fetch(`${BACKEND_API}/analyze-screen`, {
+      const res = await fetch(`${BACKEND_API}/analyze-screen`, {
         method : "POST",
         headers: { "Content-Type": "application/json" },
         body   : JSON.stringify({ image: imgB64 })
@@ -198,3 +216,4 @@ document.addEventListener("keydown", e => {
     analyzeScreen();
   }
 });
+

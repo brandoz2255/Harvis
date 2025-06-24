@@ -1,23 +1,5 @@
 services:
-  backend:
-    build:
-      context: .
-      dockerfile: python_back_end/Dockerfile
-    container_name: backend
-    ports:
-      - "8000:8000"
-    volumes:
-      - ./python_back_end:/app
-      - ./front_end:/app/front_end
-      - /tmp:/tmp
-    gpus: all  # <-- Enable GPU access
-    environment:
-      - PYTHONPATH=/app
-      - NVIDIA_VISIBLE_DEVICES=all
-      - OLLAMA_FLASH_ATTENTION=1
-    networks:
-      - ollama-n8n-network
-    restart: unless-stopped
+ 
 
   frontend:
     build:
@@ -29,9 +11,6 @@ services:
     restart: unless-stopped
 
 
-
-
-
   nginx:
     image: nginx:alpine
     container_name: nginx-proxy
@@ -41,16 +20,14 @@ services:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
       - frontend
-      - backend
-
     networks:
       - ollama-n8n-network
     restart: unless-stopped
 
+
 volumes:
   ollama:
   n8n_data:
-  tmp:
 
 networks:
   ollama-n8n-network:

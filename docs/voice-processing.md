@@ -62,6 +62,8 @@ def transcribe_audio(audio_path, stt_pipeline):
 - Customizable voice parameters
 - Streaming capabilities
 
+For detailed information about the Chatterbox TTS implementation and its integration with the main module, see [Main and Chatterbox TTS Integration](main-chatterbox-integration.md).
+
 #### Implementation
 ```python
 from chatterbox.tts import ChatterboxTTS, punc_norm

@@ -1,29 +1,40 @@
-# Use Python 3.11 as base image
+# ─────────────────────────────────────────────────────────────
+# ✅ Base Image
 FROM python:3.11-slim
 
-# Set working directory
+# ─────────────────────────────────────────────────────────────
+# ✅ Set working directory
 WORKDIR /app
 
-# Install system dependencies
+# ─────────────────────────────────────────────────────────────
+# ✅ Install system dependencies
 RUN apt-get update && apt-get install -y \
     build-essential \
     libgl1 \
+    ffmpeg \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
-# Install core dependencies first
-RUN pip install --no-cache-dir \
-    chatterbox-tts \
-    openai-whisper
-
-# Copy requirements first to leverage Docker cache
+# ─────────────────────────────────────────────────────────────
+# ✅ Install Python dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the application
+# ─────────────────────────────────────────────────────────────
+# ✅ Copy all code (done AFTER deps for better caching)
 COPY . .
 
-# Expose the port the app runs on
+# ─────────────────────────────────────────────────────────────
+# ✅ Warm-up: preload models so cold start is faster
+RUN python -c "import whisper" && \
+    python -c 'from transformers import pipeline; pipeline("image-to-text", model="Salesforce/blip-image-captioning-base")' && \
+    python -c 'from chatterbox.tts import ChatterboxTTS; ChatterboxTTS.from_pretrained(device="cpu")'
+
+# ─────────────────────────────────────────────────────────────
+# ✅ Expose API port
 EXPOSE 8000
 
-# Command to run the application
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"] 
+# ─────────────────────────────────────────────────────────────
+# ✅ Start server (use Gunicorn for prod; uvicorn for dev)
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
