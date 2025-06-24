@@ -21,6 +21,7 @@ let commentaryEnabled = false;
 let lastCommentary   = 0;
 const COMMENTARY_INTERVAL = 30_000;
 let chatHistory      = [];
+let isRecording = false; // Track recording state
 
 // ─── Utils ─────────────────────────────────────────────────────────────────────
 function clearChatMessages() {
@@ -217,3 +218,66 @@ document.addEventListener("keydown", e => {
   }
 });
 
+// ─── Microphone recording functionality ────────────────────────────────────────
+const micButton = document.getElementById("micButton");
+let mediaRecorder;
+
+micButton.addEventListener("click", () => {
+  if (isRecording) {
+    // Stop recording
+    mediaRecorder.stop();
+    micButton.textContent = "🎙️ Speak";
+    isRecording = false;
+  } else {
+    // Start recording
+    navigator.mediaDevices.getUserMedia({ audio: true })
+      .then(stream => {
+        mediaRecorder = new MediaRecorder(stream);
+        let audioChunks = [];
+
+        mediaRecorder.ondataavailable = event => {
+          audioChunks.push(event.data);
+        };
+
+        mediaRecorder.onstop = async () => {
+          const blob = new Blob(audioChunks, { type: "audio/wav" });
+          const formData = new FormData();
+          formData.append("file", blob, "mic.wav");
+
+          try {
+            const res = await fetch(`${BACKEND_API}/mic-chat`, {
+              method: "POST",
+              body: formData
+            });
+
+            if (!res.ok) throw new Error('Network response was not ok');
+
+            const data = await res.json();
+            chatHistory = data.history;
+
+            clearChatMessages();
+            for (const msg of chatHistory) {
+              addMessage(msg.content, msg.role === "user");
+            }
+
+            if (data.audio_path) {
+              ttsAudio.src = data.audio_path;
+              voiceBox.style.display = "block";
+              await ttsAudio.play();
+            }
+          } catch (error) {
+            console.error('Error sending audio:', error);
+            addMessage("Sorry, there was an error processing your audio.");
+          }
+        };
+
+        mediaRecorder.start();
+        micButton.textContent = "🎙️ Recording... Click to stop";
+        isRecording = true;
+      })
+      .catch(err => {
+        console.error('Error accessing microphone:', err);
+        addMessage("Sorry, I couldn't access your microphone.");
+      });
+  }
+});
