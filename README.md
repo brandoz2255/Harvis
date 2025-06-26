@@ -1,6 +1,6 @@
 # aidev: Voice Chat with Ollama
 
-This project is a voice chat application that allows users to interact with a language model using either text or voice input. It uses Gradio for the web interface, Whisper for speech-to-text (STT), and Chatterbox TTS for text-to-speech (TTS). The backend language model server is provided by Ollama.
+This project is a voice chat application that allows users to interact with a language model using either text or voice input. It uses Next.js for the web interface, Whisper for speech-to-text (STT), and Chatterbox TTS for text-to-speech (TTS). The backend language model server is provided by Ollama.
 
 ## Features
 
