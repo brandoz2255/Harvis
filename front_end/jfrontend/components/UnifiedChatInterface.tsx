@@ -2,9 +2,9 @@
 
 import type React from "react"
 
-import { useState, useRef, useEffect } from "react"
+import { useState, useRef, useEffect, forwardRef, useImperativeHandle } from "react"
 import { motion, AnimatePresence } from "framer-motion"
-import { Send, Mic, MicOff, Volume2, VolumeX, Cpu, Zap, Target } from "lucide-react"
+import { Send, Mic, MicOff, Volume2, VolumeX, Cpu, Zap, Target, Monitor } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card } from "@/components/ui/card"
@@ -16,7 +16,7 @@ interface Message {
   content: string
   timestamp: Date
   model?: string
-  inputType?: "text" | "voice"
+  inputType?: "text" | "voice" | "screen"
 }
 
 interface ChatResponse {
@@ -24,7 +24,7 @@ interface ChatResponse {
   audio_path?: string
 }
 
-export default function UnifiedChatInterface() {
+const UnifiedChatInterface = forwardRef<any, {}>((props, ref) => {
   const { orchestrator, hardware, isDetecting } = useAIOrchestrator()
   const [selectedModel, setSelectedModel] = useState("auto")
   const [priority, setPriority] = useState<"speed" | "accuracy" | "balanced">("balanced")
@@ -51,6 +51,20 @@ export default function UnifiedChatInterface() {
       label: model.name.charAt(0).toUpperCase() + model.name.slice(1),
     })),
   ]
+
+  // Expose method to add AI messages from external components
+  useImperativeHandle(ref, () => ({
+    addAIMessage: (content: string, source = "AI") => {
+      const aiMessage: Message = {
+        role: "assistant",
+        content: content,
+        timestamp: new Date(),
+        model: source,
+        inputType: "screen",
+      }
+      setMessages((prev) => [...prev, aiMessage])
+    },
+  }))
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -269,6 +283,17 @@ export default function UnifiedChatInterface() {
     }
   }
 
+  const getInputTypeIcon = (inputType?: string) => {
+    switch (inputType) {
+      case "voice":
+        return <Mic className="w-2 h-2 mr-1" />
+      case "screen":
+        return <Monitor className="w-2 h-2 mr-1" />
+      default:
+        return null
+    }
+  }
+
   return (
     <Card className="bg-gray-900/50 backdrop-blur-sm border-blue-500/30 h-[700px] flex flex-col">
       <div className="p-4 border-b border-blue-500/30">
@@ -359,10 +384,12 @@ export default function UnifiedChatInterface() {
               >
                 <div className="flex items-center justify-between mb-1">
                   <div className="flex items-center space-x-2">
-                    {message.inputType === "voice" && (
+                    {message.inputType && (
                       <Badge variant="outline" className="text-xs border-purple-500 text-purple-400">
-                        <Mic className="w-2 h-2 mr-1" />
-                        Voice
+                        {getInputTypeIcon(message.inputType)}
+                        {message.inputType === "screen"
+                          ? "Screen"
+                          : message.inputType.charAt(0).toUpperCase() + message.inputType.slice(1)}
                       </Badge>
                     )}
                     {message.model && message.role === "assistant" && (
@@ -451,4 +478,8 @@ export default function UnifiedChatInterface() {
       </div>
     </Card>
   )
-}
+})
+
+UnifiedChatInterface.displayName = "UnifiedChatInterface"
+
+export default UnifiedChatInterface
