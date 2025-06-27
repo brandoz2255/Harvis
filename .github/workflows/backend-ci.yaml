@@ -39,6 +39,6 @@ jobs:
           password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Push backend image
-        run: docker push dulc3/backend:0.0.1
+        run: docker push dulc3/jarvis-backend:0.0.1
 
 #.
