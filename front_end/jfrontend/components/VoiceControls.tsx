@@ -168,7 +168,7 @@ export default function VoiceControls() {
               className="bg-gray-800 rounded-lg p-3 max-w-md"
             >
               <p className="text-sm text-gray-300">
-                <span className="text-blue-400 font-medium">You said:</span> "{lastTranscription}"
+                <span className="text-blue-400 font-medium">You said:</span> &quot;{lastTranscription}&quot;
               </p>
             </motion.div>
           )}

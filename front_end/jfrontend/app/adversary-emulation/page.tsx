@@ -10,6 +10,7 @@ import { Card } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import Link from "next/link"
+import Image from "next/image"
 
 interface LogEntry {
   id: string
@@ -351,10 +352,13 @@ export default function AdversaryEmulationPage() {
               <div className="bg-gray-800 rounded-lg p-4 h-96">
                 {activeTab === "screen" && (
                   <div className="h-full flex items-center justify-center">
-                    <img
+                    <Image
                       src={screenFeed || "/placeholder.svg"}
                       alt="Agent Screen Feed"
                       className="max-w-full max-h-full rounded border border-gray-600"
+                      width={800}
+                      height={600}
+                      style={{ objectFit: "contain" }}
                     />
                   </div>
                 )}

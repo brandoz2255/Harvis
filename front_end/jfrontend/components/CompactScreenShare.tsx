@@ -25,7 +25,7 @@ export default function CompactScreenShare({ onAnalysis, onAnalyzeAndRespond }: 
   const startScreenShare = async () => {
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { cursor: "always" },
+        video: true,
         audio: false,
       })
 
@@ -192,7 +192,7 @@ export default function CompactScreenShare({ onAnalysis, onAnalyzeAndRespond }: 
 
     document.addEventListener("keydown", handleKeyDown)
     return () => document.removeEventListener("keydown", handleKeyDown)
-  }, [isSharing])
+  }, [isSharing, analyzeScreen, analyzeAndRespond])
 
   useEffect(() => {
     return () => {

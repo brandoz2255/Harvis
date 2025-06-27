@@ -19,7 +19,7 @@ export default function ScreenShare() {
   const startScreenShare = async () => {
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { cursor: "always" },
+        video: true,
         audio: false,
       })
 
@@ -131,7 +131,7 @@ export default function ScreenShare() {
 
     document.addEventListener("keydown", handleKeyDown)
     return () => document.removeEventListener("keydown", handleKeyDown)
-  }, [isSharing])
+  }, [isSharing, analyzeScreen])
 
   useEffect(() => {
     return () => {
@@ -206,7 +206,7 @@ export default function ScreenShare() {
             <div className="w-full h-64 bg-gray-800 rounded-lg border border-gray-600 flex items-center justify-center">
               <div className="text-center text-gray-400">
                 <Monitor className="w-12 h-12 mx-auto mb-2 opacity-50" />
-                <p>Click "Start Sharing" to begin screen capture</p>
+                <p>Click &quot;Start Sharing&quot; to begin screen capture</p>
               </div>
             </div>
           )}
