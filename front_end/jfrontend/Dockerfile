@@ -23,9 +23,11 @@ RUN npm run build
 FROM node:20-alpine AS runner
 WORKDIR /app
 
+# Optional: reduce image size
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
 
-
-# Copy built files and production dependencies from the builder stage
+# Copy from builder
 COPY --from=builder /app/.next .next
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/node_modules ./node_modules
@@ -34,5 +36,4 @@ COPY --from=builder /app/package.json ./package.json
 EXPOSE 3000
 
 CMD ["npm", "run", "start", "--", "-p", "3000"]
-
 
