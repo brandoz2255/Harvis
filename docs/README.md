@@ -11,8 +11,10 @@ This documentation provides comprehensive information about the AI Voice Assista
 5. [LLM Integration](llm-integration.md)
 6. [System Architecture](system-architecture.md)
 7. [Main and Chatterbox TTS Integration](main-chatterbox-integration.md)
-8. [Interview Preparation](interview-prep.md)
-9. [Troubleshooting Guide](troubleshooting.md)
+8. [CI/CD Pipelines](ci-cd-pipelines.md)
+9. [Docker Deployment](docker-deployment.md)
+10. [Interview Preparation](interview-prep.md)
+11. [Troubleshooting Guide](troubleshooting.md)
 
 ## Quick Start
 
