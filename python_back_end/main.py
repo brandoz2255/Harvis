@@ -51,7 +51,7 @@ except Exception as e:
 
 # ─── Config --------------------------------------------------------------------
 OLLAMA_URL     = "http://ollama:11434"
-DEFAULT_MODEL  = "mistral"
+DEFAULT_MODEL  = "gemma3:1b"
 
 # ─── Pydantic schemas ----------------------------------------------------------
 class ChatRequest(BaseModel):
