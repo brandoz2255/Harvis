@@ -315,7 +315,7 @@ async def get_ollama_models():
     Fetches the list of available models from the Ollama server.
     """
     try:
-        response = requests.get(f"{OLLAMA_URL}/api/tags")
+        response = requests.get(f"{OLLAMA_URL}/api/tags", timeout=10)
         response.raise_for_status()
         models = response.json().get("models", [])
         ollama_model_names = [model["name"] for model in models]
