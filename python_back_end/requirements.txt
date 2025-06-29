@@ -1,22 +1,22 @@
+# requirements.txt
+
 # Core web framework and server
 fastapi
 uvicorn[standard]==0.29.0
 python-multipart
 
-# For AI/ML models (TTS, STT, Image Captioning)
-torch==2.7.1
+# ML / AI models
+torch==2.6.0
 transformers==4.50.0
-chatterbox-tts
+chatterbox-tts==0.1.2
 soundfile
 git+https://github.com/openai/whisper.git
 
-# For image processing and HTTP requests
-pytesseract
+# Image and OCR
 Pillow
 requests
-google-generativeai
-#fiixed it
-# Security fixes
-setuptools==78.1.1
+pytesseract
+
+# Extra
 sentencepiece
 
