@@ -215,8 +215,9 @@ export function useAIOrchestrator() {
       try {
         const hw = await orchestrator.detectHardware()
         setHardware(hw)
-        const fetchedModels = await orchestrator.fetchOllamaModels()
-        setModels(fetchedModels)
+        const fetchedOllamaModels = await orchestrator.fetchOllamaModels()
+        const allModels = [...orchestrator.getAllModels().map(m => m.name), ...fetchedOllamaModels]
+        setModels(Array.from(new Set(allModels)))
       } catch (error) {
         console.error("Initialization failed:", error)
       } finally {

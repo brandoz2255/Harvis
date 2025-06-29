@@ -160,7 +160,7 @@ async def chat(req: ChatRequest, request: Request):
                 'Begin each answer with a short verbal acknowledgment (e.g., "Claro,", "¡Por supuesto!", "Right away").'
             )
             OLLAMA_ENDPOINT = "/api/chat"  # single source of truth
-            
+
             payload = {
                 "model": req.model,
                 "messages": [
@@ -309,6 +309,7 @@ except Exception as e:
 
 # ─── Dev entry-point -----------------------------------------------------------
 
+
 @app.get("/api/ollama-models", tags=["models"])
 async def get_ollama_models():
     """
@@ -321,14 +322,18 @@ async def get_ollama_models():
         ollama_model_names = [model["name"] for model in models]
 
         if is_gemini_configured():
-            ollama_model_names.insert(0, "gemini-1.5-flash") # Add Gemini to the beginning
+            ollama_model_names.insert(
+                0, "gemini-1.5-flash"
+            )  # Add Gemini to the beginning
 
         return ollama_model_names
     except requests.exceptions.RequestException as e:
         logger.error(f"Could not connect to Ollama: {e}")
-        raise HTTPException(status_code=503, detail="Could not connect to Ollama server")
+        raise HTTPException(
+            status_code=503, detail="Could not connect to Ollama server"
+        )
 
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
-
+# huh

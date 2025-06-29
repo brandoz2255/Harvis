@@ -1,0 +1,27 @@
+# .github/workflows/zap-dast.yml
+name: 🕷 ZAP DAST Scan
+
+on:
+  workflow_dispatch:
+
+jobs:
+  zap_scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pull Frontend Image & Run
+        run: |
+          docker pull dulc3/jarvis-frontend:latest
+          docker network create zap-net
+          docker run -d --rm \
+            --name frontend \
+            --network zap-net \
+            -p 3000:3000 \
+            dulc3/jarvis-frontend:latest
+          sleep 15
+
+      - name: ZAP Scan
+        uses: zaproxy/action-baseline@v0.11.0
+        with:
+          target: "http://frontend:3000"
+        env:
+          DOCKER_NETWORK: zap-net

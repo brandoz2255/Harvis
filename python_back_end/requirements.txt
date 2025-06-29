@@ -4,23 +4,19 @@ uvicorn[standard]==0.29.0
 python-multipart
 
 # For AI/ML models (TTS, STT, Image Captioning)
-# Note: Installing PyTorch with CUDA support requires a specific command.
-# Visit https://pytorch.org/get-started/locally/ for instructions.
-# Example for CUDA 12.1:
-# pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-torch
-transformers
+torch==2.7.1
+transformers==4.50.0
 chatterbox-tts
 soundfile
 git+https://github.com/openai/whisper.git
+
 # For image processing and HTTP requests
-
 pytesseract
-
 Pillow
 requests
-
 google-generativeai
-# Dependencies pulled in by the above packages, but good to have explicitly
-# sentencepiece is used by many transformer models
+
+# Security fixes
+setuptools==78.1.1
 sentencepiece
+
