@@ -25,7 +25,7 @@ interface ChatResponse {
 }
 
 const UnifiedChatInterface = forwardRef<any, {}>((props, ref) => {
-  const { orchestrator, hardware, isDetecting } = useAIOrchestrator()
+  const { orchestrator, hardware, isDetecting, models } = useAIOrchestrator()
   const [selectedModel, setSelectedModel] = useState("auto")
   const [priority, setPriority] = useState<"speed" | "accuracy" | "balanced">("balanced")
 
@@ -46,10 +46,11 @@ const UnifiedChatInterface = forwardRef<any, {}>((props, ref) => {
 
   const availableModels = [
     { value: "auto", label: "🤖 Auto-Select" },
-    ...orchestrator.getAllModels().map((model) => ({
-      value: model.name,
-      label: model.name.charAt(0).toUpperCase() + model.name.slice(1),
+    ...models.map((model) => ({
+      value: model,
+      label: model.charAt(0).toUpperCase() + model.slice(1),
     })),
+    
   ]
 
   // Expose method to add AI messages from external components

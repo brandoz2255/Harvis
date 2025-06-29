@@ -22,6 +22,14 @@ interface HardwareInfo {
 export class AIOrchestrator {
   private models: ModelCapabilities[] = [
     {
+      name: "gemini-1.5-flash",
+      tasks: ["general", "conversation", "creative", "multilingual", "code", "reasoning", "lightweight", "quick-response"],
+      speed: 9,
+      accuracy: 8,
+      memoryUsage: 1024, // Placeholder, adjust based on actual API usage/cost
+      gpuRequired: false, // API call, not local GPU
+    },
+    {
       name: "mistral",
       tasks: ["general", "conversation", "reasoning"],
       speed: 8,
@@ -117,6 +125,20 @@ export class AIOrchestrator {
     return hardware
   }
 
+  async fetchOllamaModels(): Promise<string[]> {
+    try {
+      const response = await fetch("/api/ollama-models")
+      if (!response.ok) {
+        throw new Error(`Failed to fetch models: ${response.statusText}`)
+      }
+      const models = await response.json()
+      return models
+    } catch (error) {
+      console.error("Could not fetch Ollama models:", error)
+      return []
+    }
+  }
+
   selectOptimalModel(task: string, priority: "speed" | "accuracy" | "balanced" = "balanced"): string {
     if (!this.hardware) {
       return "mistral" // fallback
@@ -186,21 +208,24 @@ export function useAIOrchestrator() {
   const [orchestrator] = useState(() => new AIOrchestrator())
   const [hardware, setHardware] = useState<HardwareInfo | null>(null)
   const [isDetecting, setIsDetecting] = useState(true)
+  const [models, setModels] = useState<string[]>([])
 
   useEffect(() => {
-    const detectHardware = async () => {
+    const initialize = async () => {
       try {
         const hw = await orchestrator.detectHardware()
         setHardware(hw)
+        const fetchedModels = await orchestrator.fetchOllamaModels()
+        setModels(fetchedModels)
       } catch (error) {
-        console.error("Hardware detection failed:", error)
+        console.error("Initialization failed:", error)
       } finally {
         setIsDetecting(false)
       }
     }
 
-    detectHardware()
+    initialize()
   }, [orchestrator])
 
-  return { orchestrator, hardware, isDetecting }
+  return { orchestrator, hardware, isDetecting, models }
 }

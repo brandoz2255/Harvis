@@ -15,10 +15,9 @@ services:
 
 networks:
   ollama-n8n-network:
-    external: true      # <-- Compose will *not* create it, you will
-
-
+    external: true # <-- Compose will *not* create it, you will
 
 volumes:
   ollama:
   n8n_data:
+

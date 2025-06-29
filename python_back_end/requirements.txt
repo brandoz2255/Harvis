@@ -20,6 +20,7 @@ pytesseract
 Pillow
 requests
 
+google-generativeai
 # Dependencies pulled in by the above packages, but good to have explicitly
 # sentencepiece is used by many transformer models
 sentencepiece
