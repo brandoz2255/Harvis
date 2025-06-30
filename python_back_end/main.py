@@ -112,17 +112,17 @@ async def analyze_and_respond(req: ScreenAnalysisRequest):
         # Create prompt with both caption and OCR text
         prompt = (
             f"Here's what's on the user's screen:\n"
-            f"Caption: {screen_data['caption']}\n"
-            f"OCR Text (first 500 chars): {screen_data['ocr_text'][:100]}\n"
-            "What should they do next?"
+            f"BLIP Caption: {screen_data['caption']}\n"
+            f"OCR Text: {screen_data['ocr_text']}\n"
+            "Based on this, what should be the next action or response?"
         )
 
         # Get LLM response
         llm_response = query_mistral(prompt)
 
-        return {"commentary": screen_data["caption"], "llm_response": llm_response}
+        return {"llm_response": llm_response}
     except Exception as e:
-        return {"commentary": "error", "llm_response": str(e)}
+        return {"llm_response": f"Error analyzing screen: {e}"}
 
 
 @app.post("/api/chat", tags=["chat"])
@@ -243,27 +243,35 @@ async def serve_audio(filename: str):
 @app.post("/api/analyze-screen", tags=["vision"])
 async def analyze_screen(req: ScreenAnalysisRequest):
     try:
-        img_data = req.image.split(",", 1)[-1]  # works for data URI or raw b64
-        image = Image.open(io.BytesIO(base64.b64decode(img_data)))
+        # Log the size of the incoming image data
+        logger.info(f"Received image data size: {len(req.image) if req.image else 0} bytes")
 
-        if image_to_text:
-            caption = image_to_text(image)[0].get("generated_text", "")
-            if caption:
-                prefixes = [
-                    "Looking at your screen, ",
-                    "I notice that ",
-                    "On your screen, ",
-                    "I can see that ",
-                    "Currently, ",
-                ]
-                return {"commentary": random.choice(prefixes) + caption.lower()}
+        # Get screen analysis data using the dedicated function
+        screen_data = analyze_image_base64(req.image)
 
-        return {
-            "commentary": "I'm having trouble analyzing the screen content right now."
-        }
+        # Log the screen analysis data
+        logger.info(f"Screen analysis data: {screen_data}")
+
+        # Check for errors from screen analysis
+        if "error" in screen_data:
+            raise HTTPException(500, detail=screen_data["error"])
+
+        # Create prompt with both caption and OCR text
+        prompt = (
+            f"Here's what's on the user's screen:\n"
+            f"BLIP Caption: {screen_data['caption']}\n"
+            f"OCR Text: {screen_data['ocr_text']}\n"
+            "Based on this, what should be the next action or response?"
+        )
+
+        # Get LLM response
+        llm_response = query_mistral(prompt)
+
+        return {"commentary": screen_data["caption"], "llm_response": llm_response}
     except Exception as e:
         logger.error("Screen analysis failed: %s", e)
         raise HTTPException(500, str(e)) from e
+
 
 
 # Load Whisper (once, at the top)

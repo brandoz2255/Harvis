@@ -1,27 +1,36 @@
-import { type NextRequest, NextResponse } from "next/server"
+import { NextRequest, NextResponse } from "next/server"
 
-const BACKEND_API = process.env.BACKEND_URL || "http://backend:8000"
-
-export async function POST(request: NextRequest) {
+export async function POST(req: NextRequest) {
   try {
-    const body = await request.json()
+    const { image } = await req.json()
 
-    const response = await fetch(`${BACKEND_API}/api/analyze-screen`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
+    const ocr_text = await runOCR(image)
+    const blip_description = await runBLIP(image)
+
+    const llm_input = `Here's what I see: ${blip_description}. The screen text reads: ${ocr_text}. What can you infer or recommend based on this?`
+
+    const llm_response = await sendToLLM(llm_input) // to Gemini, Ollama, etc.
+
+    return NextResponse.json({
+      ocr_text,
+      blip_description,
+      llm_response,
     })
-
-    if (!response.ok) {
-      throw new Error(`Backend responded with ${response.status}`)
-    }
-
-    const data = await response.json()
-    return NextResponse.json(data)
-  } catch (error) {
-    console.error("Screen analysis API error:", error)
+  } catch (err) {
+    console.error("Analysis failed:", err)
     return NextResponse.json({ error: "Failed to analyze screen" }, { status: 500 })
   }
+}
+
+// Simulated placeholder implementations
+async function runOCR(image: string): Promise<string> {
+  return "This is placeholder OCR text extracted from the screen."
+}
+
+async function runBLIP(image: string): Promise<string> {
+  return "This is a dashboard showing analytics metrics and graphs."
+}
+
+async function sendToLLM(prompt: string): Promise<string> {
+  return `This screen appears to be an analytics dashboard. Consider enabling real-time data updates.`
 }

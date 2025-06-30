@@ -8,6 +8,7 @@ import soundfile as sf
 import re
 from transformers import pipeline
 from chatterbox.tts import ChatterboxTTS, punc_norm
+from dotenv import load_dotenv
 # Only import what's needed for the chat functionality
 
 # NOTE: This application requires the 'ffmpeg' command-line tool for audio processing.
@@ -486,5 +487,6 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
 if __name__ == "__main__":
     if os.environ.get("CUDA_LAUNCH_BLOCKING") != "1":
         logger.info("Run with CUDA_LAUNCH_BLOCKING=1 for detailed CUDA errors.")
+    load_dotenv()
     demo.queue().launch(debug=True)
 

@@ -7,6 +7,12 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # ─────────────────────────────────────────────────────────────
+# ✅ Declare environment variable for Gemini API Key
+# This variable should be set when running the Docker container, e.g.,
+# docker run -e GEMINI_API_KEY="your_api_key_here" your_image_name
+ENV GEMINI_API_KEY=""
+
+# ─────────────────────────────────────────────────────────────
 # ✅ Install system dependencies
 RUN apt-get update && apt-get install -y     curl     build-essential     libgl1     ffmpeg     git     tesseract-ocr     tesseract-ocr-eng     && rm -rf /var/lib/apt/lists/*
 

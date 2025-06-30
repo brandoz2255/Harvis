@@ -13,11 +13,9 @@ def analyze_image_base64(image_b64: str) -> dict:
 
         # Get BLIP caption
         caption = blip_model(image)[0]["generated_text"]
-        print(f"BLIP Caption: {caption}")
 
         # Get OCR text
         ocr_text = pytesseract.image_to_string(image)
-        print(f"OCR Text: {ocr_text[:500]}") # Log first 500 chars
 
         return {
             "caption": caption,

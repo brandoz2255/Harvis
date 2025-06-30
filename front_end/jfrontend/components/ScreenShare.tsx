@@ -2,19 +2,23 @@
 
 import { useState, useRef, useEffect } from "react"
 import { motion } from "framer-motion"
-import { Monitor, MonitorOff, Eye, EyeOff } from "lucide-react"
+import { Monitor, MonitorOff, Eye, EyeOff, MessageSquare } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
+import { useChatStore } from "@/stores/chatStore"
 
 export default function ScreenShare() {
   const [isSharing, setIsSharing] = useState(false)
   const [commentaryEnabled, setCommentaryEnabled] = useState(false)
   const [commentary, setCommentary] = useState("")
+  const [llmResponse, setLlmResponse] = useState("")
   const [isAnalyzing, setIsAnalyzing] = useState(false)
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const commentaryTimerRef = useRef<NodeJS.Timeout | null>(null)
+
+  const addMessage = useChatStore((state) => state.addMessage)
 
   const startScreenShare = async () => {
     try {
@@ -28,7 +32,6 @@ export default function ScreenShare() {
         streamRef.current = stream
         setIsSharing(true)
 
-        // Handle stream end
         stream.getVideoTracks()[0].addEventListener("ended", stopScreenShare)
       }
     } catch (error) {
@@ -50,6 +53,7 @@ export default function ScreenShare() {
     setIsSharing(false)
     setCommentaryEnabled(false)
     setCommentary("")
+    setLlmResponse("")
 
     if (commentaryTimerRef.current) {
       clearInterval(commentaryTimerRef.current)
@@ -62,7 +66,6 @@ export default function ScreenShare() {
 
     setIsAnalyzing(true)
 
-    // Retry logic with 3 attempts
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         const canvas = document.createElement("canvas")
@@ -85,18 +88,32 @@ export default function ScreenShare() {
           if (!response.ok) throw new Error(await response.text())
 
           const data = await response.json()
-          if (data.commentary) {
-            setCommentary(data.commentary)
+
+          if (data.blip_description) {
+            setCommentary(data.blip_description)
           }
+
+          if (data.llm_response) {
+            console.log("LLM Response:", data.llm_response)
+            setLlmResponse(data.llm_response)
+
+            // ✅ Send to global chat
+            addMessage({
+              role: "assistant",
+              content: data.llm_response,
+            })
+          }
+
+          console.log("OCR Text:", data.ocr_text)
+
           setIsAnalyzing(false)
-          return // Success, exit retry loop
+          return
         }
       } catch (error) {
         console.error(`Analyze attempt ${attempt + 1} failed:`, error)
         if (attempt === 2) {
           setCommentary("Sorry, can't analyze the screen.")
         }
-        // Wait before retry (exponential backoff)
         await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)))
       }
     }
@@ -108,16 +125,15 @@ export default function ScreenShare() {
     setCommentaryEnabled(newState)
 
     if (newState && isSharing) {
-      // Start periodic analysis
       analyzeScreen()
-      commentaryTimerRef.current = setInterval(analyzeScreen, 30000) // Every 30 seconds
+      commentaryTimerRef.current = setInterval(analyzeScreen, 30000)
     } else {
-      // Stop periodic analysis
       if (commentaryTimerRef.current) {
         clearInterval(commentaryTimerRef.current)
         commentaryTimerRef.current = null
       }
       setCommentary("")
+      setLlmResponse("")
     }
   }
 
@@ -131,7 +147,7 @@ export default function ScreenShare() {
 
     document.addEventListener("keydown", handleKeyDown)
     return () => document.removeEventListener("keydown", handleKeyDown)
-  }, [isSharing, analyzeScreen])
+  }, [isSharing])
 
   useEffect(() => {
     return () => {
@@ -212,25 +228,38 @@ export default function ScreenShare() {
           )}
         </div>
 
-        {commentary && (
+        {(commentary || llmResponse) && (
           <motion.div
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
-            className="bg-blue-900/30 border border-blue-500/50 rounded-lg p-3"
+            className="bg-blue-900/30 border border-blue-500/50 rounded-lg p-3 space-y-2"
           >
-            <div className="flex items-start space-x-2">
-              <Eye className="w-4 h-4 text-blue-400 mt-0.5 flex-shrink-0" />
-              <div>
-                <p className="text-sm text-blue-300 font-medium">Screen Analysis</p>
-                <p className="text-sm text-gray-300 mt-1">{commentary}</p>
-                {isAnalyzing && (
-                  <div className="flex items-center space-x-2 mt-2">
-                    <div className="w-2 h-2 bg-blue-400 rounded-full animate-pulse"></div>
-                    <span className="text-xs text-blue-400">Analyzing...</span>
-                  </div>
-                )}
+            {commentary && (
+              <div className="flex items-start space-x-2">
+                <Eye className="w-4 h-4 text-blue-400 mt-0.5 flex-shrink-0" />
+                <div>
+                  <p className="text-sm text-blue-300 font-medium">Screen Analysis</p>
+                  <p className="text-sm text-gray-300 mt-1">{commentary}</p>
+                </div>
               </div>
-            </div>
+            )}
+
+            {llmResponse && (
+              <div className="flex items-start space-x-2">
+                <MessageSquare className="w-4 h-4 text-green-400 mt-0.5 flex-shrink-0" />
+                <div>
+                  <p className="text-sm text-green-300 font-medium">AI Response</p>
+                  <p className="text-sm text-gray-300 mt-1">{llmResponse}</p>
+                </div>
+              </div>
+            )}
+
+            {isAnalyzing && (
+              <div className="flex items-center space-x-2 mt-2">
+                <div className="w-2 h-2 bg-blue-400 rounded-full animate-pulse"></div>
+                <span className="text-xs text-blue-400">Analyzing...</span>
+              </div>
+            )}
           </motion.div>
         )}
       </div>
