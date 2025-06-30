@@ -17,6 +17,8 @@ Pillow
 requests
 pytesseract
 
+google-generativeai
+
 # Extra
 sentencepiece
 
