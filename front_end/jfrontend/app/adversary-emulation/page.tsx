@@ -4,7 +4,7 @@ import type React from "react"
 
 import { useState, useEffect, useRef } from "react"
 import { motion } from "framer-motion"
-import { ArrowLeft, Play, Square, Settings, Monitor, MessageSquare, Terminal } from "lucide-react"
+import { ArrowLeft, Play, Square, Settings, Monitor, MessageSquare, Terminal, ScanEye } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -187,6 +187,32 @@ export default function AdversaryEmulationPage() {
     }
   }
 
+  const handleAnalyzeAndRespond = async () => {
+    if (!screenFeed) return;
+
+    try {
+      const response = await fetch("/api/analyze-and-respond", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image: screenFeed }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        console.log("Analysis response:", data);
+        // Add the response to the chat
+        const assistantMessage = {
+          role: "assistant" as const,
+          content: data.llm_response || data.commentary,
+          timestamp: new Date().toLocaleTimeString(),
+        };
+        setChatMessages((prev) => [...prev, assistantMessage]);
+      }
+    } catch (error) {
+      console.error("Failed to analyze and respond:", error);
+    }
+  };
+
   const getLogTypeColor = (type: LogEntry["type"]) => {
     switch (type) {
       case "system":
@@ -236,6 +262,10 @@ export default function AdversaryEmulationPage() {
             <h1 className="text-3xl font-bold text-white">Adversary Emulation Mode</h1>
           </div>
           <div className="flex items-center space-x-2">
+            <Button variant="outline" size="sm" className="bg-gray-800 border-gray-600 text-gray-300" onClick={handleAnalyzeAndRespond}>
+              <ScanEye className="w-4 h-4 mr-2" />
+              Analyze and Respond
+            </Button>
             <Button variant="outline" size="sm" className="bg-gray-800 border-gray-600 text-gray-300">
               <Settings className="w-4 h-4 mr-2" />
               Settings
