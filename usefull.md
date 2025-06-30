@@ -84,3 +84,4 @@ ation":635305912,"load_duration":20387613,"prompt_eval_count":10,"prompt_eval_du
 root@8426bfb73cec:/app# curl -X POST <http://ollama:11434/api/chat>   -H "Content-Type: application/json"   -d '{"model": "gemma3:1b", "messages": [{"role":
  "user", "content": "Hello"}]}'
 
+i was here 
