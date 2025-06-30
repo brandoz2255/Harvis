@@ -4,7 +4,7 @@ const nextConfig = {
     serverComponentsExternalPackages: [],
   },
   env: {
-    BACKEND_URL: process.env.BACKEND_URL || "http://localhost:8000",
+    BACKEND_URL: process.env.BACKEND_URL || "http://backend:8000",
   },
   async rewrites() {
     return [

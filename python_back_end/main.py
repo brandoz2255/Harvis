@@ -96,7 +96,7 @@ async def root() -> FileResponse:
 
 # Import new modules
 from screen_analyzer import analyze_image_base64
-from llm_connector import query_mistral
+from llm_connector import query_llm, list_ollama_models
 
 
 @app.post("/api/analyze-and-respond")
@@ -118,7 +118,7 @@ async def analyze_and_respond(req: ScreenAnalysisRequest):
         )
 
         # Get LLM response
-        llm_response = query_mistral(prompt)
+        llm_response = query_llm(prompt)
 
         return {"llm_response": llm_response}
     except Exception as e:
@@ -265,7 +265,7 @@ async def analyze_screen(req: ScreenAnalysisRequest):
         )
 
         # Get LLM response
-        llm_response = query_mistral(prompt)
+        llm_response = query_llm(prompt)
 
         return {"commentary": screen_data["caption"], "llm_response": llm_response}
     except Exception as e:
@@ -343,5 +343,9 @@ async def get_ollama_models():
 
 
 if __name__ == "__main__":
+    # Start the screen share signaling server in a separate process
+    import subprocess
+    subprocess.Popen(["python", "screen_share_server.py"])
+
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
 # huh2.0

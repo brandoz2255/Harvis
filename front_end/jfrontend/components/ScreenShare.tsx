@@ -1,65 +1,166 @@
 "use client"
 
-import { useState, useRef, useEffect } from "react"
-import { motion } from "framer-motion"
-import { Monitor, MonitorOff, Eye, EyeOff, MessageSquare } from "lucide-react"
-import { Button } from "@/components/ui/button"
-import { Card } from "@/components/ui/card"
-import { useChatStore } from "@/stores/chatStore"
+import { useState, useRef, useEffect } from "react";
+import io from "socket.io-client";
+import { motion } from "framer-motion";
+import { Monitor, MonitorOff, Eye, EyeOff, MessageSquare } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { useChatStore } from "@/stores/chatStore";
+
+const SOCKET_SERVER_URL = process.env.NEXT_PUBLIC_SOCKET_SERVER_URL || "http://backend:5000";
+const socket = io(SOCKET_SERVER_URL);
+
+// WebRTC configuration
+const RTC_CONFIGURATION = {
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" }
+  ]
+};
 
 export default function ScreenShare() {
-  const [isSharing, setIsSharing] = useState(false)
-  const [commentaryEnabled, setCommentaryEnabled] = useState(false)
-  const [commentary, setCommentary] = useState("")
-  const [llmResponse, setLlmResponse] = useState("")
-  const [isAnalyzing, setIsAnalyzing] = useState(false)
+  const [isSharing, setIsSharing] = useState<boolean>(false);
+  const [commentaryEnabled, setCommentaryEnabled] = useState<boolean>(false);
+  const [commentary, setCommentary] = useState<string>("");
+  const [llmResponse, setLlmResponse] = useState<string>("");
+  const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
+  const [selectedModel, setSelectedModel] = useState<string>("mistral");
+  const [availableModels, setAvailableModels] = useState<string[]>(["mistral", "llama2", "gemini-pro"]);
 
-  const videoRef = useRef<HTMLVideoElement>(null)
-  const streamRef = useRef<MediaStream | null>(null)
-  const commentaryTimerRef = useRef<NodeJS.Timeout | null>(null)
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const commentaryTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
 
-  const addMessage = useChatStore((state) => state.addMessage)
+  const addMessage = useChatStore((state: any) => state.addMessage);
+
+  // Handle signaling
+  useEffect(() => {
+    socket.on("offer", async (offer: RTCSessionDescriptionInit) => {
+      if (!peerConnectionRef.current) return;
+
+      await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(offer));
+      const answer = await peerConnectionRef.current.createAnswer();
+      await peerConnectionRef.current.setLocalDescription(answer);
+      socket.emit("answer", answer);
+    });
+
+    socket.on("answer", async (answer: RTCSessionDescriptionInit) => {
+      if (!peerConnectionRef.current) return;
+      await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(answer));
+    });
+
+    socket.on("candidate", async (candidate: RTCIceCandidateInit) => {
+      if (!peerConnectionRef.current) return;
+      await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(candidate));
+    });
+
+    socket.on("llm_response", (data: { blip_description: string; llm_response: string }) => {
+      if (data.blip_description) {
+        setCommentary(data.blip_description);
+      }
+      if (data.llm_response) {
+        console.log("LLM Response:", data.llm_response);
+        setLlmResponse(data.llm_response);
+        addMessage({
+          role: "assistant",
+          content: data.llm_response,
+        });
+      }
+      setIsAnalyzing(false);
+    });
+
+    // Fetch available models from the backend
+    const fetchModels = async () => {
+      try {
+        const response = await fetch("/api/ollama-models");
+        if (response.ok) {
+          const models = await response.json();
+          setAvailableModels(models);
+          if (models.length > 0 && !models.includes(selectedModel)) {
+            setSelectedModel(models[0]); // Set default to first available if current is not in list
+          }
+        }
+      } catch (error) {
+        console.error("Error fetching models:", error);
+      }
+    };
+
+    fetchModels();
+
+  }, []);
 
   const startScreenShare = async () => {
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
         video: true,
         audio: false,
-      })
+      });
 
       if (videoRef.current) {
-        videoRef.current.srcObject = stream
-        streamRef.current = stream
-        setIsSharing(true)
+        videoRef.current.srcObject = stream;
+        streamRef.current = stream;
+        setIsSharing(true);
 
-        stream.getVideoTracks()[0].addEventListener("ended", stopScreenShare)
+        // Set up WebRTC peer connection
+        const peerConnection = new RTCPeerConnection(RTC_CONFIGURATION);
+        stream.getTracks().forEach(track => peerConnection.addTrack(track, stream));
+
+        peerConnection.onicecandidate = (event) => {
+          if (event.candidate) {
+            socket.emit("candidate", event.candidate);
+          }
+        };
+
+        peerConnection.ontrack = (event) => {
+          if (videoRef.current) {
+            videoRef.current.srcObject = event.streams[0];
+          }
+        };
+
+        // Create offer and send to server
+        const offer = await peerConnection.createOffer();
+        await peerConnection.setLocalDescription(offer);
+        socket.emit("offer", offer);
+
+        peerConnectionRef.current = peerConnection;
+
+        stream.getVideoTracks()[0].addEventListener("ended", stopScreenShare);
       }
     } catch (error) {
-      console.error("Error starting screen share:", error)
-      alert("Failed to start screen sharing. Please check permissions.")
+      console.error("Error starting screen share:", error);
+      alert("Failed to start screen sharing. Please check permissions.");
     }
-  }
+  };
 
   const stopScreenShare = () => {
     if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop())
-      streamRef.current = null
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+
+    if (peerConnectionRef.current) {
+      peerConnectionRef.current.close();
+      peerConnectionRef.current = null;
+
+      // Send signal to server to stop sharing
+      socket.emit("stopShare");
     }
 
     if (videoRef.current) {
-      videoRef.current.srcObject = null
+      videoRef.current.srcObject = null;
     }
 
-    setIsSharing(false)
-    setCommentaryEnabled(false)
-    setCommentary("")
-    setLlmResponse("")
+    setIsSharing(false);
+    setCommentaryEnabled(false);
+    setCommentary("");
+    setLlmResponse("");
 
     if (commentaryTimerRef.current) {
-      clearInterval(commentaryTimerRef.current)
-      commentaryTimerRef.current = null
+      clearInterval(commentaryTimerRef.current);
+      commentaryTimerRef.current = null;
     }
-  }
+  };
 
   const analyzeScreen = async () => {
     if (!videoRef.current || !streamRef.current || isAnalyzing) return
@@ -77,32 +178,7 @@ export default function ScreenShare() {
           ctx.drawImage(videoRef.current, 0, 0)
           const imageData = canvas.toDataURL("image/jpeg", 0.8)
 
-          const response = await fetch("/api/analyze-screen", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({ image: imageData }),
-          })
-
-          if (!response.ok) throw new Error(await response.text())
-
-          const data = await response.json()
-
-          if (data.blip_description) {
-            setCommentary(data.blip_description)
-          }
-
-          if (data.llm_response) {
-            console.log("LLM Response:", data.llm_response)
-            setLlmResponse(data.llm_response)
-
-            // ✅ Send to global chat
-            addMessage({
-              role: "assistant",
-              content: data.llm_response,
-            })
-          }
+          socket.emit("screen_data", { imageData, modelName: selectedModel })
 
           console.log("OCR Text:", data.ocr_text)
 
@@ -207,6 +283,17 @@ export default function ScreenShare() {
               </>
             )}
           </Button>
+          <select
+            value={selectedModel}
+            onChange={(e) => setSelectedModel(e.target.value)}
+            className="p-2 rounded-md bg-gray-800 text-white border border-gray-600"
+          >
+            {availableModels.map((model) => (
+              <option key={model} value={model}>
+                {model}
+              </option>
+            ))}
+          </select>
         </div>
 
         <div className="relative">
