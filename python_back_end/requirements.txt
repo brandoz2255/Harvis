@@ -21,4 +21,5 @@ google-generativeai
 
 # Extra
 sentencepiece
-
+socketio
+aiohttp
