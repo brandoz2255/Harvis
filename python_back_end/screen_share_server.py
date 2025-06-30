@@ -69,4 +69,4 @@ async def stopShare(sid):
 
 # Start the server
 if __name__ == "__main__":
-    web.run_app(app, host="0.0.0.0", port=5001)
+    web.run_app(app, host="127.0.0.1", port=5001)
