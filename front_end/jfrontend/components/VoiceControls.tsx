@@ -1,3 +1,4 @@
+
 "use client"
 
 import { useState, useRef } from "react"
@@ -30,7 +31,7 @@ export default function VoiceControls() {
       }
 
       mediaRecorder.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: "audio/wav" })
+        const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
         await sendAudioToBackend(audioBlob)
 
         // Stop all tracks to release microphone
