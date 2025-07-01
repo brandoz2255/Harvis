@@ -1,7 +1,7 @@
 ############################
 # 🐳 Base with CUDA libs
 ############################
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04   #  ↖ includes libcudart, cublas, etc. :contentReference[oaicite:3]{index=3}
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
 
 ############################
 # 🐧 OS packages
