@@ -97,8 +97,7 @@ def generate_speech(text, model, audio_prompt=None, exaggeration=0.5, temperatur
                         wav = model.generate(
                             normalized,
                             audio_prompt_path=audio_prompt,
-                            exagg "POST /api/mic-chat HTTP/1.0" 500 Internal Server Error
-eration=exaggeration,
+                            exaggeration=exaggeration,
                             temperature=temperature,
                             cfg_weight=cfg_weight
                         )
@@ -196,7 +195,7 @@ async def root() -> FileResponse:
 
 # Import new modules
 from screen_analyzer import analyze_image_base64
-from llm_connector import query_mistral
+
 
 
 @app.post("/api/analyze-and-respond")
@@ -256,7 +255,7 @@ async def chat(req: ChatRequest, request: Request):
         else:
             system_prompt = (
                 'You are "Jarves", a voice-first local assistant. '
-                "Reply in ≤25 spoken-style words, sprinkling brief Spanish when natural. "
+                "Reply in ≤25 spoken-style words, sprinkling brief Spanish when natural, Be bilangual about 80 percent english and 20 percent spanish"
                 'Begin each answer with a short verbal acknowledgment (e.g., "Claro,", "¡Por supuesto!", "Right away").'
             )
             OLLAMA_ENDPOINT = "/api/chat"  # single source of truth
