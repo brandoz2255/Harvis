@@ -7,8 +7,9 @@ FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
 # 🐧 OS packages
 ############################
 RUN apt-get update && apt-get install -y \
-      git build-essential libgl1 ffmpeg tesseract-ocr tesseract-ocr-eng \
-   && rm -rf /var/lib/apt/lists/*
+      git build-essential curl libgl1 ffmpeg tesseract-ocr tesseract-ocr-eng \
+      python3 python3-pip \
+    && rm -rf /var/lib/apt/lists/*
 
 ############################
 # 🐍 Python deps
