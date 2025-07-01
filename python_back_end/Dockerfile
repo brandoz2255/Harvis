@@ -37,16 +37,17 @@ COPY . .
 ############################
 # 🚀 Model warm-up (parallel & cached)
 ############################
+# ✅ Model warm-up (parallel + cache)
+############################
+# 🚀 Model warm-up (parallel + cache)
+############################
 RUN --mount=type=cache,target=/root/.cache \
-    bash -c '\
-      python -c "import whisper" & \
-      python - <<PY & \
-from transformers import pipeline; pipeline(\"image-to-text\", model=\"Salesforce/blip-image-captioning-base\") \
-PY \
-      python - <<PY & \
-from chatterbox.tts import ChatterboxTTS; ChatterboxTTS.from_pretrained(device=\"cuda\") \
-PY \
-      wait'
+    bash -c " \
+      python -c 'import whisper' & \
+      python -c 'from transformers import pipeline; pipeline(\"image-to-text\", model=\"Salesforce/blip-image-captioning-base\")' & \
+      python -c 'from chatterbox.tts import ChatterboxTTS; ChatterboxTTS.from_pretrained(device=\"cuda\")' & \
+      wait \
+    "
 
 ############################
 # 🌐 Expose + launch
