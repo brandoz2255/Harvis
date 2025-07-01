@@ -3,6 +3,6 @@ python_back_end/**/__pycache__/
 python_back_end/**/*.pyc
 python_back_end/**/*.pyo
 python_back_end/**/*.pyd
-
+.env
 # Ignore .gradio folder
 .gradio/
