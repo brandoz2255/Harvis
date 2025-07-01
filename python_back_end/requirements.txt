@@ -8,18 +8,16 @@ python-multipart
 # ML / AI models
 torch==2.6.0
 transformers==4.46.3
-chatterbox-tts
+resemble-perth
+chatterbox-tts==0.1.2
 soundfile
 git+https://github.com/openai/whisper.git
-perth
+
 # Image and OCR
 Pillow
 requests
 pytesseract
-librosa==0.11.0
 google-generativeai
 
 # Extra
 sentencepiece
-socketio
-aiohttp
