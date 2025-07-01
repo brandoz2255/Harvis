@@ -8,7 +8,7 @@ python-multipart
 # ML / AI models
 torch==2.6.0
 transformers==4.46.3
-chatterbox-tts==0.1.2
+chatterbox-tts
 soundfile
 git+https://github.com/openai/whisper.git
 # Image and OCR
