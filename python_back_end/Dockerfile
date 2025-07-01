@@ -20,12 +20,12 @@ COPY requirements.txt .
 # 3️⃣ pull CUDA wheels for torch + friends
 RUN pip install --no-cache-dir --upgrade pip \
  && pip install --no-cache-dir -r requirements.txt \
- && pip install --no-cache-dir resemble-perth \    # fixes NoneType crash :contentReference[oaicite:4]{index=4}
+ && pip install --no-cache-dir resemble-perth \    
  && pip install --no-cache-dir \
       torch==2.6.0+cu124 \
       torchvision==0.21.0+cu124 \
       torchaudio==2.6.0 \
-      --index-url https://download.pytorch.org/whl/cu124   # proper CUDA wheel repo :contentReference[oaicite:5]{index=5}
+      --index-url https://download.pytorch.org/whl/cu124  
 
 ############################
 # 📦 Copy code
