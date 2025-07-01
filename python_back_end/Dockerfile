@@ -10,7 +10,7 @@ WORKDIR /app
 # ✅ Declare environment variable for Gemini API Key
 # This variable should be set when running the Docker container, e.g.,
 # docker run -e GEMINI_API_KEY="your_api_key_here" your_image_name
-ENV GEMINI_API_KEY=""
+#ENV GEMINI_API_KEY=""
 
 # ─────────────────────────────────────────────────────────────
 # ✅ Install system dependencies
@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y     curl     build-essential     libgl1
 # ✅ Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
+  && pip install --no-cache-dir -r requirements.txt
 
 # ─────────────────────────────────────────────────────────────
 # ✅ Copy all code (done AFTER deps for better caching)
@@ -29,8 +29,8 @@ COPY . .
 # ─────────────────────────────────────────────────────────────
 # ✅ Warm-up: preload models so cold start is faster
 RUN python -c "import whisper" && \
-    python -c 'from transformers import pipeline; pipeline("image-to-text", model="Salesforce/blip-image-captioning-base")' && \
-    python -c 'from chatterbox.tts import ChatterboxTTS; ChatterboxTTS.from_pretrained(device="cpu")'
+  python -c 'from transformers import pipeline; pipeline("image-to-text", model="Salesforce/blip-image-captioning-base")' && \
+  python -c 'from chatterbox.tts import ChatterboxTTS; ChatterboxTTS.from_pretrained(device="cpu")'
 
 # ─────────────────────────────────────────────────────────────
 # ✅ Expose API port
