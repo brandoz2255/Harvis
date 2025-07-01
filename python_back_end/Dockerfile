@@ -1,48 +1,55 @@
-# ─────────────────────────────────────────────────────────────
-# ✅ Base Image
-FROM python:3.11-slim
+############################
+# 🐳 Base with CUDA libs
+############################
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04   #  ↖ includes libcudart, cublas, etc. :contentReference[oaicite:3]{index=3}
 
-# ─────────────────────────────────────────────────────────────
-# ✅ Set working directory
-WORKDIR /app
+############################
+# 🐧 OS packages
+############################
+RUN apt-get update && apt-get install -y \
+      git build-essential libgl1 ffmpeg tesseract-ocr tesseract-ocr-eng \
+   && rm -rf /var/lib/apt/lists/*
 
-# ─────────────────────────────────────────────────────────────
-# ✅ Declare environment variable for Gemini API Key
-# This variable should be set when running the Docker container, e.g.,
-# docker run -e GEMINI_API_KEY="your_api_key_here" your_image_name
-#ENV GEMINI_API_KEY=""
-
-# ─────────────────────────────────────────────────────────────
-# ✅ Install system dependencies
-RUN apt-get update && apt-get install -y     curl     build-essential     libgl1     ffmpeg     git     tesseract-ocr     tesseract-ocr-eng     && rm -rf /var/lib/apt/lists/*
-
-# ─────────────────────────────────────────────────────────────
-# ✅ Install Python dependencies
+############################
+# 🐍 Python deps
+############################
 COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip \
-  && pip install --no-cache-dir -r requirements.txt \
-   && pip install --no-cache-dir resemble-perth
 
-# ─────────────────────────────────────────────────────────────
-# ✅ Copy all code (done AFTER deps for better caching)
+# 1️⃣ install your pinned deps
+# 2️⃣ add Perth for Chatterbox watermarking
+# 3️⃣ pull CUDA wheels for torch + friends
+RUN pip install --no-cache-dir --upgrade pip \
+ && pip install --no-cache-dir -r requirements.txt \
+ && pip install --no-cache-dir resemble-perth \    # fixes NoneType crash :contentReference[oaicite:4]{index=4}
+ && pip install --no-cache-dir \
+      torch==2.6.0+cu124 \
+      torchvision==0.21.0+cu124 \
+      torchaudio==2.6.0 \
+      --index-url https://download.pytorch.org/whl/cu124   # proper CUDA wheel repo :contentReference[oaicite:5]{index=5}
+
+############################
+# 📦 Copy code
+############################
+WORKDIR /app
 COPY . .
 
-# ─────────────────────────────────────────────────────────────
-# ✅ Warm-up: preload models so cold start is faster
-RUN python -c "import whisper" && \
-  python -c 'from transformers import pipeline; pipeline("image-to-text", model="Salesforce/blip-image-captioning-base")' && \
-  python -c 'from chatterbox.tts import ChatterboxTTS; ChatterboxTTS.from_pretrained(device="cpu")'
+############################
+# 🚀 Model warm-up (parallel & cached)
+############################
+RUN --mount=type=cache,target=/root/.cache \
+    bash -c '\
+      python -c "import whisper" & \
+      python - <<PY & \
+from transformers import pipeline; pipeline(\"image-to-text\", model=\"Salesforce/blip-image-captioning-base\") \
+PY \
+      python - <<PY & \
+from chatterbox.tts import ChatterboxTTS; ChatterboxTTS.from_pretrained(device=\"cuda\") \
+PY \
+      wait'
 
-# ─────────────────────────────────────────────────────────────
-# ✅ Expose API port
+############################
+# 🌐 Expose + launch
+############################
 EXPOSE 8000
-
-# ─────────────────────────────────────────────────────────────
-# ✅ Start server (use Gunicorn for prod; uvicorn for dev)
-# Set working directory inside container
-WORKDIR /app
-
-# Set the PYTHONPATH to include the app directory for module resolution
 ENV PYTHONPATH=/app
-
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
