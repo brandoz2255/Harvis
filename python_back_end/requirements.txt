@@ -11,8 +11,6 @@ transformers==4.46.3
 chatterbox-tts==0.1.2
 soundfile
 git+https://github.com/openai/whisper.git
-perth # Added perth
-
 # Image and OCR
 Pillow
 requests
