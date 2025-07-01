@@ -19,8 +19,108 @@ import whisper  # Import Whisper
 
 # ─── Local helper --------------------------------------------------------------
 from chatterbox_tts import load_tts_model, generate_speech  # see second file below
+from chatterbox.tts import ChatterboxTTS, punc_norm
+import torch
+import logging
+import time
 
-# ─── Logging -------------------------------------------------------------------
+# ─── Set up logging ─────────────────────────────────────────────────────────────
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ─── VRAM Management ────────────────────────────────────────────────────────────
+def get_vram_threshold():
+    if not torch.cuda.is_available():
+        return float('inf')
+
+    total_mem = torch.cuda.get_device_properties(0).total_memory
+    return max(int(total_mem * 0.8), 10 * 1024**3)
+
+THRESHOLD_BYTES = get_vram_threshold()
+logger.info(f"VRAM threshold set to {THRESHOLD_BYTES/1024**3:.1f} GiB")
+
+def wait_for_vram(threshold=THRESHOLD_BYTES, interval=0.5):
+    if not torch.cuda.is_available():
+        return
+    used = torch.cuda.memory_allocated()
+    while used > threshold:
+        logger.info(f"VRAM {used/1024**3:.1f} GiB > {threshold/1024**3:.1f} GiB. Waiting…")
+        time.sleep(interval)
+        used = torch.cuda.memory_allocated()
+    torch.cuda.empty_cache()
+    logger.info("VRAM is now below threshold. Proceeding with TTS.")
+
+# ─── Global Model Variables ─────────────────────────────────────────────────────
+tts_model = None
+
+# ─── Load TTS Model (Chatterbox) ────────────────────────────────────────────────
+def load_tts_model(force_cpu=False):
+    global tts_model
+    tts_device = "cuda" if torch.cuda.is_available() and not force_cpu else "cpu"
+
+    if tts_model is None:
+        try:
+            logger.info(f"Loading TTS model on {tts_device}")
+            tts_model = ChatterboxTTS.from_pretrained(device=tts_device)
+        except Exception as e:
+            if "cuda" in str(e).lower():
+                logger.warning(f"CUDA loading failed: {e}. Trying CPU...")
+                try:
+                    tts_model = ChatterboxTTS.from_pretrained(device="cpu")
+                    logger.info("Successfully loaded TTS model on CPU")
+                except Exception as e2:
+                    logger.error(f"FATAL: Could not load TTS model on CPU either: {e2}")
+                    raise
+            else:
+                logger.error(f"FATAL: Could not load TTS model: {e}")
+                raise
+    return tts_model
+
+# ─── Generate Speech ────────────────────────────────────────────────────────────
+def generate_speech(text, model, audio_prompt=None, exaggeration=0.5, temperature=0.8, cfg_weight=0.5):
+    try:
+        normalized = punc_norm(text)
+        if torch.cuda.is_available():
+            try:
+                wav = model.generate(
+                    normalized,
+                    audio_prompt_path=audio_prompt,
+                    exaggeration=exaggeration,
+                    temperature=temperature,
+                    cfg_weight=cfg_weight
+                )
+            except RuntimeError as e:
+                if "CUDA" in str(e):
+                    logger.error(f"CUDA Error: {e}")
+                    torch.cuda.empty_cache()
+                    try:
+                        wav = model.generate(
+                            normalized,
+                            audio_prompt_path=audio_prompt,
+                            exagg "POST /api/mic-chat HTTP/1.0" 500 Internal Server Error
+eration=exaggeration,
+                            temperature=temperature,
+                            cfg_weight=cfg_weight
+                        )
+                    except RuntimeError as e2:
+                        logger.error(f"CUDA Retry Failed: {e2}")
+                        raise ValueError("CUDA error persisted after cache clear") from e2
+                else:
+                    raise
+        else:
+            wav = model.generate(
+                normalized,
+                audio_prompt_path=audio_prompt,
+                exaggeration=exaggeration,
+                temperature=temperature,
+                cfg_weight=cfg_weight,
+                device="cpu"
+            )
+        return (model.sr, wav.squeeze(0).numpy())
+    except Exception as e:
+        logger.error(f"TTS Error: {e}")
+        raise
+# hey ─── Logging -------------------------------------------------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -41,6 +141,15 @@ if os.path.exists(FRONTEND_DIR):
 # ─── Device & models -----------------------------------------------------------
 device = 0 if torch.cuda.is_available() else -1
 logger.info("Using device: %s", "cuda" if device == 0 else "cpu")
+
+try:
+    logger.info("Loading image captioning model …")
+    image_to_text = pipeline(
+        "image-to-text", model="Salesforce/blip-image-captioning-base", device=device
+    )
+except Exception as e:
+    logger.error("BLIP model failed: %s", e)
+    image_to_text = None
 
 # ─── Config --------------------------------------------------------------------
 OLLAMA_URL = "http://ollama:11434"
@@ -87,19 +196,14 @@ async def root() -> FileResponse:
 
 # Import new modules
 from screen_analyzer import analyze_image_base64
-from llm_connector import query_llm, list_ollama_models
+from llm_connector import query_mistral
 
 
 @app.post("/api/analyze-and-respond")
 async def analyze_and_respond(req: ScreenAnalysisRequest):
     try:
-        blip = pipeline(
-            "image-to-text",
-            model="Salesforce/blip-image-captioning-base",
-            device=device,
-        )
         # Get screen analysis data
-        screen_data = analyze_image_base64(req.image, blip)
+        screen_data = analyze_image_base64(req.image)
 
         # Check for errors
         if "error" in screen_data:
@@ -108,17 +212,17 @@ async def analyze_and_respond(req: ScreenAnalysisRequest):
         # Create prompt with both caption and OCR text
         prompt = (
             f"Here's what's on the user's screen:\n"
-            f"BLIP Caption: {screen_data['caption']}\n"
-            f"OCR Text: {screen_data['ocr_text']}\n"
-            "Based on this, what should be the next action or response?"
+            f"Caption: {screen_data['caption']}\n"
+            f"OCR Text (first 500 chars): {screen_data['ocr_text'][:100]}\n"
+            "What should they do next?"
         )
 
         # Get LLM response
-        llm_response = query_llm(prompt)
+        llm_response = query_mistral(prompt)
 
-        return {"llm_response": llm_response}
+        return {"commentary": screen_data["caption"], "llm_response": llm_response}
     except Exception as e:
-        return {"llm_response": f"Error analyzing screen: {e}"}
+        return {"commentary": "error", "llm_response": str(e)}
 
 
 @app.post("/api/chat", tags=["chat"])
@@ -239,44 +343,31 @@ async def serve_audio(filename: str):
 @app.post("/api/analyze-screen", tags=["vision"])
 async def analyze_screen(req: ScreenAnalysisRequest):
     try:
-        # Log the size of the incoming image data
-        logger.info(f"Received image data size: {len(req.image) if req.image else 0} bytes")
+        img_data = req.image.split(",", 1)[-1]  # works for data URI or raw b64
+        image = Image.open(io.BytesIO(base64.b64decode(img_data)))
 
-        blip = pipeline(
-            "image-to-text",
-            model="Salesforce/blip-image-captioning-base",
-            device=device,
-        )
-        # Get screen analysis data using the dedicated function
-        screen_data = analyze_image_base64(req.image, blip)
+        if image_to_text:
+            caption = image_to_text(image)[0].get("generated_text", "")
+            if caption:
+                prefixes = [
+                    "Looking at your screen, ",
+                    "I notice that ",
+                    "On your screen, ",
+                    "I can see that ",
+                    "Currently, ",
+                ]
+                return {"commentary": random.choice(prefixes) + caption.lower()}
 
-        # Log the screen analysis data
-        logger.info(f"Screen analysis data: {screen_data}")
-
-        # Check for errors from screen analysis
-        if "error" in screen_data:
-            raise HTTPException(500, detail=screen_data["error"])
-
-        # Create prompt with both caption and OCR text
-        prompt = (
-            f"Here's what's on the user's screen:\n"
-            f"BLIP Caption: {screen_data['caption']}\n"
-            f"OCR Text: {screen_data['ocr_text']}\n"
-            "Based on this, what should be the next action or response?"
-        )
-
-        # Get LLM response
-        llm_response = query_llm(prompt)
-
-        return {"commentary": screen_data["caption"], "llm_response": llm_response}
+        return {
+            "commentary": "I'm having trouble analyzing the screen content right now."
+        }
     except Exception as e:
         logger.error("Screen analysis failed: %s", e)
         raise HTTPException(500, str(e)) from e
 
 
-
 # Load Whisper (once, at the top)
-
+whisper_model = whisper.load_model("base")  # or "small", "medium", "large"
 
 
 @app.post("/api/mic-chat", tags=["voice"])
@@ -287,9 +378,6 @@ async def mic_chat(file: UploadFile = File(...)):
         tmp_path = os.path.join(tempfile.gettempdir(), f"{uuid.uuid4()}.wav")
         with open(tmp_path, "wb") as f:
             f.write(contents)
-
-        # Load Whisper model here
-        whisper_model = whisper.load_model("base")  # or "small", "medium", "large"
 
         # Transcribe it
         result = whisper_model.transcribe(tmp_path)
@@ -308,7 +396,16 @@ async def mic_chat(file: UploadFile = File(...)):
         raise HTTPException(500, str(e))
 
 
-
+# ─── Warmup ────────────────────────────────────────────────────────
+try:
+    logger.info("Preloading TTS and Whisper and BLIP…")
+    _ = load_tts_model()
+    _ = whisper.load_model("base")
+    _ = pipeline(
+        "image-to-text", model="Salesforce/blip-image-captioning-base", device=device
+    )
+except Exception as e:
+    logger.error("Preload failed: %s", e)
 
 # ─── Dev entry-point -----------------------------------------------------------
 
@@ -338,9 +435,5 @@ async def get_ollama_models():
 
 
 if __name__ == "__main__":
-    # Start the screen share signaling server in a separate process
-    import subprocess
-    subprocess.Popen(["python", "screen_share_server.py"])
-
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
 # huh2.0
