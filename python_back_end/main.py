@@ -42,15 +42,6 @@ if os.path.exists(FRONTEND_DIR):
 device = 0 if torch.cuda.is_available() else -1
 logger.info("Using device: %s", "cuda" if device == 0 else "cpu")
 
-try:
-    logger.info("Loading image captioning model …")
-    image_to_text = pipeline(
-        "image-to-text", model="Salesforce/blip-image-captioning-base", device=device
-    )
-except Exception as e:
-    logger.error("BLIP model failed: %s", e)
-    image_to_text = None
-
 # ─── Config --------------------------------------------------------------------
 OLLAMA_URL = "http://ollama:11434"
 DEFAULT_MODEL = "mistral"
@@ -102,8 +93,13 @@ from llm_connector import query_llm, list_ollama_models
 @app.post("/api/analyze-and-respond")
 async def analyze_and_respond(req: ScreenAnalysisRequest):
     try:
+        blip = pipeline(
+            "image-to-text",
+            model="Salesforce/blip-image-captioning-base",
+            device=device,
+        )
         # Get screen analysis data
-        screen_data = analyze_image_base64(req.image)
+        screen_data = analyze_image_base64(req.image, blip)
 
         # Check for errors
         if "error" in screen_data:
@@ -246,8 +242,13 @@ async def analyze_screen(req: ScreenAnalysisRequest):
         # Log the size of the incoming image data
         logger.info(f"Received image data size: {len(req.image) if req.image else 0} bytes")
 
+        blip = pipeline(
+            "image-to-text",
+            model="Salesforce/blip-image-captioning-base",
+            device=device,
+        )
         # Get screen analysis data using the dedicated function
-        screen_data = analyze_image_base64(req.image)
+        screen_data = analyze_image_base64(req.image, blip)
 
         # Log the screen analysis data
         logger.info(f"Screen analysis data: {screen_data}")
@@ -275,7 +276,7 @@ async def analyze_screen(req: ScreenAnalysisRequest):
 
 
 # Load Whisper (once, at the top)
-whisper_model = whisper.load_model("base")  # or "small", "medium", "large"
+
 
 
 @app.post("/api/mic-chat", tags=["voice"])
@@ -286,6 +287,9 @@ async def mic_chat(file: UploadFile = File(...)):
         tmp_path = os.path.join(tempfile.gettempdir(), f"{uuid.uuid4()}.wav")
         with open(tmp_path, "wb") as f:
             f.write(contents)
+
+        # Load Whisper model here
+        whisper_model = whisper.load_model("base")  # or "small", "medium", "large"
 
         # Transcribe it
         result = whisper_model.transcribe(tmp_path)
@@ -304,16 +308,7 @@ async def mic_chat(file: UploadFile = File(...)):
         raise HTTPException(500, str(e))
 
 
-# ─── Warmup ────────────────────────────────────────────────────────
-try:
-    logger.info("Preloading TTS and Whisper and BLIP…")
-    _ = load_tts_model()
-    _ = whisper.load_model("base")
-    _ = pipeline(
-        "image-to-text", model="Salesforce/blip-image-captioning-base", device=device
-    )
-except Exception as e:
-    logger.error("Preload failed: %s", e)
+
 
 # ─── Dev entry-point -----------------------------------------------------------
 

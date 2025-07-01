@@ -2,11 +2,9 @@ import base64, io, pytesseract
 from PIL import Image
 from transformers import pipeline
 
-# Load once
-blip_model = pipeline("image-to-text", model="Salesforce/blip-image-captioning-base")
 pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'  # Update this path as needed
 
-def analyze_image_base64(image_b64: str) -> dict:
+def analyze_image_base64(image_b64: str, blip_model) -> dict:
     try:
         image_data = image_b64.split(",")[-1]
         image = Image.open(io.BytesIO(base64.b64decode(image_data)))
