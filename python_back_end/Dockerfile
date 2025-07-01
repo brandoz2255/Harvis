@@ -20,7 +20,8 @@ RUN apt-get update && apt-get install -y     curl     build-essential     libgl1
 # ✅ Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip \
-  && pip install --no-cache-dir -r requirements.txt
+  && pip install --no-cache-dir -r requirements.txt \
+   && pip install --no-cache-dir resemble-perth
 
 # ─────────────────────────────────────────────────────────────
 # ✅ Copy all code (done AFTER deps for better caching)
