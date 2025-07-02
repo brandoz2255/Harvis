@@ -1,3 +1,15 @@
+# requirements.txt for the lightweight worker node
+
+# Core web framework
 fastapi
-uvicorn
+uvicorn[standard]
+python-multipart
+
+# HTTP requests to communicate with the main backend
+requests
+
+# Pydantic for data validation
+pydantic
+
+# Google Gemini API client
 google-generativeai

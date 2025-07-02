@@ -5,6 +5,9 @@ The Jarvis Project is a sophisticated, voice-activated AI assistant designed to 
 ## Core Features
 
 - **Voice-First Interaction:** Control Jarvis and receive responses primarily through natural voice commands.
+- **Vibe Coding (AI-Powered Development):** A dedicated, voice-first, AI-powered development environment. It allows users to write, execute, and debug code through conversational voice and text commands. It operates in two modes:
+    - **Assistant Mode:** Turn-by-turn interaction for collaborative, step-by-step coding.
+    - **Vibe Mode:** Continuous execution for automating larger tasks with verbal updates and explicit user confirmation for critical actions.
 - **Desktop Automation:** Jarvis can interact with your operating system, open applications, and manage files.
 - **Browser Automation:** Perform web searches, navigate to websites, and interact with web pages using simple voice commands.
 - **Real-time Screen Analysis:** Jarvis can "see" your screen, understand the context of your current task, and provide relevant assistance, powered by Blip AI for visual understanding.
@@ -23,6 +26,7 @@ The Jarvis Project is a sophisticated, voice-activated AI assistant designed to 
 - **AI/LLM:** 
   - Ollama for local language model hosting
   - Blip for visual understanding
+  - **VibeAgent:** Located in `python_back_end/ollama_cli/vibe_agent.py`, this module orchestrates the AI-powered coding experience.
 - **Speech-to-Text (STT):** Whisper
 - **Text-to-Speech (TTS):** Chatterbox TTS
 
