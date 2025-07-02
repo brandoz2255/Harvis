@@ -1,7 +1,7 @@
 import os
 import subprocess
 import logging
-from typing import List, Optional
+from typing import List, Optional, Generator, Dict, Any
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -94,6 +94,58 @@ def execute_command(command: str) -> str:
         error_msg = str(e)
         logger.error(f"Failed to execute command: {error_msg}")
         return f"❌ Error executing command: {error_msg}"
+
+def stream_command(command: str) -> Generator[Dict[str, Any], None, None]:
+    """
+    Execute a shell command and stream its stdout and stderr.
+    Yields dictionaries with 'type' (stdout, stderr, status) and 'content'.
+    """
+    logger.info(f"Streaming command: {command}")
+    process = None
+    try:
+        process = subprocess.Popen(
+            ['bash', '-c', command],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,  # Decode stdout/stderr as text
+            bufsize=1,  # Line-buffered
+            universal_newlines=True  # For cross-platform newline handling
+        )
+
+        # Stream stdout and stderr simultaneously
+        while True:
+            stdout_line = process.stdout.readline()
+            stderr_line = process.stderr.readline()
+
+            if stdout_line:
+                yield {"type": "stdout", "content": stdout_line.strip() + "\n"}
+            if stderr_line:
+                yield {"type": "stderr", "content": stderr_line.strip() + "\n"}
+
+            if not stdout_line and not stderr_line and process.poll() is not None:
+                break
+
+        # Ensure all output is consumed after process exits
+        for stdout_line in process.stdout.readlines():
+            yield {"type": "stdout", "content": stdout_line.strip() + "\n"}
+        for stderr_line in process.stderr.readlines():
+            yield {"type": "stderr", "content": stderr_line.strip() + "\n"}
+
+        process.wait()  # Wait for the process to fully terminate
+        if process.returncode != 0:
+            yield {"type": "status", "content": f"Command failed with exit code {process.returncode}", "exit_code": process.returncode}
+        else:
+            yield {"type": "status", "content": "Command completed successfully", "exit_code": 0}
+
+    except FileNotFoundError:
+        yield {"type": "status", "content": f"Error: Command not found: {command.split()[0]}", "exit_code": 127}
+    except Exception as e:
+        logger.error(f"Error streaming command '{command}': {e}")
+        yield {"type": "status", "content": f"Error executing command: {e}", "exit_code": 1}
+    finally:
+        if process and process.poll() is None:
+            process.terminate()
+            process.wait()
 
 def list_files(directory: Optional[str] = '.') -> str:
     """

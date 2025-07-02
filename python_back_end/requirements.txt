@@ -22,3 +22,6 @@ google-generativeai
 # Extra
 sentencepiece
 tavily-python
+
+requests
+textual
