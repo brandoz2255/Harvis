@@ -1,131 +1,66 @@
-# aidev: Voice Chat with Ollama
+# The Jarvis Project
 
-This project is a voice chat application that allows users to interact with a language model using either text or voice input. It uses Next.js for the web interface, Whisper for speech-to-text (STT), and Chatterbox TTS for text-to-speech (TTS). The backend language model server is provided by Ollama.
+The Jarvis Project is a sophisticated, voice-activated AI assistant designed to be a proactive and interactive partner on your computer. It combines the power of large language models, voice synthesis, and system automation to provide a seamless interface for controlling your digital environment, retrieving information, and assisting with various tasks.
 
-## Features
+## Core Features
 
-- Voice input and output
-- Text-based chat interface
-- Model selection with automatic refresh
-- Advanced voice settings for customization
-- GPU acceleration with fallback to CPU when needed
+- **Voice-First Interaction:** Control Jarvis and receive responses primarily through natural voice commands.
+- **Desktop Automation:** Jarvis can interact with your operating system, open applications, and manage files.
+- **Browser Automation:** Perform web searches, navigate to websites, and interact with web pages using simple voice commands.
+- **Real-time Screen Analysis:** Jarvis can "see" your screen, understand the context of your current task, and provide relevant assistance, powered by Blip AI for visual understanding.
+- **AI-Powered Chat:** Engage in contextual conversations, ask questions, and get intelligent responses from a powerful language model.
+- **Extensible and Modular:** Built with a modern tech stack that allows for easy expansion and customization.
 
-## Browser Automation Commands
+## Tech Stack
 
-### Voice Commands
+### Frontend
+- **Framework:** Next.js (React)
+- **Language:** TypeScript
+- **Styling:** Tailwind CSS
 
-- **"Open new tab [URL]"**: Opens a new browser tab with the specified URL.
-- **"Search [query]"**: Performs a Google search with the provided query.
-- **"Go to [URL]"**: Navigates to the specified URL in the current tab.
+### Backend
+- **API:** Python (FastAPI) & Node.js (Next.js API Routes)
+- **AI/LLM:** 
+  - Ollama for local language model hosting
+  - Blip for visual understanding
+- **Speech-to-Text (STT):** Whisper
+- **Text-to-Speech (TTS):** Chatterbox TTS
 
-### Text Input Commands
+### Infrastructure & Deployment
+- **Containerization:** Docker & Docker Compose
+- **Web Server:** Nginx
+- **CI/CD:** GitHub Actions
 
-You can also type these commands directly into the text chat interface:
-- `open new tab [URL]`
-- `search [query]`
-- `go to [URL]`
+## Getting Started
 
-## Requirements
+### Prerequisites
 
-- Python 3.10+
-- CUDA-enabled GPU (optional, but recommended for TTS)
-- ffmpeg for audio processing
-- Docker and Docker Compose for containerized deployment
+- Docker and Docker Compose
+- An NVIDIA GPU with CUDA drivers is recommended for optimal performance, but not strictly required.
+- `ffmpeg` for audio processing.
 
-## Installation
+### Installation & Usage
 
-### Local Setup
+1.  **Clone the repository:**
+    ```bash
+    git clone <repository_url>
+    cd aidev
+    ```
 
-1. Clone the repository:
-   ```bash
-   git clone <repository_url>
-   cd aidev
-   ```
+2.  **Build and run with Docker Compose:**
+    This is the recommended way to run the entire application stack.
+    ```bash
+    docker-compose up --build -d
+    ```
 
-2. Install Python dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+3.  **Access the application:**
+    The web interface will be available at `http://localhost:3000`.
 
-3. Ensure ffmpeg is installed on your system:
-   ```bash
-   sudo apt install ffmpeg  # Debian/Ubuntu
-   brew install ffmpeg      # macOS
-   ```
+## Project Structure
 
-4. Install Selenium and webdriver-manager:
-   ```bash
-   pip install selenium webdriver-manager
-   ```
-
-### Docker Setup
-
-1. Build the Docker image:
-   ```bash
-   docker-compose build
-   ```
-
-2. Start the services:
-   ```bash
-   docker-compose up -d
-   ```
-
-## Usage
-
-To run the application locally:
-
-```bash
-python new-chatbot.py
-```
-
-The web interface will be available at `http://localhost:7860`.
-
-### Docker Compose Services
-
-- **ollama**: The Ollama language model server (port 11434)
-- **webui**: Web UI for interacting with the Ollama models (port 3000)
-- **n8n**: Workflow automation service (port 5678)
-- **agent-zero-run**: Agent Zero Run microservice connected to Ollama (port 5000)
-
-### Running in CPU-only Mode
-
-If you encounter CUDA-related issues or prefer to run without GPU acceleration, you can force CPU mode by setting the `force_cpu` parameter to `True` in the application settings.
-
-## Code Structure
-
-- `new-chatbot.py`: Main application file containing all functionality
-- `requirements.txt`: Python dependencies
-- `Dockerfile`: Docker configuration for containerized deployment
-- `docker-compose.yaml`: Multi-container setup with Ollama, webui, and n8n services
-
-## VRAM Management
-
-The application includes robust VRAM management to handle GPU memory efficiently:
-
-1. Dynamic threshold based on available GPU memory (80% of total VRAM)
-2. Automatic fallback to CPU when VRAM is critically low
-3. Error handling for CUDA-related issues with retry mechanisms
-4. Thorough logging for all operations and error conditions
-
-## Notes
-
-- The application requires the Ollama server to be running before starting the chat interface.
-- For detailed CUDA errors, run with `CUDA_LAUNCH_BLOCKING=1` environment variable.
-
-```bash
-export CUDA_LAUNCH_BLOCKING=1
-python new-chatbot.py
-```
-
-## Troubleshooting
-
-If you encounter issues:
-
-1. Check if the Ollama server is running and accessible at `http://localhost:11434`
-2. Verify that ffmpeg is installed on your system
-3. Check the application logs for error messages
-4. Try forcing CPU mode by setting `force_cpu=True` in the advanced settings
-
-## License
-
-This project is open source and available under the MIT License.
+- `front_end/jfrontend/`: Contains the Next.js frontend application.
+- `python_back_end/`: The main Python backend, including the FastAPI server, AI logic, and automation scripts.
+- `rest_api/`: A separate FastAPI service.
+- `docker-compose.yaml`: Defines the services, networks, and volumes for the entire application.
+- `nginx.conf`: Nginx configuration for routing traffic to the frontend and backend services.
+- `.github/workflows/`: CI/CD pipeline definitions for automated testing and deployment.
