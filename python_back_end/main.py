@@ -1,9 +1,3 @@
-"""
-FastAPI back-end with Chatterbox-TTS voice-cloning (Jarvis voice)
-----------------------------------------------------------------
-Put jarvis_voice.mp3 in the project root before running.
-"""
-
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -23,6 +17,10 @@ from chatterbox.tts import ChatterboxTTS, punc_norm
 import torch
 import logging
 import time
+
+# Add the ollama_cli directory to the path
+sys.path.append(os.path.join(os.path.dirname(__file__), 'ollama_cli'))
+from vibe_agent import VibeAgent
 
 # ─── Set up logging ─────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
@@ -52,6 +50,7 @@ def wait_for_vram(threshold=THRESHOLD_BYTES, interval=0.5):
 
 # ─── Global Model Variables ─────────────────────────────────────────────────────
 tts_model = None
+vibe_agent = VibeAgent(project_dir=os.getcwd())
 
 # ─── Load TTS Model (Chatterbox) ────────────────────────────────────────────────
 def load_tts_model(force_cpu=False):
@@ -172,6 +171,17 @@ class ResearchChatRequest(BaseModel):
 
 class ScreenAnalysisRequest(BaseModel):
     image: str  # base-64 image (data-URI or raw)
+
+class SynthesizeSpeechRequest(BaseModel):
+    text: str
+    audio_prompt: Optional[str] = None
+    exaggeration: float = 0.5
+    temperature: float = 0.8
+    cfg_weight: float = 0.5
+
+class VibeCommandRequest(BaseModel):
+    command: str
+    mode: str = "assistant"
 
 # ─── Helpers -------------------------------------------------------------------
 BROWSER_PATTERNS = [
@@ -430,7 +440,7 @@ async def get_ollama_models():
         response = requests.get(f"{OLLAMA_URL}/api/tags", timeout=10)
         response.raise_for_status()
         models = response.json().get("models", [])
-        ollama_model_names = [model["name"] for model in models]
+        ollama__model_names = [model["name"] for model in models]
 
         if is_gemini_configured():
             ollama_model_names.insert(
@@ -444,6 +454,70 @@ async def get_ollama_models():
             status_code=503, detail="Could not connect to Ollama server"
         )
 
+@app.post("/api/vibe/command")
+async def vibe_command(req: VibeCommandRequest):
+    vibe_agent.mode = req.mode
+    response_text, _ = vibe_agent.process_command(req.command)
+    return {"response": response_text}
+
+@app.websocket("/api/ws/vibe")
+async def websocket_vibe_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        while True:
+            data = await websocket.receive_json()
+            command = data.get("command")
+            mode = data.get("mode", "assistant")
+
+            if command:
+                vibe_agent.mode = mode
+                await vibe_agent.process_command(command, websocket)
+            else:
+                await websocket.send_json({"type": "error", "content": "No command received"})
+    except WebSocketDisconnect:
+        logger.info("WebSocket disconnected")
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
+        await websocket.send_json({"type": "error", "content": f"WebSocket error: {e}"})
+
 if __name__ == "__main__":
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
 # huh2.0
+
+@app.post("/api/synthesize-speech", tags=["tts"])
+async def synthesize_speech(req: SynthesizeSpeechRequest):
+    """
+    Synthesizes speech from text using the TTS model.
+    This endpoint is called by worker nodes.
+    """
+    try:
+        tts = load_tts_model()
+
+        audio_prompt_path = req.audio_prompt or JARVIS_VOICE_PATH
+        if not os.path.isfile(audio_prompt_path):
+            logger.warning(
+                "Audio prompt %s not found, falling back to default voice.",
+                audio_prompt_path,
+            )
+            audio_prompt_path = None
+
+        sr, wav = generate_speech(
+            text=req.text,
+            model=tts,
+            audio_prompt=audio_prompt_path,
+            exaggeration=req.exaggeration,
+            temperature=req.temperature,
+            cfg_weight=req.cfg_weight,
+        )
+
+        filename = f"response_{uuid.uuid4()}.wav"
+        filepath = os.path.join(tempfile.gettempdir(), filename)
+        sf.write(filepath, wav, sr)
+        logger.info("Audio written to %s", filepath)
+
+        return {"audio_path": f"/api/audio/{filename}"}
+
+    except Exception as e:
+        logger.exception("TTS synthesis endpoint crashed")
+        raise HTTPException(500, str(e)) from e
+
