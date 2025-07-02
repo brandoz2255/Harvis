@@ -40,13 +40,14 @@ COPY . .
 ############################
 # 🚀 Model warm-up (parallel + cache)
 ############################
-RUN --mount=type=cache,target=/root/.cache \
-    bash -c " \
-      python -c 'import whisper' & \
-      python -c 'from transformers import pipeline; pipeline(\"image-to-text\", model=\"Salesforce/blip-image-captioning-base\")' & \
-      python -c 'from chatterbox.tts import ChatterboxTTS; ChatterboxTTS.from_pretrained(device=\"cuda\")' & \
-      wait \
-    "
+# 🚀 Model warm-up (parallel & cached) — BuildKit required!
+#  • caches /root/.cache across builds
+RUN --mount=type=cache,id=model-cache,target=/root/.cache \
+    set -eux; \
+    python3 -c 'import whisper'; \
+    python3 -c 'from transformers import pipeline; pipeline("image-to-text", model="Salesforce/blip-image-captioning-base")'; \
+    python3 -c 'from chatterbox.tts import ChatterboxTTS; ChatterboxTTS.from_pretrained("chatterbox/tts-base", device="cuda")'
+
 
 ############################
 # 🌐 Expose + launch
