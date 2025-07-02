@@ -4,7 +4,18 @@ import type React from "react"
 
 import { useState, useEffect, useRef } from "react"
 import { motion } from "framer-motion"
-import { ArrowLeft, Play, Square, Settings, Monitor, MessageSquare, Terminal, Eye, MonitorOff } from "lucide-react"
+import {
+  ArrowLeft,
+  Play,
+  Square,
+  Settings,
+  Monitor,
+  MessageSquare,
+  Terminal,
+  Eye,
+  MonitorOff,
+  Send,
+} from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -16,6 +27,12 @@ interface LogEntry {
   timestamp: string
   type: "system" | "red-team" | "blue-team" | "info"
   message: string
+}
+
+interface ChatMessage {
+  role: "user" | "assistant"
+  content: string
+  timestamp: string
 }
 
 interface EmulationState {
@@ -60,20 +77,20 @@ export default function VersusModePage() {
   })
 
   const [logs, setLogs] = useState<LogEntry[]>([])
-  const [redChatMessages, setRedChatMessages] = useState<
-    Array<{ role: "user" | "assistant"; content: string; timestamp: string }>
-  >([])
-  const [blueChatMessages, setBlueChatMessages] = useState<
-    Array<{ role: "user" | "assistant"; content: string; timestamp: string }>
-  >([])
+  const [redChatMessages, setRedChatMessages] = useState<ChatMessage[]>([])
+  const [blueChatMessages, setBlueChatMessages] = useState<ChatMessage[]>([])
   const [redChatInput, setRedChatInput] = useState("")
   const [blueChatInput, setBlueChatInput] = useState("")
+  const [redChatLoading, setRedChatLoading] = useState(false)
+  const [blueChatLoading, setBlueChatLoading] = useState(false)
 
   const redVideoRef = useRef<HTMLVideoElement>(null)
   const blueVideoRef = useRef<HTMLVideoElement>(null)
   const redStreamRef = useRef<MediaStream | null>(null)
   const blueStreamRef = useRef<MediaStream | null>(null)
   const logsEndRef = useRef<HTMLDivElement>(null)
+  const redChatEndRef = useRef<HTMLDivElement>(null)
+  const blueChatEndRef = useRef<HTMLDivElement>(null)
 
   const availableModels = [
     { value: "gpt-4o", label: "GPT-4o" },
@@ -97,6 +114,14 @@ export default function VersusModePage() {
   useEffect(() => {
     scrollToBottom(logsEndRef)
   }, [logs])
+
+  useEffect(() => {
+    scrollToBottom(redChatEndRef)
+  }, [redChatMessages])
+
+  useEffect(() => {
+    scrollToBottom(blueChatEndRef)
+  }, [blueChatMessages])
 
   // Screen sharing functions for Red Team
   const startRedScreenShare = async () => {
@@ -251,6 +276,105 @@ export default function VersusModePage() {
     }
   }
 
+  // Chat functions
+  const sendRedChatMessage = async () => {
+    if (!redChatInput.trim() || redChatLoading) return
+
+    const userMessage: ChatMessage = {
+      role: "user",
+      content: redChatInput,
+      timestamp: new Date().toLocaleTimeString(),
+    }
+
+    setRedChatMessages((prev) => [...prev, userMessage])
+    setRedChatInput("")
+    setRedChatLoading(true)
+
+    try {
+      const response = await fetch("/api/versus-chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: redChatInput,
+          team: "red",
+          model: emulationState.redModel,
+          scenario: emulationState.scenario,
+          sessionId: emulationState.sessionId,
+          history: redChatMessages,
+        }),
+      })
+
+      if (response.ok) {
+        const data = await response.json()
+        const aiResponse: ChatMessage = {
+          role: "assistant",
+          content: data.response || "Red team operations acknowledged.",
+          timestamp: new Date().toLocaleTimeString(),
+        }
+        setRedChatMessages((prev) => [...prev, aiResponse])
+      }
+    } catch (error) {
+      console.error("Red chat error:", error)
+      const errorResponse: ChatMessage = {
+        role: "assistant",
+        content: "Error processing red team command.",
+        timestamp: new Date().toLocaleTimeString(),
+      }
+      setRedChatMessages((prev) => [...prev, errorResponse])
+    } finally {
+      setRedChatLoading(false)
+    }
+  }
+
+  const sendBlueChatMessage = async () => {
+    if (!blueChatInput.trim() || blueChatLoading) return
+
+    const userMessage: ChatMessage = {
+      role: "user",
+      content: blueChatInput,
+      timestamp: new Date().toLocaleTimeString(),
+    }
+
+    setBlueChatMessages((prev) => [...prev, userMessage])
+    setBlueChatInput("")
+    setBlueChatLoading(true)
+
+    try {
+      const response = await fetch("/api/versus-chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: blueChatInput,
+          team: "blue",
+          model: emulationState.blueModel,
+          scenario: emulationState.scenario,
+          sessionId: emulationState.sessionId,
+          history: blueChatMessages,
+        }),
+      })
+
+      if (response.ok) {
+        const data = await response.json()
+        const aiResponse: ChatMessage = {
+          role: "assistant",
+          content: data.response || "Blue team defenses activated.",
+          timestamp: new Date().toLocaleTimeString(),
+        }
+        setBlueChatMessages((prev) => [...prev, aiResponse])
+      }
+    } catch (error) {
+      console.error("Blue chat error:", error)
+      const errorResponse: ChatMessage = {
+        role: "assistant",
+        content: "Error processing blue team command.",
+        timestamp: new Date().toLocaleTimeString(),
+      }
+      setBlueChatMessages((prev) => [...prev, errorResponse])
+    } finally {
+      setBlueChatLoading(false)
+    }
+  }
+
   // Simulate real-time log updates
   useEffect(() => {
     if (!emulationState.isRunning) return
@@ -283,7 +407,7 @@ export default function VersusModePage() {
 
   const startEmulation = async () => {
     try {
-      const response = await fetch("/api/start-emulation", {
+      const response = await fetch("/api/start-versus-emulation", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -308,6 +432,20 @@ export default function VersusModePage() {
           message: `Versus mode started: ${emulationState.redModel} vs ${emulationState.blueModel} - ${emulationState.scenario}`,
         }
         setLogs([initialLog])
+
+        // Initialize chat with welcome messages
+        const redWelcome: ChatMessage = {
+          role: "assistant",
+          content: `Red team agent initialized with ${emulationState.redModel}. Ready for ${emulationState.scenario} operations.`,
+          timestamp: new Date().toLocaleTimeString(),
+        }
+        const blueWelcome: ChatMessage = {
+          role: "assistant",
+          content: `Blue team agent initialized with ${emulationState.blueModel}. Defensive systems active for ${emulationState.scenario} scenario.`,
+          timestamp: new Date().toLocaleTimeString(),
+        }
+        setRedChatMessages([redWelcome])
+        setBlueChatMessages([blueWelcome])
       }
     } catch (error) {
       console.error("Failed to start emulation:", error)
@@ -328,52 +466,10 @@ export default function VersusModePage() {
       message: "Versus mode simulation stopped",
     }
     setLogs((prev) => [...prev, stopLog])
-  }
 
-  const sendRedChatMessage = async () => {
-    if (!redChatInput.trim() || !emulationState.isRunning) return
-
-    const userMessage = {
-      role: "user" as const,
-      content: redChatInput,
-      timestamp: new Date().toLocaleTimeString(),
-    }
-
-    setRedChatMessages((prev) => [...prev, userMessage])
-    setRedChatInput("")
-
-    // Simulate AI response
-    setTimeout(() => {
-      const aiResponse = {
-        role: "assistant" as const,
-        content: "Acknowledged. Proceeding with red team operations.",
-        timestamp: new Date().toLocaleTimeString(),
-      }
-      setRedChatMessages((prev) => [...prev, aiResponse])
-    }, 1000)
-  }
-
-  const sendBlueChatMessage = async () => {
-    if (!blueChatInput.trim() || !emulationState.isRunning) return
-
-    const userMessage = {
-      role: "user" as const,
-      content: blueChatInput,
-      timestamp: new Date().toLocaleTimeString(),
-    }
-
-    setBlueChatMessages((prev) => [...prev, userMessage])
-    setBlueChatInput("")
-
-    // Simulate AI response
-    setTimeout(() => {
-      const aiResponse = {
-        role: "assistant" as const,
-        content: "Roger. Enhancing defensive measures.",
-        timestamp: new Date().toLocaleTimeString(),
-      }
-      setBlueChatMessages((prev) => [...prev, aiResponse])
-    }, 1000)
+    // Clear chat messages
+    setRedChatMessages([])
+    setBlueChatMessages([])
   }
 
   const getLogTypeColor = (type: LogEntry["type"]) => {
@@ -410,15 +506,17 @@ export default function VersusModePage() {
     team: "red" | "blue",
     activeTab: string,
     setActiveTab: (tab: "screen" | "chat" | "commands") => void,
-    chatMessages: Array<{ role: "user" | "assistant"; content: string; timestamp: string }>,
+    chatMessages: ChatMessage[],
     chatInput: string,
     setChatInput: (input: string) => void,
     sendMessage: () => void,
+    chatLoading: boolean,
     screenState: AgentScreenState,
     videoRef: React.RefObject<HTMLVideoElement>,
     startScreenShare: () => void,
     stopScreenShare: () => void,
     analyzeScreen: () => void,
+    chatEndRef: React.RefObject<HTMLDivElement>,
   ) => {
     const teamColor = team === "red" ? "red" : "cyan"
     const teamColorClass = team === "red" ? "border-red-500/30" : "border-cyan-500/30"
@@ -528,27 +626,45 @@ export default function VersusModePage() {
                         }`}
                       >
                         <p>{message.content}</p>
-                        <span className="text-xs opacity-70">{message.timestamp}</span>
+                        <span className="text-xs opacity-70 mt-1 block">{message.timestamp}</span>
                       </div>
                     </div>
                   ))}
+                  {chatLoading && (
+                    <div className="flex justify-start">
+                      <div className="bg-gray-700 p-2 rounded">
+                        <div className="flex space-x-1">
+                          <div className="w-1 h-1 bg-blue-400 rounded-full animate-bounce"></div>
+                          <div
+                            className="w-1 h-1 bg-blue-400 rounded-full animate-bounce"
+                            style={{ animationDelay: "0.1s" }}
+                          ></div>
+                          <div
+                            className="w-1 h-1 bg-blue-400 rounded-full animate-bounce"
+                            style={{ animationDelay: "0.2s" }}
+                          ></div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  <div ref={chatEndRef} />
                 </div>
                 <div className="flex space-x-2">
                   <Input
                     value={chatInput}
                     onChange={(e) => setChatInput(e.target.value)}
-                    onKeyPress={(e) => e.key === "Enter" && sendMessage()}
+                    onKeyPress={(e) => e.key === "Enter" && !chatLoading && sendMessage()}
                     placeholder={`Message ${team} team...`}
                     className="flex-1 bg-gray-700 border-gray-600 text-white text-sm"
-                    disabled={!emulationState.isRunning}
+                    disabled={!emulationState.isRunning || chatLoading}
                   />
                   <Button
                     onClick={sendMessage}
-                    disabled={!emulationState.isRunning || !chatInput.trim()}
+                    disabled={!emulationState.isRunning || !chatInput.trim() || chatLoading}
                     size="sm"
                     className={`${teamBgClass} ${teamHoverClass} text-white`}
                   >
-                    Send
+                    <Send className="w-3 h-3" />
                   </Button>
                 </div>
               </div>
@@ -708,11 +824,13 @@ export default function VersusModePage() {
               redChatInput,
               setRedChatInput,
               sendRedChatMessage,
+              redChatLoading,
               redScreenState,
               redVideoRef,
               startRedScreenShare,
               stopRedScreenShare,
               analyzeRedScreen,
+              redChatEndRef,
             )}
 
             {/* Blue Team Interface */}
@@ -724,11 +842,13 @@ export default function VersusModePage() {
               blueChatInput,
               setBlueChatInput,
               sendBlueChatMessage,
+              blueChatLoading,
               blueScreenState,
               blueVideoRef,
               startBlueScreenShare,
               stopBlueScreenShare,
               analyzeBlueScreen,
+              blueChatEndRef,
             )}
           </div>
         </motion.div>

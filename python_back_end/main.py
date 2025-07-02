@@ -110,7 +110,7 @@ def generate_speech(text, model, audio_prompt=None, exaggeration=0.5, temperatur
             wav = model.generate(
                 normalized,
                 audio_prompt_path=audio_prompt,
-                exaggeration=exaggeration,
+                exaggeration=exagerration,
                 temperature=temperature,
                 cfg_weight=cfg_weight,
                 device="cpu"
@@ -154,7 +154,6 @@ except Exception as e:
 OLLAMA_URL = "http://ollama:11434"
 DEFAULT_MODEL = "mistral"
 
-
 # ─── Pydantic schemas ----------------------------------------------------------
 class ChatRequest(BaseModel):
     message: str
@@ -165,10 +164,14 @@ class ChatRequest(BaseModel):
     temperature: float = 0.8
     cfg_weight: float = 0.5
 
+class ResearchChatRequest(BaseModel):
+    message: str
+    history: List[Dict[str, Any]] = []
+    model: str = DEFAULT_MODEL
+    enableWebSearch: bool = True
 
 class ScreenAnalysisRequest(BaseModel):
     image: str  # base-64 image (data-URI or raw)
-
 
 # ─── Helpers -------------------------------------------------------------------
 BROWSER_PATTERNS = [
@@ -183,7 +186,6 @@ is_browser_command = lambda txt: any(
     re.match(p, txt.lower().strip()) for p in BROWSER_PATTERNS
 )
 
-
 # ─── Routes --------------------------------------------------------------------
 @app.get("/", tags=["frontend"])
 async def root() -> FileResponse:
@@ -192,11 +194,8 @@ async def root() -> FileResponse:
         return FileResponse(index_html)
     raise HTTPException(404, "Frontend not found")
 
-
 # Import new modules
 from screen_analyzer import analyze_image_base64
-
-
 
 @app.post("/api/analyze-and-respond")
 async def analyze_and_respond(req: ScreenAnalysisRequest):
@@ -222,7 +221,6 @@ async def analyze_and_respond(req: ScreenAnalysisRequest):
         return {"commentary": screen_data["caption"], "llm_response": llm_response}
     except Exception as e:
         return {"commentary": "error", "llm_response": str(e)}
-
 
 @app.post("/api/chat", tags=["chat"])
 async def chat(req: ChatRequest, request: Request):
@@ -307,7 +305,7 @@ async def chat(req: ChatRequest, request: Request):
             text=response_text,
             model=tts,
             audio_prompt=audio_prompt_path,
-            exaggeration=req.exaggeration,
+            exaggeration=req.exagerration,
             temperature=req.temperature,
             cfg_weight=req.cfg_weight,
         )
@@ -327,7 +325,6 @@ async def chat(req: ChatRequest, request: Request):
         logger.exception("Chat endpoint crashed")
         raise HTTPException(500, str(e)) from e
 
-
 @app.get("/api/audio/{filename}", tags=["audio"])
 async def serve_audio(filename: str):
     """
@@ -337,7 +334,6 @@ async def serve_audio(filename: str):
     if not os.path.exists(full_path):
         raise HTTPException(404, f"Audio file not found: {filename}")
     return FileResponse(full_path, media_type="audio/wav")
-
 
 @app.post("/api/analyze-screen", tags=["vision"])
 async def analyze_screen(req: ScreenAnalysisRequest):
@@ -364,10 +360,8 @@ async def analyze_screen(req: ScreenAnalysisRequest):
         logger.error("Screen analysis failed: %s", e)
         raise HTTPException(500, str(e)) from e
 
-
 # Load Whisper (once, at the top)
 whisper_model = whisper.load_model("base")  # or "small", "medium", "large"
-
 
 @app.post("/api/mic-chat", tags=["voice"])
 async def mic_chat(file: UploadFile = File(...)):
@@ -394,6 +388,26 @@ async def mic_chat(file: UploadFile = File(...)):
         logger.exception("Mic chat failed")
         raise HTTPException(500, str(e))
 
+# Research endpoint to handle research queries using models from Ollama or Gemini
+from agent_research import research_agent
+
+@app.post("/api/research-chat", tags=["research"])
+async def research_chat(req: ResearchChatRequest):
+    try:
+        if not req.message:
+            return {"error": "Message is required"}, 400
+
+        # Call the research agent
+        response_data = research_agent(req.message, req.model)
+
+        # Update history with assistant reply
+        new_history = req.history + [{"role": "assistant", "content": response_data}]
+
+        return {"history": new_history, "response": response_data}
+
+    except Exception as e:
+        logger.exception("Research chat endpoint crashed")
+        raise HTTPException(500, str(e))
 
 # ─── Warmup ────────────────────────────────────────────────────────
 try:
@@ -407,8 +421,6 @@ except Exception as e:
     logger.error("Preload failed: %s", e)
 
 # ─── Dev entry-point -----------------------------------------------------------
-
-
 @app.get("/api/ollama-models", tags=["models"])
 async def get_ollama_models():
     """
@@ -431,7 +443,6 @@ async def get_ollama_models():
         raise HTTPException(
             status_code=503, detail="Could not connect to Ollama server"
         )
-
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)

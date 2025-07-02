@@ -1,11 +1,25 @@
+
 "use client"
 
 import type React from "react"
 
-import { useState, useRef, useEffect, forwardRef, useImperativeHandle, useCallback } from "react";
-import html2canvas from "html2canvas";
-import { motion, AnimatePresence } from "framer-motion";
-import { Send, Mic, MicOff, Volume2, VolumeX, Cpu, Zap, Target, Monitor } from "lucide-react"
+import { useState, useRef, useEffect, forwardRef, useImperativeHandle } from "react"
+import { motion, AnimatePresence } from "framer-motion"
+import {
+  Send,
+  Mic,
+  MicOff,
+  Volume2,
+  VolumeX,
+  Cpu,
+  Zap,
+  Target,
+  Monitor,
+  Globe,
+  Search,
+  ExternalLink,
+  BookOpen,
+} from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card } from "@/components/ui/card"
@@ -18,6 +32,8 @@ interface Message {
   timestamp: Date
   model?: string
   inputType?: "text" | "voice" | "screen"
+  searchResults?: SearchResult[]
+  searchQuery?: string
 }
 
 interface ChatResponse {
@@ -25,8 +41,22 @@ interface ChatResponse {
   audio_path?: string
 }
 
+interface SearchResult {
+  title: string
+  url: string
+  snippet: string
+  timestamp: string
+}
+
+interface ResearchChatResponse {
+  history: Message[]
+  audio_path?: string
+  searchResults?: SearchResult[]
+  searchQuery?: string
+}
+
 const UnifiedChatInterface = forwardRef<any, {}>((props, ref) => {
-  const { orchestrator, hardware, isDetecting, models } = useAIOrchestrator()
+  const { orchestrator, hardware, isDetecting } = useAIOrchestrator()
   const [selectedModel, setSelectedModel] = useState("auto")
   const [priority, setPriority] = useState<"speed" | "accuracy" | "balanced">("balanced")
 
@@ -35,6 +65,11 @@ const UnifiedChatInterface = forwardRef<any, {}>((props, ref) => {
   const [isLoading, setIsLoading] = useState(false)
   const [audioUrl, setAudioUrl] = useState<string | null>(null)
   const [isPlaying, setIsPlaying] = useState(false)
+
+  const [isResearchMode, setIsResearchMode] = useState(false)
+  const [isSearching, setIsSearching] = useState(false)
+  const [searchResults, setSearchResults] = useState<any[]>([])
+  const [lastSearchQuery, setLastSearchQuery] = useState("")
 
   // Voice recording states
   const [isRecording, setIsRecording] = useState(false)
@@ -47,29 +82,25 @@ const UnifiedChatInterface = forwardRef<any, {}>((props, ref) => {
 
   const availableModels = [
     { value: "auto", label: "🤖 Auto-Select" },
-    ...models.map((model) => ({
-      value: model,
-      label: model.charAt(0).toUpperCase() + model.slice(1),
+    ...orchestrator.getAllModels().map((model) => ({
+      value: model.name,
+      label: model.name.charAt(0).toUpperCase() + model.name.slice(1),
     })),
-    
   ]
-const addMessage = useCallback((content: string, role: "user" | "assistant", model?: string, inputType?: "text" | "voice" | "screen") => {
-    const newMessage: Message = {
-      role,
-      content,
-      timestamp: new Date(),
-      model,
-      inputType,
-    };
-    setMessages((prev) => [...prev, newMessage]);
-  }, []);
 
   // Expose method to add AI messages from external components
   useImperativeHandle(ref, () => ({
     addAIMessage: (content: string, source = "AI") => {
-      addMessage(content, "assistant", source, "screen");
+      const aiMessage: Message = {
+        role: "assistant",
+        content: content,
+        timestamp: new Date(),
+        model: source,
+        inputType: "screen",
+      }
+      setMessages((prev) => [...prev, aiMessage])
     },
-  }));
+  }))
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -101,24 +132,47 @@ const addMessage = useCallback((content: string, role: "user" | "assistant", mod
 
   const sendMessage = async (inputType: "text" | "voice" = "text") => {
     if ((!inputValue.trim() && inputType === "text") || isLoading) return
-    const messageContent = inputType === "text" ? inputValue : "Voice message";
-    const optimalModel = getOptimalModel(messageContent);
 
-    addMessage(messageContent, "user", optimalModel, inputType);''
-''
+    const messageContent = inputType === "text" ? inputValue : "Voice message"
+    const optimalModel = getOptimalModel(messageContent)
+
+    const userMessage: Message = {
+      role: "user",
+      content: messageContent,
+      timestamp: new Date(),
+      model: optimalModel,
+      inputType,
+    }
+
+    setMessages((prev) => [...prev, userMessage])
     if (inputType === "text") setInputValue("")
     setIsLoading(true)
 
+    // Check if research mode is enabled and if the query seems to need web search
+    const needsWebSearch =
+      isResearchMode &&
+      (messageContent.toLowerCase().includes("search") ||
+        messageContent.toLowerCase().includes("research") ||
+        messageContent.toLowerCase().includes("latest") ||
+        messageContent.toLowerCase().includes("current") ||
+        messageContent.toLowerCase().includes("news") ||
+        messageContent.toLowerCase().includes("what is") ||
+        messageContent.toLowerCase().includes("who is") ||
+        messageContent.toLowerCase().includes("when did") ||
+        messageContent.toLowerCase().includes("how to"))
+
+    const apiEndpoint = needsWebSearch ? "/api/research-chat" : "/api/chat"
     const payload = {
       message: messageContent,
       history: messages,
       model: optimalModel,
+      ...(needsWebSearch && { enableWebSearch: true }),
     }
 
     // Retry logic with 3 attempts
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        const response = await fetch("/api/chat", {
+        const response = await fetch(apiEndpoint, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -128,16 +182,27 @@ const addMessage = useCallback((content: string, role: "user" | "assistant", mod
 
         if (!response.ok) throw new Error(await response.text())
 
-        const data: ChatResponse = await response.json()
+        const data: ResearchChatResponse = await response.json()
 
-        // Update messages with model info
-        const updatedHistory = data.history.map((msg) => ({
+        // Update messages with model info and search results
+        const updatedHistory = data.history.map((msg, index) => ({
           ...msg,
           timestamp: new Date(),
           model: msg.role === "assistant" ? optimalModel : msg.model,
+          ...(index === data.history.length - 1 &&
+            msg.role === "assistant" && {
+              searchResults: data.searchResults,
+              searchQuery: data.searchQuery,
+            }),
         }))
 
         setMessages(updatedHistory)
+
+        // Update search results if available
+        if (data.searchResults) {
+          setSearchResults(data.searchResults)
+          setLastSearchQuery(data.searchQuery || messageContent)
+        }
 
         if (data.audio_path) {
           setAudioUrl(data.audio_path)
@@ -167,6 +232,48 @@ const addMessage = useCallback((content: string, role: "user" | "assistant", mod
       }
     }
     setIsLoading(false)
+  }
+
+  const performWebSearch = async (query: string) => {
+    if (!query.trim() || isSearching) return
+
+    setIsSearching(true)
+    setLastSearchQuery(query)
+
+    try {
+      const response = await fetch("/api/web-search", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          query,
+          model: selectedModel === "auto" ? "mistral" : selectedModel,
+          maxResults: 5,
+        }),
+      })
+
+      if (response.ok) {
+        const data = await response.json()
+        setSearchResults(data.results || [])
+
+        // Add search results as a system message
+        const searchMessage: Message = {
+          role: "assistant",
+          content: `Found ${data.results?.length || 0} search results for "${query}"`,
+          timestamp: new Date(),
+          model: "Web Search",
+          inputType: "text",
+          searchResults: data.results,
+          searchQuery: query,
+        }
+        setMessages((prev) => [...prev, searchMessage])
+      }
+    } catch (error) {
+      console.error("Web search failed:", error)
+    } finally {
+      setIsSearching(false)
+    }
   }
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
@@ -295,7 +402,22 @@ const addMessage = useCallback((content: string, role: "user" | "assistant", mod
     <Card className="bg-gray-900/50 backdrop-blur-sm border-blue-500/30 h-[700px] flex flex-col">
       <div className="p-4 border-b border-blue-500/30">
         <div className="flex justify-between items-center mb-3">
-          <h2 className="text-xl font-semibold text-blue-300">AI Assistant</h2>
+          <div className="flex items-center space-x-3">
+            <h2 className="text-xl font-semibold text-blue-300">AI Assistant</h2>
+            <Button
+              onClick={() => setIsResearchMode(!isResearchMode)}
+              size="sm"
+              variant={isResearchMode ? "default" : "outline"}
+              className={`${
+                isResearchMode
+                  ? "bg-green-600 hover:bg-green-700 text-white"
+                  : "bg-gray-800 border-gray-600 text-gray-300 hover:bg-gray-700"
+              }`}
+            >
+              <Globe className="w-3 h-3 mr-1" />
+              Research Mode
+            </Button>
+          </div>
           <div className="flex items-center space-x-4">
             {hardware && (
               <div className="flex items-center space-x-2 text-xs">
@@ -361,6 +483,19 @@ const addMessage = useCallback((content: string, role: "user" | "assistant", mod
             </div>
           </div>
         </div>
+
+        {isResearchMode && (
+          <div className="mt-3 p-2 bg-green-900/20 border border-green-500/30 rounded-lg">
+            <div className="flex items-center space-x-2 mb-2">
+              <BookOpen className="w-4 h-4 text-green-400" />
+              <span className="text-sm text-green-400 font-medium">Research Mode Active</span>
+            </div>
+            <p className="text-xs text-gray-400">
+              AI will automatically search the web for current information when needed. Use keywords like "search",
+              "latest", "current", or "research" to trigger web searches.
+            </p>
+          </div>
+        )}
       </div>
 
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
@@ -394,10 +529,54 @@ const addMessage = useCallback((content: string, role: "user" | "assistant", mod
                         {message.model}
                       </Badge>
                     )}
+                    {message.searchQuery && (
+                      <Badge variant="outline" className="text-xs border-orange-500 text-orange-400">
+                        <Search className="w-2 h-2 mr-1" />
+                        Web Search
+                      </Badge>
+                    )}
                   </div>
                   <span className="text-xs opacity-70">{message.timestamp.toLocaleTimeString()}</span>
                 </div>
                 <p className="text-sm">{message.content}</p>
+
+                {/* Search Results Display */}
+                {message.searchResults && message.searchResults.length > 0 && (
+                  <div className="mt-3 space-y-2">
+                    <div className="flex items-center space-x-2">
+                      <Search className="w-3 h-3 text-orange-400" />
+                      <span className="text-xs text-orange-400 font-medium">
+                        Search Results for: "{message.searchQuery}"
+                      </span>
+                    </div>
+                    <div className="space-y-2">
+                      {message.searchResults.slice(0, 3).map((result, idx) => (
+                        <div key={idx} className="bg-gray-800/50 rounded p-2 border-l-2 border-orange-500/50">
+                          <div className="flex items-start justify-between">
+                            <div className="flex-1">
+                              <h4 className="text-xs font-medium text-orange-300 mb-1 line-clamp-1">{result.title}</h4>
+                              <p className="text-xs text-gray-400 mb-1 line-clamp-2">{result.snippet}</p>
+                              <a
+                                href={result.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-xs text-blue-400 hover:text-blue-300 flex items-center space-x-1"
+                              >
+                                <span className="truncate max-w-48">{result.url}</span>
+                                <ExternalLink className="w-2 h-2 flex-shrink-0" />
+                              </a>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                      {message.searchResults.length > 3 && (
+                        <div className="text-xs text-gray-500 text-center">
+                          +{message.searchResults.length - 3} more results
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
             </motion.div>
           ))}
@@ -429,7 +608,7 @@ const addMessage = useCallback((content: string, role: "user" | "assistant", mod
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
             onKeyPress={handleKeyPress}
-            placeholder="Type your message..."
+            placeholder={isResearchMode ? "Ask me anything or request research..." : "Type your message..."}
             className="flex-1 bg-gray-800 border-gray-600 text-white placeholder-gray-400 focus:border-blue-500"
             disabled={isLoading || isProcessing}
           />
@@ -440,6 +619,20 @@ const addMessage = useCallback((content: string, role: "user" | "assistant", mod
           >
             <Send className="w-4 h-4" />
           </Button>
+          {isResearchMode && (
+            <Button
+              onClick={() => performWebSearch(inputValue)}
+              disabled={isSearching || !inputValue.trim()}
+              className="bg-orange-600 hover:bg-orange-700 text-white"
+              title="Perform web search"
+            >
+              {isSearching ? (
+                <div className="w-4 h-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+              ) : (
+                <Search className="w-4 h-4" />
+              )}
+            </Button>
+          )}
           <Button
             onClick={toggleRecording}
             disabled={isProcessing}
@@ -449,20 +642,32 @@ const addMessage = useCallback((content: string, role: "user" | "assistant", mod
           >
             {isRecording ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
           </Button>
-
-          <Button
-            onClick={async () => {
-              const canvas = await html2canvas(document.body);
-              const screenshot = canvas.toDataURL("image/jpeg");
-              const result = await orchestrator.analyzeAndRespond(screenshot);
-              addMessage(result.llm_response, "assistant", "Screen Analysis", "screen");
-            }}
-            disabled={isLoading || isProcessing}
-            className="bg-green-600 hover:bg-green-700 text-white"
-          >
-            <Monitor className="w-4 h-4" />
-          </Button>
         </div>
+
+        {/* Search Results Summary */}
+        {searchResults.length > 0 && lastSearchQuery && (
+          <div className="mb-3 p-2 bg-orange-900/20 border border-orange-500/30 rounded-lg">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-2">
+                <Search className="w-3 h-3 text-orange-400" />
+                <span className="text-xs text-orange-400">
+                  Found {searchResults.length} results for "{lastSearchQuery}"
+                </span>
+              </div>
+              <Button
+                onClick={() => {
+                  setSearchResults([])
+                  setLastSearchQuery("")
+                }}
+                size="sm"
+                variant="ghost"
+                className="text-gray-400 hover:text-white h-5 w-5 p-0"
+              >
+                ×
+              </Button>
+            </div>
+          </div>
+        )}
 
         {audioUrl && (
           <div className="flex items-center space-x-2">
