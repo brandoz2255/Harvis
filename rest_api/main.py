@@ -217,4 +217,4 @@ async def get_ollama_models():
 if __name__ == "__main__":
     import uvicorn
     # Use 0.0.0.0 to be accessible within a container
-    uvicorn.run(app, host="0.0.0.0", port=8001, reload=True)
+    uvicorn.run(app, host="0.0.0.0", port=8001, reload=True)  # nosec

@@ -127,7 +127,7 @@ class VibeAgent:
                 "model": "mistral",
                 "prompt": prompt,
                 "stream": False
-            })
+            }, timeout=90)
             response.raise_for_status()
             commands = response.json()["response"].strip().split('\n')
             plan = [cmd for cmd in commands if cmd.strip()]
@@ -156,7 +156,7 @@ class VibeAgent:
                 "model": "mistral",
                 "prompt": diagnosis_prompt,
                 "stream": False
-            })
+            }, timeout=90)
             response.raise_for_status()
             fix_command = response.json()["response"].strip()
 
