@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useRef, useEffect } from "react"
+import { useState, useRef, useEffect, useCallback } from "react"
 import { motion } from "framer-motion"
 import { Monitor, MonitorOff, Eye, EyeOff, MessageSquare, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -62,7 +62,7 @@ export default function CompactScreenShare({ onAnalysis, onAnalyzeAndRespond }: 
     }
   }
 
-  const analyzeScreen = async () => {
+  const analyzeScreen = useCallback(async () => {
     if (!videoRef.current || !streamRef.current || isAnalyzing) return
 
     setIsAnalyzing(true)
@@ -105,9 +105,9 @@ export default function CompactScreenShare({ onAnalysis, onAnalyzeAndRespond }: 
       }
     }
     setIsAnalyzing(false)
-  }
+  }, [isAnalyzing, onAnalysis])
 
-  const analyzeAndRespond = async () => {
+  const analyzeAndRespond = useCallback(async () => {
     if (!videoRef.current || !streamRef.current || isAnalyzingAndResponding) return
 
     setIsAnalyzingAndResponding(true)
@@ -159,7 +159,7 @@ export default function CompactScreenShare({ onAnalysis, onAnalyzeAndRespond }: 
       }
     }
     setIsAnalyzingAndResponding(false)
-  }
+  }, [isAnalyzingAndResponding, onAnalyzeAndRespond])
 
   const toggleCommentary = () => {
     const newState = !commentaryEnabled

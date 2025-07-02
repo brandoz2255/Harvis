@@ -491,8 +491,8 @@ const UnifiedChatInterface = forwardRef<any, {}>((props, ref) => {
               <span className="text-sm text-green-400 font-medium">Research Mode Active</span>
             </div>
             <p className="text-xs text-gray-400">
-              AI will automatically search the web for current information when needed. Use keywords like "search",
-              "latest", "current", or "research" to trigger web searches.
+              AI will automatically search the web for current information when needed. Use keywords like &quot;search&quot;,
+              &quot;latest&quot;, &quot;current&quot;, or &quot;research&quot; to trigger web searches.
             </p>
           </div>
         )}
@@ -546,7 +546,7 @@ const UnifiedChatInterface = forwardRef<any, {}>((props, ref) => {
                     <div className="flex items-center space-x-2">
                       <Search className="w-3 h-3 text-orange-400" />
                       <span className="text-xs text-orange-400 font-medium">
-                        Search Results for: "{message.searchQuery}"
+                        Search Results for: &quot;{message.searchQuery}&quot;
                       </span>
                     </div>
                     <div className="space-y-2">
@@ -651,7 +651,7 @@ const UnifiedChatInterface = forwardRef<any, {}>((props, ref) => {
               <div className="flex items-center space-x-2">
                 <Search className="w-3 h-3 text-orange-400" />
                 <span className="text-xs text-orange-400">
-                  Found {searchResults.length} results for "{lastSearchQuery}"
+                  Found {searchResults.length} results for &quot;{lastSearchQuery}&quot;
                 </span>
               </div>
               <Button
