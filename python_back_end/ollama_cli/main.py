@@ -8,7 +8,7 @@ DEFAULT_MODEL = "mistral"
 
 def get_available_models():
     try:
-        response = requests.get(f"{OLLAMA_URL}/api/tags")
+        response = requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
         response.raise_for_status()
         models = response.json().get("models", [])
         return [model["name"] for model in models]
