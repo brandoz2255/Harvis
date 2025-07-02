@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import io from "socket.io-client";
 import { motion } from "framer-motion";
 import { Monitor, MonitorOff, Eye, EyeOff, MessageSquare } from "lucide-react";
@@ -88,7 +88,7 @@ export default function ScreenShare() {
 
     fetchModels();
 
-  }, []);
+  }, [addMessage, selectedModel]);
 
   const startScreenShare = async () => {
     try {
@@ -162,7 +162,7 @@ export default function ScreenShare() {
     }
   };
 
-  const analyzeScreen = async () => {
+  const analyzeScreen = useCallback(async () => {
     if (!videoRef.current || !streamRef.current || isAnalyzing) return
 
     setIsAnalyzing(true)
@@ -194,7 +194,7 @@ export default function ScreenShare() {
       }
     }
     setIsAnalyzing(false)
-  }
+  }, [isAnalyzing, selectedModel])
 
   const toggleCommentary = () => {
     const newState = !commentaryEnabled
@@ -223,7 +223,7 @@ export default function ScreenShare() {
 
     document.addEventListener("keydown", handleKeyDown)
     return () => document.removeEventListener("keydown", handleKeyDown)
-  }, [isSharing])
+  }, [isSharing, analyzeScreen])
 
   useEffect(() => {
     return () => {
