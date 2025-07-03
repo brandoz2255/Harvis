@@ -46,7 +46,7 @@ RUN --mount=type=cache,id=model-cache,target=/root/.cache \
     set -eux; \
     python3 -c 'import whisper'; \
     python3 -c 'from transformers import pipeline; pipeline("image-to-text", model="Salesforce/blip-image-captioning-base")'; \
-    python3 -c 'from chatterbox.tts import ChatterboxTTS; ChatterboxTTS.from_pretrained(device="cuda")'  # Model name is implicit
+    python3 -c 'from chatterbox.tts import ChatterboxTTS; ChatterboxTTS.from_pretrained(device="cpu")'
 
 ############################
 # 🌐 Expose + launch
