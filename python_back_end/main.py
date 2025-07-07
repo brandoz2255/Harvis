@@ -1,14 +1,14 @@
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, WebSocket
+from starlette.websockets import WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-import uvicorn, os, tempfile, uuid, base64, io, logging, re, requests, random
+import uvicorn, os, sys, tempfile, uuid, base64, io, logging, re, requests, random
 from gemini_api import query_gemini, is_gemini_configured
 from typing import List, Optional, Dict, Any
+from vison_models.llm_connector import query_qwen, query_llm
 
 from pydantic import BaseModel
-from PIL import Image
 import torch, soundfile as sf
-from transformers import pipeline
 import whisper  # Import Whisper
 
 # ─── Local helper --------------------------------------------------------------
@@ -140,17 +140,10 @@ if os.path.exists(FRONTEND_DIR):
 device = 0 if torch.cuda.is_available() else -1
 logger.info("Using device: %s", "cuda" if device == 0 else "cpu")
 
-try:
-    logger.info("Loading image captioning model …")
-    image_to_text = pipeline(
-        "image-to-text", model="Salesforce/blip-image-captioning-base", device=device
-    )
-except Exception as e:
-    logger.error("BLIP model failed: %s", e)
-    image_to_text = None
+
 
 # ─── Config --------------------------------------------------------------------
-OLLAMA_URL = "http://ollama:11434"
+OLLAMA_URL = "http://host.docker.internal:11434"
 DEFAULT_MODEL = "mistral"
 
 # ─── Pydantic schemas ----------------------------------------------------------
@@ -205,32 +198,9 @@ async def root() -> FileResponse:
     raise HTTPException(404, "Frontend not found")
 
 # Import new modules
-from screen_analyzer import analyze_image_base64
 
-@app.post("/api/analyze-and-respond")
-async def analyze_and_respond(req: ScreenAnalysisRequest):
-    try:
-        # Get screen analysis data
-        screen_data = analyze_image_base64(req.image)
 
-        # Check for errors
-        if "error" in screen_data:
-            return {"commentary": screen_data["error"]}
 
-        # Create prompt with both caption and OCR text
-        prompt = (
-            f"Here's what's on the user's screen:\n"
-            f"Caption: {screen_data['caption']}\n"
-            f"OCR Text (first 500 chars): {screen_data['ocr_text'][:100]}\n"
-            "What should they do next?"
-        )
-
-        # Get LLM response
-        llm_response = query_mistral(prompt)
-
-        return {"commentary": screen_data["caption"], "llm_response": llm_response}
-    except Exception as e:
-        return {"commentary": "error", "llm_response": str(e)}
 
 @app.post("/api/chat", tags=["chat"])
 async def chat(req: ChatRequest, request: Request):
@@ -348,24 +318,27 @@ async def serve_audio(filename: str):
 @app.post("/api/analyze-screen", tags=["vision"])
 async def analyze_screen(req: ScreenAnalysisRequest):
     try:
-        img_data = req.image.split(",", 1)[-1]  # works for data URI or raw b64
-        image = Image.open(io.BytesIO(base64.b64decode(img_data)))
+        # Decode base64 image and save to a temporary file
+        image_data = base64.b64decode(req.image.split(",")[1])
+        temp_image_path = os.path.join(tempfile.gettempdir(), f"{uuid.uuid4()}.png")
+        with open(temp_image_path, "wb") as f:
+            f.write(image_data)
 
-        if image_to_text:
-            caption = image_to_text(image)[0].get("generated_text", "")
-            if caption:
-                prefixes = [
-                    "Looking at your screen, ",
-                    "I notice that ",
-                    "On your screen, ",
-                    "I can see that ",
-                    "Currently, ",
-                ]
-                return {"commentary": random.choice(prefixes) + caption.lower()}
+        # Use Qwen to caption the image
+        qwen_prompt = "Describe this image in detail."
+        qwen_caption = query_qwen(temp_image_path, qwen_prompt)
+        os.remove(temp_image_path) # Clean up temp file
 
-        return {
-            "commentary": "I'm having trouble analyzing the screen content right now."
-        }
+        if "[Qwen error]" in qwen_caption:
+            raise HTTPException(status_code=500, detail=qwen_caption)
+
+        # Use LLM to get a response based on the caption
+        llm_system_prompt = "You are an AI assistant that helps users understand what's on their screen. Provide a concise and helpful response based on the screen content."
+        llm_user_prompt = f"Here's what's on the user's screen: {qwen_caption}\nWhat should they do next?"
+        llm_response = query_llm(llm_user_prompt, system_prompt=llm_system_prompt)
+
+        return {"commentary": qwen_caption, "llm_response": llm_response}
+
     except Exception as e:
         logger.error("Screen analysis failed: %s", e)
         raise HTTPException(500, str(e)) from e
@@ -399,6 +372,7 @@ async def mic_chat(file: UploadFile = File(...)):
         raise HTTPException(500, str(e))
 
 # Research endpoint to handle research queries using models from Ollama or Gemini
+#TODO: add a research dir that will use langchain to rrun AI research bots on the web to give sources on what we ask it in the frontend
 from agent_research import research_agent
 
 @app.post("/api/research-chat", tags=["research"])
@@ -421,12 +395,9 @@ async def research_chat(req: ResearchChatRequest):
 
 # ─── Warmup ────────────────────────────────────────────────────────
 try:
-    logger.info("Preloading TTS and Whisper and BLIP…")
+    logger.info("Preloading TTS and Whisper…")
     _ = load_tts_model()
     _ = whisper.load_model("base")
-    _ = pipeline(
-        "image-to-text", model="Salesforce/blip-image-captioning-base", device=device
-    )
 except Exception as e:
     logger.error("Preload failed: %s", e)
 

@@ -53,13 +53,13 @@ async def screen_data(sid, data): # data is now an object { imageData, modelName
         print(f"Screen analysis error: {analysis_results['error']}")
         return
 
-    blip_description = analysis_results.get("caption", "")
+    caption = analysis_results.get("caption", "")
     ocr_text = analysis_results.get("ocr_text", "")
 
-    llm_prompt = f"Analyze the following screen content. BLIP description: {blip_description}. OCR text: {ocr_text}. Provide a concise summary or relevant insights."
+    llm_prompt = f"Analyze the following screen content. Caption: {caption}. OCR text: {ocr_text}. Provide a concise summary or relevant insights."
     llm_response = query_llm(llm_prompt, model_name=model_name)
 
-    await sio.emit("llm_response", {"blip_description": blip_description, "llm_response": llm_response}, room=sid)
+    await sio.emit("llm_response", {"caption": caption, "llm_response": llm_response}, room=sid)
 
 @sio.event
 async def stopShare(sid):
