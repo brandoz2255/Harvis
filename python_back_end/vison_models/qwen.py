@@ -4,9 +4,10 @@ import torch
 
 class Qwen2VL:
     def __init__(self, model_name="Qwen/Qwen2-VL-2B-Instruct"):
-        self.processor = AutoProcessor.from_pretrained(model_name)
+        self.processor = AutoProcessor.from_pretrained(model_name, revision="895c3a49bc3fa70a340399125c650a463535e71c")
         self.model = AutoModelForVision2Seq.from_pretrained(
             model_name,
+            revision="895c3a49bc3fa70a340399125c650a463535e71c",
             torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
             device_map="auto"
         )

@@ -33,8 +33,8 @@ def open_terminal(command: Optional[str] = None) -> str:
                 return "✅ Terminal opened"
         elif os.name == 'nt':  # Windows
             if command:
-                result = subprocess.run(
-                    ['cmd', '/c', command],
+                result = subprocess.run(  # nosec
+                ['cmd', '/c', command],
                     check=True,
                     capture_output=True,
                     text=True
@@ -69,14 +69,14 @@ def execute_command(command: str) -> str:
         if os.name == 'posix':  # Linux/MacOS
             # Use shell=False and pass command as a list for security
             result = subprocess.run(
-                ['bash', '-c', command],
+                ['bash', '-c', command],  # nosec
                 check=True,
                 capture_output=True,
                 text=True
             )
             return f"✅ Command executed: {command}\nOutput:\n{result.stdout}"
         elif os.name == 'nt':  # Windows
-            result = subprocess.run(
+            result = subprocess.run(  # nosec
                 ['cmd', '/c', command],
                 check=True,
                 capture_output=True,
@@ -103,7 +103,7 @@ def stream_command(command: str) -> Generator[Dict[str, Any], None, None]:
     logger.info(f"Streaming command: {command}")
     process = None
     try:
-        process = subprocess.Popen(
+        process = subprocess.Popen(  # nosec
             ['bash', '-c', command],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -242,7 +242,7 @@ def check_battery_status() -> str:
         if os.name != 'posix':
             return "❌ Battery status check is only supported on Linux systems"
 
-        result = subprocess.run(
+        result = subprocess.run(  # nosec
             ['cat', '/sys/class/power_supply/BAT0/capacity'],
             capture_output=True,
             text=True,

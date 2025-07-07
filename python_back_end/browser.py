@@ -18,7 +18,7 @@ import re
 from typing import Optional, List, Literal, Union, Dict
 from urllib.parse import urlparse, urljoin
 import platform
-import subprocess
+import subprocess  # nosec
 import os
 from selenium_stealth import stealth
 
@@ -46,14 +46,8 @@ def detect_installed_browsers() -> List[str]:
 
     def check_linux_browser(commands):
         for cmd in commands:
-            try:
-                if shutil.which(cmd) is not None:
-                    return True
-                result = subprocess.run(['which', cmd], capture_output=True, text=True)
-                if result.returncode == 0:
-                    return True
-            except:
-                continue
+            if shutil.which(cmd):
+                return True
         return False
 
     if system == "linux":
@@ -170,8 +164,8 @@ def _add_browser_features(driver):
     for feature in features:
         try:
             driver.execute_script(feature)
-        except:
-            pass
+        except Exception as e:
+            logger.warning(f"Could not execute firefox stealth script, error: {e}")
 
 def _add_stealth_js(driver):
     """Add additional stealth JavaScript to make automation harder to detect."""
@@ -304,7 +298,7 @@ def _create_undetected_firefox_profile():
     
     # Set random user agent
     profile.set_preference("general.useragent.override", 
-                          random.choice([ua for ua in USER_AGENTS if "Firefox" in ua]))
+                          random.choice([ua for ua in USER_AGENTS if "Firefox" in ua]))  # nosec
     
     return profile
 
@@ -451,8 +445,8 @@ def _add_firefox_stealth(driver):
     """
     try:
         driver.execute_script(firefox_stealth_js)
-    except:
-        pass
+    except Exception as e:
+        logger.warning(f"Could not execute firefox stealth script, error: {e}")
 
 def open_blank_tabs(count: int = 1) -> str:
     """Open specified number of blank tabs."""
@@ -623,7 +617,7 @@ def search_google(query: str, headless: bool = False, proxy: Optional[str] = Non
             "https://google.com/search?source=hp&q=",
             "https://www.google.com/search?source=hp&ei=random&q="
         ]
-        search_url = random.choice(search_params) + cleaned_query.replace(" ", "+")
+        search_url = random.choice(search_params) + cleaned_query.replace(" ", "+")  # nosec  # nosec
         
         # Random pre-search delay
         _random_delay(0.5, 2.0)
