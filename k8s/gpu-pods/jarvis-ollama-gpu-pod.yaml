@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: jarvis-gpu-pod
+  labels:
+    app: jarvis-gpu-pod
+spec:
+  runtimeClassName: nvidia
+  restartPolicy: Always
+  containers:
+    - name: backend
+      image: dulc3/jarvis-backend:latest
+      command: ["uvicorn"]
+      args: ["main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+      ports:
+        - containerPort: 8000
+      #envFrom:
+        #- configMapRef:
+         #   name: jarvis-backend-env
+      volumeMounts:
+        - name: backend-storage
+          mountPath: /app/data
+
+    - name: ollama
+      image: ollama/ollama
+      ports:
+        - containerPort: 11434
+      volumeMounts:
+        - name: ollama-model-cache
+          mountPath: /root/.ollama
+      resources:
+        limits:
+          nvidia.com/gpu: 1
+
+  volumes:
+    - name: backend-storage
+      persistentVolumeClaim:
+        claimName: backend-storage
+    - name: ollama-model-cache
+      persistentVolumeClaim:
+        claimName: ollama-model-cache

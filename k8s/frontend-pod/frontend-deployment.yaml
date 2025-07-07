@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jarvis-frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jarvis-frontend
+  template:
+    metadata:
+      labels:
+        app: jarvis-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: dulc3/jarvis-frontend:latest
+          ports:
+            - containerPort: 3000

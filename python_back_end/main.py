@@ -6,7 +6,7 @@ import uvicorn, os, sys, tempfile, uuid, base64, io, logging, re, requests, rand
 from gemini_api import query_gemini, is_gemini_configured
 from typing import List, Optional, Dict, Any
 from vison_models.llm_connector import query_qwen, query_llm
-
+import sys
 from pydantic import BaseModel
 import torch, soundfile as sf
 import whisper  # Import Whisper
@@ -216,7 +216,7 @@ async def chat(req: ChatRequest, request: Request):
         # ── 2. Browser automation branch -------------------------------------------------
         if is_browser_command(req.message):
             try:
-                from trash.browser import smart_url_handler, search_google, open_new_tab
+                from browser import smart_url_handler, search_google, open_new_tab
 
                 result = smart_url_handler(req.message)
                 response_text = (

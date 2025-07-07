@@ -22,6 +22,6 @@ google-generativeai
 # Extra
 sentencepiece
 tavily-python
-
+accelerate>=0.26.0
 requests
 textual

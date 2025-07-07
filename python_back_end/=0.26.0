@@ -1,10 +1,12 @@
-Requirement already satisfied: accelerate in /usr/local/lib/python3.10/dist-packages (1.8.1)
+Collecting accelerate
+  Downloading accelerate-1.8.1-py3-none-any.whl.metadata (19 kB)
 Requirement already satisfied: numpy<3.0.0,>=1.17 in /usr/local/lib/python3.10/dist-packages (from accelerate) (2.2.6)
 Requirement already satisfied: packaging>=20.0 in /usr/local/lib/python3.10/dist-packages (from accelerate) (25.0)
-Requirement already satisfied: psutil in /usr/local/lib/python3.10/dist-packages (from accelerate) (7.0.0)
+Collecting psutil (from accelerate)
+  Downloading psutil-7.0.0-cp36-abi3-manylinux_2_12_x86_64.manylinux2010_x86_64.manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (22 kB)
 Requirement already satisfied: pyyaml in /usr/local/lib/python3.10/dist-packages (from accelerate) (6.0.2)
 Requirement already satisfied: torch>=2.0.0 in /usr/local/lib/python3.10/dist-packages (from accelerate) (2.6.0+cu124)
-Requirement already satisfied: huggingface_hub>=0.21.0 in /usr/local/lib/python3.10/dist-packages (from accelerate) (0.33.2)
+Requirement already satisfied: huggingface_hub>=0.21.0 in /usr/local/lib/python3.10/dist-packages (from accelerate) (0.33.1)
 Requirement already satisfied: safetensors>=0.4.3 in /usr/local/lib/python3.10/dist-packages (from accelerate) (0.5.3)
 Requirement already satisfied: filelock in /usr/local/lib/python3.10/dist-packages (from huggingface_hub>=0.21.0->accelerate) (3.18.0)
 Requirement already satisfied: fsspec>=2023.5.0 in /usr/local/lib/python3.10/dist-packages (from huggingface_hub>=0.21.0->accelerate) (2025.5.1)
@@ -35,3 +37,8 @@ Requirement already satisfied: charset_normalizer<4,>=2 in /usr/local/lib/python
 Requirement already satisfied: idna<4,>=2.5 in /usr/local/lib/python3.10/dist-packages (from requests->huggingface_hub>=0.21.0->accelerate) (3.10)
 Requirement already satisfied: urllib3<3,>=1.21.1 in /usr/local/lib/python3.10/dist-packages (from requests->huggingface_hub>=0.21.0->accelerate) (2.5.0)
 Requirement already satisfied: certifi>=2017.4.17 in /usr/local/lib/python3.10/dist-packages (from requests->huggingface_hub>=0.21.0->accelerate) (2025.6.15)
+Downloading accelerate-1.8.1-py3-none-any.whl (365 kB)
+Downloading psutil-7.0.0-cp36-abi3-manylinux_2_12_x86_64.manylinux2010_x86_64.manylinux_2_17_x86_64.manylinux2014_x86_64.whl (277 kB)
+Installing collected packages: psutil, accelerate
+
+Successfully installed accelerate-1.8.1 psutil-7.0.0

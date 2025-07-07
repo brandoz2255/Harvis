@@ -44,10 +44,10 @@ COPY . .
 #  • caches /root/.cache across builds
 RUN --mount=type=cache,id=model-cache,target=/root/.cache \
     set -eux; \
-    python3 -c 'import whisper'; \
-    
-    python3 -c 'from chatterbox.tts import ChatterboxTTS; ChatterboxTTS.from_pretrained(device="cpu")'
-
+    python3 -c 'import whisper, chatterbox.tts, vison_models.qwen; \
+                chatterbox.tts.ChatterboxTTS.from_pretrained(device="cpu"); \
+                vison_models.qwen.Qwen2VL()'
+                
 ############################
 # 🌐 Expose + launch
 ############################

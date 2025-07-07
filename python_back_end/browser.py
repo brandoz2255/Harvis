@@ -3,6 +3,7 @@ from pathlib import Path
 from selenium import webdriver
 from selenium.webdriver.firefox.service import Service as FirefoxService
 from webdriver_manager.firefox import GeckoDriverManager
+from selenium.webdriver.firefox.firefox_profile import FirefoxProfile
 from selenium.common.exceptions import WebDriverException, TimeoutException
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -690,7 +691,3 @@ def navigate_to(url: str) -> str:
 def get_current_browser() -> Optional[Literal["firefox", "chrome"]]:
     """Get the currently active browser type."""
     return _browser_type
-
-def get_current_browser() -> str:
-    """Return the current browser type."""
-    return "firefox"
