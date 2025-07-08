@@ -52,26 +52,26 @@ def wait_for_vram(threshold=THRESHOLD_BYTES, interval=0.5):
 tts_model = None
 vibe_agent = VibeAgent(project_dir=os.getcwd())
 
-# ─── Load TTS Model (Chatterbox) ────────────────────────────────────────────────
+
 def load_tts_model(force_cpu=False):
     global tts_model
     tts_device = "cuda" if torch.cuda.is_available() and not force_cpu else "cpu"
 
     if tts_model is None:
         try:
-            logger.info(f"Loading TTS model on {tts_device}")
+            logger.info(f"🔊 Loading TTS model on device: {tts_device}")
             tts_model = ChatterboxTTS.from_pretrained(device=tts_device)
         except Exception as e:
             if "cuda" in str(e).lower():
-                logger.warning(f"CUDA loading failed: {e}. Trying CPU...")
+                logger.warning(f"⚠️ CUDA load failed: {e}. Falling back to CPU...")
                 try:
                     tts_model = ChatterboxTTS.from_pretrained(device="cpu")
-                    logger.info("Successfully loaded TTS model on CPU")
+                    logger.info("✅ Successfully loaded TTS model on CPU")
                 except Exception as e2:
-                    logger.error(f"FATAL: Could not load TTS model on CPU either: {e2}")
-                    raise
+                    logger.error(f"❌ Failed to load TTS model on CPU: {e2}")
+                    raise RuntimeError("TTS model loading failed on both CUDA and CPU.") from e2
             else:
-                logger.error(f"FATAL: Could not load TTS model: {e}")
+                logger.error(f"❌ TTS model loading error: {e}")
                 raise
     return tts_model
 
