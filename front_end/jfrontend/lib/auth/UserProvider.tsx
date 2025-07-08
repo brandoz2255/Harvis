@@ -36,7 +36,10 @@ export const UserProvider = ({ children }: { children: ReactNode }) => {
         } catch (error) {
           console.error('UserProvider: Token validation failed:', error);
           localStorage.removeItem('jwt_token'); // Token is invalid, remove it
+          setUser(null); // Explicitly set user to null
         }
+      } else {
+        setUser(null); // No token, set user to null
       }
       setIsLoading(false);
       console.log('UserProvider: Initial auth check complete.');
