@@ -180,7 +180,7 @@ export default function ScreenShare() {
 
           socket.emit("screen_data", { imageData, modelName: selectedModel })
 
-          console.log("OCR Text:", data.ocr_text)
+          
 
           setIsAnalyzing(false)
           return
