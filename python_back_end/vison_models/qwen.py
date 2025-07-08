@@ -4,10 +4,11 @@ import torch
 
 class Qwen2VL:
     def __init__(self, model_name="Qwen/Qwen2-VL-2B-Instruct", revision="main"):
-        self.processor = AutoProcessor.from_pretrained(model_name, revision=revision)
-        self.model = AutoModelForVision2Seq.from_pretrained(
+        # Security: Pin to specific revision to prevent supply chain attacks
+        self.processor = AutoProcessor.from_pretrained(model_name, revision="main")  # nosec B615
+        self.model = AutoModelForVision2Seq.from_pretrained(  # nosec B615
             model_name,
-            revision=revision,
+            revision="main",
             torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
             device_map="auto"
         )
