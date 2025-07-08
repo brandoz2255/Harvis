@@ -105,9 +105,9 @@ export class AIOrchestrator {
         hardware.webgl = true
         hardware.gpu = true
 
-        const debugInfo = gl.getExtension("WEBGL_debug_renderer_info")
+        const debugInfo = (gl as any).getExtension("WEBGL_debug_renderer_info");
         if (debugInfo) {
-          const renderer = gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL)
+          const renderer = (gl as any).getParameter(debugInfo.UNMASKED_RENDERER_WEBGL);
           console.log("GPU Renderer:", renderer)
         }
       }

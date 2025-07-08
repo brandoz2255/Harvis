@@ -1,0 +1,41 @@
+# version: "3.9"
+
+services:
+  frontend:
+    build: .
+    container_name: jfrontend
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    env_file:
+      - .env.local
+    networks:
+      - ollama-n8n-network
+    depends_on:
+      pgsql:
+        condition: service_healthy
+
+  pgsql:
+    image: postgres:15
+    container_name: pgsql-db
+    restart: unless-stopped
+    env_file:
+      - .env.local
+    volumes:
+      - pgsql_data:/var/lib/postgresql/data
+    networks:
+      - ollama-n8n-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pguser -d database"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+networks:
+  ollama-n8n-network:
+    external: true
+
+volumes:
+  ollama:
+  n8n_data:
+  pgsql_data:

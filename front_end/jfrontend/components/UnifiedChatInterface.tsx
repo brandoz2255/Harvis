@@ -55,7 +55,12 @@ interface ResearchChatResponse {
   searchQuery?: string
 }
 
-const UnifiedChatInterface = forwardRef<any, {}>((props, ref) => {
+
+export interface ChatHandle {
+  addAIMessage: (content: string, source?: string) => void;
+}
+
+const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
   const { orchestrator, hardware, isDetecting } = useAIOrchestrator()
   const [selectedModel, setSelectedModel] = useState("auto")
   const [priority, setPriority] = useState<"speed" | "accuracy" | "balanced">("balanced")

@@ -1,18 +1,25 @@
-import base64, io, pytesseract
+import base64, io, pytesseract, tempfile, os
 from PIL import Image
-from transformers import pipeline
+from llm_connector import query_qwen
 
 pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'  # Update this path as needed
 
-def analyze_image_base64(image_b64: str, blip_model) -> dict:
+def analyze_image_base64(image_b64: str) -> dict:
     try:
         image_data = image_b64.split(",")[-1]
-        image = Image.open(io.BytesIO(base64.b64decode(image_data)))
+        # Save the image to a temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as temp_image:
+            temp_image.write(base64.b64decode(image_data))
+            temp_image_path = temp_image.name
 
-        # Get BLIP caption
-        caption = blip_model(image)[0]["generated_text"]
+        # Get Qwen2VL caption
+        caption = query_qwen(temp_image_path, "Describe the image.")
+
+        # Clean up the temporary file
+        os.unlink(temp_image_path)
 
         # Get OCR text
+        image = Image.open(io.BytesIO(base64.b64decode(image_data)))
         ocr_text = pytesseract.image_to_string(image)
 
         return {

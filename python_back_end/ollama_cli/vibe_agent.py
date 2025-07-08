@@ -8,6 +8,8 @@ import json
 from typing import List, Dict, Any, Optional
 from starlette.websockets import WebSocket
 
+#TODO: Add RAG for vibe coding documents such as next.js documentation and frameworks documentations
+
 # Add parent directory to path to import modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -16,7 +18,6 @@ from os_ops import (
     list_files,
     create_file,
     delete_file,
-    write_file as write_to_file,
     stream_command
 )
 from chatterbox_tts import load_tts_model, generate_speech
@@ -111,7 +112,7 @@ class VibeAgent:
         - The commands should be runnable in a standard Linux shell.
         - Use `echo` to provide status updates to the user.
         - For file creation, use `create_file("path/to/file.txt", "content")`.
-        - For writing to files, use `write_to_file("path/to/file.txt", "content")`.
+        - For writing to files, use `create_file("path/to/file.txt", "content")`.
         Example:
         Objective: Create a new file called 'test.txt' and write 'hello world' to it.
         Commands:
@@ -206,19 +207,7 @@ class VibeAgent:
                         await websocket.send_json({"type": "stderr", "content": f"Invalid create_file command format: {step}\n"})
                 except Exception as e:
                     await websocket.send_json({"type": "stderr", "content": f"Error executing create_file: {e}\n"})
-            elif step.startswith("write_to_file("):
-                try:
-                    # Extract arguments: write_to_file("path", "content")
-                    match = re.match(r'write_to_file\("(.*)", "(.*)"\)', step)
-                    if match:
-                        file_path = match.group(1)
-                        content = match.group(2)
-                        result = write_to_file(file_path, content)
-                        await websocket.send_json({"type": "stdout", "content": result + "\n"})
-                    else:
-                        await websocket.send_json({"type": "stderr", "content": f"Invalid write_to_file command format: {step}\n"})
-                except Exception as e:
-                    await websocket.send_json({"type": "stderr", "content": f"Error executing write_to_file: {e}\n"})
+            
             else:
                 # Use stream_command for real-time output for other commands
                 stderr_output = ""

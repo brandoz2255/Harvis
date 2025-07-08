@@ -1,6 +1,15 @@
 import requests
 import os
 import google.generativeai as genai
+from .qwen import Qwen2VL
+
+qwen_model = Qwen2VL()
+
+def query_qwen(image_path: str, prompt: str) -> str:
+    try:
+        return qwen_model.predict(image_path, prompt)
+    except Exception as e:
+        return f"[Qwen error] {e}"
 
 OLLAMA_URL = "http://ollama:11434"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
