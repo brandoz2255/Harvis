@@ -127,7 +127,7 @@ export default function VersusModePage() {
   const startRedScreenShare = async () => {
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { cursor: "always" },
+        video: true,
         audio: false,
       })
 
@@ -166,7 +166,7 @@ export default function VersusModePage() {
   const startBlueScreenShare = async () => {
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { cursor: "always" },
+        video: true,
         audio: false,
       })
 

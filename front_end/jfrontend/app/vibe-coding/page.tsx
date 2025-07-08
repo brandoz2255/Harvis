@@ -761,7 +761,7 @@ export default function VibeCodingPage() {
       </div>
 
       {/* Settings Modal */}
-      <SettingsModal isOpen={showSettings} onClose={() => setShowSettings(false)} context="vibe-coding" />
+      <SettingsModal isOpen={showSettings} onClose={() => setShowSettings(false)} context="agent" />
     </div>
   )
 }

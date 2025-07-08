@@ -57,12 +57,14 @@ function optimizePerformance() {
           "Analyzing user interaction patterns to improve response accuracy. Detected preference for technical explanations.",
         document:
           "Generated summary: The current conversation indicates a focus on AI orchestration and performance optimization. Key topics include model selection, hardware detection, and user interface improvements.",
+        image: "A placeholder for a generated image."
       }
 
       const titles = {
         code: "Performance Optimization",
         thought: "AI Reasoning Process",
         document: "Conversation Summary",
+        image: "Generated Image"
       }
 
       if (Math.random() > 0.7) {
