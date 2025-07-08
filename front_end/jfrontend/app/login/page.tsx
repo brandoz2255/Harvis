@@ -1,32 +1,41 @@
+
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { useRouter } from "next/navigation"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
+import { useUser } from "@/lib/auth/UserProvider";
+import { AuthService } from "@/lib/auth/AuthService"
 
 export default function LoginPage() {
   const router = useRouter()
+  const { user, login, isLoading } = useUser();
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
   const [error, setError] = useState("")
+
+  useEffect(() => {
+    if (user) {
+      router.push("/");
+    }
+  }, [user, router]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setError("")
 
-    const res = await fetch("/api/auth/login", {
-      method: "POST",
-      body: JSON.stringify({ email, password }),
-      headers: { "Content-Type": "application/json" },
-    })
-
-    if (res.ok) {
-      router.push("/") // go to home
-    } else {
-      const { message } = await res.json()
-      setError(message || "Login failed.")
+    try {
+      const token = await AuthService.login(email, password);
+      await login(token);
+      router.push("/"); // go to home
+    } catch (err: any) {
+      setError(err.message || "Login failed.");
     }
+  }
+
+  if (isLoading) {
+    return <div className="min-h-screen flex items-center justify-center">Loading...</div>
   }
 
   return (
@@ -70,3 +79,4 @@ export default function LoginPage() {
     </div>
   )
 }
+
