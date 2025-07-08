@@ -1,0 +1,109 @@
+'use client';
+
+import { useUser } from '@/lib/auth/UserProvider';
+import { useRouter } from 'next/navigation';
+import { useEffect } from 'react';
+import { Button } from '@/components/ui/button';
+import Image from 'next/image';
+import Link from 'next/link';
+
+export default function ProfilePage() {
+  const { user, logout, isLoading } = useUser();
+  const router = useRouter();
+
+  useEffect(() => {
+    if (!isLoading && !user) {
+      router.push('/login');
+    }
+  }, [user, isLoading, router]);
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-black via-gray-900 to-blue-900">
+        <div className="text-white text-lg">Loading...</div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return null; // Will redirect to login
+  }
+
+  const handleLogout = () => {
+    logout();
+    router.push('/');
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-black via-gray-900 to-blue-900 text-white">
+      <div className="container mx-auto px-4 py-8 max-w-2xl">
+        {/* Back to Home */}
+        <div className="mb-6">
+          <Link href="/">
+            <Button variant="ghost" className="text-slate-300 hover:text-white">
+              ← Back to Home
+            </Button>
+          </Link>
+        </div>
+
+        {/* Profile Card */}
+        <div className="bg-gray-800/80 backdrop-blur-sm rounded-lg shadow-xl p-8">
+          <div className="text-center mb-8">
+            <h1 className="text-3xl font-bold mb-2">User Profile</h1>
+            <p className="text-gray-400">Manage your account information</p>
+          </div>
+
+          {/* Avatar and Basic Info */}
+          <div className="flex flex-col items-center mb-8">
+            <div className="w-24 h-24 rounded-full overflow-hidden mb-4 ring-4 ring-blue-500/20">
+              <Image
+                src={user.avatar || 'https://api.dicebear.com/7.x/initials/svg?seed=' + user.name}
+                alt="User Avatar"
+                className="w-full h-full object-cover bg-gray-600"
+                width={96}
+                height={96}
+              />
+            </div>
+            <h2 className="text-2xl font-semibold mb-2">{user.name}</h2>
+            <p className="text-gray-400">{user.email}</p>
+          </div>
+
+          {/* Profile Details */}
+          <div className="space-y-6">
+            <div>
+              <h3 className="text-lg font-semibold mb-4">Account Information</h3>
+              <div className="grid gap-4">
+                <div className="flex justify-between items-center p-4 bg-gray-700/50 rounded-lg">
+                  <span className="text-gray-300">User ID</span>
+                  <span className="font-mono text-sm">{user.id}</span>
+                </div>
+                <div className="flex justify-between items-center p-4 bg-gray-700/50 rounded-lg">
+                  <span className="text-gray-300">Username</span>
+                  <span>{user.name}</span>
+                </div>
+                <div className="flex justify-between items-center p-4 bg-gray-700/50 rounded-lg">
+                  <span className="text-gray-300">Email</span>
+                  <span>{user.email}</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Actions */}
+            <div className="pt-6 border-t border-gray-700">
+              <h3 className="text-lg font-semibold mb-4">Account Actions</h3>
+              <div className="flex gap-4">
+                <Button 
+                  onClick={handleLogout}
+                  variant="outline"
+                  className="border-red-600 text-red-400 hover:bg-red-600/10"
+                >
+                  Sign Out
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

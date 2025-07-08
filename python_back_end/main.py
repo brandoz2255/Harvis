@@ -1,8 +1,13 @@
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File, WebSocket
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, WebSocket, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.websockets import WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn, os, sys, tempfile, uuid, base64, io, logging, re, requests, random
+from datetime import datetime, timedelta
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+import asyncpg
 from gemini_api import query_gemini, is_gemini_configured
 from typing import List, Optional, Dict, Any
 from vison_models.llm_connector import query_qwen, query_llm
@@ -10,6 +15,86 @@ from vison_models.llm_connector import query_qwen, query_llm
 from pydantic import BaseModel
 import torch, soundfile as sf
 import whisper  # Import Whisper
+
+# ─── Authentication Setup ──────────────────────────────────────────────────────
+SECRET_KEY = os.getenv("JWT_SECRET", "your-secret-key")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+security = HTTPBearer()
+
+# Database connection
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://pguser:pgpassword@localhost:5432/database")
+
+class AuthRequest(BaseModel):
+    email: str
+    password: str
+
+class SignupRequest(BaseModel):
+    username: str
+    email: str
+    password: str
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str
+
+class UserResponse(BaseModel):
+    id: int
+    username: str
+    email: str
+    avatar: Optional[str] = None
+
+# ─── Authentication Utilities ───────────────────────────────────────────────────
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
+
+def get_password_hash(password):
+    return pwd_context.hash(password)
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=15)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+async def get_db_connection():
+    return await asyncpg.connect(DATABASE_URL)
+
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    credentials_exception = HTTPException(
+        status_code=401,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    
+    try:
+        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        logger.info(f"JWT payload: {payload}")
+        user_id_str: str = payload.get("sub")
+        if user_id_str is None:
+            raise credentials_exception
+        user_id: int = int(user_id_str)
+        logger.info(f"User ID from token: {user_id}")
+    except (JWTError, ValueError) as e:
+        logger.error(f"JWT decode error: {e}")
+        raise credentials_exception
+    
+    conn = await get_db_connection()
+    try:
+        user = await conn.fetchrow("SELECT id, username, email, avatar FROM users WHERE id = $1", user_id)
+        if user is None:
+            logger.error(f"User not found for ID: {user_id}")
+            raise credentials_exception
+        logger.info(f"User found: {dict(user)}")
+        return UserResponse(**dict(user))
+    finally:
+        await conn.close()
 
 # ─── Local helper --------------------------------------------------------------
 from chatterbox_tts import load_tts_model, generate_speech  # see second file below
@@ -109,7 +194,7 @@ def generate_speech(text, model, audio_prompt=None, exaggeration=0.5, temperatur
             wav = model.generate(
                 normalized,
                 audio_prompt_path=audio_prompt,
-                exaggeration=exagerration,
+                exaggeration=exaggeration,
                 temperature=temperature,
                 cfg_weight=cfg_weight,
                 device="cpu"
@@ -143,7 +228,7 @@ logger.info("Using device: %s", "cuda" if device == 0 else "cpu")
 
 
 # ─── Config --------------------------------------------------------------------
-OLLAMA_URL = "http://host.docker.internal:11434"
+OLLAMA_URL = "http://ollama:11434"
 DEFAULT_MODEL = "mistral"
 
 # ─── Pydantic schemas ----------------------------------------------------------
@@ -176,6 +261,11 @@ class VibeCommandRequest(BaseModel):
     command: str
     mode: str = "assistant"
 
+class AnalyzeAndRespondRequest(BaseModel):
+    image: str  # base-64 image (data-URI or raw)
+    model: str = DEFAULT_MODEL
+    system_prompt: Optional[str] = None
+
 # ─── Helpers -------------------------------------------------------------------
 BROWSER_PATTERNS = [
     r"^(?:open|launch|go\s+to|navigate\s+to|take\s+me\s+to|visit)\s+",
@@ -196,6 +286,76 @@ async def root() -> FileResponse:
     if os.path.exists(index_html):
         return FileResponse(index_html)
     raise HTTPException(404, "Frontend not found")
+
+# ─── Authentication Endpoints ─────────────────────────────────────────────────────
+@app.post("/api/auth/signup", response_model=TokenResponse, tags=["auth"])
+async def signup(request: SignupRequest):
+    conn = await get_db_connection()
+    try:
+        # Check if user already exists
+        existing_user = await conn.fetchrow(
+            "SELECT id FROM users WHERE email = $1 OR username = $2",
+            request.email, request.username
+        )
+        if existing_user:
+            raise HTTPException(status_code=409, detail="User with this email or username already exists")
+        
+        # Hash password and create user
+        hashed_password = get_password_hash(request.password)
+        user_id = await conn.fetchval(
+            "INSERT INTO users (username, email, password) VALUES ($1, $2, $3) RETURNING id",
+            request.username, request.email, hashed_password
+        )
+        
+        # Create access token
+        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token = create_access_token(
+            data={"sub": str(user_id)}, expires_delta=access_token_expires
+        )
+        
+        return TokenResponse(access_token=access_token, token_type="bearer")
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Signup error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+    finally:
+        await conn.close()
+
+@app.post("/api/auth/login", response_model=TokenResponse, tags=["auth"])
+async def login(request: AuthRequest):
+    conn = await get_db_connection()
+    try:
+        user = await conn.fetchrow(
+            "SELECT id, password FROM users WHERE email = $1",
+            request.email
+        )
+        if not user or not verify_password(request.password, user["password"]):
+            raise HTTPException(
+                status_code=401,
+                detail="Incorrect email or password",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        
+        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token = create_access_token(
+            data={"sub": str(user["id"])}, expires_delta=access_token_expires
+        )
+        
+        return TokenResponse(access_token=access_token, token_type="bearer")
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Login error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+    finally:
+        await conn.close()
+
+@app.get("/api/auth/me", response_model=UserResponse, tags=["auth"])
+async def get_current_user_info(current_user: UserResponse = Depends(get_current_user)):
+    return current_user
 
 # Import new modules
 
@@ -285,7 +445,7 @@ async def chat(req: ChatRequest, request: Request):
             text=response_text,
             model=tts,
             audio_prompt=audio_prompt_path,
-            exaggeration=req.exagerration,
+            exaggeration=req.exaggeration,
             temperature=req.temperature,
             cfg_weight=req.cfg_weight,
         )
@@ -341,6 +501,64 @@ async def analyze_screen(req: ScreenAnalysisRequest):
 
     except Exception as e:
         logger.error("Screen analysis failed: %s", e)
+        raise HTTPException(500, str(e)) from e
+
+@app.post("/api/analyze-and-respond", tags=["vision"])
+async def analyze_and_respond(req: AnalyzeAndRespondRequest):
+    """
+    Analyze screen with Qwen vision model and get LLM response using selected model.
+    """
+    try:
+        # Decode base64 image and save to a temporary file
+        image_data = base64.b64decode(req.image.split(",")[1])
+        temp_image_path = os.path.join(tempfile.gettempdir(), f"{uuid.uuid4()}.png")
+        with open(temp_image_path, "wb") as f:
+            f.write(image_data)
+
+        # Use Qwen to analyze the image
+        qwen_prompt = "Analyze this screen in detail. Describe what you see, including any text, UI elements, applications, and content visible."
+        qwen_analysis = query_qwen(temp_image_path, qwen_prompt)
+        os.remove(temp_image_path)  # Clean up temp file
+
+        if "[Qwen error]" in qwen_analysis:
+            raise HTTPException(status_code=500, detail=qwen_analysis)
+
+        # Use the selected LLM model to generate a response based on Qwen's analysis
+        # Use custom system prompt if provided, otherwise use default
+        system_prompt = req.system_prompt or "You are Jarvis, an AI assistant analyzing what the user is seeing on their screen. Provide helpful insights, suggestions, or commentary about what you observe. Be conversational and helpful."
+        
+        if req.model == "gemini-1.5-flash":
+            # Use Gemini for response
+            llm_response = query_gemini(f"Screen analysis: {qwen_analysis}\n\nPlease provide helpful insights about this screen.", [])
+        else:
+            # Use Ollama for response
+            
+            payload = {
+                "model": req.model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Screen analysis: {qwen_analysis}\n\nPlease provide helpful insights about this screen."},
+                ],
+                "stream": False,
+            }
+
+            logger.info(f"→ Asking Ollama with model {req.model}")
+            resp = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=90)
+            
+            if resp.status_code != 200:
+                logger.error("Ollama error %s: %s", resp.status_code, resp.text)
+                raise HTTPException(status_code=500, detail="LLM request failed")
+            
+            llm_response = resp.json().get("message", {}).get("content", "").strip()
+
+        return {
+            "response": llm_response,
+            "screen_analysis": qwen_analysis,
+            "model_used": req.model
+        }
+
+    except Exception as e:
+        logger.error("Analyze and respond failed: %s", e)
         raise HTTPException(500, str(e)) from e
 
 # Load Whisper (once, at the top)
@@ -411,7 +629,7 @@ async def get_ollama_models():
         response = requests.get(f"{OLLAMA_URL}/api/tags", timeout=10)
         response.raise_for_status()
         models = response.json().get("models", [])
-        ollama__model_names = [model["name"] for model in models]
+        ollama_model_names = [model["name"] for model in models]
 
         if is_gemini_configured():
             ollama_model_names.insert(
