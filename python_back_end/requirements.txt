@@ -11,4 +11,4 @@ soundfile
 whisper
 pydantic
 tavily-python
-chatterbox
+chatterbox-tts
