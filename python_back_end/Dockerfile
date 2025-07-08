@@ -16,9 +16,6 @@ RUN apt-get update && apt-get install -y \
 ############################
 COPY requirements.txt .
 
-# 1️⃣ install your pinned deps
-# 2️⃣ add Perth for Chatterbox watermarking
-# 3️⃣ pull CUDA wheels for torch + friends
 RUN pip install --no-cache-dir --upgrade pip \
  && pip install --no-cache-dir -r requirements.txt \
  && pip install --no-cache-dir \
@@ -28,20 +25,14 @@ RUN pip install --no-cache-dir --upgrade pip \
       --index-url https://download.pytorch.org/whl/cu124  
 
 ############################
-# 📦 Copy code
+# 📦 Copy app code
 ############################
 WORKDIR /app
 COPY . .
 
 ############################
-# 🚀 Model warm-up (parallel & cached)
+# 🚀 Pre-warm models into Hugging Face cache (BuildKit required!)
 ############################
-# ✅ Model warm-up (parallel + cache)
-############################
-# 🚀 Model warm-up (parallel + cache)
-############################
-# 🚀 Model warm-up (parallel & cached) — BuildKit required!
-#  • caches /root/.cache across builds
 RUN --mount=type=cache,id=model-cache,target=/root/.cache \
     set -eux; \
     python3 -c 'import whisper'; \
@@ -53,4 +44,7 @@ RUN --mount=type=cache,id=model-cache,target=/root/.cache \
 ############################
 EXPOSE 8000
 ENV PYTHONPATH=/app
+ENV TRANSFORMERS_CACHE=/root/.cache/huggingface
+
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+
