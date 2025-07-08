@@ -711,7 +711,7 @@ export default function AIAgentsPage() {
       </div>
 
       {/* Settings Modal */}
-      <SettingsModal isOpen={showSettings} onClose={() => setShowSettings(false)} context="ai-agents" />
+      <SettingsModal isOpen={showSettings} onClose={() => setShowSettings(false)} context="agent" />
     </div>
   )
 }

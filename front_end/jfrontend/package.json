@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "type-check": "tsc --noEmit"
   },
   "dependencies": {
     "@babel/runtime": "^7.26.10",
@@ -14,15 +15,18 @@
     "@radix-ui/react-dialog": "^1.1.14",
     "@radix-ui/react-select": "^2.2.5",
     "@radix-ui/react-slot": "^1.2.3",
+    "bcrypt": "^6.0.0",
     "brace-expansion": "^2.0.2",
     "class-variance-authority": "^0.7.0",
     "clsx": "^2.0.0",
     "cross-spawn": "^7.0.5",
     "framer-motion": "^10.16.16",
     "html2canvas": "^1.4.1",
+    "jsonwebtoken": "^9.0.2",
     "lucide-react": "^0.294.0",
     "next": "^14.2.30",
     "ogl": "^1.0.11",
+    "pg": "^8.16.3",
     "react": "^18",
     "react-dom": "^18",
     "socket.io-client": "^4.8.1",
@@ -32,7 +36,10 @@
     "zustand": "^5.0.6"
   },
   "devDependencies": {
+    "@types/bcrypt": "^5.0.2",
+    "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "20.19.2",
+    "@types/pg": "^8.15.4",
     "@types/react": "^18",
     "@types/react-dom": "^18",
     "autoprefixer": "^10.0.1",

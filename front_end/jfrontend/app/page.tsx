@@ -150,8 +150,6 @@ export default function Home() {
             >
               <UnifiedChatInterface
                 ref={chatInterfaceRef}
-                onScreenAnalysisRequest={screenAnalysisCallback}
-                screenFeed={isScreenSharing ? 'active' : null}
               />
             </motion.div>
 
@@ -174,8 +172,6 @@ export default function Home() {
                 <CompactScreenShare
                   onAnalysis={handleScreenAnalysis}
                   onAnalyzeAndRespond={handleAnalyzeAndRespond}
-                  onGetScreenAnalysis={(cb) => setScreenAnalysisCallback(() => cb)}
-                  onScreenStateChange={setIsScreenSharing}
                 />
                 <MiscDisplay screenAnalysis={screenAnalysis} />
               </motion.div>
