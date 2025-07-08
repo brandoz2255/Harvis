@@ -13,6 +13,7 @@ import { Button } from '@/components/ui/button';
 import { Swords, Shield, Globe, Sparkles, Bot, Settings } from 'lucide-react';
 import Link   from 'next/link';
 import Aurora from '@/components/Aurora';
+import { useUser } from '@/lib/auth/UserProvider';
 
 export default function Home() {
   const [isLoaded,            setIsLoaded]            = useState(false);

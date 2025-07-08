@@ -13,6 +13,7 @@ export default function Header() {
 
   console.log('Header: user state:', user);
   console.log('Header: isLoading state:', isLoading);
+  console.log('Header: Should show auth buttons:', !user && !isLoading);
 
   const handleLogout = () => {
     logout();
@@ -24,9 +25,13 @@ export default function Header() {
   }
 
   return (
-    <header className="w-full border-b border-slate-700 bg-[#111827]/80 backdrop-blur-sm">
+    <header className="w-full border-b border-slate-700 bg-[#111827]/80 backdrop-blur-sm relative z-50">
       <div className="container mx-auto flex items-center justify-between px-4 py-3">
-        <h1 className="text-xl font-bold">JARVIS AI</h1>
+        <Link href="/">
+          <h1 className="text-xl font-bold cursor-pointer hover:text-blue-400 transition-colors duration-200">
+            JARVIS AI
+          </h1>
+        </Link>
         <nav className="flex items-center space-x-4">
           <Link href="/versus-mode">
             <Button variant="ghost" className="text-slate-300 hover:text-white">
@@ -43,28 +48,42 @@ export default function Header() {
             <div className="relative">
               <button
                 onClick={() => setDropdownOpen(!dropdownOpen)}
-                className="relative w-10 h-10 rounded-full overflow-hidden focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                className="relative w-10 h-10 rounded-full overflow-hidden focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 hover:ring-2 hover:ring-blue-400"
               >
                 <Image
-                  src={user.avatar || 'https://api.dicebear.com/7.x/initials/svg?seed=Default'}
+                  src={user.avatar || 'https://api.dicebear.com/7.x/initials/svg?seed=' + user.name}
                   alt="User Avatar"
-                  className="w-full h-full object-cover"
+                  className="w-full h-full object-cover bg-gray-600"
                   width={40}
                   height={40}
                 />
               </button>
               {dropdownOpen && (
-                <div className="absolute right-0 mt-2 w-48 bg-gray-800 rounded-md shadow-lg py-1 z-50">
-                  <Link href="/profile" className="block px-4 py-2 text-sm text-gray-200 hover:bg-gray-700">
-                    Profile
-                  </Link>
-                  <button
-                    onClick={handleLogout}
-                    className="block w-full text-left px-4 py-2 text-sm text-gray-200 hover:bg-gray-700"
-                  >
-                    Log out
-                  </button>
-                </div>
+                <>
+                  {/* Backdrop to close dropdown when clicking outside */}
+                  <div 
+                    className="fixed inset-0 z-[9998]" 
+                    onClick={() => setDropdownOpen(false)}
+                  />
+                  <div className="absolute right-0 mt-2 w-48 bg-gray-800 border border-gray-700 rounded-md shadow-xl py-1 z-[9999]">
+                    <div className="px-4 py-2 text-xs text-gray-400 border-b border-gray-700">
+                      {user.name}
+                    </div>
+                    <Link 
+                      href="/profile" 
+                      className="block px-4 py-2 text-sm text-gray-200 hover:bg-gray-700 transition-colors"
+                      onClick={() => setDropdownOpen(false)}
+                    >
+                      Profile
+                    </Link>
+                    <button
+                      onClick={handleLogout}
+                      className="block w-full text-left px-4 py-2 text-sm text-gray-200 hover:bg-gray-700 transition-colors"
+                    >
+                      Log out
+                    </button>
+                  </div>
+                </>
               )}
             </div>
           ) : (

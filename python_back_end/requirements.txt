@@ -1,27 +1,13 @@
-# requirements.txt
-
-# Core web framework and server
 fastapi
-uvicorn[standard]==0.29.0
+uvicorn
 python-multipart
-
-# ML / AI models
-torch==2.6.0
-transformers==4.46.3
-resemble-perth
-chatterbox-tts==0.1.2
+asyncpg
+passlib
+python-jose[cryptography]==3.3.0
+bcrypt
+requests
+torch
 soundfile
-git+https://github.com/openai/whisper.git
-
-# Image and OCR
-Pillow
-requests
-pytesseract
-google-generativeai
-
-# Extra
-sentencepiece
+whisper
+pydantic
 tavily-python
-
-requests
-textual
