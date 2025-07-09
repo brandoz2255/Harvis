@@ -12,3 +12,15 @@ whisper
 pydantic
 tavily-python
 chatterbox-tts
+langchain
+langchain-community
+langchain-openai
+duckduckgo-search
+beautifulsoup4
+newspaper3k
+pytest
+pytest-asyncio
+pytest-mock
+pytest-cov
+httpx
+responses
