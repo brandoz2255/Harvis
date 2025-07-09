@@ -10,8 +10,8 @@ The Jarvis Project is a sophisticated, voice-activated AI assistant designed to 
     - **Vibe Mode:** Continuous execution for automating larger tasks with verbal updates and explicit user confirmation for critical actions.
 - **Desktop Automation:** Jarvis can interact with your operating system, open applications, and manage files.
 - **Browser Automation:** Perform web searches, navigate to websites, and interact with web pages using simple voice commands.
-- **Real-time Screen Analysis:** Jarvis can "see" your screen, understand the context of your current task, and provide relevant assistance, powered by Blip AI for visual understanding.
-- **AI-Powered Chat:** Engage in contextual conversations, ask questions, and get intelligent responses from a powerful language model.
+- **Real-time Screen Analysis:** Jarvis can "see" your screen, understand the context of your current task, and provide relevant assistance, powered by Qwen2-VL AI for visual understanding.
+- **AI-Powered Chat:** Engage in contextual conversations, ask questions, and get intelligent responses from a powerful language model such  as Mistral.
 - **Extensible and Modular:** Built with a modern tech stack that allows for easy expansion and customization.
 
 ## Tech Stack
@@ -25,7 +25,7 @@ The Jarvis Project is a sophisticated, voice-activated AI assistant designed to 
 - **API:** Python (FastAPI) & Node.js (Next.js API Routes)
 - **AI/LLM:** 
   - Ollama for local language model hosting
-  - Blip for visual understanding
+  - Qwen2-VL for visual understanding
   - **VibeAgent:** Located in `python_back_end/ollama_cli/vibe_agent.py`, this module orchestrates the AI-powered coding experience.
 - **Speech-to-Text (STT):** Whisper
 - **Text-to-Speech (TTS):** Chatterbox TTS
