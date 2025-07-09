@@ -24,3 +24,5 @@ pytest-mock
 pytest-cov
 httpx
 responses
+accelerate>=0.26.0
+lxml_html_clean
