@@ -589,26 +589,79 @@ async def mic_chat(file: UploadFile = File(...)):
         logger.exception("Mic chat failed")
         raise HTTPException(500, str(e))
 
-# Research endpoint to handle research queries using models from Ollama or Gemini
-#TODO: add a research dir that will use langchain to rrun AI research bots on the web to give sources on what we ask it in the frontend
-from agent_research import research_agent
+# Research endpoints using the new research module with LangChain
+from agent_research import research_agent, fact_check_agent, comparative_research_agent
 
 @app.post("/api/research-chat", tags=["research"])
 async def research_chat(req: ResearchChatRequest):
+    """
+    Enhanced research chat endpoint with comprehensive web search and analysis
+    """
     try:
         if not req.message:
             return {"error": "Message is required"}, 400
 
-        # Call the research agent
+        # Call the enhanced research agent
         response_data = research_agent(req.message, req.model)
 
-        # Update history with assistant reply
-        new_history = req.history + [{"role": "assistant", "content": response_data}]
+        # Format response for chat interface
+        if "error" in response_data:
+            response_content = f"Research Error: {response_data['error']}"
+        else:
+            # Format the comprehensive research response
+            analysis = response_data.get("analysis", "No analysis available")
+            sources = response_data.get("sources", [])
+            sources_found = response_data.get("sources_found", 0)
+            
+            response_content = f"{analysis}\n\n"
+            
+            if sources:
+                response_content += f"**Sources ({sources_found} found):**\n"
+                for i, source in enumerate(sources[:5], 1):  # Limit to top 5 sources
+                    response_content += f"{i}. [{source['title']}]({source['url']})\n"
 
-        return {"history": new_history, "response": response_data}
+        # Update history with assistant reply
+        new_history = req.history + [{"role": "assistant", "content": response_content}]
+
+        return {"history": new_history, "response": response_content}
 
     except Exception as e:
         logger.exception("Research chat endpoint crashed")
+        raise HTTPException(500, str(e))
+
+class FactCheckRequest(BaseModel):
+    claim: str
+    model: str = DEFAULT_MODEL
+
+class ComparativeResearchRequest(BaseModel):
+    topics: List[str]
+    model: str = DEFAULT_MODEL
+
+@app.post("/api/fact-check", tags=["research"])
+async def fact_check(req: FactCheckRequest):
+    """
+    Fact-check a claim using web search and analysis
+    """
+    try:
+        result = fact_check_agent(req.claim, req.model)
+        return result
+    except Exception as e:
+        logger.exception("Fact-check endpoint crashed")
+        raise HTTPException(500, str(e))
+
+@app.post("/api/comparative-research", tags=["research"])
+async def comparative_research(req: ComparativeResearchRequest):
+    """
+    Compare multiple topics using web research
+    """
+    try:
+        if len(req.topics) < 2:
+            raise HTTPException(400, "At least 2 topics are required for comparison")
+        
+        result = comparative_research_agent(req.topics, req.model)
+        return result
+    except Exception as e:
+        logger.exception("Comparative research endpoint crashed")
         raise HTTPException(500, str(e))
 
 # ─── Warmup ────────────────────────────────────────────────────────
