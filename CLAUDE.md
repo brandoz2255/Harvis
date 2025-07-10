@@ -103,12 +103,140 @@ CREATE TABLE users (
 - **LLM Integration**: Ollama for local model hosting
 - **Browser Automation**: Selenium WebDriver
 - **Screen Analysis**: Blip AI for visual understanding
+- **Web Search**: LangChain-based web search with DuckDuckGo integration
 
 ### Key AI Features
 - **Vibe Coding**: AI-powered development environment at `python_back_end/ollama_cli/vibe_agent.py`
 - **Real-time Screen Analysis**: Context-aware assistance
 - **Voice-First Interaction**: Natural language commands
 - **Browser Automation**: Web navigation and interaction
+- **Research & Web Search**: Comprehensive web search and research capabilities
+
+### Web Search & Research API Endpoints
+
+#### `/api/web-search` - Basic Web Search
+**POST** - Perform web search using LangChain search agents
+
+**Request Body:**
+```json
+{
+  "query": "search query",
+  "max_results": 5,
+  "extract_content": false
+}
+```
+
+**Response:**
+```json
+{
+  "query": "search query",
+  "search_results": [
+    {
+      "title": "Result Title",
+      "url": "https://example.com",
+      "snippet": "Result snippet",
+      "source": "DuckDuckGo"
+    }
+  ],
+  "extracted_content": []
+}
+```
+
+#### `/api/research-chat` - Enhanced Research Chat
+**POST** - Enhanced research with comprehensive web search and analysis
+
+**Request Body:**
+```json
+{
+  "message": "research question",
+  "history": [],
+  "model": "mistral",
+  "enableWebSearch": true
+}
+```
+
+#### `/api/fact-check` - Fact Checking
+**POST** - Fact-check claims using web search
+
+**Request Body:**
+```json
+{
+  "claim": "claim to verify",
+  "model": "mistral"
+}
+```
+
+#### `/api/comparative-research` - Comparative Analysis
+**POST** - Compare multiple topics using web research
+
+**Request Body:**
+```json
+{
+  "topics": ["topic1", "topic2"],
+  "model": "mistral"
+}
+```
+
+### Web Search Implementation Details
+
+#### Search Agents
+- **Location**: `python_back_end/research/`
+- **Primary**: DuckDuckGo search via LangChain
+- **Fallback**: Tavily API (requires `TAVILY_API_KEY`)
+- **Content Extraction**: newspaper3k for full article content
+
+#### Dependencies
+Required packages in `requirements.txt`:
+```
+langchain
+langchain-community
+duckduckgo-search
+beautifulsoup4
+newspaper3k
+tavily-python
+```
+
+### Troubleshooting Web Search
+
+#### Common Issues with 0 Results
+
+1. **Rate Limiting**: DuckDuckGo may throttle requests
+   - **Solution**: Add delays between requests
+   - **Check**: Look for rate limit errors in logs
+
+2. **Network Issues in Docker**: Container connectivity problems
+   - **Solution**: Verify Docker network configuration
+   - **Check**: Test network connectivity from container
+
+3. **User-Agent Blocking**: Search engines blocking requests
+   - **Solution**: Set proper User-Agent (automatically configured)
+   - **Environment**: `USER_AGENT` is set automatically if missing
+
+4. **API Changes**: DuckDuckGo search library changes
+   - **Warning**: Library suggests using `ddgs` instead of `duckduckgo_search`
+   - **Solution**: Consider updating to newer library version
+
+#### Debugging Steps
+
+1. **Enable Debug Logging**: Set logging level to DEBUG
+2. **Check Raw Results**: Verify DuckDuckGo returns data
+3. **Network Tests**: Test connectivity from container
+4. **Rate Limit Checks**: Monitor for rate limiting messages
+
+#### Log Analysis
+The web search endpoint provides detailed logging:
+- Request parameters and query
+- DuckDuckGo response count
+- Formatted result details
+- Error messages with full stack traces
+
+Example log output:
+```
+INFO:main:Web search request: query='python', max_results=5, extract_content=False
+INFO:research.web_search:Starting DuckDuckGo search for query: 'python' with max_results: 5
+INFO:research.web_search:DuckDuckGo returned 5 raw results
+INFO:main:Search completed: found 5 results
+```
 
 ## Development Workflow
 
