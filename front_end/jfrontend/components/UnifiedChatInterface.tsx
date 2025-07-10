@@ -25,6 +25,8 @@ import { Input } from "@/components/ui/input"
 import { Card } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { useAIOrchestrator } from "./AIOrchestrator"
+import ReactMarkdown from "react-markdown"
+import remarkGfm from "remark-gfm"
 
 interface Message {
   role: "user" | "assistant"
@@ -171,7 +173,12 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
       message: messageContent,
       history: messages,
       model: optimalModel,
-      ...(needsWebSearch && { enableWebSearch: true }),
+      ...(needsWebSearch && { 
+        enableWebSearch: true,
+        exaggeration: 0.5,
+        temperature: 0.8,
+        cfg_weight: 0.5
+      }),
     }
 
     // Retry logic with 3 attempts
@@ -543,7 +550,37 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
                   </div>
                   <span className="text-xs opacity-70">{message.timestamp.toLocaleTimeString()}</span>
                 </div>
-                <p className="text-sm">{message.content}</p>
+                <ReactMarkdown 
+                  className="text-sm prose prose-invert prose-sm max-w-none"
+                  remarkPlugins={[remarkGfm]}
+                  components={{
+                    p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
+                    ul: ({ children }) => <ul className="list-disc ml-4 mb-2">{children}</ul>,
+                    ol: ({ children }) => <ol className="list-decimal ml-4 mb-2">{children}</ol>,
+                    li: ({ children }) => <li className="mb-1">{children}</li>,
+                    strong: ({ children }) => <strong className="font-semibold text-white">{children}</strong>,
+                    em: ({ children }) => <em className="italic">{children}</em>,
+                    h1: ({ children }) => <h1 className="text-lg font-bold mb-2">{children}</h1>,
+                    h2: ({ children }) => <h2 className="text-md font-semibold mb-2">{children}</h2>,
+                    h3: ({ children }) => <h3 className="text-sm font-medium mb-1">{children}</h3>,
+                    blockquote: ({ children }) => (
+                      <blockquote className="border-l-4 border-gray-500 pl-4 italic mb-2">{children}</blockquote>
+                    ),
+                    code: ({ inline, children }) => 
+                      inline ? (
+                        <code className="bg-gray-600 px-1 py-0.5 rounded text-xs">{children}</code>
+                      ) : (
+                        <code className="block bg-gray-600 p-2 rounded text-xs overflow-x-auto">{children}</code>
+                      ),
+                    a: ({ href, children }) => (
+                      <a href={href} className="text-blue-400 hover:text-blue-300 underline" target="_blank" rel="noopener noreferrer">
+                        {children}
+                      </a>
+                    ),
+                  }}
+                >
+                  {message.content}
+                </ReactMarkdown>
 
                 {/* Search Results Display */}
                 {message.searchResults && message.searchResults.length > 0 && (
