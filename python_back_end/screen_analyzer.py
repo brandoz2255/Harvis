@@ -1,6 +1,6 @@
 import base64, io, pytesseract, tempfile, os
 from PIL import Image
-from llm_connector import query_qwen
+from vison_models.llm_connector import query_qwen
 
 pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'  # Update this path as needed
 

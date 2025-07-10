@@ -10,7 +10,7 @@ from passlib.context import CryptContext
 import asyncpg
 from gemini_api import query_gemini, is_gemini_configured
 from typing import List, Optional, Dict, Any
-from vison_models.llm_connector import query_qwen, query_llm
+from vison_models.llm_connector import query_qwen, query_llm, load_qwen_model, unload_qwen_model
 
 from pydantic import BaseModel
 import torch, soundfile as sf
@@ -96,10 +96,11 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     finally:
         await conn.close()
 
-# ─── Local helper --------------------------------------------------------------
-from chatterbox_tts import load_tts_model, generate_speech  # see second file below
-from chatterbox.tts import ChatterboxTTS, punc_norm
-import torch
+# ─── Model Management -----------------------------------------------------------
+from model_manager import (
+    unload_models, unload_all_models, reload_models_if_needed, log_gpu_memory,
+    get_tts_model, get_whisper_model, generate_speech, wait_for_vram
+)
 import logging
 import time
 
@@ -111,101 +112,19 @@ from vibe_agent import VibeAgent
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ─── VRAM Management ────────────────────────────────────────────────────────────
-def get_vram_threshold():
-    if not torch.cuda.is_available():
-        return float('inf')
+# ─── Initialize vibe agent ─────────────────────────────────────────────────────
+# Note: Import VibeAgent after all model_manager imports to avoid circular imports
+try:
+    vibe_agent = VibeAgent(project_dir=os.getcwd())
+    logger.info("✅ VibeAgent initialized successfully")
+except Exception as e:
+    logger.error(f"❌ Failed to initialize VibeAgent: {e}")
+    vibe_agent = None
 
-    total_mem = torch.cuda.get_device_properties(0).total_memory
-    return max(int(total_mem * 0.8), 10 * 1024**3)
-
-THRESHOLD_BYTES = get_vram_threshold()
-logger.info(f"VRAM threshold set to {THRESHOLD_BYTES/1024**3:.1f} GiB")
-
-def wait_for_vram(threshold=THRESHOLD_BYTES, interval=0.5):
-    if not torch.cuda.is_available():
-        return
-    used = torch.cuda.memory_allocated()
-    while used > threshold:
-        logger.info(f"VRAM {used/1024**3:.1f} GiB > {threshold/1024**3:.1f} GiB. Waiting…")
-        time.sleep(interval)
-        used = torch.cuda.memory_allocated()
-    torch.cuda.empty_cache()
-    logger.info("VRAM is now below threshold. Proceeding with TTS.")
-
-# ─── Global Model Variables ─────────────────────────────────────────────────────
-tts_model = None
-vibe_agent = VibeAgent(project_dir=os.getcwd())
-
-
-def load_tts_model(force_cpu=False):
-    global tts_model
-    tts_device = "cuda" if torch.cuda.is_available() and not force_cpu else "cpu"
-
-    if tts_model is None:
-        try:
-            logger.info(f"🔊 Loading TTS model on device: {tts_device}")
-            tts_model = ChatterboxTTS.from_pretrained(device=tts_device)
-        except Exception as e:
-            if "cuda" in str(e).lower():
-                logger.warning(f"⚠️ CUDA load failed: {e}. Falling back to CPU...")
-                try:
-                    tts_model = ChatterboxTTS.from_pretrained(device="cpu")
-                    logger.info("✅ Successfully loaded TTS model on CPU")
-                except Exception as e2:
-                    logger.error(f"❌ Failed to load TTS model on CPU: {e2}")
-                    raise RuntimeError("TTS model loading failed on both CUDA and CPU.") from e2
-            else:
-                logger.error(f"❌ TTS model loading error: {e}")
-                raise
-    return tts_model
-
-# ─── Generate Speech ────────────────────────────────────────────────────────────
-def generate_speech(text, model, audio_prompt=None, exaggeration=0.5, temperature=0.8, cfg_weight=0.5):
-    try:
-        normalized = punc_norm(text)
-        if torch.cuda.is_available():
-            try:
-                wav = model.generate(
-                    normalized,
-                    audio_prompt_path=audio_prompt,
-                    exaggeration=exaggeration,
-                    temperature=temperature,
-                    cfg_weight=cfg_weight
-                )
-            except RuntimeError as e:
-                if "CUDA" in str(e):
-                    logger.error(f"CUDA Error: {e}")
-                    torch.cuda.empty_cache()
-                    try:
-                        wav = model.generate(
-                            normalized,
-                            audio_prompt_path=audio_prompt,
-                            exaggeration=exaggeration,
-                            temperature=temperature,
-                            cfg_weight=cfg_weight
-                        )
-                    except RuntimeError as e2:
-                        logger.error(f"CUDA Retry Failed: {e2}")
-                        raise ValueError("CUDA error persisted after cache clear") from e2
-                else:
-                    raise
-        else:
-            wav = model.generate(
-                normalized,
-                audio_prompt_path=audio_prompt,
-                exaggeration=exaggeration,
-                temperature=temperature,
-                cfg_weight=cfg_weight,
-                device="cpu"
-            )
-        return (model.sr, wav.squeeze(0).numpy())
-    except Exception as e:
-        logger.error(f"TTS Error: {e}")
-        raise
-# hey ─── Logging -------------------------------------------------------------------
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# ─── Additional logging setup ──────────────────────────────────────────────────
+if 'logger' not in locals():
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
 
 # ─── Paths ---------------------------------------------------------------------
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -269,6 +188,35 @@ class AnalyzeAndRespondRequest(BaseModel):
     image: str  # base-64 image (data-URI or raw)
     model: str = DEFAULT_MODEL
     system_prompt: Optional[str] = None
+
+class ScreenAnalysisWithTTSRequest(BaseModel):
+    image: str  # base-64 image (data-URI or raw)
+    model: str = DEFAULT_MODEL
+    system_prompt: Optional[str] = None
+    audio_prompt: Optional[str] = None
+    exaggeration: float = 0.5
+    temperature: float = 0.8
+    cfg_weight: float = 0.5
+
+class VibeCodingRequest(BaseModel):
+    message: str
+    files: List[Dict[str, Any]] = []
+    terminalHistory: List[str] = []
+    model: str = DEFAULT_MODEL
+    audio_prompt: Optional[str] = None
+    exaggeration: float = 0.5
+    temperature: float = 0.8
+    cfg_weight: float = 0.5
+
+class VoiceTranscribeRequest(BaseModel):
+    model: str = DEFAULT_MODEL
+
+class RunCommandRequest(BaseModel):
+    command: str
+
+class SaveFileRequest(BaseModel):
+    filename: str
+    content: str
 
 # ─── Helpers -------------------------------------------------------------------
 BROWSER_PATTERNS = [
@@ -434,7 +382,8 @@ async def chat(req: ChatRequest, request: Request):
         new_history = history + [{"role": "assistant", "content": response_text}]
 
         # ── 5. Text-to-speech -----------------------------------------------------------
-        tts = load_tts_model()  # lazy global singleton
+        reload_models_if_needed()
+        tts = get_tts_model()  # Get TTS model from model_manager
 
         # Handle audio prompt path
         audio_prompt_path = req.audio_prompt or JARVIS_VOICE_PATH
@@ -489,6 +438,10 @@ async def serve_audio(filename: str):
 @app.post("/api/analyze-screen", tags=["vision"])
 async def analyze_screen(req: ScreenAnalysisRequest):
     try:
+        # Unload ALL models to free maximum GPU memory for Qwen2VL
+        logger.info("🖼️ Starting screen analysis - clearing ALL GPU memory")
+        unload_all_models()  # Unload everything for maximum memory
+        
         # Decode base64 image and save to a temporary file
         image_data = base64.b64decode(req.image.split(",")[1])
         temp_image_path = os.path.join(tempfile.gettempdir(), f"{uuid.uuid4()}.png")
@@ -503,23 +456,40 @@ async def analyze_screen(req: ScreenAnalysisRequest):
         if "[Qwen error]" in qwen_caption:
             raise HTTPException(status_code=500, detail=qwen_caption)
 
+        # Unload Qwen2VL immediately after use to free memory
+        logger.info("🔄 Unloading Qwen2VL after screen analysis")
+        unload_qwen_model()
+        
         # Use LLM to get a response based on the caption
         llm_system_prompt = "You are an AI assistant that helps users understand what's on their screen. Provide a concise and helpful response based on the screen content."
         llm_user_prompt = f"Here's what's on the user's screen: {qwen_caption}\nWhat should they do next?"
         llm_response = query_llm(llm_user_prompt, system_prompt=llm_system_prompt)
-
+        
+        # Reload TTS/Whisper models for future use
+        logger.info("🔄 Reloading TTS/Whisper models after screen analysis")
+        reload_models_if_needed()
+        
+        logger.info("✅ Screen analysis complete - all models restored")
         return {"commentary": qwen_caption, "llm_response": llm_response}
 
     except Exception as e:
         logger.error("Screen analysis failed: %s", e)
+        # Ensure models are reloaded even on error
+        logger.info("🔄 Reloading models after error")
+        reload_models_if_needed()
         raise HTTPException(500, str(e)) from e
 
 @app.post("/api/analyze-and-respond", tags=["vision"])
 async def analyze_and_respond(req: AnalyzeAndRespondRequest):
     """
     Analyze screen with Qwen vision model and get LLM response using selected model.
+    Features intelligent model management to optimize GPU memory usage.
     """
     try:
+        # Unload ALL models to free maximum GPU memory for Qwen2VL
+        logger.info("🖼️ Starting enhanced screen analysis - clearing ALL GPU memory")
+        unload_all_models()  # Unload everything for maximum memory
+        
         # Decode base64 image and save to a temporary file
         image_data = base64.b64decode(req.image.split(",")[1])
         temp_image_path = os.path.join(tempfile.gettempdir(), f"{uuid.uuid4()}.png")
@@ -528,22 +498,27 @@ async def analyze_and_respond(req: AnalyzeAndRespondRequest):
 
         # Use Qwen to analyze the image
         qwen_prompt = "Analyze this screen in detail. Describe what you see, including any text, UI elements, applications, and content visible."
+        logger.info("🔍 Analyzing screen with Qwen2VL...")
         qwen_analysis = query_qwen(temp_image_path, qwen_prompt)
         os.remove(temp_image_path)  # Clean up temp file
 
         if "[Qwen error]" in qwen_analysis:
             raise HTTPException(status_code=500, detail=qwen_analysis)
 
+        # Unload Qwen2VL immediately after analysis to free memory for LLM
+        logger.info("🔄 Unloading Qwen2VL after analysis, preparing for LLM")
+        unload_qwen_model()
+        
         # Use the selected LLM model to generate a response based on Qwen's analysis
         # Use custom system prompt if provided, otherwise use default
         system_prompt = req.system_prompt or "You are Jarvis, an AI assistant analyzing what the user is seeing on their screen. Provide helpful insights, suggestions, or commentary about what you observe. Be conversational and helpful."
         
+        logger.info(f"🤖 Generating response with {req.model}")
         if req.model == "gemini-1.5-flash":
             # Use Gemini for response
             llm_response = query_gemini(f"Screen analysis: {qwen_analysis}\n\nPlease provide helpful insights about this screen.", [])
         else:
             # Use Ollama for response
-            
             payload = {
                 "model": req.model,
                 "messages": [
@@ -562,6 +537,11 @@ async def analyze_and_respond(req: AnalyzeAndRespondRequest):
             
             llm_response = resp.json().get("message", {}).get("content", "").strip()
 
+        # Reload TTS/Whisper models for future use
+        logger.info("🔄 Reloading TTS/Whisper models after enhanced screen analysis")
+        reload_models_if_needed()
+
+        logger.info("✅ Enhanced screen analysis complete - all models restored")
         return {
             "response": llm_response,
             "screen_analysis": qwen_analysis,
@@ -570,14 +550,110 @@ async def analyze_and_respond(req: AnalyzeAndRespondRequest):
 
     except Exception as e:
         logger.error("Analyze and respond failed: %s", e)
+        # Ensure models are reloaded even on error
+        logger.info("🔄 Reloading models after error")
+        reload_models_if_needed()
         raise HTTPException(500, str(e)) from e
 
-# Load Whisper (once, at the top)
-whisper_model = whisper.load_model("base")  # or "small", "medium", "large"
+@app.post("/api/analyze-screen-with-tts", tags=["vision"])
+async def analyze_screen_with_tts(req: ScreenAnalysisWithTTSRequest):
+    """
+    Complete screen analysis with Qwen2VL + LLM response + TTS audio output.
+    Implements intelligent model management: Qwen2VL -> LLM -> TTS pipeline.
+    """
+    try:
+        # Phase 1: Unload ALL models for maximum memory for Qwen2VL processing
+        logger.info("🖼️ Phase 1: Starting screen analysis - clearing ALL GPU memory for Qwen2VL")
+        unload_all_models()
+        
+        # Decode base64 image and save to a temporary file
+        image_data = base64.b64decode(req.image.split(",")[1])
+        temp_image_path = os.path.join(tempfile.gettempdir(), f"{uuid.uuid4()}.png")
+        with open(temp_image_path, "wb") as f:
+            f.write(image_data)
+
+        # Use Qwen2VL to analyze the image
+        qwen_prompt = "Analyze this screen comprehensively. Describe what you see, including any text, UI elements, applications, and content. Focus on what the user might need help with."
+        logger.info("🔍 Analyzing screen with Qwen2VL...")
+        qwen_analysis = query_qwen(temp_image_path, qwen_prompt)
+        os.remove(temp_image_path)
+
+        if "[Qwen error]" in qwen_analysis:
+            raise HTTPException(status_code=500, detail=qwen_analysis)
+
+        # Phase 2: Unload Qwen2VL to free memory for LLM processing
+        logger.info("🤖 Phase 2: Unloading Qwen2VL, generating LLM response")
+        unload_qwen_model()
+        
+        # Generate LLM response
+        system_prompt = req.system_prompt or "You are Jarvis, an AI assistant. Based on the screen analysis, provide helpful, conversational insights. Keep responses under 100 words for voice output."
+        
+        if req.model == "gemini-1.5-flash":
+            llm_response = query_gemini(f"Screen analysis: {qwen_analysis}\n\nProvide helpful insights about this screen.", [])
+        else:
+            payload = {
+                "model": req.model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Screen analysis: {qwen_analysis}\n\nProvide helpful insights about this screen."},
+                ],
+                "stream": False,
+            }
+            resp = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=90)
+            resp.raise_for_status()
+            llm_response = resp.json().get("message", {}).get("content", "").strip()
+
+        # Phase 3: Reload TTS for audio generation
+        logger.info("🔊 Phase 3: Reloading TTS for audio generation")
+        reload_models_if_needed()
+        
+        # Generate TTS audio
+        audio_prompt_path = req.audio_prompt or JARVIS_VOICE_PATH
+        if not os.path.isfile(audio_prompt_path):
+            logger.warning(f"Audio prompt {audio_prompt_path} not found, using default voice")
+            audio_prompt_path = None
+
+        sr, wav = generate_speech(
+            text=llm_response,
+            model=get_tts_model(),
+            audio_prompt=audio_prompt_path,
+            exaggeration=req.exaggeration,
+            temperature=req.temperature,
+            cfg_weight=req.cfg_weight,
+        )
+
+        # Save audio file
+        filename = f"screen_analysis_{uuid.uuid4()}.wav"
+        filepath = os.path.join(tempfile.gettempdir(), filename)
+        sf.write(filepath, wav, sr)
+        
+        logger.info("✅ Complete screen analysis with TTS finished")
+        return {
+            "response": llm_response,
+            "screen_analysis": qwen_analysis,
+            "model_used": req.model,
+            "audio_path": f"/api/audio/{filename}",
+            "processing_stages": {
+                "qwen_analysis": "✅ Completed",
+                "llm_response": "✅ Completed", 
+                "tts_generation": "✅ Completed"
+            }
+        }
+
+    except Exception as e:
+        logger.error("Screen analysis with TTS failed: %s", e)
+        # Ensure models are reloaded on error
+        reload_models_if_needed()
+        raise HTTPException(500, str(e)) from e
+
+# Whisper model will be loaded on demand
 
 @app.post("/api/mic-chat", tags=["voice"])
 async def mic_chat(file: UploadFile = File(...)):
     try:
+        # Ensure Whisper model is loaded
+        reload_models_if_needed()
+        
         # Save uploaded file to temp
         contents = await file.read()
         tmp_path = os.path.join(tempfile.gettempdir(), f"{uuid.uuid4()}.wav")
@@ -585,7 +661,7 @@ async def mic_chat(file: UploadFile = File(...)):
             f.write(contents)
 
         # Transcribe it
-        result = whisper_model.transcribe(tmp_path)
+        result = get_whisper_model().transcribe(tmp_path)
         message = result.get("text", "").strip()
         logger.info(f"MIC input transcribed: {message}")
 
@@ -603,7 +679,7 @@ async def mic_chat(file: UploadFile = File(...)):
 # Research endpoints using the new research module with LangChain
 from agent_research import research_agent, fact_check_agent, comparative_research_agent
 from research.web_search import WebSearchAgent
-from research.research_agent import ResearchAgent
+# from research.research_agent import ResearchAgent  # Not used directly
 
 @app.post("/api/research-chat", tags=["research"])
 async def research_chat(req: ResearchChatRequest):
@@ -613,6 +689,10 @@ async def research_chat(req: ResearchChatRequest):
     try:
         if not req.message:
             return {"error": "Message is required"}, 400
+
+        # Unload models to free GPU memory for research processing
+        logger.info("🔍 Starting research - unloading models to free GPU memory")
+        unload_models()
 
         # Call the enhanced research agent
         response_data = research_agent(req.message, req.model)
@@ -630,14 +710,20 @@ async def research_chat(req: ResearchChatRequest):
             
             if sources:
                 response_content += f"**Sources ({sources_found} found):**\n"
+                logger.info(f"Formatting {len(sources)} sources for display")
                 for i, source in enumerate(sources[:5], 1):  # Limit to top 5 sources
-                    response_content += f"{i}. [{source['title']}]({source['url']})\n"
+                    title = source.get('title', 'Unknown Title')
+                    url = source.get('url', 'No URL')
+                    logger.info(f"Source {i}: title='{title}', url='{url}'")
+                    response_content += f"{i}. [{title}]({url})\n"
 
         # Update history with assistant reply
         new_history = req.history + [{"role": "assistant", "content": response_content}]
 
         # ── Generate TTS for research response ──────────────────────────────────────────
-        tts = load_tts_model()  # lazy global singleton
+        logger.info("🔊 Research complete - reloading models for TTS generation")
+        reload_models_if_needed()
+        tts = get_tts_model()  # Get TTS model from model_manager
 
         # Handle audio prompt path
         audio_prompt_path = req.audio_prompt or JARVIS_VOICE_PATH
@@ -764,12 +850,8 @@ async def web_search(req: WebSearchRequest):
         raise HTTPException(500, f"Search failed: {str(e)}")
 
 # ─── Warmup ────────────────────────────────────────────────────────
-try:
-    logger.info("Preloading TTS and Whisper…")
-    _ = load_tts_model()
-    _ = whisper.load_model("base")
-except Exception as e:
-    logger.error("Preload failed: %s", e)
+# Models will be loaded on demand to manage GPU memory efficiently
+logger.info("Models will be loaded on demand for optimal memory management")
 
 # ─── Dev entry-point -----------------------------------------------------------
 @app.get("/api/ollama-models", tags=["models"])
@@ -832,7 +914,8 @@ async def synthesize_speech(req: SynthesizeSpeechRequest):
     This endpoint is called by worker nodes.
     """
     try:
-        tts = load_tts_model()
+        reload_models_if_needed()
+        tts = get_tts_model()
 
         audio_prompt_path = req.audio_prompt or JARVIS_VOICE_PATH
         if not os.path.isfile(audio_prompt_path):
@@ -861,4 +944,297 @@ async def synthesize_speech(req: SynthesizeSpeechRequest):
     except Exception as e:
         logger.exception("TTS synthesis endpoint crashed")
         raise HTTPException(500, str(e)) from e
+
+# ─── Vibe Coding Endpoints ─────────────────────────────────────────────────────
+
+@app.post("/api/vibe-coding", tags=["vibe-coding"])
+async def vibe_coding(req: VibeCodingRequest):
+    """
+    Voice-enabled vibe coding with intelligent model management.
+    Unloads models → Executes vibe agent → Generates TTS response → Reloads models.
+    """
+    try:
+        # Phase 1: Unload models to free GPU memory for vibe agent processing
+        logger.info("🤖 Phase 1: Starting vibe coding - clearing GPU memory for vibe agent")
+        unload_all_models()
+        
+        # Phase 2: Execute vibe agent processing
+        logger.info("⚡ Phase 2: Executing vibe agent with Mistral")
+        
+        # Use the existing vibe agent for processing
+        vibe_response, steps = await process_vibe_command_with_context(req.message, req.files, req.terminalHistory, req.model)
+        
+        # Phase 4: Unload vibe processing, reload models for TTS
+        logger.info("🔊 Phase 3: Reloading models for TTS generation")
+        reload_models_if_needed()
+        
+        # Generate TTS response
+        audio_prompt_path = req.audio_prompt or JARVIS_VOICE_PATH
+        if not os.path.isfile(audio_prompt_path):
+            audio_prompt_path = None
+
+        # Create speech-friendly version of response
+        tts_text = vibe_response
+        if len(tts_text) > 200:
+            tts_text = tts_text[:200] + "... I'm ready to help you code this!"
+
+        sr, wav = generate_speech(
+            text=tts_text,
+            model=get_tts_model(),
+            audio_prompt=audio_prompt_path,
+            exaggeration=req.exaggeration,
+            temperature=req.temperature,
+            cfg_weight=req.cfg_weight,
+        )
+
+        # Save audio file
+        filename = f"vibe_coding_{uuid.uuid4()}.wav"
+        filepath = os.path.join(tempfile.gettempdir(), filename)
+        sf.write(filepath, wav, sr)
+        
+        logger.info("✅ Vibe coding complete - all models restored")
+        return {
+            "response": vibe_response,
+            "steps": steps,
+            "audio_path": f"/api/audio/{filename}",
+            "model_used": req.model,
+            "processing_stages": {
+                "vibe_agent": "✅ Completed",
+                "tts_generation": "✅ Completed"
+            }
+        }
+
+    except Exception as e:
+        logger.error("Vibe coding failed: %s", e)
+        # Ensure models are reloaded even on error
+        logger.info("🔄 Reloading models after vibe coding error")
+        reload_models_if_needed()
+        raise HTTPException(500, str(e)) from e
+
+@app.post("/api/voice-transcribe", tags=["vibe-coding"])
+async def voice_transcribe(file: UploadFile = File(...), model: str = DEFAULT_MODEL):
+    """
+    Transcribe voice input for vibe coding with model management.
+    """
+    try:
+        # Ensure Whisper model is loaded
+        reload_models_if_needed()
+        
+        # Save uploaded file to temp
+        contents = await file.read()
+        tmp_path = os.path.join(tempfile.gettempdir(), f"vibe_{uuid.uuid4()}.wav")
+        with open(tmp_path, "wb") as f:
+            f.write(contents)
+
+        # Transcribe with Whisper
+        result = get_whisper_model().transcribe(tmp_path)
+        transcription = result.get("text", "").strip()
+        
+        # Clean up temp file
+        os.remove(tmp_path)
+        
+        logger.info(f"🎤 Voice transcribed for vibe coding: {transcription}")
+        return {"transcription": transcription, "model_used": "whisper-base"}
+
+    except Exception as e:
+        logger.error("Voice transcription failed: %s", e)
+        raise HTTPException(500, str(e)) from e
+
+@app.post("/api/run-command", tags=["vibe-coding"])
+async def run_command(req: RunCommandRequest):
+    """
+    Execute terminal commands for vibe coding.
+    """
+    try:
+        logger.info(f"🔧 Executing command: {req.command}")
+        
+        # Security: Basic command filtering
+        dangerous_commands = ["rm -rf", "sudo", "format", "del", "shutdown"]
+        if any(dangerous in req.command.lower() for dangerous in dangerous_commands):
+            return {"output": "❌ Command rejected for security reasons", "error": True}
+        
+        # Import and use existing command execution
+        from os_ops import execute_command
+        result = execute_command(req.command)
+        
+        return {"output": result, "error": False}
+        
+    except Exception as e:
+        logger.error(f"Command execution failed: {e}")
+        return {"output": f"❌ Error: {str(e)}", "error": True}
+
+@app.post("/api/save-file", tags=["vibe-coding"])
+async def save_file(req: SaveFileRequest):
+    """
+    Save file content for vibe coding.
+    """
+    try:
+        logger.info(f"💾 Saving file: {req.filename}")
+        
+        # Security: Basic path validation
+        if ".." in req.filename or req.filename.startswith("/"):
+            return {"success": False, "error": "Invalid filename"}
+        
+        # Save to project directory
+        filepath = os.path.join(os.getcwd(), req.filename)
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(req.content)
+        
+        return {"success": True, "message": f"File {req.filename} saved successfully"}
+        
+    except Exception as e:
+        logger.error(f"File save failed: {e}")
+        return {"success": False, "error": str(e)}
+
+# ─── Vibe Agent Helper Functions ─────────────────────────────────────────────
+
+async def process_vibe_command_with_context(message: str, files: List[Dict], terminal_history: List[str], model: str) -> tuple[str, List[Dict]]:
+    """
+    Process vibe coding command with full context using the vibe agent logic
+    """
+    # Create context from files and terminal history
+    context = ""
+    if files:
+        context += "CURRENT FILES:\n"
+        for file in files:
+            context += f"=== {file.get('name', 'unknown')} ===\n{file.get('content', '')}\n\n"
+    
+    if terminal_history:
+        context += "TERMINAL HISTORY:\n"
+        context += "\n".join(terminal_history[-5:])  # Last 5 lines
+        context += "\n\n"
+    
+    # Generate vibe agent response using Ollama
+    system_prompt = """You are a Vibe Coding AI assistant. You help users build projects through natural conversation and voice commands.
+
+GUIDELINES:
+- Generate practical, executable coding steps
+- Be conversational and encouraging  
+- Focus on what the user wants to build
+- Provide clear, actionable steps
+- Keep responses under 100 words for voice output
+
+RESPONSE FORMAT:
+Provide your response as conversational text, followed by specific coding steps if needed."""
+
+    user_prompt = f"""
+User request: {message}
+
+Context:
+{context}
+
+Please provide a helpful, conversational response about how to implement this request. If specific code changes are needed, describe them clearly.
+"""
+
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "stream": False,
+    }
+
+    logger.info(f"→ Asking Ollama with model {model} for vibe coding")
+    resp = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=120)
+    resp.raise_for_status()
+    
+    vibe_response = resp.json().get("message", {}).get("content", "").strip()
+    
+    # Generate coding steps based on the message
+    steps = generate_vibe_steps(message, vibe_response)
+    
+    return vibe_response, steps
+
+def generate_vibe_steps(message: str, response: str) -> List[Dict]:
+    """
+    Generate coding steps based on the user message and AI response
+    """
+    steps = []
+    message_lower = message.lower()
+    
+    # File creation
+    if "create" in message_lower and "file" in message_lower:
+        filename = "new_file.py"  # Default
+        # Try to extract filename from message
+        words = message.split()
+        for i, word in enumerate(words):
+            if word.lower() in ["file", "create"] and i + 1 < len(words):
+                potential_filename = words[i + 1]
+                if "." in potential_filename:
+                    filename = potential_filename
+                break
+        
+        steps.append({
+            "id": "1",
+            "description": f"Creating file: {filename}",
+            "action": "create_file",
+            "target": filename,
+            "content": f"# Generated by Vibe Coding AI\n# {message}\n\nprint('Hello from {filename}!')",
+            "completed": False
+        })
+    
+    # Web app/API creation
+    elif "api" in message_lower or "web" in message_lower or "flask" in message_lower or "fastapi" in message_lower:
+        steps.extend([
+            {
+                "id": "1",
+                "description": "Creating main API file",
+                "action": "create_file", 
+                "target": "app.py",
+                "content": "# FastAPI/Flask Web Application\nfrom fastapi import FastAPI\n\napp = FastAPI()\n\n@app.get('/')\ndef hello():\n    return {'message': 'Hello from Vibe Coding!'}",
+                "completed": False
+            },
+            {
+                "id": "2", 
+                "description": "Installing dependencies",
+                "action": "install_package",
+                "target": "fastapi uvicorn",
+                "command": "pip install fastapi uvicorn",
+                "completed": False
+            }
+        ])
+    
+    # Data analysis/ML
+    elif "data" in message_lower or "pandas" in message_lower or "analysis" in message_lower:
+        steps.append({
+            "id": "1",
+            "description": "Creating data analysis script",
+            "action": "create_file",
+            "target": "analysis.py",
+            "content": "# Data Analysis Script\nimport pandas as pd\nimport numpy as np\n\n# Load your data here\ndf = pd.DataFrame({'example': [1, 2, 3]})\nprint(df.head())",
+            "completed": False
+        })
+    
+    # Package installation
+    elif "install" in message_lower:
+        # Extract package names
+        packages = []
+        common_packages = ["numpy", "pandas", "requests", "flask", "fastapi", "django", "matplotlib", "seaborn"]
+        for pkg in common_packages:
+            if pkg in message_lower:
+                packages.append(pkg)
+        
+        if packages:
+            steps.append({
+                "id": "1",
+                "description": f"Installing packages: {', '.join(packages)}",
+                "action": "install_package",
+                "target": " ".join(packages),
+                "command": f"pip install {' '.join(packages)}",
+                "completed": False
+            })
+    
+    # Default: create a simple script
+    if not steps:
+        steps.append({
+            "id": "1", 
+            "description": "Creating script based on your request",
+            "action": "create_file",
+            "target": "vibe_script.py",
+            "content": f"# Script for: {message}\n# Generated by Vibe Coding AI\n\nprint('Starting your vibe coding project!')\n# Add your code here",
+            "completed": False
+        })
+    
+    return steps
 
