@@ -2,7 +2,7 @@
 
 import type React from "react"
 
-import { useState, useRef, useEffect } from "react"
+import { useState, useRef, useEffect, useCallback } from "react"
 import { motion, AnimatePresence } from "framer-motion"
 import {
   ArrowLeft,
@@ -152,6 +152,34 @@ export default function VibeCodingPage() {
     }
   }
 
+  const sendVibeCommand = async (command?: string, inputType: "text" | "voice" = "text") => {
+    const message = command || chatInput
+    if (!message.trim() || isLoading) return
+
+    const userMessage: ChatMessage = {
+      role: "user",
+      content: message,
+      timestamp: new Date(),
+      type: inputType,
+    }
+
+    setChatMessages((prev) => [...prev, userMessage])
+    if (inputType === "text") setChatInput("")
+    setIsLoading(true)
+
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          message,
+          files: files.map((f) => ({ name: f.name, content: f.content })),
+        })
+      )
+    } else {
+      addTerminalOutput("❌ WebSocket not connected. Cannot send command.")
+      setIsLoading(false)
+    }
+  }
+
   const processVoiceCommand = async (audioBlob: Blob) => {
     try {
       const formData = new FormData()
@@ -198,80 +226,72 @@ export default function VibeCodingPage() {
     }
   }
 
-  // Main vibe coding function
-  const sendVibeCommand = async (command?: string, inputType: "text" | "voice" = "text") => {
-    const message = command || chatInput
-    if (!message.trim() || isLoading) return
+  const addTerminalOutput = useCallback((output: string) => {
+    setTerminalOutput((prev) => [...prev, output])
+  }, [])
 
-    const userMessage: ChatMessage = {
-      role: "user",
-      content: message,
-      timestamp: new Date(),
-      type: inputType,
+  const getLanguageFromFilename = useCallback((filename: string): string => {
+    const ext = filename.split(".").pop()?.toLowerCase()
+    const langMap: { [key: string]: string } = {
+      py: "python",
+      js: "javascript",
+      ts: "typescript",
+      jsx: "javascript",
+      tsx: "typescript",
+      html: "html",
+      css: "css",
+      json: "json",
+      md: "markdown",
+      yml: "yaml",
+      yaml: "yaml",
+      sh: "bash",
+      sql: "sql",
+    }
+    return langMap[ext || ""] || "text"
+  }, [])
+
+  const createFile = useCallback((name: string, content: string, language: string) => {
+    const newFile: CodeFile = {
+      id: Date.now().toString(),
+      name,
+      content,
+      language,
+      isActive: false,
+      isModified: false,
     }
 
-    setChatMessages((prev) => [...prev, userMessage])
-    if (inputType === "text") setChatInput("")
-    setIsLoading(true)
+    setFiles((prev) => [...prev, newFile])
+    setActiveFileId(newFile.id)
+  }, [])
+
+  const modifyFile = useCallback((name: string, content: string) => {
+    setFiles((prev) => prev.map((file) => (file.name === name ? { ...file, content, isModified: true } : file)))
+  }, [])
+
+  const runCommand = useCallback(async (command: string) => {
+    addTerminalOutput(`$ ${command}`)
 
     try {
-      const response = await fetch("/api/vibe-coding", {
+      const response = await fetch("/api/run-command", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          message,
-          files: files.map((f) => ({ name: f.name, content: f.content, language: f.language })),
-          terminalHistory: terminalOutput.slice(-10), // Last 10 terminal outputs
-          model: "mistral",
-        }),
+        body: JSON.stringify({ command }),
       })
 
       if (response.ok) {
         const data = await response.json()
-
-        // Add AI response to chat
-        const aiMessage: ChatMessage = {
-          role: "assistant",
-          content: data.response || "I'll help you with that!",
-          timestamp: new Date(),
-          type: "code",
-        }
-        setChatMessages((prev) => [...prev, aiMessage])
-
-        // Execute the coding steps
-        if (data.steps && data.steps.length > 0) {
-          setCurrentSteps(data.steps)
-          setIsVibeCoding(true)
-          executeSteps(data.steps)
-        }
-
-        // Play voice response if available
-        if (data.audio_path) {
-          setAudioUrl(data.audio_path)
-          setTimeout(() => {
-            if (audioRef.current) {
-              audioRef.current.play().catch(console.warn)
-            }
-          }, 1000)
-        }
+        addTerminalOutput(data.output || "Command executed successfully")
+      } else {
+        addTerminalOutput("❌ Command failed")
       }
     } catch (error) {
-      console.error("Vibe coding error:", error)
-      const errorMessage: ChatMessage = {
-        role: "assistant",
-        content: "Sorry, I encountered an error while processing your request.",
-        timestamp: new Date(),
-        type: "text",
-      }
-      setChatMessages((prev) => [...prev, errorMessage])
-    } finally {
-      setIsLoading(false)
+      addTerminalOutput("❌ Error executing command")
     }
-  }
+  }, [addTerminalOutput])
 
-  const executeSteps = async (steps: CodeStep[]) => {
+  const executeSteps = useCallback(async (steps: CodeStep[]) => {
     for (const step of steps) {
       setExecutingStep(step.id)
       await new Promise((resolve) => setTimeout(resolve, 1000)) // Simulate execution time
@@ -307,72 +327,81 @@ export default function VibeCodingPage() {
     setExecutingStep(null)
     setIsVibeCoding(false)
     addTerminalOutput("🎉 Vibe coding session completed!")
-  }
+  }, [addTerminalOutput, createFile, getLanguageFromFilename, modifyFile, runCommand])
 
-  const createFile = (name: string, content: string, language: string) => {
-    const newFile: CodeFile = {
-      id: Date.now().toString(),
-      name,
-      content,
-      language,
-      isActive: false,
-      isModified: false,
+  const handleProjectGenerated = useCallback((data: any) => {
+    const { summary, steps, files_created } = data
+
+    const aiMessage: ChatMessage = {
+      role: "assistant",
+      content: summary || "I've created the project for you!",
+      timestamp: new Date(),
+      type: "code",
     }
+    setChatMessages((prev) => [...prev, aiMessage])
 
-    setFiles((prev) => [...prev, newFile])
-    setActiveFileId(newFile.id)
-  }
-
-  const modifyFile = (name: string, content: string) => {
-    setFiles((prev) => prev.map((file) => (file.name === name ? { ...file, content, isModified: true } : file)))
-  }
-
-  const runCommand = async (command: string) => {
-    addTerminalOutput(`$ ${command}`)
-
-    try {
-      const response = await fetch("/api/run-command", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ command }),
+    if (files_created && files_created.length > 0) {
+      // This assumes the backend provides file content. If not, we need to read it.
+      // For now, let's assume we get content back, or we create empty files.
+      files_created.forEach((file: any) => {
+        createFile(file.path, file.content || "", getLanguageFromFilename(file.path))
       })
+    }
 
-      if (response.ok) {
-        const data = await response.json()
-        addTerminalOutput(data.output || "Command executed successfully")
-      } else {
-        addTerminalOutput("❌ Command failed")
+    if (steps && steps.length > 0) {
+      setCurrentSteps(steps)
+      setIsVibeCoding(true)
+      executeSteps(steps)
+    }
+
+    setIsLoading(false)
+  }, [createFile, executeSteps, getLanguageFromFilename])
+
+  const wsRef = useRef<WebSocket | null>(null)
+
+  useEffect(() => {
+    const connectWebSocket = () => {
+      const ws = new WebSocket(`ws://${window.location.host}/api/ws/vibe-chat`)
+
+      ws.onopen = () => {
+        addTerminalOutput("🔌 WebSocket connected")
       }
-    } catch (error) {
-      addTerminalOutput("❌ Error executing command")
-    }
-  }
 
-  const addTerminalOutput = (output: string) => {
-    setTerminalOutput((prev) => [...prev, output])
-  }
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data)
+        switch (data.type) {
+          case "status":
+            addTerminalOutput(`[AI] ${data.content}`)
+            break
+          case "vibe_project_generated":
+            handleProjectGenerated(data)
+            break
+          case "error":
+            addTerminalOutput(`[ERROR] ${data.content}`)
+            break
+        }
+      }
 
-  const getLanguageFromFilename = (filename: string): string => {
-    const ext = filename.split(".").pop()?.toLowerCase()
-    const langMap: { [key: string]: string } = {
-      py: "python",
-      js: "javascript",
-      ts: "typescript",
-      jsx: "javascript",
-      tsx: "typescript",
-      html: "html",
-      css: "css",
-      json: "json",
-      md: "markdown",
-      yml: "yaml",
-      yaml: "yaml",
-      sh: "bash",
-      sql: "sql",
+      ws.onclose = () => {
+        addTerminalOutput("🔌 WebSocket disconnected. Reconnecting...")
+        setTimeout(connectWebSocket, 3000)
+      }
+
+      ws.onerror = (error) => {
+        console.error("WebSocket error:", error)
+        addTerminalOutput("🔌 WebSocket error. See console for details.")
+        ws.close()
+      }
+
+      wsRef.current = ws
     }
-    return langMap[ext || ""] || "text"
-  }
+
+    connectWebSocket()
+
+    return () => {
+      wsRef.current?.close()
+    }
+  }, [addTerminalOutput, handleProjectGenerated])
 
   const activeFile = files.find((f) => f.id === activeFileId)
 

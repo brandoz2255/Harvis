@@ -5,8 +5,10 @@ import subprocess
 import logging
 import requests
 import json
-from typing import List, Dict, Any, Optional
+import re
+from typing import List, Dict, Any, Optional, Tuple
 from starlette.websockets import WebSocket
+from datetime import datetime
 
 #TODO: Add RAG for vibe coding documents such as next.js documentation and frameworks documentations
 
@@ -40,6 +42,11 @@ class VibeAgent:
         self.tts_model = None
         self.stt_model = None
         self.file_tree = ""
+        
+        # Enhanced vibe coding properties
+        self.vibe_workspace = os.path.join(project_dir, "vibe")
+        self.context_file = os.path.join(self.vibe_workspace, "Ollama.md")
+        self.ensure_vibe_workspace()
         self.update_file_tree()
 
     def update_file_tree(self):
@@ -260,4 +267,280 @@ class VibeAgent:
             logger.error(f"Error receiving confirmation from WebSocket: {e}")
             await websocket.send_json({"type": "error", "content": f"Error awaiting confirmation: {e}"})
             return False
+
+    # ─── Enhanced Vibe Coding Methods (LLM-Generated) ──────────────────────────
+
+    def ensure_vibe_workspace(self):
+        """Ensure the vibe workspace directory exists"""
+        if not os.path.exists(self.vibe_workspace):
+            os.makedirs(self.vibe_workspace, exist_ok=True)
+            logger.info(f"Created vibe workspace: {self.vibe_workspace}")
+
+    def get_vibe_file_tree(self) -> Dict[str, Any]:
+        """Get the file tree for the vibe workspace"""
+        try:
+            def build_tree(path: str, relative_path: str = "") -> Dict[str, Any]:
+                items = []
+                try:
+                    for item in sorted(os.listdir(path)):
+                        item_path = os.path.join(path, item)
+                        item_relative = os.path.join(relative_path, item) if relative_path else item
+                        
+                        if os.path.isdir(item_path):
+                            items.append({
+                                "name": item,
+                                "type": "directory", 
+                                "path": item_relative,
+                                "children": build_tree(item_path, item_relative)["items"]
+                            })
+                        else:
+                            items.append({
+                                "name": item,
+                                "type": "file",
+                                "path": item_relative,
+                                "size": os.path.getsize(item_path)
+                            })
+                except PermissionError:
+                    pass
+                
+                return {"items": items}
+            
+            return build_tree(self.vibe_workspace)
+        except Exception as e:
+            logger.error(f"Error building vibe file tree: {e}")
+            return {"items": []}
+
+    def write_vibe_file(self, file_path: str, content: str) -> bool:
+        """Write/update a file in the vibe workspace"""
+        try:
+            if '..' in file_path:
+                return False
+            
+            full_path = os.path.join(self.vibe_workspace, file_path)
+            
+            # Create directory if it doesn't exist
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            
+            with open(full_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            
+            logger.info(f"Created/updated vibe file: {file_path}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error writing vibe file {file_path}: {e}")
+            return False
+
+    def update_context_notes(self, message: str, response: str, files_created: List[str] = None):
+        """Update the Ollama.md context file with session information"""
+        try:
+            # Read existing content
+            existing_content = ""
+            if os.path.exists(self.context_file):
+                with open(self.context_file, 'r', encoding='utf-8') as f:
+                    existing_content = f.read()
+            else:
+                existing_content = "# Ollama Context Notes\n\nVibe Coding Session History\n\n"
+            
+            # Create new entry
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            new_entry = f"""## Session {timestamp}
+
+**User Request:** {message}
+
+**AI Response:** {response}
+
+"""
+            
+            if files_created:
+                new_entry += "**Files Created:**\n"
+                for file_path in files_created:
+                    new_entry += f"- {file_path}\n"
+                new_entry += "\n"
+            
+            new_entry += "---\n\n"
+            
+            # Append to existing content
+            updated_content = existing_content + new_entry
+            
+            # Write back to file
+            with open(self.context_file, 'w', encoding='utf-8') as f:
+                f.write(updated_content)
+                
+            logger.info(f"Updated context notes with session: {message[:50]}...")
+            
+        except Exception as e:
+            logger.error(f"Error updating context notes: {e}")
+
+    async def enhanced_vibe_coding(self, message: str, existing_files: List[Dict] = None) -> Tuple[str, List[Dict], List[str]]:
+        """
+        Enhanced vibe coding that lets the LLM generate everything based on user preferences
+        """
+        try:
+            # Read context notes for continuity
+            context = self.read_context_notes()
+            
+            # Build file context
+            file_context = ""
+            if existing_files:
+                file_context = "CURRENT FILES:\n"
+                for file in existing_files:
+                    file_context += f"=== {file.get('name', 'unknown')} ===\n{file.get('content', '')}\n\n"
+            
+            # Get LLM to plan the entire project structure and content
+            project_plan = await self.get_llm_project_plan(message, context, file_context)
+            
+            # Execute the plan (create files)
+            files_created = []
+            steps = []
+            
+            if project_plan and "files" in project_plan:
+                for i, file_info in enumerate(project_plan["files"]):
+                    file_path = file_info.get("path", f"file_{i+1}.py")
+                    file_content = file_info.get("content", "")
+                    
+                    if self.write_vibe_file(file_path, file_content):
+                        files_created.append(file_path)
+                        steps.append({
+                            "id": str(i+1),
+                            "description": f"Created {file_path}",
+                            "action": "create_file",
+                            "target": file_path,
+                            "completed": True
+                        })
+            
+            # Generate summary response
+            summary = project_plan.get("summary", f"Created {len(files_created)} files for your project!")
+            
+            # Update context notes
+            self.update_context_notes(message, summary, files_created)
+            
+            return summary, steps, files_created
+            
+        except Exception as e:
+            logger.error(f"Error in enhanced vibe coding: {e}")
+            return f"Error creating project: {str(e)}", [], []
+
+    async def get_llm_project_plan(self, message: str, context: str, file_context: str) -> Dict:
+        """
+        Ask LLM to plan and generate the entire project structure and content
+        """
+        try:
+            system_prompt = """You are an expert programmer and project architect. Your job is to create complete, functional project structures based on user requests.
+
+INSTRUCTIONS:
+1. Analyze the user's request carefully
+2. Plan a complete project structure with all necessary files
+3. Generate actual, functional code for each file (no placeholders or comments like "# Add your code here")
+4. Create a project that works out of the box
+5. Include proper imports, error handling, and best practices
+6. Make the code production-ready and well-structured
+
+RESPONSE FORMAT (JSON):
+{
+  "summary": "Brief description of what you created",
+  "files": [
+    {
+      "path": "relative/path/to/file.py",
+      "content": "Complete file content here (no placeholders)"
+    }
+  ]
+}
+
+REQUIREMENTS:
+- Generate COMPLETE, FUNCTIONAL code
+- No TODO comments or placeholders
+- Include all necessary dependencies
+- Make it a working project the user can run immediately
+- Follow best practices for the chosen technology stack"""
+
+            user_prompt = f"""
+User Request: {message}
+
+Previous Context:
+{context}
+
+Existing Files:
+{file_context}
+
+Please create a complete, functional project based on this request. Generate all necessary files with complete, working code.
+"""
+
+            payload = {
+                "model": "mistral",
+                "prompt": f"System: {system_prompt}\n\nUser: {user_prompt}\n\nAssistant: I'll create a complete project for you. Here's the JSON response:",
+                "stream": False,
+                "options": {
+                    "temperature": 0.7,
+                    "top_p": 0.9
+                }
+            }
+
+            response = requests.post(OLLAMA_URL, json=payload, timeout=120)
+            response.raise_for_status()
+            
+            llm_response = response.json().get("response", "").strip()
+            
+            # Try to parse JSON response
+            try:
+                # Extract JSON from response (in case LLM adds extra text)
+                json_start = llm_response.find('{')
+                json_end = llm_response.rfind('}') + 1
+                
+                if json_start >= 0 and json_end > json_start:
+                    json_str = llm_response[json_start:json_end]
+                    project_plan = json.loads(json_str)
+                    return project_plan
+                else:
+                    logger.error("No valid JSON found in LLM response")
+                    return self.fallback_project_plan(message, llm_response)
+                    
+            except json.JSONDecodeError as e:
+                logger.error(f"JSON decode error: {e}")
+                return self.fallback_project_plan(message, llm_response)
+            
+        except Exception as e:
+            logger.error(f"Error getting LLM project plan: {e}")
+            return self.fallback_project_plan(message, str(e))
+
+    def fallback_project_plan(self, message: str, llm_response: str) -> Dict:
+        """Create a simple fallback plan when JSON parsing fails"""
+        return {
+            "summary": f"Created a simple project based on: {message}",
+            "files": [
+                {
+                    "path": "main.py",
+                    "content": f'''#!/usr/bin/env python3
+"""
+Project: {message}
+Generated by Vibe Coding
+
+LLM Response:
+{llm_response}
+"""
+
+def main():
+    print("🚀 Vibe Coding Project Started!")
+    print(f"Goal: {message}")
+    
+    # Implementation goes here
+    print("✨ Project ready for development!")
+
+if __name__ == "__main__":
+    main()
+'''
+                }
+            ]
+        }
+
+    def read_context_notes(self) -> str:
+        """Read existing context notes for continuity"""
+        try:
+            if os.path.exists(self.context_file):
+                with open(self.context_file, 'r', encoding='utf-8') as f:
+                    return f.read()
+            return ""
+        except Exception as e:
+            logger.error(f"Error reading context notes: {e}")
+            return ""
 

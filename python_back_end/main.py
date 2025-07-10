@@ -903,6 +903,48 @@ async def websocket_vibe_endpoint(websocket: WebSocket):
         logger.error(f"WebSocket error: {e}")
         await websocket.send_json({"type": "error", "content": f"WebSocket error: {e}"})
 
+@app.websocket("/api/ws/vibe-chat")
+async def websocket_vibe_chat(websocket: WebSocket):
+    """
+    WebSocket endpoint for enhanced, LLM-driven vibe coding.
+    Handles the entire project generation flow.
+    """
+    await websocket.accept()
+    try:
+        while True:
+            data = await websocket.receive_json()
+            message = data.get("message")
+            existing_files = data.get("files", [])
+
+            if not message:
+                await websocket.send_json({"type": "error", "content": "No message received"})
+                continue
+
+            if vibe_agent:
+                await websocket.send_json({"type": "status", "content": "🚀 Starting enhanced vibe coding..."})
+                
+                summary, steps, files_created = await vibe_agent.enhanced_vibe_coding(message, existing_files)
+                
+                await websocket.send_json({
+                    "type": "vibe_project_generated",
+                    "summary": summary,
+                    "steps": steps,
+                    "files_created": files_created
+                })
+                
+                await websocket.send_json({"type": "status", "content": "✅ Project generation complete."})
+            else:
+                await websocket.send_json({"type": "error", "content": "VibeAgent not initialized"})
+
+    except WebSocketDisconnect:
+        logger.info("Vibe chat WebSocket disconnected")
+    except Exception as e:
+        logger.error(f"Vibe chat WebSocket error: {e}")
+        try:
+            await websocket.send_json({"type": "error", "content": f"An unexpected error occurred: {e}"})
+        except Exception:
+            pass  # Websocket might already be closed
+
 if __name__ == "__main__":
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
 # huh2.0
@@ -1084,6 +1126,185 @@ async def save_file(req: SaveFileRequest):
         
     except Exception as e:
         logger.error(f"File save failed: {e}")
+        return {"success": False, "error": str(e)}
+
+# ─── Enhanced File System Endpoints ──────────────────────────────────────────
+
+@app.post("/api/vibe/create-directory", tags=["vibe-coding"])
+async def create_directory(request: dict):
+    """Create a new directory in the vibe workspace"""
+    try:
+        dir_path = request.get('path', '')
+        if not dir_path or '..' in dir_path:
+            return {"success": False, "error": "Invalid directory path"}
+        
+        # Use the separate vibe directory
+        vibe_workspace = os.path.join(PROJECT_ROOT, "vibe")
+        full_path = os.path.join(vibe_workspace, dir_path)
+        os.makedirs(full_path, exist_ok=True)
+        
+        return {"success": True, "message": f"Directory {dir_path} created"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@app.get("/api/vibe/file-tree", tags=["vibe-coding"])
+async def get_file_tree():
+    """Get the complete file tree for the vibe workspace"""
+    try:
+        vibe_workspace = os.path.join(PROJECT_ROOT, "vibe")
+        if not os.path.exists(vibe_workspace):
+            os.makedirs(vibe_workspace)
+        
+        def build_tree(path: str, relative_path: str = "") -> dict:
+            items = []
+            try:
+                for item in sorted(os.listdir(path)):
+                    item_path = os.path.join(path, item)
+                    item_relative = os.path.join(relative_path, item) if relative_path else item
+                    
+                    if os.path.isdir(item_path):
+                        items.append({
+                            "name": item,
+                            "type": "directory",
+                            "path": item_relative,
+                            "children": build_tree(item_path, item_relative)["items"]
+                        })
+                    else:
+                        items.append({
+                            "name": item,
+                            "type": "file",
+                            "path": item_relative,
+                            "size": os.path.getsize(item_path)
+                        })
+            except PermissionError:
+                pass
+            
+            return {"items": items}
+        
+        tree = build_tree(vibe_workspace)
+        return {"success": True, "tree": tree}
+        
+    except Exception as e:
+        logger.error(f"Error getting file tree: {e}")
+        return {"success": False, "error": str(e)}
+
+@app.post("/api/vibe/read-file", tags=["vibe-coding"])
+async def read_vibe_file(request: dict):
+    """Read a file from the vibe workspace"""
+    try:
+        file_path = request.get('path', '')
+        if not file_path or '..' in file_path:
+            return {"success": False, "error": "Invalid file path"}
+        
+        vibe_workspace = os.path.join(PROJECT_ROOT, "vibe")
+        full_path = os.path.join(vibe_workspace, file_path)
+        
+        if not os.path.exists(full_path):
+            return {"success": False, "error": "File not found"}
+        
+        with open(full_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        return {
+            "success": True, 
+            "content": content,
+            "path": file_path,
+            "size": os.path.getsize(full_path)
+        }
+        
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@app.post("/api/vibe/write-file", tags=["vibe-coding"])
+async def write_vibe_file(request: dict):
+    """Write/update a file in the vibe workspace"""
+    try:
+        file_path = request.get('path', '')
+        content = request.get('content', '')
+        
+        if not file_path or '..' in file_path:
+            return {"success": False, "error": "Invalid file path"}
+        
+        vibe_workspace = os.path.join(PROJECT_ROOT, "vibe")
+        full_path = os.path.join(vibe_workspace, file_path)
+        
+        # Create directory if it doesn't exist
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+        
+        with open(full_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+        
+        return {
+            "success": True, 
+            "message": f"File {file_path} saved",
+            "size": len(content.encode('utf-8'))
+        }
+        
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@app.delete("/api/vibe/delete-file", tags=["vibe-coding"])
+async def delete_vibe_file(request: dict):
+    """Delete a file from the vibe workspace"""
+    try:
+        file_path = request.get('path', '')
+        if not file_path or '..' in file_path:
+            return {"success": False, "error": "Invalid file path"}
+        
+        vibe_workspace = os.path.join(PROJECT_ROOT, "vibe")
+        full_path = os.path.join(vibe_workspace, file_path)
+        
+        if not os.path.exists(full_path):
+            return {"success": False, "error": "File not found"}
+        
+        if os.path.isdir(full_path):
+            import shutil
+            shutil.rmtree(full_path)
+        else:
+            os.remove(full_path)
+        
+        return {"success": True, "message": f"Deleted {file_path}"}
+        
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@app.post("/api/vibe/context-notes", tags=["vibe-coding"])
+async def manage_context_notes(request: dict):
+    """Manage Ollama.md context file for AI self-notes"""
+    try:
+        action = request.get('action', 'read')  # read, write, append
+        content = request.get('content', '')
+        
+        vibe_workspace = os.path.join(PROJECT_ROOT, "vibe")
+        notes_path = os.path.join(vibe_workspace, "Ollama.md")
+        
+        if action == 'read':
+            if os.path.exists(notes_path):
+                with open(notes_path, 'r', encoding='utf-8') as f:
+                    existing_content = f.read()
+                return {"success": True, "content": existing_content}
+            else:
+                return {"success": True, "content": "# Ollama Context Notes\n\nNo context notes yet."}
+        
+        elif action == 'write':
+            with open(notes_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            return {"success": True, "message": "Context notes updated"}
+        
+        elif action == 'append':
+            existing_content = ""
+            if os.path.exists(notes_path):
+                with open(notes_path, 'r', encoding='utf-8') as f:
+                    existing_content = f.read()
+            
+            new_content = f"{existing_content}\n\n{content}"
+            with open(notes_path, 'w', encoding='utf-8') as f:
+                f.write(new_content)
+            return {"success": True, "message": "Content appended to context notes"}
+        
+        return {"success": False, "error": "Invalid action"}
+        
+    except Exception as e:
         return {"success": False, "error": str(e)}
 
 # ─── Vibe Agent Helper Functions ─────────────────────────────────────────────

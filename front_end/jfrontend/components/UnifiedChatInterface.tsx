@@ -566,12 +566,20 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
                     blockquote: ({ children }) => (
                       <blockquote className="border-l-4 border-gray-500 pl-4 italic mb-2">{children}</blockquote>
                     ),
-                    code: ({ inline, children }) => 
-                      inline ? (
-                        <code className="bg-gray-600 px-1 py-0.5 rounded text-xs">{children}</code>
+                    code: ({ node, inline, className, children, ...props }) => {
+                      const match = /language-(\w+)/.exec(className || '')
+                      return !inline && match ? (
+                        <pre className="bg-gray-600 p-2 rounded text-xs overflow-x-auto">
+                          <code className={className} {...props}>
+                            {String(children).replace(/\n$/, '')}
+                          </code>
+                        </pre>
                       ) : (
-                        <code className="block bg-gray-600 p-2 rounded text-xs overflow-x-auto">{children}</code>
-                      ),
+                        <code className="bg-gray-600 px-1 py-0.5 rounded text-xs" {...props}>
+                          {children}
+                        </code>
+                      )
+                    },
                     a: ({ href, children }) => (
                       <a href={href} className="text-blue-400 hover:text-blue-300 underline" target="_blank" rel="noopener noreferrer">
                         {children}
