@@ -25,6 +25,11 @@ class WebSearchAgent:
     def __init__(self, max_results: int = 5, max_workers: int = 3):
         self.max_results = max_results
         self.max_workers = max_workers
+        
+        # Set a default User-Agent if not set
+        if not os.getenv("USER_AGENT"):
+            os.environ["USER_AGENT"] = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        
         self.search_wrapper = DuckDuckGoSearchAPIWrapper(
             region="us-en",
             time="y",  # Past year
@@ -52,23 +57,30 @@ class WebSearchAgent:
             if num_results:
                 self.search_wrapper.max_results = num_results
             
+            logger.info(f"Starting DuckDuckGo search for query: '{query}' with max_results: {num_results or self.max_results}")
+            
             # Use DuckDuckGo search
             results = self.search_wrapper.results(query, max_results=num_results or self.max_results)
             
+            logger.info(f"DuckDuckGo returned {len(results)} raw results")
+            
             formatted_results = []
             for result in results:
-                formatted_results.append({
+                formatted_result = {
                     "title": result.get("title", ""),
                     "url": result.get("link", ""),
                     "snippet": result.get("snippet", ""),
                     "source": "DuckDuckGo"
-                })
+                }
+                formatted_results.append(formatted_result)
+                logger.debug(f"Formatted result: {formatted_result}")
             
             logger.info(f"Found {len(formatted_results)} search results for query: {query}")
             return formatted_results
             
         except Exception as e:
-            logger.error(f"Web search failed: {e}")
+            logger.error(f"Web search failed for query '{query}': {e}")
+            logger.exception("Full traceback:")
             return []
     
     def extract_content_from_url(self, url: str) -> Dict[str, Any]:
