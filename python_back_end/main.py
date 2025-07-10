@@ -17,7 +17,7 @@ import torch, soundfile as sf
 import whisper  # Import Whisper
 
 # ─── Authentication Setup ──────────────────────────────────────────────────────
-SECRET_KEY = os.getenv("JWT_SECRET", "your-secret-key")
+SECRET_KEY = os.getenv("JWT_SECRET", "key")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
@@ -25,7 +25,7 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer()
 
 # Database connection
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://pguser:pgpassword@localhost:5432/database")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://pguser:pgpassword@pgsql:5432/database")
 
 class AuthRequest(BaseModel):
     email: str
@@ -246,6 +246,10 @@ class ResearchChatRequest(BaseModel):
     history: List[Dict[str, Any]] = []
     model: str = DEFAULT_MODEL
     enableWebSearch: bool = True
+    audio_prompt: Optional[str] = None  # overrides JARVIS_VOICE_PATH if provided
+    exaggeration: float = 0.5
+    temperature: float = 0.8
+    cfg_weight: float = 0.5
 
 class ScreenAnalysisRequest(BaseModel):
     image: str  # base-64 image (data-URI or raw)
@@ -391,11 +395,18 @@ async def chat(req: ChatRequest, request: Request):
         elif req.model == "gemini-1.5-flash":
             response_text = query_gemini(req.message, req.history)
         else:
-            system_prompt = (
-                'You are "Jarves", a voice-first local assistant. '
-                "Reply in ≤25 spoken-style words, sprinkling brief Spanish when natural, Be bilangual about 80 percent english and 20 percent spanish"
-                'Begin each answer with a short verbal acknowledgment (e.g., "Claro,", "¡Por supuesto!", "Right away").'
-            )
+            # Load system prompt from file
+            system_prompt_path = os.path.join(os.path.dirname(__file__), "system_prompt.txt")
+            try:
+                with open(system_prompt_path, 'r', encoding='utf-8') as f:
+                    system_prompt = f.read().strip()
+            except FileNotFoundError:
+                logger.warning("system_prompt.txt not found, using default prompt")
+                system_prompt = (
+                    'You are "Jarves", a voice-first local assistant. '
+                    "Reply in ≤25 spoken-style words, sprinkling brief Spanish when natural, Be bilangual about 80 percent english and 20 percent spanish"
+                    'Begin each answer with a short verbal acknowledgment (e.g., "Claro,", "¡Por supuesto!", "Right away").'
+                )
             OLLAMA_ENDPOINT = "/api/chat"  # single source of truth
 
             payload = {
@@ -591,6 +602,8 @@ async def mic_chat(file: UploadFile = File(...)):
 
 # Research endpoints using the new research module with LangChain
 from agent_research import research_agent, fact_check_agent, comparative_research_agent
+from research.web_search import WebSearchAgent
+from research.research_agent import ResearchAgent
 
 @app.post("/api/research-chat", tags=["research"])
 async def research_chat(req: ResearchChatRequest):
@@ -623,7 +636,57 @@ async def research_chat(req: ResearchChatRequest):
         # Update history with assistant reply
         new_history = req.history + [{"role": "assistant", "content": response_content}]
 
-        return {"history": new_history, "response": response_content}
+        # ── Generate TTS for research response ──────────────────────────────────────────
+        tts = load_tts_model()  # lazy global singleton
+
+        # Handle audio prompt path
+        audio_prompt_path = req.audio_prompt or JARVIS_VOICE_PATH
+        if not os.path.isfile(audio_prompt_path):
+            logger.warning(
+                "Audio prompt %s not found, falling back to default voice.",
+                audio_prompt_path,
+            )
+            audio_prompt_path = None
+
+        # Debug logging for the audio prompt path
+        if audio_prompt_path:
+            if not os.path.exists(audio_prompt_path):
+                logger.warning(f"JARVIS voice prompt missing at: {audio_prompt_path}")
+            else:
+                logger.info(f"Cloning voice using prompt: {audio_prompt_path}")
+
+        # Create a more conversational version of the research response for TTS
+        # Remove markdown formatting and make it more speech-friendly
+        tts_text = response_content.replace("**", "").replace("*", "").replace("#", "")
+        # Replace numbered lists with more natural speech
+        import re
+        tts_text = re.sub(r'^\d+\.\s*', '', tts_text, flags=re.MULTILINE)
+        # Replace markdown links with just the title
+        tts_text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', tts_text)
+        # Limit length for TTS (keep it conversational)
+        if len(tts_text) > 800:
+            tts_text = tts_text[:800] + "... and more details are available in the sources."
+
+        sr, wav = generate_speech(
+            text=tts_text,
+            model=tts,
+            audio_prompt=audio_prompt_path,
+            exaggeration=req.exaggeration,
+            temperature=req.temperature,
+            cfg_weight=req.cfg_weight,
+        )
+
+        # ── Persist WAV to /tmp so it can be served ──────────────────────────────────────
+        filename = f"research_{uuid.uuid4()}.wav"
+        filepath = os.path.join(tempfile.gettempdir(), filename)
+        sf.write(filepath, wav, sr)
+        logger.info("Research TTS audio written to %s", filepath)
+
+        return {
+            "history": new_history, 
+            "response": response_content,
+            "audio_path": f"/api/audio/{filename}"
+        }
 
     except Exception as e:
         logger.exception("Research chat endpoint crashed")
@@ -636,6 +699,11 @@ class FactCheckRequest(BaseModel):
 class ComparativeResearchRequest(BaseModel):
     topics: List[str]
     model: str = DEFAULT_MODEL
+
+class WebSearchRequest(BaseModel):
+    query: str
+    max_results: int = 5
+    extract_content: bool = False
 
 @app.post("/api/fact-check", tags=["research"])
 async def fact_check(req: FactCheckRequest):
@@ -663,6 +731,37 @@ async def comparative_research(req: ComparativeResearchRequest):
     except Exception as e:
         logger.exception("Comparative research endpoint crashed")
         raise HTTPException(500, str(e))
+
+@app.post("/api/web-search", tags=["research"])
+async def web_search(req: WebSearchRequest):
+    """
+    Perform web search using LangChain search agents
+    """
+    try:
+        logger.info(f"Web search request: query='{req.query}', max_results={req.max_results}, extract_content={req.extract_content}")
+        
+        # Initialize the web search agent
+        search_agent = WebSearchAgent(max_results=req.max_results)
+        
+        if req.extract_content:
+            # Search and extract content from URLs
+            logger.info("Performing search with content extraction...")
+            result = search_agent.search_and_extract(req.query, extract_content=True)
+        else:
+            # Just search without content extraction
+            logger.info("Performing basic search...")
+            search_results = search_agent.search_web(req.query, req.max_results)
+            result = {
+                "query": req.query,
+                "search_results": search_results,
+                "extracted_content": []
+            }
+        
+        logger.info(f"Search completed: found {len(result.get('search_results', []))} results")
+        return result
+    except Exception as e:
+        logger.exception(f"Web search endpoint crashed for query '{req.query}': {str(e)}")
+        raise HTTPException(500, f"Search failed: {str(e)}")
 
 # ─── Warmup ────────────────────────────────────────────────────────
 try:
