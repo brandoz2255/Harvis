@@ -20,8 +20,10 @@ from os_ops import (
     delete_file,
     stream_command
 )
-from chatterbox_tts import load_tts_model, generate_speech
-import whisper
+# Import model management functions from model_manager to avoid circular imports
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from model_manager import unload_all_models, reload_models_if_needed, log_gpu_memory
 
 # ─── Set up logging ─────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
@@ -34,8 +36,9 @@ class VibeAgent:
         self.project_dir = project_dir
         self.history: List[Dict[str, Any]] = []
         self.mode = "assistant"  # or "vibe"
-        self.tts_model = load_tts_model()
-        self.stt_model = whisper.load_model("base")
+        # Models will be loaded on demand for memory efficiency
+        self.tts_model = None
+        self.stt_model = None
         self.file_tree = ""
         self.update_file_tree()
 
@@ -55,26 +58,38 @@ class VibeAgent:
             return ""
 
     async def speak(self, text: str, websocket: WebSocket):
-        """Converts text to speech and sends it over WebSocket."""
+        """Converts text to speech and sends it over WebSocket with model management."""
         try:
-            sr, wav = generate_speech(text, self.tts_model)
-            # In a real implementation, you'd send the audio data over the WebSocket
-            # For now, we'll just send a text message indicating speech generation
+            # Ensure TTS models are loaded for speech generation
+            reload_models_if_needed()
+            
+            # For WebSocket implementation, just send text indication
+            # Full TTS integration would require audio streaming setup
             await websocket.send_json({"type": "speech", "content": text})
-            logger.info(f"Generated speech for: {text}")
+            logger.info(f"Generated speech indication for: {text}")
         except Exception as e:
-            logger.error(f"Error generating speech: {e}")
-            await websocket.send_json({"type": "error", "content": f"Error generating speech: {e}"})
+            logger.error(f"Error in speech processing: {e}")
+            await websocket.send_json({"type": "error", "content": f"Error in speech processing: {e}"})
 
     async def process_command(self, command: str, websocket: WebSocket):
-        """Processes a command based on the current mode."""
+        """Processes a command based on the current mode with intelligent model management."""
         self.history.append({"role": "user", "content": command})
         await websocket.send_json({"type": "status", "content": f"Processing command: {command}"})
+
+        # Phase 1: Unload models to free GPU memory for vibe processing
+        logger.info("🤖 Unloading models for vibe agent processing")
+        unload_all_models()
+        log_gpu_memory("before vibe processing")
 
         if self.mode == "assistant":
             await self.execute_assistant_command(command, websocket)
         elif self.mode == "vibe":
             await self.execute_vibe_plan(command, websocket)
+        
+        # Phase 2: Reload models after vibe processing
+        logger.info("🔄 Reloading models after vibe processing")
+        reload_models_if_needed()
+        log_gpu_memory("after vibe processing")
 
     async def execute_assistant_command(self, command: str, websocket: WebSocket):
         """Executes a single command in assistant mode."""

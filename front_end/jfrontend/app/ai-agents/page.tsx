@@ -26,6 +26,7 @@ import {
   Settings,
   Workflow
 } from "lucide-react"
+        
 import { Button } from "@/components/ui/button"
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -69,7 +70,6 @@ export default function AIAgents() {
   const n8nVoiceInputRef = useRef<any>(null)
   const [isN8nVoiceRecording, setIsN8nVoiceRecording] = useState(false)
   const [isN8nVoiceProcessing, setIsN8nVoiceProcessing] = useState(false)
-
   useEffect(() => {
     const fetchAgents = async () => {
       try {
@@ -262,6 +262,123 @@ export default function AIAgents() {
     }
   }
 
+  const handleN8nPromptChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setN8nPrompt(e.target.value);
+  };
+
+  const handleN8nSubmit = async () => {
+    setN8nError('');
+    setN8nWorkflow(null);
+    setStatusMessage(null);
+    setStatusType(null);
+    setIsProcessing(true);
+
+    try {
+      const response = await fetch('/api/n8n-automation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: n8nPrompt }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        const errorMessage = errorData.error || 'Failed to create workflow';
+        setN8nError(errorMessage);
+        setStatusMessage(`Error: ${errorMessage}`);
+        setStatusType('error');
+        setLastErrorType('n8n'); // Set error type to n8n
+        console.error("n8n workflow creation error:", errorData);
+        throw new Error(errorMessage);
+      }
+
+      const data = await response.json();
+      setN8nWorkflow(data.workflow);
+      setStatusMessage("Workflow created successfully!");
+      setStatusType('success');
+      setLastErrorType(null); // Clear error type on success
+    } catch (err: any) {
+      if (!n8nError) { // Only set if not already set by response.ok check
+        setN8nError(err.message);
+        setStatusMessage(`Error: ${err.message}`);
+        setStatusType('error');
+        console.error("n8n workflow submission error:", err);
+      }
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const handleVoiceInput = () => {
+    if (isListening) {
+      recognitionRef.current?.stop();
+      setIsListening(false);
+      setIsProcessing(false);
+      setStatusMessage("Voice input stopped.");
+      setStatusType('info');
+      return;
+    }
+
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      const msg = 'Speech recognition is not supported in this browser.';
+      setN8nError(msg);
+      setStatusMessage(`Error: ${msg}`);
+      setStatusType('error');
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.interimResults = false;
+    recognition.lang = 'en-US';
+    recognitionRef.current = recognition;
+
+    setN8nError('');
+    setN8nWorkflow(null);
+    setStatusMessage("Listening...");
+    setStatusType('info');
+    setIsProcessing(true);
+
+    recognition.onstart = () => {
+      setIsListening(true);
+      setStatusMessage("Listening...");
+      setStatusType('info');
+    };
+
+    recognition.onend = () => {
+      setIsListening(false);
+      setIsProcessing(false);
+    };
+
+    recognition.onerror = (event: any) => {
+      setIsListening(false);
+      setIsProcessing(false);
+      let errorMessage = `Speech recognition error: ${event.error}`;
+      if (event.error === 'not-allowed') {
+        errorMessage = 'Microphone access denied. Please enable microphone permissions.';
+      } else if (event.error === 'no-speech') {
+        errorMessage = 'No speech detected. Please try again.';
+      } else if (event.error === 'aborted') {
+        errorMessage = 'Speech recognition aborted.';
+      }
+      setN8nError(errorMessage);
+      setStatusMessage(`Error: ${errorMessage}`);
+      setStatusType('error');
+      setLastErrorType('speech'); // Set error type to speech
+      console.error("Speech recognition error:", event);
+    };
+
+    recognition.onresult = (event: any) => {
+      const speechResult = event.results[0][0].transcript;
+      setN8nPrompt(speechResult);
+      setStatusMessage("Speech recognized successfully.");
+      setStatusType('success');
+      setIsProcessing(false);
+    };
+
+    recognition.start();
+  };
+
   return (
     <div className="relative min-h-screen overflow-hidden">
       {/* Aurora Background */}
@@ -326,7 +443,9 @@ export default function AIAgents() {
               <div className="flex items-center justify-between">
                 <div>
                   <p className="text-sm text-gray-400">Total Agents</p>
-                  <p className="text-2xl font-bold text-white">{agents.length}</p>
+                  <p className="text-2xl font-bold text-white">
+                    {agents.length}
+                  </p>
                 </div>
                 <Bot className="w-8 h-8 text-indigo-400" />
               </div>
@@ -349,7 +468,9 @@ export default function AIAgents() {
                 <div>
                   <p className="text-sm text-gray-400">Total Executions</p>
                   <p className="text-2xl font-bold text-white">
-                    {agents.reduce((sum, agent) => sum + agent.executionCount, 0).toLocaleString()}
+                    {agents
+                      .reduce((sum, agent) => sum + agent.executionCount, 0)
+                      .toLocaleString()}
                   </p>
                 </div>
                 <Zap className="w-8 h-8 text-blue-400" />
@@ -357,7 +478,6 @@ export default function AIAgents() {
             </Card>
           </div>
         </motion.div>
-
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -526,7 +646,6 @@ export default function AIAgents() {
         </motion.div>
         </div>
       </div>
-
       <SettingsModal
         isOpen={showSettings}
         onClose={() => setShowSettings(false)}
