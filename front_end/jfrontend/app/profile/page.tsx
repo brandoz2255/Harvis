@@ -6,6 +6,7 @@ import { useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import Image from 'next/image';
 import Link from 'next/link';
+import Aurora from '@/components/Aurora';
 
 export default function ProfilePage() {
   const { user, logout, isLoading } = useUser();
@@ -35,8 +36,22 @@ export default function ProfilePage() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-black via-gray-900 to-blue-900 text-white">
-      <div className="container mx-auto px-4 py-8 max-w-2xl">
+    <div className="relative min-h-screen overflow-hidden">
+      {/* Aurora Background */}
+      <div className="fixed inset-0 -z-10 pointer-events-none select-none">
+        <Aurora
+          className="w-full h-full"
+          colorStops={['#3B82F6', '#8B5CF6', '#06B6D4']}
+          blend={0.4}
+          amplitude={1.0}
+          speed={0.6}
+        />
+        <div className="absolute inset-0 bg-black/20 pointer-events-none [mask-image:radial-gradient(ellipse_at_center,white,transparent_80%)]" />
+      </div>
+
+      {/* Content */}
+      <div className="relative z-10 min-h-screen bg-black/40 backdrop-blur-sm text-white">
+        <div className="container mx-auto px-4 py-8 max-w-2xl">
         {/* Back to Home */}
         <div className="mb-6">
           <Link href="/">
@@ -102,6 +117,7 @@ export default function ProfilePage() {
               </div>
             </div>
           </div>
+        </div>
         </div>
       </div>
     </div>
