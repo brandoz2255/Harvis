@@ -15,7 +15,7 @@ chatterbox-tts
 langchain
 langchain-community
 langchain-openai
-duckduckgo-search
+ddgs
 beautifulsoup4
 newspaper3k
 pytest
