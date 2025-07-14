@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/input';
 import { useUser } from '@/lib/auth/UserProvider';
 import { AuthService } from '@/lib/auth/AuthService';
 import { useRouter } from 'next/navigation';
+import Aurora from '@/components/Aurora';
 
 export default function SignUpPage() {
   const router = useRouter();
@@ -48,7 +49,21 @@ export default function SignUpPage() {
   }
 
   return (
-    <div className="flex items-center justify-center min-h-screen">
+    <div className="relative min-h-screen overflow-hidden">
+      {/* Aurora Background */}
+      <div className="fixed inset-0 -z-10 pointer-events-none select-none">
+        <Aurora
+          className="w-full h-full"
+          colorStops={['#059669', '#0D9488', '#0F766E']}
+          blend={0.4}
+          amplitude={1.0}
+          speed={0.6}
+        />
+        <div className="absolute inset-0 bg-black/20 pointer-events-none [mask-image:radial-gradient(ellipse_at_center,white,transparent_80%)]" />
+      </div>
+
+      {/* Content */}
+      <div className="relative z-10 min-h-screen bg-black/40 backdrop-blur-sm flex items-center justify-center">
       <div className="w-full max-w-md p-8 space-y-6 bg-gray-800/80 backdrop-blur-sm rounded-lg shadow-md">
         <h1 className="text-2xl font-bold text-center text-white">Sign Up</h1>
         <form onSubmit={handleSubmit} className="space-y-6">
@@ -89,6 +104,7 @@ export default function SignUpPage() {
           {success && <p className="text-green-500">{success}</p>}
           <Button type="submit" className="w-full">Sign Up</Button>
         </form>
+      </div>
       </div>
     </div>
   );
