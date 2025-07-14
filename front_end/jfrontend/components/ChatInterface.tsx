@@ -8,6 +8,8 @@ import { Send, Volume2, VolumeX } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card } from "@/components/ui/card"
+import ReactMarkdown from "react-markdown"
+import remarkGfm from "remark-gfm"
 
 interface Message {
   role: "user" | "assistant"
@@ -150,7 +152,34 @@ export default function ChatInterface() {
                   message.role === "user" ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-100"
                 }`}
               >
-                <p className="text-sm">{message.content}</p>
+                <ReactMarkdown 
+                  className="text-sm prose prose-invert prose-sm max-w-none"
+                  remarkPlugins={[remarkGfm]}
+                  components={{
+                    p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
+                    ul: ({ children }) => <ul className="list-disc ml-4 mb-2">{children}</ul>,
+                    ol: ({ children }) => <ol className="list-decimal ml-4 mb-2">{children}</ol>,
+                    li: ({ children }) => <li className="mb-1">{children}</li>,
+                    strong: ({ children }) => <strong className="font-semibold text-white">{children}</strong>,
+                    em: ({ children }) => <em className="italic">{children}</em>,
+                    h1: ({ children }) => <h1 className="text-lg font-bold mb-2">{children}</h1>,
+                    h2: ({ children }) => <h2 className="text-md font-semibold mb-2">{children}</h2>,
+                    h3: ({ children }) => <h3 className="text-sm font-medium mb-1">{children}</h3>,
+                    code: ({ inline, children }) => 
+                      inline ? (
+                        <code className="bg-gray-600 px-1 py-0.5 rounded text-xs">{children}</code>
+                      ) : (
+                        <code className="block bg-gray-600 p-2 rounded text-xs overflow-x-auto">{children}</code>
+                      ),
+                    a: ({ href, children }) => (
+                      <a href={href} className="text-blue-400 hover:text-blue-300 underline" target="_blank" rel="noopener noreferrer">
+                        {children}
+                      </a>
+                    ),
+                  }}
+                >
+                  {message.content}
+                </ReactMarkdown>
                 <span className="text-xs opacity-70 mt-1 block">{message.timestamp.toLocaleTimeString()}</span>
               </div>
             </motion.div>

@@ -98,6 +98,7 @@ class ResearchAgent:
             Research results with analysis and sources
         """
         logger.info(f"Starting research on topic: {topic}")
+        logger.info(f"Research model: {model}, depth: {research_depth}")
         
         # Adjust search parameters based on depth
         search_params = {
@@ -108,40 +109,72 @@ class ResearchAgent:
         
         params = search_params.get(research_depth, search_params["standard"])
         
-        # Search the web
-        if hasattr(self.search_agent, 'search_and_extract'):
-            search_data = self.search_agent.search_and_extract(
-                topic, 
-                extract_content=params["extract_content"]
-            )
-        else:
-            search_data = {
-                "query": topic,
-                "search_results": self.search_agent.search_web(topic, params["max_results"]),
-                "extracted_content": []
-            }
+        # First, let the LLM analyze and improve the search query
+        search_queries = self._generate_search_queries(topic, model)
+        logger.info(f"Generated search queries: {search_queries}")
+        
+        # Search the web with improved queries
+        all_search_data = {"search_results": [], "extracted_content": []}
+        
+        for query in search_queries:
+            logger.info(f"Searching for: '{query}'")
+            if hasattr(self.search_agent, 'search_and_extract'):
+                query_data = self.search_agent.search_and_extract(
+                    query, 
+                    extract_content=params["extract_content"]
+                )
+            else:
+                query_data = {
+                    "query": query,
+                    "search_results": self.search_agent.search_web(query, params["max_results"]),
+                    "extracted_content": []
+                }
+            
+            # Combine results from all queries
+            all_search_data["search_results"].extend(query_data.get("search_results", []))
+            all_search_data["extracted_content"].extend(query_data.get("extracted_content", []))
+        
+        # Remove duplicates and limit results
+        search_data = self._deduplicate_search_results(all_search_data, params["max_results"])
         
         # Prepare context for LLM
         context = self._prepare_research_context(search_data)
+        
+        # Debug: Log the context being sent to LLM
+        logger.info(f"Context length: {len(context)} characters")
+        logger.info(f"Context preview: {context[:500]}...")
         
         # Generate research analysis
         system_prompt = self._get_research_system_prompt(research_depth)
         
         research_prompt = f"""
-Research Topic: {topic}
+You are analyzing search results for the user's question: "{topic}"
 
-Based on the following web search results and content, provide a comprehensive analysis:
-
+SEARCH RESULTS:
 {context}
 
-Please provide:
-1. A summary of key findings
-2. Main insights and conclusions
-3. Different perspectives or viewpoints found
-4. Potential implications or applications
-5. Areas that might need further research
+Your task:
+1. First, assess if these search results actually address what the user is asking about "{topic}"
+2. If the results are relevant, provide a comprehensive analysis WITH SPECIFIC SOURCE CITATIONS
+3. If the results are largely irrelevant, clearly state this and explain what type of information would better answer their question
 
-Be thorough but concise, and cite sources when referencing specific information.
+IMPORTANT: When referencing information, ALWAYS cite the specific source URL.
+
+Provide your analysis in this format:
+
+RELEVANCE ASSESSMENT:
+[Are these results relevant to the user's question? If not, explain why and what would be more relevant]
+
+ANALYSIS:
+[Only if results are relevant - provide detailed analysis of the findings with citations like "According to [URL]: ..."]
+
+SOURCES CITED:
+[List all URLs you referenced in your analysis]
+
+RECOMMENDATIONS:
+[What the user should know based on the results, or what better searches might be needed]
+
+Focus on being helpful and honest about whether the search results actually answer their question.
 """
         
         analysis = self.query_llm(research_prompt, model, system_prompt)
@@ -158,6 +191,7 @@ Be thorough but concise, and cite sources when referencing specific information.
         
         if include_sources:
             result["sources"] = self._format_sources(search_data.get("search_results", []))
+            result["raw_search_results"] = search_data.get("search_results", [])  # Include raw results for debugging
         
         logger.info(f"Research completed for topic: {topic}")
         return result
@@ -292,12 +326,19 @@ Content: {text}
     
     def _get_research_system_prompt(self, depth: str) -> str:
         """Get system prompt based on research depth"""
-        base_prompt = "You are a research assistant providing comprehensive, accurate analysis based on web search results."
+        base_prompt = """You are a research assistant that analyzes web search results to provide specific, accurate information about the requested topic. 
+
+CRITICAL RULES:
+- You must ONLY use information from the provided search results
+- Do NOT provide general knowledge or generic information about search engines
+- Focus specifically on the topic being researched
+- Cite specific sources when making claims
+- If the search results don't contain relevant information, say so explicitly"""
         
         depth_prompts = {
-            "quick": f"{base_prompt} Provide concise, focused insights.",
-            "standard": f"{base_prompt} Provide thorough analysis with balanced coverage.",
-            "deep": f"{base_prompt} Provide in-depth, comprehensive analysis with detailed insights and implications."
+            "quick": f"{base_prompt} Provide concise, focused insights from the search results.",
+            "standard": f"{base_prompt} Provide thorough analysis with balanced coverage of the search results.",
+            "deep": f"{base_prompt} Provide in-depth, comprehensive analysis with detailed insights from the search results."
         }
         
         return depth_prompts.get(depth, depth_prompts["standard"])
@@ -312,6 +353,134 @@ Content: {text}
                 "source": result.get("source", "Web Search")
             })
         return sources
+    
+    def _generate_search_queries(self, topic: str, model: str = None) -> List[str]:
+        """
+        Use LLM to generate optimized search queries based on the user's topic
+        """
+        system_prompt = """You are an expert search strategist. Generate targeted search queries that will find the most relevant, authoritative information.
+
+Focus Areas:
+- AI/ML topics: Target research papers, official docs, and authoritative sources
+- Technical topics: Target documentation, tutorials, and recent implementations
+- Projects: Target repositories, demos, and case studies
+- General topics: Target educational and authoritative sources
+
+Output Format: Provide ONLY the search queries, one per line, no explanations."""
+
+        # Analyze topic to determine search strategy
+        topic_lower = topic.lower()
+        if any(term in topic_lower for term in ['ai', 'agentic', 'machine learning', 'llm']):
+            context = "This is an AI/ML research topic. Focus on recent research, implementations, and authoritative sources."
+        elif any(term in topic_lower for term in ['project', 'implementation', 'build']):
+            context = "This is about finding projects or implementations. Focus on repositories and working examples."
+        else:
+            context = "This is a general research topic. Focus on comprehensive, authoritative information."
+        
+        query_prompt = f"""
+Topic: "{topic}"
+Context: {context}
+
+Generate 3 specific search queries that will find the most relevant information. Focus on:
+1. The main concept/technology
+2. Practical applications or examples
+3. Recent developments or implementations
+
+Queries:"""
+
+        try:
+            response = self.query_llm(query_prompt, model, system_prompt)
+            
+            # Parse the response to extract individual queries
+            queries = []
+            logger.info(f"LLM query generation response: {response[:200]}...")
+            
+            for line in response.strip().split('\n'):
+                line = line.strip()
+                # Skip empty lines and headers
+                if line and not line.lower().startswith(('topic:', 'context:', 'queries:', 'generate')):
+                    # Remove numbering and clean up
+                    query = line.lstrip('0123456789.- ').strip()
+                    # Remove quotes if present
+                    query = query.strip('"\'')
+                    
+                    if query and len(query) > 5 and not query.lower().startswith(('example', 'user', 'think')):
+                        queries.append(query)
+                        logger.info(f"Extracted query: '{query}'")
+            
+            # Enhanced fallback with topic-specific optimization
+            if not queries:
+                logger.warning(f"No queries extracted, generating fallback queries for: '{topic}'")
+                queries = self._generate_fallback_queries(topic)
+            
+            # Limit to 3 queries max
+            final_queries = queries[:3]
+            logger.info(f"Final search queries: {final_queries}")
+            return final_queries
+            
+        except Exception as e:
+            logger.error(f"Failed to generate search queries: {e}")
+            return self._generate_fallback_queries(topic)
+    
+    def _deduplicate_search_results(self, search_data: Dict[str, Any], max_results: int) -> Dict[str, Any]:
+        """
+        Remove duplicate search results and limit to max_results
+        """
+        seen_urls = set()
+        unique_results = []
+        
+        for result in search_data.get("search_results", []):
+            url = result.get("url", "")
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                unique_results.append(result)
+                
+                if len(unique_results) >= max_results:
+                    break
+        
+        # Do the same for extracted content
+        seen_content_urls = set()
+        unique_content = []
+        
+        for content in search_data.get("extracted_content", []):
+            url = content.get("url", "")
+            if url and url not in seen_content_urls:
+                seen_content_urls.add(url)
+                unique_content.append(content)
+        
+        return {
+            "search_results": unique_results,
+            "extracted_content": unique_content
+        }
+
+    def _generate_fallback_queries(self, topic: str) -> List[str]:
+        """
+        Generate fallback queries when LLM fails
+        """
+        topic_lower = topic.lower()
+        queries = []
+        
+        # Base query
+        queries.append(topic)
+        
+        # Topic-specific fallbacks
+        if any(term in topic_lower for term in ['ai', 'agentic', 'machine learning']):
+            queries.extend([
+                f"{topic} research paper arxiv",
+                f"{topic} implementation github"
+            ])
+        elif 'project' in topic_lower:
+            queries.extend([
+                f"{topic} github repository",
+                f"{topic} example demo"
+            ])
+        else:
+            queries.extend([
+                f"{topic} tutorial guide",
+                f"{topic} documentation"
+            ])
+        
+        return queries[:3]
     
     def _get_timestamp(self) -> str:
         """Get current timestamp"""
