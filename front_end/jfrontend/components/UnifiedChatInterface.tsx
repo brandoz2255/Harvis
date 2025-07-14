@@ -25,6 +25,7 @@ import { Input } from "@/components/ui/input"
 import { Card } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { useAIOrchestrator } from "./AIOrchestrator"
+import { useAIInsights } from "@/hooks/useAIInsights"
 
 interface Message {
   role: "user" | "assistant"
@@ -62,6 +63,7 @@ export interface ChatHandle {
 
 const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
   const { orchestrator, hardware, isDetecting } = useAIOrchestrator()
+  const { logUserInteraction, completeInsight, logReasoningProcess } = useAIInsights()
   const [selectedModel, setSelectedModel] = useState("auto")
   const [priority, setPriority] = useState<"speed" | "accuracy" | "balanced">("balanced")
 
@@ -141,6 +143,9 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
     const messageContent = inputType === "text" ? inputValue : "Voice message"
     const optimalModel = getOptimalModel(messageContent)
 
+    // Log the AI's thought process for this user interaction
+    const insightId = logUserInteraction(messageContent, optimalModel)
+
     const userMessage: Message = {
       role: "user",
       content: messageContent,
@@ -203,6 +208,12 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
 
         setMessages(updatedHistory)
 
+        // Complete the insight with the AI response
+        const assistantResponse = data.history.find(msg => msg.role === "assistant")
+        if (assistantResponse) {
+          completeInsight(insightId, assistantResponse.content.substring(0, 100) + "...")
+        }
+
         // Update search results if available
         if (data.searchResults) {
           setSearchResults(data.searchResults)
@@ -225,6 +236,9 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
       } catch (error) {
         console.error(`Chat attempt ${attempt + 1} failed:`, error)
         if (attempt === 2) {
+          // Complete insight with error
+          completeInsight(insightId, `Error: ${error instanceof Error ? error.message : 'Unknown error'}`, 'error')
+          
           const errorMessage: Message = {
             role: "assistant",
             content: "Sorry, I'm having trouble right now.",
