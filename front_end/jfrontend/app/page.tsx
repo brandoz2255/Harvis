@@ -10,7 +10,7 @@ import ResearchAssistant    from '@/components/ResearchAssistant';
 
 import { motion } from 'framer-motion';
 import { Button } from '@/components/ui/button';
-import { Swords, Shield, Globe, Sparkles, Bot, Settings } from 'lucide-react';
+import { Swords, Gamepad2, Globe, Sparkles, Bot, Settings } from 'lucide-react';
 import Link   from 'next/link';
 import Aurora from '@/components/Aurora';
 import { useUser } from '@/lib/auth/UserProvider';
@@ -111,13 +111,12 @@ export default function Home() {
                 </Button>
               </Link>
 
-              <Button
-                variant="outline"
-                className="border-cyan-500 text-cyan-400 hover:bg-cyan-500/10 px-6 py-3 text-lg bg-transparent"
-              >
-                <Shield className="w-5 h-5 mr-2" />
-                Defense Mode
-              </Button>
+              <Link href="/ai-games">
+                <Button className="bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white px-6 py-3 text-lg">
+                  <Gamepad2 className="w-5 h-5 mr-2" />
+                  AI-Games
+                </Button>
+              </Link>
 
               <Button
                 onClick={() => setShowResearchAssistant(!showResearchAssistant)}

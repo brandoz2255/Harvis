@@ -11,6 +11,7 @@ import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import Link from "next/link"
 import Image from "next/image"
+import Aurora from "@/components/Aurora"
 
 interface LogEntry {
   id: string
@@ -244,8 +245,22 @@ export default function AdversaryEmulationPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-black via-gray-900 to-red-900">
-      <div className="container mx-auto px-4 py-6">
+    <div className="relative min-h-screen overflow-hidden">
+      {/* Aurora Background */}
+      <div className="fixed inset-0 -z-10 pointer-events-none select-none">
+        <Aurora
+          className="w-full h-full"
+          colorStops={['#DC2626', '#B91C1C', '#7F1D1D']}
+          blend={0.4}
+          amplitude={1.0}
+          speed={0.6}
+        />
+        <div className="absolute inset-0 bg-black/20 pointer-events-none [mask-image:radial-gradient(ellipse_at_center,white,transparent_80%)]" />
+      </div>
+
+      {/* Content */}
+      <div className="relative z-10 min-h-screen bg-black/40 backdrop-blur-sm">
+        <div className="container mx-auto px-4 py-6">
         {/* Header */}
         <motion.div
           initial={{ opacity: 0, y: -20 }}
@@ -476,6 +491,7 @@ export default function AdversaryEmulationPage() {
             </div>
           </Card>
         </motion.div>
+        </div>
       </div>
     </div>
   )
