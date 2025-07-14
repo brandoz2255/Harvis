@@ -13,8 +13,13 @@ interface MiscDisplayProps {
 }
 
 export default function MiscDisplay({ screenAnalysis }: MiscDisplayProps) {
-  const { insights, addInsight } = useInsightsStore()
+  const { insights, addInsight, clearInsights } = useInsightsStore()
   const [selectedItem, setSelectedItem] = useState<InsightEntry | null>(null)
+
+  // Clear any existing insights on component mount to ensure fresh start
+  useEffect(() => {
+    clearInsights()
+  }, [clearInsights])
 
   useEffect(() => {
     if (screenAnalysis) {
@@ -80,8 +85,18 @@ export default function MiscDisplay({ screenAnalysis }: MiscDisplayProps) {
 
   return (
     <Card className="bg-gray-900/50 backdrop-blur-sm border-blue-500/30">
-      <div className="p-3 border-b border-blue-500/30">
+      <div className="p-3 border-b border-blue-500/30 flex justify-between items-center">
         <h3 className="text-lg font-semibold text-blue-300">AI Insights</h3>
+        {insights.length > 0 && (
+          <Button
+            onClick={clearInsights}
+            size="sm"
+            variant="ghost"
+            className="text-gray-400 hover:text-white text-xs"
+          >
+            Clear
+          </Button>
+        )}
       </div>
 
       <div className="p-3 max-h-96 overflow-y-auto">
@@ -129,8 +144,11 @@ export default function MiscDisplay({ screenAnalysis }: MiscDisplayProps) {
         {insights.length === 0 && (
           <div className="text-center text-gray-500 py-8">
             <Brain className="w-8 h-8 mx-auto mb-2 opacity-50" />
-            <p className="text-sm">AI insights will appear when you interact with the assistant</p>
-            <p className="text-xs mt-1">Thought processes from Qwen2.VL and reasoning models will show here</p>
+            <p className="text-sm font-medium mb-2">Real-Time AI Thought Process</p>
+            <p className="text-xs text-gray-400 mb-1">• See the AI's reasoning before it responds</p>
+            <p className="text-xs text-gray-400 mb-1">• Watch Qwen2.VL analyze your prompts</p>
+            <p className="text-xs text-gray-400 mb-1">• View reasoning model step-by-step thinking</p>
+            <p className="text-xs text-gray-500 mt-3">Start a conversation to see AI insights in action</p>
           </div>
         )}
       </div>
