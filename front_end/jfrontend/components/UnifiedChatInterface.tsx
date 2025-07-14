@@ -19,6 +19,9 @@ import {
   Search,
   ExternalLink,
   BookOpen,
+  RefreshCw,
+  Wifi,
+  WifiOff,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -62,7 +65,7 @@ export interface ChatHandle {
 }
 
 const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
-  const { orchestrator, hardware, isDetecting } = useAIOrchestrator()
+  const { orchestrator, hardware, isDetecting, models, ollamaModels, ollamaConnected, ollamaError, refreshOllamaModels } = useAIOrchestrator()
   const { logUserInteraction, completeInsight, logReasoningProcess } = useAIInsights()
   const [selectedModel, setSelectedModel] = useState("auto")
   const [priority, setPriority] = useState<"speed" | "accuracy" | "balanced">("balanced")
@@ -88,10 +91,18 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
   const audioChunksRef = useRef<Blob[]>([])
 
   const availableModels = [
-    { value: "auto", label: "🤖 Auto-Select" },
+    { value: "auto", label: "🤖 Auto-Select", type: "auto" },
+    // Built-in models
     ...orchestrator.getAllModels().map((model) => ({
       value: model.name,
       label: model.name.charAt(0).toUpperCase() + model.name.slice(1),
+      type: "builtin"
+    })),
+    // Ollama models
+    ...ollamaModels.map((modelName) => ({
+      value: modelName,
+      label: `🦙 ${modelName}`,
+      type: "ollama"
     })),
   ]
 
@@ -118,9 +129,12 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
   }, [messages])
 
   const getOptimalModel = (message: string): string => {
-    if (selectedModel !== "auto") return selectedModel
+    if (selectedModel !== "auto") {
+      // If user selected a specific model, use it
+      return selectedModel
+    }
 
-    // Analyze message to determine task type
+    // Auto-select mode: analyze message to determine best model
     const lowerMessage = message.toLowerCase()
     let taskType = "general"
 
@@ -134,7 +148,21 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
       taskType = "lightweight"
     }
 
-    return orchestrator.selectOptimalModel(taskType, priority)
+    // Use the orchestrator to select optimal model from available models
+    const optimalModel = orchestrator.selectOptimalModel(taskType, priority)
+    
+    // If the optimal model is available in our models list, use it
+    // Otherwise, fall back to first available Ollama model or built-in model
+    if (models.includes(optimalModel)) {
+      return optimalModel
+    }
+    
+    // Fallback: prefer Ollama models if available, otherwise use built-in
+    if (ollamaModels.length > 0) {
+      return ollamaModels[0]
+    }
+    
+    return orchestrator.getAllModels()[0]?.name || "mistral"
   }
 
   const sendMessage = async (inputType: "text" | "voice" = "text") => {
@@ -438,6 +466,27 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
             </Button>
           </div>
           <div className="flex items-center space-x-4">
+            {/* Ollama Connection Status */}
+            <div className="flex items-center space-x-2">
+              <Badge 
+                variant="outline" 
+                className={`text-xs ${ollamaConnected ? 'border-green-500 text-green-400' : 'border-red-500 text-red-400'}`}
+                title={ollamaError || (ollamaConnected ? 'Connected to Ollama server' : 'Cannot connect to Ollama server')}
+              >
+                {ollamaConnected ? <Wifi className="w-3 h-3 mr-1" /> : <WifiOff className="w-3 h-3 mr-1" />}
+                Ollama {ollamaConnected ? `(${ollamaModels.length} models)` : 'Offline'}
+              </Badge>
+              <Button
+                onClick={refreshOllamaModels}
+                size="sm"
+                variant="ghost"
+                className="h-6 w-6 p-0 text-gray-400 hover:text-white"
+                title={`Refresh Ollama models${ollamaError ? ` (Last error: ${ollamaError})` : ''}`}
+              >
+                <RefreshCw className="w-3 h-3" />
+              </Button>
+            </div>
+            
             {hardware && (
               <div className="flex items-center space-x-2 text-xs">
                 <Badge variant="outline" className="border-green-500 text-green-400">
@@ -460,13 +509,39 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
             <select
               value={selectedModel}
               onChange={(e) => setSelectedModel(e.target.value)}
-              className="bg-gray-800 border border-gray-600 text-white text-sm rounded px-2 py-1 focus:border-blue-500 focus:outline-none"
+              className="bg-gray-800 border border-gray-600 text-white text-sm rounded px-2 py-1 focus:border-blue-500 focus:outline-none min-w-[200px]"
             >
-              {availableModels.map((model) => (
-                <option key={model.value} value={model.value}>
-                  {model.label}
-                </option>
-              ))}
+              {/* Auto-select option */}
+              <option value="auto">🤖 Auto-Select</option>
+              
+              {/* Built-in models */}
+              {orchestrator.getAllModels().length > 0 && (
+                <optgroup label="Built-in Models">
+                  {orchestrator.getAllModels().map((model) => (
+                    <option key={model.name} value={model.name}>
+                      {model.name.charAt(0).toUpperCase() + model.name.slice(1)}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+              
+              {/* Ollama models */}
+              {ollamaModels.length > 0 && (
+                <optgroup label={`Ollama Models (${ollamaModels.length})`}>
+                  {ollamaModels.map((modelName) => (
+                    <option key={modelName} value={modelName}>
+                      🦙 {modelName}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+              
+              {/* Show message if no Ollama models */}
+              {!ollamaConnected && (
+                <optgroup label="Ollama (Offline)">
+                  <option disabled>No Ollama models available</option>
+                </optgroup>
+              )}
             </select>
           </div>
 

@@ -123,17 +123,31 @@ export class AIOrchestrator {
     return hardware
   }
 
-  async fetchOllamaModels(): Promise<string[]> {
+  async fetchOllamaModels(): Promise<{ models: string[], connected: boolean, error?: string }> {
     try {
       const response = await fetch("/api/ollama-models")
-      if (!response.ok) {
-        throw new Error(`Failed to fetch models: ${response.statusText}`)
+      const data = await response.json()
+      
+      if (data.success && data.models) {
+        const modelNames = data.models.map((model: any) => model.name)
+        return {
+          models: modelNames,
+          connected: true
+        }
+      } else {
+        return {
+          models: [],
+          connected: false,
+          error: data.error || 'Failed to fetch models'
+        }
       }
-      const models = await response.json()
-      return models
     } catch (error) {
       console.error("Could not fetch Ollama models:", error)
-      return []
+      return {
+        models: [],
+        connected: false,
+        error: error instanceof Error ? error.message : 'Network error'
+      }
     }
   }
 
@@ -225,15 +239,32 @@ export function useAIOrchestrator() {
   const [hardware, setHardware] = useState<HardwareInfo | null>(null)
   const [isDetecting, setIsDetecting] = useState(true)
   const [models, setModels] = useState<string[]>([])
+  const [ollamaModels, setOllamaModels] = useState<string[]>([])
+  const [ollamaConnected, setOllamaConnected] = useState(false)
+  const [ollamaError, setOllamaError] = useState<string | null>(null)
+  const [lastFetch, setLastFetch] = useState<Date | null>(null)
+
+  const refreshOllamaModels = async () => {
+    const result = await orchestrator.fetchOllamaModels()
+    setOllamaModels(result.models)
+    setOllamaConnected(result.connected)
+    setOllamaError(result.error || null)
+    setLastFetch(new Date())
+    
+    // Update combined models list
+    const builtInModels = orchestrator.getAllModels().map((m) => m.name)
+    const allModels = [...builtInModels, ...result.models]
+    setModels(Array.from(new Set(allModels)))
+    
+    return result
+  }
 
   useEffect(() => {
     const initialize = async () => {
       try {
         const hw = await orchestrator.detectHardware()
         setHardware(hw)
-        const fetchedOllamaModels = await orchestrator.fetchOllamaModels()
-        const allModels = [...orchestrator.getAllModels().map((m) => m.name), ...fetchedOllamaModels]
-        setModels(Array.from(new Set(allModels)))
+        await refreshOllamaModels()
       } catch (error) {
         console.error("Initialization failed:", error)
       } finally {
@@ -242,7 +273,22 @@ export function useAIOrchestrator() {
     }
 
     initialize()
+    
+    // Set up periodic refresh every 30 seconds
+    const interval = setInterval(refreshOllamaModels, 30000)
+    
+    return () => clearInterval(interval)
   }, [orchestrator])
 
-  return { orchestrator, hardware, isDetecting, models }
+  return { 
+    orchestrator, 
+    hardware, 
+    isDetecting, 
+    models, 
+    ollamaModels, 
+    ollamaConnected, 
+    ollamaError, 
+    lastFetch,
+    refreshOllamaModels 
+  }
 }

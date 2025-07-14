@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { useUser } from "@/lib/auth/UserProvider";
 import { AuthService } from "@/lib/auth/AuthService"
+import Aurora from "@/components/Aurora"
 
 export default function LoginPage() {
   const router = useRouter()
@@ -39,7 +40,21 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-black via-gray-900 to-blue-900 px-4">
+    <div className="relative min-h-screen overflow-hidden">
+      {/* Aurora Background */}
+      <div className="fixed inset-0 -z-10 pointer-events-none select-none">
+        <Aurora
+          className="w-full h-full"
+          colorStops={['#3B82F6', '#1D4ED8', '#1E40AF']}
+          blend={0.4}
+          amplitude={1.0}
+          speed={0.6}
+        />
+        <div className="absolute inset-0 bg-black/20 pointer-events-none [mask-image:radial-gradient(ellipse_at_center,white,transparent_80%)]" />
+      </div>
+
+      {/* Content */}
+      <div className="relative z-10 min-h-screen bg-black/40 backdrop-blur-sm flex items-center justify-center px-4">
       <div className="max-w-md w-full bg-[#111827] p-8 rounded-lg shadow-lg border border-slate-700">
         <h2 className="text-2xl font-bold text-white mb-6 text-center">Sign in to Jarvis</h2>
 
@@ -75,6 +90,7 @@ export default function LoginPage() {
             Sign In
           </Button>
         </form>
+      </div>
       </div>
     </div>
   )
