@@ -28,6 +28,7 @@ import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import Link from "next/link"
 import SettingsModal from "@/components/SettingsModal"
+import Aurora from "@/components/Aurora"
 
 interface CodeFile {
   id: string
@@ -414,8 +415,22 @@ export default function VibeCodingPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-black via-gray-900 to-purple-900">
-      <div className="container mx-auto px-4 py-6">
+    <div className="relative min-h-screen overflow-hidden">
+      {/* Aurora Background */}
+      <div className="fixed inset-0 -z-10 pointer-events-none select-none">
+        <Aurora
+          className="w-full h-full"
+          colorStops={['#8B5CF6', '#F59E0B', '#EF4444']}
+          blend={0.4}
+          amplitude={1.0}
+          speed={0.6}
+        />
+        <div className="absolute inset-0 bg-black/20 pointer-events-none [mask-image:radial-gradient(ellipse_at_center,white,transparent_80%)]" />
+      </div>
+
+      {/* Content */}
+      <div className="relative z-10 min-h-screen bg-black/40 backdrop-blur-sm">
+        <div className="container mx-auto px-4 py-6">
         {/* Header */}
         <motion.div
           initial={{ opacity: 0, y: -20 }}
@@ -762,6 +777,7 @@ export default function VibeCodingPage() {
 
       {/* Settings Modal */}
       <SettingsModal isOpen={showSettings} onClose={() => setShowSettings(false)} context="agent" />
+      </div>
     </div>
   )
 }
