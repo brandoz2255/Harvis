@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react"
 import { motion, AnimatePresence } from "framer-motion"
-import { ImageIcon, Code, Brain, FileText, X, Clock, CheckCircle, AlertCircle } from "lucide-react"
+import { ImageIcon, Code, Brain, FileText, X, Clock, CheckCircle, AlertCircle, Cpu } from "lucide-react"
 import { Card } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -40,7 +40,7 @@ export default function MiscDisplay({ screenAnalysis }: MiscDisplayProps) {
       case "thought":
         return <Brain className="w-4 h-4" />
       case "reasoning":
-        return <Brain className="w-4 h-4" />
+        return <Cpu className="w-4 h-4" />  // Different icon for reasoning models
       case "analysis":
         return <FileText className="w-4 h-4" />
       case "error":
