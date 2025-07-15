@@ -73,7 +73,7 @@ export default function AIAgents() {
   useEffect(() => {
     const fetchAgents = async () => {
       try {
-        const response = await fetch("/api/ollama-models")
+        const response = await fetch("http://backend:8000/api/ollama-models", { credentials: 'include' })
         if (!response.ok) throw new Error("Failed to fetch agent data")
         const data = await response.json()
         const fetchedAgents: Agent[] = data.models?.map((model: any) => ({
@@ -153,6 +153,7 @@ export default function AIAgents() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ prompt: n8nPrompt }),
+        credentials: 'include',
       })
 
       if (!response.ok) {
@@ -234,6 +235,7 @@ export default function AIAgents() {
       const response = await fetch("/api/voice-transcribe", {
         method: "POST",
         body: formData,
+        credentials: 'include',
       })
 
       if (!response.ok) throw new Error("Network response was not ok")
