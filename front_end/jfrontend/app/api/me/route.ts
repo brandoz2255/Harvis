@@ -1,30 +1,42 @@
-import { NextRequest, NextResponse } from 'next/server';
-import jwt from 'jsonwebtoken';
-import { getDb } from '@/lib/db';
+import { NextRequest, NextResponse } from 'next/server'
 
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
+const BACKEND_URL = process.env.BACKEND_URL || 'http://backend:8000'
 
-export async function GET(req: NextRequest) {
-  const authHeader = req.headers.get('Authorization');
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return NextResponse.json({ message: 'Unauthorized' }, { status: 401 });
-  }
-
-  const token = authHeader.split(' ')[1];
-
+export async function GET(request: NextRequest) {
   try {
-    const decoded = jwt.verify(token, JWT_SECRET) as { userId: number };
-    const { rows } = await getDb().query('SELECT id, username, email, avatar FROM users WHERE id = $1', [decoded.userId]);
-
-    if (rows.length === 0) {
-      return NextResponse.json({ message: 'User not found' }, { status: 404 });
+    const authHeader = request.headers.get('authorization')
+    
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return NextResponse.json({ message: 'Unauthorized' }, { status: 401 })
     }
+    
+    console.log(`/api/me: Calling backend ${BACKEND_URL}/api/auth/me`)
+    const response = await fetch(`${BACKEND_URL}/api/auth/me`, {
+      method: 'GET',
+      headers: {
+        'Authorization': authHeader,
+      },
+    })
 
-    const user = rows[0];
-    return NextResponse.json({ id: user.id, name: user.username, email: user.email, avatar: user.avatar });
-
+    console.log(`/api/me: Backend response status: ${response.status}`)
+    if (!response.ok) {
+      const errorText = await response.text()
+      console.error('/api/me: Backend error:', response.status, errorText)
+      return NextResponse.json({ message: 'Authentication failed' }, { status: response.status })
+    }
+    
+    const userData = await response.json()
+    console.log('/api/me: Got user data:', userData)
+    
+    // Convert backend response format to frontend expected format
+    return NextResponse.json({
+      id: userData.id.toString(),
+      name: userData.username,  // Backend returns 'username', frontend expects 'name'
+      email: userData.email,
+      avatar: userData.avatar
+    })
   } catch (error) {
-    console.error('Error fetching user:', error);
-    return NextResponse.json({ message: 'Invalid token' }, { status: 401 });
+    console.error('/api/me: Error:', error)
+    return NextResponse.json({ message: 'Failed to fetch user data' }, { status: 500 })
   }
 }

@@ -5,6 +5,8 @@ import type React from "react"
 
 import { useState, useRef, useEffect, forwardRef, useImperativeHandle } from "react"
 import { motion, AnimatePresence } from "framer-motion"
+import ReactMarkdown from "react-markdown"
+import remarkGfm from "remark-gfm"
 import {
   Send,
   Mic,
@@ -29,6 +31,9 @@ import { Card } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { useAIOrchestrator } from "./AIOrchestrator"
 import { useAIInsights } from "@/hooks/useAIInsights"
+import ChatHistory from "./ChatHistory"
+import { useChatHistoryStore } from "@/stores/chatHistoryStore"
+import AuthStatus from "./AuthStatus"
 
 interface Message {
   role: "user" | "assistant"
@@ -43,6 +48,8 @@ interface Message {
 interface ChatResponse {
   history: Message[]
   audio_path?: string
+  reasoning?: string  // Reasoning content from reasoning models
+  final_answer?: string  // Final answer without reasoning
 }
 
 interface SearchResult {
@@ -57,6 +64,8 @@ interface ResearchChatResponse {
   audio_path?: string
   searchResults?: SearchResult[]
   searchQuery?: string
+  reasoning?: string  // Reasoning content from reasoning models
+  final_answer?: string  // Final answer without reasoning
 }
 
 
@@ -66,7 +75,15 @@ export interface ChatHandle {
 
 const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
   const { orchestrator, hardware, isDetecting, models, ollamaModels, ollamaConnected, ollamaError, refreshOllamaModels } = useAIOrchestrator()
+  
+  // Debug logging
+  console.log("🎯 UnifiedChatInterface render - ollamaModels:", ollamaModels, "ollamaConnected:", ollamaConnected, "ollamaError:", ollamaError)
   const { logUserInteraction, completeInsight, logReasoningProcess } = useAIInsights()
+  
+  // Chat history integration
+  const { currentSession, createSession, isHistoryVisible } = useChatHistoryStore()
+  const [sessionId, setSessionId] = useState<string | null>(null)
+  
   const [selectedModel, setSelectedModel] = useState("auto")
   const [priority, setPriority] = useState<"speed" | "accuracy" | "balanced">("balanced")
 
@@ -105,6 +122,8 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
       type: "ollama"
     })),
   ]
+  
+  console.log("🎯 availableModels array:", availableModels)
 
   // Expose method to add AI messages from external components
   useImperativeHandle(ref, () => ({
@@ -127,6 +146,77 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
   useEffect(() => {
     scrollToBottom()
   }, [messages])
+
+  // Create new session when chat starts
+  useEffect(() => {
+    if (messages.length === 1 && !sessionId) {
+      handleCreateSession()
+    }
+  }, [messages.length, sessionId])
+
+  // Update session ID when current session changes
+  useEffect(() => {
+    if (currentSession) {
+      setSessionId(currentSession.id)
+    }
+  }, [currentSession])
+
+  const handleCreateSession = async () => {
+    if (!sessionId) {
+      const newSession = await createSession('New Chat', selectedModel)
+      if (newSession) {
+        setSessionId(newSession.id)
+      }
+    }
+  }
+
+  const handleSessionSelect = (selectedSessionId: string) => {
+    setSessionId(selectedSessionId)
+    // Clear current messages to load the selected session
+    setMessages([])
+  }
+
+  const persistMessage = async (message: Message, reasoning?: string) => {
+    if (!sessionId) return
+
+    try {
+      const token = localStorage.getItem('token')
+      console.log('UnifiedChatInterface: Retrieved token:', token ? `${token.substring(0, 20)}...` : 'null')
+      
+      if (!token) {
+        console.error('UnifiedChatInterface: No token found')
+        return
+      }
+      
+      const response = await fetch('/api/chat-history/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          session_id: sessionId,
+          role: message.role,
+          content: message.content,
+          reasoning: reasoning,
+          model_used: message.model,
+          input_type: message.inputType || 'text',
+          metadata: {
+            timestamp: message.timestamp.toISOString(),
+            ...(message.searchResults && { searchResults: message.searchResults }),
+            ...(message.searchQuery && { searchQuery: message.searchQuery }),
+          },
+        }),
+        credentials: 'include',
+      })
+
+      if (!response.ok) {
+        console.error('Failed to persist message:', response.statusText)
+      }
+    } catch (error) {
+      console.error('Error persisting message:', error)
+    }
+  }
 
   const getOptimalModel = (message: string): string => {
     if (selectedModel !== "auto") {
@@ -186,6 +276,9 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
     if (inputType === "text") setInputValue("")
     setIsLoading(true)
 
+    // Persist user message
+    await persistMessage(userMessage)
+
     // Check if research mode is enabled and if the query seems to need web search
     const needsWebSearch =
       isResearchMode &&
@@ -221,6 +314,7 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
             "Content-Type": "application/json",
           },
           body: JSON.stringify(payload),
+          credentials: 'include',
         })
 
         if (!response.ok) throw new Error(await response.text())
@@ -241,10 +335,26 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
 
         setMessages(updatedHistory)
 
-        // Complete the insight with the AI response
-        const assistantResponse = data.history.find(msg => msg.role === "assistant")
-        if (assistantResponse) {
-          completeInsight(insightId, assistantResponse.content.substring(0, 100) + "...")
+        // Persist assistant message with reasoning if present
+        const assistantMessage = updatedHistory.find(msg => msg.role === "assistant" && msg.timestamp)
+        if (assistantMessage) {
+          await persistMessage(assistantMessage, data.reasoning)
+        }
+
+        // Handle reasoning content if present
+        if (data.reasoning) {
+          // Log the reasoning process in AI insights
+          const reasoningInsightId = logReasoningProcess(data.reasoning, optimalModel)
+          completeInsight(reasoningInsightId, "Reasoning process completed", "done")
+          
+          // Complete the original insight with the final answer
+          completeInsight(insightId, data.final_answer?.substring(0, 100) + "..." || "Response completed")
+        } else {
+          // Complete the insight with the AI response (no reasoning)
+          const assistantResponse = data.history.find(msg => msg.role === "assistant")
+          if (assistantResponse) {
+            completeInsight(insightId, assistantResponse.content.substring(0, 100) + "...")
+          }
         }
 
         // Update search results if available
@@ -303,6 +413,7 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
           model: selectedModel === "auto" ? "mistral" : selectedModel,
           maxResults: 5,
         }),
+        credentials: 'include',
       })
 
       if (response.ok) {
@@ -393,6 +504,7 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
         const response = await fetch("/api/mic-chat", {
           method: "POST",
           body: formData,
+          credentials: 'include',
         })
 
         if (!response.ok) throw new Error("Network response was not ok")
@@ -451,7 +563,12 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
   }
 
   return (
-    <Card className="bg-gray-900/50 backdrop-blur-sm border-blue-500/30 h-[700px] flex flex-col">
+    <>
+      <ChatHistory 
+        onSessionSelect={handleSessionSelect}
+        currentSessionId={sessionId || undefined}
+      />
+      <Card className="bg-gray-900/50 backdrop-blur-sm border-blue-500/30 h-[700px] flex flex-col">
       <div className="p-4 border-b border-blue-500/30">
         <div className="flex justify-between items-center mb-3">
           <div className="flex items-center space-x-3">
@@ -471,6 +588,9 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
             </Button>
           </div>
           <div className="flex items-center space-x-4">
+            {/* Authentication Status */}
+            <AuthStatus />
+            
             {/* Ollama Connection Status */}
             <div className="flex items-center space-x-2">
               <Badge 
@@ -637,37 +757,40 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
                   </div>
                   <span className="text-xs opacity-70">{message.timestamp.toLocaleTimeString()}</span>
                 </div>
-                <ReactMarkdown 
-                  className="text-sm prose prose-invert prose-sm max-w-none"
-                  remarkPlugins={[remarkGfm]}
-                  components={{
-                    p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
-                    ul: ({ children }) => <ul className="list-disc ml-4 mb-2">{children}</ul>,
-                    ol: ({ children }) => <ol className="list-decimal ml-4 mb-2">{children}</ol>,
-                    li: ({ children }) => <li className="mb-1">{children}</li>,
-                    strong: ({ children }) => <strong className="font-semibold text-white">{children}</strong>,
-                    em: ({ children }) => <em className="italic">{children}</em>,
-                    h1: ({ children }) => <h1 className="text-lg font-bold mb-2">{children}</h1>,
-                    h2: ({ children }) => <h2 className="text-md font-semibold mb-2">{children}</h2>,
-                    h3: ({ children }) => <h3 className="text-sm font-medium mb-1">{children}</h3>,
-                    blockquote: ({ children }) => (
-                      <blockquote className="border-l-4 border-gray-500 pl-4 italic mb-2">{children}</blockquote>
-                    ),
-                    code: ({ inline, children }) => 
-                      inline ? (
-                        <code className="bg-gray-600 px-1 py-0.5 rounded text-xs">{children}</code>
-                      ) : (
-                        <code className="block bg-gray-600 p-2 rounded text-xs overflow-x-auto">{children}</code>
+                <div className="text-sm prose prose-invert prose-sm max-w-none">
+                  <ReactMarkdown 
+                    remarkPlugins={[remarkGfm]}
+                    components={{
+                      p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
+                      ul: ({ children }) => <ul className="list-disc ml-4 mb-2">{children}</ul>,
+                      ol: ({ children }) => <ol className="list-decimal ml-4 mb-2">{children}</ol>,
+                      li: ({ children }) => <li className="mb-1">{children}</li>,
+                      strong: ({ children }) => <strong className="font-semibold text-white">{children}</strong>,
+                      em: ({ children }) => <em className="italic">{children}</em>,
+                      h1: ({ children }) => <h1 className="text-lg font-bold mb-2">{children}</h1>,
+                      h2: ({ children }) => <h2 className="text-md font-semibold mb-2">{children}</h2>,
+                      h3: ({ children }) => <h3 className="text-sm font-medium mb-1">{children}</h3>,
+                      blockquote: ({ children }) => (
+                        <blockquote className="border-l-4 border-gray-500 pl-4 italic mb-2">{children}</blockquote>
                       ),
-                    a: ({ href, children }) => (
-                      <a href={href} className="text-blue-400 hover:text-blue-300 underline" target="_blank" rel="noopener noreferrer">
-                        {children}
-                      </a>
-                    ),
-                  }}
-                >
-                  {message.content}
-                </ReactMarkdown>
+                      code: ({ children, ...props }) => {
+                        const isInline = !props.className;
+                        return isInline ? (
+                          <code className="bg-gray-600 px-1 py-0.5 rounded text-xs">{children}</code>
+                        ) : (
+                          <code className="block bg-gray-600 p-2 rounded text-xs overflow-x-auto">{children}</code>
+                        );
+                      },
+                      a: ({ href, children }) => (
+                        <a href={href} className="text-blue-400 hover:text-blue-300 underline" target="_blank" rel="noopener noreferrer">
+                          {children}
+                        </a>
+                      ),
+                    }}
+                  >
+                    {message.content}
+                  </ReactMarkdown>
+                </div>
 
                 {/* Search Results Display */}
                 {message.searchResults && message.searchResults.length > 0 && (
@@ -821,6 +944,7 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
         )}
       </div>
     </Card>
+    </>
   )
 })
 

@@ -2,9 +2,9 @@ fastapi
 uvicorn
 python-multipart
 asyncpg
-passlib
+passlib[bcrypt]==1.7.4
 python-jose[cryptography]==3.3.0
-bcrypt
+bcrypt==4.0.1
 requests
 torch
 soundfile
