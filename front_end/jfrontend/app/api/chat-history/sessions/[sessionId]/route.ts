@@ -27,14 +27,13 @@ export async function GET(
     }
 
     // Use the token directly from the backend login response
-    const backendAuth = authorization
     console.log(`🔗 Proxying GET session messages for ${params.sessionId}`)
     
     const response = await fetch(`${BACKEND_URL}/api/chat-history/sessions/${params.sessionId}?limit=${limit}&offset=${offset}`, {
       method: 'GET',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': backendAuth,
+        'Authorization': authorization,
       },
       signal: AbortSignal.timeout(10000),
     })
@@ -78,7 +77,7 @@ export async function DELETE(
       method: 'DELETE',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': backendAuth,
+        'Authorization': authorization,
       },
       signal: AbortSignal.timeout(10000),
     })

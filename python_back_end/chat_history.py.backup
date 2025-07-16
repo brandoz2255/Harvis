@@ -9,6 +9,7 @@ import logging
 from datetime import datetime
 from typing import List, Dict, Optional, Any, Tuple
 from pydantic import BaseModel
+from uuid import UUID
 import json
 
 logger = logging.getLogger(__name__)
@@ -17,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 class ChatMessage(BaseModel):
     id: Optional[int] = None
-    session_id: str
+    session_id: UUID
     user_id: int
     role: str  # 'user', 'assistant', 'system'
     content: str
@@ -28,7 +29,7 @@ class ChatMessage(BaseModel):
     created_at: Optional[datetime] = None
 
 class ChatSession(BaseModel):
-    id: str
+    id: UUID
     user_id: int
     title: str
     created_at: datetime
@@ -39,13 +40,21 @@ class ChatSession(BaseModel):
     is_active: bool = True
 
 class CreateSessionRequest(BaseModel):
-    user_id: int
     title: Optional[str] = "New Chat"
     model_used: Optional[str] = None
 
+class CreateMessageRequest(BaseModel):
+    session_id: UUID
+    role: str  # 'user', 'assistant', 'system'
+    content: str
+    reasoning: Optional[str] = None
+    model_used: Optional[str] = None
+    input_type: str = 'text'  # 'text', 'voice', 'screen'
+    metadata: Dict[str, Any] = {}
+
 class MessageHistoryResponse(BaseModel):
     messages: List[ChatMessage]
-    session: ChatSession
+    session: Optional[ChatSession]
     total_count: int
 
 # ─── Chat History Manager Class ────────────────────────────────────────────────
@@ -70,7 +79,7 @@ class ChatHistoryManager:
         try:
             conn = await self.get_db_connection()
             try:
-                session_id = str(uuid.uuid4())
+                session_id = uuid.uuid4()
                 
                 row = await conn.fetchrow("""
                     INSERT INTO chat_sessions (id, user_id, title, model_used)
@@ -88,7 +97,7 @@ class ChatHistoryManager:
             logger.error(f"Error creating chat session: {e}")
             raise
     
-    async def get_session(self, session_id: str, user_id: int) -> Optional[ChatSession]:
+    async def get_session(self, session_id: UUID, user_id: int) -> Optional[ChatSession]:
         """Get a specific chat session"""
         try:
             conn = await self.get_db_connection()
@@ -132,7 +141,7 @@ class ChatHistoryManager:
             logger.error(f"Error getting user sessions for user {user_id}: {e}")
             raise
     
-    async def update_session_title(self, session_id: str, user_id: int, title: str) -> bool:
+    async def update_session_title(self, session_id: UUID, user_id: int, title: str) -> bool:
         """Update session title"""
         try:
             conn = await self.get_db_connection()
@@ -152,7 +161,7 @@ class ChatHistoryManager:
             logger.error(f"Error updating session title: {e}")
             raise
     
-    async def delete_session(self, session_id: str, user_id: int) -> bool:
+    async def delete_session(self, session_id: UUID, user_id: int) -> bool:
         """Soft delete a chat session"""
         try:
             conn = await self.get_db_connection()
@@ -194,7 +203,17 @@ class ChatHistoryManager:
                 """, message.session_id, message.user_id, message.role, message.content, 
                      message.reasoning, message.model_used, message.input_type, json.dumps(message.metadata))
                 
-                result = ChatMessage(**dict(row))
+                # Handle metadata conversion from string back to dict
+                row_dict = dict(row)
+                if isinstance(row_dict.get('metadata'), str):
+                    try:
+                        row_dict['metadata'] = json.loads(row_dict['metadata'])
+                    except (json.JSONDecodeError, TypeError):
+                        row_dict['metadata'] = {}
+                elif row_dict.get('metadata') is None:
+                    row_dict['metadata'] = {}
+                
+                result = ChatMessage(**row_dict)
                 logger.info(f"Added {message.role} message to session {message.session_id}")
                 return result
                 
@@ -222,7 +241,17 @@ class ChatHistoryManager:
                         """, message.session_id, message.user_id, message.role, message.content,
                              message.reasoning, message.model_used, message.input_type, json.dumps(message.metadata))
                         
-                        results.append(ChatMessage(**dict(row)))
+                        # Handle metadata conversion from string back to dict
+                        row_dict = dict(row)
+                        if isinstance(row_dict.get('metadata'), str):
+                            try:
+                                row_dict['metadata'] = json.loads(row_dict['metadata'])
+                            except (json.JSONDecodeError, TypeError):
+                                row_dict['metadata'] = {}
+                        elif row_dict.get('metadata') is None:
+                            row_dict['metadata'] = {}
+                        
+                        results.append(ChatMessage(**row_dict))
                     
                     logger.info(f"Added batch of {len(messages)} messages")
                     return results
@@ -234,7 +263,31 @@ class ChatHistoryManager:
             logger.error(f"Error adding message batch: {e}")
             raise
     
-    async def get_session_messages(self, session_id: str, user_id: int, limit: int = 100, offset: int = 0) -> MessageHistoryResponse:
+    async def get_or_create_session(self, session_id: UUID, user_id: int, title: str = "New Chat") -> ChatSession:
+        """Get session or create it if it doesn't exist"""
+        try:
+            session = await self.get_session(session_id, user_id)
+            if session:
+                return session
+            else:
+                # Create new session with the specified ID
+                conn = await self.get_db_connection()
+                try:
+                    row = await conn.fetchrow("""
+                        INSERT INTO chat_sessions (id, user_id, title)
+                        VALUES ($1, $2, $3)
+                        RETURNING id, user_id, title, created_at, updated_at, last_message_at, message_count, model_used, is_active
+                    """, session_id, user_id, title)
+                    
+                    logger.info(f"Created new chat session {session_id} for user {user_id}")
+                    return ChatSession(**dict(row))
+                finally:
+                    await conn.close()
+        except Exception as e:
+            logger.error(f"Error getting or creating session: {e}")
+            raise
+
+    async def get_session_messages(self, session_id: UUID, user_id: int, limit: int = 100, offset: int = 0) -> MessageHistoryResponse:
         """Get messages for a specific session"""
         try:
             conn = await self.get_db_connection()
@@ -247,7 +300,13 @@ class ChatHistoryManager:
                 """, session_id, user_id)
                 
                 if not session_row:
-                    raise ValueError(f"Session {session_id} not found for user {user_id}")
+                    # Return empty response for non-existent sessions
+                    logger.warning(f"Session {session_id} not found for user {user_id}, returning empty response")
+                    return MessageHistoryResponse(
+                        messages=[],
+                        session=None,
+                        total_count=0
+                    )
                 
                 session = ChatSession(**dict(session_row))
                 
@@ -260,7 +319,18 @@ class ChatHistoryManager:
                     LIMIT $3 OFFSET $4
                 """, session_id, user_id, limit, offset)
                 
-                messages = [ChatMessage(**dict(row)) for row in message_rows]
+                messages = []
+                for row in message_rows:
+                    row_dict = dict(row)
+                    # Ensure metadata is a dict, not a string
+                    if isinstance(row_dict.get('metadata'), str):
+                        try:
+                            row_dict['metadata'] = json.loads(row_dict['metadata'])
+                        except (json.JSONDecodeError, TypeError):
+                            row_dict['metadata'] = {}
+                    elif row_dict.get('metadata') is None:
+                        row_dict['metadata'] = {}
+                    messages.append(ChatMessage(**row_dict))
                 
                 # Get total count
                 total_count = await conn.fetchval("""
@@ -281,7 +351,7 @@ class ChatHistoryManager:
             logger.error(f"Error getting session messages: {e}")
             raise
     
-    async def get_recent_messages(self, session_id: str, user_id: int, count: int = 10) -> List[ChatMessage]:
+    async def get_recent_messages(self, session_id: UUID, user_id: int, count: int = 10) -> List[ChatMessage]:
         """Get most recent messages for context"""
         try:
             conn = await self.get_db_connection()
@@ -338,7 +408,7 @@ class ChatHistoryManager:
     
     # ─── Utility Methods ────────────────────────────────────────────────────────
     
-    async def clear_session_messages(self, session_id: str, user_id: int) -> int:
+    async def clear_session_messages(self, session_id: UUID, user_id: int) -> int:
         """Clear all messages from a session"""
         try:
             conn = await self.get_db_connection()
@@ -408,7 +478,7 @@ class ChatHistoryManager:
             })
         return formatted
     
-    def create_message_from_chat_response(self, session_id: str, user_id: int, role: str, 
+    def create_message_from_chat_response(self, session_id: UUID, user_id: int, role: str, 
                                         content: str, reasoning: Optional[str] = None,
                                         model_used: Optional[str] = None, 
                                         input_type: str = 'text',
