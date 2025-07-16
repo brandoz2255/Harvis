@@ -3,7 +3,7 @@
 
 import type React from "react"
 
-import { useState, useRef, useEffect, forwardRef, useImperativeHandle } from "react"
+import { useState, useRef, useEffect, forwardRef, useImperativeHandle, useMemo } from "react"
 import { motion, AnimatePresence } from "framer-motion"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
@@ -76,8 +76,6 @@ export interface ChatHandle {
 const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
   const { orchestrator, hardware, isDetecting, models, ollamaModels, ollamaConnected, ollamaError, refreshOllamaModels } = useAIOrchestrator()
   
-  // Debug logging
-  console.log("🎯 UnifiedChatInterface render - ollamaModels:", ollamaModels, "ollamaConnected:", ollamaConnected, "ollamaError:", ollamaError)
   const { logUserInteraction, completeInsight, logReasoningProcess } = useAIInsights()
   
   // Chat history integration
@@ -107,7 +105,7 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const audioChunksRef = useRef<Blob[]>([])
 
-  const availableModels = [
+  const availableModels = useMemo(() => [
     { value: "auto", label: "🤖 Auto-Select", type: "auto" },
     // Built-in models
     ...orchestrator.getAllModels().map((model) => ({
@@ -121,9 +119,7 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
       label: `🦙 ${modelName}`,
       type: "ollama"
     })),
-  ]
-  
-  console.log("🎯 availableModels array:", availableModels)
+  ], [orchestrator, ollamaModels])
 
   // Expose method to add AI messages from external components
   useImperativeHandle(ref, () => ({
@@ -147,19 +143,19 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
     scrollToBottom()
   }, [messages])
 
-  // Create new session when chat starts
+  // Sync sessionId with current session from store
   useEffect(() => {
-    if (messages.length === 1 && !sessionId) {
-      handleCreateSession()
-    }
-  }, [messages.length, sessionId])
-
-  // Update session ID when current session changes
-  useEffect(() => {
-    if (currentSession) {
+    if (currentSession?.id && currentSession.id !== sessionId) {
       setSessionId(currentSession.id)
     }
-  }, [currentSession])
+  }, [currentSession?.id, sessionId])
+
+  // Create new session when first message is sent and no session exists
+  useEffect(() => {
+    if (messages.length === 1 && !sessionId && !currentSession) {
+      handleCreateSession()
+    }
+  }, [messages.length, sessionId, currentSession])
 
   const handleCreateSession = async () => {
     if (!sessionId) {
@@ -172,8 +168,7 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
 
   const handleSessionSelect = (selectedSessionId: string) => {
     setSessionId(selectedSessionId)
-    // Clear current messages to load the selected session
-    setMessages([])
+    // Note: Don't clear messages here - let the store handle message loading
   }
 
   const persistMessage = async (message: Message, reasoning?: string) => {

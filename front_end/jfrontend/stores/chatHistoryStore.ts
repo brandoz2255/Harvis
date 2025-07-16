@@ -58,7 +58,7 @@ interface ChatHistoryState {
   setCurrentSession: (session: ChatSession | null) => void
 }
 
-const getAuthHeaders = () => {
+const getAuthHeaders = (): Record<string, string> => {
   const token = localStorage.getItem('token')
   return token ? { 'Authorization': `Bearer ${token}` } : {}
 }
@@ -129,9 +129,15 @@ export const useChatHistoryStore = create<ChatHistoryState>((set, get) => ({
   
   selectSession: async (sessionId: string) => {
     const session = get().sessions.find(s => s.id === sessionId)
-    if (session) {
+    const currentSession = get().currentSession
+    
+    // Prevent reselecting the same session
+    if (session && session.id !== currentSession?.id) {
       set({ currentSession: session })
-      await get().fetchSessionMessages(sessionId)
+      // Only fetch messages if we're not already loading them
+      if (!get().isLoadingMessages) {
+        await get().fetchSessionMessages(sessionId)
+      }
     }
   },
   
@@ -189,24 +195,38 @@ export const useChatHistoryStore = create<ChatHistoryState>((set, get) => ({
   
   // Message actions
   fetchSessionMessages: async (sessionId: string) => {
+    const currentState = get()
+    
+    // Prevent fetching if already loading for the same session
+    if (currentState.isLoadingMessages && currentState.currentSession?.id === sessionId) {
+      return
+    }
+    
     set({ isLoadingMessages: true })
     try {
+      const authHeaders = getAuthHeaders()
       const response = await fetch(`/api/chat-history/sessions/${sessionId}`, {
         headers: {
           'Content-Type': 'application/json',
-          ...getAuthHeaders(),
+          ...(authHeaders.Authorization ? { 'Authorization': authHeaders.Authorization } : {}),
         },
       })
       
       if (response.ok) {
         const data: MessageHistoryResponse = await response.json()
         set({ 
-          messages: data.messages,
+          messages: data.messages || [],
           isLoadingMessages: false,
         })
+        
+        // Log for debugging
+        console.log(`📨 Fetched ${data.messages?.length || 0} messages for session ${sessionId}`)
       } else {
         console.error('Failed to fetch messages:', response.statusText)
-        set({ isLoadingMessages: false })
+        set({ 
+          messages: [],
+          isLoadingMessages: false 
+        })
       }
     } catch (error) {
       console.error('Error fetching messages:', error)
