@@ -111,7 +111,12 @@ from model_manager import (
     unload_models, unload_all_models, reload_models_if_needed, log_gpu_memory,
     get_tts_model, get_whisper_model, generate_speech, wait_for_vram
 )
-from chat_history import ChatHistoryManager, ChatMessage, ChatSession, CreateSessionRequest, MessageHistoryResponse
+from chat_history_module import (
+    ChatHistoryManager, ChatMessage, ChatSession, CreateSessionRequest, 
+    CreateMessageRequest, MessageHistoryResponse, SessionListResponse,
+    SessionNotFoundError, ChatHistoryError
+)
+from uuid import UUID
 import logging
 import time
 
@@ -165,8 +170,27 @@ if os.path.exists(FRONTEND_DIR):
     app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
     logger.info("Frontend directory mounted at %s", FRONTEND_DIR)
 
-# ─── Chat History Manager Init ─────────────────────────────────────────────────
-chat_history_manager = ChatHistoryManager(DATABASE_URL)
+# ─── Database Pool and Chat History Manager Init ─────────────────────────────────────────────────
+db_pool = None
+chat_history_manager = None
+
+@app.on_event("startup")
+async def startup_event():
+    global db_pool, chat_history_manager
+    try:
+        db_pool = await asyncpg.create_pool(DATABASE_URL)
+        chat_history_manager = ChatHistoryManager(db_pool)
+        logger.info("Database pool and chat history manager initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize database pool: {e}")
+        raise
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    global db_pool
+    if db_pool:
+        await db_pool.close()
+        logger.info("Database pool closed")
 logger.info("Chat history manager initialized")
 
 # ─── Device & models -----------------------------------------------------------
@@ -333,12 +357,12 @@ async def get_user_chat_sessions(
 ):
     """Get all chat sessions for the current user"""
     try:
-        sessions = await chat_history_manager.get_user_sessions(
+        sessions_response = await chat_history_manager.get_user_sessions(
             user_id=current_user.id,
             limit=limit,
             offset=offset
         )
-        return sessions
+        return sessions_response.sessions
     except Exception as e:
         logger.error(f"Error getting user sessions: {e}")
         raise HTTPException(status_code=500, detail="Failed to get chat sessions")
@@ -352,15 +376,24 @@ async def get_session_messages(
 ):
     """Get messages for a specific chat session"""
     try:
+        # Convert string session_id to UUID
+        session_uuid = UUID(session_id)
+        logger.info(f"Getting messages for session {session_uuid}, user {current_user.id}")
         response = await chat_history_manager.get_session_messages(
-            session_id=session_id,
+            session_id=session_uuid,
             user_id=current_user.id,
             limit=limit,
             offset=offset
         )
+        logger.info(f"Retrieved {len(response.messages)} messages for session {session_uuid}")
+        
+        # Return 404 if session doesn't exist
+        if response.session is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
         return response
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting session messages: {e}")
         raise HTTPException(status_code=500, detail="Failed to get session messages")
@@ -376,8 +409,10 @@ async def update_session_title(
 ):
     """Update chat session title"""
     try:
+        # Convert string session_id to UUID
+        session_uuid = UUID(session_id)
         success = await chat_history_manager.update_session_title(
-            session_id=session_id,
+            session_id=session_uuid,
             user_id=current_user.id,
             title=request.title
         )
@@ -397,8 +432,10 @@ async def delete_chat_session(
 ):
     """Delete a chat session"""
     try:
+        # Convert string session_id to UUID
+        session_uuid = UUID(session_id)
         success = await chat_history_manager.delete_session(
-            session_id=session_id,
+            session_id=session_uuid,
             user_id=current_user.id
         )
         if not success:
@@ -417,8 +454,10 @@ async def clear_session_messages(
 ):
     """Clear all messages from a chat session"""
     try:
+        # Convert string session_id to UUID
+        session_uuid = UUID(session_id)
         deleted_count = await chat_history_manager.clear_session_messages(
-            session_id=session_id,
+            session_id=session_uuid,
             user_id=current_user.id
         )
         return {"success": True, "message": f"Deleted {deleted_count} messages"}
@@ -460,21 +499,27 @@ async def get_user_chat_stats(
 
 @app.post("/api/chat-history/messages", response_model=ChatMessage, tags=["chat-history"])
 async def add_message_to_session(
-    message: ChatMessage,
+    message_request: CreateMessageRequest,
     current_user: UserResponse = Depends(get_current_user)
 ):
     """Add a message to a chat session"""
     try:
         # Verify the user owns the session
-        session = await chat_history_manager.get_session(message.session_id, current_user.id)
+        session = await chat_history_manager.get_session(message_request.session_id, current_user.id)
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
         
-        # Set the user_id from the authenticated user
-        message.user_id = current_user.id
-        
-        # Add the message
-        added_message = await chat_history_manager.add_message(message)
+        # Add the message using the new manager API
+        added_message = await chat_history_manager.add_message(
+            user_id=current_user.id,
+            session_id=message_request.session_id,
+            role=message_request.role,
+            content=message_request.content,
+            reasoning=message_request.reasoning,
+            model_used=message_request.model_used,
+            input_type=message_request.input_type,
+            metadata=message_request.metadata
+        )
         return added_message
     except HTTPException:
         raise
@@ -671,27 +716,25 @@ async def chat(req: ChatRequest, request: Request, current_user: UserResponse = 
                     session_id = session.id
                 
                 # Save user message
-                user_message = chat_history_manager.create_message_from_chat_response(
-                    session_id=session_id,
+                await chat_history_manager.add_message(
                     user_id=current_user.id,
+                    session_id=session_id,
                     role="user",
                     content=req.message,
                     model_used=req.model,
                     input_type="text"
                 )
-                await chat_history_manager.add_message(user_message)
                 
                 # Save assistant message
-                assistant_message = chat_history_manager.create_message_from_chat_response(
-                    session_id=session_id,
+                await chat_history_manager.add_message(
                     user_id=current_user.id,
+                    session_id=session_id,
                     role="assistant",
                     content=final_answer,
                     reasoning=reasoning_content if reasoning_content else None,
                     model_used=req.model,
                     input_type="text"
                 )
-                await chat_history_manager.add_message(assistant_message)
                 
                 logger.info(f"💾 Saved chat messages to session {session_id}")
                 
@@ -709,26 +752,24 @@ async def chat(req: ChatRequest, request: Request, current_user: UserResponse = 
                 session_id = session.id
                 
                 # Save messages to new session
-                user_message = chat_history_manager.create_message_from_chat_response(
-                    session_id=session_id,
+                await chat_history_manager.add_message(
                     user_id=current_user.id,
+                    session_id=session_id,
                     role="user",
                     content=req.message,
                     model_used=req.model,
                     input_type="text"
                 )
-                await chat_history_manager.add_message(user_message)
                 
-                assistant_message = chat_history_manager.create_message_from_chat_response(
-                    session_id=session_id,
+                await chat_history_manager.add_message(
                     user_id=current_user.id,
+                    session_id=session_id,
                     role="assistant",
                     content=final_answer,
                     reasoning=reasoning_content if reasoning_content else None,
                     model_used=req.model,
                     input_type="text"
                 )
-                await chat_history_manager.add_message(assistant_message)
                 
                 logger.info(f"💾 Created new session {session_id} and saved messages")
                 
@@ -1017,7 +1058,7 @@ async def analyze_screen_with_tts(req: ScreenAnalysisWithTTSRequest):
 # Whisper model will be loaded on demand
 
 @app.post("/api/mic-chat", tags=["voice"])
-async def mic_chat(file: UploadFile = File(...)):
+async def mic_chat(file: UploadFile = File(...), current_user: UserResponse = Depends(get_current_user)):
     try:
         # Ensure Whisper model is loaded
         reload_models_if_needed()
@@ -1038,7 +1079,7 @@ async def mic_chat(file: UploadFile = File(...)):
 
         # Now use existing chat logic
         chat_req = ChatRequest(message=message)
-        return await chat(chat_req, request=None)
+        return await chat(chat_req, request=None, current_user=current_user)
 
     except Exception as e:
         logger.exception("Mic chat failed")
