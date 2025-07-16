@@ -124,6 +124,13 @@ import time
 sys.path.append(os.path.join(os.path.dirname(__file__), 'ollama_cli'))
 from vibe_agent import VibeAgent
 
+# ─── n8n Automation Setup ─────────────────────────────────────────────────────
+from n8n import N8nClient, WorkflowBuilder, N8nAutomationService, N8nStorage
+from n8n.models import (
+    CreateWorkflowRequest, N8nAutomationRequest, WorkflowExecutionRequest,
+    WorkflowResponse
+)
+
 # ─── Set up logging ─────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -136,6 +143,36 @@ try:
 except Exception as e:
     logger.error(f"❌ Failed to initialize VibeAgent: {e}")
     vibe_agent = None
+
+# ─── Initialize n8n services ──────────────────────────────────────────────────
+n8n_client = None
+n8n_automation_service = None
+n8n_storage = None
+
+def initialize_n8n_services():
+    """Initialize n8n services with database pool"""
+    global n8n_client, n8n_automation_service, n8n_storage
+    try:
+        # Initialize n8n client
+        n8n_client = N8nClient()
+        
+        # Initialize workflow builder
+        workflow_builder = WorkflowBuilder()
+        
+        # Initialize storage (will be properly set up in startup event)
+        n8n_storage = None  # Will be set in startup event with db_pool
+        
+        # Initialize automation service (will be properly set up in startup event)
+        n8n_automation_service = None  # Will be set in startup event
+        
+        logger.info("✅ n8n services initialized successfully")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize n8n services: {e}")
+        return False
+
+# Try to initialize n8n services (will be completed in startup event)
+initialize_n8n_services()
 
 # ─── Additional logging setup ──────────────────────────────────────────────────
 if 'logger' not in locals():
@@ -176,13 +213,28 @@ chat_history_manager = None
 
 @app.on_event("startup")
 async def startup_event():
-    global db_pool, chat_history_manager
+    global db_pool, chat_history_manager, n8n_storage, n8n_automation_service
     try:
         db_pool = await asyncpg.create_pool(DATABASE_URL)
         chat_history_manager = ChatHistoryManager(db_pool)
-        logger.info("Database pool and chat history manager initialized successfully")
+        
+        # Initialize n8n services with database pool
+        if n8n_client:
+            n8n_storage = N8nStorage(db_pool)
+            await n8n_storage.ensure_tables()
+            
+            workflow_builder = WorkflowBuilder()
+            n8n_automation_service = N8nAutomationService(
+                n8n_client=n8n_client,
+                workflow_builder=workflow_builder,
+                storage=n8n_storage,
+                ollama_url=OLLAMA_URL
+            )
+            logger.info("✅ n8n automation service fully initialized")
+        
+        logger.info("Database pool and all services initialized successfully")
     except Exception as e:
-        logger.error(f"Failed to initialize database pool: {e}")
+        logger.error(f"Failed to initialize services: {e}")
         raise
 
 @app.on_event("shutdown")
@@ -1370,6 +1422,256 @@ async def synthesize_speech(req: SynthesizeSpeechRequest):
     except Exception as e:
         logger.exception("TTS synthesis endpoint crashed")
         raise HTTPException(500, str(e)) from e
+
+# ─── n8n Automation Endpoints ─────────────────────────────────────────────────
+
+@app.post("/api/n8n/automate", tags=["n8n-automation"])
+async def create_n8n_automation(
+    request: N8nAutomationRequest,
+    current_user: UserResponse = Depends(get_current_user)
+):
+    """
+    Create n8n workflow from natural language prompt using AI
+    
+    This endpoint allows users to describe automation workflows in natural language
+    and automatically generates corresponding n8n workflows.
+    """
+    if not n8n_automation_service:
+        raise HTTPException(status_code=503, detail="n8n automation service not available")
+    
+    try:
+        logger.info(f"n8n automation request from user {current_user.username}: {request.prompt[:100]}...")
+        
+        result = await n8n_automation_service.process_automation_request(
+            request, user_id=current_user.id
+        )
+        
+        if result.get("success"):
+            logger.info(f"✅ n8n automation successful: {result['workflow']['name']}")
+            return {
+                "success": True,
+                "message": f"Created workflow: {result['workflow']['name']}",
+                "workflow": result["workflow"],
+                "analysis": result.get("analysis", {}),
+                "execution_time": result.get("execution_time", 0)
+            }
+        else:
+            logger.warning(f"❌ n8n automation failed: {result.get('error', 'Unknown error')}")
+            return {
+                "success": False,
+                "error": result.get("error", "Unknown error"),
+                "suggestions": result.get("suggestions", [])
+            }
+    
+    except Exception as e:
+        logger.error(f"n8n automation endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/n8n/workflow", tags=["n8n-automation"])
+async def create_simple_workflow(
+    request: CreateWorkflowRequest,
+    current_user: UserResponse = Depends(get_current_user)
+):
+    """
+    Create simple n8n workflow from template
+    
+    Creates workflows using predefined templates with specific parameters.
+    """
+    if not n8n_automation_service:
+        raise HTTPException(status_code=503, detail="n8n automation service not available")
+    
+    try:
+        logger.info(f"Creating simple n8n workflow '{request.name}' for user {current_user.username}")
+        
+        result = await n8n_automation_service.create_simple_workflow(
+            request, user_id=current_user.id
+        )
+        
+        if result.get("success"):
+            return {
+                "success": True,
+                "message": f"Created workflow: {request.name}",
+                "workflow": result["workflow"]
+            }
+        else:
+            return {
+                "success": False,
+                "error": result.get("error", "Unknown error")
+            }
+    
+    except Exception as e:
+        logger.error(f"Simple workflow creation error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/n8n/workflows", tags=["n8n-automation"])
+async def list_user_n8n_workflows(
+    current_user: UserResponse = Depends(get_current_user)
+):
+    """
+    List all n8n workflows created by the current user
+    """
+    if not n8n_automation_service:
+        raise HTTPException(status_code=503, detail="n8n automation service not available")
+    
+    try:
+        workflows = await n8n_automation_service.list_user_workflows(current_user.id)
+        return {
+            "success": True,
+            "workflows": workflows,
+            "count": len(workflows)
+        }
+    
+    except Exception as e:
+        logger.error(f"Failed to list user workflows: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/n8n/templates", tags=["n8n-automation"])
+async def list_workflow_templates():
+    """
+    List available n8n workflow templates
+    """
+    try:
+        if not n8n_automation_service:
+            # Return basic template info even if service not available
+            from n8n.workflow_builder import WorkflowBuilder
+            builder = WorkflowBuilder()
+            templates = builder.list_templates()
+        else:
+            templates = n8n_automation_service.workflow_builder.list_templates()
+        
+        return {
+            "success": True,
+            "templates": templates,
+            "count": len(templates)
+        }
+    
+    except Exception as e:
+        logger.error(f"Failed to list templates: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/n8n/workflow/{workflow_id}/execute", tags=["n8n-automation"])
+async def execute_n8n_workflow(
+    workflow_id: str,
+    request: WorkflowExecutionRequest,
+    current_user: UserResponse = Depends(get_current_user)
+):
+    """
+    Execute an n8n workflow manually
+    """
+    if not n8n_client:
+        raise HTTPException(status_code=503, detail="n8n client not available")
+    
+    try:
+        logger.info(f"Executing n8n workflow {workflow_id} for user {current_user.username}")
+        
+        # Verify user owns workflow
+        if n8n_storage:
+            workflow_record = await n8n_storage.get_workflow(workflow_id, current_user.id)
+            if not workflow_record:
+                raise HTTPException(status_code=404, detail="Workflow not found")
+        
+        # Execute workflow
+        result = n8n_client.execute_workflow(workflow_id, request.input_data)
+        
+        return {
+            "success": True,
+            "execution_id": result.get("id"),
+            "message": "Workflow execution started",
+            "result": result
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Workflow execution error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/n8n/workflow/{workflow_id}/executions", tags=["n8n-automation"])
+async def get_workflow_executions(
+    workflow_id: str,
+    limit: int = 20,
+    current_user: UserResponse = Depends(get_current_user)
+):
+    """
+    Get execution history for a workflow
+    """
+    if not n8n_client:
+        raise HTTPException(status_code=503, detail="n8n client not available")
+    
+    try:
+        # Verify user owns workflow
+        if n8n_storage:
+            workflow_record = await n8n_storage.get_workflow(workflow_id, current_user.id)
+            if not workflow_record:
+                raise HTTPException(status_code=404, detail="Workflow not found")
+        
+        executions = n8n_client.get_executions(workflow_id, limit)
+        
+        return {
+            "success": True,
+            "executions": executions,
+            "count": len(executions)
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get executions: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/n8n/history", tags=["n8n-automation"])
+async def get_automation_history(
+    current_user: UserResponse = Depends(get_current_user)
+):
+    """
+    Get automation request history for the current user
+    """
+    if not n8n_automation_service:
+        raise HTTPException(status_code=503, detail="n8n automation service not available")
+    
+    try:
+        history = await n8n_automation_service.get_automation_history(current_user.id)
+        return {
+            "success": True,
+            "history": history,
+            "count": len(history)
+        }
+    
+    except Exception as e:
+        logger.error(f"Failed to get automation history: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/n8n/health", tags=["n8n-automation"])
+async def check_n8n_health():
+    """
+    Check n8n automation service health
+    """
+    try:
+        if not n8n_automation_service:
+            return {
+                "status": "service_unavailable",
+                "n8n_connected": False,
+                "ai_service": False,
+                "database_connected": False,
+                "overall_health": False
+            }
+        
+        health = await n8n_automation_service.test_connection()
+        return {
+            "status": "healthy" if health.get("overall_health") else "unhealthy",
+            **health
+        }
+    
+    except Exception as e:
+        logger.error(f"Health check error: {e}")
+        return {
+            "status": "error",
+            "error": str(e),
+            "n8n_connected": False,
+            "ai_service": False,
+            "database_connected": False,
+            "overall_health": False
+        }
 
 # ─── Vibe Coding Endpoints ─────────────────────────────────────────────────────
 
