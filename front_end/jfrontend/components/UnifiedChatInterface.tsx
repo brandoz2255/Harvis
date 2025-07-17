@@ -3,7 +3,7 @@
 
 import type React from "react"
 
-import { useState, useRef, useEffect, forwardRef, useImperativeHandle, useMemo } from "react"
+import { useState, useRef, useEffect, forwardRef, useImperativeHandle, useMemo, useCallback } from "react"
 import { motion, AnimatePresence } from "framer-motion"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
@@ -150,21 +150,21 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
     }
   }, [currentSession?.id, sessionId])
 
-  // Create new session when first message is sent and no session exists
-  useEffect(() => {
-    if (messages.length === 1 && !sessionId && !currentSession) {
-      handleCreateSession()
-    }
-  }, [messages.length, sessionId, currentSession])
-
-  const handleCreateSession = async () => {
+  const handleCreateSession = useCallback(async () => {
     if (!sessionId) {
       const newSession = await createSession('New Chat', selectedModel)
       if (newSession) {
         setSessionId(newSession.id)
       }
     }
-  }
+  }, [sessionId, selectedModel, createSession])
+
+  // Create new session when first message is sent and no session exists
+  useEffect(() => {
+    if (messages.length === 1 && !sessionId && !currentSession) {
+      handleCreateSession()
+    }
+  }, [messages.length, sessionId, currentSession, handleCreateSession])
 
   const handleSessionSelect = (selectedSessionId: string) => {
     setSessionId(selectedSessionId)
