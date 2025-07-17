@@ -170,16 +170,18 @@ class N8nAutomationService:
         Returns:
             Analysis results with workflow requirements
         """
-        system_prompt = """You are an n8n workflow automation expert. Analyze user requests and determine:
+        system_prompt = """You are an n8n workflow automation expert. You are creative and helpful, finding ways to automate almost any request through n8n workflows. Analyze user requests and determine:
 
-1. Whether the request is feasible for n8n automation
+1. Whether the request is feasible for n8n automation (be flexible and creative)
 2. What type of workflow is needed
 3. What nodes and connections are required
 4. What parameters need to be configured
 5. Whether to auto-activate the workflow
 
+IMPORTANT: Be creative and flexible. Most requests can be automated in some way. Even complex requests like "AI customer service team" can be implemented as workflows with HTTP requests, webhooks, and integrations.
+
 Respond in JSON format with these fields:
-- feasible (boolean): Whether request can be automated with n8n
+- feasible (boolean): Whether request can be automated with n8n (default to true unless impossible)
 - workflow_type (string): Type of workflow (schedule, webhook, manual, api)
 - template_id (string): Best matching template ID if available
 - description (string): Clear description of what workflow will do
@@ -191,7 +193,13 @@ Respond in JSON format with these fields:
 
 Available templates: weather_monitor, web_scraper, slack_notification, email_automation, http_api, webhook_receiver
 
-Common node types: manual trigger, schedule trigger, webhook, http request, email send, slack, discord, code function, if condition, switch"""
+Common node types: manual trigger, schedule trigger, webhook, http request, email send, slack, discord, code function, if condition, switch, merge, split, set, move binary data
+
+Examples:
+- "AI customer service team" → webhook workflow with HTTP requests to AI APIs
+- "Monitor website" → schedule workflow with HTTP requests and notifications
+- "Send daily reports" → schedule workflow with data processing and email
+- "Process form submissions" → webhook workflow with data validation and storage"""
         
         user_prompt = f"""Analyze this automation request: "{prompt}"
         
