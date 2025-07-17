@@ -6,3 +6,5 @@ python_back_end/**/*.pyd
 .env
 # Ignore .gradio folder
 .gradio/
+__pycache__
+
