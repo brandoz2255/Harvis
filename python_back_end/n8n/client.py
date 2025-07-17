@@ -52,8 +52,14 @@ class N8nClient:
         # Ensure base URL doesn't end with slash
         self.base_url = self.base_url.rstrip('/')
         
-        # Set up authentication - prefer API key over basic auth
-        if self.api_key:
+        # Set up authentication - check if auth is disabled
+        auth_disabled = os.getenv("N8N_BASIC_AUTH_ACTIVE", "true").lower() == "false"
+        
+        if auth_disabled:
+            self.auth = None
+            self.auth_method = "none"
+            logger.info(f"Initialized n8n client for {self.base_url} with no authentication (auth disabled)")
+        elif self.api_key:
             self.auth = None  # Will use Bearer token in headers
             self.auth_method = "bearer"
             logger.info(f"Initialized n8n client for {self.base_url} with API key authentication")
@@ -77,17 +83,22 @@ class N8nClient:
         Raises:
             N8nClientError: On API errors or connection issues
         """
-        url = f"{self.base_url}/rest{endpoint}"
+        # Use public API endpoint when auth is disabled
+        if self.auth_method == "none":
+            url = f"{self.base_url}/api/v1{endpoint}"
+        else:
+            url = f"{self.base_url}/rest{endpoint}"
         
         # Set default headers
         headers = kwargs.get('headers', {})
         headers.setdefault('Content-Type', 'application/json')
         
-        # Add authentication
+        # Add authentication only if not disabled
         if self.auth_method == "bearer" and self.api_key:
             headers['Authorization'] = f'Bearer {self.api_key}'
         elif self.auth_method == "basic" and self.auth:
             kwargs['auth'] = self.auth
+        # For "none" auth method, don't add any authentication headers
         
         kwargs['headers'] = headers
         kwargs['timeout'] = self.timeout
@@ -96,8 +107,10 @@ class N8nClient:
             logger.info(f"Making {method} request to {url} with {self.auth_method} authentication")
             if self.auth_method == "bearer":
                 logger.info(f"Using API key: {self.api_key[:20]}..." if self.api_key else "No API key found")
-            else:
+            elif self.auth_method == "basic":
                 logger.info(f"Using basic auth: {self.username}:{self.password}")
+            elif self.auth_method == "none":
+                logger.info("No authentication headers sent")
             response = requests.request(method, url, **kwargs)
             response.raise_for_status()
             

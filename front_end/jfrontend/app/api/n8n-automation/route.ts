@@ -2,9 +2,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 // IMPORTANT: Replace with your actual n8n and Ollama details
-const N8N_URL = process.env.N8N_URL || 'http://localhost:5678';
-const N8N_USERNAME = process.env.N8N_USERNAME || 'user';
-const N8N_PASSWORD = process.env.N8N_PASSWORD || 'password';
+const N8N_URL = process.env.N8N_URL || 'http://n8n:5678';
 const OLLAMA_URL = process.env.OLLAMA_URL || 'http://localhost:11434/api/generate';
 
 async function generateWorkflowJson(prompt: string): Promise<any> {
@@ -165,13 +163,10 @@ export async function POST(req: NextRequest) {
 
     const workflowJson = await generateWorkflowJson(prompt);
 
-    const n8nAuth = 'Basic ' + Buffer.from(`${N8N_USERNAME}:${N8N_PASSWORD}`).toString('base64');
-
     const createWorkflowResponse = await fetch(`${N8N_URL}/api/v1/workflows`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': n8nAuth,
       },
       body: JSON.stringify(workflowJson),
     });
@@ -187,7 +182,7 @@ export async function POST(req: NextRequest) {
     // Optionally, execute the workflow immediately
     // await fetch(`${N8N_URL}/api/v1/workflows/${workflow.id}/execute`, {
     //   method: 'POST',
-    //   headers: { 'Authorization': n8nAuth },
+    //   headers: { 'Content-Type': 'application/json' },
     // });
 
     return NextResponse.json({ workflow });
