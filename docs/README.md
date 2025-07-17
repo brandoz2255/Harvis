@@ -15,6 +15,7 @@ This documentation provides comprehensive information about the AI Voice Assista
 9. [Docker Deployment](docker-deployment.md)
 10. [Interview Preparation](interview-prep.md)
 11. [Troubleshooting Guide](troubleshooting.md)
+12. [Chat History 422 Error Fix](chat-history-422-error-fix.md)
 
 ## Quick Start
 

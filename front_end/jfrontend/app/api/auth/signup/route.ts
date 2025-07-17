@@ -1,32 +1,31 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { getDb } from '@/lib/db';
-import bcrypt from 'bcrypt';
-import jwt from 'jsonwebtoken';
+import { NextRequest, NextResponse } from 'next/server'
 
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
+const BACKEND_URL = process.env.BACKEND_URL || 'http://backend:8000'
 
-export async function POST(req: NextRequest) {
+export async function POST(request: NextRequest) {
   try {
-    const { username, email, password } = await req.json();
+    const body = await request.json()
+    
+    const response = await fetch(`${BACKEND_URL}/api/auth/signup`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    })
 
-    if (!username || !email || !password) {
-      return NextResponse.json({ message: 'Missing required fields' }, { status: 400 });
+    if (!response.ok) {
+      const errorText = await response.text()
+      console.error('Backend signup error:', errorText)
+      return NextResponse.json({ message: 'Signup failed' }, { status: response.status })
     }
 
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    const { rows } = await getDb().query(
-      'INSERT INTO users (username, email, password) VALUES ($1, $2, $3) RETURNING id',
-      [username, email, hashedPassword]
-    );
-
-    const userId = rows[0].id;
-    const token = jwt.sign({ userId }, JWT_SECRET, { expiresIn: '1h' });
-
-    return NextResponse.json({ token });
-
+    const data = await response.json()
+    
+    // Convert backend response format to frontend expected format
+    return NextResponse.json({ token: data.access_token })
   } catch (error) {
-    console.error('Signup error:', error);
-    return NextResponse.json({ message: 'User with this email or username already exists' }, { status: 409 });
+    console.error('Signup proxy error:', error)
+    return NextResponse.json({ message: 'Signup failed' }, { status: 500 })
   }
 }
