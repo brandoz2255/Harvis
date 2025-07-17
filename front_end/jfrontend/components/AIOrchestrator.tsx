@@ -125,24 +125,43 @@ export class AIOrchestrator {
 
   async fetchOllamaModels(): Promise<{ models: string[], connected: boolean, error?: string }> {
     try {
+      console.log("🦙 Fetching Ollama models...")
       const response = await fetch("/api/ollama-models")
-      const data = await response.json()
+      console.log("🦙 Response status:", response.status, response.statusText)
       
-      if (data.success && data.models) {
-        const modelNames = data.models.map((model: any) => model.name)
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+      }
+      
+      const data = await response.json()
+      console.log("🦙 API Response data:", data)
+      console.log("🦙 data type:", typeof data)
+      console.log("🦙 data is array:", Array.isArray(data))
+      
+      // Backend returns array of model names directly: ["model1", "model2"]
+      if (Array.isArray(data) && data.length > 0) {
+        console.log("🦙 Found models array:", data)
         return {
-          models: modelNames,
+          models: data,
           connected: true
         }
+      } else if (Array.isArray(data) && data.length === 0) {
+        console.log("🦙 Empty models array - Ollama connected but no models")
+        return {
+          models: [],
+          connected: true,
+          error: 'No models found on Ollama server'
+        }
       } else {
+        console.log("🦙 Unexpected response format:", data)
         return {
           models: [],
           connected: false,
-          error: data.error || 'Failed to fetch models'
+          error: 'Unexpected response format from server'
         }
       }
     } catch (error) {
-      console.error("Could not fetch Ollama models:", error)
+      console.error("🦙 Could not fetch Ollama models:", error)
       return {
         models: [],
         connected: false,
@@ -245,16 +264,29 @@ export function useAIOrchestrator() {
   const [lastFetch, setLastFetch] = useState<Date | null>(null)
 
   const refreshOllamaModels = async () => {
+    console.log("🔄 refreshOllamaModels called")
     const result = await orchestrator.fetchOllamaModels()
+    console.log("🔄 fetchOllamaModels result:", result)
+    console.log("🔄 result.models type:", typeof result.models)
+    console.log("🔄 result.models length:", result.models?.length)
+    console.log("🔄 result.connected:", result.connected)
+    
     setOllamaModels(result.models)
     setOllamaConnected(result.connected)
     setOllamaError(result.error || null)
     setLastFetch(new Date())
+    console.log("🔄 State set - about to log current state")
+    
+    // Log state after a brief delay to see if React updated it
+    setTimeout(() => {
+      console.log("🔄 State after update - models:", result.models, "connected:", result.connected)
+    }, 100)
     
     // Update combined models list
     const builtInModels = orchestrator.getAllModels().map((m) => m.name)
     const allModels = [...builtInModels, ...result.models]
     setModels(Array.from(new Set(allModels)))
+    console.log("🔄 Combined models updated:", allModels)
     
     return result
   }

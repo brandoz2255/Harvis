@@ -7,7 +7,117 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This is the Jarvis Project, a sophisticated AI voice assistant that combines Next.js frontend with Python backend services. The project features voice-first interaction, browser automation, AI-powered coding assistance, and authentication with PostgreSQL.
 
 
-Remember the web app is ran through docker commands and the docker compose is just for the microservices that the web app runs on 
+Remember the web app is ran through docker commands and the docker compose is just for the microservices that the web app runs on
+
+## Docker Network URLs
+
+**IMPORTANT**: Services communicate within Docker network using these URLs:
+- **Backend URL**: `http://backend:8000` (Python FastAPI backend)
+- **Frontend URL**: `http://frontend:3000` (Next.js frontend)
+- **Ollama URL**: `http://ollama:11434` (Ollama AI models server)
+- **Database URL**: `postgresql://pguser:pgpassword@pgsql:5432/database`
+
+These are the correct URLs for inter-service communication within the Docker network.
+
+### Browser-to-Docker Communication Pattern
+
+**IMPORTANT**: Browsers cannot directly access Docker internal network addresses. Use this pattern for browser-to-backend communication:
+
+#### ❌ Incorrect (Browser cannot reach Docker network):
+```javascript
+// This will fail in the browser:
+fetch("http://backend:8000/api/endpoint")
+```
+
+#### ✅ Correct (Use Frontend Proxy Pattern):
+
+1. **Create Next.js API route** (`app/api/endpoint/route.ts`):
+```typescript
+export async function GET() {
+  const backendUrl = process.env.BACKEND_URL || 'http://backend:8000'
+  const response = await fetch(`${backendUrl}/api/endpoint`)
+  const data = await response.json()
+  return NextResponse.json(data)
+}
+```
+
+2. **Browser calls frontend route**:
+```javascript
+// Browser calls Next.js route, which proxies to backend:
+fetch("/api/endpoint")
+```
+
+#### Communication Flow:
+```
+Browser → Frontend Route → Backend → Ollama/DB
+   ↑         (Proxy)        ↑         ↑
+   └─────────────────────────┴─────────┴─ Docker Network
+```
+
+#### Example Implementation (Ollama Models):
+1. **Browser**: `fetch("/api/ollama-models")`
+2. **Frontend Route**: Proxies to `http://backend:8000/api/ollama-models`
+3. **Backend**: Calls `http://ollama:11434/api/tags`
+4. **Response**: Array flows back: `["model1", "model2"]`
+
+This pattern maintains Docker network security while enabling browser access.
+
+### Reasoning Model Integration
+
+**IMPORTANT**: The application now fully supports reasoning models (DeepSeek R1, QwQ, O1, etc.) with proper separation of thinking process from final answers.
+
+#### How It Works:
+
+1. **Automatic Detection**: Backend detects `<think>...</think>` tags in model responses
+2. **Content Separation**: Thinking process extracted from final answer server-side  
+3. **Clean UI**: Main chat shows only final answers, AI insights shows reasoning
+4. **TTS Optimization**: Chatterbox reads only final answers (not thinking process)
+
+#### Backend Implementation:
+```python
+def separate_thinking_from_final_output(text: str) -> tuple[str, str]:
+    """Extract reasoning content and return (reasoning, final_answer)"""
+    # Processes <think>...</think> tags
+    # Returns clean separation of content
+```
+
+#### API Response Format:
+```json
+{
+  "history": [...],
+  "audio_path": "/api/audio/...",
+  "reasoning": "The thinking process...",     // Only if reasoning detected
+  "final_answer": "The clean answer..."      // Clean answer for display/TTS
+}
+```
+
+#### Frontend Handling:
+- **Chat Bubble**: Displays only `final_answer` 
+- **TTS/Chatterbox**: Reads only `final_answer`
+- **AI Insights**: Shows `reasoning` with purple CPU icon
+- **Zero Regression**: Non-reasoning models work exactly as before
+
+#### Supported Models:
+- Any model using `<think>...</think>` tag format
+- DeepSeek R1 series, QwQ-32B, O1/O3 models
+- Future: Can extend to support vLLM `reasoning_content` API format
+
+#### Extensibility:
+- Easy to modify `separate_thinking_from_final_output()` for other tag formats
+- AI insights can be enhanced with reasoning analysis features
+- Can add reasoning quality scoring or step-by-step breakdown display
+
+## Documentation Requirements
+
+**IMPORTANT for Claude Code**: Always document all changes and fixes in `front_end/jfrontend/changes.md` with:
+- Timestamp of the change
+- Problem description
+- Root cause analysis  
+- Solution applied
+- Files modified
+- Result/status
+
+This helps track all modifications and provides debugging context for future development. 
 
 
 ## Key Commands
