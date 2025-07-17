@@ -9,14 +9,26 @@ workflow creation.
 from .client import N8nClient
 from .workflow_builder import WorkflowBuilder, WorkflowTemplate
 from .automation_service import N8nAutomationService
-from .models import WorkflowConfig, WorkflowNode, WorkflowConnection
+from .storage import N8nStorage
+from .models import (
+    WorkflowConfig, WorkflowNode, WorkflowConnection, 
+    CreateWorkflowRequest, N8nAutomationRequest, WorkflowExecutionRequest,
+    WorkflowResponse, WorkflowRecord, AutomationHistory
+)
 
 __all__ = [
     'N8nClient',
     'WorkflowBuilder', 
     'WorkflowTemplate',
     'N8nAutomationService',
+    'N8nStorage',
     'WorkflowConfig',
     'WorkflowNode',
-    'WorkflowConnection'
+    'WorkflowConnection',
+    'CreateWorkflowRequest',
+    'N8nAutomationRequest',
+    'WorkflowExecutionRequest',
+    'WorkflowResponse',
+    'WorkflowRecord',
+    'AutomationHistory'
 ]

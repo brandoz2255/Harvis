@@ -5,6 +5,13 @@ from starlette.websockets import WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn, os, sys, tempfile, uuid, base64, io, logging, re, requests, random
+
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # Will log after logger is set up
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -135,6 +142,13 @@ from n8n.models import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Log environment loading status
+try:
+    import dotenv
+    logger.info("✅ Successfully loaded environment variables from .env file")
+except ImportError:
+    logger.warning("⚠️ python-dotenv not installed, environment variables must be passed via Docker")
+
 # ─── Initialize vibe agent ─────────────────────────────────────────────────────
 # Note: Import VibeAgent after all model_manager imports to avoid circular imports
 try:
@@ -153,6 +167,12 @@ def initialize_n8n_services():
     """Initialize n8n services with database pool"""
     global n8n_client, n8n_automation_service, n8n_storage
     try:
+        # Debug environment variables
+        logger.info(f"N8N_URL: {os.getenv('N8N_URL', 'NOT SET')}")
+        logger.info(f"N8N_USER: {os.getenv('N8N_USER', 'NOT SET')}")
+        logger.info(f"N8N_PASSWORD: {os.getenv('N8N_PASSWORD', 'NOT SET')}")
+        logger.info(f"N8N_API_KEY: {os.getenv('N8N_API_KEY', 'NOT SET')[:20]}..." if os.getenv('N8N_API_KEY') else "N8N_API_KEY: NOT SET")
+        
         # Initialize n8n client
         n8n_client = N8nClient()
         
@@ -1424,6 +1444,16 @@ async def synthesize_speech(req: SynthesizeSpeechRequest):
         raise HTTPException(500, str(e)) from e
 
 # ─── n8n Automation Endpoints ─────────────────────────────────────────────────
+
+@app.post("/api/n8n-automation", tags=["n8n-automation"])
+async def n8n_automation_legacy(
+    request: N8nAutomationRequest,
+    current_user: UserResponse = Depends(get_current_user)
+):
+    """
+    Legacy n8n automation endpoint for backwards compatibility
+    """
+    return await create_n8n_automation(request, current_user)
 
 @app.post("/api/n8n/automate", tags=["n8n-automation"])
 async def create_n8n_automation(
