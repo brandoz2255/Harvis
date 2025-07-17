@@ -27,7 +27,7 @@ export const UserProvider = ({ children }: { children: ReactNode }) => {
   useEffect(() => {
     const checkUser = async () => {
       console.log('UserProvider: Checking for existing token...');
-      const token = localStorage.getItem('jwt_token');
+      const token = localStorage.getItem('token');
       if (token) {
         try {
           const userData = await AuthService.fetchUser(token);
@@ -35,7 +35,7 @@ export const UserProvider = ({ children }: { children: ReactNode }) => {
           console.log('UserProvider: User data restored from token:', userData);
         } catch (error) {
           console.error('UserProvider: Token validation failed:', error);
-          localStorage.removeItem('jwt_token'); // Token is invalid, remove it
+          localStorage.removeItem('token'); // Token is invalid, remove it
           setUser(null); // Explicitly set user to null
         }
       } else {
@@ -48,7 +48,7 @@ export const UserProvider = ({ children }: { children: ReactNode }) => {
   }, []);
 
   const login = async (token: string) => {
-    localStorage.setItem('jwt_token', token);
+    localStorage.setItem('token', token);
     console.log('UserProvider: New token stored. Fetching user data...');
     try {
       const userData = await AuthService.fetchUser(token);
@@ -56,14 +56,14 @@ export const UserProvider = ({ children }: { children: ReactNode }) => {
       console.log('UserProvider: User logged in successfully:', userData);
     } catch (error) {
       console.error('UserProvider: Failed to fetch user data after login:', error);
-      localStorage.removeItem('jwt_token');
+      localStorage.removeItem('token');
       setUser(null);
       throw error; // Re-throw to be caught by the UI
     }
   };
 
   const logout = () => {
-    localStorage.removeItem('jwt_token');
+    localStorage.removeItem('token');
     setUser(null);
     console.log('UserProvider: User logged out.');
   };

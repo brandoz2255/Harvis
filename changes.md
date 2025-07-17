@@ -196,3 +196,15 @@ Implemented a comprehensive AI Insights feature that displays real-time thought 
 - Create insight categories and tagging
 - Add insight sharing functionality
 - Implement insight persistence across sessions
+
+## Authentication Fix (July 15, 2025)
+
+- **Problem:** Persistent `401 Unauthorized` errors from the backend, even after adding `credentials: 'include'` to frontend `fetch` calls.
+- **Root Cause:** A mismatch in authentication handling. The backend's `/api/auth/login` endpoint returned a JWT in the response body but never set it as a cookie. The frontend was trying to send a cookie that didn't exist.
+- **Solution:**
+  1.  **Backend (`python_back_end/main.py`):**
+      - Modified the `/api/auth/login` endpoint to set a secure, `HttpOnly` cookie named `access_token` on the response.
+      - Updated the `get_current_user` dependency to be more flexible: it now checks for the `access_token` in the request's cookies first, and if not found, falls back to the `Authorization: Bearer` header.
+  2.  **Frontend (`front_end/jfrontend/**`):
+      - Ensured all `fetch` calls to protected API endpoints include the `credentials: 'include'` option.
+- **Result:** This resolved the authentication issue by creating a complete, working cookie-based authentication flow between the frontend and backend, while also preserving the ability to use bearer tokens for other clients.

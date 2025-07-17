@@ -1,7 +1,8 @@
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, WebSocket, Depends
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.websockets import WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn, os, sys, tempfile, uuid, base64, io, logging, re, requests, random
 from datetime import datetime, timedelta
@@ -22,7 +23,7 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 
 # Database connection
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://pguser:pgpassword@pgsql:5432/database")
@@ -66,15 +67,24 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
 async def get_db_connection():
     return await asyncpg.connect(DATABASE_URL)
 
-async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+async def get_current_user(request: Request, credentials: HTTPAuthorizationCredentials | None = Depends(security)):
+    logger.info(f"get_current_user called with credentials: {credentials}")
+    token = request.cookies.get("access_token")
+    if token is None and credentials is not None:
+        token = credentials.credentials
+
     credentials_exception = HTTPException(
         status_code=401,
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
     
+    if token is None:
+        logger.error("No credentials provided in cookies or headers")
+        raise credentials_exception
+    
     try:
-        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         logger.info(f"JWT payload: {payload}")
         user_id_str: str = payload.get("sub")
         if user_id_str is None:
@@ -101,12 +111,25 @@ from model_manager import (
     unload_models, unload_all_models, reload_models_if_needed, log_gpu_memory,
     get_tts_model, get_whisper_model, generate_speech, wait_for_vram
 )
+from chat_history_module import (
+    ChatHistoryManager, ChatMessage, ChatSession, CreateSessionRequest, 
+    CreateMessageRequest, MessageHistoryResponse, SessionListResponse,
+    SessionNotFoundError, ChatHistoryError
+)
+from uuid import UUID
 import logging
 import time
 
 # Add the ollama_cli directory to the path
 sys.path.append(os.path.join(os.path.dirname(__file__), 'ollama_cli'))
 from vibe_agent import VibeAgent
+
+# ─── n8n Automation Setup ─────────────────────────────────────────────────────
+from n8n import N8nClient, WorkflowBuilder, N8nAutomationService, N8nStorage
+from n8n.models import (
+    CreateWorkflowRequest, N8nAutomationRequest, WorkflowExecutionRequest,
+    WorkflowResponse
+)
 
 # ─── Set up logging ─────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
@@ -120,6 +143,36 @@ try:
 except Exception as e:
     logger.error(f"❌ Failed to initialize VibeAgent: {e}")
     vibe_agent = None
+
+# ─── Initialize n8n services ──────────────────────────────────────────────────
+n8n_client = None
+n8n_automation_service = None
+n8n_storage = None
+
+def initialize_n8n_services():
+    """Initialize n8n services with database pool"""
+    global n8n_client, n8n_automation_service, n8n_storage
+    try:
+        # Initialize n8n client
+        n8n_client = N8nClient()
+        
+        # Initialize workflow builder
+        workflow_builder = WorkflowBuilder()
+        
+        # Initialize storage (will be properly set up in startup event)
+        n8n_storage = None  # Will be set in startup event with db_pool
+        
+        # Initialize automation service (will be properly set up in startup event)
+        n8n_automation_service = None  # Will be set in startup event
+        
+        logger.info("✅ n8n services initialized successfully")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize n8n services: {e}")
+        return False
+
+# Try to initialize n8n services (will be completed in startup event)
+initialize_n8n_services()
 
 # ─── Additional logging setup ──────────────────────────────────────────────────
 if 'logger' not in locals():
@@ -136,9 +189,61 @@ JARVIS_VOICE_PATH = os.path.abspath(
 # ─── FastAPI init --------------------------------------------------------------
 app = FastAPI(title="Jarves-TTS API")
 
+# CORS Middleware must be added before routes
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:3001",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 if os.path.exists(FRONTEND_DIR):
     app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
     logger.info("Frontend directory mounted at %s", FRONTEND_DIR)
+
+# ─── Database Pool and Chat History Manager Init ─────────────────────────────────────────────────
+db_pool = None
+chat_history_manager = None
+
+@app.on_event("startup")
+async def startup_event():
+    global db_pool, chat_history_manager, n8n_storage, n8n_automation_service
+    try:
+        db_pool = await asyncpg.create_pool(DATABASE_URL)
+        chat_history_manager = ChatHistoryManager(db_pool)
+        
+        # Initialize n8n services with database pool
+        if n8n_client:
+            n8n_storage = N8nStorage(db_pool)
+            await n8n_storage.ensure_tables()
+            
+            workflow_builder = WorkflowBuilder()
+            n8n_automation_service = N8nAutomationService(
+                n8n_client=n8n_client,
+                workflow_builder=workflow_builder,
+                storage=n8n_storage,
+                ollama_url=OLLAMA_URL
+            )
+            logger.info("✅ n8n automation service fully initialized")
+        
+        logger.info("Database pool and all services initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize services: {e}")
+        raise
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    global db_pool
+    if db_pool:
+        await db_pool.close()
+        logger.info("Database pool closed")
+logger.info("Chat history manager initialized")
 
 # ─── Device & models -----------------------------------------------------------
 device = 0 if torch.cuda.is_available() else -1
@@ -155,6 +260,7 @@ class ChatRequest(BaseModel):
     message: str
     history: List[Dict[str, Any]] = []
     model: str = DEFAULT_MODEL
+    session_id: Optional[str] = None  # Chat session ID for history persistence
     audio_prompt: Optional[str] = None  # overrides JARVIS_VOICE_PATH if provided
     exaggeration: float = 0.5
     temperature: float = 0.8
@@ -164,6 +270,7 @@ class ResearchChatRequest(BaseModel):
     message: str
     history: List[Dict[str, Any]] = []
     model: str = DEFAULT_MODEL
+    session_id: Optional[str] = None  # Chat session ID for history persistence
     enableWebSearch: bool = True
     audio_prompt: Optional[str] = None  # overrides JARVIS_VOICE_PATH if provided
     exaggeration: float = 0.5
@@ -218,6 +325,43 @@ class SaveFileRequest(BaseModel):
     filename: str
     content: str
 
+# ─── Reasoning Model Helpers --------------------------------------------------
+def separate_thinking_from_final_output(text: str) -> tuple[str, str]:
+    """
+    Extract the content between <think> and </think> tags and remove them from the text.
+    Returns (reasoning/thoughts, final_answer)
+    """
+    thoughts = ""
+    remaining_text = text
+    
+    # Extract all thinking blocks
+    while "<think>" in remaining_text and "</think>" in remaining_text:
+        start = remaining_text.find("<think>")
+        end = remaining_text.find("</think>")
+        
+        if start != -1 and end != -1 and end > start:
+            # Extract the content between tags (excluding the tags themselves)
+            thought_content = remaining_text[start + len("<think>"):end].strip()
+            if thought_content:
+                thoughts += thought_content + "\n\n"
+            
+            # Remove the tags and their content from the original text
+            remaining_text = remaining_text[:start] + remaining_text[end + len("</think>"):]
+        else:
+            break
+    
+    # Clean up the final answer
+    final_answer = remaining_text.strip()
+    reasoning = thoughts.strip()
+    
+    logger.info(f"Separated reasoning: {len(reasoning)} chars, final answer: {len(final_answer)} chars")
+    
+    return reasoning, final_answer
+
+def has_reasoning_content(text: str) -> bool:
+    """Check if text contains reasoning markers"""
+    return "<think>" in text and "</think>" in text
+
 # ─── Helpers -------------------------------------------------------------------
 BROWSER_PATTERNS = [
     r"^(?:open|launch|go\s+to|navigate\s+to|take\s+me\s+to|visit)\s+",
@@ -238,6 +382,202 @@ async def root() -> FileResponse:
     if os.path.exists(index_html):
         return FileResponse(index_html)
     raise HTTPException(404, "Frontend not found")
+
+# ─── Chat History Endpoints ───────────────────────────────────────────────────────
+@app.post("/api/chat-history/sessions", response_model=ChatSession, tags=["chat-history"])
+async def create_chat_session(
+    request: CreateSessionRequest,
+    current_user: UserResponse = Depends(get_current_user)
+):
+    """Create a new chat session"""
+    try:
+        session = await chat_history_manager.create_session(
+            user_id=current_user.id,
+            title=request.title,
+            model_used=request.model_used
+        )
+        return session
+    except Exception as e:
+        logger.error(f"Error creating chat session: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create chat session")
+
+@app.get("/api/chat-history/sessions", response_model=List[ChatSession], tags=["chat-history"])
+async def get_user_chat_sessions(
+    limit: int = 50,
+    offset: int = 0,
+    current_user: UserResponse = Depends(get_current_user)
+):
+    """Get all chat sessions for the current user"""
+    try:
+        sessions_response = await chat_history_manager.get_user_sessions(
+            user_id=current_user.id,
+            limit=limit,
+            offset=offset
+        )
+        return sessions_response.sessions
+    except Exception as e:
+        logger.error(f"Error getting user sessions: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get chat sessions")
+
+@app.get("/api/chat-history/sessions/{session_id}", response_model=MessageHistoryResponse, tags=["chat-history"])
+async def get_session_messages(
+    session_id: str,
+    limit: int = 100,
+    offset: int = 0,
+    current_user: UserResponse = Depends(get_current_user)
+):
+    """Get messages for a specific chat session"""
+    try:
+        # Convert string session_id to UUID
+        session_uuid = UUID(session_id)
+        logger.info(f"Getting messages for session {session_uuid}, user {current_user.id}")
+        response = await chat_history_manager.get_session_messages(
+            session_id=session_uuid,
+            user_id=current_user.id,
+            limit=limit,
+            offset=offset
+        )
+        logger.info(f"Retrieved {len(response.messages)} messages for session {session_uuid}")
+        
+        # Return 404 if session doesn't exist
+        if response.session is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        return response
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting session messages: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get session messages")
+
+class UpdateTitleRequest(BaseModel):
+    title: str
+
+@app.put("/api/chat-history/sessions/{session_id}/title", tags=["chat-history"])
+async def update_session_title(
+    session_id: str,
+    request: UpdateTitleRequest,
+    current_user: UserResponse = Depends(get_current_user)
+):
+    """Update chat session title"""
+    try:
+        # Convert string session_id to UUID
+        session_uuid = UUID(session_id)
+        success = await chat_history_manager.update_session_title(
+            session_id=session_uuid,
+            user_id=current_user.id,
+            title=request.title
+        )
+        if not success:
+            raise HTTPException(status_code=404, detail="Session not found")
+        return {"success": True, "message": "Session title updated"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating session title: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update session title")
+
+@app.delete("/api/chat-history/sessions/{session_id}", tags=["chat-history"])
+async def delete_chat_session(
+    session_id: str,
+    current_user: UserResponse = Depends(get_current_user)
+):
+    """Delete a chat session"""
+    try:
+        # Convert string session_id to UUID
+        session_uuid = UUID(session_id)
+        success = await chat_history_manager.delete_session(
+            session_id=session_uuid,
+            user_id=current_user.id
+        )
+        if not success:
+            raise HTTPException(status_code=404, detail="Session not found")
+        return {"success": True, "message": "Session deleted"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting session: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete session")
+
+@app.delete("/api/chat-history/sessions/{session_id}/messages", tags=["chat-history"])
+async def clear_session_messages(
+    session_id: str,
+    current_user: UserResponse = Depends(get_current_user)
+):
+    """Clear all messages from a chat session"""
+    try:
+        # Convert string session_id to UUID
+        session_uuid = UUID(session_id)
+        deleted_count = await chat_history_manager.clear_session_messages(
+            session_id=session_uuid,
+            user_id=current_user.id
+        )
+        return {"success": True, "message": f"Deleted {deleted_count} messages"}
+    except Exception as e:
+        logger.error(f"Error clearing session messages: {e}")
+        raise HTTPException(status_code=500, detail="Failed to clear session messages")
+
+@app.get("/api/chat-history/search", response_model=List[ChatMessage], tags=["chat-history"])
+async def search_messages(
+    query: str,
+    session_id: Optional[str] = None,
+    limit: int = 50,
+    current_user: UserResponse = Depends(get_current_user)
+):
+    """Search messages by content"""
+    try:
+        messages = await chat_history_manager.search_messages(
+            user_id=current_user.id,
+            query=query,
+            session_id=session_id,
+            limit=limit
+        )
+        return messages
+    except Exception as e:
+        logger.error(f"Error searching messages: {e}")
+        raise HTTPException(status_code=500, detail="Failed to search messages")
+
+@app.get("/api/chat-history/stats", tags=["chat-history"])
+async def get_user_chat_stats(
+    current_user: UserResponse = Depends(get_current_user)
+):
+    """Get user chat statistics"""
+    try:
+        stats = await chat_history_manager.get_user_stats(current_user.id)
+        return stats
+    except Exception as e:
+        logger.error(f"Error getting user stats: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get user stats")
+
+@app.post("/api/chat-history/messages", response_model=ChatMessage, tags=["chat-history"])
+async def add_message_to_session(
+    message_request: CreateMessageRequest,
+    current_user: UserResponse = Depends(get_current_user)
+):
+    """Add a message to a chat session"""
+    try:
+        # Verify the user owns the session
+        session = await chat_history_manager.get_session(message_request.session_id, current_user.id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        # Add the message using the new manager API
+        added_message = await chat_history_manager.add_message(
+            user_id=current_user.id,
+            session_id=message_request.session_id,
+            role=message_request.role,
+            content=message_request.content,
+            reasoning=message_request.reasoning,
+            model_used=message_request.model_used,
+            input_type=message_request.input_type,
+            metadata=message_request.metadata
+        )
+        return added_message
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error adding message: {e}")
+        raise HTTPException(status_code=500, detail="Failed to add message")
 
 # ─── Authentication Endpoints ─────────────────────────────────────────────────────
 @app.post("/api/auth/signup", response_model=TokenResponse, tags=["auth"])
@@ -275,7 +615,7 @@ async def signup(request: SignupRequest):
     finally:
         await conn.close()
 
-@app.post("/api/auth/login", response_model=TokenResponse, tags=["auth"])
+@app.post("/api/auth/login", tags=["auth"])
 async def login(request: AuthRequest):
     conn = await get_db_connection()
     try:
@@ -295,7 +635,15 @@ async def login(request: AuthRequest):
             data={"sub": str(user["id"])}, expires_delta=access_token_expires
         )
         
-        return TokenResponse(access_token=access_token, token_type="bearer")
+        response = JSONResponse(content={"access_token": access_token, "token_type": "bearer"})
+        response.set_cookie(
+            key="access_token",
+            value=access_token,
+            httponly=True,
+            samesite="lax",
+            secure=False,  # Set to True in production with HTTPS
+        )
+        return response
     
     except HTTPException:
         raise
@@ -315,14 +663,34 @@ async def get_current_user_info(current_user: UserResponse = Depends(get_current
 
 
 @app.post("/api/chat", tags=["chat"])
-async def chat(req: ChatRequest, request: Request):
+async def chat(req: ChatRequest, request: Request, current_user: UserResponse = Depends(get_current_user)):
     """
-    Main conversational endpoint.
-    Produces: JSON {history, audio_path}
+    Main conversational endpoint with persistent chat history.
+    Produces: JSON {history, audio_path, session_id}
     """
     try:
-        # ── 1. Update dialogue history with the latest user turn
-        history = req.history + [{"role": "user", "content": req.message}]
+        logger.info(f"Chat endpoint reached - User: {current_user.username}, Message: {req.message[:50]}...")
+        # ── 1. Handle chat session and history ──────────────────────────────────────────
+        session_id = req.session_id
+        
+        # If no session provided, get recent messages from provided history or use empty history
+        if session_id:
+            # Get recent messages from database for context
+            recent_messages = await chat_history_manager.get_recent_messages(
+                session_id=session_id, 
+                user_id=current_user.id, 
+                count=10
+            )
+            # Convert to format expected by model
+            history = chat_history_manager.format_messages_for_context(recent_messages)
+            logger.info(f"Using session {session_id} with {len(recent_messages)} recent messages")
+        else:
+            # Use provided history or empty
+            history = req.history
+            logger.info("No session provided, using request history")
+        
+        # Add current user message to history
+        history = history + [{"role": "user", "content": req.message}]
         response_text: str
 
         # ── 2. Browser automation branch -------------------------------------------------
@@ -378,10 +746,93 @@ async def chat(req: ChatRequest, request: Request):
 
             response_text = resp.json().get("message", {}).get("content", "").strip()
 
-        # ── 4. Update history with assistant reply
-        new_history = history + [{"role": "assistant", "content": response_text}]
+        # ── 4. Process reasoning content if present
+        reasoning_content = ""
+        final_answer = response_text
+        
+        if has_reasoning_content(response_text):
+            reasoning_content, final_answer = separate_thinking_from_final_output(response_text)
+            logger.info(f"🧠 Reasoning model detected - separated thinking from final answer")
+        
+        # ── 5. Persist chat history to database ─────────────────────────────────────────
+        if session_id:
+            try:
+                # Create session if it doesn't exist
+                session = await chat_history_manager.get_session(session_id, current_user.id)
+                if not session:
+                    session = await chat_history_manager.create_session(
+                        user_id=current_user.id,
+                        title="New Chat",
+                        model_used=req.model
+                    )
+                    session_id = session.id
+                
+                # Save user message
+                await chat_history_manager.add_message(
+                    user_id=current_user.id,
+                    session_id=session_id,
+                    role="user",
+                    content=req.message,
+                    model_used=req.model,
+                    input_type="text"
+                )
+                
+                # Save assistant message
+                await chat_history_manager.add_message(
+                    user_id=current_user.id,
+                    session_id=session_id,
+                    role="assistant",
+                    content=final_answer,
+                    reasoning=reasoning_content if reasoning_content else None,
+                    model_used=req.model,
+                    input_type="text"
+                )
+                
+                logger.info(f"💾 Saved chat messages to session {session_id}")
+                
+            except Exception as e:
+                logger.error(f"Error saving chat history: {e}")
+                # Don't fail the entire request if history saving fails
+        else:
+            # Create new session for this conversation if none provided
+            try:
+                session = await chat_history_manager.create_session(
+                    user_id=current_user.id,
+                    title="New Chat",
+                    model_used=req.model
+                )
+                session_id = session.id
+                
+                # Save messages to new session
+                await chat_history_manager.add_message(
+                    user_id=current_user.id,
+                    session_id=session_id,
+                    role="user",
+                    content=req.message,
+                    model_used=req.model,
+                    input_type="text"
+                )
+                
+                await chat_history_manager.add_message(
+                    user_id=current_user.id,
+                    session_id=session_id,
+                    role="assistant",
+                    content=final_answer,
+                    reasoning=reasoning_content if reasoning_content else None,
+                    model_used=req.model,
+                    input_type="text"
+                )
+                
+                logger.info(f"💾 Created new session {session_id} and saved messages")
+                
+            except Exception as e:
+                logger.error(f"Error creating session and saving history: {e}")
+                session_id = None  # Set to None if creation fails
+        
+        # ── 6. Update history with assistant reply (use final answer only for chat history)
+        new_history = history + [{"role": "assistant", "content": final_answer}]
 
-        # ── 5. Text-to-speech -----------------------------------------------------------
+        # ── 7. Text-to-speech -----------------------------------------------------------
         reload_models_if_needed()
         tts = get_tts_model()  # Get TTS model from model_manager
 
@@ -401,8 +852,9 @@ async def chat(req: ChatRequest, request: Request):
             else:
                 logger.info(f"Cloning voice using prompt: {audio_prompt_path}")
 
+        # Use only final_answer for TTS (not the reasoning process)
         sr, wav = generate_speech(
-            text=response_text,
+            text=final_answer,
             model=tts,
             audio_prompt=audio_prompt_path,
             exaggeration=req.exaggeration,
@@ -416,10 +868,19 @@ async def chat(req: ChatRequest, request: Request):
         sf.write(filepath, wav, sr)
         logger.info("Audio written to %s", filepath)
 
-        return {
+        response_data = {
             "history": new_history,
             "audio_path": f"/api/audio/{filename}",  # FastAPI route below (or nginx alias /audio/)
+            "session_id": session_id  # Include session ID for frontend
         }
+        
+        # Add reasoning content if present
+        if reasoning_content:
+            response_data["reasoning"] = reasoning_content
+            response_data["final_answer"] = final_answer
+            logger.info(f"🧠 Returning reasoning content ({len(reasoning_content)} chars)")
+        
+        return response_data
 
     except Exception as e:
         logger.exception("Chat endpoint crashed")
@@ -649,7 +1110,7 @@ async def analyze_screen_with_tts(req: ScreenAnalysisWithTTSRequest):
 # Whisper model will be loaded on demand
 
 @app.post("/api/mic-chat", tags=["voice"])
-async def mic_chat(file: UploadFile = File(...)):
+async def mic_chat(file: UploadFile = File(...), current_user: UserResponse = Depends(get_current_user)):
     try:
         # Ensure Whisper model is loaded
         reload_models_if_needed()
@@ -670,7 +1131,7 @@ async def mic_chat(file: UploadFile = File(...)):
 
         # Now use existing chat logic
         chat_req = ChatRequest(message=message)
-        return await chat(chat_req, request=None)
+        return await chat(chat_req, request=None, current_user=current_user)
 
     except Exception as e:
         logger.exception("Mic chat failed")
@@ -717,8 +1178,16 @@ async def research_chat(req: ResearchChatRequest):
                     logger.info(f"Source {i}: title='{title}', url='{url}'")
                     response_content += f"{i}. [{title}]({url})\n"
 
-        # Update history with assistant reply
-        new_history = req.history + [{"role": "assistant", "content": response_content}]
+        # ── Process reasoning content if present in research response
+        research_reasoning = ""
+        final_research_answer = response_content
+        
+        if has_reasoning_content(response_content):
+            research_reasoning, final_research_answer = separate_thinking_from_final_output(response_content)
+            logger.info(f"🧠 Research reasoning model detected - separated thinking from final answer")
+        
+        # Update history with assistant reply (use final answer only for chat history)
+        new_history = req.history + [{"role": "assistant", "content": final_research_answer}]
 
         # ── Generate TTS for research response ──────────────────────────────────────────
         logger.info("🔊 Research complete - reloading models for TTS generation")
@@ -742,8 +1211,9 @@ async def research_chat(req: ResearchChatRequest):
                 logger.info(f"Cloning voice using prompt: {audio_prompt_path}")
 
         # Create a more conversational version of the research response for TTS
+        # Use final_research_answer (without reasoning) for TTS
         # Remove markdown formatting and make it more speech-friendly
-        tts_text = response_content.replace("**", "").replace("*", "").replace("#", "")
+        tts_text = final_research_answer.replace("**", "").replace("*", "").replace("#", "")
         # Replace numbered lists with more natural speech
         import re
         tts_text = re.sub(r'^\d+\.\s*', '', tts_text, flags=re.MULTILINE)
@@ -768,11 +1238,19 @@ async def research_chat(req: ResearchChatRequest):
         sf.write(filepath, wav, sr)
         logger.info("Research TTS audio written to %s", filepath)
 
-        return {
+        research_response_data = {
             "history": new_history, 
-            "response": response_content,
+            "response": final_research_answer,  # Use final answer for response
             "audio_path": f"/api/audio/{filename}"
         }
+        
+        # Add reasoning content if present
+        if research_reasoning:
+            research_response_data["reasoning"] = research_reasoning
+            research_response_data["final_answer"] = final_research_answer
+            logger.info(f"🧠 Returning research reasoning content ({len(research_reasoning)} chars)")
+        
+        return research_response_data
 
     except Exception as e:
         logger.exception("Research chat endpoint crashed")
@@ -944,6 +1422,256 @@ async def synthesize_speech(req: SynthesizeSpeechRequest):
     except Exception as e:
         logger.exception("TTS synthesis endpoint crashed")
         raise HTTPException(500, str(e)) from e
+
+# ─── n8n Automation Endpoints ─────────────────────────────────────────────────
+
+@app.post("/api/n8n/automate", tags=["n8n-automation"])
+async def create_n8n_automation(
+    request: N8nAutomationRequest,
+    current_user: UserResponse = Depends(get_current_user)
+):
+    """
+    Create n8n workflow from natural language prompt using AI
+    
+    This endpoint allows users to describe automation workflows in natural language
+    and automatically generates corresponding n8n workflows.
+    """
+    if not n8n_automation_service:
+        raise HTTPException(status_code=503, detail="n8n automation service not available")
+    
+    try:
+        logger.info(f"n8n automation request from user {current_user.username}: {request.prompt[:100]}...")
+        
+        result = await n8n_automation_service.process_automation_request(
+            request, user_id=current_user.id
+        )
+        
+        if result.get("success"):
+            logger.info(f"✅ n8n automation successful: {result['workflow']['name']}")
+            return {
+                "success": True,
+                "message": f"Created workflow: {result['workflow']['name']}",
+                "workflow": result["workflow"],
+                "analysis": result.get("analysis", {}),
+                "execution_time": result.get("execution_time", 0)
+            }
+        else:
+            logger.warning(f"❌ n8n automation failed: {result.get('error', 'Unknown error')}")
+            return {
+                "success": False,
+                "error": result.get("error", "Unknown error"),
+                "suggestions": result.get("suggestions", [])
+            }
+    
+    except Exception as e:
+        logger.error(f"n8n automation endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/n8n/workflow", tags=["n8n-automation"])
+async def create_simple_workflow(
+    request: CreateWorkflowRequest,
+    current_user: UserResponse = Depends(get_current_user)
+):
+    """
+    Create simple n8n workflow from template
+    
+    Creates workflows using predefined templates with specific parameters.
+    """
+    if not n8n_automation_service:
+        raise HTTPException(status_code=503, detail="n8n automation service not available")
+    
+    try:
+        logger.info(f"Creating simple n8n workflow '{request.name}' for user {current_user.username}")
+        
+        result = await n8n_automation_service.create_simple_workflow(
+            request, user_id=current_user.id
+        )
+        
+        if result.get("success"):
+            return {
+                "success": True,
+                "message": f"Created workflow: {request.name}",
+                "workflow": result["workflow"]
+            }
+        else:
+            return {
+                "success": False,
+                "error": result.get("error", "Unknown error")
+            }
+    
+    except Exception as e:
+        logger.error(f"Simple workflow creation error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/n8n/workflows", tags=["n8n-automation"])
+async def list_user_n8n_workflows(
+    current_user: UserResponse = Depends(get_current_user)
+):
+    """
+    List all n8n workflows created by the current user
+    """
+    if not n8n_automation_service:
+        raise HTTPException(status_code=503, detail="n8n automation service not available")
+    
+    try:
+        workflows = await n8n_automation_service.list_user_workflows(current_user.id)
+        return {
+            "success": True,
+            "workflows": workflows,
+            "count": len(workflows)
+        }
+    
+    except Exception as e:
+        logger.error(f"Failed to list user workflows: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/n8n/templates", tags=["n8n-automation"])
+async def list_workflow_templates():
+    """
+    List available n8n workflow templates
+    """
+    try:
+        if not n8n_automation_service:
+            # Return basic template info even if service not available
+            from n8n.workflow_builder import WorkflowBuilder
+            builder = WorkflowBuilder()
+            templates = builder.list_templates()
+        else:
+            templates = n8n_automation_service.workflow_builder.list_templates()
+        
+        return {
+            "success": True,
+            "templates": templates,
+            "count": len(templates)
+        }
+    
+    except Exception as e:
+        logger.error(f"Failed to list templates: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/n8n/workflow/{workflow_id}/execute", tags=["n8n-automation"])
+async def execute_n8n_workflow(
+    workflow_id: str,
+    request: WorkflowExecutionRequest,
+    current_user: UserResponse = Depends(get_current_user)
+):
+    """
+    Execute an n8n workflow manually
+    """
+    if not n8n_client:
+        raise HTTPException(status_code=503, detail="n8n client not available")
+    
+    try:
+        logger.info(f"Executing n8n workflow {workflow_id} for user {current_user.username}")
+        
+        # Verify user owns workflow
+        if n8n_storage:
+            workflow_record = await n8n_storage.get_workflow(workflow_id, current_user.id)
+            if not workflow_record:
+                raise HTTPException(status_code=404, detail="Workflow not found")
+        
+        # Execute workflow
+        result = n8n_client.execute_workflow(workflow_id, request.input_data)
+        
+        return {
+            "success": True,
+            "execution_id": result.get("id"),
+            "message": "Workflow execution started",
+            "result": result
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Workflow execution error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/n8n/workflow/{workflow_id}/executions", tags=["n8n-automation"])
+async def get_workflow_executions(
+    workflow_id: str,
+    limit: int = 20,
+    current_user: UserResponse = Depends(get_current_user)
+):
+    """
+    Get execution history for a workflow
+    """
+    if not n8n_client:
+        raise HTTPException(status_code=503, detail="n8n client not available")
+    
+    try:
+        # Verify user owns workflow
+        if n8n_storage:
+            workflow_record = await n8n_storage.get_workflow(workflow_id, current_user.id)
+            if not workflow_record:
+                raise HTTPException(status_code=404, detail="Workflow not found")
+        
+        executions = n8n_client.get_executions(workflow_id, limit)
+        
+        return {
+            "success": True,
+            "executions": executions,
+            "count": len(executions)
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get executions: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/n8n/history", tags=["n8n-automation"])
+async def get_automation_history(
+    current_user: UserResponse = Depends(get_current_user)
+):
+    """
+    Get automation request history for the current user
+    """
+    if not n8n_automation_service:
+        raise HTTPException(status_code=503, detail="n8n automation service not available")
+    
+    try:
+        history = await n8n_automation_service.get_automation_history(current_user.id)
+        return {
+            "success": True,
+            "history": history,
+            "count": len(history)
+        }
+    
+    except Exception as e:
+        logger.error(f"Failed to get automation history: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/n8n/health", tags=["n8n-automation"])
+async def check_n8n_health():
+    """
+    Check n8n automation service health
+    """
+    try:
+        if not n8n_automation_service:
+            return {
+                "status": "service_unavailable",
+                "n8n_connected": False,
+                "ai_service": False,
+                "database_connected": False,
+                "overall_health": False
+            }
+        
+        health = await n8n_automation_service.test_connection()
+        return {
+            "status": "healthy" if health.get("overall_health") else "unhealthy",
+            **health
+        }
+    
+    except Exception as e:
+        logger.error(f"Health check error: {e}")
+        return {
+            "status": "error",
+            "error": str(e),
+            "n8n_connected": False,
+            "ai_service": False,
+            "database_connected": False,
+            "overall_health": False
+        }
 
 # ─── Vibe Coding Endpoints ─────────────────────────────────────────────────────
 
