@@ -145,7 +145,7 @@ export default function MiscDisplay({ screenAnalysis }: MiscDisplayProps) {
           <div className="text-center text-gray-500 py-8">
             <Brain className="w-8 h-8 mx-auto mb-2 opacity-50" />
             <p className="text-sm font-medium mb-2">Real-Time AI Thought Process</p>
-            <p className="text-xs text-gray-400 mb-1">• See the AI's reasoning before it responds</p>
+            <p className="text-xs text-gray-400 mb-1">• See the AI&apos;s reasoning before it responds</p>
             <p className="text-xs text-gray-400 mb-1">• Watch Qwen2.VL analyze your prompts</p>
             <p className="text-xs text-gray-400 mb-1">• View reasoning model step-by-step thinking</p>
             <p className="text-xs text-gray-500 mt-3">Start a conversation to see AI insights in action</p>

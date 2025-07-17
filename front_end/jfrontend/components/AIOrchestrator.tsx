@@ -1,7 +1,7 @@
 
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useCallback } from "react"
 
 interface ModelCapabilities {
   name: string
@@ -263,7 +263,7 @@ export function useAIOrchestrator() {
   const [ollamaError, setOllamaError] = useState<string | null>(null)
   const [lastFetch, setLastFetch] = useState<Date | null>(null)
 
-  const refreshOllamaModels = async () => {
+  const refreshOllamaModels = useCallback(async () => {
     console.log("🔄 refreshOllamaModels called")
     const result = await orchestrator.fetchOllamaModels()
     console.log("🔄 fetchOllamaModels result:", result)
@@ -289,7 +289,7 @@ export function useAIOrchestrator() {
     console.log("🔄 Combined models updated:", allModels)
     
     return result
-  }
+  }, [orchestrator])
 
   useEffect(() => {
     const initialize = async () => {
@@ -310,7 +310,7 @@ export function useAIOrchestrator() {
     const interval = setInterval(refreshOllamaModels, 30000)
     
     return () => clearInterval(interval)
-  }, [orchestrator])
+  }, [orchestrator, refreshOllamaModels])
 
   return { 
     orchestrator, 
