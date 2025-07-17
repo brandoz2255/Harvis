@@ -1,6 +1,14 @@
 'use client';
 
 import { useState, useRef, useEffect } from "react"
+
+// Type declarations for SpeechRecognition API
+declare global {
+  interface Window {
+    SpeechRecognition: any;
+    webkitSpeechRecognition: any;
+  }
+}
 import { motion, AnimatePresence } from "framer-motion"
 import {
   Cpu,
@@ -70,6 +78,15 @@ export default function AIAgents() {
   const n8nVoiceInputRef = useRef<any>(null)
   const [isN8nVoiceRecording, setIsN8nVoiceRecording] = useState(false)
   const [isN8nVoiceProcessing, setIsN8nVoiceProcessing] = useState(false)
+  
+  // Additional state variables for n8n workflow functionality
+  const [n8nError, setN8nError] = useState<string>('')
+  const [statusMessage, setStatusMessage] = useState<string | null>(null)
+  const [statusType, setStatusType] = useState<'info' | 'success' | 'error' | null>(null)
+  const [isProcessing, setIsProcessing] = useState(false)
+  const [lastErrorType, setLastErrorType] = useState<'n8n' | 'speech' | null>(null)
+  const [isListening, setIsListening] = useState(false)
+  const recognitionRef = useRef<any>(null)
   useEffect(() => {
     const fetchAgents = async () => {
       try {
