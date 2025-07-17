@@ -31,28 +31,36 @@ class N8nClient:
                  base_url: str = None,
                  username: str = None, 
                  password: str = None,
+                 api_key: str = None,
                  timeout: int = 30):
         """
         Initialize n8n client
         
         Args:
             base_url: n8n server URL (defaults to docker network URL)
-            username: Basic auth username
-            password: Basic auth password
+            username: Basic auth username (optional if using API key)
+            password: Basic auth password (optional if using API key)
+            api_key: n8n API key JWT token (preferred method)
             timeout: Request timeout in seconds
         """
         self.base_url = base_url or os.getenv("N8N_URL", "http://n8n:5678")
+        self.api_key = api_key or os.getenv("N8N_API_KEY")
         self.username = username or os.getenv("N8N_USER", "admin")
-        self.password = password or os.getenv("N8N_PASSWORD", "password")
+        self.password = password or os.getenv("N8N_PASSWORD", "adminpass")
         self.timeout = timeout
         
         # Ensure base URL doesn't end with slash
         self.base_url = self.base_url.rstrip('/')
         
-        # Set up authentication
-        self.auth = HTTPBasicAuth(self.username, self.password)
-        
-        logger.info(f"Initialized n8n client for {self.base_url}")
+        # Set up authentication - prefer API key over basic auth
+        if self.api_key:
+            self.auth = None  # Will use Bearer token in headers
+            self.auth_method = "bearer"
+            logger.info(f"Initialized n8n client for {self.base_url} with API key authentication")
+        else:
+            self.auth = HTTPBasicAuth(self.username, self.password)
+            self.auth_method = "basic"
+            logger.info(f"Initialized n8n client for {self.base_url} with basic auth user: {self.username}")
     
     def _make_request(self, method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
         """
@@ -74,14 +82,22 @@ class N8nClient:
         # Set default headers
         headers = kwargs.get('headers', {})
         headers.setdefault('Content-Type', 'application/json')
-        kwargs['headers'] = headers
         
-        # Add authentication and timeout
-        kwargs['auth'] = self.auth
+        # Add authentication
+        if self.auth_method == "bearer" and self.api_key:
+            headers['Authorization'] = f'Bearer {self.api_key}'
+        elif self.auth_method == "basic" and self.auth:
+            kwargs['auth'] = self.auth
+        
+        kwargs['headers'] = headers
         kwargs['timeout'] = self.timeout
         
         try:
-            logger.debug(f"Making {method} request to {url}")
+            logger.info(f"Making {method} request to {url} with {self.auth_method} authentication")
+            if self.auth_method == "bearer":
+                logger.info(f"Using API key: {self.api_key[:20]}..." if self.api_key else "No API key found")
+            else:
+                logger.info(f"Using basic auth: {self.username}:{self.password}")
             response = requests.request(method, url, **kwargs)
             response.raise_for_status()
             
