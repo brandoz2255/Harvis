@@ -224,8 +224,51 @@ Determine what kind of n8n workflow this needs and provide detailed analysis."""
             )
             response.raise_for_status()
             
-            ai_response = response.json().get("message", {}).get("content", "")
-            analysis = json.loads(ai_response)
+            response_data = response.json()
+            logger.info(f"Raw Ollama response: {response_data}")
+            
+            ai_response = response_data.get("message", {}).get("content", "")
+            
+            if not ai_response or ai_response.strip() == "":
+                logger.error("Empty response from AI service")
+                return {
+                    "feasible": False,
+                    "error": "Empty response from AI service",
+                    "suggestions": ["Please try again with a more specific request"]
+                }
+            
+            try:
+                analysis = json.loads(ai_response)
+            except json.JSONDecodeError as json_error:
+                logger.error(f"Failed to parse AI response as JSON: {json_error}")
+                logger.error(f"AI response content: {ai_response}")
+                # Try to extract JSON from response if it's wrapped in markdown
+                import re
+                json_match = re.search(r'```json\s*(\{.*?\})\s*```', ai_response, re.DOTALL)
+                if json_match:
+                    try:
+                        analysis = json.loads(json_match.group(1))
+                    except json.JSONDecodeError:
+                        return {
+                            "feasible": False,
+                            "error": "Could not parse AI analysis",
+                            "suggestions": ["Please rephrase your request more clearly"]
+                        }
+                else:
+                    return {
+                        "feasible": False,
+                        "error": "Could not parse AI analysis",
+                        "suggestions": ["Please rephrase your request more clearly"]
+                    }
+            
+            # Ensure analysis is a dictionary
+            if not isinstance(analysis, dict):
+                logger.error(f"AI analysis is not a dictionary: {type(analysis)}")
+                return {
+                    "feasible": False,
+                    "error": "Invalid AI analysis format",
+                    "suggestions": ["Please try again"]
+                }
             
             logger.info(f"AI analysis complete: {analysis.get('workflow_type', 'unknown')} workflow")
             return analysis
@@ -268,11 +311,15 @@ Determine what kind of n8n workflow this needs and provide detailed analysis."""
         
         # Build custom workflow from analysis
         logger.info("Building custom workflow from analysis")
+        # Safely extract schedule information
+        schedule_info = analysis.get("schedule") or {}
+        parameters_info = analysis.get("parameters") or {}
+        
         requirements = {
             "trigger": analysis.get("workflow_type", "manual"),
             "actions": self._extract_actions_from_analysis(analysis),
-            "schedule_interval": analysis.get("schedule", {}).get("interval", "daily"),
-            "webhook_path": analysis.get("parameters", {}).get("webhook_path", "/webhook"),
+            "schedule_interval": schedule_info.get("interval", "daily"),
+            "webhook_path": parameters_info.get("webhook_path", "/webhook"),
             "keywords": self._extract_keywords_from_prompt(original_prompt)
         }
         
