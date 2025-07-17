@@ -16,13 +16,27 @@ RUN apt-get update && apt-get install -y \
 ############################
 COPY requirements.txt .
 
-RUN pip install --no-cache-dir --upgrade pip \
- && pip install --no-cache-dir -r requirements.txt \
- && pip install --no-cache-dir \
+# Multi-stage pip installation with retry mechanism and dependency resolution
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+
+# Install PyTorch first (specific CUDA version) to avoid conflicts
+RUN pip install --no-cache-dir \
       torch==2.6.0+cu124 \
       torchvision==0.21.0+cu124 \
       torchaudio==2.6.0 \
-      --index-url https://download.pytorch.org/whl/cu124  
+      --index-url https://download.pytorch.org/whl/cu124
+
+# Create requirements without torch to avoid conflicts
+RUN grep -v "^torch" requirements.txt > requirements_no_torch.txt
+
+# Copy the robust installation script
+COPY install_deps.py .
+
+# Install remaining requirements using robust Python script with fallback
+RUN python3 install_deps.py || \
+    (echo "Python script failed, falling back to traditional method..." && \
+     pip install --no-cache-dir -r requirements_no_torch.txt && \
+     pip install --no-cache-dir -r requirements_no_torch.txt)  
 
 ############################
 # 📦 Copy app code
