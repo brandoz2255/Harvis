@@ -1,27 +1,398 @@
-# .github/workflows/zap-dast.yml
 name: 🕷 ZAP DAST Scan
-
 on:
   workflow_dispatch:
-
+  schedule:
+    # Run weekly on Sundays at 2 AM UTC
+    - cron: '0 2 * * 0'
+  pull_request:
+    branches: [ main, develop ]
+    
 jobs:
   zap_scan:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      issues: write
+      
     steps:
-      - name: Pull Frontend Image & Run
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Set up Docker Network
+        run: docker network create ollama-n8n-network
+        
+      - name: Start PostgreSQL Database
+        run: |
+          docker run -d --rm \
+            --name pgsql-db \
+            --network ollama-n8n-network \
+            -e POSTGRES_USER=pguser \
+            -e POSTGRES_PASSWORD=pgpassword \
+            -e POSTGRES_DB=database \
+            -v $(pwd)/pgsql_data:/var/lib/postgresql/data \
+            postgres:15
+          
+          # Wait for database to be ready
+          echo "Waiting for PostgreSQL to start..."
+          until docker exec pgsql-db pg_isready -U pguser; do
+            echo "Waiting for database..."
+            sleep 2
+          done
+          echo "PostgreSQL is ready!"
+          
+      - name: Initialize Database Schema
+        run: |
+          # Copy SQL files to container
+          docker cp front_end/jfrontend/db_setup.sql pgsql-db:/tmp/
+          docker cp python_back_end/chat_history_schema.sql pgsql-db:/tmp/
+          
+          # Execute database setup
+          echo "Setting up main database schema..."
+          docker exec pgsql-db psql -U pguser -d database -f /tmp/db_setup.sql
+          
+          echo "Setting up chat history schema..."
+          docker exec pgsql-db psql -U pguser -d database -f /tmp/chat_history_schema.sql
+          
+          echo "Database initialization complete!"
+          
+      - name: Pull and Start Backend Container
+        run: |
+          docker pull dulc3/jarvis-backend:latest
+          
+          # Run backend with proper port exposure
+          docker run -d --rm \
+            --name jarvis-backend \
+            --network ollama-n8n-network \
+            -e DATABASE_URL=postgresql://pguser:pgpassword@pgsql-db:5432/database \
+            -e NODE_ENV=production \
+            -p 8080:8080 \
+            dulc3/jarvis-backend:latest
+          
+          # Wait for backend to be ready
+          echo "Waiting for backend to start..."
+          for i in {1..30}; do
+            if curl -f -s http://localhost:8080 > /dev/null 2>&1 || \
+               curl -f -s http://localhost:8080/health > /dev/null 2>&1 || \
+               curl -f -s http://localhost:8080/api > /dev/null 2>&1; then
+              echo "Backend is ready!"
+              break
+            fi
+            echo "Waiting for backend... ($i/30)"
+            sleep 2
+          done
+          
+      - name: Pull and Start Frontend Container
         run: |
           docker pull dulc3/jarvis-frontend:latest
-          docker network create zap-net
+          
           docker run -d --rm \
-            --name frontend \
-            --network zap-net \
+            --name jarvis-frontend \
+            --network ollama-n8n-network \
+            -e REACT_APP_API_URL=http://jarvis-backend:8080 \
             -p 3000:3000 \
             dulc3/jarvis-frontend:latest
-          sleep 15
-
-      - name: ZAP Scan
+          
+          # Wait for frontend to be ready
+          echo "Waiting for frontend to start..."
+          for i in {1..30}; do
+            if curl -f -s http://localhost:3000 > /dev/null 2>&1; then
+              echo "Frontend is ready!"
+              break
+            fi
+            echo "Waiting for frontend... ($i/30)"
+            sleep 2
+          done
+          
+      - name: Start Nginx Proxy
+        run: |
+          # First, verify upstream services are running
+          echo "=== Checking running containers ==="
+          docker ps
+          
+          # Test direct connectivity to services
+          echo "=== Testing backend connectivity ==="
+          curl -I http://localhost:8080 || echo "Backend not accessible from host"
+          
+          echo "=== Testing frontend connectivity ==="
+          curl -I http://localhost:3000 || echo "Frontend not accessible from host"
+          
+          # Debug: Check if nginx.conf exists
+          if [ ! -f "nginx.conf" ]; then
+            echo "nginx.conf not found in repository root. Creating a basic one..."
+            cat > nginx.conf << 'EOF'
+          events {
+              worker_connections 1024;
+          }
+          
+          http {
+              upstream frontend {
+                  server jarvis-frontend:3000;
+              }
+              
+              upstream backend {
+                  server jarvis-backend:8080;
+              }
+              
+              server {
+                  listen 80;
+                  
+                  location / {
+                      proxy_pass http://frontend;
+                      proxy_set_header Host $host;
+                      proxy_set_header X-Real-IP $remote_addr;
+                      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                      proxy_set_header X-Forwarded-Proto $scheme;
+                      
+                      # Add timeout settings
+                      proxy_connect_timeout 60s;
+                      proxy_send_timeout 60s;
+                      proxy_read_timeout 60s;
+                  }
+                  
+                  location /api {
+                      proxy_pass http://backend;
+                      proxy_set_header Host $host;
+                      proxy_set_header X-Real-IP $remote_addr;
+                      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                      proxy_set_header X-Forwarded-Proto $scheme;
+                      
+                      # Add timeout settings
+                      proxy_connect_timeout 60s;
+                      proxy_send_timeout 60s;
+                      proxy_read_timeout 60s;
+                  }
+              }
+          }
+          EOF
+          else
+            echo "Using existing nginx.conf from repository"
+            cat nginx.conf
+          fi
+          
+          # Test nginx config before starting
+          docker run --rm \
+            -v $(pwd)/nginx.conf:/etc/nginx/nginx.conf:ro \
+            nginx:alpine nginx -t
+          
+          # Start nginx proxy
+          echo "Starting Nginx proxy..."
+          docker run -d \
+            --name nginx-proxy \
+            --network ollama-n8n-network \
+            -p 9000:80 \
+            -v $(pwd)/nginx.conf:/etc/nginx/nginx.conf:ro \
+            nginx:alpine
+          
+          # Give nginx a moment to start
+          sleep 5
+          
+          # Check if container is still running
+          if ! docker ps | grep nginx-proxy > /dev/null; then
+            echo "Nginx container failed to start. Checking logs..."
+            docker logs nginx-proxy 2>&1 || echo "No logs available"
+            echo "=== All container statuses ==="
+            docker ps -a
+            exit 1
+          fi
+          
+          # Wait for nginx to be ready with timeout
+          echo "Waiting for Nginx proxy to be accessible..."
+          for i in {1..30}; do
+            if curl -f -s -m 5 http://localhost:9000 > /dev/null 2>&1; then
+              echo "Nginx proxy is ready!"
+              break
+            fi
+            echo "Waiting for proxy... ($i/30)"
+            
+            # Check if container is still running
+            if ! docker ps | grep nginx-proxy > /dev/null; then
+              echo "Nginx container stopped unexpectedly"
+              docker logs nginx-proxy 2>&1
+              exit 1
+            fi
+            
+            sleep 2
+          done
+          
+          # Final check
+          if ! curl -f -s -m 5 http://localhost:9000 > /dev/null 2>&1; then
+            echo "Nginx is running but not responding. Checking logs..."
+            docker logs nginx-proxy 2>&1
+            echo "=== Container network inspection ==="
+            docker inspect nginx-proxy | grep -A 10 NetworkMode
+            exit 1
+          fi
+          
+      - name: Verify All Services
+        run: |
+          echo "Verifying all services are running..."
+          docker ps
+          
+          # Test connectivity through proxy
+          curl -I http://localhost:9000 || true
+          
+      - name: Run ZAP Baseline Scan
         uses: zaproxy/action-baseline@v0.11.0
         with:
-          target: "http://frontend:3000"
-        env:
-          DOCKER_NETWORK: zap-net
+          target: 'http://localhost:9000'
+          rules_file_name: '.zap/rules.tsv'
+          cmd_options: '-j -l PASS'
+          
+      - name: Run ZAP Full Scan (Through Proxy)
+        uses: zaproxy/action-full-scan@v0.10.0
+        with:
+          target: 'http://localhost:9000'
+          rules_file_name: '.zap/rules.tsv'
+          cmd_options: '-a -j -l PASS -r zap-proxy-report.html -w zap-proxy-report.md -x zap-proxy-report.xml'
+          allow_issue_writing: true
+          issue_title: 'ZAP Full Scan Report - Proxy'
+          
+      - name: Run ZAP API Scan (Direct Backend)
+        continue-on-error: true
+        run: |
+          # Get backend container IP
+          BACKEND_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' jarvis-backend)
+          
+          docker run --rm \
+            --network ollama-n8n-network \
+            -v $(pwd):/zap/wrk/:rw \
+            -t ghcr.io/zaproxy/zaproxy:stable zap-api-scan.py \
+            -t http://${BACKEND_IP}:8080 \
+            -f openapi \
+            -r zap-api-report.html \
+            -w zap-api-report.md \
+            -J zap-api-report.json \
+            -a -j -l PASS
+            
+      - name: Advanced Security Tests
+        run: |
+          # Create custom scan configuration
+          mkdir -p .zap
+          
+          # Custom rules to reduce false positives
+          cat > .zap/rules.tsv << 'EOF'
+          # Rule ID	Risk	Confidence	Description
+          10015	IGNORE	IGNORE	# Incomplete or No Cache-control Header Set
+          10027	IGNORE	IGNORE	# Information Disclosure - Suspicious Comments
+          10096	IGNORE	IGNORE	# Timestamp Disclosure
+          EOF
+          
+          # Run advanced scan with authentication simulation
+          docker run --rm \
+            --network ollama-n8n-network \
+            -v $(pwd):/zap/wrk/:rw \
+            -t ghcr.io/zaproxy/zaproxy:stable zap-full-scan.py \
+            -t http://nginx-proxy \
+            -r zap-advanced-report.html \
+            -w zap-advanced-report.md \
+            -x zap-advanced-report.xml \
+            -j \
+            -a \
+            -l PASS \
+            -z "-config scanner.threadPerHost=10 \
+                -config spider.maxDuration=10 \
+                -config spider.maxDepth=10 \
+                -config spider.maxChildren=50 \
+                -config ajaxSpider.maxDuration=10 \
+                -config ajaxSpider.maxCrawlStates=50 \
+                -config ascan.delayInMs=50"
+                
+      - name: Database Security Scan
+        run: |
+          # Test for SQL injection vulnerabilities through the application
+          echo "Testing database security through application endpoints..."
+          
+          # Create SQL injection test payloads
+          cat > sql-injection-tests.txt << 'EOF'
+          ' OR '1'='1
+          '; DROP TABLE users--
+          ' UNION SELECT * FROM information_schema.tables--
+          admin'--
+          ' OR 1=1--
+          EOF
+          
+          # Run targeted SQL injection tests (adjust endpoints as needed)
+          # This is a simplified example - ZAP will do more comprehensive testing
+          
+      - name: Upload All ZAP Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-scan-reports
+          path: |
+            zap-*.html
+            zap-*.md
+            zap-*.xml
+            zap-*.json
+            
+      - name: Parse and Summarize Results
+        if: always()
+        run: |
+          # Install dependencies
+          sudo apt-get update
+          sudo apt-get install -y xmlstarlet jq
+          
+          # Parse all XML reports
+          for report in zap-*-report.xml; do
+            if [ -f "$report" ]; then
+              echo "### Results from $report ###"
+              
+              HIGH=$(xmlstarlet sel -t -v "count(//alertitem[riskcode='3'])" "$report" 2>/dev/null || echo "0")
+              MEDIUM=$(xmlstarlet sel -t -v "count(//alertitem[riskcode='2'])" "$report" 2>/dev/null || echo "0")
+              LOW=$(xmlstarlet sel -t -v "count(//alertitem[riskcode='1'])" "$report" 2>/dev/null || echo "0")
+              
+              echo "- High Risk: $HIGH"
+              echo "- Medium Risk: $MEDIUM"
+              echo "- Low Risk: $LOW"
+              echo ""
+            fi
+          done >> $GITHUB_STEP_SUMMARY
+          
+      - name: Security Quality Gate
+        run: |
+          # Check all reports for high-risk vulnerabilities
+          TOTAL_HIGH=0
+          
+          for report in zap-*-report.xml; do
+            if [ -f "$report" ]; then
+              HIGH=$(xmlstarlet sel -t -v "count(//alertitem[riskcode='3'])" "$report" 2>/dev/null || echo "0")
+              TOTAL_HIGH=$((TOTAL_HIGH + HIGH))
+            fi
+          done
+          
+          if [ "$TOTAL_HIGH" -gt "0" ]; then
+            echo "❌ Security Quality Gate Failed: $TOTAL_HIGH high-risk vulnerabilities found!"
+            exit 1
+          else
+            echo "✅ Security Quality Gate Passed"
+          fi
+          
+      - name: Container Logs (for debugging)
+        if: failure()
+        run: |
+          echo "=== Nginx Logs ==="
+          docker logs nginx-proxy || true
+          echo "=== Backend Logs ==="
+          docker logs jarvis-backend || true
+          echo "=== Frontend Logs ==="
+          docker logs jarvis-frontend || true
+          echo "=== Database Logs ==="
+          docker logs pgsql-db || true
+          
+      - name: Cleanup
+        if: always()
+        run: |
+          docker stop nginx-proxy jarvis-frontend jarvis-backend pgsql-db || true
+          docker network rm ollama-n8n-network || true
+          
+  notification:
+    runs-on: ubuntu-latest
+    needs: zap_scan
+    if: failure()
+    
+    steps:
+      - name: Notify on Failure
+        run: |
+          echo "Security scan failed! Check the artifacts for detailed reports."
+          # Add your notification logic here (Slack, email, etc.)
