@@ -38,8 +38,8 @@ class N8nClient:
         
         Args:
             base_url: n8n server URL (defaults to docker network URL)
-            username: Basic auth username (optional if using API key)
-            password: Basic auth password (optional if using API key)
+            username: Username for login (will be treated as email if contains @)
+            password: Password for login
             api_key: n8n API key JWT token (preferred method)
             timeout: Request timeout in seconds
         """
@@ -52,15 +52,45 @@ class N8nClient:
         # Ensure base URL doesn't end with slash
         self.base_url = self.base_url.rstrip('/')
         
-        # Set up authentication - prefer API key over basic auth
-        if self.api_key:
-            self.auth = None  # Will use Bearer token in headers
-            self.auth_method = "bearer"
-            logger.info(f"Initialized n8n client for {self.base_url} with API key authentication")
-        else:
-            self.auth = HTTPBasicAuth(self.username, self.password)
-            self.auth_method = "basic"
-            logger.info(f"Initialized n8n client for {self.base_url} with basic auth user: {self.username}")
+        # Set up session for authentication
+        self.session = requests.Session()
+        self.session.timeout = timeout
+        self.authenticated = False
+        
+        logger.info(f"Initialized n8n client for {self.base_url} with session auth user: {self.username}")
+    
+    def _login(self) -> bool:
+        """
+        Authenticate with n8n using API key
+        
+        Returns:
+            True if authentication successful, False otherwise
+        """
+        if self.authenticated:
+            return True
+
+        if not self.api_key:
+            raise N8nClientError("API key not provided. Set N8N_API_KEY environment variable or pass api_key parameter.")
+
+        # Test the API key
+        try:
+            headers = {'X-N8N-API-KEY': self.api_key}
+            test_url = f"{self.base_url}/api/v1/workflows"
+            response = self.session.get(test_url, headers=headers, timeout=self.timeout)
+            
+            if response.status_code == 200:
+                self.authenticated = True
+                self.use_api_v1 = True
+                logger.info("✅ Successfully authenticated with API key")
+                return True
+            else:
+                logger.error(f"❌ API key authentication failed: {response.status_code} - {response.text}")
+                raise N8nClientError(f"API key authentication failed: {response.status_code} - {response.text}")
+                
+        except Exception as e:
+            logger.error(f"❌ API key authentication error: {e}")
+            raise N8nClientError(f"API key authentication error: {e}")
+    
     
     def _make_request(self, method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
         """
@@ -77,28 +107,29 @@ class N8nClient:
         Raises:
             N8nClientError: On API errors or connection issues
         """
-        url = f"{self.base_url}/rest{endpoint}"
+        # Ensure we're authenticated
+        if not self._login():
+            raise N8nClientError("Failed to authenticate with n8n")
+            
+        # Use /api/v1 for newer n8n versions, /rest for older
+        api_prefix = "/api/v1" if hasattr(self, 'use_api_v1') and self.use_api_v1 else "/rest"
+        url = f"{self.base_url}{api_prefix}{endpoint}"
         
         # Set default headers
         headers = kwargs.get('headers', {})
         headers.setdefault('Content-Type', 'application/json')
         
-        # Add authentication
-        if self.auth_method == "bearer" and self.api_key:
-            headers['Authorization'] = f'Bearer {self.api_key}'
-        elif self.auth_method == "basic" and self.auth:
-            kwargs['auth'] = self.auth
+        # Add API key authentication (required)
+        if not self.api_key:
+            raise N8nClientError("API key is missing — cannot perform request")
+        
+        headers['X-N8N-API-KEY'] = self.api_key
         
         kwargs['headers'] = headers
-        kwargs['timeout'] = self.timeout
         
         try:
-            logger.info(f"Making {method} request to {url} with {self.auth_method} authentication")
-            if self.auth_method == "bearer":
-                logger.info(f"Using API key: {self.api_key[:20]}..." if self.api_key else "No API key found")
-            else:
-                logger.info(f"Using basic auth: {self.username}:{self.password}")
-            response = requests.request(method, url, **kwargs)
+            logger.info(f"Making {method} request to {url} with session authentication")
+            response = self.session.request(method, url, **kwargs)
             response.raise_for_status()
             
             # Handle empty responses
