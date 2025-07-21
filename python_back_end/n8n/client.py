@@ -197,6 +197,50 @@ class N8nClient:
             logger.error(f"Failed to get workflow {workflow_id}: {e}")
             raise
     
+    def _sanitize_workflow_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Remove read-only fields and fix field types in workflow payload before sending to n8n API
+        
+        Args:
+            payload: Raw workflow payload
+            
+        Returns:
+            Sanitized payload without read-only fields and proper field types
+        """
+        read_only_fields = [
+            'id', 
+            'active', 
+            'tags',
+            'createdAt', 
+            'updatedAt',
+            'createdBy',
+            'updatedBy', 
+            'versionId'
+        ]
+        sanitized = {k: v for k, v in payload.items() if k not in read_only_fields}
+        
+        if any(field in payload for field in read_only_fields):
+            removed_fields = [field for field in read_only_fields if field in payload]
+            logger.info(f"Removed read-only fields from payload: {removed_fields}")
+        
+        # Ensure all nodes have credentials as objects, not null
+        if 'nodes' in sanitized:
+            for node in sanitized['nodes']:
+                if 'credentials' not in node or node['credentials'] is None:
+                    node['credentials'] = {}
+                    logger.debug(f"Fixed credentials field for node: {node.get('name', 'unknown')}")
+        
+        # Ensure settings and staticData are objects, not null
+        if 'settings' not in sanitized or sanitized['settings'] is None:
+            sanitized['settings'] = {}
+            logger.debug("Fixed settings field to be empty object")
+        
+        if 'staticData' not in sanitized or sanitized['staticData'] is None:
+            sanitized['staticData'] = {}
+            logger.debug("Fixed staticData field to be empty object")
+        
+        return sanitized
+
     def create_workflow(self, workflow_data: Dict[str, Any]) -> Dict[str, Any]:
         """
         Create new workflow
@@ -208,7 +252,10 @@ class N8nClient:
             Created workflow object with ID
         """
         try:
-            workflow = self._make_request('POST', '/workflows', json=workflow_data)
+            # Sanitize payload to remove read-only fields like 'active'
+            sanitized_data = self._sanitize_workflow_payload(workflow_data)
+            
+            workflow = self._make_request('POST', '/workflows', json=sanitized_data)
             workflow_id = workflow.get('id', 'unknown')
             logger.info(f"Created workflow {workflow_id}: {workflow_data.get('name', 'Unnamed')}")
             return workflow
