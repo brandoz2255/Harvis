@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect } from "react"
+import { useState, useRef, useEffect, useMemo } from "react"
 
 // Type declarations for SpeechRecognition API
 declare global {
@@ -49,7 +49,7 @@ interface Agent {
   id: string
   name: string
   description: string
-  type: "Ollama" | "Gemini" | "Research"
+  type: "Ollama" | "Gemini" | "Research" | "n8n" | "Voice" | "Chat"
   status: "active" | "inactive" | "error"
   executionCount: number
   hardware: string
@@ -87,38 +87,37 @@ export default function AIAgents() {
   const [lastErrorType, setLastErrorType] = useState<'n8n' | 'speech' | null>(null)
   const [isListening, setIsListening] = useState(false)
   const recognitionRef = useRef<any>(null)
-  useEffect(() => {
-    const fetchAgents = async () => {
-      try {
-        const response = await fetch("http://backend:8000/api/ollama-models", { credentials: 'include' })
-        if (!response.ok) throw new Error("Failed to fetch agent data")
-        const data = await response.json()
-        const fetchedAgents: Agent[] = data.models?.map((model: any) => ({
-          id: model.name,
-          name: model.name.split(":")[0],
-          description: `An AI agent powered by the ${model.name} model.`,
-          type: model.name.includes("gemini") ? "Gemini" : "Ollama",
-          status: "active",
-          executionCount: Math.floor(Math.random() * 100),
-          hardware: "GPU",
-        })) || []
-        fetchedAgents.push({
-          id: "research-assistant",
-          name: "Research Assistant",
-          description: "Performs research and analysis using web searches.",
-          type: "Research",
-          status: "active",
-          executionCount: Math.floor(Math.random() * 50),
-          hardware: "CPU",
-        })
-        setAgents(fetchedAgents)
-      } catch (error: any) {
-        setAgentsError(error.message || "An unknown error occurred")
-      } finally {
-        setIsLoadingAgents(false)
+  
+  // Workflow statistics state
+  const [workflowStats, setWorkflowStats] = useState({
+    totalWorkflows: 0,
+    activeWorkflows: 0,
+    totalExecutions: 0
+  })
+  const [isLoadingStats, setIsLoadingStats] = useState(false)
+  // Fetch n8n workflow statistics
+  const fetchWorkflowStats = async () => {
+    try {
+      setIsLoadingStats(true);
+      const response = await fetch("/api/n8n-stats", { credentials: 'include' });
+      if (response.ok) {
+        const stats = await response.json();
+        setWorkflowStats(stats);
       }
+    } catch (error) {
+      console.error("Failed to fetch workflow stats:", error);
+    } finally {
+      setIsLoadingStats(false);
     }
-    fetchAgents()
+  };
+
+  useEffect(() => {
+    // Show no agents in the cards - this is a pure n8n page showing only n8n workflows
+    setAgents([])
+    setIsLoadingAgents(false)
+    
+    // Fetch n8n workflow statistics for the cards
+    fetchWorkflowStats()
   }, [])
 
   const getAgentStatusColor = (status: Agent["status"]) => {
@@ -147,13 +146,20 @@ export default function AIAgents() {
 
   const getAgentTypeIcon = (type: Agent["type"]) => {
     switch (type) {
+      case "n8n":
+        return <Workflow className="w-4 h-4" />
+      case "Voice":
+        return <Mic className="w-4 h-4" />
+      case "Chat":
+        return <MessageSquare className="w-4 h-4" />
+      case "Research":
+        return <Globe className="w-4 h-4" />
       case "Ollama":
-      default:
         return <Bot className="w-4 h-4" />
       case "Gemini":
         return <BrainCircuit className="w-4 h-4" />
-      case "Research":
-        return <Globe className="w-4 h-4" />
+      default:
+        return <Bot className="w-4 h-4" />
     }
   }
 
@@ -188,6 +194,8 @@ export default function AIAgents() {
       setN8nMessage("Workflow created successfully!")
       setN8nMessageType("success")
       setN8nStatus("success")
+      // Refresh workflow statistics
+      fetchWorkflowStats()
     } catch (error: any) {
       if (n8nStatus !== "error") { // Only update if not already in an error state from speech recognition
         setN8nMessage(error.message)
@@ -404,7 +412,7 @@ export default function AIAgents() {
       <div className="fixed inset-0 -z-10 pointer-events-none select-none">
         <Aurora
           className="w-full h-full"
-          colorStops={['#4F46E5', '#06B6D4', '#8B5CF6']}
+          colorStops={useMemo(() => ['#4F46E5', '#06B6D4', '#8B5CF6'], [])}
           blend={0.4}
           amplitude={1.0}
           speed={0.6}
@@ -461,21 +469,35 @@ export default function AIAgents() {
             <Card className="bg-gray-900/50 backdrop-blur-sm border-indigo-500/30 p-6">
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="text-sm text-gray-400">Total Agents</p>
+                  <p className="text-sm text-gray-400">Total Workflows</p>
                   <p className="text-2xl font-bold text-white">
-                    {agents.length}
+                    {isLoadingStats ? (
+                      <Loader2 className="w-6 h-6 animate-spin inline" />
+                    ) : (
+                      workflowStats.totalWorkflows
+                    )}
+                  </p>
+                  <p className="text-xs text-gray-500">
+                    n8n workflows
                   </p>
                 </div>
-                <Bot className="w-8 h-8 text-indigo-400" />
+                <Workflow className="w-8 h-8 text-indigo-400" />
               </div>
             </Card>
 
             <Card className="bg-gray-900/50 backdrop-blur-sm border-green-500/30 p-6">
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="text-sm text-gray-400">Active Agents</p>
+                  <p className="text-sm text-gray-400">Active Workflows</p>
                   <p className="text-2xl font-bold text-white">
-                    {agents.filter((agent) => agent.status === "active").length}
+                    {isLoadingStats ? (
+                      <Loader2 className="w-6 h-6 animate-spin inline" />
+                    ) : (
+                      workflowStats.activeWorkflows
+                    )}
+                  </p>
+                  <p className="text-xs text-gray-500">
+                    currently running
                   </p>
                 </div>
                 <Check className="w-8 h-8 text-green-400" />
@@ -487,9 +509,14 @@ export default function AIAgents() {
                 <div>
                   <p className="text-sm text-gray-400">Total Executions</p>
                   <p className="text-2xl font-bold text-white">
-                    {agents
-                      .reduce((sum, agent) => sum + agent.executionCount, 0)
-                      .toLocaleString()}
+                    {isLoadingStats ? (
+                      <Loader2 className="w-6 h-6 animate-spin inline" />
+                    ) : (
+                      workflowStats.totalExecutions.toLocaleString()
+                    )}
+                  </p>
+                  <p className="text-xs text-gray-500">
+                    workflow runs
                   </p>
                 </div>
                 <Zap className="w-8 h-8 text-blue-400" />
@@ -575,19 +602,59 @@ export default function AIAgents() {
                 </div>
               )}
               {n8nWorkflow && (
-                <div className="mt-4 p-4 bg-gray-800 rounded-md">
-                  <h3 className="text-lg font-semibold text-white mb-2">Workflow Created!</h3>
-                  <pre className="bg-gray-700 p-3 rounded-md overflow-auto text-gray-200 text-sm max-h-60">
-                    {JSON.stringify(n8nWorkflow, null, 2)}
-                  </pre>
-                  <a
-                    href={`YOUR_N8N_URL/workflow/${n8nWorkflow.id}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-blue-400 hover:underline mt-2 block"
-                  >
-                    View in n8n
-                  </a>
+                <div className="mt-4 space-y-4">
+                  {/* Workflow Info Card */}
+                  <Card className="bg-gray-800/50 backdrop-blur-sm border-green-500/30">
+                    <CardHeader className="pb-3">
+                      <CardTitle className="text-white flex items-center text-lg">
+                        <Workflow className="w-5 h-5 mr-2 text-green-400" />
+                        Workflow Information
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+                        <div className="bg-gray-700/50 rounded-lg p-3">
+                          <p className="text-xs text-gray-400">Workflow ID</p>
+                          <p className="text-sm font-mono text-white truncate">{n8nWorkflow.id}</p>
+                        </div>
+                        <div className="bg-gray-700/50 rounded-lg p-3">
+                          <p className="text-xs text-gray-400">Name</p>
+                          <p className="text-sm text-white">{n8nWorkflow.name || 'Unnamed Workflow'}</p>
+                        </div>
+                        <div className="bg-gray-700/50 rounded-lg p-3">
+                          <p className="text-xs text-gray-400">Status</p>
+                          <Badge variant="outline" className="border-green-500 text-green-400 mt-1">
+                            <Check className="w-3 h-3 mr-1" />
+                            Created
+                          </Badge>
+                        </div>
+                      </div>
+                      <div className="bg-gray-700/50 rounded-lg p-3 mb-4">
+                        <p className="text-xs text-gray-400 mb-2">Description</p>
+                        <p className="text-sm text-white">{n8nWorkflow.description || 'No description available'}</p>
+                      </div>
+                      <Button
+                        onClick={() => window.open('http://localhost:5678', '_blank')}
+                        variant="outline"
+                        className="w-full bg-indigo-600 hover:bg-indigo-700 text-white border-indigo-500"
+                      >
+                        <ExternalLink className="w-4 h-4 mr-2" />
+                        Open n8n Dashboard
+                      </Button>
+                    </CardContent>
+                  </Card>
+
+                  {/* JSON Details (Collapsible) */}
+                  <div className="bg-gray-800 rounded-md">
+                    <div className="p-4 border-b border-gray-700">
+                      <h3 className="text-lg font-semibold text-white">Workflow JSON</h3>
+                    </div>
+                    <div className="p-4">
+                      <pre className="bg-gray-700 p-3 rounded-md overflow-auto text-gray-200 text-sm max-h-60">
+                        {JSON.stringify(n8nWorkflow, null, 2)}
+                      </pre>
+                    </div>
+                  </div>
                 </div>
               )}
             </CardContent>
