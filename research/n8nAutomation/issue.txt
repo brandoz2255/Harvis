@@ -1,0 +1,20 @@
+INFO:main:get_current_user called with credentials: None
+INFO:main:JWT payload: {'sub': '2', 'exp': 1753121977}
+INFO:main:User ID from token: 2
+INFO:main:User found: {'id': 2, 'username': 'cisoai7', 'email': 'cisoai7@gmail.com', 'avatar': None}
+INFO:main:n8n automation request from user cisoai7: create a n8n workflow for automating youtube tasks 
+...
+INFO:n8n.automation_service:Processing automation request: create a n8n workflow for automating youtube tasks 
+...
+INFO:n8n.automation_service:Analyzing prompt with mistral
+INFO:n8n.automation_service:AI analysis complete: api workflow
+INFO:n8n.automation_service:Creating workflow from analysis: {'feasible': True, 'workflow_type': 'api', 'template_id': None, 'description': 'This workflow will automate various YouTube tasks such as video uploading, comment moderation, and playlist management.', 'auto_activate': False, 'nodes_required': ['manual trigger', 'http request', 'if condition', 'switch', 'merge', 'set', 'move binary data', 'YouTube API'], 'parameters': {'api_key': '', 'video_title': '', 'video_description': '', 'privacy_status': 'private', 'category_id': '', 'tags': [], 'youtube_channel_id': ''}, 'schedule': None, 'suggestions': ['Consider using the YouTube Data API v3 to interact with your videos and channel.', "You might also want to incorporate a function node to handle specific tasks that aren't covered by existing nodes."]}
+INFO:n8n.automation_service:Building custom workflow from analysis
+INFO:n8n.workflow_builder:Built simple workflow 'Custom Create Workflow' with 2 nodes
+INFO:n8n.client:✅ Successfully authenticated with API key
+INFO:n8n.client:Making POST request to http://n8n:5678/api/v1/workflows with session authentication
+ERROR:n8n.client:n8n API error 400: {"message":"request/body/active is read-only"}
+ERROR:n8n.client:Failed to create workflow: n8n API error 400: {"message":"request/body/active is read-only"}
+ERROR:n8n.automation_service:Automation request failed: n8n API error 400: {"message":"request/body/active is read-only"}
+INFO:n8n.storage:Saved automation history 30
+WARNING:main:❌ n8n automation failed: n8n API error 400: {"message":"request/body/active is read-only"}
