@@ -43,13 +43,18 @@ class WorkflowNode(BaseModel):
     typeVersion: int = Field(default=1, description="Node type version")
     position: List[int] = Field(default=[100, 100], description="Node position [x, y]")
     parameters: Dict[str, Any] = Field(default_factory=dict, description="Node parameters")
-    credentials: Optional[Dict[str, str]] = Field(None, description="Node credentials")
+    credentials: Dict[str, str] = Field(default_factory=dict, description="Node credentials")
     
     @validator('position')
     def validate_position(cls, v):
         if len(v) != 2:
             raise ValueError('Position must be [x, y] coordinates')
         return v
+    
+    @validator('credentials', pre=True)
+    def validate_credentials(cls, v):
+        # Ensure credentials is always a dict, never None
+        return v if v is not None else {}
 
 
 class WorkflowConfig(BaseModel):
@@ -61,8 +66,8 @@ class WorkflowConfig(BaseModel):
         description="Node connections"
     )
     active: bool = Field(default=False, description="Whether workflow is active")
-    settings: Optional[Dict[str, Any]] = Field(None, description="Workflow settings")
-    staticData: Optional[Dict[str, Any]] = Field(None, description="Static workflow data")
+    settings: Dict[str, Any] = Field(default_factory=dict, description="Workflow settings")
+    staticData: Dict[str, Any] = Field(default_factory=dict, description="Static workflow data")
     tags: List[str] = Field(default_factory=list, description="Workflow tags")
     
     def add_connection(self, from_node: str, to_node: str, 
