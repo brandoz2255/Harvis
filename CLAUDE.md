@@ -117,7 +117,21 @@ def separate_thinking_from_final_output(text: str) -> tuple[str, str]:
 - Files modified
 - Result/status
 
-This helps track all modifications and provides debugging context for future development. 
+This helps track all modifications and provides debugging context for future development.
+
+## Fixes and Troubleshooting
+
+**IMPORTANT**: Before implementing solutions for common issues, check the `fixes/` directory for documented solutions:
+- `fixes/` contains detailed documentation of resolved issues with complete step-by-step solutions
+- Each fix document includes problem symptoms, root cause analysis, failed approaches, and working solutions
+- When encountering authentication errors, API failures, or integration issues, search `fixes/` first
+- Always reference existing fix documentation in new changes.md entries
+
+Common fix categories:
+- Authentication issues (n8n, database, JWT)
+- API integration problems  
+- Docker networking and configuration
+- Frontend-backend communication errors 
 
 
 ## Key Commands
