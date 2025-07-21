@@ -1703,6 +1703,122 @@ async def check_n8n_health():
             "overall_health": False
         }
 
+@app.get("/api/n8n/stats", tags=["n8n-automation"])
+async def get_n8n_statistics():
+    """
+    Get n8n workflow statistics
+    
+    Returns workflow count, active workflows, and total executions
+    """
+    try:
+        if not n8n_automation_service or not n8n_automation_service.n8n_client:
+            logger.warning("n8n automation service not available for stats")
+            return {
+                "totalWorkflows": 0,
+                "activeWorkflows": 0,
+                "totalExecutions": 0
+            }
+
+        # Get all workflows
+        workflows = n8n_automation_service.n8n_client.get_workflows()
+        total_workflows = len(workflows)
+        
+        # Count active workflows
+        active_workflows = sum(1 for workflow in workflows if workflow.get('active', False))
+        
+        # Get total executions across all workflows
+        total_executions = 0
+        for workflow in workflows:
+            try:
+                workflow_id = workflow.get('id')
+                if workflow_id:
+                    executions = n8n_automation_service.n8n_client.get_executions(workflow_id, limit=1000)
+                    total_executions += len(executions)
+            except Exception as e:
+                logger.warning(f"Failed to get executions for workflow {workflow_id}: {e}")
+                continue
+
+        logger.info(f"n8n stats: {total_workflows} workflows, {active_workflows} active, {total_executions} executions")
+        
+        return {
+            "totalWorkflows": total_workflows,
+            "activeWorkflows": active_workflows,
+            "totalExecutions": total_executions
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to get n8n statistics: {e}")
+        # Return default stats on error to prevent UI from breaking
+        return {
+            "totalWorkflows": 0,
+            "activeWorkflows": 0,
+            "totalExecutions": 0
+        }
+
+@app.get("/api/n8n/workflows", tags=["n8n-automation"])
+async def get_n8n_workflows():
+    """
+    Get n8n workflows with execution counts
+    
+    Returns list of workflows with details and execution counts
+    """
+    try:
+        if not n8n_automation_service or not n8n_automation_service.n8n_client:
+            logger.warning("n8n automation service not available for workflows")
+            return {
+                "workflows": []
+            }
+
+        # Get all workflows
+        workflows = n8n_automation_service.n8n_client.get_workflows()
+        
+        # Enhance workflows with execution counts
+        enhanced_workflows = []
+        for workflow in workflows:
+            try:
+                workflow_id = workflow.get('id')
+                execution_count = 0
+                
+                if workflow_id:
+                    executions = n8n_automation_service.n8n_client.get_executions(workflow_id, limit=1000)
+                    execution_count = len(executions)
+                
+                enhanced_workflow = {
+                    "id": workflow.get('id'),
+                    "name": workflow.get('name', f'Workflow {workflow.get("id", "Unknown")}'),
+                    "description": workflow.get('description', 'n8n automation workflow'),
+                    "active": workflow.get('active', False),
+                    "executionCount": execution_count,
+                    "createdAt": workflow.get('createdAt'),
+                    "updatedAt": workflow.get('updatedAt'),
+                    "tags": workflow.get('tags', [])
+                }
+                enhanced_workflows.append(enhanced_workflow)
+                
+            except Exception as e:
+                logger.warning(f"Failed to enhance workflow {workflow.get('id')}: {e}")
+                # Add workflow without execution count
+                enhanced_workflows.append({
+                    "id": workflow.get('id'),
+                    "name": workflow.get('name', f'Workflow {workflow.get("id", "Unknown")}'),
+                    "description": workflow.get('description', 'n8n automation workflow'),
+                    "active": workflow.get('active', False),
+                    "executionCount": 0
+                })
+
+        logger.info(f"n8n workflows: returning {len(enhanced_workflows)} workflows")
+        
+        return {
+            "workflows": enhanced_workflows
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to get n8n workflows: {e}")
+        # Return empty workflows list on error
+        return {
+            "workflows": []
+        }
+
 # ─── Vibe Coding Endpoints ─────────────────────────────────────────────────────
 
 @app.post("/api/vibe-coding", tags=["vibe-coding"])
