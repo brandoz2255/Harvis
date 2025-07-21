@@ -1,5 +1,7 @@
 # The Jarvis Project
 
+![Jarvis AI Interface](assets/images/swappy-20250713-001120.png)
+
 The Jarvis Project is a sophisticated, voice-activated AI assistant designed to be a proactive and interactive partner on your computer. It combines the power of large language models, voice synthesis, and system automation to provide a seamless interface for controlling your digital environment, retrieving information, and assisting with various tasks.
 
 ## Core Features
