@@ -257,22 +257,30 @@ Determine what kind of n8n workflow this needs and provide detailed analysis."""
         Returns:
             WorkflowConfig ready for n8n
         """
+        # Add debug logging for analysis
+        logger.info(f"Creating workflow from analysis: {analysis}")
+        
         workflow_name = self._generate_workflow_name(analysis, original_prompt)
         
         # Try to use template if available
         template_id = analysis.get("template_id")
         if template_id and template_id in self.workflow_builder.templates:
             logger.info(f"Using template {template_id}")
-            parameters = analysis.get("parameters", {})
+            parameters = analysis.get("parameters") or {}
             return self.workflow_builder.build_from_template(template_id, workflow_name, parameters)
         
         # Build custom workflow from analysis
         logger.info("Building custom workflow from analysis")
+        
+        # Safely extract nested values with proper null checking
+        schedule = analysis.get("schedule") or {}
+        parameters = analysis.get("parameters") or {}
+        
         requirements = {
             "trigger": analysis.get("workflow_type", "manual"),
             "actions": self._extract_actions_from_analysis(analysis),
-            "schedule_interval": analysis.get("schedule", {}).get("interval", "daily"),
-            "webhook_path": analysis.get("parameters", {}).get("webhook_path", "/webhook"),
+            "schedule_interval": schedule.get("interval", "daily"),
+            "webhook_path": parameters.get("webhook_path", "/webhook"),
             "keywords": self._extract_keywords_from_prompt(original_prompt)
         }
         
