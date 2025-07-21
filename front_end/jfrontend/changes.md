@@ -1,5 +1,51 @@
 # Recent Changes and Fixes Documentation
 
+## Date: 2025-01-21
+
+### 6. n8n Authentication 401 Unauthorized Error Fixed ✅ FIXED
+
+#### Problem:
+- n8n automation service was failing with `401 Unauthorized` error when trying to create workflows
+- Error occurred during `POST http://n8n:5678/rest/workflows` requests
+- User authentication was working (JWT payload present) but n8n API calls were rejected
+
+#### Root Cause Analysis:
+- The n8n REST API does not support session-based authentication for programmatic access
+- The client.py was attempting to use session login (`/rest/login`) which only works for UI access
+- n8n REST API requires either API Key authentication (`X-N8N-API-KEY` header) or Basic Auth
+- Docker-compose.yaml had Basic Auth configured but client wasn't using it properly
+
+#### Solution Applied:
+1. **Added CORS support for n8n in nginx.conf**:
+   - Added n8n origins to the CORS map (`http://localhost:5678`, `http://127.0.0.1:5678`)
+   - Created `/n8n/` location block with proper CORS headers including `X-N8N-API-KEY`
+   - Configured proxy pass to `http://n8n:5678/`
+
+2. **Created comprehensive n8n authentication helper module** (`python_back_end/n8n/helper.py`):
+   - Supports both API Key and Basic Auth methods
+   - Includes convenience methods for common n8n operations
+   - Factory functions for different authentication patterns
+   - Docker network URL configuration
+
+3. **Fixed client.py authentication flow**:
+   - Replaced session login with proper Basic Auth using `HTTPBasicAuth`
+   - Updated `_login()` method to use configured credentials (`admin`/`adminpass`)
+   - Modified `_make_request()` to avoid overriding Basic Auth with API key headers
+   - Maintained backward compatibility with API key authentication
+
+#### Files Modified:
+- `/nginx.conf` - Added CORS and proxy configuration for n8n
+- `/python_back_end/n8n/client.py` - Fixed authentication method 
+- `/python_back_end/n8n/helper.py` - Created new authentication helper module
+
+#### Result/Status:
+- ✅ Fixed: n8n client now uses Basic Auth properly for REST API access
+- ✅ Added: Comprehensive helper module for n8n automation tasks
+- ✅ Added: CORS support for n8n API calls through nginx proxy
+- 🔄 Ready for testing: Automation service should now successfully create workflows
+
+---
+
 ## Date: 2025-01-17
 
 ### 5. Security Issues Fixed ✅ FIXED
