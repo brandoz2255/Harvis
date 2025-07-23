@@ -217,9 +217,14 @@ Determine what kind of n8n workflow this needs and provide detailed analysis."""
         
         try:
             logger.info(f"Analyzing prompt with {model}")
+            # Add authentication headers for external Ollama server
+            import os
+            api_key = os.getenv("OLLAMA_API_KEY", "key")
+            headers = {"Authorization": f"Bearer {api_key}"} if api_key != "key" else {}
             response = requests.post(
                 f"{self.ollama_url}/api/chat",
                 json=payload,
+                headers=headers,
                 timeout=60
             )
             response.raise_for_status()
@@ -494,7 +499,11 @@ Determine what kind of n8n workflow this needs and provide detailed analysis."""
     async def _test_ai_service(self) -> bool:
         """Test AI service connectivity"""
         try:
-            response = requests.get(f"{self.ollama_url}/api/tags", timeout=10)
+            # Add authentication headers for external Ollama server
+            import os
+            api_key = os.getenv("OLLAMA_API_KEY", "key")
+            headers = {"Authorization": f"Bearer {api_key}"} if api_key != "key" else {}
+            response = requests.get(f"{self.ollama_url}/api/tags", headers=headers, timeout=10)
             return response.status_code == 200
         except Exception:
             return False
