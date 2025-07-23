@@ -68,7 +68,7 @@ run_command() {
         --network ollama-n8n-network \
         -v /home/guruai/compose/rag-info:/data/workflows:ro \
         -v $(pwd)/logs:/app/logs \
-        -e VECTOR_DATABASE_URL=postgresql://pguser:pgpassword@pgsql:5432/database \
+        -e VECTOR_DATABASE_URL=postgresql://pguser:pgpassword@pgsql-db:5432/database \
         -e VECTOR_COLLECTION_NAME=n8n_workflows \
         -e N8N_WORKFLOWS_PATH=/data/workflows/n8n-workflows/workflows \
         -e TEST_WORKFLOWS_PATH=/data/workflows/test-workflows \
@@ -86,7 +86,7 @@ open_shell() {
         --network ollama-n8n-network \
         -v /home/guruai/compose/rag-info:/data/workflows:ro \
         -v $(pwd)/logs:/app/logs \
-        -e VECTOR_DATABASE_URL=postgresql://pguser:pgpassword@pgsql:5432/database \
+        -e VECTOR_DATABASE_URL=postgresql://pguser:pgpassword@pgsql-db:5432/database \
         -e VECTOR_COLLECTION_NAME=n8n_workflows \
         -e N8N_WORKFLOWS_PATH=/data/workflows/n8n-workflows/workflows \
         -e TEST_WORKFLOWS_PATH=/data/workflows/test-workflows \
