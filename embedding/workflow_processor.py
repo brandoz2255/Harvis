@@ -45,7 +45,21 @@ class WorkflowProcessor:
         """Process a single n8n workflow JSON file and return LangChain Documents."""
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
-                workflow_data = json.load(f)
+                raw_data = json.load(f)
+            
+            # Handle both dict and list formats
+            if isinstance(raw_data, list):
+                if not raw_data:
+                    logger.warning(f"Empty array in workflow file: {file_path}")
+                    return []
+                # Take the first item if it's a list of workflows
+                workflow_data = raw_data[0] if isinstance(raw_data[0], dict) else {}
+                logger.debug(f"Processing array-format workflow: {file_path}")
+            elif isinstance(raw_data, dict):
+                workflow_data = raw_data
+            else:
+                logger.error(f"Unsupported JSON format in {file_path}: {type(raw_data)}")
+                return []
             
             metadata = self._extract_metadata(workflow_data, file_path, source_repo)
             content = self._extract_content(workflow_data)
@@ -104,14 +118,20 @@ class WorkflowProcessor:
         """Extract metadata from workflow JSON."""
         filename = os.path.basename(file_path)
         
-        # Extract basic workflow info
+        # Extract basic workflow info with safe defaults
         workflow_id = workflow_data.get('id')
         name = workflow_data.get('name', filename.replace('.json', ''))
         description = workflow_data.get('description', '')
         tags = workflow_data.get('tags', [])
         
+        # Ensure tags is a list
+        if not isinstance(tags, list):
+            tags = []
+        
         # Extract nodes information
         nodes = workflow_data.get('nodes', [])
+        if not isinstance(nodes, list):
+            nodes = []
         node_count = len(nodes)
         
         # Extract node types and trigger types
@@ -119,6 +139,9 @@ class WorkflowProcessor:
         trigger_types = []
         
         for node in nodes:
+            if not isinstance(node, dict):
+                continue
+                
             node_type = node.get('type', '')
             if node_type:
                 node_types.append(node_type)
@@ -157,15 +180,22 @@ class WorkflowProcessor:
             content_parts.append(f"Description: {workflow_data['description']}")
         
         # Add tags
-        if workflow_data.get('tags'):
-            content_parts.append(f"Tags: {', '.join(workflow_data['tags'])}")
+        tags = workflow_data.get('tags', [])
+        if tags and isinstance(tags, list):
+            try:
+                content_parts.append(f"Tags: {', '.join(str(tag) for tag in tags)}")
+            except Exception:
+                content_parts.append(f"Tags: [complex tags structure]")
         
         # Process nodes
         nodes = workflow_data.get('nodes', [])
-        if nodes:
+        if nodes and isinstance(nodes, list):
             content_parts.append("\nWorkflow Nodes:")
             
             for node in nodes:
+                if not isinstance(node, dict):
+                    continue
+                    
                 node_info = []
                 
                 # Node name and type
@@ -175,7 +205,7 @@ class WorkflowProcessor:
                 
                 # Node parameters (extract meaningful ones)
                 parameters = node.get('parameters', {})
-                if parameters:
+                if parameters and isinstance(parameters, dict):
                     meaningful_params = self._extract_meaningful_parameters(parameters)
                     if meaningful_params:
                         node_info.append(f"  Parameters: {meaningful_params}")
@@ -218,7 +248,14 @@ class WorkflowProcessor:
                 elif isinstance(value, dict) and value:
                     meaningful_params.append(f"{key}: [complex object]")
                 elif isinstance(value, list) and value:
-                    meaningful_params.append(f"{key}: [list with {len(value)} items]")
+                    # Handle list of strings vs list of dicts
+                    if all(isinstance(item, str) for item in value):
+                        list_str = ', '.join(str(item)[:50] for item in value[:3])  # First 3 items, truncated
+                        if len(value) > 3:
+                            list_str += f" (and {len(value)-3} more)"
+                        meaningful_params.append(f"{key}: [{list_str}]")
+                    else:
+                        meaningful_params.append(f"{key}: [list with {len(value)} items]")
         
         return ', '.join(meaningful_params) if meaningful_params else ""
     
