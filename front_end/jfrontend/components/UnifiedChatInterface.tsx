@@ -488,13 +488,18 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
   }
 
   const sendAudioToBackend = async (audioBlob: Blob) => {
-    const optimalModel = orchestrator.selectOptimalModel("voice", priority)
+    // Use the selected model instead of auto-selecting
+    console.log("🎤 Voice Chat Debug - selectedModel:", selectedModel)
+    const modelToUse = selectedModel === "auto" 
+      ? orchestrator.selectOptimalModel("voice", priority)
+      : selectedModel
+    console.log("🎤 Voice Chat Debug - modelToUse:", modelToUse)
 
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         const formData = new FormData()
         formData.append("file", audioBlob, "mic.wav")
-        formData.append("model", optimalModel)
+        formData.append("model", modelToUse)
 
         const response = await fetch("/api/mic-chat", {
           method: "POST",
@@ -510,11 +515,18 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
         const updatedHistory = data.history.map((msg: any, index: number) => ({
           ...msg,
           timestamp: new Date(),
-          model: msg.role === "assistant" ? optimalModel : undefined,
+          model: msg.role === "assistant" ? modelToUse : undefined,
           inputType: index === data.history.length - 2 ? "voice" : msg.inputType,
         }))
 
         setMessages(updatedHistory)
+
+        // Handle reasoning content if present (same as regular chat)
+        if (data.reasoning) {
+          // Log the reasoning process in AI insights
+          const reasoningInsightId = logReasoningProcess(data.reasoning, modelToUse)
+          completeInsight(reasoningInsightId, "Reasoning process completed", "done")
+        }
 
         if (data.audio_path) {
           setAudioUrl(data.audio_path)
