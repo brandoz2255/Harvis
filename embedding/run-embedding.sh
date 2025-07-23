@@ -64,7 +64,7 @@ run_command() {
     
     echo -e "${BLUE}Running: $cmd${NC}"
     
-    docker run --rm -it \
+    docker run --rm \
         --network ollama-n8n-network \
         -v /home/guruai/compose/rag-info:/data/workflows:ro \
         -v $(pwd)/logs:/app/logs \

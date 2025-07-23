@@ -89,7 +89,9 @@ class WorkflowProcessor:
                 return [main_doc]
                 
         except Exception as e:
+            import traceback
             logger.error(f"Error processing workflow file {file_path}: {e}")
+            logger.error(f"Full traceback: {traceback.format_exc()}")
             return []
     
     def process_directory(self, directory_path: str, source_repo: str = "unknown", 
@@ -172,58 +174,70 @@ class WorkflowProcessor:
         """Extract meaningful text content from workflow for embedding."""
         content_parts = []
         
-        # Add workflow name and description
-        if workflow_data.get('name'):
-            content_parts.append(f"Workflow Name: {workflow_data['name']}")
-        
-        if workflow_data.get('description'):
-            content_parts.append(f"Description: {workflow_data['description']}")
-        
-        # Add tags
-        tags = workflow_data.get('tags', [])
-        if tags and isinstance(tags, list):
-            try:
-                content_parts.append(f"Tags: {', '.join(str(tag) for tag in tags)}")
-            except Exception:
-                content_parts.append(f"Tags: [complex tags structure]")
-        
-        # Process nodes
-        nodes = workflow_data.get('nodes', [])
-        if nodes and isinstance(nodes, list):
-            content_parts.append("\nWorkflow Nodes:")
+        try:
+            # Add workflow name and description
+            if workflow_data.get('name'):
+                content_parts.append(f"Workflow Name: {workflow_data['name']}")
             
-            for node in nodes:
-                if not isinstance(node, dict):
-                    continue
+            if workflow_data.get('description'):
+                content_parts.append(f"Description: {workflow_data['description']}")
+            
+            # Add tags
+            tags = workflow_data.get('tags', [])
+            if tags and isinstance(tags, list):
+                try:
+                    content_parts.append(f"Tags: {', '.join(str(tag) for tag in tags)}")
+                except Exception:
+                    content_parts.append(f"Tags: [complex tags structure]")
+            
+            # Process nodes
+            nodes = workflow_data.get('nodes', [])
+            if nodes and isinstance(nodes, list):
+                content_parts.append("\nWorkflow Nodes:")
+                
+                for node in nodes:
+                    if not isinstance(node, dict):
+                        continue
+                        
+                    node_info = []
                     
-                node_info = []
-                
-                # Node name and type
-                node_name = node.get('name', 'Unknown')
-                node_type = node.get('type', 'Unknown')
-                node_info.append(f"- {node_name} ({node_type})")
-                
-                # Node parameters (extract meaningful ones)
-                parameters = node.get('parameters', {})
-                if parameters and isinstance(parameters, dict):
-                    meaningful_params = self._extract_meaningful_parameters(parameters)
-                    if meaningful_params:
-                        node_info.append(f"  Parameters: {meaningful_params}")
-                
-                # Node notes/description
-                if node.get('notes'):
-                    node_info.append(f"  Notes: {node['notes']}")
-                
-                content_parts.append('\n'.join(node_info))
+                    # Node name and type
+                    node_name = node.get('name', 'Unknown')
+                    node_type = node.get('type', 'Unknown')
+                    node_info.append(f"- {node_name} ({node_type})")
+                    
+                    # Node parameters (extract meaningful ones)
+                    parameters = node.get('parameters', {})
+                    if parameters and isinstance(parameters, dict):
+                        meaningful_params = self._extract_meaningful_parameters(parameters)
+                        if meaningful_params:
+                            node_info.append(f"  Parameters: {meaningful_params}")
+                    
+                    # Node notes/description
+                    if node.get('notes'):
+                        node_info.append(f"  Notes: {node['notes']}")
+                    
+                    content_parts.append('\n'.join(node_info))
         
-        # Add connections info (simplified)
-        connections = workflow_data.get('connections', {})
-        if connections:
-            connection_summary = self._summarize_connections(connections)
-            if connection_summary:
-                content_parts.append(f"\nWorkflow Flow: {connection_summary}")
-        
-        return '\n\n'.join(content_parts)
+            # Add connections info (simplified)
+            connections = workflow_data.get('connections', {})
+            if connections:
+                connection_summary = self._summarize_connections(connections)
+                if connection_summary:
+                    content_parts.append(f"\nWorkflow Flow: {connection_summary}")
+            
+            return '\n\n'.join(content_parts)
+            
+        except Exception as e:
+            logger.error(f"Error in _extract_content: {e}")
+            import traceback
+            logger.error(f"_extract_content traceback: {traceback.format_exc()}")
+            # Return basic info if available
+            try:
+                name = workflow_data.get('name', 'Unknown Workflow')
+                return f"Workflow Name: {name}\n[Error extracting additional content]"
+            except:
+                return "[Error extracting workflow content]"
     
     def _extract_meaningful_parameters(self, parameters: Dict[str, Any]) -> str:
         """Extract meaningful parameters from node configuration."""
