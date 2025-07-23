@@ -5,10 +5,21 @@ const BACKEND_API = process.env.BACKEND_URL || "http://backend:8000"
 export async function POST(request: NextRequest) {
   try {
     const formData = await request.formData()
+    
+    // Extract model and file parameters  
+    const model = formData.get('model') as string
+    const file = formData.get('file') as File
+    
+    // Create FormData with both file and model for the backend (same as regular chat)
+    const backendFormData = new FormData()
+    backendFormData.append('file', file)
+    backendFormData.append('model', model)
+    
+    const url = `${BACKEND_API}/api/mic-chat`
 
-    const response = await fetch(`${BACKEND_API}/api/mic-chat`, {
+    const response = await fetch(url, {
       method: "POST",
-      body: formData,
+      body: backendFormData,
     })
 
     if (!response.ok) {
