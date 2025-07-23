@@ -7,7 +7,11 @@ import { Mic, MicOff, Volume2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 
-export default function VoiceControls() {
+interface VoiceControlsProps {
+  selectedModel?: string
+}
+
+export default function VoiceControls({ selectedModel = "llama3.2:3b" }: VoiceControlsProps) {
   const [isRecording, setIsRecording] = useState(false)
   const [isProcessing, setIsProcessing] = useState(false)
   const [audioUrl, setAudioUrl] = useState<string | null>(null)
@@ -60,6 +64,7 @@ export default function VoiceControls() {
       try {
         const formData = new FormData()
         formData.append("file", audioBlob, "mic.wav")
+        formData.append("model", selectedModel)
 
         const response = await fetch("/api/mic-chat", {
           method: "POST",

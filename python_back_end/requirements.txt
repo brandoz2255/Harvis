@@ -9,7 +9,7 @@ requests
 # torch is installed separately with CUDA support in Dockerfile
 # torch==2.6.0+cu124
 soundfile
-whisper
+openai-whisper
 pydantic
 tavily-python
 chatterbox-tts

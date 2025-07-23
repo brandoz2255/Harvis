@@ -16,10 +16,8 @@ export default function MiscDisplay({ screenAnalysis }: MiscDisplayProps) {
   const { insights, addInsight, clearInsights } = useInsightsStore()
   const [selectedItem, setSelectedItem] = useState<InsightEntry | null>(null)
 
-  // Clear any existing insights on component mount to ensure fresh start
-  useEffect(() => {
-    clearInsights()
-  }, [clearInsights])
+  // Don't clear insights on mount - this would clear reasoning content!
+  // Insights are managed by the chat interface and should persist
 
   useEffect(() => {
     if (screenAnalysis) {
