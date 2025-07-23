@@ -282,9 +282,17 @@ class WorkflowProcessor:
                 for output_index, target_list in targets.items():
                     if isinstance(target_list, list):
                         for target in target_list:
-                            target_node = target.get('node')
-                            if target_node:
-                                connection_parts.append(f"{source_node} → {target_node}")
+                            if isinstance(target, dict):
+                                target_node = target.get('node')
+                                if target_node:
+                                    connection_parts.append(f"{source_node} → {target_node}")
+                            elif isinstance(target, list):
+                                # Handle nested list structures
+                                for nested_target in target:
+                                    if isinstance(nested_target, dict):
+                                        target_node = nested_target.get('node')
+                                        if target_node:
+                                            connection_parts.append(f"{source_node} → {target_node}")
         
         return ', '.join(connection_parts[:10])  # Limit to first 10 connections
     
