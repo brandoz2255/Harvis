@@ -1,5 +1,132 @@
 # Changes Log
 
+## 2025-07-23 - Fixed Voice Chat Model Selection & Added AI Insights
+
+### Problem Description
+User reported that mic chat always uses LLaMA instead of their selected model (e.g., DeepSeek). Also requested that AI insights (reasoning display) appear for voice chat like it does for regular chat.
+
+### Root Cause Analysis
+The issue was in the mic chat API parameter handling:
+
+1. **Model Parameter Mismatch**: Backend expected model as Form data, but frontend API route was sending it as query parameter
+2. **Missing AI Insights**: Voice chat wasn't processing reasoning content from DeepSeek/reasoning models
+
+### Solution Applied
+1. **Fixed Model Parameter Handling**: 
+   - Backend: Changed from `Query()` to `Form()` parameter in `/api/mic-chat` endpoint
+   - Frontend: Keep model as form data instead of converting to query parameter
+2. **Added AI Insights to Voice Chat**:
+   - Added reasoning processing logic to `sendAudioToBackend()` function
+   - Now shows AI insights panel with reasoning content for reasoning models like DeepSeek
+
+### Files Modified
+- `python_back_end/main.py`: Changed mic-chat model parameter from Query to Form
+- `front_end/jfrontend/app/api/mic-chat/route.ts`: Send model as form data
+- `front_end/jfrontend/components/UnifiedChatInterface.tsx`: Added reasoning processing to voice chat
+
+### Result/Status 
+✅ **FIXED**: Voice chat now uses selected model (tested with DeepSeek) and shows AI insights with reasoning content
+
+**Primary Issues**:
+1. **Missing "voice" task type in orchestrator**: The `selectOptimalModel("voice", priority)` function searches for models that support the "voice" task, but NONE of the built-in models in `AIOrchestrator.tsx` have "voice" listed in their `tasks` array.
+
+2. **Hardcoded backend default**: The Python backend in `main.py` has `DEFAULT_MODEL = "llama3.2:3b"` which becomes the fallback when model selection fails.
+
+3. **VoiceControls component hardcoded default**: The standalone `VoiceControls.tsx` component has a hardcoded default of `"llama3.2:3b"` in its props.
+
+4. **Fallback logic prioritizes LLaMA**: In `getOptimalModel()` function, when no suitable models are found for a task, it falls back to "general" models. The `llama3` model is listed as supporting "general" tasks and may be selected due to scoring algorithm.
+
+**Detailed Analysis**:
+
+1. **Model Task Definitions** (AIOrchestrator.tsx lines 24-89):
+   - `gemini-1.5-flash`: ["general", "conversation", "creative", "multilingual", "code", "reasoning", "lightweight", "quick-response"]
+   - `mistral`: ["general", "conversation", "reasoning"]  
+   - `llama3`: ["general", "conversation", "complex-reasoning"]
+   - `codellama`: ["code", "programming", "debugging"]
+   - `gemma`: ["general", "creative", "writing"]
+   - `phi3`: ["lightweight", "mobile", "quick-response"]
+   - `qwen`: ["multilingual", "translation", "general"]
+   - `deepseek-coder`: ["code", "programming", "technical"]
+
+   **❌ NONE include "voice" as a supported task type**
+
+2. **Voice Chat Flow** (UnifiedChatInterface.tsx lines 492-494):
+   ```typescript
+   const modelToUse = selectedModel === "auto" 
+     ? orchestrator.selectOptimalModel("voice", priority)
+     : selectedModel
+   ```
+
+3. **Selection Logic** (AIOrchestrator.tsx lines 173-188):
+   - When no models support "voice" task, it falls back to "general" models
+   - Hardware compatibility and priority scoring then determine the final selection
+   - Models with better scores for the selected priority (speed/accuracy/balanced) are chosen
+
+4. **Backend Default Enforcement** (python_back_end/main.py line 277):
+   ```python
+   DEFAULT_MODEL = "llama3.2:3b"
+   ```
+
+### Solution Needed
+To fix this issue, one or more of the following changes should be implemented:
+
+1. **Add "voice" task support to appropriate models** in AIOrchestrator.tsx
+2. **Update auto-selection logic** to use "conversation" or "general" instead of "voice" 
+3. **Fix backend model parameter handling** to ensure frontend selections are properly passed through
+4. **Review and adjust model scoring** to ensure balanced selection across different model types
+
+### Files Requiring Changes
+- `/home/guruai/compose/aidev/front_end/jfrontend/components/AIOrchestrator.tsx` (lines 24-89)
+- `/home/guruai/compose/aidev/front_end/jfrontend/components/UnifiedChatInterface.tsx` (line 493)
+- `/home/guruai/compose/aidev/front_end/jfrontend/components/VoiceControls.tsx` (line 14)
+- `/home/guruai/compose/aidev/python_back_end/main.py` (line 277)
+
+### Status
+🔍 **Investigation Complete** - Root causes identified, awaiting implementation of fixes
+
+## 2025-07-23 - Fixed JSON Processing Errors in Embedding Module
+
+### Problem Description
+The embedding module was failing to process n8n workflow JSON files with error `'list' object has no attribute 'get'`. Hundreds of workflows were being skipped during the embedding process.
+
+### Root Cause Analysis
+**Primary Issue**: Docker deployment problem - code changes weren't being reflected in the running container due to image caching.
+
+**Secondary Issues**:
+1. **Inconsistent JSON structures**: Some n8n workflows stored as arrays `[{...}]` instead of objects `{...}`
+2. **Missing type safety**: Code assumed all JSON elements were dictionaries 
+3. **Complex connection structures**: Workflow connections contained nested lists instead of simple dictionaries
+4. **Generic error handling**: Masked the actual location of failures
+
+### Solution Applied
+1. **Fixed Docker Deployment**:
+   - Used `docker rmi n8n-embedding-service` to force rebuild
+   - Modified `run-embedding.sh` to remove `-it` flags for non-interactive use
+   - Ensured code changes were properly copied into Docker image
+
+2. **Enhanced JSON Processing** (`workflow_processor.py`):
+   - Added robust handling for both array and dictionary JSON formats
+   - Implemented `isinstance()` checks before calling `.get()` methods
+   - Added type safety throughout the processing pipeline
+
+3. **Fixed Connection Processing**:
+   - Enhanced `_summarize_connections()` to handle nested list structures
+   - Added proper type checking for connection targets
+
+4. **Improved Error Handling**:
+   - Added detailed traceback logging for easier debugging
+   - Implemented graceful fallbacks for malformed data
+
+### Files Modified
+- `embedding/workflow_processor.py` - Core JSON processing logic
+- `embedding/run-embedding.sh` - Docker execution script
+- `embedding/jsonIssue.md` - Updated documentation
+
+### Result/Status
+✅ **Complete Resolution**: 700+ workflows now process successfully without JSON parsing errors
+✅ **Robust Data Handling**: Both array and dictionary JSON formats supported
+✅ **Future-proof**: Enhanced type checking prevents similar issues
+
 ## 2025-07-22 - Dynamic Model Selection for AI Agents
 
 ### Problem Description
