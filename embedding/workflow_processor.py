@@ -316,12 +316,27 @@ class WorkflowProcessor:
         for file_path in json_files[:100]:  # Sample first 100 files for stats
             try:
                 with open(file_path, 'r', encoding='utf-8') as f:
-                    workflow_data = json.load(f)
+                    raw_data = json.load(f)
+                
+                # Handle both dict and list formats (same as main processing)
+                if isinstance(raw_data, list):
+                    if not raw_data:
+                        continue
+                    workflow_data = raw_data[0] if isinstance(raw_data[0], dict) else {}
+                elif isinstance(raw_data, dict):
+                    workflow_data = raw_data
+                else:
+                    continue
                 
                 nodes = workflow_data.get('nodes', [])
+                if not isinstance(nodes, list):
+                    continue
+                    
                 total_nodes += len(nodes)
                 
                 for node in nodes:
+                    if not isinstance(node, dict):
+                        continue
                     node_type = node.get('type', '')
                     if node_type:
                         node_types.add(node_type)
