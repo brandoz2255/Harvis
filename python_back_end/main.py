@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File, WebSocket, Depends
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, WebSocket, Depends, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.websockets import WebSocketDisconnect
@@ -272,8 +272,9 @@ logger.info("Using device: %s", "cuda" if device == 0 else "cpu")
 
 
 # ─── Config --------------------------------------------------------------------
-OLLAMA_URL = "http://ollama:11434"
-DEFAULT_MODEL = "mistral"
+OLLAMA_URL = "https://coyotegpt.ngrok.app/ollama"
+API_KEY = os.getenv("OLLAMA_API_KEY", "key")
+DEFAULT_MODEL = "llama3.2:3b"
 
 # ─── Pydantic schemas ----------------------------------------------------------
 class ChatRequest(BaseModel):
@@ -754,10 +755,11 @@ async def chat(req: ChatRequest, request: Request, current_user: UserResponse = 
                 "stream": False,
             }
 
-            logger.info("→ Asking Ollama %s with model %s", OLLAMA_ENDPOINT, req.model)
+            logger.info("💬 CHAT: Using model '%s' for Ollama %s", req.model, OLLAMA_ENDPOINT)
 
+            headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY != "key" else {}
             resp = requests.post(
-                f"{OLLAMA_URL}{OLLAMA_ENDPOINT}", json=payload, timeout=90
+                f"{OLLAMA_URL}{OLLAMA_ENDPOINT}", json=payload, headers=headers, timeout=90
             )
 
             if resp.status_code != 200:
@@ -1010,7 +1012,8 @@ async def analyze_and_respond(req: AnalyzeAndRespondRequest):
             }
 
             logger.info(f"→ Asking Ollama with model {req.model}")
-            resp = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=90)
+            headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY != "key" else {}
+            resp = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, headers=headers, timeout=90)
             
             if resp.status_code != 200:
                 logger.error("Ollama error %s: %s", resp.status_code, resp.text)
@@ -1080,7 +1083,8 @@ async def analyze_screen_with_tts(req: ScreenAnalysisWithTTSRequest):
                 ],
                 "stream": False,
             }
-            resp = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=90)
+            headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY != "key" else {}
+            resp = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, headers=headers, timeout=90)
             resp.raise_for_status()
             llm_response = resp.json().get("message", {}).get("content", "").strip()
 
@@ -1130,8 +1134,12 @@ async def analyze_screen_with_tts(req: ScreenAnalysisWithTTSRequest):
 # Whisper model will be loaded on demand
 
 @app.post("/api/mic-chat", tags=["voice"])
-async def mic_chat(file: UploadFile = File(...), current_user: UserResponse = Depends(get_current_user)):
+async def mic_chat(file: UploadFile = File(...), model: str = Form(DEFAULT_MODEL), current_user: UserResponse = Depends(get_current_user)):
     try:
+        # DEBUG: Log the received model parameter
+        logger.info(f"🎤 MIC-CHAT: Received model parameter: '{model}' (type: {type(model)})")
+        logger.info(f"🎤 MIC-CHAT: DEFAULT_MODEL is: '{DEFAULT_MODEL}'")
+        
         # Ensure Whisper model is loaded
         reload_models_if_needed()
         
@@ -1149,8 +1157,9 @@ async def mic_chat(file: UploadFile = File(...), current_user: UserResponse = De
         if not message:
             raise HTTPException(400, "Could not transcribe anything.")
 
-        # Now use existing chat logic
-        chat_req = ChatRequest(message=message)
+        # Now use existing chat logic with the selected model
+        logger.info(f"🎤 MIC-CHAT: Creating ChatRequest with model: '{model}'")
+        chat_req = ChatRequest(message=message, model=model)
         return await chat(chat_req, request=None, current_user=current_user)
 
     except Exception as e:
@@ -1358,10 +1367,19 @@ async def get_ollama_models():
     Fetches the list of available models from the Ollama server.
     """
     try:
-        response = requests.get(f"{OLLAMA_URL}/api/tags", timeout=10)
+        url = f"{OLLAMA_URL}/api/tags"
+        headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY != "key" else {}
+        logger.info(f"Trying to connect to Ollama at: {url}")
+        logger.info(f"Using headers: {headers}")
+        response = requests.get(url, headers=headers, timeout=10)
+        logger.info(f"Ollama response status: {response.status_code}")
+        logger.info(f"Ollama response headers: {response.headers}")
+        logger.info(f"Ollama response text (first 200 chars): {response.text[:200]}")
+        
         response.raise_for_status()
         models = response.json().get("models", [])
         ollama_model_names = [model["name"] for model in models]
+        logger.info(f"Available models from Ollama server: {ollama_model_names}")
 
         if is_gemini_configured():
             ollama_model_names.insert(
@@ -1373,6 +1391,12 @@ async def get_ollama_models():
         logger.error(f"Could not connect to Ollama: {e}")
         raise HTTPException(
             status_code=503, detail="Could not connect to Ollama server"
+        )
+    except ValueError as e:
+        logger.error(f"JSON parsing error from Ollama: {e}")
+        logger.error(f"Response content: {response.text}")
+        raise HTTPException(
+            status_code=503, detail="Invalid response from Ollama server"
         )
 
 @app.post("/api/vibe/command")
@@ -2010,7 +2034,8 @@ Please provide a helpful, conversational response about how to implement this re
     }
 
     logger.info(f"→ Asking Ollama with model {model} for vibe coding")
-    resp = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=120)
+    headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY != "key" else {}
+    resp = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, headers=headers, timeout=120)
     resp.raise_for_status()
     
     vibe_response = resp.json().get("message", {}).get("content", "").strip()

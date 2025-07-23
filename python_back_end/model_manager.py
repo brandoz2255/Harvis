@@ -11,7 +11,15 @@ import gc
 from typing import Optional
 
 # Import model classes
-import whisper
+try:
+    import whisper
+except ImportError:
+    # Try alternative whisper import
+    try:
+        import openai_whisper as whisper
+    except ImportError:
+        logger.error("No whisper package found. Please install with: pip install openai-whisper")
+        whisper = None
 from chatterbox.tts import ChatterboxTTS
 
 logger = logging.getLogger(__name__)
@@ -80,6 +88,9 @@ def load_whisper_model():
     """Load Whisper model with memory management"""
     global whisper_model
     if whisper_model is None:
+        if whisper is None:
+            logger.error("❌ Whisper not available - install with: pip install openai-whisper")
+            return None
         logger.info("🔄 Loading Whisper model")
         whisper_model = whisper.load_model("base")
         logger.info("✅ Whisper model loaded successfully")

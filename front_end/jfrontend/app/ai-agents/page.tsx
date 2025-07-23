@@ -79,6 +79,10 @@ export default function AIAgents() {
   const [isN8nVoiceRecording, setIsN8nVoiceRecording] = useState(false)
   const [isN8nVoiceProcessing, setIsN8nVoiceProcessing] = useState(false)
   
+  // Model selection state
+  const [selectedModel, setSelectedModel] = useState("auto")
+  const { ollamaModels, ollamaConnected, ollamaError, refreshOllamaModels } = useAIOrchestrator()
+  
   // Additional state variables for n8n workflow functionality
   const [n8nError, setN8nError] = useState<string>('')
   const [statusMessage, setStatusMessage] = useState<string | null>(null)
@@ -175,7 +179,10 @@ export default function AIAgents() {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ prompt: n8nPrompt }),
+        body: JSON.stringify({ 
+          prompt: n8nPrompt,
+          model: selectedModel === "auto" ? "mistral" : selectedModel 
+        }),
         credentials: 'include',
       })
 
@@ -304,7 +311,10 @@ export default function AIAgents() {
       const response = await fetch('/api/n8n-automation', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: n8nPrompt }),
+        body: JSON.stringify({ 
+          prompt: n8nPrompt,
+          model: selectedModel === "auto" ? "mistral" : selectedModel 
+        }),
       });
 
       if (!response.ok) {
@@ -538,6 +548,50 @@ export default function AIAgents() {
             </CardHeader>
             <CardContent>
               <div className="flex flex-col space-y-4">
+                {/* Model Selection */}
+                <div className="flex items-center justify-between mb-2">
+                  <label className="text-sm font-medium text-gray-300">AI Model</label>
+                  <button
+                    onClick={refreshOllamaModels}
+                    className="text-xs text-gray-400 hover:text-white transition-colors"
+                    disabled={n8nStatus === "loading"}
+                  >
+                    Refresh Models
+                  </button>
+                </div>
+                <select
+                  value={selectedModel}
+                  onChange={(e) => setSelectedModel(e.target.value)}
+                  className="bg-gray-800 border border-gray-600 text-white text-sm rounded px-3 py-2 focus:border-purple-500 focus:outline-none mb-4"
+                  disabled={n8nStatus === "loading"}
+                >
+                  <option value="auto">🤖 Auto-Select</option>
+                  
+                  {/* Built-in models */}
+                  <optgroup label="Built-in Models">
+                    <option value="gemini-1.5-flash">Gemini 1.5 Flash</option>
+                    <option value="mistral">Mistral</option>
+                  </optgroup>
+                  
+                  {/* Ollama models */}
+                  {ollamaModels.length > 0 && (
+                    <optgroup label={`Ollama Models (${ollamaModels.length})`}>
+                      {ollamaModels.map((modelName) => (
+                        <option key={modelName} value={modelName}>
+                          🦙 {modelName}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                  
+                  {/* Show message if no Ollama models */}
+                  {!ollamaConnected && (
+                    <optgroup label="Ollama (Offline)">
+                      <option disabled>No Ollama models available</option>
+                    </optgroup>
+                  )}
+                </select>
+                
                 <div className="relative">
                   <Textarea
                     placeholder="e.g., Check if google.com is up every hour and send me a message if it's not."
@@ -570,19 +624,26 @@ export default function AIAgents() {
                     {isN8nVoiceRecording ? <MicOff className="h-5 w-5" /> : <Mic className="h-5 w-5" />}
                   </Button>
                 </div>
-                <Button
-                  onClick={handleN8nAutomation}
-                  className="bg-purple-600 hover:bg-purple-700 text-white"
-                  disabled={n8nStatus === "loading"}
-                >
-                  {n8nStatus === "loading" ? (
-                    <span className="flex items-center">
-                      <Loader2 className="animate-spin mr-2" size={18} /> Thinking...
-                    </span>
-                  ) : (
-                    "Generate n8n Workflow"
+                <div className="flex items-center space-x-2">
+                  <Button
+                    onClick={handleN8nAutomation}
+                    className="bg-purple-600 hover:bg-purple-700 text-white flex-1"
+                    disabled={n8nStatus === "loading"}
+                  >
+                    {n8nStatus === "loading" ? (
+                      <span className="flex items-center">
+                        <Loader2 className="animate-spin mr-2" size={18} /> Thinking...
+                      </span>
+                    ) : (
+                      "Generate n8n Workflow"
+                    )}
+                  </Button>
+                  {selectedModel !== "auto" && (
+                    <div className="text-xs text-gray-400 px-3 py-2 bg-gray-800 rounded border border-gray-600">
+                      Using: {selectedModel.startsWith('🦙') ? selectedModel : (selectedModel === 'gemini-1.5-flash' ? 'Gemini' : selectedModel)}
+                    </div>
                   )}
-                </Button>
+                </div>
               </div>
               {n8nMessage && (
                 <div

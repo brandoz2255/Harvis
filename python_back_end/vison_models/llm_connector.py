@@ -83,7 +83,7 @@ def query_qwen(image_path: str, prompt: str) -> str:
         logger.error(f"Qwen2VL query failed: {e}")
         return f"[Qwen error] {e}"
 
-OLLAMA_URL = "http://ollama:11434"
+OLLAMA_URL = "https://coyotegpt.ngrok.app/ollama"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 if GEMINI_API_KEY:
@@ -101,6 +101,8 @@ def query_llm(prompt: str, model_name: str = "mistral", system_prompt: str = "")
             return f"[LLM error] Gemini: {e}"
     else:
         try:
+            api_key = os.getenv("OLLAMA_API_KEY", "key")
+            headers = {"Authorization": f"Bearer {api_key}"} if api_key != "key" else {}
             res = requests.post(
                 f"{OLLAMA_URL}/api/generate",
                 json={
@@ -109,6 +111,7 @@ def query_llm(prompt: str, model_name: str = "mistral", system_prompt: str = "")
                     "system": system_prompt,
                     "stream": False
                 },
+                headers=headers,
                 timeout=60
             )
             res.raise_for_status()
@@ -118,7 +121,9 @@ def query_llm(prompt: str, model_name: str = "mistral", system_prompt: str = "")
 
 def list_ollama_models() -> list[str]:
     try:
-        res = requests.get(f"{OLLAMA_URL}/api/tags", timeout=10)
+        api_key = os.getenv("OLLAMA_API_KEY", "key")
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key != "key" else {}
+        res = requests.get(f"{OLLAMA_URL}/api/tags", headers=headers, timeout=10)
         res.raise_for_status()
         models = res.json().get("models", [])
         return [model["name"] for model in models]
