@@ -10,9 +10,8 @@ langchain-core>=0.2.0
 sentence-transformers>=2.2.0
 torch>=2.0.0
 transformers>=4.21.0
-
-# Database
-psycopg2-binary>=2.9.0
+psycopg2-binary
+# Database  
 pgvector>=0.2.0
 
 # Utilities

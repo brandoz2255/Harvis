@@ -8,10 +8,10 @@ from langchain_core.documents import Document
 from langchain_postgres import PGVector
 from langchain_community.embeddings import HuggingFaceEmbeddings
 import psycopg2
-from psycopg2.extras import RealDictCursor
+import psycopg2.extras
 
-from .config import EmbeddingConfig
-from .workflow_processor import WorkflowProcessor
+from config import EmbeddingConfig
+from workflow_processor import WorkflowProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -227,7 +227,7 @@ class EmbeddingManager:
             }
             
             with psycopg2.connect(**conn_params) as conn:
-                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
                     table_name = f"langchain_pg_embedding_{self.config.collection_name}"
                     
                     # Get total count
