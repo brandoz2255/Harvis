@@ -72,6 +72,7 @@ start_backend() {
         --env-file "$ENV_FILE" \
         --network ollama-n8n-network \
         -v "$(pwd)/python_back_end:/app" \
+        -v "$(pwd)/embedding:/app/embedding" \
         -v /tmp:/tmp \
         dulc3/jarvis-backend:latest \
         uvicorn main:app --host 0.0.0.0 --port 8000 --reload
@@ -98,6 +99,7 @@ start_backend_detached() {
         --env-file "$ENV_FILE" \
         --network ollama-n8n-network \
         -v "$(pwd)/python_back_end:/app" \
+        -v "$(pwd)/embedding:/app/embedding" \
         -v /tmp:/tmp \
         dulc3/jarvis-backend:latest \
         uvicorn main:app --host 0.0.0.0 --port 8000 --reload

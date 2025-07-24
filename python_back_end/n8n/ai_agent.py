@@ -69,10 +69,8 @@ class N8nAIAgent:
             enhanced_request = N8nAutomationRequest(
                 prompt=enhanced_prompt,
                 model=request.model,
-                complexity=request.complexity,
-                enable_scheduling=request.enable_scheduling,
-                enable_webhooks=request.enable_webhooks,
-                tags=request.tags
+                session_id=request.session_id,
+                user_context=request.user_context
             )
             
             # Step 4: Process with automation service
