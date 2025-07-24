@@ -16,9 +16,9 @@ logger = logging.getLogger(__name__)
 # Add the embedding directory to Python path
 # Try multiple possible paths for embedding directory
 possible_embedding_paths = [
+    Path("/app/embedding"),                              # Docker mounted path (preferred)
     Path(__file__).parent.parent.parent / "embedding",  # From python_back_end/n8n/
     Path("/home/guruai/compose/aidev/embedding"),        # Absolute path
-    Path("/app") / "embedding",                          # Docker absolute path
     Path("/app") / ".." / "embedding",                   # Docker relative path
 ]
 
@@ -64,6 +64,10 @@ except ImportError as e:
         def __init__(self):
             self.collection_name = "n8n_workflows"
             self.database_url = "postgresql://pguser:pgpassword@pgsql-db:5432/database"
+            self.embedding_model = "sentence-transformers/all-MiniLM-L6-v2"
+            self.embedding_dimension = 384
+            self.chunk_size = 1000
+            self.chunk_overlap = 200
     
     class EmbeddingManager:
         def __init__(self, config):
@@ -71,8 +75,53 @@ except ImportError as e:
         def setup_database(self): pass
         def initialize_embeddings(self): pass
         def initialize_vector_store(self): pass
-        def search_workflows_with_score(self, **kwargs): return []
-        def search_workflows(self, **kwargs): return []
+        def search_workflows_with_score(self, query: str, k: int = 5, **kwargs):
+            """Search existing embeddings using keyword matching"""
+            try:
+                import psycopg2
+                import json
+                
+                conn = psycopg2.connect(self.config.database_url)
+                cur = conn.cursor()
+                
+                # Search for workflows containing keywords from the query
+                keywords = query.lower().split()
+                like_conditions = []
+                params = ['n8n_workflows']
+                
+                for keyword in keywords:
+                    like_conditions.append("e.document ILIKE %s")
+                    params.append(f'%{keyword}%')
+                
+                where_clause = " AND ".join(like_conditions) if like_conditions else "true"
+                
+                cur.execute(f'''
+                    SELECT e.document, e.cmetadata
+                    FROM langchain_pg_embedding e
+                    JOIN langchain_pg_collection c ON e.collection_id = c.uuid
+                    WHERE c.name = %s 
+                    AND ({where_clause})
+                    LIMIT %s
+                ''', params + [k])
+                
+                results = []
+                for doc_content, metadata in cur.fetchall():
+                    doc = Document(page_content=doc_content, metadata=metadata or {})
+                    results.append((doc, 1.0))  # Dummy score
+                
+                cur.close()
+                conn.close()
+                
+                logger.info(f"📊 Found {len(results)} workflows using keyword search")
+                return results
+                
+            except Exception as e:
+                logger.error(f"Keyword search failed: {e}")
+                return []
+        
+        def search_workflows(self, **kwargs):
+            results = self.search_workflows_with_score(**kwargs)
+            return [doc for doc, score in results]
         def get_collection_stats(self): return {"error": "Embedding system not available"}
         def test_embedding_pipeline(self, text=""): return {"success": False, "error": "Not available"}
     
@@ -287,9 +336,12 @@ class VectorDatabaseService:
                 }
             )
             
-            # Add to vector store
-            self.embedding_manager.vector_store.add_documents([doc])
-            logger.info(f"✅ Added workflow context: {metadata.get('workflow_name', 'unnamed')}")
+            # Add to vector store (check if vector store is available)
+            if hasattr(self.embedding_manager, 'vector_store') and self.embedding_manager.vector_store is not None:
+                self.embedding_manager.vector_store.add_documents([doc])
+                logger.info(f"✅ Added workflow context: {metadata.get('workflow_name', 'unnamed')}")
+            else:
+                logger.warning("⚠️ Vector store not available - workflow context not added to database")
             return True
             
         except Exception as e:

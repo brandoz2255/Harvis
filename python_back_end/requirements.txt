@@ -32,3 +32,6 @@ lxml_html_clean
 python-dotenv
 google-generativeai
 psycopg2-binary
+psycopg[binary]>=3.1.0
+psycopg-pool>=3.1.0
+pgvector>=0.2.0

@@ -169,6 +169,7 @@ open_shell() {
             --env-file "$ENV_FILE" \
             --network ollama-n8n-network \
             -v "$(pwd)/python_back_end:/app" \
+            -v "$(pwd)/embedding:/app/embedding" \
             -v /tmp:/tmp \
             dulc3/jarvis-backend:latest \
             /bin/bash
