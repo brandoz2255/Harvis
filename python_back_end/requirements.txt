@@ -16,6 +16,8 @@ chatterbox-tts
 langchain
 langchain-community
 langchain-openai
+langchain-postgres
+sentence-transformers
 ddgs
 beautifulsoup4
 newspaper3k
@@ -29,3 +31,4 @@ accelerate>=0.26.0
 lxml_html_clean
 python-dotenv
 google-generativeai
+psycopg2-binary

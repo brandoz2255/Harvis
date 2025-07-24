@@ -11,7 +11,7 @@ class EmbeddingConfig:
     """Configuration class for n8n workflow embedding."""
     
     # Database Configuration
-    database_url: str = "postgresql://pguser:pgpassword@pgsql:5432/database"
+    database_url: str = "postgresql://pguser:pgpassword@pgsql-db:5432/database"
     collection_name: str = "n8n_workflows"
     
     # Local workflow directories
