@@ -962,82 +962,166 @@ async def analyze_screen(req: ScreenAnalysisRequest):
         reload_models_if_needed()
         raise HTTPException(500, str(e)) from e
 
+# Global rate limiting for vision endpoints
+import asyncio
+_vision_processing_lock = asyncio.Lock()
+_last_vision_request_time = 0
+
 @app.post("/api/analyze-and-respond", tags=["vision"])
 async def analyze_and_respond(req: AnalyzeAndRespondRequest):
     """
     Analyze screen with Qwen vision model and get LLM response using selected model.
     Features intelligent model management to optimize GPU memory usage.
     """
-    try:
-        # Unload ALL models to free maximum GPU memory for Qwen2VL
-        logger.info("🖼️ Starting enhanced screen analysis - clearing ALL GPU memory")
-        unload_all_models()  # Unload everything for maximum memory
+    global _last_vision_request_time
+    
+    # Rate limiting: only allow one vision request at a time
+    async with _vision_processing_lock:
+        current_time = time.time()
         
-        # Decode base64 image and save to a temporary file
-        image_data = base64.b64decode(req.image.split(",")[1])
-        temp_image_path = os.path.join(tempfile.gettempdir(), f"{uuid.uuid4()}.png")
-        with open(temp_image_path, "wb") as f:
-            f.write(image_data)
-
-        # Use Qwen to analyze the image
-        qwen_prompt = "Analyze this screen in detail. Describe what you see, including any text, UI elements, applications, and content visible."
-        logger.info("🔍 Analyzing screen with Qwen2VL...")
-        qwen_analysis = query_qwen(temp_image_path, qwen_prompt)
-        os.remove(temp_image_path)  # Clean up temp file
-
-        if "[Qwen error]" in qwen_analysis:
-            raise HTTPException(status_code=500, detail=qwen_analysis)
-
-        # Unload Qwen2VL immediately after analysis to free memory for LLM
-        logger.info("🔄 Unloading Qwen2VL after analysis, preparing for LLM")
-        unload_qwen_model()
+        # Enforce minimum 2 second delay between requests
+        time_since_last = current_time - _last_vision_request_time
+        if time_since_last < 2.0:
+            wait_time = 2.0 - time_since_last
+            logger.info(f"⏳ Rate limiting: waiting {wait_time:.1f}s before processing vision request")
+            await asyncio.sleep(wait_time)
         
-        # Use the selected LLM model to generate a response based on Qwen's analysis
-        # Use custom system prompt if provided, otherwise use default
-        system_prompt = req.system_prompt or "You are Jarvis, an AI assistant analyzing what the user is seeing on their screen. Provide helpful insights, suggestions, or commentary about what you observe. Be conversational and helpful."
+        _last_vision_request_time = time.time()
         
-        logger.info(f"🤖 Generating response with {req.model}")
-        if req.model == "gemini-1.5-flash":
-            # Use Gemini for response
-            llm_response = query_gemini(f"Screen analysis: {qwen_analysis}\n\nPlease provide helpful insights about this screen.", [])
-        else:
-            # Use Ollama for response
-            payload = {
-                "model": req.model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"Screen analysis: {qwen_analysis}\n\nPlease provide helpful insights about this screen."},
-                ],
-                "stream": False,
+        temp_image_path = None
+        try:
+            # Unload ALL models to free maximum GPU memory for Qwen2VL
+            logger.info("🖼️ Starting enhanced screen analysis - clearing ALL GPU memory")
+            unload_all_models()  # Unload everything for maximum memory
+            
+            # Add explicit garbage collection and memory cleanup
+            import gc
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            
+            # Decode base64 image and save to a temporary file
+            try:
+                image_data = base64.b64decode(req.image.split(",")[1])
+            except (IndexError, ValueError) as e:
+                logger.error(f"Invalid image data format: {e}")
+                raise HTTPException(status_code=400, detail="Invalid image data format")
+                
+            temp_image_path = os.path.join(tempfile.gettempdir(), f"{uuid.uuid4()}.png")
+            with open(temp_image_path, "wb") as f:
+                f.write(image_data)
+
+            # Use Qwen to analyze the image
+            qwen_prompt = "Analyze this screen in detail. Describe what you see, including any text, UI elements, applications, and content visible."
+            logger.info("🔍 Analyzing screen with Qwen2VL...")
+            
+            try:
+                qwen_analysis = query_qwen(temp_image_path, qwen_prompt)
+            except Exception as e:
+                logger.error(f"Qwen2VL analysis failed: {e}")
+                raise HTTPException(status_code=500, detail=f"Screen analysis failed: {str(e)}")
+            finally:
+                # Always clean up temp file, even if analysis fails
+                if temp_image_path and os.path.exists(temp_image_path):
+                    try:
+                        os.remove(temp_image_path)
+                        temp_image_path = None
+                    except OSError as e:
+                        logger.warning(f"Failed to remove temp file {temp_image_path}: {e}")
+
+            if "[Qwen error]" in qwen_analysis:
+                raise HTTPException(status_code=500, detail=qwen_analysis)
+
+            # Unload Qwen2VL immediately after analysis to free memory for LLM
+            logger.info("🔄 Unloading Qwen2VL after analysis, preparing for LLM")
+            unload_qwen_model()
+            
+            # Additional cleanup after Qwen unload
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
+            # Use the selected LLM model to generate a response based on Qwen's analysis
+            # Use custom system prompt if provided, otherwise use default
+            system_prompt = req.system_prompt or "You are Jarvis, an AI assistant analyzing what the user is seeing on their screen. Provide helpful insights, suggestions, or commentary about what you observe. Be conversational and helpful."
+            
+            logger.info(f"🤖 Generating response with {req.model}")
+            if req.model == "gemini-1.5-flash":
+                # Use Gemini for response
+                try:
+                    llm_response = query_gemini(f"Screen analysis: {qwen_analysis}\n\nPlease provide helpful insights about this screen.", [])
+                except Exception as e:
+                    logger.error(f"Gemini response failed: {e}")
+                    raise HTTPException(status_code=500, detail=f"AI response generation failed: {str(e)}")
+            else:
+                # Use Ollama for response
+                payload = {
+                    "model": req.model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": f"Screen analysis: {qwen_analysis}\n\nPlease provide helpful insights about this screen."},
+                    ],
+                    "stream": False,
+                }
+
+                logger.info(f"→ Asking Ollama with model {req.model}")
+                headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY != "key" else {}
+                
+                try:
+                    resp = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, headers=headers, timeout=90)
+                    
+                    if resp.status_code != 200:
+                        logger.error("Ollama error %s: %s", resp.status_code, resp.text)
+                        raise HTTPException(status_code=500, detail=f"LLM request failed with status {resp.status_code}")
+                    
+                    llm_response = resp.json().get("message", {}).get("content", "").strip()
+                    
+                    if not llm_response:
+                        logger.warning("Empty response from Ollama")
+                        llm_response = "I was able to analyze the screen but couldn't generate a detailed response. Please try again."
+                        
+                except requests.RequestException as e:
+                    logger.error(f"Ollama request failed: {e}")
+                    raise HTTPException(status_code=500, detail=f"AI service unavailable: {str(e)}")
+
+            # Reload TTS/Whisper models for future use
+            logger.info("🔄 Reloading TTS/Whisper models after enhanced screen analysis")
+            reload_models_if_needed()
+
+            logger.info("✅ Enhanced screen analysis complete - all models restored")
+            return {
+                "response": llm_response,
+                "screen_analysis": qwen_analysis,
+                "model_used": req.model
             }
 
-            logger.info(f"→ Asking Ollama with model {req.model}")
-            headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY != "key" else {}
-            resp = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, headers=headers, timeout=90)
+        except HTTPException:
+            # Re-raise HTTP exceptions without wrapping
+            raise
+        except Exception as e:
+            logger.error(f"Analyze and respond failed with unexpected error: {e}", exc_info=True)
+            raise HTTPException(500, f"Internal server error: {str(e)}") from e
+        finally:
+            # Cleanup: Always ensure temp file is removed and models are restored
+            if temp_image_path and os.path.exists(temp_image_path):
+                try:
+                    os.remove(temp_image_path)
+                except OSError as e:
+                    logger.warning(f"Failed to remove temp file in finally block: {e}")
             
-            if resp.status_code != 200:
-                logger.error("Ollama error %s: %s", resp.status_code, resp.text)
-                raise HTTPException(status_code=500, detail="LLM request failed")
-            
-            llm_response = resp.json().get("message", {}).get("content", "").strip()
-
-        # Reload TTS/Whisper models for future use
-        logger.info("🔄 Reloading TTS/Whisper models after enhanced screen analysis")
-        reload_models_if_needed()
-
-        logger.info("✅ Enhanced screen analysis complete - all models restored")
-        return {
-            "response": llm_response,
-            "screen_analysis": qwen_analysis,
-            "model_used": req.model
-        }
-
-    except Exception as e:
-        logger.error("Analyze and respond failed: %s", e)
-        # Ensure models are reloaded even on error
-        logger.info("🔄 Reloading models after error")
-        reload_models_if_needed()
-        raise HTTPException(500, str(e)) from e
+            # Ensure models are reloaded even on error
+            try:
+                logger.info("🔄 Ensuring models are reloaded after request completion")
+                reload_models_if_needed()
+            except Exception as e:
+                logger.error(f"Failed to reload models in finally block: {e}")
+                
+            # Final memory cleanup
+            import gc
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
 @app.post("/api/analyze-screen-with-tts", tags=["vision"])
 async def analyze_screen_with_tts(req: ScreenAnalysisWithTTSRequest):
