@@ -29,7 +29,7 @@ class EmbeddingConfig:
     max_workflows: Optional[int] = None  # None = process all workflows
     
     # Vector Database Configuration
-    distance_strategy: str = "COSINE"  # COSINE, EUCLIDEAN, MAX_INNER_PRODUCT
+    distance_strategy: str = "cosine"  # cosine, l2, inner
     pre_delete_collection: bool = False
     use_jsonb: bool = True
     
