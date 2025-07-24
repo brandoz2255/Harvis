@@ -189,7 +189,10 @@ class EmbeddingManager:
             return results
         except Exception as e:
             logger.error(f"Error searching workflows: {e}")
-            return []
+            # Try fallback keyword search when vector search fails
+            logger.info("🔄 Attempting fallback keyword search...")
+            fallback_results = self._fallback_keyword_search(query, k)
+            return [doc for doc, score in fallback_results]
     
     def search_workflows_with_score(self, query: str, k: int = 5, 
                                   filter_dict: Optional[Dict] = None) -> List[tuple]:
@@ -206,6 +209,51 @@ class EmbeddingManager:
             return results
         except Exception as e:
             logger.error(f"Error searching workflows with scores: {e}")
+            # Try fallback keyword search when vector search fails
+            logger.info("🔄 Attempting fallback keyword search...")
+            return self._fallback_keyword_search(query, k)
+    
+    def _fallback_keyword_search(self, query: str, k: int = 5) -> List[tuple]:
+        """Fallback keyword search when vector search fails"""
+        try:
+            import psycopg2
+            
+            conn = psycopg2.connect(self.config.database_url)
+            cur = conn.cursor()
+            
+            # Search for workflows containing keywords from the query
+            keywords = query.lower().split()
+            like_conditions = []
+            params = [self.config.collection_name]
+            
+            for keyword in keywords:
+                like_conditions.append("e.document ILIKE %s")
+                params.append(f'%{keyword}%')
+            
+            where_clause = " AND ".join(like_conditions) if like_conditions else "true"
+            
+            cur.execute(f'''
+                SELECT e.document, e.cmetadata
+                FROM langchain_pg_embedding e
+                JOIN langchain_pg_collection c ON e.collection_id = c.uuid
+                WHERE c.name = %s 
+                AND ({where_clause})
+                LIMIT %s
+            ''', params + [k])
+            
+            results = []
+            for doc_content, metadata in cur.fetchall():
+                doc = Document(page_content=doc_content, metadata=metadata or {})
+                results.append((doc, 1.0))  # Dummy score
+            
+            cur.close()
+            conn.close()
+            
+            logger.info(f"📊 Fallback search found {len(results)} YouTube workflows")
+            return results
+            
+        except Exception as e:
+            logger.error(f"❌ Fallback search failed: {e}")
             return []
     
     def get_collection_stats(self) -> Dict[str, Any]:
