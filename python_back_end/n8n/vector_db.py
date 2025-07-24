@@ -79,6 +79,12 @@ except ImportError as e:
     class WorkflowProcessor:
         def __init__(self, **kwargs): pass
     
+    class Document:
+        """Fallback Document class for when langchain is not available"""
+        def __init__(self, page_content, metadata=None):
+            self.page_content = page_content
+            self.metadata = metadata or {}
+    
     logger.warning("⚠️ Embedding modules not available - vector database will run in fallback mode")
 
 class VectorDatabaseService:

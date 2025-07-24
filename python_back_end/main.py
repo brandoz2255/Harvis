@@ -33,7 +33,7 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer(auto_error=False)
 
 # Database connection
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://pguser:pgpassword@pgsql:5432/database")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://pguser:pgpassword@pgsql-db:5432/database")
 
 class AuthRequest(BaseModel):
     email: str
@@ -1902,7 +1902,7 @@ async def get_n8n_statistics():
             try:
                 workflow_id = workflow.get('id')
                 if workflow_id:
-                    executions = n8n_automation_service.n8n_client.get_executions(workflow_id, limit=1000)
+                    executions = n8n_automation_service.n8n_client.get_executions(workflow_id, limit=250)
                     total_executions += len(executions)
             except Exception as e:
                 logger.warning(f"Failed to get executions for workflow {workflow_id}: {e}")
@@ -1950,7 +1950,7 @@ async def get_n8n_workflows():
                 execution_count = 0
                 
                 if workflow_id:
-                    executions = n8n_automation_service.n8n_client.get_executions(workflow_id, limit=1000)
+                    executions = n8n_automation_service.n8n_client.get_executions(workflow_id, limit=250)
                     execution_count = len(executions)
                 
                 enhanced_workflow = {
