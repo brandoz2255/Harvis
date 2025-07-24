@@ -233,7 +233,7 @@ chat_history_manager = None
 
 @app.on_event("startup")
 async def startup_event():
-    global db_pool, chat_history_manager, n8n_storage, n8n_automation_service
+    global db_pool, chat_history_manager, n8n_storage, n8n_automation_service, n8n_ai_agent
     try:
         db_pool = await asyncpg.create_pool(DATABASE_URL)
         chat_history_manager = ChatHistoryManager(db_pool)
@@ -251,6 +251,15 @@ async def startup_event():
                 ollama_url=OLLAMA_URL
             )
             logger.info("✅ n8n automation service fully initialized")
+            
+            # Initialize AI agent with vector database
+            try:
+                from n8n import initialize_ai_agent
+                n8n_ai_agent = await initialize_ai_agent(n8n_automation_service)
+                logger.info("✅ n8n AI agent with vector database initialized")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to initialize n8n AI agent: {e}")
+                logger.warning("n8n automation will work without vector database enhancement")
         
         logger.info("Database pool and all services initialized successfully")
     except Exception as e:
@@ -1978,6 +1987,160 @@ async def get_n8n_workflows():
         # Return empty workflows list on error
         return {
             "workflows": []
+        }
+
+# ─── Vector Database Enhanced n8n Endpoints ───────────────────────────────────────
+
+# Initialize AI agent (will be set up in startup event)
+n8n_ai_agent = None
+
+@app.post("/api/n8n/ai-automate", tags=["n8n-ai-automation"])
+async def create_n8n_automation_with_ai(
+    request: N8nAutomationRequest,
+    current_user: UserResponse = Depends(get_current_user)
+):
+    """
+    Create n8n workflow using AI with vector database context
+    
+    This enhanced endpoint uses vector search to find similar workflows
+    and provides better context to the AI for creating more accurate workflows.
+    """
+    if not n8n_ai_agent:
+        raise HTTPException(status_code=503, detail="n8n AI agent not available")
+    
+    try:
+        logger.info(f"🧠 AI-enhanced n8n automation request from user {current_user.username}: {request.prompt[:100]}...")
+        
+        # Process request with AI agent and vector context
+        result = await n8n_ai_agent.process_automation_request_with_context(
+            request, user_id=current_user.id
+        )
+        
+        if result.get("success"):
+            logger.info(f"✅ AI-enhanced n8n automation successful: {result['workflow']['name']}")
+            return {
+                "success": True,
+                "message": f"Created workflow with AI assistance: {result['workflow']['name']}",
+                "workflow": result["workflow"],
+                "analysis": result.get("analysis", {}),
+                "ai_context": result.get("ai_context", {}),
+                "execution_time": result.get("execution_time", 0)
+            }
+        else:
+            logger.warning(f"❌ AI-enhanced n8n automation failed: {result.get('error', 'Unknown error')}")
+            return {
+                "success": False,
+                "error": result.get("error", "Unknown error"),
+                "suggestions": result.get("suggestions", []),
+                "fallback_used": result.get("fallback_used", False)
+            }
+    
+    except Exception as e:
+        logger.error(f"AI-enhanced n8n automation endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/n8n/search-examples", tags=["n8n-ai-automation"])
+async def search_workflow_examples(
+    query: str,
+    limit: int = 5,
+    current_user: UserResponse = Depends(get_current_user)
+):
+    """
+    Search for workflow examples in the vector database
+    """
+    if not n8n_ai_agent:
+        raise HTTPException(status_code=503, detail="n8n AI agent not available")
+    
+    try:
+        logger.info(f"🔍 Searching workflow examples for query: {query}")
+        
+        result = await n8n_ai_agent.search_workflow_examples(query, limit)
+        
+        return {
+            "success": result.get("success", False),
+            "query": query,
+            "examples": result.get("results", []),
+            "count": result.get("count", 0),
+            "error": result.get("error")
+        }
+    
+    except Exception as e:
+        logger.error(f"Workflow search error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/n8n/workflow-insights", tags=["n8n-ai-automation"])
+async def get_workflow_insights(
+    workflow_data: Dict[str, Any],
+    current_user: UserResponse = Depends(get_current_user)
+):
+    """
+    Get AI insights about a workflow using vector database
+    """
+    if not n8n_ai_agent:
+        raise HTTPException(status_code=503, detail="n8n AI agent not available")
+    
+    try:
+        logger.info(f"🔍 Getting insights for workflow: {workflow_data.get('name', 'unnamed')}")
+        
+        insights = await n8n_ai_agent.get_workflow_insights(workflow_data)
+        
+        return {
+            "success": True,
+            "insights": insights
+        }
+    
+    except Exception as e:
+        logger.error(f"Workflow insights error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/n8n/vector-db/health", tags=["n8n-ai-automation"])
+async def check_vector_db_health():
+    """
+    Check the health of the vector database service
+    """
+    try:
+        if not n8n_ai_agent:
+            return {
+                "status": "service_unavailable",
+                "vector_database": {"status": "not_initialized"},
+                "overall_health": False
+            }
+        
+        health = await n8n_ai_agent.health_check()
+        return health
+    
+    except Exception as e:
+        logger.error(f"Vector DB health check error: {e}")
+        return {
+            "status": "error",
+            "error": str(e),
+            "overall_health": False
+        }
+
+@app.get("/api/n8n/vector-db/stats", tags=["n8n-ai-automation"])
+async def get_vector_db_stats():
+    """
+    Get statistics about the vector database collection
+    """
+    try:
+        if not n8n_ai_agent:
+            return {
+                "error": "AI agent not available",
+                "stats": {}
+            }
+        
+        stats = await n8n_ai_agent.vector_db.get_collection_stats()
+        return {
+            "success": True,
+            "stats": stats
+        }
+    
+    except Exception as e:
+        logger.error(f"Vector DB stats error: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "stats": {}
         }
 
 # ─── Vibe Coding Endpoints ─────────────────────────────────────────────────────
