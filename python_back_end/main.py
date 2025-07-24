@@ -962,10 +962,13 @@ async def analyze_screen(req: ScreenAnalysisRequest):
         reload_models_if_needed()
         raise HTTPException(500, str(e)) from e
 
-# Global rate limiting for vision endpoints
+# Global rate limiting and circuit breaker for vision endpoints
 import asyncio
 _vision_processing_lock = asyncio.Lock()
 _last_vision_request_time = 0
+_vision_endpoint_enabled = True  # Emergency disable flag
+_vision_request_count = 0
+_vision_error_count = 0
 
 @app.post("/api/analyze-and-respond", tags=["vision"])
 async def analyze_and_respond(req: AnalyzeAndRespondRequest):
@@ -973,7 +976,21 @@ async def analyze_and_respond(req: AnalyzeAndRespondRequest):
     Analyze screen with Qwen vision model and get LLM response using selected model.
     Features intelligent model management to optimize GPU memory usage.
     """
-    global _last_vision_request_time
+    global _last_vision_request_time, _vision_endpoint_enabled, _vision_request_count, _vision_error_count
+    
+    # Circuit breaker: Check if endpoint is disabled
+    if not _vision_endpoint_enabled:
+        logger.warning("🚫 Vision endpoint is disabled due to repeated issues")
+        raise HTTPException(status_code=503, detail="Vision analysis temporarily disabled")
+    
+    # Circuit breaker: Check error rate
+    if _vision_request_count > 10 and _vision_error_count / _vision_request_count > 0.8:
+        logger.error("🚫 Circuit breaker activated: too many failures")
+        _vision_endpoint_enabled = False
+        raise HTTPException(status_code=503, detail="Vision analysis disabled due to high error rate")
+    
+    _vision_request_count += 1
+    logger.info(f"📊 Vision request #{_vision_request_count} (errors: {_vision_error_count})")
     
     # Rate limiting: only allow one vision request at a time
     async with _vision_processing_lock:
@@ -1098,8 +1115,10 @@ async def analyze_and_respond(req: AnalyzeAndRespondRequest):
 
         except HTTPException:
             # Re-raise HTTP exceptions without wrapping
+            _vision_error_count += 1
             raise
         except Exception as e:
+            _vision_error_count += 1
             logger.error(f"Analyze and respond failed with unexpected error: {e}", exc_info=True)
             raise HTTPException(500, f"Internal server error: {str(e)}") from e
         finally:
@@ -1122,6 +1141,40 @@ async def analyze_and_respond(req: AnalyzeAndRespondRequest):
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+
+@app.post("/api/vision-control", tags=["vision"])
+async def vision_control(action: str = "status"):
+    """
+    Emergency control endpoint for vision processing
+    Actions: 'disable', 'enable', 'status', 'reset'
+    """
+    global _vision_endpoint_enabled, _vision_request_count, _vision_error_count
+    
+    if action == "disable":
+        _vision_endpoint_enabled = False
+        logger.warning("🚫 Vision endpoint manually disabled")
+        return {"status": "disabled", "message": "Vision analysis disabled"}
+    
+    elif action == "enable":
+        _vision_endpoint_enabled = True
+        logger.info("✅ Vision endpoint manually enabled")
+        return {"status": "enabled", "message": "Vision analysis enabled"}
+    
+    elif action == "reset":
+        _vision_endpoint_enabled = True
+        _vision_request_count = 0
+        _vision_error_count = 0
+        logger.info("🔄 Vision endpoint stats reset")
+        return {"status": "reset", "message": "Vision stats reset"}
+    
+    else:  # status
+        return {
+            "enabled": _vision_endpoint_enabled,
+            "total_requests": _vision_request_count,
+            "total_errors": _vision_error_count,
+            "error_rate": _vision_error_count / max(_vision_request_count, 1),
+            "status": "enabled" if _vision_endpoint_enabled else "disabled"
+        }
 
 @app.post("/api/analyze-screen-with-tts", tags=["vision"])
 async def analyze_screen_with_tts(req: ScreenAnalysisWithTTSRequest):
