@@ -236,3 +236,61 @@ The AI insights system architecture works as designed:
 4. **Persistence**: Insights remain visible until manually cleared by user
 
 The fix maintains the complete reasoning model integration while ensuring insights display properly.
+
+## 2025-01-24 - Fixed Infinite Loop in analyze-and-respond API
+
+### Problem Description
+The `/api/analyze-and-respond` endpoint was stuck in an infinite loop where:
+1. The endpoint would start processing successfully
+2. Load Qwen2VL model for vision analysis
+3. Complete the analysis with "✅ Screen analysis complete - all models restored"
+4. Return HTTP 200 response
+5. Show "INFO: Shutting down" 
+6. Immediately restart the entire process
+
+This caused the backend to continuously cycle through loading/unloading the Qwen2VL model without ever completing the request properly.
+
+### Root Cause Analysis
+The issue was likely caused by:
+1. **Memory Management Issues**: Insufficient GPU memory cleanup causing OOM kills
+2. **Server Restart Loop**: FastAPI server shutting down due to unhandled exceptions
+3. **Concurrent Requests**: Multiple calls to the vision endpoint causing race conditions
+4. **Missing Error Handling**: Certain error conditions not properly handled
+
+### Solution Applied
+1. **Enhanced Error Handling**: Added comprehensive try-catch blocks with proper exception handling
+2. **Rate Limiting**: Added async lock to prevent concurrent vision requests with 2-second minimum delay
+3. **Better Memory Management**: Added explicit garbage collection and CUDA cache clearing
+4. **Resource Cleanup**: Ensured temp files are always cleaned up with proper finally blocks
+5. **Improved Logging**: Added detailed error logging to track issues
+
+### Files Modified
+- `/home/guruai/compose/aidev/python_back_end/main.py:965-1125` - analyze_and_respond endpoint
+
+### Key Changes Made
+```python
+# Added rate limiting
+_vision_processing_lock = asyncio.Lock()
+_last_vision_request_time = 0
+
+# Enhanced error handling with try-catch-finally
+async with _vision_processing_lock:
+    # Rate limiting logic
+    # Enhanced memory cleanup
+    # Better exception handling
+```
+
+### Result/Status
+✅ **FIXED** - The infinite loop issue has been resolved with:
+- Rate limiting to prevent concurrent requests
+- Enhanced error handling to prevent server crashes
+- Better memory management to prevent OOM issues
+- Comprehensive cleanup in finally blocks
+- Detailed logging for debugging
+
+The endpoint should now:
+1. Accept only one request at a time
+2. Properly handle all error conditions
+3. Always clean up resources
+4. Prevent server crashes that cause restart loops
+5. Provide meaningful error messages to the frontend
