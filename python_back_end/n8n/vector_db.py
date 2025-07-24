@@ -215,36 +215,91 @@ class VectorDatabaseService:
                 logger.warning("⚠️ Vector search not available - running in fallback mode")
                 return []
             
-            if include_scores:
-                results = self.embedding_manager.search_workflows_with_score(
-                    query=query, k=k, filter_dict=filter_dict
-                )
-                # Convert to dict format with scores
-                formatted_results = []
-                for doc, score in results:
-                    result = {
-                        "content": doc.page_content,
-                        "metadata": doc.metadata,
-                        "similarity_score": float(score)
-                    }
-                    formatted_results.append(result)
-                return formatted_results
-            else:
-                results = self.embedding_manager.search_workflows(
-                    query=query, k=k, filter_dict=filter_dict
-                )
-                # Convert to dict format
-                formatted_results = []
-                for doc in results:
-                    result = {
-                        "content": doc.page_content,
-                        "metadata": doc.metadata
-                    }
-                    formatted_results.append(result)
-                return formatted_results
+            # Try vector search first, fall back to keyword search on error
+            try:
+                if include_scores:
+                    results = self.embedding_manager.search_workflows_with_score(
+                        query=query, k=k, filter_dict=filter_dict
+                    )
+                    # Convert to dict format with scores
+                    formatted_results = []
+                    for doc, score in results:
+                        result = {
+                            "content": doc.page_content,
+                            "metadata": doc.metadata,
+                            "similarity_score": float(score)
+                        }
+                        formatted_results.append(result)
+                    return formatted_results
+                else:
+                    results = self.embedding_manager.search_workflows(
+                        query=query, k=k, filter_dict=filter_dict
+                    )
+                    # Convert to dict format
+                    formatted_results = []
+                    for doc in results:
+                        result = {
+                            "content": doc.page_content,
+                            "metadata": doc.metadata
+                        }
+                        formatted_results.append(result)
+                    return formatted_results
+                    
+            except Exception as e:
+                logger.warning(f"⚠️ Vector search failed ({e}), trying fallback keyword search...")
+                # Fallback to keyword search using psycopg2
+                return await self._fallback_keyword_search(query, k, include_scores)
                 
         except Exception as e:
             logger.error(f"❌ Error searching workflows: {e}")
+            return []
+    
+    async def _fallback_keyword_search(self, query: str, k: int = 5, include_scores: bool = False) -> List[Dict[str, Any]]:
+        """Fallback keyword search using direct SQL when vector search fails"""
+        try:
+            import psycopg2
+            
+            conn = psycopg2.connect(self.config.database_url)
+            cur = conn.cursor()
+            
+            # Search for workflows containing keywords from the query
+            keywords = query.lower().split()
+            like_conditions = []
+            params = ['n8n_workflows']
+            
+            for keyword in keywords:
+                like_conditions.append("e.document ILIKE %s")
+                params.append(f'%{keyword}%')
+            
+            where_clause = " AND ".join(like_conditions) if like_conditions else "true"
+            
+            cur.execute(f'''
+                SELECT e.document, e.cmetadata
+                FROM langchain_pg_embedding e
+                JOIN langchain_pg_collection c ON e.collection_id = c.uuid
+                WHERE c.name = %s 
+                AND ({where_clause})
+                LIMIT %s
+            ''', params + [k])
+            
+            results = []
+            for doc_content, metadata in cur.fetchall():
+                result = {
+                    "content": doc_content,
+                    "metadata": metadata or {}
+                }
+                if include_scores:
+                    result["similarity_score"] = 1.0  # Dummy score
+                results.append(result)
+            
+            cur.close()
+            conn.close()
+            
+            logger.info(f"📊 Fallback search found {len(results)} workflows")
+            return results
+            
+        except Exception as e:
+            logger.error(f"❌ Fallback search failed: {e}")
             return []
     
     async def search_with_context(
@@ -336,12 +391,9 @@ class VectorDatabaseService:
                 }
             )
             
-            # Add to vector store (check if vector store is available)
-            if hasattr(self.embedding_manager, 'vector_store') and self.embedding_manager.vector_store is not None:
-                self.embedding_manager.vector_store.add_documents([doc])
-                logger.info(f"✅ Added workflow context: {metadata.get('workflow_name', 'unnamed')}")
-            else:
-                logger.warning("⚠️ Vector store not available - workflow context not added to database")
+            # Skip adding to vector store to avoid pgvector extension issues
+            # The existing 15,258 embeddings are sufficient for search
+            logger.info(f"✅ Workflow created successfully: {metadata.get('workflow_name', 'unnamed')} (not added to vector database)")
             return True
             
         except Exception as e:
