@@ -155,7 +155,8 @@ class WorkflowBuilder:
     def _analyze_workflow_type(self, requirements: Dict[str, Any]) -> str:
         """Analyze requirements to determine best workflow type"""
         keywords = requirements.get("keywords", [])
-        action = requirements.get("action", "").lower()
+        action_value = requirements.get("action", "")
+        action = action_value.lower() if isinstance(action_value, str) else ""
         
         # Simple keyword matching
         if any(word in keywords for word in ["weather", "forecast"]):
