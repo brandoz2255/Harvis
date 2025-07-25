@@ -63,6 +63,12 @@ interface WorkflowType {
 
 interface N8nAutomationResponse {
   workflow: WorkflowType;
+  ai_context?: {
+    similar_workflows_found: number;
+    context_used: boolean;
+    suggestions: string[];
+    vector_search_query: string;
+  };
 }
 
 export default function AIAgents() {
@@ -75,6 +81,7 @@ export default function AIAgents() {
   const [n8nStatus, setN8nStatus] = useState<"idle" | "loading" | "success" | "error">("idle")
   const [n8nMessage, setN8nMessage] = useState<string | null>(null)
   const [n8nMessageType, setN8nMessageType] = useState<"info" | "success" | "error" | null>(null)
+  const [aiContext, setAiContext] = useState<N8nAutomationResponse['ai_context'] | null>(null)
   const n8nVoiceInputRef = useRef<any>(null)
   const [isN8nVoiceRecording, setIsN8nVoiceRecording] = useState(false)
   const [isN8nVoiceProcessing, setIsN8nVoiceProcessing] = useState(false)
@@ -174,7 +181,7 @@ export default function AIAgents() {
     setN8nStatus("loading")
 
     try {
-      const response = await fetch("/api/n8n-automation", {
+      const response = await fetch("/api/n8n/ai-automate", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -198,7 +205,14 @@ export default function AIAgents() {
 
       const data: N8nAutomationResponse = await response.json()
       setN8nWorkflow(data.workflow)
-      setN8nMessage("Workflow created successfully!")
+      setAiContext(data.ai_context || null)
+      
+      let successMessage = "Workflow created successfully!"
+      if (data.ai_context?.context_used) {
+        successMessage += ` (Enhanced with ${data.ai_context.similar_workflows_found} similar workflows)`
+      }
+      
+      setN8nMessage(successMessage)
       setN8nMessageType("success")
       setN8nStatus("success")
       // Refresh workflow statistics
@@ -308,13 +322,14 @@ export default function AIAgents() {
     setIsProcessing(true);
 
     try {
-      const response = await fetch('/api/n8n-automation', {
+      const response = await fetch('/api/n8n/ai-automate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           prompt: n8nPrompt,
           model: selectedModel === "auto" ? "mistral" : selectedModel 
         }),
+        credentials: 'include',
       });
 
       if (!response.ok) {
@@ -330,7 +345,14 @@ export default function AIAgents() {
 
       const data = await response.json();
       setN8nWorkflow(data.workflow);
-      setStatusMessage("Workflow created successfully!");
+      setAiContext(data.ai_context || null);
+      
+      let successMessage = "Workflow created successfully!";
+      if (data.ai_context?.context_used) {
+        successMessage += ` (Enhanced with ${data.ai_context.similar_workflows_found} similar workflows)`;
+      }
+      
+      setStatusMessage(successMessage);
       setStatusType('success');
       setLastErrorType(null); // Clear error type on success
     } catch (err: any) {
@@ -632,10 +654,14 @@ export default function AIAgents() {
                   >
                     {n8nStatus === "loading" ? (
                       <span className="flex items-center">
-                        <Loader2 className="animate-spin mr-2" size={18} /> Thinking...
+                        <Loader2 className="animate-spin mr-2" size={18} /> 
+                        AI Enhanced Generation...
                       </span>
                     ) : (
-                      "Generate n8n Workflow"
+                      <span className="flex items-center">
+                        <BrainCircuit className="mr-2" size={18} />
+                        Generate AI Enhanced Workflow
+                      </span>
                     )}
                   </Button>
                   {selectedModel !== "auto" && (
@@ -662,6 +688,35 @@ export default function AIAgents() {
                   )}
                 </div>
               )}
+              {/* AI Context Display */}
+              {aiContext && aiContext.context_used && (
+                <div className="mt-4">
+                  <Card className="bg-indigo-900/50 backdrop-blur-sm border-indigo-500/30">
+                    <CardHeader className="pb-3">
+                      <CardTitle className="text-white flex items-center text-sm">
+                        <BrainCircuit className="w-4 h-4 mr-2 text-indigo-400" />
+                        AI Enhancement Used
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="text-sm text-gray-300 space-y-2">
+                        <p>✨ Found {aiContext.similar_workflows_found} similar workflows for context</p>
+                        {aiContext.suggestions && aiContext.suggestions.length > 0 && (
+                          <div>
+                            <p className="text-xs text-gray-400 mb-1">AI Suggestions:</p>
+                            <ul className="text-xs text-gray-300 list-disc list-inside">
+                              {aiContext.suggestions.map((suggestion, idx) => (
+                                <li key={idx}>{suggestion}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+                    </CardContent>
+                  </Card>
+                </div>
+              )}
+
               {n8nWorkflow && (
                 <div className="mt-4 space-y-4">
                   {/* Workflow Info Card */}
