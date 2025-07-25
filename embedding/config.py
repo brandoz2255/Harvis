@@ -11,7 +11,7 @@ class EmbeddingConfig:
     """Configuration class for n8n workflow embedding."""
     
     # Database Configuration
-    database_url: str = "postgresql://pguser:pgpassword@pgsql:5432/database"
+    database_url: str = "postgresql://pguser:pgpassword@pgsql-db:5432/database"
     collection_name: str = "n8n_workflows"
     
     # Local workflow directories
@@ -29,7 +29,7 @@ class EmbeddingConfig:
     max_workflows: Optional[int] = None  # None = process all workflows
     
     # Vector Database Configuration
-    distance_strategy: str = "COSINE"  # COSINE, EUCLIDEAN, MAX_INNER_PRODUCT
+    distance_strategy: str = "cosine"  # cosine, l2, inner
     pre_delete_collection: bool = False
     use_jsonb: bool = True
     
