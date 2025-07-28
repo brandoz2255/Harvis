@@ -179,6 +179,17 @@ class WorkflowBuilder:
         """Build custom workflow from requirements"""
         nodes = []
         
+        # Check if nodes_required is specified in requirements (from AI analysis)
+        nodes_required = requirements.get("nodes_required", [])
+        parameters = requirements.get("parameters", {})
+        
+        if nodes_required:
+            logger.info(f"Building workflow with AI-specified nodes: {nodes_required}")
+            return self._build_workflow_from_ai_nodes(name, description, nodes_required, parameters, requirements)
+        
+        # Fallback to legacy action-based workflow building
+        logger.info("No AI nodes specified, falling back to action-based workflow")
+        
         # Always start with a trigger
         trigger_type = requirements.get("trigger", "manual")
         if trigger_type == "schedule":

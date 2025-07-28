@@ -120,9 +120,22 @@ class N8nAutomationService:
             
             logger.info(f"Successfully created workflow {workflow_id} in {execution_time:.2f}s")
             
+            # Get the full n8n workflow JSON from the created workflow
+            full_workflow = n8n_workflow.copy()
+            
+            # Add our metadata to the full workflow
+            full_workflow.update({
+                "description": analysis.get("description", ""),
+                "template_used": analysis.get("template_id"),
+                "url": f"{self.n8n_client.base_url}/workflow/{workflow_id}",
+                "execution_time": execution_time,
+                "ai_generated": True
+            })
+            
             return {
                 "success": True,
-                "workflow": {
+                "workflow": full_workflow,
+                "metadata": {
                     "id": workflow_id,
                     "name": workflow_config.name,
                     "description": analysis.get("description", ""),
@@ -395,9 +408,21 @@ Determine what kind of n8n workflow this needs and provide detailed analysis."""
                 )
                 await self.storage.save_workflow(workflow_record)
             
+            # Get the full n8n workflow JSON from the created workflow
+            full_workflow = n8n_workflow.copy()
+            
+            # Add our metadata to the full workflow
+            full_workflow.update({
+                "description": request.description or "",
+                "template_used": request.template_id,
+                "url": f"{self.n8n_client.base_url}/workflow/{workflow_id}",
+                "ai_generated": False
+            })
+            
             return {
                 "success": True,
-                "workflow": {
+                "workflow": full_workflow,
+                "metadata": {
                     "id": workflow_id,
                     "name": workflow_config.name,
                     "active": request.activate,
