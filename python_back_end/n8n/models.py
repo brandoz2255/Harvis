@@ -27,6 +27,21 @@ class NodeType(str, Enum):
     SET = "n8n-nodes-base.set"
     MERGE = "n8n-nodes-base.merge"
     SPLIT_IN_BATCHES = "n8n-nodes-base.splitInBatches"
+    
+    # LangChain nodes
+    LANGCHAIN_AGENT = "@n8n/n8n-nodes-langchain.agent"
+    LANGCHAIN_OPENAI = "@n8n/n8n-nodes-langchain.openAi"
+    LANGCHAIN_OLLAMA = "@n8n/n8n-nodes-langchain.lmOllama"
+    LANGCHAIN_CHAIN = "@n8n/n8n-nodes-langchain.chainLlm"
+    LANGCHAIN_TOOL = "@n8n/n8n-nodes-langchain.toolAgent"
+    
+    # Additional common nodes
+    YOUTUBE = "n8n-nodes-base.youTube"
+    GOOGLE_SHEETS = "n8n-nodes-base.googleSheets"
+    TWITTER = "n8n-nodes-base.twitter"
+    TRELLO = "n8n-nodes-base.trello"
+    NOTION = "n8n-nodes-base.notion"
+    STICKY_NOTE = "n8n-nodes-base.stickyNote"
 
 
 class WorkflowConnection(BaseModel):
