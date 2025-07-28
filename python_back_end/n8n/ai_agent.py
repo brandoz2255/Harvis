@@ -59,7 +59,7 @@ class N8nAIAgent:
             # Step 1: Search for similar workflows in vector database
             context_data = await self.vector_db.get_workflow_suggestions(
                 user_request=request.prompt,
-                context_limit=3
+                context_limit=10
             )
             
             # Step 2: Enhance the original prompt with context
@@ -128,7 +128,7 @@ class N8nAIAgent:
             "Similar Workflow Examples for Reference:",
         ]
         
-        for i, workflow in enumerate(similar_workflows[:3], 1):
+        for i, workflow in enumerate(similar_workflows[:5], 1):
             metadata = workflow.get("metadata", {})
             content = workflow.get("content", "")
             score = workflow.get("similarity_score", 0)
