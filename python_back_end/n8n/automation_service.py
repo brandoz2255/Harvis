@@ -293,13 +293,16 @@ Determine what kind of n8n workflow this needs and provide detailed analysis."""
         # Safely extract nested values with proper null checking
         schedule = analysis.get("schedule") or {}
         parameters = analysis.get("parameters") or {}
+        nodes_required = analysis.get("nodes_required", [])
         
         requirements = {
             "trigger": analysis.get("workflow_type", "manual"),
             "actions": self._extract_actions_from_analysis(analysis),
             "schedule_interval": schedule.get("interval", "daily"),
             "webhook_path": parameters.get("webhook_path", "/webhook"),
-            "keywords": self._extract_keywords_from_prompt(original_prompt)
+            "keywords": self._extract_keywords_from_prompt(original_prompt),
+            "nodes_required": nodes_required,  # Pass AI-identified nodes
+            "parameters": parameters  # Pass all AI analysis parameters
         }
         
         return self.workflow_builder.build_ai_workflow(
