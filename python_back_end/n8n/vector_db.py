@@ -86,23 +86,33 @@ except ImportError as e:
                 
                 # Search for workflows containing keywords from the query
                 keywords = query.lower().split()
-                like_conditions = []
                 params = ['n8n_workflows']
                 
-                for keyword in keywords:
-                    like_conditions.append("e.document ILIKE %s")
-                    params.append(f'%{keyword}%')
+                # Build query with proper parameterization
+                base_query = (
+                    "SELECT e.document, e.cmetadata "
+                    "FROM langchain_pg_embedding e "
+                    "JOIN langchain_pg_collection c ON e.collection_id = c.uuid "
+                    "WHERE c.name = %s"
+                )
                 
-                where_clause = " AND ".join(like_conditions) if like_conditions else "true"
+                if keywords:
+                    # Add keyword search conditions
+                    keyword_conditions = []
+                    for keyword in keywords:
+                        keyword_conditions.append("e.document ILIKE %s")
+                        params.append(f'%{keyword}%')
+                    
+                    # Combine conditions using proper SQL composition
+                    if keyword_conditions:
+                        query = base_query + " AND (" + " AND ".join(keyword_conditions) + ") LIMIT %s"
+                    else:
+                        query = base_query + " LIMIT %s"
+                else:
+                    query = base_query + " LIMIT %s"
                 
-                cur.execute(f'''
-                    SELECT e.document, e.cmetadata
-                    FROM langchain_pg_embedding e
-                    JOIN langchain_pg_collection c ON e.collection_id = c.uuid
-                    WHERE c.name = %s 
-                    AND ({where_clause})
-                    LIMIT %s
-                ''', params + [k])
+                params.append(k)
+                cur.execute(query, params)
                 
                 results = []
                 for doc_content, metadata in cur.fetchall():
@@ -264,23 +274,33 @@ class VectorDatabaseService:
             
             # Search for workflows containing keywords from the query
             keywords = query.lower().split()
-            like_conditions = []
             params = ['n8n_workflows']
             
-            for keyword in keywords:
-                like_conditions.append("e.document ILIKE %s")
-                params.append(f'%{keyword}%')
+            # Build query with proper parameterization
+            base_query = (
+                "SELECT e.document, e.cmetadata "
+                "FROM langchain_pg_embedding e "
+                "JOIN langchain_pg_collection c ON e.collection_id = c.uuid "
+                "WHERE c.name = %s"
+            )
             
-            where_clause = " AND ".join(like_conditions) if like_conditions else "true"
+            if keywords:
+                # Add keyword search conditions
+                keyword_conditions = []
+                for keyword in keywords:
+                    keyword_conditions.append("e.document ILIKE %s")
+                    params.append(f'%{keyword}%')
+                
+                # Combine conditions using proper SQL composition
+                if keyword_conditions:
+                    query = base_query + " AND (" + " AND ".join(keyword_conditions) + ") LIMIT %s"
+                else:
+                    query = base_query + " LIMIT %s"
+            else:
+                query = base_query + " LIMIT %s"
             
-            cur.execute(f'''
-                SELECT e.document, e.cmetadata
-                FROM langchain_pg_embedding e
-                JOIN langchain_pg_collection c ON e.collection_id = c.uuid
-                WHERE c.name = %s 
-                AND ({where_clause})
-                LIMIT %s
-            ''', params + [k])
+            params.append(k)
+            cur.execute(query, params)
             
             results = []
             for doc_content, metadata in cur.fetchall():
