@@ -1,0 +1,112 @@
+# OWASP ZAP DAST Scanner Configuration for Jarvis Application
+
+# Target application settings
+target_url: "http://localhost:9000"
+backend_url: "http://localhost:8000"
+
+# ZAP proxy settings
+zap_proxy_host: "127.0.0.1"
+zap_proxy_port: 8080
+api_key: null  # Set if ZAP API key is configured
+
+# Spider scan configuration
+spider_depth: 5
+spider_max_children: 10
+ajax_spider_enabled: true
+
+# Active scan settings
+active_scan_policy: "Default Policy"
+timeout: 300
+
+# Authentication settings (optional)
+auth_username: ""
+auth_password: ""
+session_management: true
+context_name: "JarvisApp"
+
+# Output and reporting
+output_dir: "./reports"
+report_formats:
+  - "html"
+  - "json"
+  - "xml"
+
+# Target-specific endpoints for Jarvis application
+jarvis_endpoints:
+  # Authentication endpoints
+  - "/api/auth/login"
+  - "/api/auth/signup" 
+  - "/api/me"
+  
+  # Chat and AI endpoints
+  - "/api/chat"
+  - "/api/mic-chat"
+  - "/api/research-chat"
+  - "/api/gemini-chat"
+  - "/api/versus-chat"
+  
+  # Voice and media
+  - "/api/voice-transcribe"
+  - "/api/audio/"
+  
+  # Screen and analysis
+  - "/api/analyze-screen"
+  - "/api/analyze-and-respond"
+  - "/api/screen-feed"
+  
+  # n8n automation
+  - "/api/n8n-automation"
+  - "/api/n8n-workflows"
+  - "/api/n8n-stats"
+  
+  # System and controls
+  - "/api/send-command"
+  - "/api/settings"
+  - "/api/ollama-models"
+  - "/api/test-ollama"
+  
+  # Chat history
+  - "/api/chat-history/sessions"
+  - "/api/chat-history/messages"
+  
+  # Emulation features
+  - "/api/start-emulation"
+  - "/api/start-versus-emulation"
+  - "/api/emulation-log"
+
+# Security test priorities for OWASP Top 10
+owasp_priorities:
+  high:
+    - "A01:2021 – Broken Access Control"
+    - "A03:2021 – Injection" 
+    - "A07:2021 – Identification and Authentication Failures"
+  medium:
+    - "A02:2021 – Cryptographic Failures"
+    - "A05:2021 – Security Misconfiguration"
+    - "A10:2021 – Server-Side Request Forgery"
+  low:
+    - "A04:2021 – Insecure Design"
+    - "A06:2021 – Vulnerable and Outdated Components"
+    - "A08:2021 – Software and Data Integrity Failures"
+    - "A09:2021 – Security Logging and Monitoring Failures"
+
+# Custom scan profiles
+scan_profiles:
+  quick:
+    spider_depth: 2
+    spider_max_children: 5
+    ajax_spider_enabled: false
+    timeout: 120
+    
+  comprehensive:
+    spider_depth: 10
+    spider_max_children: 20
+    ajax_spider_enabled: true
+    timeout: 600
+    
+  api_focused:
+    spider_depth: 3
+    spider_max_children: 10
+    ajax_spider_enabled: false
+    timeout: 300
+    focus_endpoints: true
