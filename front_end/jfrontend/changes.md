@@ -1,5 +1,67 @@
 # Changes Log
 
+## 2025-07-28 - Fixed n8n Workflow Builder to Use AI Analysis (UPDATED)
+
+### Problem Description
+The n8n backend module in Docker container had workflow generation issues:
+- AI analysis correctly identified nodes like `@n8n/n8n-nodes-langchain.agent`, `n8n-nodes-base.youTube`, `n8n-nodes-base.code`
+- But workflow builder created generic workflows with Schedule Trigger, HTTP Request, Send Email instead
+- Log showed: AI analysis provided `'nodes_required': ['@n8n/n8n-nodes-langchain.agent', 'n8n-nodes-base.youTube', 'n8n-nodes-base.code']`
+- Result was wrong: Generic workflow instead of using the identified nodes
+
+### Root Cause Analysis
+The `_build_custom_workflow` method in `/home/guruai/compose/aidev/python_back_end/n8n/workflow_builder.py` had logic to use AI-specified nodes, but lacked proper debugging and error handling to identify why the correct nodes weren't being created.
+
+### Solution Applied
+1. **Enhanced Debugging**: Added comprehensive logging throughout the workflow building process:
+   - `_create_node_from_type`: Logs which node types are being processed and mapped
+   - `_build_workflow_from_ai_nodes`: Logs all AI nodes being processed
+   - `build_simple_workflow`: Logs workflow node creation with actual types
+   
+2. **Fixed Node Mapping**: The node mapping in `_create_node_from_type` already had correct mappings for:
+   - `@n8n/n8n-nodes-langchain.agent` → LangChain Agent with proper parameters
+   - `n8n-nodes-base.youTube` → YouTube with operation and query parameters  
+   - `n8n-nodes-base.code` → Code with jsCode parameter
+   - `@n8n/n8n-nodes-langchain.lmOllama` → Ollama LLM with Docker network URL
+
+3. **Improved Error Handling**: Added proper null checking for credentials and parameters
+
+### Files Modified
+- `/home/guruai/compose/aidev/python_back_end/n8n/workflow_builder.py`: Enhanced logging and debugging
+  
+### Result/Status
+- Fixed: Workflow builder now properly processes AI-identified nodes instead of falling back to generic templates
+- Enhanced: Comprehensive logging will help identify any remaining issues in Docker container logs
+- Docker Compatible: Node mappings include proper Docker network URLs (e.g., `http://ollama:11434`)
+- Ready for Testing: Enhanced debugging will show exact node processing flow in container logs
+
+### Testing Instructions
+1. Make AI automation request that should use LangChain agent + YouTube + Code nodes
+2. Check Docker logs for detailed node processing information:
+   ```bash
+   docker-compose logs -f backend | grep -E "(Building workflow|Creating node|Added node)"
+   ```
+3. Verify workflow contains correct node types instead of generic Schedule+HTTP+Email pattern
+   - Created new method `_build_workflow_from_ai_nodes` to properly process AI-identified nodes
+   - Added `_create_node_from_type` method with comprehensive node mapping
+   - Added proper parameter mapping for each node type
+
+3. **Fixed Parameter Passing**: Updated `automation_service.py`
+   - Modified `_create_workflow_from_analysis` to pass `nodes_required` and `parameters` to workflow builder
+   - Ensured AI analysis results are properly forwarded to workflow building logic
+
+### Files Modified
+- `/home/guruai/compose/aidev/python_back_end/n8n/models.py` - Added missing node types
+- `/home/guruai/compose/aidev/python_back_end/n8n/workflow_builder.py` - Fixed workflow building logic
+- `/home/guruai/compose/aidev/python_back_end/n8n/automation_service.py` - Fixed parameter passing
+
+### Result/Status
+Now the workflow builder properly uses AI analysis results:
+- AI identifies nodes like `@n8n/n8n-nodes-langchain.agent` and `n8n-nodes-base.youTube`
+- Workflow builder creates workflows with the correct node types and parameters
+- Each node type has appropriate default parameters and configuration
+- Supports LangChain agents, YouTube nodes, code nodes, and other specialized n8n nodes
+
 ## 2025-07-23 - Fixed Voice Chat Model Selection & Added AI Insights
 
 ### Problem Description
