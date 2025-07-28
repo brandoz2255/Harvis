@@ -435,15 +435,63 @@ class VectorDatabaseService:
         Returns:
             List of n8n workflow documents
         """
-        # Add n8n-specific filter
-        filter_dict = {"source_repo": "n8n_workflows"}
+        # Try multiple search strategies to find the best matches
+        all_results = []
         
-        return await self.search_similar_workflows(
+        # Strategy 1: Direct search with n8n prefix
+        results1 = await self.search_similar_workflows(
             query=f"n8n {query}",
             k=k,
-            filter_dict=filter_dict,
             include_scores=True
         )
+        all_results.extend(results1)
+        
+        # Strategy 2: Search with automation/workflow keywords
+        results2 = await self.search_similar_workflows(
+            query=f"workflow automation {query}",
+            k=k//2 if k > 2 else k,
+            include_scores=True
+        )
+        all_results.extend(results2)
+        
+        # Strategy 3: Search for specific keywords from the query
+        keywords = query.lower().split()
+        important_keywords = [word for word in keywords if len(word) > 3 and word not in {"the", "and", "for", "with", "that", "this", "from", "into", "will", "can"}]
+        
+        if important_keywords:
+            keyword_query = " ".join(important_keywords[:3])  # Use top 3 keywords
+            results3 = await self.search_similar_workflows(
+                query=keyword_query,
+                k=k//2 if k > 2 else k,
+                include_scores=True
+            )
+            all_results.extend(results3)
+        
+        # Remove duplicates and keep the best scores
+        seen_workflows = {}
+        unique_results = []
+        
+        for result in all_results:
+            workflow_id = result.get("metadata", {}).get("workflow_id", "")
+            content_hash = hash(result.get("content", ""))
+            identifier = workflow_id or content_hash
+            
+            if identifier not in seen_workflows:
+                seen_workflows[identifier] = result
+                unique_results.append(result)
+            elif result.get("similarity_score", 0) > seen_workflows[identifier].get("similarity_score", 0):
+                # Replace with higher scoring result
+                seen_workflows[identifier] = result
+                # Update in unique_results
+                for i, ur in enumerate(unique_results):
+                    ur_id = ur.get("metadata", {}).get("workflow_id", "") or hash(ur.get("content", ""))
+                    if ur_id == identifier:
+                        unique_results[i] = result
+                        break
+        
+        # Sort by similarity score and return top k
+        unique_results.sort(key=lambda x: x.get("similarity_score", 0), reverse=True)
+        return unique_results[:k]
     
     async def get_workflow_suggestions(
         self, 
@@ -463,11 +511,27 @@ class VectorDatabaseService:
         await self.initialize()
         
         try:
-            # Search for similar workflows
+            # Search for similar workflows with expanded search
+            # First try specific n8n workflow search
             similar_workflows = await self.search_n8n_workflows(
                 query=user_request,
                 k=context_limit
             )
+            
+            # If we don't get enough results, do a broader search 
+            if len(similar_workflows) < context_limit:
+                additional_results = await self.search_similar_workflows(
+                    query=user_request,
+                    k=context_limit * 2,  # Search for more to get better variety
+                    include_scores=True
+                )
+                
+                # Merge results, avoiding duplicates
+                existing_ids = {w.get("metadata", {}).get("workflow_id", "") for w in similar_workflows}
+                for result in additional_results:
+                    result_id = result.get("metadata", {}).get("workflow_id", "")
+                    if result_id not in existing_ids and len(similar_workflows) < context_limit:
+                        similar_workflows.append(result)
             
             # Format suggestions
             suggestions = {

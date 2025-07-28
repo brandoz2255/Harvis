@@ -120,9 +120,22 @@ class N8nAutomationService:
             
             logger.info(f"Successfully created workflow {workflow_id} in {execution_time:.2f}s")
             
+            # Get the full n8n workflow JSON from the created workflow
+            full_workflow = n8n_workflow.copy()
+            
+            # Add our metadata to the full workflow
+            full_workflow.update({
+                "description": analysis.get("description", ""),
+                "template_used": analysis.get("template_id"),
+                "url": f"{self.n8n_client.base_url}/workflow/{workflow_id}",
+                "execution_time": execution_time,
+                "ai_generated": True
+            })
+            
             return {
                 "success": True,
-                "workflow": {
+                "workflow": full_workflow,
+                "metadata": {
                     "id": workflow_id,
                     "name": workflow_config.name,
                     "description": analysis.get("description", ""),
@@ -280,13 +293,16 @@ Determine what kind of n8n workflow this needs and provide detailed analysis."""
         # Safely extract nested values with proper null checking
         schedule = analysis.get("schedule") or {}
         parameters = analysis.get("parameters") or {}
+        nodes_required = analysis.get("nodes_required", [])
         
         requirements = {
             "trigger": analysis.get("workflow_type", "manual"),
             "actions": self._extract_actions_from_analysis(analysis),
             "schedule_interval": schedule.get("interval", "daily"),
             "webhook_path": parameters.get("webhook_path", "/webhook"),
-            "keywords": self._extract_keywords_from_prompt(original_prompt)
+            "keywords": self._extract_keywords_from_prompt(original_prompt),
+            "nodes_required": nodes_required,  # Pass AI-identified nodes
+            "parameters": parameters  # Pass all AI analysis parameters
         }
         
         return self.workflow_builder.build_ai_workflow(
@@ -395,9 +411,21 @@ Determine what kind of n8n workflow this needs and provide detailed analysis."""
                 )
                 await self.storage.save_workflow(workflow_record)
             
+            # Get the full n8n workflow JSON from the created workflow
+            full_workflow = n8n_workflow.copy()
+            
+            # Add our metadata to the full workflow
+            full_workflow.update({
+                "description": request.description or "",
+                "template_used": request.template_id,
+                "url": f"{self.n8n_client.base_url}/workflow/{workflow_id}",
+                "ai_generated": False
+            })
+            
             return {
                 "success": True,
-                "workflow": {
+                "workflow": full_workflow,
+                "metadata": {
                     "id": workflow_id,
                     "name": workflow_config.name,
                     "active": request.activate,

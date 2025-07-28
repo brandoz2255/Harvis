@@ -102,15 +102,21 @@ class WorkflowBuilder:
         workflow_nodes = []
         node_positions = self._calculate_positions(len(nodes))
         
+        logger.info(f"Building simple workflow with {len(nodes)} nodes")
         for i, node_def in enumerate(nodes):
+            node_name = node_def.get("name", f"Node_{i+1}")
+            node_type = node_def.get("type", NodeType.HTTP_REQUEST)
+            logger.info(f"Creating WorkflowNode {i+1}: {node_name} (type: {node_type})")
+            
             node = WorkflowNode(
-                name=node_def.get("name", f"Node_{i+1}"),
-                type=node_def.get("type", NodeType.HTTP_REQUEST),
+                name=node_name,
+                type=node_type,
                 parameters=node_def.get("parameters", {}),
                 position=node_positions[i],
-                credentials=node_def.get("credentials")
+                credentials=node_def.get("credentials") or {}
             )
             workflow_nodes.append(node)
+            logger.info(f"Added WorkflowNode: {node.name} with type {node.type}")
         
         config = WorkflowConfig(name=name, nodes=workflow_nodes)
         
@@ -179,6 +185,17 @@ class WorkflowBuilder:
         """Build custom workflow from requirements"""
         nodes = []
         
+        # Check if nodes_required is specified in requirements (from AI analysis)
+        nodes_required = requirements.get("nodes_required", [])
+        parameters = requirements.get("parameters", {})
+        
+        if nodes_required:
+            logger.info(f"Building workflow with AI-specified nodes: {nodes_required}")
+            return self._build_workflow_from_ai_nodes(name, description, nodes_required, parameters, requirements)
+        
+        # Fallback to legacy action-based workflow building
+        logger.info("No AI nodes specified, falling back to action-based workflow")
+        
         # Always start with a trigger
         trigger_type = requirements.get("trigger", "manual")
         if trigger_type == "schedule":
@@ -233,6 +250,185 @@ class WorkflowBuilder:
                 })
         
         return self.build_simple_workflow(name, nodes)
+    
+    def _build_workflow_from_ai_nodes(self, name: str, description: str, 
+                                    nodes_required: List[str], parameters: Dict[str, Any],
+                                    requirements: Dict[str, Any]) -> WorkflowConfig:
+        """Build workflow from AI-identified node types"""
+        logger.info(f"Building workflow from AI nodes: {nodes_required}")
+        logger.info(f"Parameters: {parameters}")
+        logger.info(f"Requirements: {requirements}")
+        
+        nodes = []
+        
+        # Determine trigger node from requirements
+        trigger_type = requirements.get("trigger", "manual")
+        has_trigger = any(self._is_trigger_node(node_type) for node_type in nodes_required)
+        
+        logger.info(f"Trigger type: {trigger_type}, has_trigger: {has_trigger}")
+        
+        if not has_trigger:
+            # Add appropriate trigger if none specified
+            if trigger_type == "schedule":
+                nodes.append({
+                    "name": "Schedule Trigger",
+                    "type": NodeType.SCHEDULE_TRIGGER,
+                    "parameters": {
+                        "rule": {
+                            "interval": requirements.get("schedule_interval", "daily")
+                        }
+                    }
+                })
+            elif trigger_type == "webhook":
+                nodes.append({
+                    "name": "Webhook",
+                    "type": NodeType.WEBHOOK,
+                    "parameters": {
+                        "httpMethod": "POST",
+                        "path": requirements.get("webhook_path", "/webhook")
+                    }
+                })
+            else:
+                nodes.append({
+                    "name": "Manual Trigger",
+                    "type": NodeType.MANUAL_TRIGGER,
+                    "parameters": {}
+                })
+        
+        # Process each AI-identified node
+        logger.info(f"Processing {len(nodes_required)} AI-identified nodes")
+        for i, node_type in enumerate(nodes_required):
+            logger.info(f"Processing node {i+1}/{len(nodes_required)}: {node_type}")
+            node_config = self._create_node_from_type(node_type, parameters, i, description)
+            if node_config:
+                nodes.append(node_config)
+                logger.info(f"Added node: {node_config['name']} (type: {node_config['type']})")
+            else:
+                logger.warning(f"Failed to create node config for: {node_type}")
+        
+        logger.info(f"Total nodes to build into workflow: {len(nodes)}")
+        for i, node in enumerate(nodes):
+            logger.info(f"Node {i+1}: {node['name']} ({node['type']})")
+        
+        return self.build_simple_workflow(name, nodes)
+    
+    def _is_trigger_node(self, node_type: str) -> bool:
+        """Check if node type is a trigger node"""
+        trigger_keywords = ["trigger", "webhook", "schedule", "manual"]
+        return any(keyword in node_type.lower() for keyword in trigger_keywords)
+    
+    def _create_node_from_type(self, node_type: str, parameters: Dict[str, Any], 
+                              node_index: int, description: str = "") -> Optional[Dict[str, Any]]:
+        """Create node configuration from n8n node type"""
+        
+        logger.info(f"Creating node for type: {node_type} with parameters: {list(parameters.keys())}")
+        
+        # Map specific node types to configurations
+        node_mapping = {
+            # LangChain nodes
+            "@n8n/n8n-nodes-langchain.agent": {
+                "name": "LangChain Agent",
+                "type": "@n8n/n8n-nodes-langchain.agent",
+                "parameters": {
+                    "sessionId": parameters.get("session_id", "default"),
+                    "model": parameters.get("model", "gpt-3.5-turbo"),
+                    "prompt": parameters.get("prompt", "You are a helpful assistant")
+                }
+            },
+            "@n8n/n8n-nodes-langchain.openAi": {
+                "name": "OpenAI LLM",
+                "type": "@n8n/n8n-nodes-langchain.openAi",
+                "parameters": {
+                    "model": parameters.get("model", "gpt-3.5-turbo"),
+                    "temperature": parameters.get("temperature", 0.7),
+                    "maxTokens": parameters.get("max_tokens", 1000)
+                }
+            },
+            "@n8n/n8n-nodes-langchain.lmOllama": {
+                "name": "Ollama LLM",
+                "type": "@n8n/n8n-nodes-langchain.lmOllama",
+                "parameters": {
+                    "model": parameters.get("model", "mistral"),
+                    "baseURL": parameters.get("base_url", "http://ollama:11434"),
+                    "temperature": parameters.get("temperature", 0.7)
+                }
+            },
+            
+            # Base nodes
+            "n8n-nodes-base.youTube": {
+                "name": "YouTube",
+                "type": "n8n-nodes-base.youTube",
+                "parameters": {
+                    "operation": parameters.get("youtube_operation", "search"),
+                    "query": parameters.get("query", ""),
+                    "maxResults": parameters.get("max_results", 10)
+                }
+            },
+            "n8n-nodes-base.code": {
+                "name": "Code",
+                "type": "n8n-nodes-base.code",
+                "parameters": {
+                    "jsCode": parameters.get("code", "// Add your custom code here\\nreturn items;")
+                }
+            },
+            "n8n-nodes-base.httpRequest": {
+                "name": "HTTP Request",
+                "type": "n8n-nodes-base.httpRequest",
+                "parameters": {
+                    "url": parameters.get("url", ""),
+                    "requestMethod": parameters.get("method", "GET"),
+                    "headers": parameters.get("headers", {}),
+                    "body": parameters.get("body", {})
+                }
+            },
+            "n8n-nodes-base.stickyNote": {
+                "name": "Sticky Note",
+                "type": "n8n-nodes-base.stickyNote",
+                "parameters": {
+                    "content": parameters.get("note", description if description else "Workflow note")
+                }
+            },
+            "n8n-nodes-base.emailSend": {
+                "name": "Send Email",
+                "type": "n8n-nodes-base.emailSend",
+                "parameters": {
+                    "to": parameters.get("to", ""),
+                    "subject": parameters.get("subject", ""),
+                    "text": parameters.get("email_body", "")
+                }
+            },
+            "n8n-nodes-base.slack": {
+                "name": "Slack",
+                "type": "n8n-nodes-base.slack",
+                "parameters": {
+                    "channel": parameters.get("channel", ""),
+                    "text": parameters.get("message", "")
+                }
+            }
+        }
+        
+        # Get base configuration
+        base_config = node_mapping.get(node_type)
+        if not base_config:
+            # Create generic node for unknown types
+            logger.warning(f"Unknown node type: {node_type}, creating generic node")
+            base_config = {
+                "name": f"Node {node_index + 1}",
+                "type": node_type,
+                "parameters": {}
+            }
+        else:
+            logger.info(f"Found mapping for node type: {node_type} -> {base_config['name']}")
+        
+        # Create a copy and customize
+        node_config = base_config.copy()
+        
+        # Add unique suffix if multiple nodes of same type
+        if node_index > 0:
+            node_config["name"] = f"{base_config['name']} {node_index + 1}"
+        
+        logger.info(f"Created node config: {node_config['name']} ({node_config['type']})")
+        return node_config
     
     def _calculate_positions(self, node_count: int) -> List[List[int]]:
         """Calculate node positions for workflow layout"""
