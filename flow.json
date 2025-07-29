@@ -1,0 +1,70 @@
+{
+  "nodes": [
+    {
+      "id": "1",
+      "type": "google_oauth2",
+      "name": "YouTube OAuth2",
+      "description": "",
+      "position": { "x": -450, "y": 0 }
+    },
+    {
+      "id": "2",
+      "type": "youtube.uploadVideo",
+      "name": "Upload Video to YouTube",
+      "description": "",
+      "position": { "x": 100, "y": 0 },
+      "configuration": {
+        "part": "snippet,status",
+        "body": {
+          "snippet": {
+            "title": "Test Video Upload",
+            "description": "This is a test video uploaded using n8n.",
+            "tags": ["test", "upload"],
+            "categoryId": "27" // Replace with your YouTube category ID
+          },
+          "status": {
+            "privacyStatus": "private" // Options: public, private, unlisted
+          }
+        }
+      },
+      "outputs": 1,
+      "credentials": {
+        "api_key": "your_api_key",
+        "oauth_token": "your_oauth_token"
+      }
+    },
+    {
+      "id": "3",
+      "type": "youtube.insert_playlist_item",
+      "name": "Add to Playlist",
+      "description": "",
+      "position": { "x": 500, "y": 0 },
+      "configuration": {
+        "part": "snippet,status",
+        "body": {
+          "snippet": {
+            "playlistId": "PLxxxxxxxxxxxxxxx", // Replace with your playlist ID
+            "position": 0 // Position in the playlist (optional)
+          }
+        }
+      },
+      "outputs": 1,
+      "credentials": {
+        "api_key": "your_api_key",
+        "oauth_token": "your_oauth_token"
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": "1",
+      "to": "2",
+      "type": "success"
+    },
+    {
+      "from": "2",
+      "to": "3",
+      "type": "success"
+    }
+  ]
+}
