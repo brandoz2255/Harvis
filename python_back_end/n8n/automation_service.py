@@ -222,7 +222,7 @@ Examples:
 MANDATORY - Return this exact JSON structure:
 {{
   "feasible": true,
-  "workflow_type": "direct_json",
+  "workflow_type": "custom_with_structure",
   "complete_workflow": {{
     "name": "Descriptive Name Based on User Request",
     "nodes": [
@@ -348,27 +348,42 @@ Determine what kind of n8n workflow this needs and provide detailed analysis."""
                 complete_workflow["description"] = analysis.get("description", "AI-generated from vector examples")
                 
                 # Return the complete workflow directly without using WorkflowConfig models
-                return type('DirectWorkflow', (), {
-                    'dict': lambda: complete_workflow,
-                    'name': complete_workflow.get("name"),
-                    'description': complete_workflow.get("description")
-                })()
+                class DirectWorkflow:
+                    def __init__(self, workflow_data):
+                        self.workflow_data = workflow_data
+                        self.name = workflow_data.get("name")
+                        self.description = workflow_data.get("description")
+                    
+                    def dict(self):
+                        return self.workflow_data
+                
+                return DirectWorkflow(complete_workflow)
             else:
                 logger.warning("⚠️ Direct JSON type but no complete_workflow provided, falling back")
                 return self._build_custom_workflow_from_vector_analysis(analysis, workflow_name)
         elif workflow_type == "custom_with_structure":
             logger.info("Building workflow from AI-provided complete structure")
-            # Check if AI provided a complete workflow structure
-            full_workflow = analysis.get("full_workflow")
+            # Check for both field names (complete_workflow and full_workflow)
+            full_workflow = analysis.get("complete_workflow") or analysis.get("full_workflow")
             if full_workflow:
-                logger.info("Using AI-generated complete workflow structure")
+                logger.info("✅ Using AI-generated complete workflow structure")
                 # Add necessary metadata
                 full_workflow["name"] = workflow_name
                 full_workflow["description"] = analysis.get("description", "AI-generated from vector examples")
-                from .models import WorkflowConfig
-                return WorkflowConfig(**full_workflow)
+                
+                # Return the complete workflow directly without using WorkflowConfig models
+                class DirectWorkflow:
+                    def __init__(self, workflow_data):
+                        self.workflow_data = workflow_data
+                        self.name = workflow_data.get("name")
+                        self.description = workflow_data.get("description")
+                    
+                    def dict(self):
+                        return self.workflow_data
+                
+                return DirectWorkflow(full_workflow)
             else:
-                logger.warning("custom_with_structure specified but no full_workflow provided, falling back to node-based building")
+                logger.warning("custom_with_structure specified but no complete_workflow provided, falling back to node-based building")
                 return self._build_custom_workflow_from_vector_analysis(analysis, workflow_name)
         elif workflow_type == "custom":
             logger.info("Building workflow directly from vector store examples")
