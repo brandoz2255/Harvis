@@ -56,10 +56,10 @@ class N8nAIAgent:
         try:
             logger.info(f"🤖 Processing automation request with AI context: {request.prompt[:100]}...")
             
-            # Step 1: Search for similar workflows in vector database with optimal examples
+            # Step 1: Search for similar workflows in vector database with minimal examples
             context_data = await self.vector_db.get_workflow_suggestions(
                 user_request=request.prompt,
-                context_limit=25  # Optimized for stability and context size
+                context_limit=10  # Reduced to prevent model crashes
             )
             
             # Step 2: Enhance the original prompt with context
@@ -128,7 +128,7 @@ class N8nAIAgent:
             "Similar Workflow Examples for Reference:",
         ]
         
-        for i, workflow in enumerate(similar_workflows[:15], 1):  # Show more examples (15 instead of 5)
+        for i, workflow in enumerate(similar_workflows[:5], 1):  # Show fewer examples to prevent crashes
             metadata = workflow.get("metadata", {})
             content = workflow.get("content", "")
             score = workflow.get("similarity_score", 0)
@@ -138,35 +138,20 @@ class N8nAIAgent:
             
             enhanced_parts.extend([
                 f"{i}. {workflow_name} (similarity: {score:.3f})",
-                f"   Nodes used: {', '.join(node_types[:5]) if node_types else 'N/A'}",
-                f"   Full content: {content[:500]}...",  # Show more content (500 chars instead of 150)
+                f"   Nodes used: {', '.join(node_types[:3]) if node_types else 'N/A'}",
+                f"   Content: {content[:200]}...",  # Reduced content to prevent prompt overflow
                 ""
             ])
         
         enhanced_parts.extend([
-            "🚨 CRITICAL INSTRUCTIONS - FOLLOW EXACTLY 🚨:",
-            "- NEVER use generic node names like 'Node 1', 'Node 2 2', 'Node 3 3'",
-            "- NEVER create basic workflows with just manualTrigger + writeBinaryFile + set + moveBinaryData",
-            "- ABSOLUTELY FORBIDDEN: Generic template patterns that don't match user request",
-            "- MANDATORY: Copy the exact JSON structure from most relevant example above",
-            "- REQUIRED: Use specific, descriptive node names from the examples",
-            "- REQUIRED: Use the exact node types and parameters from proven examples",
+            "INSTRUCTIONS:",
+            "- Copy the JSON structure from the most relevant example above",
+            "- Use specific node names from examples, not generic 'Node 1', 'Node 2'", 
+            "- Use the exact node types from proven examples",
+            "- Modify parameters to match user request",
             "",
-            "WORKFLOW CREATION PROCESS:",
-            "1. IDENTIFY the example with most similar functionality to user request",
-            "2. COPY that example's complete JSON structure exactly", 
-            "3. REPLACE generic IDs with new UUIDs but keep all other structure",
-            "4. MODIFY only node parameters to match user's specific needs",
-            "5. PRESERVE all connections, positions, and node configurations",
-            "",
-            "FORBIDDEN PATTERNS (DO NOT USE):",
-            "❌ 'Node 1', 'Node 2 2' - Use descriptive names from examples",
-            "❌ Empty parameters: {} - Copy full parameter blocks from examples", 
-            "❌ Generic workflows - Must match user's actual automation need",
-            "❌ Basic trigger+process+output - Use complex patterns from examples",
-            "",
-            f"USER REQUEST TO IMPLEMENT: {original_prompt}",
-            "Find the example above that best matches this request and copy its structure completely."
+            f"REQUEST: {original_prompt}",
+            "Copy the best matching example structure above."
         ])
         
         return "\n".join(enhanced_parts)
