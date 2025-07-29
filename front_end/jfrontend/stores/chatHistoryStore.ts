@@ -44,8 +44,12 @@ interface ChatHistoryState {
   // UI State
   isHistoryVisible: boolean
   
+  // Error State
+  error: string | null
+  
   // Actions
   fetchSessions: () => Promise<void>
+  createNewChat: () => Promise<ChatSession | null>
   createSession: (title?: string, modelUsed?: string) => Promise<ChatSession | null>
   selectSession: (sessionId: string) => Promise<void>
   deleteSession: (sessionId: string) => Promise<void>
@@ -53,9 +57,11 @@ interface ChatHistoryState {
   
   fetchSessionMessages: (sessionId: string) => Promise<void>
   clearMessages: () => void
+  clearCurrentChat: () => void
   
   toggleHistoryVisibility: () => void
   setCurrentSession: (session: ChatSession | null) => void
+  setError: (error: string | null) => void
 }
 
 const getAuthHeaders = (): Record<string, string> => {
@@ -71,6 +77,7 @@ export const useChatHistoryStore = create<ChatHistoryState>((set, get) => ({
   messages: [],
   isLoadingMessages: false,
   isHistoryVisible: false,
+  error: null,
   
   // Session actions
   fetchSessions: async () => {
@@ -96,6 +103,52 @@ export const useChatHistoryStore = create<ChatHistoryState>((set, get) => ({
     }
   },
   
+  createNewChat: async () => {
+    try {
+      set({ error: null, isLoadingSessions: true })
+      
+      const response = await fetch('/api/chat-history/sessions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeaders(),
+        },
+        body: JSON.stringify({
+          title: 'New Chat',
+        }),
+      })
+      
+      if (response.ok) {
+        const newSession = await response.json()
+        set(state => ({
+          sessions: [newSession, ...state.sessions],
+          currentSession: newSession,
+          messages: [], // Clear messages for new chat
+          isLoadingSessions: false,
+          error: null,
+        }))
+        
+        console.log(`🆕 Created new chat session: ${newSession.id}`)
+        return newSession
+      } else {
+        const errorText = await response.text()
+        set({ 
+          error: 'Could not start new chat', 
+          isLoadingSessions: false 
+        })
+        console.error('Failed to create new chat:', errorText)
+        return null
+      }
+    } catch (error) {
+      set({ 
+        error: 'Could not start new chat', 
+        isLoadingSessions: false 
+      })
+      console.error('Error creating new chat:', error)
+      return null
+    }
+  },
+
   createSession: async (title = 'New Chat', modelUsed) => {
     try {
       const response = await fetch('/api/chat-history/sessions', {
@@ -133,10 +186,24 @@ export const useChatHistoryStore = create<ChatHistoryState>((set, get) => ({
     
     // Prevent reselecting the same session
     if (session && session.id !== currentSession?.id) {
-      set({ currentSession: session })
-      // Only fetch messages if we're not already loading them
-      if (!get().isLoadingMessages) {
+      try {
+        set({ 
+          currentSession: session, 
+          error: null,
+          messages: [] // Clear messages immediately when switching
+        })
+        
+        console.log(`🔄 Switching to chat session: ${sessionId}`)
+        
+        // Fetch messages for this session
         await get().fetchSessionMessages(sessionId)
+        
+      } catch (error) {
+        set({ 
+          error: 'Could not load chat history',
+          messages: [] 
+        })
+        console.error('Error selecting session:', error)
       }
     }
   },
@@ -202,7 +269,7 @@ export const useChatHistoryStore = create<ChatHistoryState>((set, get) => ({
       return
     }
     
-    set({ isLoadingMessages: true })
+    set({ isLoadingMessages: true, error: null })
     try {
       const authHeaders = getAuthHeaders()
       const response = await fetch(`/api/chat-history/sessions/${sessionId}`, {
@@ -214,28 +281,48 @@ export const useChatHistoryStore = create<ChatHistoryState>((set, get) => ({
       
       if (response.ok) {
         const data: MessageHistoryResponse = await response.json()
-        set({ 
-          messages: data.messages || [],
-          isLoadingMessages: false,
-        })
         
-        // Log for debugging
-        console.log(`📨 Fetched ${data.messages?.length || 0} messages for session ${sessionId}`)
+        // Only update messages if this is still the current session
+        const state = get()
+        if (state.currentSession?.id === sessionId) {
+          set({ 
+            messages: data.messages || [],
+            isLoadingMessages: false,
+            error: null,
+          })
+          
+          console.log(`📨 Loaded ${data.messages?.length || 0} messages for session ${sessionId}`)
+        }
       } else {
-        console.error('Failed to fetch messages:', response.statusText)
+        const errorText = await response.text()
         set({ 
+          error: 'Could not load chat history',
           messages: [],
           isLoadingMessages: false 
         })
+        console.error('Failed to fetch messages:', errorText)
       }
     } catch (error) {
+      set({ 
+        error: 'Could not load chat history',
+        messages: [],
+        isLoadingMessages: false 
+      })
       console.error('Error fetching messages:', error)
-      set({ isLoadingMessages: false })
     }
   },
   
   clearMessages: () => {
     set({ messages: [] })
+  },
+  
+  clearCurrentChat: () => {
+    set({ 
+      messages: [],
+      currentSession: null,
+      error: null,
+    })
+    console.log('🧹 Cleared current chat')
   },
   
   // UI actions
@@ -245,5 +332,9 @@ export const useChatHistoryStore = create<ChatHistoryState>((set, get) => ({
   
   setCurrentSession: (session: ChatSession | null) => {
     set({ currentSession: session })
+  },
+  
+  setError: (error: string | null) => {
+    set({ error })
   },
 }))
