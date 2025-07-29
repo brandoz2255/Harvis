@@ -217,18 +217,28 @@ Examples:
         # Check if this is an enhanced prompt with vector store context
         if "Similar Workflow Examples for Reference:" in prompt:
             # Enhanced prompt with vector store examples - use direct workflow creation
-            user_prompt = f"""You have been provided with similar workflow examples from a vector database.
+            user_prompt = f"""You are an expert n8n workflow builder. You have been provided with similar workflow examples from a vector database.
 
 CRITICAL INSTRUCTIONS - FOLLOW EXACTLY:
-1. DO NOT categorize as simple types like "webhook" or "schedule"
-2. USE the provided workflow examples to create the exact workflow structure
-3. Set workflow_type to "custom" to use vector examples instead of templates
-4. Extract specific nodes and configurations from the examples
-5. Return detailed workflow structure based on examples
+1. ANALYZE the provided workflow examples carefully
+2. EXTRACT the specific n8n node types from the examples (e.g., "@n8n/n8n-nodes-langchain.lmOllama", "n8n-nodes-base.youTube", "n8n-nodes-base.httpRequest")
+3. CREATE a complete workflow JSON structure based on the most relevant example
+4. SET workflow_type to "custom_with_structure" 
+5. INCLUDE a "full_workflow" field with the complete n8n workflow JSON
+6. USE specific node names, not generic ones like "Node 1", "Node 2"
+7. ADAPT parameters to match the user request while keeping the proven structure
+
+RETURN JSON with:
+- feasible: true
+- workflow_type: "custom_with_structure" 
+- description: clear description
+- nodes_required: array of specific n8n node types from examples
+- full_workflow: complete n8n workflow JSON structure
+- parameters: relevant parameters extracted from examples
 
 {prompt}
 
-Based on the examples above, create a comprehensive workflow. Use "custom" as workflow_type."""
+Build a complete workflow structure using the best matching example above."""
         else:
             # Original simple analysis
             user_prompt = f"""Analyze this automation request: "{prompt}"
@@ -247,6 +257,8 @@ Determine what kind of n8n workflow this needs and provide detailed analysis."""
         
         try:
             logger.info(f"Analyzing prompt with {model}")
+            logger.debug(f"Prompt length: {len(user_prompt)} characters")
+            
             # Add authentication headers for external Ollama server
             import os
             api_key = os.getenv("OLLAMA_API_KEY", "key")
@@ -255,11 +267,13 @@ Determine what kind of n8n workflow this needs and provide detailed analysis."""
                 f"{self.ollama_url}/api/chat",
                 json=payload,
                 headers=headers,
-                timeout=60
+                timeout=120  # Increased timeout for complex prompts
             )
             response.raise_for_status()
             
             ai_response = response.json().get("message", {}).get("content", "")
+            logger.debug(f"AI response: {ai_response[:200]}...")
+            
             analysis = json.loads(ai_response)
             
             logger.info(f"AI analysis complete: {analysis.get('workflow_type', 'unknown')} workflow")
@@ -267,6 +281,19 @@ Determine what kind of n8n workflow this needs and provide detailed analysis."""
             
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse AI response as JSON: {e}")
+            logger.error(f"Raw AI response: {ai_response}")
+            
+            # If this was an enhanced prompt, try fallback with simple prompt
+            if "Similar Workflow Examples for Reference:" in prompt:
+                logger.info("Enhanced prompt failed, trying fallback analysis")
+                # Extract just the original user request
+                original_request = prompt.split("USER REQUEST TO IMPLEMENT:")[-1].split("Copy the best matching example")[0].strip()
+                if not original_request:
+                    original_request = prompt.split("REQUEST:")[-1].split("Copy the best matching example")[0].strip()
+                
+                # Retry with simple analysis
+                return await self._analyze_user_prompt(original_request, model)
+            
             return {
                 "feasible": False,
                 "error": "Could not parse AI analysis",
@@ -274,6 +301,14 @@ Determine what kind of n8n workflow this needs and provide detailed analysis."""
             }
         except Exception as e:
             logger.error(f"AI analysis failed: {e}")
+            
+            # If this was an enhanced prompt, try fallback
+            if "Similar Workflow Examples for Reference:" in prompt:
+                logger.info("Enhanced prompt caused error, trying fallback analysis")
+                original_request = prompt.split("REQUEST:")[-1].split("Copy the best matching example")[0].strip()
+                if original_request:
+                    return await self._analyze_user_prompt(original_request, model)
+            
             return {
                 "feasible": False,
                 "error": f"AI analysis error: {str(e)}",
@@ -299,7 +334,21 @@ Determine what kind of n8n workflow this needs and provide detailed analysis."""
         
         # Check if this is a custom workflow with vector store examples
         workflow_type = analysis.get("workflow_type", "manual")
-        if workflow_type == "custom":
+        if workflow_type == "custom_with_structure":
+            logger.info("Building workflow from AI-provided complete structure")
+            # Check if AI provided a complete workflow structure
+            full_workflow = analysis.get("full_workflow")
+            if full_workflow:
+                logger.info("Using AI-generated complete workflow structure")
+                # Add necessary metadata
+                full_workflow["name"] = workflow_name
+                full_workflow["description"] = analysis.get("description", "AI-generated from vector examples")
+                from .models import WorkflowConfig
+                return WorkflowConfig(**full_workflow)
+            else:
+                logger.warning("custom_with_structure specified but no full_workflow provided, falling back to node-based building")
+                return self._build_custom_workflow_from_vector_analysis(analysis, workflow_name)
+        elif workflow_type == "custom":
             logger.info("Building workflow directly from vector store examples")
             # Check if AI provided a complete workflow structure
             full_workflow = analysis.get("full_workflow")
