@@ -1,5 +1,86 @@
 # Changes Log
 
+## 2025-07-29 - Fixed Critical n8n Connection Parsing Error
+
+### Problem Description
+The n8n automation service was failing to create workflows due to a critical error in the connection parsing logic:
+```
+ERROR:n8n.automation_service:Automation request failed: 'str' object has no attribute 'get'
+ERROR:n8n.automation_service:Full traceback: Traceback (most recent call last):
+  File "/app/n8n/automation_service.py", line 93, in process_automation_request
+    n8n_workflow = self.n8n_client.create_workflow(workflow_data)
+  File "/app/n8n/client.py", line 303, in create_workflow
+    sanitized_data = self._sanitize_workflow_payload(workflow_data)
+  File "/app/n8n/client.py", line 261, in _sanitize_workflow_payload
+    old_target = connection.get('node')
+AttributeError: 'str' object has no attribute 'get'
+```
+
+### Root Cause Analysis
+The error was in the `_sanitize_workflow_payload` method in `/app/n8n/client.py` at line 261. The issue was with the nested loop structure for processing workflow connections:
+
+1. **Incorrect Loop Structure**: The code assumed connection outputs contained nested lists of connections, but the actual structure was a flat list
+2. **Wrong Data Type Assumption**: The code tried to call `.get('node')` on string objects instead of dictionary objects
+3. **Mismatched Data Structure**: The expected structure was `outputs -> output_list -> connection` but the actual structure was `outputs -> connection`
+
+**Actual Connection Structure**:
+```python
+'connections': {
+    'manual-trigger': {
+        'main': [{'node': 'content-generator', 'type': 'main', 'index': 0}]  # Direct list of dicts
+    }, 
+    'content-generator': {
+        'main': [{'node': 'youtube-upload', 'type': 'main', 'index': 0}]
+    }
+}
+```
+
+**Problematic Code**:
+```python
+for output_list in outputs:           # outputs is already the list of connections
+    for connection in output_list:    # This iterates over dict keys, not dict objects
+        old_target = connection.get('node')  # connection is a string key, not a dict
+```
+
+### Solution Applied
+
+#### Fixed Connection Processing Logic (`python_back_end/n8n/client.py`):
+- **Removed Extra Loop**: Eliminated the unnecessary `for output_list in outputs:` loop
+- **Direct Connection Processing**: Process connections directly from the outputs list
+- **Added Type Safety**: Added `isinstance(connection, dict)` check to handle unexpected data types
+- **Improved Error Handling**: Added warning logging for unexpected connection types
+
+**Fixed Code**:
+```python
+for output_type, outputs in connections.items():
+    new_connections[new_source_id][output_type] = []
+    # outputs is directly a list of connection dictionaries
+    for connection in outputs:
+        # Update target node ID in connection
+        if isinstance(connection, dict):
+            old_target = connection.get('node')
+            if old_target in node_id_mapping:
+                connection['node'] = node_id_mapping[old_target]
+            new_connections[new_source_id][output_type].append(connection)
+        else:
+            logger.warning(f"Unexpected connection type: {type(connection)}, value: {connection}")
+            new_connections[new_source_id][output_type].append(connection)
+```
+
+### Files Modified
+- `/home/guruai/compose/aidev/python_back_end/n8n/client.py` - Fixed connection parsing logic in `_sanitize_workflow_payload` method
+
+### Result/Status
+- ✅ **FIXED**: Connection parsing now handles the correct data structure
+- ✅ **TESTED**: Verified with simple and complex workflow structures
+- ✅ **DEPLOYED**: Backend container restarted with the fix
+- ✅ **VERIFIED**: No more `'str' object has no attribute 'get'` errors in logs
+- ✅ **ROBUST**: Added type checking and error handling for edge cases
+
+The n8n automation service can now successfully create workflows without connection parsing errors. The fix maintains backward compatibility and adds robustness for future data structure variations.
+
+# Changes Log
+
 ## 2025-07-29 - Enhanced n8n Vector Store Integration for More Robust Automations (UPDATED)
 
 ### Problem Description
