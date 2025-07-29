@@ -281,7 +281,7 @@ logger.info("Using device: %s", "cuda" if device == 0 else "cpu")
 
 
 # ─── Config --------------------------------------------------------------------
-OLLAMA_URL = "https://coyotedev.ngrok.app/ollama"
+OLLAMA_URL = "https://coyotegpt.ngrok.app/ollama"
 API_KEY = os.getenv("OLLAMA_API_KEY", "key")
 DEFAULT_MODEL = "llama3.2:3b"
 
