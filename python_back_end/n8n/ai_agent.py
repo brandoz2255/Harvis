@@ -56,10 +56,10 @@ class N8nAIAgent:
         try:
             logger.info(f"🤖 Processing automation request with AI context: {request.prompt[:100]}...")
             
-            # Step 1: Search for similar workflows in vector database
+            # Step 1: Search for similar workflows in vector database with more examples
             context_data = await self.vector_db.get_workflow_suggestions(
                 user_request=request.prompt,
-                context_limit=10
+                context_limit=50  # Increased from 10 to 50 for more robust examples
             )
             
             # Step 2: Enhance the original prompt with context
@@ -128,7 +128,7 @@ class N8nAIAgent:
             "Similar Workflow Examples for Reference:",
         ]
         
-        for i, workflow in enumerate(similar_workflows[:5], 1):
+        for i, workflow in enumerate(similar_workflows[:15], 1):  # Show more examples (15 instead of 5)
             metadata = workflow.get("metadata", {})
             content = workflow.get("content", "")
             score = workflow.get("similarity_score", 0)
@@ -139,16 +139,27 @@ class N8nAIAgent:
             enhanced_parts.extend([
                 f"{i}. {workflow_name} (similarity: {score:.3f})",
                 f"   Nodes used: {', '.join(node_types[:5]) if node_types else 'N/A'}",
-                f"   Description: {content[:150]}...",
+                f"   Full content: {content[:500]}...",  # Show more content (500 chars instead of 150)
                 ""
             ])
         
         enhanced_parts.extend([
-            "Instructions:",
-            "- Use the above examples as inspiration for creating the requested workflow",
-            "- Adapt the node types and patterns that are most relevant",
-            "- Create a new workflow that fulfills the user's specific requirements",
-            f"- Original request: {original_prompt}"
+            "CRITICAL INSTRUCTIONS - READ CAREFULLY:",
+            "- DO NOT create workflows from scratch or 'freestyle'",
+            "- COPY the JSON structure from the most relevant example above",
+            "- START with the closest matching example as your base template",
+            "- MODIFY only the necessary parts to fulfill the user's request",
+            "- PRESERVE the exact JSON structure, node connections, and parameters format",
+            "- Use proper node names, types, and parameter structures from the examples",
+            "- The examples above contain 18,000+ proven n8n workflows - USE THEM",
+            "- Copy-modify approach: Pick example → Copy structure → Adapt for user request",
+            f"- User's specific request to adapt the template for: {original_prompt}",
+            "",
+            "Template Selection Priority:",
+            "1. Find example with similar node types to what user needs",
+            "2. Copy that example's complete JSON structure", 
+            "3. Modify node parameters and connections as needed",
+            "4. Keep the same overall workflow pattern and structure"
         ])
         
         return "\n".join(enhanced_parts)
