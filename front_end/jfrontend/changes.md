@@ -1,6 +1,6 @@
 # Changes Log
 
-## 2025-07-29 - Enhanced n8n Vector Store Integration for More Robust Automations
+## 2025-07-29 - Enhanced n8n Vector Store Integration for More Robust Automations (UPDATED)
 
 ### Problem Description
 The n8n automation system was not leveraging the full potential of the vector database:
@@ -19,8 +19,8 @@ The n8n automation system was not leveraging the full potential of the vector da
 
 ### Solution Applied
 
-#### 1. **Expanded Context Retrieval** (`n8n/ai_agent.py`):
-- Increased `context_limit` from 10 to 50 workflow examples
+#### 1. **Optimized Context Retrieval** (`n8n/ai_agent.py`):
+- Increased `context_limit` from 10 to 25 workflow examples (optimized for stability)
 - Enhanced prompt to show 15 examples instead of 5
 - Extended content display from 150 to 500 characters per example
 - Added comprehensive template copying instructions
@@ -42,17 +42,20 @@ The n8n automation system was not leveraging the full potential of the vector da
 - **Generic Fallback**: Generic n8n searches to fill remaining context slots
 - **Enhanced Logging**: Detailed logging shows search progression and result counts
 
-#### 4. **Template-Based AI Instructions** (`n8n/ai_agent.py`):
+#### 4. **Strengthened Anti-Generic Instructions** (`n8n/ai_agent.py`):
 ```
-CRITICAL INSTRUCTIONS - READ CAREFULLY:
-- DO NOT create workflows from scratch or 'freestyle'
-- COPY the JSON structure from the most relevant example above
-- START with the closest matching example as your base template
-- MODIFY only the necessary parts to fulfill the user's request
-- PRESERVE the exact JSON structure, node connections, and parameters format
-- Use proper node names, types, and parameter structures from the examples
-- The examples above contain 18,000+ proven n8n workflows - USE THEM
-- Copy-modify approach: Pick example → Copy structure → Adapt for user request
+🚨 CRITICAL INSTRUCTIONS - FOLLOW EXACTLY 🚨:
+- NEVER use generic node names like 'Node 1', 'Node 2 2', 'Node 3 3'
+- NEVER create basic workflows with just manualTrigger + writeBinaryFile + set + moveBinaryData
+- ABSOLUTELY FORBIDDEN: Generic template patterns that don't match user request
+- MANDATORY: Copy the exact JSON structure from most relevant example above
+- REQUIRED: Use specific, descriptive node names from the examples
+
+FORBIDDEN PATTERNS (DO NOT USE):
+❌ 'Node 1', 'Node 2 2' - Use descriptive names from examples
+❌ Empty parameters: {} - Copy full parameter blocks from examples
+❌ Generic workflows - Must match user's actual automation need
+❌ Basic trigger+process+output - Use complex patterns from examples
 ```
 
 ### Files Modified
@@ -60,11 +63,25 @@ CRITICAL INSTRUCTIONS - READ CAREFULLY:
 - `/home/guruai/compose/aidev/python_back_end/n8n/vector_db.py`: Multi-strategy search with diversity algorithm
 
 ### Expected Results
-- **50x More Context**: AI now receives up to 50 relevant workflow examples instead of 10
+- **2.5x More Context**: AI now receives up to 25 relevant workflow examples instead of 10 (optimized for stability)
 - **Diverse Examples**: Multiple search strategies ensure varied node type combinations  
 - **Template Copying**: AI instructed to copy-modify existing workflows instead of creating from scratch
 - **Better Workflows**: Should produce workflows with proper node names, types, and parameter structures
 - **Leveraged Knowledge**: Full utilization of 18,000+ workflow examples in vector database
+
+### CRITICAL FIX - Template Bypass Issue Resolved
+**Problem**: Even with enhanced vector context, automation service was ignoring examples and falling back to basic templates like `webhook_receiver`.
+
+**Root Cause**: The automation service's `_analyze_user_prompt()` was doing simple categorization (webhook/schedule) and the enhanced vector context was being ignored.
+
+**Solution Applied**:
+1. **Enhanced Context Detection**: Modified automation service to detect vector store enhanced prompts
+2. **Custom Workflow Type**: When vector examples present, AI analysis returns `workflow_type: "custom"` 
+3. **Template System Bypass**: Custom workflows skip template selection entirely
+4. **Direct Vector Processing**: New `_build_custom_workflow_from_vector_analysis()` method processes vector examples directly
+
+### Files Modified (Additional)
+- `/home/guruai/compose/aidev/python_back_end/n8n/automation_service.py`: Fixed template bypass issue
 
 ### Testing Instructions
 1. Create n8n automation request (e.g., "Create YouTube automation workflow")

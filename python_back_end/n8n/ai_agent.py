@@ -56,10 +56,10 @@ class N8nAIAgent:
         try:
             logger.info(f"🤖 Processing automation request with AI context: {request.prompt[:100]}...")
             
-            # Step 1: Search for similar workflows in vector database with more examples
+            # Step 1: Search for similar workflows in vector database with optimal examples
             context_data = await self.vector_db.get_workflow_suggestions(
                 user_request=request.prompt,
-                context_limit=50  # Increased from 10 to 50 for more robust examples
+                context_limit=25  # Optimized for stability and context size
             )
             
             # Step 2: Enhance the original prompt with context
@@ -144,22 +144,29 @@ class N8nAIAgent:
             ])
         
         enhanced_parts.extend([
-            "CRITICAL INSTRUCTIONS - READ CAREFULLY:",
-            "- DO NOT create workflows from scratch or 'freestyle'",
-            "- COPY the JSON structure from the most relevant example above",
-            "- START with the closest matching example as your base template",
-            "- MODIFY only the necessary parts to fulfill the user's request",
-            "- PRESERVE the exact JSON structure, node connections, and parameters format",
-            "- Use proper node names, types, and parameter structures from the examples",
-            "- The examples above contain 18,000+ proven n8n workflows - USE THEM",
-            "- Copy-modify approach: Pick example → Copy structure → Adapt for user request",
-            f"- User's specific request to adapt the template for: {original_prompt}",
+            "🚨 CRITICAL INSTRUCTIONS - FOLLOW EXACTLY 🚨:",
+            "- NEVER use generic node names like 'Node 1', 'Node 2 2', 'Node 3 3'",
+            "- NEVER create basic workflows with just manualTrigger + writeBinaryFile + set + moveBinaryData",
+            "- ABSOLUTELY FORBIDDEN: Generic template patterns that don't match user request",
+            "- MANDATORY: Copy the exact JSON structure from most relevant example above",
+            "- REQUIRED: Use specific, descriptive node names from the examples",
+            "- REQUIRED: Use the exact node types and parameters from proven examples",
             "",
-            "Template Selection Priority:",
-            "1. Find example with similar node types to what user needs",
-            "2. Copy that example's complete JSON structure", 
-            "3. Modify node parameters and connections as needed",
-            "4. Keep the same overall workflow pattern and structure"
+            "WORKFLOW CREATION PROCESS:",
+            "1. IDENTIFY the example with most similar functionality to user request",
+            "2. COPY that example's complete JSON structure exactly", 
+            "3. REPLACE generic IDs with new UUIDs but keep all other structure",
+            "4. MODIFY only node parameters to match user's specific needs",
+            "5. PRESERVE all connections, positions, and node configurations",
+            "",
+            "FORBIDDEN PATTERNS (DO NOT USE):",
+            "❌ 'Node 1', 'Node 2 2' - Use descriptive names from examples",
+            "❌ Empty parameters: {} - Copy full parameter blocks from examples", 
+            "❌ Generic workflows - Must match user's actual automation need",
+            "❌ Basic trigger+process+output - Use complex patterns from examples",
+            "",
+            f"USER REQUEST TO IMPLEMENT: {original_prompt}",
+            "Find the example above that best matches this request and copy its structure completely."
         ])
         
         return "\n".join(enhanced_parts)
