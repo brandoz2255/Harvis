@@ -144,14 +144,22 @@ class N8nAIAgent:
             ])
         
         enhanced_parts.extend([
-            "INSTRUCTIONS:",
-            "- Copy the JSON structure from the most relevant example above",
-            "- Use specific node names from examples, not generic 'Node 1', 'Node 2'", 
-            "- Use the exact node types from proven examples",
-            "- Modify parameters to match user request",
+            "CRITICAL WORKFLOW BUILDING INSTRUCTIONS:",
+            "1. Find the most relevant example above for the user request",
+            "2. Extract the complete workflow JSON structure from that example",
+            "3. Use the exact node types (e.g., '@n8n/n8n-nodes-langchain.lmOllama', 'n8n-nodes-base.youTube')",
+            "4. Use descriptive node names, never generic 'Node 1', 'Node 2', 'Node 3 3'",
+            "5. Set workflow_type to 'custom_with_structure'",
+            "6. Include the full workflow JSON in the 'full_workflow' field",
+            "7. Adapt parameters to match the user's specific requirements",
             "",
-            f"REQUEST: {original_prompt}",
-            "Copy the best matching example structure above."
+            f"USER REQUEST TO IMPLEMENT: {original_prompt}",
+            "",
+            "Based on the examples above, create a complete n8n workflow with:",
+            "- Specific descriptive node names (e.g., 'Ollama AI Generator', 'YouTube Upload', 'Content Processor')",
+            "- Exact node types from the examples above", 
+            "- Proper connections between nodes",
+            "- Parameters adapted for the user request"
         ])
         
         return "\n".join(enhanced_parts)
