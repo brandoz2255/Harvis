@@ -80,7 +80,17 @@ class N8nAutomationService:
             )
             
             # Step 3: Create workflow in n8n
-            n8n_workflow = self.n8n_client.create_workflow(workflow_config.dict())
+            logger.debug(f"Workflow config type: {type(workflow_config)}")
+            logger.debug(f"Workflow config dict method exists: {hasattr(workflow_config, 'dict')}")
+            
+            if hasattr(workflow_config, 'dict') and callable(getattr(workflow_config, 'dict')):
+                workflow_data = workflow_config.dict()
+            else:
+                # Fallback for DirectWorkflow objects
+                workflow_data = workflow_config.workflow_data if hasattr(workflow_config, 'workflow_data') else workflow_config
+            
+            logger.debug(f"Workflow data type: {type(workflow_data)}")
+            n8n_workflow = self.n8n_client.create_workflow(workflow_data)
             workflow_id = n8n_workflow.get("id")
             
             # Step 4: Activate workflow if requested
@@ -148,8 +158,10 @@ class N8nAutomationService:
             }
             
         except Exception as e:
+            import traceback
             execution_time = time.time() - start_time
             logger.error(f"Automation request failed: {e}")
+            logger.error(f"Full traceback: {traceback.format_exc()}")
             
             # Save failed attempt to history
             if user_id:
