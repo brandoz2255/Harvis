@@ -35,12 +35,12 @@ export default function ChatHistory({ onSessionSelect, currentSessionId }: ChatH
     isLoadingSessions,
     isLoadingMessages,
     isHistoryVisible,
+    error,
     fetchSessions,
-    createSession,
+    createNewChat,
     selectSession,
     deleteSession,
     updateSessionTitle,
-    fetchSessionMessages,
     toggleHistoryVisibility,
   } = useChatHistoryStore()
 
@@ -63,8 +63,8 @@ export default function ChatHistory({ onSessionSelect, currentSessionId }: ChatH
     session.title.toLowerCase().includes(searchTerm.toLowerCase())
   )
 
-  const handleCreateSession = async () => {
-    const session = await createSession()
+  const handleCreateNewChat = async () => {
+    const session = await createNewChat()
     if (session && onSessionSelect) {
       onSessionSelect(session.id)
     }
@@ -208,11 +208,12 @@ export default function ChatHistory({ onSessionSelect, currentSessionId }: ChatH
 
               {/* New Chat Button */}
               <Button
-                onClick={handleCreateSession}
+                onClick={handleCreateNewChat}
                 className="w-full bg-blue-600 hover:bg-blue-700 text-white"
+                disabled={isLoadingSessions}
               >
                 <Plus className="w-4 h-4 mr-2" />
-                New Chat
+                {isLoadingSessions ? 'Creating...' : 'New Chat'}
               </Button>
             </>
           )}
@@ -242,6 +243,15 @@ export default function ChatHistory({ onSessionSelect, currentSessionId }: ChatH
           )}
         </div>
 
+        {/* Error Display */}
+        {error && (
+          <div className="px-4 pb-2">
+            <div className="p-2 bg-red-900/20 border border-red-500/30 rounded text-red-400 text-sm">
+              {error}
+            </div>
+          </div>
+        )}
+        
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-4">
           {selectedView === 'sessions' && (

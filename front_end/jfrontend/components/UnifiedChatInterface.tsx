@@ -3,7 +3,7 @@
 
 import type React from "react"
 
-import { useState, useRef, useEffect, forwardRef, useImperativeHandle, useMemo, useCallback } from "react"
+import { useState, useRef, useEffect, forwardRef, useImperativeHandle, useCallback } from "react"
 import { motion, AnimatePresence } from "framer-motion"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
@@ -24,6 +24,7 @@ import {
   RefreshCw,
   Wifi,
   WifiOff,
+  Plus,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -45,12 +46,6 @@ interface Message {
   searchQuery?: string
 }
 
-interface ChatResponse {
-  history: Message[]
-  audio_path?: string
-  reasoning?: string  // Reasoning content from reasoning models
-  final_answer?: string  // Final answer without reasoning
-}
 
 interface SearchResult {
   title: string
@@ -73,19 +68,29 @@ export interface ChatHandle {
   addAIMessage: (content: string, source?: string) => void;
 }
 
-const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
-  const { orchestrator, hardware, isDetecting, models, ollamaModels, ollamaConnected, ollamaError, refreshOllamaModels } = useAIOrchestrator()
+const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
+  const { orchestrator, hardware, models, ollamaModels, ollamaConnected, ollamaError, refreshOllamaModels } = useAIOrchestrator()
   
   const { logUserInteraction, completeInsight, logReasoningProcess } = useAIInsights()
   
   // Chat history integration
-  const { currentSession, createSession, isHistoryVisible } = useChatHistoryStore()
+  const { 
+    currentSession, 
+    messages: storeMessages, 
+    createSession, 
+    createNewChat, 
+    selectSession,
+    isHistoryVisible,
+    error: storeError,
+    isLoadingMessages 
+  } = useChatHistoryStore()
   const [sessionId, setSessionId] = useState<string | null>(null)
   
   const [selectedModel, setSelectedModel] = useState("auto")
   const [priority, setPriority] = useState<"speed" | "accuracy" | "balanced">("balanced")
 
   const [messages, setMessages] = useState<Message[]>([])
+  const [isUsingStoreMessages, setIsUsingStoreMessages] = useState(false)
   const [inputValue, setInputValue] = useState("")
   const [isLoading, setIsLoading] = useState(false)
   const [audioUrl, setAudioUrl] = useState<string | null>(null)
@@ -105,21 +110,6 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const audioChunksRef = useRef<Blob[]>([])
 
-  const availableModels = useMemo(() => [
-    { value: "auto", label: "🤖 Auto-Select", type: "auto" },
-    // Built-in models
-    ...orchestrator.getAllModels().map((model) => ({
-      value: model.name,
-      label: model.name.charAt(0).toUpperCase() + model.name.slice(1),
-      type: "builtin"
-    })),
-    // Ollama models
-    ...ollamaModels.map((modelName) => ({
-      value: modelName,
-      label: `🦙 ${modelName}`,
-      type: "ollama"
-    })),
-  ], [orchestrator, ollamaModels])
 
   // Expose method to add AI messages from external components
   useImperativeHandle(ref, () => ({
@@ -143,13 +133,33 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
     scrollToBottom()
   }, [messages])
 
-  // Sync sessionId with current session from store
+  // Sync with current session from store
   useEffect(() => {
-    if (currentSession?.id && currentSession.id !== sessionId) {
-      setSessionId(currentSession.id)
+    if (currentSession?.id !== sessionId) {
+      setSessionId(currentSession?.id || null)
+      
+      // If we have a current session, use store messages, otherwise use local messages
+      if (currentSession?.id) {
+        setIsUsingStoreMessages(true)
+        // Convert store messages to local message format
+        const convertedMessages: Message[] = storeMessages.map(msg => ({
+          role: msg.role as "user" | "assistant",
+          content: msg.content,
+          timestamp: new Date(msg.created_at || Date.now()),
+          model: msg.model_used,
+          inputType: msg.input_type as "text" | "voice" | "screen",
+        }))
+        setMessages(convertedMessages)
+        console.log(`🔄 Synced ${convertedMessages.length} messages from store for session ${currentSession.id}`)
+      } else {
+        setIsUsingStoreMessages(false)
+        setMessages([])
+        console.log('🆕 Started new chat - cleared messages')
+      }
     }
-  }, [currentSession?.id, sessionId])
+  }, [currentSession?.id, sessionId, storeMessages])
 
+  
   const handleCreateSession = useCallback(async () => {
     if (!sessionId) {
       const newSession = await createSession('New Chat', selectedModel)
@@ -161,14 +171,26 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
 
   // Create new session when first message is sent and no session exists
   useEffect(() => {
-    if (messages.length === 1 && !sessionId && !currentSession) {
+    if (messages.length === 1 && !sessionId && !currentSession && !isUsingStoreMessages) {
       handleCreateSession()
     }
-  }, [messages.length, sessionId, currentSession, handleCreateSession])
+  }, [messages.length, sessionId, currentSession, handleCreateSession, isUsingStoreMessages])
 
   const handleSessionSelect = (selectedSessionId: string) => {
-    setSessionId(selectedSessionId)
-    // Note: Don't clear messages here - let the store handle message loading
+    // Let the store handle session selection and message loading
+    selectSession(selectedSessionId)
+  }
+  
+  const handleNewChat = async () => {
+    // Clear local messages immediately for responsive UI
+    setMessages([])
+    setIsUsingStoreMessages(true)
+    
+    const newSession = await createNewChat()
+    if (newSession) {
+      setSessionId(newSession.id)
+      console.log(`🆕 Created new chat session: ${newSession.id}`)
+    }
   }
 
   const persistMessage = async (message: Message, reasoning?: string) => {
@@ -267,12 +289,15 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
       inputType,
     }
 
+    // Add message to current context (isolated per session)
     setMessages((prev) => [...prev, userMessage])
     if (inputType === "text") setInputValue("")
     setIsLoading(true)
 
-    // Persist user message
-    await persistMessage(userMessage)
+    // Persist user message only if we have a session
+    if (currentSession?.id) {
+      await persistMessage(userMessage)
+    }
 
     // Check if research mode is enabled and if the query seems to need web search
     const needsWebSearch =
@@ -288,9 +313,12 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
         messageContent.toLowerCase().includes("how to"))
 
     const apiEndpoint = needsWebSearch ? "/api/research-chat" : "/api/chat"
+    // Use only current session's messages for context, never mix sessions
+    const contextMessages = isUsingStoreMessages && currentSession ? messages : messages
+    
     const payload = {
       message: messageContent,
-      history: messages,
+      history: contextMessages, // Context isolated to current session
       model: optimalModel,
       ...(needsWebSearch && { 
         enableWebSearch: true,
@@ -328,11 +356,12 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
             }),
         }))
 
+        // Update messages - ensure they belong only to current session
         setMessages(updatedHistory)
 
-        // Persist assistant message with reasoning if present
+        // Persist assistant message with reasoning if present (only for current session)
         const assistantMessage = updatedHistory.find(msg => msg.role === "assistant" && msg.timestamp)
-        if (assistantMessage) {
+        if (assistantMessage && currentSession?.id) {
           await persistMessage(assistantMessage, data.reasoning)
         }
 
@@ -434,12 +463,6 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
     }
   }
 
-  const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault()
-      sendMessage("text")
-    }
-  }
 
   const toggleAudio = () => {
     if (audioRef.current) {
@@ -519,7 +542,17 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
           inputType: index === data.history.length - 2 ? "voice" : msg.inputType,
         }))
 
+        // Update messages for current session only
         setMessages(updatedHistory)
+
+        // Persist voice messages to current session
+        const userMsg = updatedHistory.find((msg: Message) => msg.role === "user" && msg.inputType === "voice")
+        const assistantMsg = updatedHistory.find((msg: Message) => msg.role === "assistant")
+        
+        if (currentSession?.id) {
+          if (userMsg) await persistMessage(userMsg)
+          if (assistantMsg) await persistMessage(assistantMsg, data.reasoning)
+        }
 
         // Handle reasoning content if present (same as regular chat)
         if (data.reasoning) {
@@ -575,6 +608,28 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
         onSessionSelect={handleSessionSelect}
         currentSessionId={sessionId || undefined}
       />
+      
+      {/* Floating New Chat Button */}
+      {isHistoryVisible && (
+        <Button
+          onClick={handleNewChat}
+          className="fixed top-20 left-4 z-50 bg-blue-600 hover:bg-blue-700 text-white shadow-lg"
+          size="sm"
+          disabled={isLoadingMessages}
+        >
+          <Plus className="w-4 h-4 mr-2" />
+          New Chat
+        </Button>
+      )}
+      {/* Error Display */}
+      {storeError && (
+        <div className="mb-4">
+          <div className="bg-red-900/20 border border-red-500/30 rounded-lg p-3 text-red-400 text-sm">
+            {storeError}
+          </div>
+        </div>
+      )}
+      
       <Card className="bg-gray-900/50 backdrop-blur-sm border-blue-500/30 h-[700px] flex flex-col">
       <div className="p-4 border-b border-blue-500/30">
         <div className="flex justify-between items-center mb-3">
@@ -841,6 +896,7 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
           ))}
         </AnimatePresence>
 
+        {/* Loading indicator */}
         {(isLoading || isProcessing) && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex justify-start">
             <div className="bg-gray-700 p-3 rounded-lg">
@@ -858,6 +914,18 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
             </div>
           </motion.div>
         )}
+        
+        {/* Loading messages indicator */}
+        {isLoadingMessages && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex justify-center">
+            <div className="bg-gray-800/50 p-3 rounded-lg">
+              <div className="flex items-center space-x-2 text-gray-400">
+                <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-500"></div>
+                <span className="text-sm">Loading chat history...</span>
+              </div>
+            </div>
+          </motion.div>
+        )}
         <div ref={messagesEndRef} />
       </div>
 
@@ -866,7 +934,12 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((props, ref) => {
           <Input
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
-            onKeyPress={handleKeyPress}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault()
+                sendMessage("text")
+              }
+            }}
             placeholder={isResearchMode ? "Ask me anything or request research..." : "Type your message..."}
             className="flex-1 bg-gray-800 border-gray-600 text-white placeholder-gray-400 focus:border-blue-500"
             disabled={isLoading || isProcessing}
