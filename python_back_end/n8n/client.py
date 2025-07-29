@@ -207,6 +207,8 @@ class N8nClient:
         Returns:
             Sanitized payload without read-only fields and proper field types
         """
+        import uuid
+        
         read_only_fields = [
             'id', 
             'active', 
@@ -218,6 +220,53 @@ class N8nClient:
             'versionId'
         ]
         sanitized = {k: v for k, v in payload.items() if k not in read_only_fields}
+        
+        # Fix node IDs - n8n expects UUIDs, not custom IDs from LLM
+        if 'nodes' in sanitized:
+            node_id_mapping = {}
+            for node in sanitized['nodes']:
+                if 'id' in node:
+                    old_id = node['id']
+                    new_id = str(uuid.uuid4())
+                    node_id_mapping[old_id] = new_id
+                    node['id'] = new_id
+                    logger.debug(f"Remapped node ID: {old_id} → {new_id}")
+                else:
+                    node['id'] = str(uuid.uuid4())
+                
+                # Ensure required node fields
+                if 'typeVersion' not in node:
+                    node['typeVersion'] = 1
+                if 'position' not in node:
+                    node['position'] = [300, 300]
+                if 'parameters' not in node:
+                    node['parameters'] = {}
+                if 'credentials' not in node:
+                    node['credentials'] = {}
+            
+            # Fix connections to use new node IDs
+            if 'connections' in sanitized:
+                new_connections = {}
+                for source_node, connections in sanitized['connections'].items():
+                    # Update source node ID
+                    new_source_id = node_id_mapping.get(source_node, source_node)
+                    new_connections[new_source_id] = {}
+                    
+                    for output_type, outputs in connections.items():
+                        new_connections[new_source_id][output_type] = []
+                        # outputs is directly a list of connection dictionaries
+                        for connection in outputs:
+                            # Update target node ID in connection
+                            if isinstance(connection, dict):
+                                old_target = connection.get('node')
+                                if old_target in node_id_mapping:
+                                    connection['node'] = node_id_mapping[old_target]
+                                new_connections[new_source_id][output_type].append(connection)
+                            else:
+                                logger.warning(f"Unexpected connection type: {type(connection)}, value: {connection}")
+                                new_connections[new_source_id][output_type].append(connection)
+                
+                sanitized['connections'] = new_connections
         
         if any(field in payload for field in read_only_fields):
             removed_fields = [field for field in read_only_fields if field in payload]
