@@ -214,7 +214,24 @@ Examples:
 - "Send daily reports" → schedule workflow with data processing and email
 - "Process form submissions" → webhook workflow with data validation and storage"""
         
-        user_prompt = f"""Analyze this automation request: "{prompt}"
+        # Check if this is an enhanced prompt with vector store context
+        if "Similar Workflow Examples for Reference:" in prompt:
+            # Enhanced prompt with vector store examples - use direct workflow creation
+            user_prompt = f"""You have been provided with similar workflow examples from a vector database.
+
+CRITICAL INSTRUCTIONS - FOLLOW EXACTLY:
+1. DO NOT categorize as simple types like "webhook" or "schedule"
+2. USE the provided workflow examples to create the exact workflow structure
+3. Set workflow_type to "custom" to use vector examples instead of templates
+4. Extract specific nodes and configurations from the examples
+5. Return detailed workflow structure based on examples
+
+{prompt}
+
+Based on the examples above, create a comprehensive workflow. Use "custom" as workflow_type."""
+        else:
+            # Original simple analysis
+            user_prompt = f"""Analyze this automation request: "{prompt}"
         
 Determine what kind of n8n workflow this needs and provide detailed analysis."""
         
@@ -280,6 +297,24 @@ Determine what kind of n8n workflow this needs and provide detailed analysis."""
         
         workflow_name = self._generate_workflow_name(analysis, original_prompt)
         
+        # Check if this is a custom workflow with vector store examples
+        workflow_type = analysis.get("workflow_type", "manual")
+        if workflow_type == "custom":
+            logger.info("Building workflow directly from vector store examples")
+            # Check if AI provided a complete workflow structure
+            full_workflow = analysis.get("full_workflow")
+            if full_workflow:
+                logger.info("Using AI-generated complete workflow structure")
+                # Add necessary metadata
+                full_workflow["name"] = workflow_name
+                full_workflow["description"] = analysis.get("description", "AI-generated from vector examples")
+                from .models import WorkflowConfig
+                return WorkflowConfig(**full_workflow)
+            else:
+                logger.info("Building custom workflow from vector analysis")
+                # Use enhanced custom workflow building
+                return self._build_custom_workflow_from_vector_analysis(analysis, workflow_name)
+        
         # Try to use template if available
         template_id = analysis.get("template_id")
         if template_id and template_id in self.workflow_builder.templates:
@@ -308,6 +343,42 @@ Determine what kind of n8n workflow this needs and provide detailed analysis."""
         return self.workflow_builder.build_ai_workflow(
             workflow_name,
             analysis.get("description", "AI-generated workflow"),
+            requirements
+        )
+    
+    def _build_custom_workflow_from_vector_analysis(self, analysis: Dict[str, Any], workflow_name: str) -> Any:
+        """
+        Build workflow directly from vector store analysis with specific nodes
+        
+        Args:
+            analysis: AI analysis with vector store context
+            workflow_name: Generated workflow name
+            
+        Returns:
+            WorkflowConfig ready for n8n
+        """
+        logger.info("Building enhanced custom workflow from vector analysis")
+        
+        # Extract specific nodes identified by AI from vector examples
+        nodes_required = analysis.get("nodes_required", [])
+        parameters = analysis.get("parameters", {})
+        description = analysis.get("description", "AI-generated from vector examples")
+        
+        # Use the workflow builder's AI workflow method but with enhanced requirements
+        requirements = {
+            "trigger": "custom",  # Use custom handling
+            "actions": ["process_data", "connect_services"],
+            "nodes_required": nodes_required,
+            "parameters": parameters,
+            "enhanced_from_vector": True,  # Flag for special handling
+            "keywords": self._extract_keywords_from_prompt(workflow_name)
+        }
+        
+        logger.info(f"Building with vector-enhanced requirements: nodes={nodes_required}")
+        
+        return self.workflow_builder.build_ai_workflow(
+            workflow_name,
+            description,
             requirements
         )
     
