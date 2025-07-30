@@ -345,12 +345,23 @@ class WorkflowBuilder:
                 }
             },
             "@n8n/n8n-nodes-langchain.lmOllama": {
-                "name": "Ollama LLM",
+                "name": "Ollama AI Model",
                 "type": "@n8n/n8n-nodes-langchain.lmOllama",
                 "parameters": {
                     "model": parameters.get("model", "mistral"),
                     "baseURL": parameters.get("base_url", "http://ollama:11434"),
-                    "temperature": parameters.get("temperature", 0.7)
+                    "temperature": parameters.get("temperature", 0.7),
+                    "maxTokens": parameters.get("max_tokens", 2000)
+                }
+            },
+            "ollama": {
+                "name": "Ollama Content Generator",
+                "type": "@n8n/n8n-nodes-langchain.lmOllama",
+                "parameters": {
+                    "model": parameters.get("model", "mistral"),
+                    "baseURL": "http://ollama:11434",
+                    "temperature": 0.8,
+                    "maxTokens": 2000
                 }
             },
             
@@ -389,14 +400,29 @@ class WorkflowBuilder:
                     "to": "{{$json.phone_number}}",
                     "url": "{{$json.call_url}}"
                 }
-            },            # Base nodes
+            },            # YouTube nodes - different operations
             "n8n-nodes-base.youTube": {
                 "name": "YouTube",
                 "type": "n8n-nodes-base.youTube",
                 "parameters": {
-                    "operation": parameters.get("youtube_operation", "search"),
-                    "query": parameters.get("query", ""),
-                    "maxResults": parameters.get("max_results", 10)
+                    "operation": parameters.get("youtube_operation", "upload"),
+                    "title": parameters.get("title", "{{$json.title}}"),
+                    "description": parameters.get("description", "{{$json.description}}"),
+                    "tags": parameters.get("tags", "automation,ai"),
+                    "categoryId": parameters.get("categoryId", "22"),
+                    "privacyStatus": parameters.get("privacyStatus", "public")
+                }
+            },
+            "youtube": {
+                "name": "YouTube Upload",
+                "type": "n8n-nodes-base.youTube",
+                "parameters": {
+                    "operation": "upload",
+                    "title": parameters.get("title", "AI Generated Video"),
+                    "description": parameters.get("description", "Created with AI automation"),
+                    "tags": parameters.get("tags", "ai,automation,youtube"),
+                    "categoryId": "22",
+                    "privacyStatus": "public"
                 }
             },
             "n8n-nodes-base.code": {

@@ -426,7 +426,7 @@ class VectorDatabaseService:
         k: int = 5
     ) -> List[Dict[str, Any]]:
         """
-        Search specifically for n8n workflow examples
+        Search specifically for n8n workflow examples with enhanced diversity
         
         Args:
             query: Search query for n8n workflows
@@ -437,11 +437,12 @@ class VectorDatabaseService:
         """
         # Try multiple search strategies to find the best matches
         all_results = []
+        search_limit = k * 3  # Search for 3x more to get better diversity
         
         # Strategy 1: Direct search with n8n prefix
         results1 = await self.search_similar_workflows(
             query=f"n8n {query}",
-            k=k,
+            k=search_limit,
             include_scores=True
         )
         all_results.extend(results1)
@@ -449,7 +450,7 @@ class VectorDatabaseService:
         # Strategy 2: Search with automation/workflow keywords
         results2 = await self.search_similar_workflows(
             query=f"workflow automation {query}",
-            k=k//2 if k > 2 else k,
+            k=search_limit,
             include_scores=True
         )
         all_results.extend(results2)
@@ -462,23 +463,53 @@ class VectorDatabaseService:
             keyword_query = " ".join(important_keywords[:3])  # Use top 3 keywords
             results3 = await self.search_similar_workflows(
                 query=keyword_query,
-                k=k//2 if k > 2 else k,
+                k=search_limit,
                 include_scores=True
             )
             all_results.extend(results3)
         
-        # Remove duplicates and keep the best scores
+        # Strategy 4: Search for broader automation terms
+        broad_terms = ["trigger", "webhook", "api", "email", "notification", "database", "data", "process"]
+        for term in broad_terms:
+            if term.lower() in query.lower():
+                results4 = await self.search_similar_workflows(
+                    query=f"{term} workflow",
+                    k=search_limit//2,
+                    include_scores=True
+                )
+                all_results.extend(results4)
+        
+        # Strategy 5: Generic n8n workflow search for more examples
+        results5 = await self.search_similar_workflows(
+            query="n8n workflow automation",
+            k=search_limit,
+            include_scores=True
+        )
+        all_results.extend(results5)
+        
+        # Remove duplicates and keep diverse results
         seen_workflows = {}
         unique_results = []
+        node_type_diversity = {}  # Track node type diversity
         
         for result in all_results:
             workflow_id = result.get("metadata", {}).get("workflow_id", "")
             content_hash = hash(result.get("content", ""))
             identifier = workflow_id or content_hash
             
+            # Get node types for diversity tracking
+            node_types = result.get("metadata", {}).get("node_types", [])
+            node_signature = tuple(sorted(node_types[:3]))  # Use first 3 node types as signature
+            
             if identifier not in seen_workflows:
                 seen_workflows[identifier] = result
                 unique_results.append(result)
+                
+                # Track node type diversity
+                if node_signature not in node_type_diversity:
+                    node_type_diversity[node_signature] = []
+                node_type_diversity[node_signature].append(result)
+                
             elif result.get("similarity_score", 0) > seen_workflows[identifier].get("similarity_score", 0):
                 # Replace with higher scoring result
                 seen_workflows[identifier] = result
@@ -489,9 +520,26 @@ class VectorDatabaseService:
                         unique_results[i] = result
                         break
         
-        # Sort by similarity score and return top k
-        unique_results.sort(key=lambda x: x.get("similarity_score", 0), reverse=True)
-        return unique_results[:k]
+        # Ensure diversity by including examples from different node type combinations
+        diverse_results = []
+        used_signatures = set()
+        
+        # First, add top scoring examples from each node type combination
+        for signature, results in node_type_diversity.items():
+            if len(diverse_results) < k and signature not in used_signatures:
+                best_result = max(results, key=lambda x: x.get("similarity_score", 0))
+                diverse_results.append(best_result)
+                used_signatures.add(signature)
+        
+        # Fill remaining slots with highest scoring unique results
+        remaining_results = [r for r in unique_results if r not in diverse_results]
+        remaining_results.sort(key=lambda x: x.get("similarity_score", 0), reverse=True)
+        
+        while len(diverse_results) < k and remaining_results:
+            diverse_results.append(remaining_results.pop(0))
+        
+        logger.info(f"🎯 Retrieved {len(diverse_results)} diverse n8n workflows from {len(all_results)} total results")
+        return diverse_results[:k]
     
     async def get_workflow_suggestions(
         self, 
@@ -518,20 +566,57 @@ class VectorDatabaseService:
                 k=context_limit
             )
             
-            # If we don't get enough results, do a broader search 
+            # If we don't get enough results, do a broader search with multiple strategies
             if len(similar_workflows) < context_limit:
+                logger.info(f"🔍 Need more examples ({len(similar_workflows)}/{context_limit}), doing broader search...")
+                
+                # Strategy 1: Broader search with more results
                 additional_results = await self.search_similar_workflows(
                     query=user_request,
-                    k=context_limit * 2,  # Search for more to get better variety
+                    k=context_limit * 4,  # Search for 4x more to get better variety
                     include_scores=True
                 )
                 
+                # Strategy 2: Search with common automation keywords
+                automation_terms = ["automation", "workflow", "trigger", "webhook", "api", "email", "data", "process"]
+                for term in automation_terms:
+                    if len(similar_workflows) >= context_limit:
+                        break
+                    term_results = await self.search_similar_workflows(
+                        query=f"{term} n8n",
+                        k=context_limit,
+                        include_scores=True
+                    )
+                    additional_results.extend(term_results)
+                
+                # Strategy 3: Generic n8n search to fill remaining slots
+                if len(similar_workflows) < context_limit:
+                    generic_results = await self.search_similar_workflows(
+                        query="n8n node workflow",
+                        k=context_limit * 2,
+                        include_scores=True
+                    )
+                    additional_results.extend(generic_results)
+                
                 # Merge results, avoiding duplicates
                 existing_ids = {w.get("metadata", {}).get("workflow_id", "") for w in similar_workflows}
+                seen_content_hashes = {hash(w.get("content", "")) for w in similar_workflows}
+                
                 for result in additional_results:
+                    if len(similar_workflows) >= context_limit:
+                        break
+                        
                     result_id = result.get("metadata", {}).get("workflow_id", "")
-                    if result_id not in existing_ids and len(similar_workflows) < context_limit:
+                    content_hash = hash(result.get("content", ""))
+                    
+                    # Check for duplicates using both ID and content hash
+                    if (result_id not in existing_ids and 
+                        content_hash not in seen_content_hashes):
                         similar_workflows.append(result)
+                        existing_ids.add(result_id)
+                        seen_content_hashes.add(content_hash)
+                
+                logger.info(f"📈 Enhanced search found {len(similar_workflows)} total examples")
             
             # Format suggestions
             suggestions = {

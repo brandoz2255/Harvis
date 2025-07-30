@@ -80,7 +80,17 @@ class N8nAutomationService:
             )
             
             # Step 3: Create workflow in n8n
-            n8n_workflow = self.n8n_client.create_workflow(workflow_config.dict())
+            logger.debug(f"Workflow config type: {type(workflow_config)}")
+            logger.debug(f"Workflow config dict method exists: {hasattr(workflow_config, 'dict')}")
+            
+            if hasattr(workflow_config, 'dict') and callable(getattr(workflow_config, 'dict')):
+                workflow_data = workflow_config.dict()
+            else:
+                # Fallback for DirectWorkflow objects
+                workflow_data = workflow_config.workflow_data if hasattr(workflow_config, 'workflow_data') else workflow_config
+            
+            logger.debug(f"Workflow data type: {type(workflow_data)}")
+            n8n_workflow = self.n8n_client.create_workflow(workflow_data)
             workflow_id = n8n_workflow.get("id")
             
             # Step 4: Activate workflow if requested
@@ -148,8 +158,10 @@ class N8nAutomationService:
             }
             
         except Exception as e:
+            import traceback
             execution_time = time.time() - start_time
             logger.error(f"Automation request failed: {e}")
+            logger.error(f"Full traceback: {traceback.format_exc()}")
             
             # Save failed attempt to history
             if user_id:
@@ -172,7 +184,7 @@ class N8nAutomationService:
                 "execution_time": execution_time
             }
     
-    async def _analyze_user_prompt(self, prompt: str, model: str = "mistral") -> Dict[str, Any]:
+    async def _analyze_user_prompt(self, prompt: str, model: str = "auto") -> Dict[str, Any]:
         """
         Analyze user prompt with AI to extract workflow requirements
         
@@ -183,40 +195,97 @@ class N8nAutomationService:
         Returns:
             Analysis results with workflow requirements
         """
-        system_prompt = """You are an n8n workflow automation expert. You are creative and helpful, finding ways to automate almost any request through n8n workflows. Analyze user requests and determine:
-
-1. Whether the request is feasible for n8n automation (be flexible and creative)
-2. What type of workflow is needed
-3. What nodes and connections are required
-4. What parameters need to be configured
-5. Whether to auto-activate the workflow
-
-IMPORTANT: Be creative and flexible. Most requests can be automated in some way. Even complex requests like "AI customer service team" can be implemented as workflows with HTTP requests, webhooks, and integrations.
-
-Respond in JSON format with these fields:
-- feasible (boolean): Whether request can be automated with n8n (default to true unless impossible)
-- workflow_type (string): Type of workflow (schedule, webhook, manual, api)
-- template_id (string): Best matching template ID if available
-- description (string): Clear description of what workflow will do
-- auto_activate (boolean): Whether to activate immediately
-- nodes_required (array): List of required n8n node types
-- parameters (object): Key configuration parameters
-- schedule (object): If scheduled, timing details
-- suggestions (array): Alternative suggestions if not feasible
-
-Available templates: weather_monitor, web_scraper, slack_notification, email_automation, http_api, webhook_receiver
-
-Common node types: manual trigger, schedule trigger, webhook, http request, email send, slack, discord, code function, if condition, switch, merge, split, set, move binary data
-
-Examples:
-- "AI customer service team" → webhook workflow with HTTP requests to AI APIs
-- "Monitor website" → schedule workflow with HTTP requests and notifications
-- "Send daily reports" → schedule workflow with data processing and email
-- "Process form submissions" → webhook workflow with data validation and storage"""
+        # Handle auto model selection - default to mistral for n8n workflows
+        if model == "auto":
+            model = "mistral"  # Mistral is good for structured JSON generation
+            logger.info(f"Auto-selected model: {model} for n8n workflow generation")
         
-        user_prompt = f"""Analyze this automation request: "{prompt}"
+        system_prompt = """You are an n8n workflow automation expert. Generate COMPLETE n8n workflow JSON that can be directly imported into n8n.
+
+CRITICAL: Your response must be a valid JSON object that matches n8n's exact import format.
+
+REQUIRED JSON Structure (copy this exactly):
+{
+  "feasible": true,
+  "workflow_type": "direct_json",
+  "complete_workflow": {
+    "name": "Descriptive Workflow Name",
+    "nodes": [
+      {
+        "id": "generate-actual-uuid-like-a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "name": "Descriptive Node Name (NOT Node 1, Node 2)",
+        "type": "exact-n8n-node-type",
+        "typeVersion": 1,
+        "position": [240, 300],
+        "parameters": {},
+        "credentials": {}
+      }
+    ],
+    "connections": {
+      "Node Name": {
+        "main": [
+          [
+            {
+              "node": "Target Node Name",
+              "type": "main", 
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "active": false,
+    "settings": {"executionOrder": "v1"},
+    "staticData": {},
+    "tags": []
+  },
+  "description": "What this workflow does"
+}
+
+EXACT n8n Node Types to Use:
+- "n8n-nodes-base.manualTrigger" (NOT "manual trigger")
+- "n8n-nodes-base.scheduleTrigger" (NOT "schedule trigger") 
+- "n8n-nodes-base.webhook"
+- "n8n-nodes-base.httpRequest"
+- "n8n-nodes-base.emailSend"
+- "n8n-nodes-base.slack"
+- "n8n-nodes-base.code"
+- "n8n-nodes-base.googleSheets" (NOT "google sheets")
+- "n8n-nodes-base.youTube"
+- "n8n-nodes-base.twitter" (for Twitter posting)
+- "n8n-nodes-base.facebook" (for Facebook posting)  
+- "n8n-nodes-base.linkedIn" (for LinkedIn posting)
+- "n8n-nodes-base.if" (for conditions)
+- "n8n-nodes-base.set" (for data transformation)
+- "@n8n/n8n-nodes-langchain.lmOllama" (for AI/LLM operations only)
+
+MANDATORY Rules:
+1. Each node MUST have unique UUID in "id" field (format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
+2. Use descriptive node names like "Schedule Daily Trigger", "Fetch Weather Data", "Send Notification"
+3. Use EXACT n8n node types from list above
+4. Position nodes horizontally: [240, 300], [460, 300], [680, 300], etc.
+5. Generate REAL UUIDs - not placeholder text like "generate-random-uuid"
+6. Connect nodes properly in "connections" object
+
+UUID Generation Examples:
+- "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+- "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+- "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+
+CRITICAL Node Type Usage:
+- Social Media: Use "n8n-nodes-base.twitter", "n8n-nodes-base.facebook", "n8n-nodes-base.linkedIn"
+- Data Sources: Use "n8n-nodes-base.googleSheets", "n8n-nodes-base.airtable"
+- Communication: Use "n8n-nodes-base.emailSend", "n8n-nodes-base.slack"
+- AI/LLM: ONLY use "@n8n/n8n-nodes-langchain.lmOllama" for AI text generation
+- Logic: Use "n8n-nodes-base.if", "n8n-nodes-base.switch" for conditions
+- Data: Use "n8n-nodes-base.set", "n8n-nodes-base.code" for data transformation
+
+NEVER use generic names like "Node 1", "Node 2 2", "Node 3 3".
+NEVER use "@n8n/n8n-nodes-langchain.lmOllama" for social media posting - use proper social media nodes."""
         
-Determine what kind of n8n workflow this needs and provide detailed analysis."""
+        user_prompt = f"""Create a complete n8n workflow for: "{prompt}"
+
+Generate the full JSON response following the exact structure above. The workflow should be directly importable into n8n."""
         
         payload = {
             "model": model,
@@ -230,6 +299,8 @@ Determine what kind of n8n workflow this needs and provide detailed analysis."""
         
         try:
             logger.info(f"Analyzing prompt with {model}")
+            logger.debug(f"Prompt length: {len(user_prompt)} characters")
+            
             # Add authentication headers for external Ollama server
             import os
             api_key = os.getenv("OLLAMA_API_KEY", "key")
@@ -238,11 +309,13 @@ Determine what kind of n8n workflow this needs and provide detailed analysis."""
                 f"{self.ollama_url}/api/chat",
                 json=payload,
                 headers=headers,
-                timeout=60
+                timeout=120  # Increased timeout for complex prompts
             )
             response.raise_for_status()
             
             ai_response = response.json().get("message", {}).get("content", "")
+            logger.debug(f"AI response: {ai_response[:200]}...")
+            
             analysis = json.loads(ai_response)
             
             logger.info(f"AI analysis complete: {analysis.get('workflow_type', 'unknown')} workflow")
@@ -250,6 +323,19 @@ Determine what kind of n8n workflow this needs and provide detailed analysis."""
             
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse AI response as JSON: {e}")
+            logger.error(f"Raw AI response: {ai_response}")
+            
+            # If this was an enhanced prompt, try fallback with simple prompt
+            if "Similar Workflow Examples for Reference:" in prompt:
+                logger.info("Enhanced prompt failed, trying fallback analysis")
+                # Extract just the original user request
+                original_request = prompt.split("USER REQUEST TO IMPLEMENT:")[-1].split("Copy the best matching example")[0].strip()
+                if not original_request:
+                    original_request = prompt.split("REQUEST:")[-1].split("Copy the best matching example")[0].strip()
+                
+                # Retry with simple analysis
+                return await self._analyze_user_prompt(original_request, model)
+            
             return {
                 "feasible": False,
                 "error": "Could not parse AI analysis",
@@ -257,6 +343,14 @@ Determine what kind of n8n workflow this needs and provide detailed analysis."""
             }
         except Exception as e:
             logger.error(f"AI analysis failed: {e}")
+            
+            # If this was an enhanced prompt, try fallback
+            if "Similar Workflow Examples for Reference:" in prompt:
+                logger.info("Enhanced prompt caused error, trying fallback analysis")
+                original_request = prompt.split("REQUEST:")[-1].split("Copy the best matching example")[0].strip()
+                if original_request:
+                    return await self._analyze_user_prompt(original_request, model)
+            
             return {
                 "feasible": False,
                 "error": f"AI analysis error: {str(e)}",
@@ -279,6 +373,74 @@ Determine what kind of n8n workflow this needs and provide detailed analysis."""
         logger.info(f"Creating workflow from analysis: {analysis}")
         
         workflow_name = self._generate_workflow_name(analysis, original_prompt)
+        
+        # Check if this is a direct JSON workflow from AI
+        workflow_type = analysis.get("workflow_type", "manual")
+        if workflow_type == "direct_json":
+            logger.info("🎯 Using direct JSON workflow from AI")
+            complete_workflow = analysis.get("complete_workflow")
+            if complete_workflow:
+                logger.info("✅ AI provided complete workflow JSON - bypassing workflow builder entirely")
+                
+                # Ensure the workflow has proper name and description
+                if "name" not in complete_workflow or not complete_workflow["name"]:
+                    complete_workflow["name"] = workflow_name
+                if "description" not in complete_workflow:
+                    complete_workflow["description"] = analysis.get("description", "AI-generated workflow")
+                
+                # Return the complete workflow directly without using WorkflowConfig models
+                class DirectWorkflow:
+                    def __init__(self, workflow_data):
+                        self.workflow_data = workflow_data
+                        self.name = workflow_data.get("name")
+                        self.description = workflow_data.get("description")
+                    
+                    def dict(self):
+                        return self.workflow_data
+                
+                return DirectWorkflow(complete_workflow)
+            else:
+                logger.warning("⚠️ Direct JSON type but no complete_workflow provided, falling back")
+                return self._build_custom_workflow_from_vector_analysis(analysis, workflow_name)
+        elif workflow_type == "custom_with_structure":
+            logger.info("Building workflow from AI-provided complete structure")
+            # Check for both field names (complete_workflow and full_workflow)
+            full_workflow = analysis.get("complete_workflow") or analysis.get("full_workflow")
+            if full_workflow:
+                logger.info("✅ Using AI-generated complete workflow structure")
+                # Add necessary metadata
+                full_workflow["name"] = workflow_name
+                full_workflow["description"] = analysis.get("description", "AI-generated from vector examples")
+                
+                # Return the complete workflow directly without using WorkflowConfig models
+                class DirectWorkflow:
+                    def __init__(self, workflow_data):
+                        self.workflow_data = workflow_data
+                        self.name = workflow_data.get("name")
+                        self.description = workflow_data.get("description")
+                    
+                    def dict(self):
+                        return self.workflow_data
+                
+                return DirectWorkflow(full_workflow)
+            else:
+                logger.warning("custom_with_structure specified but no complete_workflow provided, falling back to node-based building")
+                return self._build_custom_workflow_from_vector_analysis(analysis, workflow_name)
+        elif workflow_type == "custom":
+            logger.info("Building workflow directly from vector store examples")
+            # Check if AI provided a complete workflow structure
+            full_workflow = analysis.get("full_workflow")
+            if full_workflow:
+                logger.info("Using AI-generated complete workflow structure")
+                # Add necessary metadata
+                full_workflow["name"] = workflow_name
+                full_workflow["description"] = analysis.get("description", "AI-generated from vector examples")
+                from .models import WorkflowConfig
+                return WorkflowConfig(**full_workflow)
+            else:
+                logger.info("Building custom workflow from vector analysis")
+                # Use enhanced custom workflow building
+                return self._build_custom_workflow_from_vector_analysis(analysis, workflow_name)
         
         # Try to use template if available
         template_id = analysis.get("template_id")
@@ -308,6 +470,42 @@ Determine what kind of n8n workflow this needs and provide detailed analysis."""
         return self.workflow_builder.build_ai_workflow(
             workflow_name,
             analysis.get("description", "AI-generated workflow"),
+            requirements
+        )
+    
+    def _build_custom_workflow_from_vector_analysis(self, analysis: Dict[str, Any], workflow_name: str) -> Any:
+        """
+        Build workflow directly from vector store analysis with specific nodes
+        
+        Args:
+            analysis: AI analysis with vector store context
+            workflow_name: Generated workflow name
+            
+        Returns:
+            WorkflowConfig ready for n8n
+        """
+        logger.info("Building enhanced custom workflow from vector analysis")
+        
+        # Extract specific nodes identified by AI from vector examples
+        nodes_required = analysis.get("nodes_required", [])
+        parameters = analysis.get("parameters", {})
+        description = analysis.get("description", "AI-generated from vector examples")
+        
+        # Use the workflow builder's AI workflow method but with enhanced requirements
+        requirements = {
+            "trigger": "custom",  # Use custom handling
+            "actions": ["process_data", "connect_services"],
+            "nodes_required": nodes_required,
+            "parameters": parameters,
+            "enhanced_from_vector": True,  # Flag for special handling
+            "keywords": self._extract_keywords_from_prompt(workflow_name)
+        }
+        
+        logger.info(f"Building with vector-enhanced requirements: nodes={nodes_required}")
+        
+        return self.workflow_builder.build_ai_workflow(
+            workflow_name,
+            description,
             requirements
         )
     
