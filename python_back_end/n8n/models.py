@@ -144,7 +144,7 @@ class CreateWorkflowRequest(BaseModel):
 class N8nAutomationRequest(BaseModel):
     """Request for AI-driven n8n automation"""
     prompt: str = Field(..., description="Natural language automation request")
-    model: str = Field(default="mistral", description="AI model to use")
+    model: str = Field(default="auto", description="AI model to use")
     session_id: Optional[str] = Field(None, description="Chat session ID")
     user_context: Optional[Dict[str, Any]] = Field(None, description="User context")
 

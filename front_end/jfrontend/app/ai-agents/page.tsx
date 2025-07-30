@@ -188,7 +188,7 @@ export default function AIAgents() {
         },
         body: JSON.stringify({ 
           prompt: n8nPrompt,
-          model: selectedModel === "auto" ? "mistral" : selectedModel 
+          model: selectedModel
         }),
         credentials: 'include',
       })
@@ -204,6 +204,7 @@ export default function AIAgents() {
       }
 
       const data: N8nAutomationResponse = await response.json()
+      console.log("n8n automation response:", data) // Debug log
       setN8nWorkflow(data.workflow)
       setAiContext(data.ai_context || null)
       
@@ -327,7 +328,7 @@ export default function AIAgents() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           prompt: n8nPrompt,
-          model: selectedModel === "auto" ? "mistral" : selectedModel 
+          model: selectedModel
         }),
         credentials: 'include',
       });
@@ -344,6 +345,7 @@ export default function AIAgents() {
       }
 
       const data = await response.json();
+      console.log("n8n automation response (2nd handler):", data) // Debug log
       setN8nWorkflow(data.workflow);
       setAiContext(data.ai_context || null);
       

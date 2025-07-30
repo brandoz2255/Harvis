@@ -195,71 +195,92 @@ class N8nAutomationService:
         Returns:
             Analysis results with workflow requirements
         """
-        system_prompt = """You are an n8n workflow automation expert. You are creative and helpful, finding ways to automate almost any request through n8n workflows. Analyze user requests and determine:
+        system_prompt = """You are an n8n workflow automation expert. Generate COMPLETE n8n workflow JSON that can be directly imported into n8n.
 
-1. Whether the request is feasible for n8n automation (be flexible and creative)
-2. What type of workflow is needed
-3. What nodes and connections are required
-4. What parameters need to be configured
-5. Whether to auto-activate the workflow
+CRITICAL: Your response must be a valid JSON object that matches n8n's exact import format.
 
-IMPORTANT: Be creative and flexible. Most requests can be automated in some way. Even complex requests like "AI customer service team" can be implemented as workflows with HTTP requests, webhooks, and integrations.
-
-Respond in JSON format with these fields:
-- feasible (boolean): Whether request can be automated with n8n (default to true unless impossible)
-- workflow_type (string): Type of workflow (schedule, webhook, manual, api)
-- template_id (string): Best matching template ID if available
-- description (string): Clear description of what workflow will do
-- auto_activate (boolean): Whether to activate immediately
-- nodes_required (array): List of required n8n node types
-- parameters (object): Key configuration parameters
-- schedule (object): If scheduled, timing details
-- suggestions (array): Alternative suggestions if not feasible
-
-Available templates: weather_monitor, web_scraper, slack_notification, email_automation, http_api, webhook_receiver
-
-Common node types: manual trigger, schedule trigger, webhook, http request, email send, slack, discord, code function, if condition, switch, merge, split, set, move binary data
-
-Examples:
-- "AI customer service team" → webhook workflow with HTTP requests to AI APIs
-- "Monitor website" → schedule workflow with HTTP requests and notifications
-- "Send daily reports" → schedule workflow with data processing and email
-- "Process form submissions" → webhook workflow with data validation and storage"""
-        
-        # Check if this is an enhanced prompt with vector store context
-        if "Similar Workflow Examples for Reference:" in prompt:
-            # Enhanced prompt with vector store examples - use direct workflow creation
-            user_prompt = f"""You are an n8n workflow expert. Create a COMPLETE n8n workflow JSON directly from the examples.
-
-MANDATORY - Return this exact JSON structure:
-{{
+REQUIRED JSON Structure (copy this exactly):
+{
   "feasible": true,
-  "workflow_type": "custom_with_structure",
-  "complete_workflow": {{
-    "name": "Descriptive Name Based on User Request",
+  "workflow_type": "direct_json",
+  "complete_workflow": {
+    "name": "Descriptive Workflow Name",
     "nodes": [
-      // Copy node structure from most relevant example
-      // Use specific names like "Ollama Content Generator", "YouTube Uploader"
-      // Include proper parameters from examples
+      {
+        "id": "generate-actual-uuid-like-a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "name": "Descriptive Node Name (NOT Node 1, Node 2)",
+        "type": "exact-n8n-node-type",
+        "typeVersion": 1,
+        "position": [240, 300],
+        "parameters": {},
+        "credentials": {}
+      }
     ],
-    "connections": {{
-      // Copy connection structure from example
-    }},
-    "settings": {{}},
-    "staticData": {{}},
-    "active": false
-  }},
-  "description": "Clear workflow description"
-}}
+    "connections": {
+      "Node Name": {
+        "main": [
+          [
+            {
+              "node": "Target Node Name",
+              "type": "main", 
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "active": false,
+    "settings": {"executionOrder": "v1"},
+    "staticData": {},
+    "tags": []
+  },
+  "description": "What this workflow does"
+}
 
-{prompt}
+EXACT n8n Node Types to Use:
+- "n8n-nodes-base.manualTrigger" (NOT "manual trigger")
+- "n8n-nodes-base.scheduleTrigger" (NOT "schedule trigger") 
+- "n8n-nodes-base.webhook"
+- "n8n-nodes-base.httpRequest"
+- "n8n-nodes-base.emailSend"
+- "n8n-nodes-base.slack"
+- "n8n-nodes-base.code"
+- "n8n-nodes-base.googleSheets" (NOT "google sheets")
+- "n8n-nodes-base.youTube"
+- "n8n-nodes-base.twitter" (for Twitter posting)
+- "n8n-nodes-base.facebook" (for Facebook posting)  
+- "n8n-nodes-base.linkedIn" (for LinkedIn posting)
+- "n8n-nodes-base.if" (for conditions)
+- "n8n-nodes-base.set" (for data transformation)
+- "@n8n/n8n-nodes-langchain.lmOllama" (for AI/LLM operations only)
 
-Return ONLY the JSON structure above with complete workflow copied from examples."""
-        else:
-            # Original simple analysis
-            user_prompt = f"""Analyze this automation request: "{prompt}"
+MANDATORY Rules:
+1. Each node MUST have unique UUID in "id" field (format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
+2. Use descriptive node names like "Schedule Daily Trigger", "Fetch Weather Data", "Send Notification"
+3. Use EXACT n8n node types from list above
+4. Position nodes horizontally: [240, 300], [460, 300], [680, 300], etc.
+5. Generate REAL UUIDs - not placeholder text like "generate-random-uuid"
+6. Connect nodes properly in "connections" object
+
+UUID Generation Examples:
+- "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+- "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+- "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+
+CRITICAL Node Type Usage:
+- Social Media: Use "n8n-nodes-base.twitter", "n8n-nodes-base.facebook", "n8n-nodes-base.linkedIn"
+- Data Sources: Use "n8n-nodes-base.googleSheets", "n8n-nodes-base.airtable"
+- Communication: Use "n8n-nodes-base.emailSend", "n8n-nodes-base.slack"
+- AI/LLM: ONLY use "@n8n/n8n-nodes-langchain.lmOllama" for AI text generation
+- Logic: Use "n8n-nodes-base.if", "n8n-nodes-base.switch" for conditions
+- Data: Use "n8n-nodes-base.set", "n8n-nodes-base.code" for data transformation
+
+NEVER use generic names like "Node 1", "Node 2 2", "Node 3 3".
+NEVER use "@n8n/n8n-nodes-langchain.lmOllama" for social media posting - use proper social media nodes."""
         
-Determine what kind of n8n workflow this needs and provide detailed analysis."""
+        user_prompt = f"""Create a complete n8n workflow for: "{prompt}"
+
+Generate the full JSON response following the exact structure above. The workflow should be directly importable into n8n."""
         
         payload = {
             "model": model,
@@ -348,16 +369,19 @@ Determine what kind of n8n workflow this needs and provide detailed analysis."""
         
         workflow_name = self._generate_workflow_name(analysis, original_prompt)
         
-        # Check if this is a direct JSON workflow from vector store examples
+        # Check if this is a direct JSON workflow from AI
         workflow_type = analysis.get("workflow_type", "manual")
         if workflow_type == "direct_json":
-            logger.info("🎯 Using direct JSON workflow from vector store examples")
+            logger.info("🎯 Using direct JSON workflow from AI")
             complete_workflow = analysis.get("complete_workflow")
             if complete_workflow:
                 logger.info("✅ AI provided complete workflow JSON - bypassing workflow builder entirely")
-                # Add necessary metadata
-                complete_workflow["name"] = workflow_name
-                complete_workflow["description"] = analysis.get("description", "AI-generated from vector examples")
+                
+                # Ensure the workflow has proper name and description
+                if "name" not in complete_workflow or not complete_workflow["name"]:
+                    complete_workflow["name"] = workflow_name
+                if "description" not in complete_workflow:
+                    complete_workflow["description"] = analysis.get("description", "AI-generated workflow")
                 
                 # Return the complete workflow directly without using WorkflowConfig models
                 class DirectWorkflow:
