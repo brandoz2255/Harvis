@@ -5,6 +5,7 @@ Handles authentication and communication with the n8n REST API for workflow CRUD
 """
 
 import os
+import json
 import requests
 import logging
 from typing import Dict, List, Optional, Any
@@ -207,37 +208,96 @@ class N8nClient:
         Returns:
             Sanitized payload without read-only fields and proper field types
         """
-        read_only_fields = [
-            'id', 
-            'active', 
-            'tags',
-            'createdAt', 
-            'updatedAt',
-            'createdBy',
-            'updatedBy', 
-            'versionId'
+        import uuid
+        
+        # Only include fields that n8n API actually accepts for workflow creation
+        allowed_fields = [
+            'name',
+            'nodes', 
+            'connections',
+            'settings',
+            'staticData'
         ]
-        sanitized = {k: v for k, v in payload.items() if k not in read_only_fields}
         
-        if any(field in payload for field in read_only_fields):
-            removed_fields = [field for field in read_only_fields if field in payload]
-            logger.info(f"Removed read-only fields from payload: {removed_fields}")
+        # Start with only allowed fields
+        sanitized = {k: v for k, v in payload.items() if k in allowed_fields}
         
-        # Ensure all nodes have credentials as objects, not null
-        if 'nodes' in sanitized:
-            for node in sanitized['nodes']:
-                if 'credentials' not in node or node['credentials'] is None:
-                    node['credentials'] = {}
-                    logger.debug(f"Fixed credentials field for node: {node.get('name', 'unknown')}")
-        
-        # Ensure settings and staticData are objects, not null
-        if 'settings' not in sanitized or sanitized['settings'] is None:
+        # Ensure required fields exist
+        if 'name' not in sanitized:
+            sanitized['name'] = 'Generated Workflow'
+        if 'nodes' not in sanitized:
+            sanitized['nodes'] = []
+        if 'connections' not in sanitized:
+            sanitized['connections'] = {}
+        if 'settings' not in sanitized:
             sanitized['settings'] = {}
-            logger.debug("Fixed settings field to be empty object")
-        
-        if 'staticData' not in sanitized or sanitized['staticData'] is None:
+        if 'staticData' not in sanitized:
             sanitized['staticData'] = {}
-            logger.debug("Fixed staticData field to be empty object")
+        
+        # Fix node IDs - n8n expects UUIDs, not custom IDs from LLM
+        if 'nodes' in sanitized:
+            node_id_mapping = {}
+            for node in sanitized['nodes']:
+                if 'id' in node:
+                    old_id = node['id']
+                    new_id = str(uuid.uuid4())
+                    node_id_mapping[old_id] = new_id
+                    node['id'] = new_id
+                    logger.debug(f"Remapped node ID: {old_id} → {new_id}")
+                else:
+                    node['id'] = str(uuid.uuid4())
+                
+                # Ensure required node fields
+                if 'typeVersion' not in node:
+                    node['typeVersion'] = 1
+                if 'position' not in node:
+                    node['position'] = [300, 300]
+                if 'parameters' not in node:
+                    node['parameters'] = {}
+                if 'credentials' not in node:
+                    node['credentials'] = {}
+            
+            # Fix connections to use new node IDs
+            if 'connections' in sanitized:
+                new_connections = {}
+                for source_node, connections in sanitized['connections'].items():
+                    # Update source node ID
+                    new_source_id = node_id_mapping.get(source_node, source_node)
+                    new_connections[new_source_id] = {}
+                    
+                    for output_type, outputs in connections.items():
+                        new_connections[new_source_id][output_type] = []
+                        # Handle nested array structure - outputs might contain another array
+                        if isinstance(outputs, list) and len(outputs) > 0 and isinstance(outputs[0], list):
+                            # Structure is: outputs = [[{connection}, {connection}]]
+                            for output_list in outputs:
+                                for connection in output_list:
+                                    if isinstance(connection, dict):
+                                        old_target = connection.get('node')
+                                        if old_target in node_id_mapping:
+                                            connection['node'] = node_id_mapping[old_target]
+                                        new_connections[new_source_id][output_type].append(connection)
+                                    else:
+                                        logger.warning(f"Unexpected connection type: {type(connection)}, value: {connection}")
+                                        new_connections[new_source_id][output_type].append(connection)
+                        else:
+                            # Structure is: outputs = [{connection}, {connection}]  
+                            for connection in outputs:
+                                if isinstance(connection, dict):
+                                    old_target = connection.get('node')
+                                    if old_target in node_id_mapping:
+                                        connection['node'] = node_id_mapping[old_target]
+                                    new_connections[new_source_id][output_type].append(connection)
+                                else:
+                                    logger.warning(f"Unexpected connection type: {type(connection)}, value: {connection}")
+                                    new_connections[new_source_id][output_type].append(connection)
+                
+                sanitized['connections'] = new_connections
+        
+        # Log what was filtered out
+        filtered_fields = [k for k in payload.keys() if k not in allowed_fields]
+        if filtered_fields:
+            logger.info(f"Filtered out non-allowed fields from payload: {filtered_fields}")
         
         return sanitized
 
@@ -254,6 +314,11 @@ class N8nClient:
         try:
             # Sanitize payload to remove read-only fields like 'active'
             sanitized_data = self._sanitize_workflow_payload(workflow_data)
+            
+            # Debug logging
+            logger.info(f"Original workflow data keys: {list(workflow_data.keys())}")
+            logger.info(f"Sanitized workflow data keys: {list(sanitized_data.keys())}")
+            logger.debug(f"Sanitized payload structure: {json.dumps(sanitized_data, indent=2)[:2000]}")
             
             workflow = self._make_request('POST', '/workflows', json=sanitized_data)
             workflow_id = workflow.get('id', 'unknown')

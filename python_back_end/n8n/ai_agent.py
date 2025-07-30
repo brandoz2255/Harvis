@@ -56,10 +56,10 @@ class N8nAIAgent:
         try:
             logger.info(f"🤖 Processing automation request with AI context: {request.prompt[:100]}...")
             
-            # Step 1: Search for similar workflows in vector database
+            # Step 1: Search for similar workflows in vector database with minimal examples
             context_data = await self.vector_db.get_workflow_suggestions(
                 user_request=request.prompt,
-                context_limit=10
+                context_limit=10  # Reduced to prevent model crashes
             )
             
             # Step 2: Enhance the original prompt with context
@@ -128,7 +128,7 @@ class N8nAIAgent:
             "Similar Workflow Examples for Reference:",
         ]
         
-        for i, workflow in enumerate(similar_workflows[:5], 1):
+        for i, workflow in enumerate(similar_workflows[:5], 1):  # Show fewer examples to prevent crashes
             metadata = workflow.get("metadata", {})
             content = workflow.get("content", "")
             score = workflow.get("similarity_score", 0)
@@ -138,17 +138,28 @@ class N8nAIAgent:
             
             enhanced_parts.extend([
                 f"{i}. {workflow_name} (similarity: {score:.3f})",
-                f"   Nodes used: {', '.join(node_types[:5]) if node_types else 'N/A'}",
-                f"   Description: {content[:150]}...",
+                f"   Nodes used: {', '.join(node_types[:3]) if node_types else 'N/A'}",
+                f"   Content: {content[:200]}...",  # Reduced content to prevent prompt overflow
                 ""
             ])
         
         enhanced_parts.extend([
-            "Instructions:",
-            "- Use the above examples as inspiration for creating the requested workflow",
-            "- Adapt the node types and patterns that are most relevant",
-            "- Create a new workflow that fulfills the user's specific requirements",
-            f"- Original request: {original_prompt}"
+            "CRITICAL WORKFLOW BUILDING INSTRUCTIONS:",
+            "1. Find the most relevant example above for the user request",
+            "2. Extract the complete workflow JSON structure from that example",
+            "3. Use the exact node types (e.g., '@n8n/n8n-nodes-langchain.lmOllama', 'n8n-nodes-base.youTube')",
+            "4. Use descriptive node names, never generic 'Node 1', 'Node 2', 'Node 3 3'",
+            "5. Set workflow_type to 'custom_with_structure'",
+            "6. Include the full workflow JSON in the 'full_workflow' field",
+            "7. Adapt parameters to match the user's specific requirements",
+            "",
+            f"USER REQUEST TO IMPLEMENT: {original_prompt}",
+            "",
+            "Based on the examples above, create a complete n8n workflow with:",
+            "- Specific descriptive node names (e.g., 'Ollama AI Generator', 'YouTube Upload', 'Content Processor')",
+            "- Exact node types from the examples above", 
+            "- Proper connections between nodes",
+            "- Parameters adapted for the user request"
         ])
         
         return "\n".join(enhanced_parts)
