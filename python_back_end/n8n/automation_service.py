@@ -184,7 +184,7 @@ class N8nAutomationService:
                 "execution_time": execution_time
             }
     
-    async def _analyze_user_prompt(self, prompt: str, model: str = "mistral") -> Dict[str, Any]:
+    async def _analyze_user_prompt(self, prompt: str, model: str = "auto") -> Dict[str, Any]:
         """
         Analyze user prompt with AI to extract workflow requirements
         
@@ -195,6 +195,11 @@ class N8nAutomationService:
         Returns:
             Analysis results with workflow requirements
         """
+        # Handle auto model selection - default to mistral for n8n workflows
+        if model == "auto":
+            model = "mistral"  # Mistral is good for structured JSON generation
+            logger.info(f"Auto-selected model: {model} for n8n workflow generation")
+        
         system_prompt = """You are an n8n workflow automation expert. Generate COMPLETE n8n workflow JSON that can be directly imported into n8n.
 
 CRITICAL: Your response must be a valid JSON object that matches n8n's exact import format.
