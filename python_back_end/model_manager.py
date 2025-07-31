@@ -91,9 +91,28 @@ def load_whisper_model():
         if whisper is None:
             logger.error("❌ Whisper not available - install with: pip install openai-whisper")
             return None
-        logger.info("🔄 Loading Whisper model")
-        whisper_model = whisper.load_model("base")
-        logger.info("✅ Whisper model loaded successfully")
+        try:
+            logger.info("🔄 Loading Whisper model")
+            # Try a larger model for better transcription accuracy
+            try:
+                whisper_model = whisper.load_model("medium")
+                logger.info("✅ Loaded Whisper 'medium' model")
+            except Exception as e:
+                logger.warning(f"Failed to load 'medium' model, falling back to 'small': {e}")
+                try:
+                    whisper_model = whisper.load_model("small")
+                    logger.info("✅ Loaded Whisper 'small' model")
+                except Exception as e2:
+                    logger.warning(f"Failed to load 'small' model, falling back to 'base': {e2}")
+                    whisper_model = whisper.load_model("base")
+            logger.info("✅ Whisper model loaded successfully")
+        except AttributeError as e:
+            logger.error(f"❌ Whisper module missing load_model: {e}")
+            logger.error(f"Available whisper attributes: {dir(whisper)}")
+            return None
+        except Exception as e:
+            logger.error(f"❌ Failed to load Whisper model: {e}")
+            return None
     return whisper_model
 
 # ─── Model Unloading Functions ──────────────────────────────────────────────
