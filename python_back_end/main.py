@@ -281,7 +281,7 @@ logger.info("Using device: %s", "cuda" if device == 0 else "cpu")
 
 
 # ─── Config --------------------------------------------------------------------
-OLLAMA_URL = "https://coyotedev.ngrok.app/ollama"
+OLLAMA_URL = "https://coyotegpt.ngrok.app/ollama"
 API_KEY = os.getenv("OLLAMA_API_KEY", "key")
 DEFAULT_MODEL = "llama3.2:3b"
 
@@ -1291,17 +1291,166 @@ async def mic_chat(file: UploadFile = File(...), model: str = Form(DEFAULT_MODEL
         
         # Save uploaded file to temp
         contents = await file.read()
-        tmp_path = os.path.join(tempfile.gettempdir(), f"{uuid.uuid4()}.wav")
+        logger.info(f"Received audio data: {len(contents)} bytes, content_type: {file.content_type}")
+        
+        if len(contents) == 0:
+            raise HTTPException(400, "No audio data received")
+        
+        # Detect actual audio format from header
+        header = contents[:4]
+        logger.info(f"Audio file header: {header}")
+        
+        # Use appropriate file extension based on actual format
+        if header == b'RIFF':
+            file_ext = ".wav"
+        elif header == b'OggS':
+            file_ext = ".ogg"
+        elif header.startswith(b'ID3') or header.startswith(b'\xff\xfb'):
+            file_ext = ".mp3"
+        elif header.startswith(b'\x1a\x45\xdf\xa3'):  # WebM/Matroska
+            file_ext = ".webm"
+        else:
+            logger.warning(f"Unknown audio format, header: {header}, trying as original filename")
+            # Use original filename extension if available
+            if hasattr(file, 'filename') and file.filename:
+                _, file_ext = os.path.splitext(file.filename)
+                if not file_ext:
+                    file_ext = ".wav"
+            else:
+                file_ext = ".wav"
+            
+        tmp_path = os.path.join(tempfile.gettempdir(), f"{uuid.uuid4()}{file_ext}")
         with open(tmp_path, "wb") as f:
             f.write(contents)
+        
+        logger.info(f"Saved audio file as: {tmp_path}")
 
         # Transcribe it
-        result = get_whisper_model().transcribe(tmp_path)
+        whisper_model = get_whisper_model()
+        if whisper_model is None:
+            raise HTTPException(500, "Whisper model not available")
+        
+        logger.info(f"Transcribing audio file: {tmp_path} (size: {os.path.getsize(tmp_path)} bytes)")
+        
+        try:
+            # Use Whisper's load_audio function to preprocess the audio
+            import whisper
+            audio = whisper.load_audio(tmp_path)
+            logger.info(f"Loaded audio shape: {audio.shape}, duration: {len(audio)/16000:.2f}s")
+            
+            # Check if audio has any non-zero values
+            import numpy as np
+            max_amplitude = np.max(np.abs(audio))
+            logger.info(f"Audio max amplitude: {max_amplitude}")
+            
+            # Amplify quiet audio
+            if max_amplitude < 0.001:  # Very quiet audio
+                logger.warning("Audio appears to be silent or very quiet")
+                raise HTTPException(400, "Audio is too quiet or silent to transcribe")
+            elif max_amplitude < 0.1:  # Quiet audio - amplify it
+                logger.warning(f"Audio appears to be quiet (amplitude: {max_amplitude}), amplifying...")
+                amplification_factor = min(0.5 / max_amplitude, 10.0)  # Cap at 10x amplification
+                audio_amplified = audio * amplification_factor
+                logger.info(f"Applied {amplification_factor:.1f}x amplification")
+                
+                # Save amplified audio to new temp file
+                import soundfile as sf
+                amplified_path = tmp_path.replace('.ogg', '_amplified.wav')
+                sf.write(amplified_path, audio_amplified, 16000)
+                logger.info(f"Saved amplified audio to: {amplified_path}")
+                
+                # Check if amplified audio has actual content
+                rms = np.sqrt(np.mean(audio_amplified**2))
+                logger.info(f"Amplified audio RMS: {rms}")
+                
+                # Check for potential silence or noise patterns
+                non_zero_samples = np.count_nonzero(audio_amplified)
+                logger.info(f"Non-zero samples: {non_zero_samples}/{len(audio_amplified)} ({non_zero_samples/len(audio_amplified)*100:.1f}%)")
+                
+                tmp_path = amplified_path
+            
+            # Try transcription with improved parameters
+            logger.info("Attempting transcription with optimized settings...")
+            
+            # First attempt: Use default parameters but force English
+            result = whisper_model.transcribe(
+                tmp_path,
+                fp16=False,
+                language='en',  # Force English to prevent language misdetection
+                task='transcribe',
+                verbose=True  # Enable verbose for debugging
+            )
+            
+            # If still no good result, try with more aggressive settings
+            if not result.get('text', '').strip() or len(result.get('text', '').strip()) < 3:
+                logger.info("First attempt failed, trying with basic settings...")
+                result = whisper_model.transcribe(
+                    tmp_path,
+                    fp16=False,
+                    language='en',
+                    task='transcribe',
+                    verbose=True
+                )
+            
+            # Final fallback: Force English with maximum flexibility
+            if not result.get('text', '').strip() or len(result.get('text', '').strip()) < 3:
+                logger.info("Final attempt with maximum English flexibility...")
+                result = whisper_model.transcribe(
+                    tmp_path,
+                    fp16=False,
+                    language='en',  # FORCE English - never auto-detect
+                    task='transcribe',
+                    temperature=1.0,  # Maximum creativity
+                    no_speech_threshold=0.01,  # Extremely low threshold
+                    logprob_threshold=-2.0,    # Very lenient
+                    compression_ratio_threshold=2.5,
+                    condition_on_previous_text=False,
+                    verbose=False
+                )
+        except Exception as e:
+            logger.error(f"Error during transcription: {e}")
+            raise HTTPException(500, f"Transcription failed: {str(e)}")
+            
+        logger.info(f"Whisper transcription result: {result}")
+        
         message = result.get("text", "").strip()
         logger.info(f"MIC input transcribed: {message}")
 
         if not message:
             raise HTTPException(400, "Could not transcribe anything.")
+        
+        # Check for Whisper hallucinations (common phrases with high no_speech_prob)
+        segments = result.get("segments", [])
+        if segments:
+            avg_no_speech_prob = sum(seg.get("no_speech_prob", 0) for seg in segments) / len(segments)
+            logger.info(f"Average no_speech_prob: {avg_no_speech_prob}")
+            
+            # Common Whisper hallucinations
+            hallucination_phrases = [
+                "thanks for watching", "thank you for watching", "thanks for listening",
+                "subscribe", "like and subscribe", "don't forget to subscribe",
+                "see you next time", "bye", "goodbye", "hello", "hi there",
+                "welcome back", "welcome to", "this is"
+            ]
+            
+            message_lower = message.lower().strip(".,!?")
+            if (avg_no_speech_prob > 0.6 and 
+                any(phrase in message_lower for phrase in hallucination_phrases)):
+                logger.warning(f"Likely hallucination detected: '{message}' (no_speech_prob: {avg_no_speech_prob})")
+                raise HTTPException(400, "Audio unclear - Whisper detected mostly silence. Please speak louder and closer to microphone.")
+
+        # Clean up temp files
+        try:
+            os.unlink(tmp_path)
+            # Also clean up amplified file if it exists
+            if tmp_path.endswith('_amplified.wav'):
+                original_path = tmp_path.replace('_amplified.wav', '.ogg')
+                try:
+                    os.unlink(original_path)
+                except:
+                    pass
+        except:
+            pass
 
         # Now use existing chat logic with the selected model
         logger.info(f"🎤 MIC-CHAT: Creating ChatRequest with model: '{model}'")
@@ -1310,6 +1459,19 @@ async def mic_chat(file: UploadFile = File(...), model: str = Form(DEFAULT_MODEL
 
     except Exception as e:
         logger.exception("Mic chat failed")
+        # Clean up temp files on error
+        try:
+            if 'tmp_path' in locals():
+                os.unlink(tmp_path)
+                # Also clean up amplified file if it exists
+                if tmp_path.endswith('_amplified.wav'):
+                    original_path = tmp_path.replace('_amplified.wav', '.ogg')
+                    try:
+                        os.unlink(original_path)
+                    except:
+                        pass
+        except:
+            pass
         raise HTTPException(500, str(e))
 
 # Research endpoints using the new research module with LangChain
