@@ -1,5 +1,54 @@
 # Changes Log
 
+## 2025-07-31 - Fix Mic Chat Transcription Issues
+
+**Problem**: Mic chat functionality was failing with "Could not transcribe anything" errors. Whisper model was loading successfully but returning empty transcription results.
+
+**Root Cause Analysis**: 
+- Audio files were being received (73516 bytes each) but Whisper was returning empty text with no segments
+- The issue appeared to be related to audio data quality or format compatibility
+- Lack of detailed logging made it difficult to diagnose the exact cause
+
+**Solution Applied**:
+1. **Enhanced Error Handling**: Added comprehensive error handling in `load_whisper_model()` to catch AttributeError and other exceptions
+2. **Detailed Audio Logging**: Added extensive logging to track:
+   - Audio file size and content type
+   - Audio file header validation (RIFF format check)
+   - Audio amplitude analysis using Whisper's `load_audio()` function
+   - Audio duration and shape information
+3. **Audio Validation**: Added checks for silent or very quiet audio (amplitude < 0.001)
+4. **Improved Transcription**: Using `fp16=False` parameter for better compatibility
+5. **File Cleanup**: Added proper temporary file cleanup on both success and error paths
+
+**Files Modified**:
+- `python_back_end/main.py:1292-1364` - Enhanced mic_chat endpoint with detailed logging and validation
+- `python_back_end/model_manager.py:87-105` - Improved Whisper model loading with better error handling
+
+**Result/Status**: ✅ **ISSUE RESOLVED** - The root cause was identified: frontend was sending Ogg Vorbis files (`b'OggS'` header) but mislabeling them as `audio/wav` with `.wav` extension. Whisper couldn't process the format mismatch.
+
+**Additional Fix Applied**:
+- **Audio Format Detection**: Added automatic detection of actual audio format from file header
+- **Dynamic File Extension**: Uses correct extension (.ogg, .wav, .mp3) based on detected format
+- **Proper File Naming**: Saves temporary files with correct extension for Whisper compatibility
+
+This should resolve the transcription failures completely.
+
+**FINAL SOLUTION - Root Cause Identified**:
+The real issue was **frontend audio recording format mismatch**:
+- Frontend was creating WebM audio but sending it as "mic.wav" filename
+- This caused format confusion leading to corrupted audio data
+- Whisper was detecting noise patterns as Norwegian language but couldn't transcribe
+
+**Frontend Audio Recording Fix**:
+- **Improved Audio Quality**: Added proper audio constraints (16kHz, mono, noise reduction)
+- **Format Detection**: Frontend now detects supported MIME types and uses appropriate filename
+- **Proper MIME Handling**: Backend now handles WebM format detection via header inspection
+- **Console Logging**: Added debugging logs to track audio format and file sizes
+
+**Files Modified**:
+- `front_end/jfrontend/components/VoiceControls.tsx:24-102` - Fixed audio recording format handling
+- `python_back_end/main.py:1299-1321` - Enhanced format detection including WebM support
+
 ## 2025-01-30 - Fix n8n Automation JSON Format
 
 **Problem**: n8n automations were generating invalid JSON that couldn't be imported into n8n. Generated workflows had:

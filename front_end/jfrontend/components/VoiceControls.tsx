@@ -23,10 +23,41 @@ export default function VoiceControls({ selectedModel = "llama3.2:3b" }: VoiceCo
 
   const startRecording = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      const mediaRecorder = new MediaRecorder(stream)
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          sampleRate: { ideal: 16000 },  // Prefer 16kHz for Whisper
+          channelCount: 1,    // Mono audio
+          echoCancellation: true,
+          noiseSuppression: false,  // Disable - can interfere with speech
+          autoGainControl: false,   // Disable - can cause volume fluctuations
+          googEchoCancellation: true,
+          googAutoGainControl: false,
+          googNoiseSuppression: false,
+          googHighpassFilter: false,
+          googTypingNoiseDetection: false
+        }
+      })
+      
+      // Log actual audio settings
+      const audioTrack = stream.getAudioTracks()[0]
+      const settings = audioTrack.getSettings()
+      console.log('Actual audio settings:', settings)
+      
+      // Try to use WAV format if supported, fallback to webm
+      let options: MediaRecorderOptions = {}
+      if (MediaRecorder.isTypeSupported('audio/wav')) {
+        options.mimeType = 'audio/wav'
+      } else if (MediaRecorder.isTypeSupported('audio/webm;codecs=pcm')) {
+        options.mimeType = 'audio/webm;codecs=pcm'
+      } else if (MediaRecorder.isTypeSupported('audio/webm')) {
+        options.mimeType = 'audio/webm'
+      }
+      
+      const mediaRecorder = new MediaRecorder(stream, options)
       mediaRecorderRef.current = mediaRecorder
       audioChunksRef.current = []
+
+      console.log('Recording with MIME type:', mediaRecorder.mimeType)
 
       mediaRecorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
@@ -35,7 +66,9 @@ export default function VoiceControls({ selectedModel = "llama3.2:3b" }: VoiceCo
       }
 
       mediaRecorder.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+        const mimeType = mediaRecorder.mimeType || 'audio/webm'
+        const audioBlob = new Blob(audioChunksRef.current, { type: mimeType })
+        console.log('Created audio blob:', audioBlob.size, 'bytes, type:', audioBlob.type)
         await sendAudioToBackend(audioBlob)
 
         // Stop all tracks to release microphone
@@ -62,8 +95,20 @@ export default function VoiceControls({ selectedModel = "llama3.2:3b" }: VoiceCo
     // Retry logic with 3 attempts
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
+        // Determine proper file extension based on MIME type
+        let filename = "mic.wav"
+        if (audioBlob.type.includes('webm')) {
+          filename = "mic.webm"
+        } else if (audioBlob.type.includes('wav')) {
+          filename = "mic.wav"
+        } else if (audioBlob.type.includes('ogg')) {
+          filename = "mic.ogg"
+        }
+        
+        console.log('Sending audio file:', filename, 'size:', audioBlob.size, 'type:', audioBlob.type)
+        
         const formData = new FormData()
-        formData.append("file", audioBlob, "mic.wav")
+        formData.append("file", audioBlob, filename)
         formData.append("model", selectedModel)
 
         const response = await fetch("/api/mic-chat", {
