@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { 
   MessageSquare, 
@@ -49,21 +49,47 @@ export default function ChatHistory({ onSessionSelect, currentSessionId }: ChatH
   const [editTitle, setEditTitle] = useState('')
   const [selectedView, setSelectedView] = useState<'sessions' | 'messages'>('sessions')
 
+  // Debounced fetch sessions to prevent spam
+  const fetchSessionsRef = useRef(fetchSessions)
+  fetchSessionsRef.current = fetchSessions
+  
+  const debouncedFetchSessions = useCallback(
+    (() => {
+      let timeoutId: NodeJS.Timeout
+      return () => {
+        clearTimeout(timeoutId)
+        timeoutId = setTimeout(() => {
+          fetchSessionsRef.current()
+        }, 500) // 500ms debounce
+      }
+    })(),
+    []
+  )
+  
   // Fetch sessions on mount only to prevent infinite loops
   useEffect(() => {
-    fetchSessions()
-  }, []) // Empty dependency array to run only on mount
+    debouncedFetchSessions()
+  }, [debouncedFetchSessions])
 
-  // Handle external session selection with proper cleanup
+  // Stabilized selectSession to prevent recreation
+  const selectSessionRef = useRef(selectSession)
+  selectSessionRef.current = selectSession
+  
+  const stableSelectSession = useCallback(
+    (sessionId: string) => selectSessionRef.current(sessionId),
+    []
+  )
+  
+  // Handle external session selection with proper cleanup and debouncing
   useEffect(() => {
     if (currentSessionId && currentSessionId !== currentSession?.id) {
-      // Use a ref to prevent stale closures
       const controller = new AbortController()
+      let timeoutId: NodeJS.Timeout
       
       const handleSelection = async () => {
         try {
           if (!controller.signal.aborted) {
-            await selectSession(currentSessionId)
+            await stableSelectSession(currentSessionId)
           }
         } catch (error) {
           if (!controller.signal.aborted) {
@@ -72,13 +98,15 @@ export default function ChatHistory({ onSessionSelect, currentSessionId }: ChatH
         }
       }
       
-      handleSelection()
+      // Debounce session selection to prevent rapid switches
+      timeoutId = setTimeout(handleSelection, 300)
       
       return () => {
         controller.abort()
+        clearTimeout(timeoutId)
       }
     }
-  }, [currentSessionId, currentSession?.id]) // Remove selectSession from deps
+  }, [currentSessionId, currentSession?.id, stableSelectSession])
 
   const filteredSessions = sessions.filter(session =>
     session.title.toLowerCase().includes(searchTerm.toLowerCase())
