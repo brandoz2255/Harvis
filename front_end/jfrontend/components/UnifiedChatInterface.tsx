@@ -396,6 +396,7 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
       message: messageContent,
       history: contextMessages, // Context isolated to current session
       model: optimalModel,
+      session_id: currentSession?.id || sessionId || null, // Pass session ID for backend context
       ...(needsWebSearch && { 
         enableWebSearch: true,
         exaggeration: 0.5,
@@ -599,6 +600,9 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
         const formData = new FormData()
         formData.append("file", audioBlob, "mic.wav")
         formData.append("model", modelToUse)
+        if (currentSession?.id || sessionId) {
+          formData.append("session_id", currentSession?.id || sessionId || "")
+        }
 
         const response = await fetch("/api/mic-chat", {
           method: "POST",
