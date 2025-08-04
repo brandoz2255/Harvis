@@ -83,7 +83,7 @@ def query_qwen(image_path: str, prompt: str) -> str:
         logger.error(f"Qwen2VL query failed: {e}")
         return f"[Qwen error] {e}"
 
-OLLAMA_URL = "https://harvis.example.com/ollama"
+OLLAMA_URL = "https://ollama.example.com/ollama"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 if GEMINI_API_KEY:
