@@ -147,13 +147,20 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
       
       if (currentSessionId) {
         setIsUsingStoreMessages(true)
-        // Clear messages immediately for responsive UI
-        setMessages([])
-        console.log(`🔄 Switching to session ${currentSessionId} - cleared local messages`)
+        // Preserve pending messages during session switch to prevent message loss
+        setMessages(prevMessages => {
+          const pendingMessages = prevMessages.filter(msg => msg.status === "pending")
+          console.log(`🔄 Switching to session ${currentSessionId} - preserved ${pendingMessages.length} pending messages`)
+          return pendingMessages
+        })
       } else {
         setIsUsingStoreMessages(false)
-        setMessages([])
-        console.log('🆕 Started new chat - cleared messages')
+        // For new chats, preserve pending messages too
+        setMessages(prevMessages => {
+          const pendingMessages = prevMessages.filter(msg => msg.status === "pending")
+          console.log(`🆕 Started new chat - preserved ${pendingMessages.length} pending messages`)
+          return pendingMessages
+        })
       }
     }
   }, [currentSession?.id, sessionId])
@@ -170,11 +177,18 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
         setMessages(prevMessages => {
             console.log(`🔄 [STORE_DEBUG] Reconciling with previous messages: ${prevMessages.length}`);
             
-            // If store is empty but we have local messages, keep local messages
+            // If store is empty but we have pending messages, keep pending messages
             // This prevents clearing during new session creation
-            if (storeMessages.length === 0 && prevMessages.length > 0) {
-                console.log(`⚠️ [STORE_DEBUG] Store empty but local messages exist - keeping local messages`);
-                return prevMessages;
+            const pendingMessages = prevMessages.filter(msg => msg.status === "pending")
+            if (storeMessages.length === 0 && pendingMessages.length > 0) {
+                console.log(`⚠️ [STORE_DEBUG] Store empty but have ${pendingMessages.length} pending messages - keeping pending messages`);
+                return pendingMessages;
+            }
+            
+            // If store is empty and no pending messages, return store (empty)
+            if (storeMessages.length === 0) {
+                console.log(`📭 [STORE_DEBUG] Store empty and no pending messages - clearing`);
+                return [];
             }
             
             // If store has messages, perform proper reconciliation
@@ -205,8 +219,18 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
                 } as Message;
             });
 
-            console.log(`📊 [STORE_DEBUG] Reconciliation complete: ${storeMessages.length} -> ${reconciled.length}`);
-            return reconciled;
+            // Add pending messages that don't have corresponding store messages
+            const unmatchedPending = pendingMessages.filter(pending => {
+                const key = pending.tempId || pending.id;
+                return !storeMessages.some(store => {
+                    const storeKey = (store as any).tempId || (store as any).id;
+                    return storeKey === key;
+                });
+            });
+
+            const finalMessages = [...reconciled, ...unmatchedPending];
+            console.log(`📊 [STORE_DEBUG] Reconciliation complete: ${storeMessages.length} store + ${unmatchedPending.length} pending -> ${finalMessages.length}`);
+            return finalMessages;
         });
     }
 }, [storeMessages, isUsingStoreMessages, currentSession?.id, sessionId]);
