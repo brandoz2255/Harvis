@@ -352,7 +352,7 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
     setIsLoading(true)
     
     // Log user interaction for AI insights
-    logUserInteraction(messageContent, optimalModel)
+    const userInsightId = logUserInteraction(messageContent, optimalModel)
 
     // Persist user message only if we have a session
     if (currentSession?.id) {
@@ -403,13 +403,6 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
       const data: ResearchChatResponse = await response.json()
 
       setMessages(currentMessages => {
-        // Create map of current messages by tempId/id for reconciliation
-        const currentMap = new Map<string, Message>()
-        currentMessages.forEach(msg => {
-          const key = msg.tempId || msg.id
-          if (key) currentMap.set(key, msg)
-        })
-
         // Update optimistic user message to "sent" status if it matches tempId
         const updatedMessages = [...currentMessages]
         const optimisticIndex = updatedMessages.findIndex(msg => msg.tempId === tempId)
@@ -420,18 +413,29 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
           }
         }
 
-        // Add only new assistant messages from server that aren't already in current messages
+        // Add only the latest assistant message if it's not already present
         const serverAssistantMessages = data.history.filter(msg => msg.role === "assistant")
-        const newAssistantMessages = serverAssistantMessages.filter(serverMsg => {
-          const serverKey = (serverMsg as any).tempId || (serverMsg as any).id
-          return !serverKey || !currentMap.has(serverKey)
-        }).map(serverMsg => ({
-          ...serverMsg,
-          status: "sent" as const,
-          timestamp: new Date((serverMsg as any).timestamp || Date.now())
-        }))
+        const latestAssistantMessage = serverAssistantMessages[serverAssistantMessages.length - 1]
+        
+        if (latestAssistantMessage) {
+          // Check if this assistant message already exists (by content and timestamp proximity)
+          const isDuplicate = updatedMessages.some(existingMsg => 
+            existingMsg.role === "assistant" && 
+            existingMsg.content === latestAssistantMessage.content &&
+            Math.abs(existingMsg.timestamp.getTime() - new Date().getTime()) < 5000 // Within 5 seconds
+          )
+          
+          if (!isDuplicate) {
+            const newAssistantMessage = {
+              ...latestAssistantMessage,
+              status: "sent" as const,
+              timestamp: new Date((latestAssistantMessage as any).timestamp || Date.now())
+            }
+            updatedMessages.push(newAssistantMessage)
+          }
+        }
 
-        return [...updatedMessages, ...newAssistantMessages]
+        return updatedMessages
       })
 
       const assistantResponse = data.history.find(msg => msg.role === "assistant")
@@ -443,6 +447,18 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
           inputType: "text",
         }
         await persistMessage(aiMessage, data.reasoning)
+      }
+
+      // Complete the user interaction insight
+      if (assistantResponse) {
+        completeInsight(userInsightId, `Response generated using ${optimalModel}`, "done")
+      }
+
+      // Handle reasoning content if present
+      if (data.reasoning) {
+        // Log the reasoning process in AI insights
+        const reasoningInsightId = logReasoningProcess(data.reasoning, optimalModel)
+        completeInsight(reasoningInsightId, "Reasoning process completed", "done")
       }
 
       if (data.searchResults) {
@@ -465,6 +481,9 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
       setMessages(currentMessages => currentMessages.map(msg =>
         msg.tempId === tempId ? { ...msg, status: "failed" } : msg
       ))
+      
+      // Complete the user interaction insight with error
+      completeInsight(userInsightId, `Error: ${error}`, "error")
     } finally {
       setIsLoading(false)
     }
