@@ -24,9 +24,9 @@ import {
   RefreshCw,
   Wifi,
   WifiOff,
-  Plus,
   MessageSquare,
 } from "lucide-react"
+import { v4 as uuidv4 } from 'uuid'
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card } from "@/components/ui/card"
@@ -38,8 +38,11 @@ import { useChatHistoryStore } from "@/stores/chatHistoryStore"
 import AuthStatus from "./AuthStatus"
 
 interface Message {
-  role: "user" | "assistant"
-  content: string
+  id?: string;
+  tempId?: string;
+  status?: "pending" | "sent" | "failed";
+  role: "user" | "assistant";
+  content: string;
   timestamp: Date
   model?: string
   inputType?: "text" | "voice" | "screen"
@@ -163,30 +166,36 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
   // Message sync effect - handles message updates for current session
   useEffect(() => {
     if (isUsingStoreMessages && currentSession?.id === sessionId && storeMessages) {
-      const messageCount = storeMessages.length
-      
-      // Only sync if we have new messages or if messages were cleared
-      if (messageCount !== lastSyncedMessages || (messageCount > 0 && messages.length === 0)) {
-        console.log(`📨 Syncing messages: ${lastSyncedMessages} -> ${messageCount} for session ${sessionId}`)
-        
-        // Convert store messages to local message format
-        const convertedMessages: Message[] = storeMessages.map(msg => ({
-          role: msg.role as "user" | "assistant",
-          content: msg.content,
-          timestamp: new Date(msg.created_at || Date.now()),
-          model: msg.model_used,
-          inputType: msg.input_type as "text" | "voice" | "screen",
-        }))
-        
-        setMessages(convertedMessages)
-        setLastSyncedMessages(messageCount)
-        console.log(`📨 Successfully synced ${convertedMessages.length} messages from store for session ${sessionId}`)
-      }
-    } else if (!isUsingStoreMessages && lastSyncedMessages > 0) {
-      // Reset sync counter when not using store messages
-      setLastSyncedMessages(0)
+        setMessages(prevMessages => {
+            const localMap = new Map<string, Message>();
+            prevMessages.forEach(m => {
+                if (m.tempId) localMap.set(m.tempId, m);
+                else if (m.id) localMap.set(m.id, m);
+            });
+
+            const reconciled = storeMessages.map(storeMsg => {
+                const storeMsgCasted = storeMsg as any;
+                const key = storeMsgCasted.tempId || storeMsgCasted.id;
+                const timestamp = storeMsgCasted.created_at ? new Date(storeMsgCasted.created_at) : new Date();
+                
+                if (key && localMap.has(key)) {
+                    return {
+                        ...storeMsg,
+                        status: "sent",
+                        timestamp,
+                    } as Message;
+                }
+                return {
+                    ...storeMsg,
+                    status: "sent",
+                    timestamp,
+                } as Message;
+            });
+
+            return reconciled;
+        });
     }
-  }, [storeMessages, isUsingStoreMessages, currentSession?.id, sessionId, lastSyncedMessages, messages.length])
+}, [storeMessages, isUsingStoreMessages, currentSession?.id, sessionId]);
 
   
   const handleCreateSession = useCallback(async () => {
@@ -238,36 +247,6 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
     }
   }
   
-  const handleNewChat = async () => {
-    try {
-      console.log('🆕 UI: Creating new chat')
-      
-      // Clear all local state immediately for responsive UI
-      setMessages([])
-      setLastSyncedMessages(0)
-      setIsUsingStoreMessages(true)
-      
-      const newSession = await createNewChat()
-      if (newSession) {
-        setSessionId(newSession.id)
-        console.log(`🆕 Created new chat session: ${newSession.id}`)
-      } else {
-        // If creation failed, revert to local messages with empty state
-        setIsUsingStoreMessages(false)
-        setMessages([])
-        setSessionId(null)
-        setLastSyncedMessages(0)
-        console.warn('⚠️ New chat creation failed, continuing with local-only mode')
-      }
-    } catch (error) {
-      console.error('Failed to create new chat:', error)
-      // Fallback to local-only mode
-      setIsUsingStoreMessages(false)
-      setMessages([])
-      setSessionId(null)
-      setLastSyncedMessages(0)
-    }
-  }
 
   const persistMessage = async (message: Message, reasoning?: string) => {
     if (!sessionId) return
@@ -348,34 +327,38 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
     return orchestrator.getAllModels()[0]?.name || "mistral"
   }
 
+
+// ... (rest of the component)
+
   const sendMessage = async (inputType: "text" | "voice" = "text") => {
     if ((!inputValue.trim() && inputType === "text") || isLoading) return
 
     const messageContent = inputType === "text" ? inputValue : "Voice message"
+    const tempId = uuidv4();
     const optimalModel = getOptimalModel(messageContent)
 
-    // Log the AI's thought process for this user interaction
-    const insightId = logUserInteraction(messageContent, optimalModel)
-
-    const userMessage: Message = {
+    const optimisticMessage: Message = {
+      tempId,
       role: "user",
       content: messageContent,
       timestamp: new Date(),
       model: optimalModel,
       inputType,
+      status: "pending",
     }
 
-    // Add message to current context (isolated per session)
-    setMessages((prev) => [...prev, userMessage])
+    setMessages(prev => [...prev, optimisticMessage])
     if (inputType === "text") setInputValue("")
     setIsLoading(true)
+    
+    // Log user interaction for AI insights
+    logUserInteraction(messageContent, optimalModel)
 
     // Persist user message only if we have a session
     if (currentSession?.id) {
-      await persistMessage(userMessage)
+      await persistMessage(optimisticMessage)
     }
 
-    // Check if research mode is enabled and if the query seems to need web search
     const needsWebSearch =
       isResearchMode &&
       (messageContent.toLowerCase().includes("search") ||
@@ -389,15 +372,15 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
         messageContent.toLowerCase().includes("how to"))
 
     const apiEndpoint = needsWebSearch ? "/api/research-chat" : "/api/chat"
-    // Use only current session's messages for context, never mix sessions
-    const contextMessages = isUsingStoreMessages && currentSession ? messages : messages
-    
+    const contextMessages = messages
+
     const payload = {
       message: messageContent,
-      history: contextMessages, // Context isolated to current session
+      history: contextMessages,
       model: optimalModel,
-      session_id: currentSession?.id || sessionId || null, // Pass session ID for backend context
-      ...(needsWebSearch && { 
+      session_id: currentSession?.id || sessionId || null,
+      tempId, // Pass tempId to the backend
+      ...(needsWebSearch && {
         enableWebSearch: true,
         exaggeration: 0.5,
         temperature: 0.8,
@@ -405,96 +388,86 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
       }),
     }
 
-    // Retry logic with 3 attempts
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        const response = await fetch(apiEndpoint, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify(payload),
-          credentials: 'include',
+    try {
+      const response = await fetch(apiEndpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+        credentials: 'include',
+      })
+
+      if (!response.ok) throw new Error(await response.text())
+
+      const data: ResearchChatResponse = await response.json()
+
+      setMessages(currentMessages => {
+        // Create map of current messages by tempId/id for reconciliation
+        const currentMap = new Map<string, Message>()
+        currentMessages.forEach(msg => {
+          const key = msg.tempId || msg.id
+          if (key) currentMap.set(key, msg)
         })
 
-        if (!response.ok) throw new Error(await response.text())
+        // Update optimistic user message to "sent" status if it matches tempId
+        const updatedMessages = [...currentMessages]
+        const optimisticIndex = updatedMessages.findIndex(msg => msg.tempId === tempId)
+        if (optimisticIndex >= 0) {
+          updatedMessages[optimisticIndex] = {
+            ...updatedMessages[optimisticIndex],
+            status: "sent"
+          }
+        }
 
-        const data: ResearchChatResponse = await response.json()
-
-        // Update messages with model info and search results
-        const updatedHistory = data.history.map((msg, index) => ({
-          ...msg,
-          timestamp: new Date(),
-          model: msg.role === "assistant" ? optimalModel : msg.model,
-          ...(index === data.history.length - 1 &&
-            msg.role === "assistant" && {
-              searchResults: data.searchResults,
-              searchQuery: data.searchQuery,
-            }),
+        // Add only new assistant messages from server that aren't already in current messages
+        const serverAssistantMessages = data.history.filter(msg => msg.role === "assistant")
+        const newAssistantMessages = serverAssistantMessages.filter(serverMsg => {
+          const serverKey = (serverMsg as any).tempId || (serverMsg as any).id
+          return !serverKey || !currentMap.has(serverKey)
+        }).map(serverMsg => ({
+          ...serverMsg,
+          status: "sent" as const,
+          timestamp: new Date((serverMsg as any).timestamp || Date.now())
         }))
 
-        // Update messages - ensure they belong only to current session
-        setMessages(updatedHistory)
+        return [...updatedMessages, ...newAssistantMessages]
+      })
 
-        // Persist assistant message with reasoning if present (only for current session)
-        const assistantMessage = updatedHistory.find(msg => msg.role === "assistant" && msg.timestamp)
-        if (assistantMessage && currentSession?.id) {
-          await persistMessage(assistantMessage, data.reasoning)
+      const assistantResponse = data.history.find(msg => msg.role === "assistant")
+      if (assistantResponse && currentSession?.id) {
+        const aiMessage: Message = {
+          ...assistantResponse,
+          timestamp: new Date(),
+          model: optimalModel,
+          inputType: "text",
         }
-
-        // Handle reasoning content if present
-        if (data.reasoning) {
-          // Log the reasoning process in AI insights
-          const reasoningInsightId = logReasoningProcess(data.reasoning, optimalModel)
-          completeInsight(reasoningInsightId, "Reasoning process completed", "done")
-          
-          // Complete the original insight with the final answer
-          completeInsight(insightId, data.final_answer?.substring(0, 100) + "..." || "Response completed")
-        } else {
-          // Complete the insight with the AI response (no reasoning)
-          const assistantResponse = data.history.find(msg => msg.role === "assistant")
-          if (assistantResponse) {
-            completeInsight(insightId, assistantResponse.content.substring(0, 100) + "...")
-          }
-        }
-
-        // Update search results if available
-        if (data.searchResults) {
-          setSearchResults(data.searchResults)
-          setLastSearchQuery(data.searchQuery || messageContent)
-        }
-
-        if (data.audio_path) {
-          setAudioUrl(data.audio_path)
-          setTimeout(() => {
-            if (audioRef.current) {
-              audioRef.current.play().catch(() => {
-                console.warn("Autoplay blocked. Use Replay button.")
-              })
-            }
-          }, 500)
-        }
-
-        setIsLoading(false)
-        return
-      } catch (error) {
-        console.error(`Chat attempt ${attempt + 1} failed:`, error)
-        if (attempt === 2) {
-          // Complete insight with error
-          completeInsight(insightId, `Error: ${error instanceof Error ? error.message : 'Unknown error'}`, 'error')
-          
-          const errorMessage: Message = {
-            role: "assistant",
-            content: "Sorry, I'm having trouble right now.",
-            timestamp: new Date(),
-            inputType: "text",
-          }
-          setMessages((prev) => [...prev, errorMessage])
-        }
-        await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)))
+        await persistMessage(aiMessage, data.reasoning)
       }
+
+      if (data.searchResults) {
+        setSearchResults(data.searchResults)
+        setLastSearchQuery(data.searchQuery || messageContent)
+      }
+
+      if (data.audio_path) {
+        setAudioUrl(data.audio_path)
+        setTimeout(() => {
+          if (audioRef.current) {
+            audioRef.current.play().catch(() => {
+              console.warn("Autoplay blocked. Use Replay button.")
+            })
+          }
+        }, 500)
+      }
+    } catch (error) {
+      console.error(`Chat attempt failed:`, error)
+      setMessages(currentMessages => currentMessages.map(msg =>
+        msg.tempId === tempId ? { ...msg, status: "failed" } : msg
+      ))
+    } finally {
+      setIsLoading(false)
     }
-    setIsLoading(false)
   }
 
   const performWebSearch = async (query: string) => {
@@ -626,12 +599,27 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
         setMessages(updatedHistory)
 
         // Persist voice messages to current session
-        const userMsg = updatedHistory.find((msg: Message) => msg.role === "user" && msg.inputType === "voice")
-        const assistantMsg = updatedHistory.find((msg: Message) => msg.role === "assistant")
+        const userVoiceMsg = data.history.find((msg: any) => msg.role === "user")
+        const assistantResponse = data.history.find((msg: any) => msg.role === "assistant")
         
         if (currentSession?.id) {
-          if (userMsg) await persistMessage(userMsg)
-          if (assistantMsg) await persistMessage(assistantMsg, data.reasoning)
+          if (userVoiceMsg) {
+            const userMessage: Message = {
+              ...userVoiceMsg,
+              timestamp: new Date(),
+              inputType: "voice",
+            }
+            await persistMessage(userMessage)
+          }
+          if (assistantResponse) {
+            const aiMessage: Message = {
+              ...assistantResponse,
+              timestamp: new Date(),
+              model: modelToUse,
+              inputType: "text",
+            }
+            await persistMessage(aiMessage, data.reasoning)
+          }
         }
 
         // Handle reasoning content if present (same as regular chat)
@@ -904,7 +892,7 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
         <AnimatePresence>
           {messages.map((message, index) => (
             <motion.div
-              key={index}
+              key={message.tempId || message.id || index}
               initial={{ opacity: 0, y: 20, scale: 0.95 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, y: -20, scale: 0.95 }}
@@ -915,6 +903,11 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
                 className={`max-w-[80%] p-3 rounded-lg ${
                   message.role === "user" ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-100"
                 }`}
+                style={{
+                  opacity: message.status === "pending" ? 0.6 : 1,
+                  borderColor: message.status === "failed" ? "red" : "transparent",
+                  borderWidth: message.status === "failed" ? "1px" : "0px",
+                }}
               >
                 <div className="flex items-center justify-between mb-1">
                   <div className="flex items-center space-x-2">
