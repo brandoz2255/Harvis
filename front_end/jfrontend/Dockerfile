@@ -5,7 +5,7 @@ WORKDIR /app
 COPY package.json package-lock.json* pnpm-lock.yaml* ./
 
 RUN \
-  if [ -f package-lock.json ]; then npm ci; \
+  if [ -f package-lock.json ]; then npm install; \
   elif [ -f pnpm-lock.yaml ]; then \
     npm install -g pnpm && pnpm install --frozen-lockfile; \
   else npm install; fi
