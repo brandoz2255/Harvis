@@ -1280,7 +1280,7 @@ async def analyze_screen_with_tts(req: ScreenAnalysisWithTTSRequest):
 # Whisper model will be loaded on demand
 
 @app.post("/api/mic-chat", tags=["voice"])
-async def mic_chat(file: UploadFile = File(...), model: str = Form(DEFAULT_MODEL), current_user: UserResponse = Depends(get_current_user)):
+async def mic_chat(file: UploadFile = File(...), model: str = Form(DEFAULT_MODEL), session_id: Optional[str] = Form(None), current_user: UserResponse = Depends(get_current_user)):
     try:
         # DEBUG: Log the received model parameter
         logger.info(f"🎤 MIC-CHAT: Received model parameter: '{model}' (type: {type(model)})")
@@ -1453,8 +1453,8 @@ async def mic_chat(file: UploadFile = File(...), model: str = Form(DEFAULT_MODEL
             pass
 
         # Now use existing chat logic with the selected model
-        logger.info(f"🎤 MIC-CHAT: Creating ChatRequest with model: '{model}'")
-        chat_req = ChatRequest(message=message, model=model)
+        logger.info(f"🎤 MIC-CHAT: Creating ChatRequest with model: '{model}' and session_id: '{session_id}'")
+        chat_req = ChatRequest(message=message, model=model, session_id=session_id)
         return await chat(chat_req, request=None, current_user=current_user)
 
     except Exception as e:
