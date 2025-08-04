@@ -5,6 +5,9 @@ from starlette.websockets import WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn, os, sys, tempfile, uuid, base64, io, logging, re, requests, random
+import subprocess
+import asyncio
+import time
 
 # Load environment variables from .env file
 try:
@@ -248,7 +251,7 @@ async def startup_event():
                 n8n_client=n8n_client,
                 workflow_builder=workflow_builder,
                 storage=n8n_storage,
-                ollama_url=OLLAMA_URL
+                ollama_url=CLOUD_OLLAMA_URL  # Pass cloud URL as primary, service will handle fallback
             )
             logger.info("✅ n8n automation service fully initialized")
             
@@ -281,9 +284,111 @@ logger.info("Using device: %s", "cuda" if device == 0 else "cpu")
 
 
 # ─── Config --------------------------------------------------------------------
-OLLAMA_URL = "https://harvis.example.com/ollama"
+CLOUD_OLLAMA_URL = "https://harvis.example.com/ollama"
+LOCAL_OLLAMA_URL = "http://ollama:11434"
 API_KEY = os.getenv("OLLAMA_API_KEY", "key")
 DEFAULT_MODEL = "llama3.2:3b"
+
+def make_ollama_request(endpoint, payload, timeout=90):
+    """
+    Make a POST request to Ollama with automatic fallback from cloud to local.
+    Returns the response object from the successful request.
+    """
+    headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY != "key" else {}
+    
+    # Try cloud first
+    try:
+        logger.info("🌐 Trying cloud Ollama: %s", CLOUD_OLLAMA_URL)
+        response = requests.post(f"{CLOUD_OLLAMA_URL}{endpoint}", json=payload, headers=headers, timeout=timeout)
+        if response.status_code == 200:
+            logger.info("✅ Cloud Ollama request successful")
+            return response
+        else:
+            logger.warning("⚠️ Cloud Ollama returned status %s", response.status_code)
+    except Exception as e:
+        logger.warning("⚠️ Cloud Ollama request failed: %s", e)
+    
+    # Fallback to local
+    try:
+        logger.info("🏠 Falling back to local Ollama: %s", LOCAL_OLLAMA_URL)
+        response = requests.post(f"{LOCAL_OLLAMA_URL}{endpoint}", json=payload, timeout=timeout)
+        if response.status_code == 200:
+            logger.info("✅ Local Ollama request successful")
+            return response
+        else:
+            logger.error("❌ Local Ollama returned status %s", response.status_code)
+            response.raise_for_status()
+    except Exception as e:
+        logger.error("❌ Local Ollama request failed: %s", e)
+        raise
+    
+    return response
+
+def make_ollama_get_request(endpoint, timeout=10):
+    """
+    Make a GET request to Ollama with automatic fallback from cloud to local.
+    Returns the response object from the successful request.
+    """
+    headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY != "key" else {}
+    
+    # Try cloud first
+    try:
+        logger.info("🌐 Trying cloud Ollama GET: %s", CLOUD_OLLAMA_URL)
+        response = requests.get(f"{CLOUD_OLLAMA_URL}{endpoint}", headers=headers, timeout=timeout)
+        if response.status_code == 200:
+            logger.info("✅ Cloud Ollama GET request successful")
+            return response
+        else:
+            logger.warning("⚠️ Cloud Ollama GET returned status %s", response.status_code)
+    except Exception as e:
+        logger.warning("⚠️ Cloud Ollama GET request failed: %s", e)
+    
+    # Fallback to local
+    try:
+        logger.info("🏠 Falling back to local Ollama GET: %s", LOCAL_OLLAMA_URL)
+        response = requests.get(f"{LOCAL_OLLAMA_URL}{endpoint}", timeout=timeout)
+        if response.status_code == 200:
+            logger.info("✅ Local Ollama GET request successful")
+            return response
+        else:
+            logger.error("❌ Local Ollama GET returned status %s", response.status_code)
+            response.raise_for_status()
+    except Exception as e:
+        logger.error("❌ Local Ollama GET request failed: %s", e)
+        raise
+    
+    return response
+
+def get_ollama_url():
+    """
+    Try cloud Ollama first, fallback to local if cloud fails.
+    Returns the working Ollama URL for initialization purposes.
+    """
+    # Try cloud first
+    try:
+        headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY != "key" else {}
+        response = requests.get(f"{CLOUD_OLLAMA_URL}/api/tags", headers=headers, timeout=5)
+        if response.status_code == 200:
+            logger.info("✅ Using cloud Ollama URL: %s", CLOUD_OLLAMA_URL)
+            return CLOUD_OLLAMA_URL
+    except Exception as e:
+        logger.warning("⚠️ Cloud Ollama unavailable: %s", e)
+    
+    # Fallback to local
+    try:
+        response = requests.get(f"{LOCAL_OLLAMA_URL}/api/tags", timeout=5)
+        if response.status_code == 200:
+            logger.info("✅ Using local Ollama URL: %s", LOCAL_OLLAMA_URL)
+            return LOCAL_OLLAMA_URL
+    except Exception as e:
+        logger.error("❌ Local Ollama also unavailable: %s", e)
+    
+    # If both fail, default to cloud (let the actual request handle the error)
+    logger.warning("⚠️ Both Ollama instances unavailable, defaulting to cloud")
+    return CLOUD_OLLAMA_URL
+
+# Get the working Ollama URL for initialization
+OLLAMA_URL = get_ollama_url()
 
 # ─── Pydantic schemas ----------------------------------------------------------
 class ChatRequest(BaseModel):
@@ -354,6 +459,46 @@ class RunCommandRequest(BaseModel):
 class SaveFileRequest(BaseModel):
     filename: str
     content: str
+
+class RunCodeRequest(BaseModel):
+    code: str
+    timeout: Optional[int] = 30
+
+class RunCodeResponse(BaseModel):
+    output: Optional[str] = None
+    error: Optional[str] = None
+    execution_time: float
+    container_id: Optional[str] = None
+
+class AssistantRequest(BaseModel):
+    messages: List[Dict[str, str]]
+    model: str = DEFAULT_MODEL
+    context: Optional[Dict[str, Any]] = None
+
+class AssistantResponse(BaseModel):
+    reply: str
+    reasoning: Optional[str] = None
+    model_used: str
+
+class TerminalRequest(BaseModel):
+    command: str
+    working_directory: Optional[str] = None
+    timeout: Optional[int] = 30
+
+class TerminalResponse(BaseModel):
+    command: str
+    output: str
+    error: str
+    exit_code: int
+    execution_time: float
+    working_directory: str
+
+class FileContentRequest(BaseModel):
+    filename: str
+    content: str
+
+class FileListRequest(BaseModel):
+    directory: Optional[str] = ""
 
 # ─── Reasoning Model Helpers --------------------------------------------------
 def separate_thinking_from_final_output(text: str) -> tuple[str, str]:
@@ -766,10 +911,7 @@ async def chat(req: ChatRequest, request: Request, current_user: UserResponse = 
 
             logger.info("💬 CHAT: Using model '%s' for Ollama %s", req.model, OLLAMA_ENDPOINT)
 
-            headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY != "key" else {}
-            resp = requests.post(
-                f"{OLLAMA_URL}{OLLAMA_ENDPOINT}", json=payload, headers=headers, timeout=90
-            )
+            resp = make_ollama_request(OLLAMA_ENDPOINT, payload, timeout=90)
 
             if resp.status_code != 200:
                 logger.error("Ollama error %s: %s", resp.status_code, resp.text)
@@ -1092,10 +1234,9 @@ async def analyze_and_respond(req: AnalyzeAndRespondRequest):
                 }
 
                 logger.info(f"→ Asking Ollama with model {req.model}")
-                headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY != "key" else {}
                 
                 try:
-                    resp = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, headers=headers, timeout=90)
+                    resp = make_ollama_request("/api/chat", payload, timeout=90)
                     
                     if resp.status_code != 200:
                         logger.error("Ollama error %s: %s", resp.status_code, resp.text)
@@ -1229,8 +1370,7 @@ async def analyze_screen_with_tts(req: ScreenAnalysisWithTTSRequest):
                 ],
                 "stream": False,
             }
-            headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY != "key" else {}
-            resp = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, headers=headers, timeout=90)
+            resp = make_ollama_request("/api/chat", payload, timeout=90)
             resp.raise_for_status()
             llm_response = resp.json().get("message", {}).get("content", "").strip()
 
@@ -1675,11 +1815,8 @@ async def get_ollama_models():
     Fetches the list of available models from the Ollama server.
     """
     try:
-        url = f"{OLLAMA_URL}/api/tags"
-        headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY != "key" else {}
-        logger.info(f"Trying to connect to Ollama at: {url}")
-        logger.info(f"Using headers: {headers}")
-        response = requests.get(url, headers=headers, timeout=10)
+        logger.info("Fetching available models from Ollama with fallback")
+        response = make_ollama_get_request("/api/tags", timeout=10)
         logger.info(f"Ollama response status: {response.status_code}")
         logger.info(f"Ollama response headers: {response.headers}")
         logger.info(f"Ollama response text (first 200 chars): {response.text[:200]}")
@@ -2496,8 +2633,7 @@ Please provide a helpful, conversational response about how to implement this re
     }
 
     logger.info(f"→ Asking Ollama with model {model} for vibe coding")
-    headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY != "key" else {}
-    resp = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, headers=headers, timeout=120)
+    resp = make_ollama_request("/api/chat", payload, timeout=120)
     resp.raise_for_status()
     
     vibe_response = resp.json().get("message", {}).get("content", "").strip()
@@ -2598,4 +2734,589 @@ def generate_vibe_steps(message: str, response: str) -> List[Dict]:
         })
     
     return steps
+
+@app.post("/api/run", response_model=RunCodeResponse, tags=["vibe-coding"])
+async def run_code(req: RunCodeRequest):
+    """
+    Execute Python code in a secure Docker container.
+    """
+    start_time = time.time()
+    container_id = None
+    temp_file_path = None
+    
+    try:
+        import docker
+        logger.info(f"🐍 Code execution request received ({len(req.code)} chars)")
+        
+        # Create Docker client
+        client = docker.from_env()
+        
+        # Create temporary file with UUID-based naming
+        temp_file_id = str(uuid.uuid4())
+        temp_file_path = f"/tmp/code_{temp_file_id}.py"
+        
+        # Write code to temporary file
+        with open(temp_file_path, 'w') as f:
+            f.write(req.code)
+        
+        logger.info(f"📝 Code written to temporary file: {temp_file_path}")
+        
+        # Create and run container with comprehensive security settings
+        container = client.containers.run(
+            image="python:3.11-slim",
+            command=["python", "/code/main.py"],
+            volumes={temp_file_path: {'bind': '/code/main.py', 'mode': 'ro'}},
+            working_dir="/code",
+            # Security settings
+            network_disabled=True,  # No network access for security
+            read_only=True,  # Read-only file system
+            tmpfs={'/tmp': 'size=10m,noexec'},  # Temporary filesystem with limits
+            # Resource limits
+            mem_limit="128m",  # Memory limit
+            memswap_limit="128m",  # Disable swap
+            cpu_quota=50000,  # CPU limit (50% of one core)
+            cpu_period=100000,  # CPU period for quota
+            pids_limit=50,  # Limit number of processes
+            # Security options
+            security_opt=['no-new-privileges:true'],  # Prevent privilege escalation
+            cap_drop=['ALL'],  # Drop all capabilities
+            user='nobody',  # Run as non-root user
+            # Cleanup and execution settings
+            remove=True,  # Auto-remove container after execution
+            detach=False,
+            stdout=True,
+            stderr=True,
+            timeout=req.timeout or 30
+        )
+        
+        # Get container ID for response
+        container_id = container.id if hasattr(container, 'id') else "auto-removed"
+        
+        # Decode output
+        output = container.decode('utf-8') if container else ""
+        
+        execution_time = time.time() - start_time
+        logger.info(f"✅ Code executed successfully in {execution_time:.2f}s")
+        
+        return RunCodeResponse(
+            output=output,
+            error=None,
+            execution_time=execution_time,
+            container_id=container_id
+        )
+        
+    except docker.errors.ContainerError as e:
+        # Container ran but exited with non-zero code (runtime error)
+        execution_time = time.time() - start_time
+        error_output = e.stderr.decode('utf-8') if e.stderr else str(e)
+        logger.warning(f"⚠️ Code execution failed: {error_output}")
+        
+        return RunCodeResponse(
+            output=e.stdout.decode('utf-8') if e.stdout else None,
+            error=error_output,
+            execution_time=execution_time,
+            container_id=container_id
+        )
+        
+    except docker.errors.ImageNotFound:
+        execution_time = time.time() - start_time
+        error_msg = "Python Docker image not found. Please ensure python:3.11-slim is available."
+        logger.error(f"❌ {error_msg}")
+        
+        return RunCodeResponse(
+            output=None,
+            error=error_msg,
+            execution_time=execution_time,
+            container_id=container_id
+        )
+        
+    except Exception as e:
+        execution_time = time.time() - start_time
+        logger.error(f"❌ Code execution error: {e}")
+        
+        return RunCodeResponse(
+            output=None,
+            error=f"Code execution error: {str(e)}",
+            execution_time=execution_time,
+            container_id=container_id
+        )
+        
+    finally:
+        # Clean up temporary file
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.remove(temp_file_path)
+                logger.info(f"🧹 Cleaned up temporary file: {temp_file_path}")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to clean up temporary file: {e}")
+
+@app.post("/api/assistant", response_model=AssistantResponse, tags=["vibe-coding"])
+async def ai_assistant(req: AssistantRequest):
+    """
+    Interact with AI models for coding assistance using Ollama CLI.
+    """
+    try:
+        logger.info(f"🤖 AI Assistant request with model: {req.model}")
+        
+        # Format conversation for Ollama
+        conversation_text = ""
+        for msg in req.messages:
+            role = msg["role"]
+            content = msg["content"]
+            if role == "user":
+                conversation_text += f"User: {content}\n"
+            elif role == "assistant":
+                conversation_text += f"Assistant: {content}\n"
+        
+        # Add the current user message if not already included
+        if req.messages and req.messages[-1]["role"] == "user":
+            conversation_text += "Assistant: "
+        
+        logger.info(f"📝 Formatted conversation ({len(conversation_text)} chars)")
+        
+        # Determine model to use (with fallback)
+        model_to_use = req.model or DEFAULT_MODEL
+        logger.info(f"🎯 Using model: {model_to_use}")
+        
+        # Call Ollama CLI using subprocess
+        process = await asyncio.create_subprocess_exec(
+            "ollama", "run", model_to_use,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+        # Send conversation to Ollama via stdin
+        stdout, stderr = await process.communicate(input=conversation_text.encode('utf-8'))
+        
+        if process.returncode != 0:
+            error_msg = stderr.decode('utf-8') if stderr else "Unknown Ollama error"
+            logger.error(f"❌ Ollama CLI error: {error_msg}")
+            raise HTTPException(status_code=500, detail=f"Ollama CLI error: {error_msg}")
+        
+        # Parse response from stdout
+        response_text = stdout.decode('utf-8').strip()
+        
+        # Extract reasoning if present (look for <think> tags)
+        reasoning = None
+        reply = response_text
+        
+        if "<think>" in response_text and "</think>" in response_text:
+            # Extract reasoning from <think> tags
+            start = response_text.find("<think>")
+            end = response_text.find("</think>")
+            if start != -1 and end != -1:
+                reasoning = response_text[start + 7:end].strip()
+                # Remove thinking tags from reply
+                reply = response_text[:start] + response_text[end + 8:].strip()
+        
+        logger.info(f"✅ AI Assistant response generated ({len(reply)} chars)")
+        
+        return AssistantResponse(
+            reply=reply,
+            reasoning=reasoning,
+            model_used=model_to_use
+        )
+        
+    except subprocess.TimeoutExpired:
+        logger.error("❌ Ollama CLI timeout")
+        raise HTTPException(status_code=504, detail="AI Assistant request timed out")
+        
+    except FileNotFoundError:
+        logger.error("❌ Ollama CLI not found")
+        raise HTTPException(status_code=503, detail="Ollama CLI not available. Please ensure Ollama is installed.")
+        
+    except Exception as e:
+        logger.error(f"❌ AI Assistant error: {e}")
+        raise HTTPException(status_code=500, detail=f"AI Assistant error: {str(e)}")
+
+async def ai_assistant_fallback(req: AssistantRequest):
+    """
+    Fallback to Ollama API when CLI fails.
+    """
+    try:
+        # Prepare payload for Ollama API
+        payload = {
+            "model": req.model,
+            "messages": [{"role": msg["role"], "content": msg["content"]} for msg in req.messages],
+            "stream": False
+        }
+        
+        # Make request to Ollama API
+        response = make_ollama_request("/api/chat", payload, timeout=60)
+        response.raise_for_status()
+        
+        data = response.json()
+        reply = data.get("message", {}).get("content", "").strip()
+        
+        # Check for reasoning content
+        reasoning = None
+        if has_reasoning_content(reply):
+            reasoning, reply = separate_thinking_from_final_output(reply)
+        
+        return AssistantResponse(
+            reply=reply,
+            reasoning=reasoning,
+            model_used=req.model
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ AI Assistant fallback error: {e}")
+        raise HTTPException(status_code=500, detail=f"AI Assistant unavailable: {str(e)}")
+
+@app.get("/api/code-execution/status", tags=["vibe-coding"])
+async def get_code_execution_status():
+    """
+    Get the status of the code execution service.
+    """
+    try:
+        from code_execution_service import code_execution_service
+        status = code_execution_service.get_service_status()
+        return status
+    except Exception as e:
+        logger.error(f"❌ Failed to get code execution status: {e}")
+        return {
+            "docker_available": False,
+            "error": str(e),
+            "images": {},
+            "limits": {}
+        }
+
+@app.get("/api/assistant/models", tags=["vibe-coding"])
+async def get_available_models():
+    """
+    Get list of available AI models.
+    """
+    try:
+        from ai_assistant_service import ai_assistant_service
+        models = await ai_assistant_service.get_available_models()
+        return {"models": models}
+    except Exception as e:
+        logger.error(f"❌ Failed to get available models: {e}")
+        return {"models": ["llama3.2:3b"], "error": str(e)}
+
+@app.get("/api/assistant/status", tags=["vibe-coding"])
+async def get_assistant_status():
+    """
+    Get the status of the AI assistant service.
+    """
+    try:
+        from ai_assistant_service import ai_assistant_service
+        status = ai_assistant_service.get_service_status()
+        return status
+    except Exception as e:
+        logger.error(f"❌ Failed to get assistant status: {e}")
+        return {
+            "ollama_cli_available": False,
+            "error": str(e),
+            "default_model": "llama3.2:3b",
+            "api_endpoints": [],
+            "context_limits": {}
+        }
+
+@app.post("/api/terminal", response_model=TerminalResponse, tags=["vibe-coding"])
+async def execute_terminal_command(req: TerminalRequest):
+    """
+    Execute terminal commands in a secure environment.
+    """
+    try:
+        from terminal_service import terminal_service
+        
+        logger.info(f"🖥️ Terminal command request: {req.command[:50]}...")
+        
+        # Execute command using the terminal service
+        result = await terminal_service.execute_command(
+            command=req.command,
+            working_directory=req.working_directory,
+            timeout=req.timeout
+        )
+        
+        return TerminalResponse(
+            command=result.command,
+            output=result.output,
+            error=result.error,
+            exit_code=result.exit_code,
+            execution_time=result.execution_time,
+            working_directory=result.working_directory
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Terminal command execution failed: {e}")
+        return TerminalResponse(
+            command=req.command,
+            output="",
+            error=f"Terminal service error: {str(e)}",
+            exit_code=-1,
+            execution_time=0.0,
+            working_directory=req.working_directory or "/tmp"
+        )
+
+@app.get("/api/terminal/history", tags=["vibe-coding"])
+async def get_terminal_history(limit: int = 10):
+    """
+    Get recent terminal command history.
+    """
+    try:
+        from terminal_service import terminal_service
+        history = terminal_service.get_command_history(limit)
+        
+        return {
+            "history": [
+                {
+                    "command": cmd.command,
+                    "output": cmd.output,
+                    "error": cmd.error,
+                    "exit_code": cmd.exit_code,
+                    "execution_time": cmd.execution_time,
+                    "working_directory": cmd.working_directory
+                }
+                for cmd in history
+            ]
+        }
+    except Exception as e:
+        logger.error(f"❌ Failed to get terminal history: {e}")
+        return {"history": [], "error": str(e)}
+
+@app.delete("/api/terminal/history", tags=["vibe-coding"])
+async def clear_terminal_history():
+    """
+    Clear terminal command history.
+    """
+    try:
+        from terminal_service import terminal_service
+        terminal_service.clear_history()
+        return {"success": True, "message": "Terminal history cleared"}
+    except Exception as e:
+        logger.error(f"❌ Failed to clear terminal history: {e}")
+        return {"success": False, "error": str(e)}
+
+@app.get("/api/terminal/status", tags=["vibe-coding"])
+async def get_terminal_status():
+    """
+    Get terminal service status and configuration.
+    """
+    try:
+        from terminal_service import terminal_service
+        status = terminal_service.get_service_status()
+        return status
+    except Exception as e:
+        logger.error(f"❌ Failed to get terminal status: {e}")
+        return {
+            "working_directory": "/tmp",
+            "command_history_count": 0,
+            "error": str(e),
+            "allowed_commands": [],
+            "blocked_commands": [],
+            "limits": {}
+        }
+
+# ─── File Management Endpoints ─────────────────────────────────────────────────
+
+@app.post("/api/files/save", tags=["vibe-coding"])
+async def save_file_content(req: FileContentRequest):
+    """
+    Save file content to workspace.
+    """
+    try:
+        from file_service import file_service
+        
+        logger.info(f"💾 Save file request: {req.filename}")
+        result = file_service.save_file(req.filename, req.content)
+        
+        if result["success"]:
+            return result
+        else:
+            raise HTTPException(status_code=400, detail=result["error"])
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ File save failed: {e}")
+        raise HTTPException(status_code=500, detail=f"File save error: {str(e)}")
+
+@app.get("/api/files/list", tags=["vibe-coding"])
+async def list_workspace_files(directory: str = ""):
+    """
+    List files in workspace directory.
+    """
+    try:
+        from file_service import file_service
+        
+        result = file_service.list_files(directory)
+        
+        if result["success"]:
+            return result
+        else:
+            raise HTTPException(status_code=400, detail=result["error"])
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ File list failed: {e}")
+        raise HTTPException(status_code=500, detail=f"File list error: {str(e)}")
+
+@app.get("/api/files/content/{filename:path}", tags=["vibe-coding"])
+async def get_file_content(filename: str):
+    """
+    Get file content from workspace.
+    """
+    try:
+        from file_service import file_service
+        
+        result = file_service.get_file_content(filename)
+        
+        if result["success"]:
+            return result
+        else:
+            raise HTTPException(status_code=404, detail=result["error"])
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Get file content failed: {e}")
+        raise HTTPException(status_code=500, detail=f"File read error: {str(e)}")
+
+@app.get("/api/files/download/{filename:path}", tags=["vibe-coding"])
+async def download_single_file(filename: str):
+    """
+    Download a single file from workspace.
+    """
+    try:
+        from file_service import file_service
+        
+        logger.info(f"📥 Download request: {filename}")
+        
+        # Create temporary download file
+        temp_path = file_service.create_download_file(filename)
+        if not temp_path:
+            raise HTTPException(status_code=404, detail="File not found or cannot be downloaded")
+        
+        # Get MIME type
+        mime_type = file_service._get_mime_type(filename)
+        
+        # Return file response
+        def cleanup():
+            file_service.cleanup_temp_file(temp_path)
+        
+        return FileResponse(
+            path=temp_path,
+            filename=os.path.basename(filename),
+            media_type=mime_type,
+            background=cleanup
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ File download failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Download error: {str(e)}")
+
+@app.get("/api/files/download-project", tags=["vibe-coding"])
+async def download_project_zip(project_name: str = "vibe_coding_project"):
+    """
+    Download entire project as ZIP archive.
+    """
+    try:
+        from file_service import file_service
+        
+        logger.info(f"📦 Project download request: {project_name}")
+        
+        # Create ZIP archive
+        temp_path = file_service.create_project_zip(project_name)
+        if not temp_path:
+            raise HTTPException(status_code=404, detail="No files to download or project too large")
+        
+        # Return ZIP file
+        def cleanup():
+            file_service.cleanup_temp_file(temp_path)
+        
+        return FileResponse(
+            path=temp_path,
+            filename=f"{project_name}.zip",
+            media_type="application/zip",
+            background=cleanup
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Project download failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Project download error: {str(e)}")
+
+@app.get("/api/files/stats", tags=["vibe-coding"])
+async def get_workspace_stats():
+    """
+    Get workspace statistics.
+    """
+    try:
+        from file_service import file_service
+        
+        stats = file_service.get_workspace_stats()
+        return stats
+        
+    except Exception as e:
+        logger.error(f"❌ Get workspace stats failed: {e}")
+        return {"error": str(e)}
+
+# ─── Performance Monitoring Endpoints ─────────────────────────────────────────
+
+@app.get("/api/performance/metrics", tags=["monitoring"])
+async def get_performance_metrics(endpoint: Optional[str] = None, last_n: int = 100):
+    """
+    Get performance metrics summary.
+    """
+    try:
+        from performance_monitor import performance_monitor
+        
+        metrics = performance_monitor.get_metrics_summary(endpoint, last_n)
+        return metrics
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to get performance metrics: {e}")
+        return {"error": str(e)}
+
+@app.get("/api/performance/system", tags=["monitoring"])
+async def get_system_stats():
+    """
+    Get current system statistics.
+    """
+    try:
+        from performance_monitor import performance_monitor
+        
+        stats = performance_monitor.get_system_stats()
+        return stats
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to get system stats: {e}")
+        return {"error": str(e)}
+
+@app.get("/api/performance/rankings", tags=["monitoring"])
+async def get_endpoint_rankings():
+    """
+    Get endpoint performance rankings.
+    """
+    try:
+        from performance_monitor import performance_monitor
+        
+        rankings = performance_monitor.get_endpoint_rankings()
+        return rankings
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to get endpoint rankings: {e}")
+        return {"error": str(e)}
+
+@app.delete("/api/performance/metrics", tags=["monitoring"])
+async def clear_performance_metrics():
+    """
+    Clear all performance metrics.
+    """
+    try:
+        from performance_monitor import performance_monitor
+        
+        performance_monitor.clear_metrics()
+        return {"success": True, "message": "Performance metrics cleared"}
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to clear performance metrics: {e}")
+        return {"success": False, "error": str(e)}
 
