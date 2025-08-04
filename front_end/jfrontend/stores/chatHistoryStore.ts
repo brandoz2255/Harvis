@@ -47,6 +47,13 @@ interface ChatHistoryState {
   // Error State
   error: string | null
   
+  // Robustness State
+  lastFetchTime: number
+  requestInFlight: Set<string>
+  retryCount: number
+  circuitBreakerOpen: boolean
+  circuitBreakerResetTime: number
+  
   // Actions
   fetchSessions: () => Promise<void>
   createNewChat: () => Promise<ChatSession | null>
@@ -70,6 +77,12 @@ const getAuthHeaders = (): Record<string, string> => {
   return token ? { 'Authorization': `Bearer ${token}` } : {}
 }
 
+// Request deduplication and robustness helpers
+const MIN_REQUEST_INTERVAL = 1000 // Minimum 1 second between requests
+const CIRCUIT_BREAKER_THRESHOLD = 5 // Open circuit after 5 failures
+const CIRCUIT_BREAKER_TIMEOUT = 30000 // 30 seconds
+const MAX_RETRIES = 3 // Maximum retry attempts
+
 export const useChatHistoryStore = create<ChatHistoryState>((set, get) => ({
   // Initial state
   sessions: [],
@@ -80,12 +93,39 @@ export const useChatHistoryStore = create<ChatHistoryState>((set, get) => ({
   isHistoryVisible: false,
   error: null,
   
+  // Robustness state
+  lastFetchTime: 0,
+  requestInFlight: new Set(),
+  retryCount: 0,
+  circuitBreakerOpen: false,
+  circuitBreakerResetTime: 0,
+  
   // Session actions
   fetchSessions: async () => {
     const state = get()
+    const now = Date.now()
+    const requestKey = 'fetchSessions'
     
-    // Prevent concurrent fetches
-    if (state.isLoadingSessions) {
+    // Circuit breaker check
+    if (state.circuitBreakerOpen) {
+      if (now < state.circuitBreakerResetTime) {
+        console.log('🚫 Circuit breaker open - blocking request')
+        return
+      } else {
+        // Reset circuit breaker
+        set({ circuitBreakerOpen: false, retryCount: 0 })
+      }
+    }
+    
+    // Prevent concurrent fetches and rapid requests
+    if (state.isLoadingSessions || state.requestInFlight.has(requestKey)) {
+      console.log('⏳ Request already in progress, skipping')
+      return
+    }
+    
+    // Rate limiting - prevent requests too close together
+    if (now - state.lastFetchTime < MIN_REQUEST_INTERVAL) {
+      console.log('⏰ Rate limited - too soon since last request')
       return
     }
 
@@ -100,7 +140,14 @@ export const useChatHistoryStore = create<ChatHistoryState>((set, get) => ({
       return
     }
     
-    set({ isLoadingSessions: true, error: null })
+    // Mark request as in flight
+    set({ 
+      isLoadingSessions: true, 
+      error: null, 
+      lastFetchTime: now,
+      requestInFlight: new Set(Array.from(state.requestInFlight).concat(requestKey))
+    })
+    
     try {
       const response = await fetch('/api/chat-history/sessions', {
         headers: {
@@ -112,36 +159,64 @@ export const useChatHistoryStore = create<ChatHistoryState>((set, get) => ({
       
       if (response.ok) {
         const sessions = await response.json()
+        const currentState = get()
+        const newRequestInFlight = new Set(Array.from(currentState.requestInFlight).filter(key => key !== requestKey))
+        
         set({ 
           sessions: Array.isArray(sessions) ? sessions : [],
           isLoadingSessions: false,
-          error: null 
+          error: null,
+          retryCount: 0, // Reset on success
+          requestInFlight: newRequestInFlight
         })
       } else {
         const errorText = await response.text()
         console.error('Failed to fetch sessions:', response.statusText, errorText)
+        
+        const currentState = get()
+        const newRequestInFlight = new Set(Array.from(currentState.requestInFlight).filter(key => key !== requestKey))
+        const newRetryCount = currentState.retryCount + 1
         
         // Handle auth errors specifically
         if (response.status === 401) {
           localStorage.removeItem('token') // Clear invalid token
           set({ 
             isLoadingSessions: false,
-            error: 'Session expired. Please login again.'
+            error: 'Session expired. Please login again.',
+            requestInFlight: newRequestInFlight
           })
         } else {
+          // Open circuit breaker if too many failures
+          const shouldOpenCircuit = newRetryCount >= CIRCUIT_BREAKER_THRESHOLD
+          
           set({ 
             isLoadingSessions: false,
-            error: 'Could not load chat history'
+            error: shouldOpenCircuit ? 'Service temporarily unavailable' : 'Could not load chat history',
+            retryCount: newRetryCount,
+            circuitBreakerOpen: shouldOpenCircuit,
+            circuitBreakerResetTime: shouldOpenCircuit ? Date.now() + CIRCUIT_BREAKER_TIMEOUT : 0,
+            requestInFlight: newRequestInFlight
           })
         }
       }
     } catch (error) {
       console.error('Error fetching sessions:', error)
+      const currentState = get()
+      const newRequestInFlight = new Set(Array.from(currentState.requestInFlight).filter(key => key !== requestKey))
+      const newRetryCount = currentState.retryCount + 1
+      const shouldOpenCircuit = newRetryCount >= CIRCUIT_BREAKER_THRESHOLD
+      
       set({ 
         isLoadingSessions: false,
-        error: error instanceof Error && error.name === 'AbortError' 
-          ? 'Request timed out' 
-          : 'Could not load chat history'
+        error: shouldOpenCircuit 
+          ? 'Service temporarily unavailable'
+          : error instanceof Error && error.name === 'AbortError' 
+            ? 'Request timed out' 
+            : 'Could not load chat history',
+        retryCount: newRetryCount,
+        circuitBreakerOpen: shouldOpenCircuit,
+        circuitBreakerResetTime: shouldOpenCircuit ? Date.now() + CIRCUIT_BREAKER_TIMEOUT : 0,
+        requestInFlight: newRequestInFlight
       })
     }
   },
@@ -362,10 +437,26 @@ export const useChatHistoryStore = create<ChatHistoryState>((set, get) => ({
   // Message actions
   fetchSessionMessages: async (sessionId: string) => {
     const currentState = get()
+    const now = Date.now()
+    const requestKey = `fetchMessages-${sessionId}`
     
     console.log(`🔄 Starting to fetch messages for session: ${sessionId}`)
     console.log(`🔄 Current loading state:`, currentState.isLoadingMessages)
     console.log(`🔄 Current session:`, currentState.currentSession?.id)
+    
+    // Circuit breaker check
+    if (currentState.circuitBreakerOpen) {
+      if (now < currentState.circuitBreakerResetTime) {
+        console.log('🚫 Circuit breaker open - blocking message request')
+        return
+      }
+    }
+    
+    // Prevent concurrent requests for the same session
+    if (currentState.requestInFlight.has(requestKey)) {
+      console.log(`⏳ Message request already in progress for session ${sessionId}, skipping`)
+      return
+    }
 
     // Check authentication first
     const token = localStorage.getItem('token')
@@ -385,8 +476,12 @@ export const useChatHistoryStore = create<ChatHistoryState>((set, get) => ({
       return
     }
     
-    // Always set loading state to ensure UI updates
-    set({ isLoadingMessages: true, error: null })
+    // Mark request as in flight and set loading state
+    set({ 
+      isLoadingMessages: true, 
+      error: null,
+      requestInFlight: new Set(Array.from(currentState.requestInFlight).concat(requestKey))
+    })
     
     try {
       const authHeaders = getAuthHeaders()
@@ -413,6 +508,7 @@ export const useChatHistoryStore = create<ChatHistoryState>((set, get) => ({
         // Always update if we got a successful response
         const state = get()
         const messages = Array.isArray(data.messages) ? data.messages : []
+        const newRequestInFlight = new Set(Array.from(state.requestInFlight).filter(key => key !== requestKey))
         
         // Update session info if provided and matches current session
         const sessionUpdate = data.session && state.currentSession?.id === data.session.id 
@@ -423,6 +519,8 @@ export const useChatHistoryStore = create<ChatHistoryState>((set, get) => ({
           messages,
           isLoadingMessages: false,
           error: null,
+          retryCount: 0, // Reset on success
+          requestInFlight: newRequestInFlight,
           ...sessionUpdate
         })
         
@@ -443,29 +541,59 @@ export const useChatHistoryStore = create<ChatHistoryState>((set, get) => ({
         const errorText = await response.text()
         console.error(`❌ API Error ${response.status}:`, errorText)
         
+        const state = get()
+        const newRequestInFlight = new Set(Array.from(state.requestInFlight).filter(key => key !== requestKey))
+        const newRetryCount = state.retryCount + 1
+        
         // Handle auth errors specifically
         if (response.status === 401) {
           localStorage.removeItem('token') // Clear invalid token
           set({ 
             error: 'Session expired. Please login again.',
             messages: [],
-            isLoadingMessages: false 
+            isLoadingMessages: false,
+            requestInFlight: newRequestInFlight
           })
         } else {
+          // Open circuit breaker if too many failures
+          const shouldOpenCircuit = newRetryCount >= CIRCUIT_BREAKER_THRESHOLD
+          
           set({ 
-            error: response.status === 404 ? 'Chat session not found' : 'Could not load chat history',
+            error: shouldOpenCircuit 
+              ? 'Service temporarily unavailable'
+              : response.status === 404 
+                ? 'Chat session not found' 
+                : 'Could not load chat history',
             messages: [],
-            isLoadingMessages: false 
+            isLoadingMessages: false,
+            retryCount: newRetryCount,
+            circuitBreakerOpen: shouldOpenCircuit,
+            circuitBreakerResetTime: shouldOpenCircuit ? Date.now() + CIRCUIT_BREAKER_TIMEOUT : 0,
+            requestInFlight: newRequestInFlight
           })
         }
       }
     } catch (error) {
       const isTimeout = error instanceof Error && error.name === 'AbortError'
       console.error(`❌ Fetch error for session ${sessionId}:`, error)
+      
+      const state = get()
+      const newRequestInFlight = new Set(Array.from(state.requestInFlight).filter(key => key !== requestKey))
+      const newRetryCount = state.retryCount + 1
+      const shouldOpenCircuit = newRetryCount >= CIRCUIT_BREAKER_THRESHOLD
+      
       set({ 
-        error: isTimeout ? 'Request timed out' : 'Could not load chat history',
+        error: shouldOpenCircuit 
+          ? 'Service temporarily unavailable'
+          : isTimeout 
+            ? 'Request timed out' 
+            : 'Could not load chat history',
         messages: [],
-        isLoadingMessages: false 
+        isLoadingMessages: false,
+        retryCount: newRetryCount,
+        circuitBreakerOpen: shouldOpenCircuit,
+        circuitBreakerResetTime: shouldOpenCircuit ? Date.now() + CIRCUIT_BREAKER_TIMEOUT : 0,
+        requestInFlight: newRequestInFlight
       })
     }
   },
@@ -522,5 +650,27 @@ export const useChatHistoryStore = create<ChatHistoryState>((set, get) => ({
   
   setError: (error: string | null) => {
     set({ error })
+  },
+  
+  // Retry mechanism with exponential backoff
+  retryWithExponentialBackoff: async (operation: () => Promise<void>, maxRetries: number = MAX_RETRIES) => {
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        await operation()
+        return // Success, exit retry loop
+      } catch (error) {
+        console.error(`Attempt ${attempt + 1} failed:`, error)
+        
+        if (attempt === maxRetries - 1) {
+          // Final attempt failed
+          throw error
+        }
+        
+        // Exponential backoff: 1s, 2s, 4s, 8s...
+        const delay = Math.min(1000 * Math.pow(2, attempt), 10000) // Max 10 seconds
+        console.log(`Retrying in ${delay}ms...`)
+        await new Promise(resolve => setTimeout(resolve, delay))
+      }
+    }
   },
 }))
