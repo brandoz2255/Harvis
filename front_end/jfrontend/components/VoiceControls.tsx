@@ -30,11 +30,6 @@ export default function VoiceControls({ selectedModel = "llama3.2:3b" }: VoiceCo
           echoCancellation: true,
           noiseSuppression: false,  // Disable - can interfere with speech
           autoGainControl: false,   // Disable - can cause volume fluctuations
-          googEchoCancellation: true,
-          googAutoGainControl: false,
-          googNoiseSuppression: false,
-          googHighpassFilter: false,
-          googTypingNoiseDetection: false
         }
       })
       
