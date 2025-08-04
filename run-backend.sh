@@ -22,7 +22,7 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 # Check if env file exists
-ENV_FILE="/home/user/auth/aidev/python_back_end/.env"
+ENV_FILE="/home/user/compose/composev1/composev2/aidev/python_back_end/.env"
 if [ ! -f "$ENV_FILE" ]; then
     echo -e "${RED}Error: Environment file not found at $ENV_FILE${NC}"
     exit 1
