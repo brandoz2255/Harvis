@@ -705,12 +705,21 @@ async def chat(req: ChatRequest, request: Request, current_user: UserResponse = 
         
         # If no session provided, get recent messages from provided history or use empty history
         if session_id:
-            # Get recent messages from database for context
-            recent_messages = await chat_history_manager.get_recent_messages(
-                session_id=session_id, 
-                user_id=current_user.id, 
-                count=10
-            )
+            try:
+                # Convert session_id string to UUID
+                from uuid import UUID
+                session_uuid = UUID(session_id)
+                
+                # Get recent messages from database for context
+                recent_messages = await chat_history_manager.get_recent_messages(
+                    session_id=session_uuid, 
+                    user_id=current_user.id, 
+                    limit=10
+                )
+            except (ValueError, Exception) as e:
+                logger.error(f"Invalid session_id format or error loading context: {e}")
+                # Fallback to request history if session_id is invalid
+                recent_messages = []
             # Convert to format expected by model
             history = chat_history_manager.format_messages_for_context(recent_messages)
             logger.info(f"Using session {session_id} with {len(recent_messages)} recent messages")
@@ -755,14 +764,23 @@ async def chat(req: ChatRequest, request: Request, current_user: UserResponse = 
                 )
             OLLAMA_ENDPOINT = "/api/chat"  # single source of truth
 
+            # Build messages array with conversation history
+            messages = [{"role": "system", "content": system_prompt}]
+            
+            # Add conversation history (excluding the current message that will be added)
+            for msg in history[:-1]:  # Exclude the last message which is the current user message
+                messages.append({"role": msg["role"], "content": msg["content"]})
+            
+            # Add current user message
+            messages.append({"role": "user", "content": req.message})
+            
             payload = {
                 "model": req.model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": req.message},
-                ],
+                "messages": messages,
                 "stream": False,
             }
+            
+            logger.info(f"💬 CHAT: Sending {len(messages)} messages to Ollama (including {len(history)-1} context messages)")
 
             logger.info("💬 CHAT: Using model '%s' for Ollama %s", req.model, OLLAMA_ENDPOINT)
 
