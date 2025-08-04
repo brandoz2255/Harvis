@@ -82,15 +82,12 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
     currentSession, 
     messages: storeMessages, 
     createSession, 
-    createNewChat, 
     selectSession,
     refreshSessionMessages,
-    isHistoryVisible,
     error: storeError,
     isLoadingMessages 
   } = useChatHistoryStore()
   const [sessionId, setSessionId] = useState<string | null>(null)
-  const [lastSyncedMessages, setLastSyncedMessages] = useState<number>(0)
   
   const [selectedModel, setSelectedModel] = useState("auto")
   const [priority, setPriority] = useState<"speed" | "accuracy" | "balanced">("balanced")
@@ -152,12 +149,10 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
         setIsUsingStoreMessages(true)
         // Clear messages immediately for responsive UI
         setMessages([])
-        setLastSyncedMessages(0)
         console.log(`🔄 Switching to session ${currentSessionId} - cleared local messages`)
       } else {
         setIsUsingStoreMessages(false)
         setMessages([])
-        setLastSyncedMessages(0)
         console.log('🆕 Started new chat - cleared messages')
       }
     }
@@ -166,7 +161,23 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
   // Message sync effect - handles message updates for current session
   useEffect(() => {
     if (isUsingStoreMessages && currentSession?.id === sessionId && storeMessages) {
+        console.log(`🗄️ [STORE_DEBUG] Store messages sync triggered:`, {
+            storeCount: storeMessages.length,
+            sessionId: currentSession?.id
+        });
+        
+        // Only sync if store has more messages than local state to prevent clearing
         setMessages(prevMessages => {
+            console.log(`🔄 [STORE_DEBUG] Reconciling with previous messages: ${prevMessages.length}`);
+            
+            // If store is empty but we have local messages, keep local messages
+            // This prevents clearing during new session creation
+            if (storeMessages.length === 0 && prevMessages.length > 0) {
+                console.log(`⚠️ [STORE_DEBUG] Store empty but local messages exist - keeping local messages`);
+                return prevMessages;
+            }
+            
+            // If store has messages, perform proper reconciliation
             const localMap = new Map<string, Message>();
             prevMessages.forEach(m => {
                 if (m.tempId) localMap.set(m.tempId, m);
@@ -179,12 +190,14 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
                 const timestamp = storeMsgCasted.created_at ? new Date(storeMsgCasted.created_at) : new Date();
                 
                 if (key && localMap.has(key)) {
+                    console.log(`🔗 [STORE_DEBUG] Found matching local message for key: ${key}`);
                     return {
                         ...storeMsg,
                         status: "sent",
                         timestamp,
                     } as Message;
                 }
+                console.log(`➕ [STORE_DEBUG] Adding store message without local match: ${key || 'no-key'}`);
                 return {
                     ...storeMsg,
                     status: "sent",
@@ -192,6 +205,7 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
                 } as Message;
             });
 
+            console.log(`📊 [STORE_DEBUG] Reconciliation complete: ${storeMessages.length} -> ${reconciled.length}`);
             return reconciled;
         });
     }
@@ -214,10 +228,11 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
   // Create new session when first message is sent and no session exists - stabilized
   useEffect(() => {
     if (messages.length === 1 && !sessionId && !currentSession && !isUsingStoreMessages) {
+      console.log(`🆕 [SESSION_DEBUG] Creating new session for first message`)
       // Use a timeout to prevent race conditions
       const timeoutId = setTimeout(() => {
         handleCreateSession()
-      }, 100)
+      }, 200) // Increased delay to prevent race conditions
       
       return () => clearTimeout(timeoutId)
     }
@@ -337,6 +352,14 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
     const tempId = uuidv4();
     const optimalModel = getOptimalModel(messageContent)
 
+    console.log(`🚀 [CHAT_DEBUG] Starting sendMessage:`, {
+      tempId,
+      messageContent: messageContent.substring(0, 50) + '...',
+      optimalModel,
+      inputType,
+      sessionId: currentSession?.id
+    })
+
     const optimisticMessage: Message = {
       tempId,
       role: "user",
@@ -347,11 +370,15 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
       status: "pending",
     }
 
-    setMessages(prev => [...prev, optimisticMessage])
+    setMessages(prev => {
+      console.log(`📝 [CHAT_DEBUG] Adding optimistic message. Current count: ${prev.length} -> ${prev.length + 1}`)
+      return [...prev, optimisticMessage]
+    })
     if (inputType === "text") setInputValue("")
     setIsLoading(true)
     
     // Log user interaction for AI insights
+    console.log(`🧠 [INSIGHTS_DEBUG] Creating user insight for: ${messageContent.substring(0, 30)}...`)
     const userInsightId = logUserInteraction(messageContent, optimalModel)
 
     // Persist user message only if we have a session
@@ -401,29 +428,53 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
       if (!response.ok) throw new Error(await response.text())
 
       const data: ResearchChatResponse = await response.json()
+      
+      console.log(`📡 [CHAT_DEBUG] Server response received:`, {
+        tempId,
+        historyLength: data.history?.length || 0, // Note: Server includes system prompts in count
+        hasReasoning: !!data.reasoning,
+        hasAudio: !!data.audio_path
+      })
 
       setMessages(currentMessages => {
+        console.log(`🔄 [CHAT_DEBUG] Processing response. Current messages: ${currentMessages.length}`)
+        
         // Update optimistic user message to "sent" status if it matches tempId
         const updatedMessages = [...currentMessages]
         const optimisticIndex = updatedMessages.findIndex(msg => msg.tempId === tempId)
+        
+        console.log(`🎯 [CHAT_DEBUG] Looking for tempId: ${tempId}, found at index: ${optimisticIndex}`)
+        
         if (optimisticIndex >= 0) {
           updatedMessages[optimisticIndex] = {
             ...updatedMessages[optimisticIndex],
             status: "sent"
           }
+          console.log(`✅ [CHAT_DEBUG] Updated user message status to 'sent'`)
         }
 
         // Add only the latest assistant message if it's not already present
         const serverAssistantMessages = data.history.filter(msg => msg.role === "assistant")
         const latestAssistantMessage = serverAssistantMessages[serverAssistantMessages.length - 1]
         
+        console.log(`🤖 [CHAT_DEBUG] Server assistant messages: ${serverAssistantMessages.length}`)
+        console.log(`📊 [CHAT_DEBUG] Server history length: ${data.history?.length}, expected context: user + assistant`)
+        
         if (latestAssistantMessage) {
-          // Check if this assistant message already exists (by content and timestamp proximity)
+          // Improved duplicate detection - check by content hash and recent timestamp
+          const messageHash = latestAssistantMessage.content?.substring(0, 100)
           const isDuplicate = updatedMessages.some(existingMsg => 
             existingMsg.role === "assistant" && 
-            existingMsg.content === latestAssistantMessage.content &&
-            Math.abs(existingMsg.timestamp.getTime() - new Date().getTime()) < 5000 // Within 5 seconds
+            existingMsg.content?.substring(0, 100) === messageHash &&
+            Math.abs(existingMsg.timestamp.getTime() - new Date().getTime()) < 10000 // Within 10 seconds
           )
+          
+          console.log(`🔍 [CHAT_DEBUG] Checking for duplicates:`, {
+            isDuplicate,
+            assistantContent: latestAssistantMessage.content?.substring(0, 50) + '...',
+            existingAssistantCount: updatedMessages.filter(m => m.role === "assistant").length,
+            messageHash: messageHash?.substring(0, 30) + '...'
+          })
           
           if (!isDuplicate) {
             const newAssistantMessage = {
@@ -432,9 +483,13 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
               timestamp: new Date((latestAssistantMessage as any).timestamp || Date.now())
             }
             updatedMessages.push(newAssistantMessage)
+            console.log(`✨ [CHAT_DEBUG] Added new assistant message`)
+          } else {
+            console.log(`⚠️ [CHAT_DEBUG] Skipped duplicate assistant message`)
           }
         }
 
+        console.log(`📊 [CHAT_DEBUG] Final message count: ${currentMessages.length} -> ${updatedMessages.length}`)
         return updatedMessages
       })
 
@@ -449,16 +504,41 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
         await persistMessage(aiMessage, data.reasoning)
       }
 
-      // Complete the user interaction insight
-      if (assistantResponse) {
-        completeInsight(userInsightId, `Response generated using ${optimalModel}`, "done")
-      }
+      // Handle AI insights with improved timing and error handling
+      try {
+        // Complete the user interaction insight
+        if (assistantResponse) {
+          console.log(`🧠 [INSIGHTS_DEBUG] Completing user insight: ${userInsightId}`)
+          completeInsight(userInsightId, `Response generated using ${optimalModel}`, "done")
+        }
 
-      // Handle reasoning content if present
-      if (data.reasoning) {
-        // Log the reasoning process in AI insights
-        const reasoningInsightId = logReasoningProcess(data.reasoning, optimalModel)
-        completeInsight(reasoningInsightId, "Reasoning process completed", "done")
+        // Handle reasoning content if present - with delay to prevent race conditions
+        if (data.reasoning) {
+          console.log(`🔮 [INSIGHTS_DEBUG] Processing reasoning content:`, {
+            reasoningLength: data.reasoning.length,
+            model: optimalModel
+          })
+          
+          // Add small delay to prevent insight timing conflicts
+          setTimeout(() => {
+            try {
+              // Log the reasoning process in AI insights
+              const reasoningInsightId = logReasoningProcess(data.reasoning || '', optimalModel)
+              console.log(`🔮 [INSIGHTS_DEBUG] Created reasoning insight: ${reasoningInsightId}`)
+              
+              // Complete reasoning insight after a brief delay
+              setTimeout(() => {
+                completeInsight(reasoningInsightId, "Reasoning process completed", "done")
+              }, 100)
+            } catch (reasoningError) {
+              console.error(`❌ [INSIGHTS_DEBUG] Error processing reasoning:`, reasoningError)
+            }
+          }, 50)
+        } else {
+          console.log(`❌ [INSIGHTS_DEBUG] No reasoning content in response`)
+        }
+      } catch (insightError) {
+        console.error(`❌ [INSIGHTS_DEBUG] Error handling AI insights:`, insightError)
       }
 
       if (data.searchResults) {
@@ -477,12 +557,16 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
         }, 500)
       }
     } catch (error) {
-      console.error(`Chat attempt failed:`, error)
-      setMessages(currentMessages => currentMessages.map(msg =>
-        msg.tempId === tempId ? { ...msg, status: "failed" } : msg
-      ))
+      console.error(`❌ [CHAT_DEBUG] Chat attempt failed:`, error)
+      setMessages(currentMessages => {
+        console.log(`💥 [CHAT_DEBUG] Marking message as failed for tempId: ${tempId}`)
+        return currentMessages.map(msg =>
+          msg.tempId === tempId ? { ...msg, status: "failed" } : msg
+        )
+      })
       
       // Complete the user interaction insight with error
+      console.log(`🧠 [INSIGHTS_DEBUG] Completing user insight with error: ${userInsightId}`)
       completeInsight(userInsightId, `Error: ${error}`, "error")
     } finally {
       setIsLoading(false)
