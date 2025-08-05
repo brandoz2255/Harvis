@@ -116,6 +116,42 @@ def load_whisper_model():
     return whisper_model
 
 # ─── Model Unloading Functions ──────────────────────────────────────────────
+def unload_tts_model():
+    """Unload only TTS model to free GPU memory for Whisper"""
+    global tts_model
+    
+    if tts_model is not None:
+        logger.info("🗑️ Unloading TTS model to free GPU memory for Whisper")
+        del tts_model
+        tts_model = None
+        
+        # Aggressive GPU cleanup
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            gc.collect()
+            torch.cuda.empty_cache()
+        
+        log_gpu_memory("after TTS unload")
+
+def unload_whisper_model():
+    """Unload only Whisper model to free GPU memory for TTS"""
+    global whisper_model
+    
+    if whisper_model is not None:
+        logger.info("🗑️ Unloading Whisper model to free GPU memory for TTS")
+        del whisper_model
+        whisper_model = None
+        
+        # Aggressive GPU cleanup
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            gc.collect()
+            torch.cuda.empty_cache()
+        
+        log_gpu_memory("after Whisper unload")
+
 def unload_models():
     """Unload TTS and Whisper models to free GPU memory"""
     global tts_model, whisper_model
@@ -229,6 +265,97 @@ def generate_speech(text, model=None, audio_prompt=None, exaggeration=0.5, tempe
     except Exception as e:
         logger.error(f"TTS Error: {e}")
         raise
+
+# ─── VRAM-Optimized Sequential Model Functions ─────────────────────────────
+def use_whisper_model_optimized():
+    """Load Whisper model with VRAM optimization (unload TTS first)"""
+    global whisper_model, tts_model
+    
+    logger.info("🔄 Starting VRAM-optimized Whisper loading")
+    log_gpu_memory("before Whisper optimization")
+    
+    # Unload TTS model to free VRAM for Whisper
+    unload_tts_model()
+    
+    # Load Whisper model
+    if whisper_model is None:
+        load_whisper_model()
+    
+    log_gpu_memory("after Whisper loaded")
+    return whisper_model
+
+def use_tts_model_optimized():
+    """Load TTS model with VRAM optimization (unload Whisper first)"""
+    global tts_model, whisper_model
+    
+    logger.info("🔄 Starting VRAM-optimized TTS loading")
+    log_gpu_memory("before TTS optimization")
+    
+    # Unload Whisper model to free VRAM for TTS
+    unload_whisper_model()
+    
+    # Load TTS model
+    if tts_model is None:
+        load_tts_model()
+    
+    log_gpu_memory("after TTS loaded")
+    return tts_model
+
+def transcribe_with_whisper_optimized(audio_path):
+    """Transcribe audio with VRAM optimization"""
+    logger.info(f"🎤 Starting VRAM-optimized transcription for: {audio_path}")
+    
+    # Load Whisper with optimization
+    whisper_model = use_whisper_model_optimized()
+    
+    if whisper_model is None:
+        raise RuntimeError("Failed to load Whisper model")
+    
+    try:
+        # Perform transcription
+        result = whisper_model.transcribe(
+            audio_path,
+            fp16=False,
+            language='en',
+            task='transcribe',
+            verbose=True
+        )
+        
+        logger.info(f"✅ Transcription completed: {result.get('text', '')[:100]}...")
+        return result
+        
+    except Exception as e:
+        logger.error(f"❌ Transcription failed: {e}")
+        raise
+    finally:
+        # Unload Whisper to free VRAM
+        logger.info("🗑️ Unloading Whisper after transcription")
+        unload_whisper_model()
+
+def generate_speech_optimized(text, audio_prompt=None, exaggeration=0.5, temperature=0.8, cfg_weight=0.5):
+    """Generate speech with VRAM optimization"""
+    logger.info(f"🔊 Starting VRAM-optimized TTS generation for: {text[:50]}...")
+    
+    # Load TTS with optimization  
+    tts_model = use_tts_model_optimized()
+    
+    if tts_model is None:
+        raise RuntimeError("Failed to load TTS model")
+    
+    try:
+        # Generate speech
+        result = generate_speech(text, tts_model, audio_prompt, exaggeration, temperature, cfg_weight)
+        
+        logger.info("✅ TTS generation completed")
+        return result
+        
+    except Exception as e:
+        logger.error(f"❌ TTS generation failed: {e}")
+        raise
+    finally:
+        # Unload TTS to free VRAM
+        logger.info("🗑️ Unloading TTS after generation")
+        unload_tts_model()
 
 # ─── Model Access Functions ─────────────────────────────────────────────────
 def get_tts_model():

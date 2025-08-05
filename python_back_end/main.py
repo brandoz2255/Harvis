@@ -116,7 +116,9 @@ async def get_current_user(request: Request, credentials: HTTPAuthorizationCrede
 # ─── Model Management -----------------------------------------------------------
 from model_manager import (
     unload_models, unload_all_models, reload_models_if_needed, log_gpu_memory,
-    get_tts_model, get_whisper_model, generate_speech, wait_for_vram
+    get_tts_model, get_whisper_model, generate_speech, wait_for_vram,
+    transcribe_with_whisper_optimized, generate_speech_optimized,
+    unload_tts_model, unload_whisper_model
 )
 from chat_history_module import (
     ChatHistoryManager, ChatMessage, ChatSession, CreateSessionRequest, 
@@ -202,12 +204,12 @@ if 'logger' not in locals():
 # ─── Paths ---------------------------------------------------------------------
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 FRONTEND_DIR = os.path.join(PROJECT_ROOT, "front_end")
-JARVIS_VOICE_PATH = os.path.abspath(
-    "jarvis_voice.mp3"
+HARVIS_VOICE_PATH = os.path.abspath(
+    "harvis_voice.mp3"
 )  # Point to the file in project root
 
 # ─── FastAPI init --------------------------------------------------------------
-app = FastAPI(title="Jarves-TTS API")
+app = FastAPI(title="Harvis AI API")
 
 # CORS Middleware must be added before routes
 app.add_middleware(
@@ -291,7 +293,7 @@ class ChatRequest(BaseModel):
     history: List[Dict[str, Any]] = []
     model: str = DEFAULT_MODEL
     session_id: Optional[str] = None  # Chat session ID for history persistence
-    audio_prompt: Optional[str] = None  # overrides JARVIS_VOICE_PATH if provided
+    audio_prompt: Optional[str] = None  # overrides HARVIS_VOICE_PATH if provided
     exaggeration: float = 0.5
     temperature: float = 0.8
     cfg_weight: float = 0.5
@@ -302,7 +304,7 @@ class ResearchChatRequest(BaseModel):
     model: str = DEFAULT_MODEL
     session_id: Optional[str] = None  # Chat session ID for history persistence
     enableWebSearch: bool = True
-    audio_prompt: Optional[str] = None  # overrides JARVIS_VOICE_PATH if provided
+    audio_prompt: Optional[str] = None  # overrides HARVIS_VOICE_PATH if provided
     exaggeration: float = 0.5
     temperature: float = 0.8
     cfg_weight: float = 0.5
@@ -882,11 +884,8 @@ async def chat(req: ChatRequest, request: Request, current_user: UserResponse = 
         new_history = history + [{"role": "assistant", "content": final_answer}]
 
         # ── 7. Text-to-speech -----------------------------------------------------------
-        reload_models_if_needed()
-        tts = get_tts_model()  # Get TTS model from model_manager
-
         # Handle audio prompt path
-        audio_prompt_path = req.audio_prompt or JARVIS_VOICE_PATH
+        audio_prompt_path = req.audio_prompt or HARVIS_VOICE_PATH
         if not os.path.isfile(audio_prompt_path):
             logger.warning(
                 "Audio prompt %s not found, falling back to default voice.",
@@ -901,10 +900,9 @@ async def chat(req: ChatRequest, request: Request, current_user: UserResponse = 
             else:
                 logger.info(f"Cloning voice using prompt: {audio_prompt_path}")
 
-        # Use only final_answer for TTS (not the reasoning process)
-        sr, wav = generate_speech(
+        # Use VRAM-optimized TTS generation with only final_answer (not the reasoning process)
+        sr, wav = generate_speech_optimized(
             text=final_answer,
-            model=tts,
             audio_prompt=audio_prompt_path,
             exaggeration=req.exaggeration,
             temperature=req.temperature,
@@ -1088,7 +1086,7 @@ async def analyze_and_respond(req: AnalyzeAndRespondRequest):
             
             # Use the selected LLM model to generate a response based on Qwen's analysis
             # Use custom system prompt if provided, otherwise use default
-            system_prompt = req.system_prompt or "You are Jarvis, an AI assistant analyzing what the user is seeing on their screen. Provide helpful insights, suggestions, or commentary about what you observe. Be conversational and helpful."
+            system_prompt = req.system_prompt or "You are Harvis AI, an AI assistant analyzing what the user is seeing on their screen. Provide helpful insights, suggestions, or commentary about what you observe. Be conversational and helpful."
             
             logger.info(f"🤖 Generating response with {req.model}")
             if req.model == "gemini-1.5-flash":
@@ -1234,7 +1232,7 @@ async def analyze_screen_with_tts(req: ScreenAnalysisWithTTSRequest):
         unload_qwen_model()
         
         # Generate LLM response
-        system_prompt = req.system_prompt or "You are Jarvis, an AI assistant. Based on the screen analysis, provide helpful, conversational insights. Keep responses under 100 words for voice output."
+        system_prompt = req.system_prompt or "You are Harvis AI, an AI assistant. Based on the screen analysis, provide helpful, conversational insights. Keep responses under 100 words for voice output."
         
         if req.model == "gemini-1.5-flash":
             llm_response = query_gemini(f"Screen analysis: {qwen_analysis}\n\nProvide helpful insights about this screen.", [])
@@ -1257,14 +1255,13 @@ async def analyze_screen_with_tts(req: ScreenAnalysisWithTTSRequest):
         reload_models_if_needed()
         
         # Generate TTS audio
-        audio_prompt_path = req.audio_prompt or JARVIS_VOICE_PATH
+        audio_prompt_path = req.audio_prompt or HARVIS_VOICE_PATH
         if not os.path.isfile(audio_prompt_path):
             logger.warning(f"Audio prompt {audio_prompt_path} not found, using default voice")
             audio_prompt_path = None
 
-        sr, wav = generate_speech(
+        sr, wav = generate_speech_optimized(
             text=llm_response,
-            model=get_tts_model(),
             audio_prompt=audio_prompt_path,
             exaggeration=req.exaggeration,
             temperature=req.temperature,
@@ -1304,9 +1301,6 @@ async def mic_chat(file: UploadFile = File(...), model: str = Form(DEFAULT_MODEL
         logger.info(f"🎤 MIC-CHAT: Received model parameter: '{model}' (type: {type(model)})")
         logger.info(f"🎤 MIC-CHAT: DEFAULT_MODEL is: '{DEFAULT_MODEL}'")
         
-        # Ensure Whisper model is loaded
-        reload_models_if_needed()
-        
         # Save uploaded file to temp
         contents = await file.read()
         logger.info(f"Received audio data: {len(contents)} bytes, content_type: {file.content_type}")
@@ -1343,90 +1337,11 @@ async def mic_chat(file: UploadFile = File(...), model: str = Form(DEFAULT_MODEL
         
         logger.info(f"Saved audio file as: {tmp_path}")
 
-        # Transcribe it
-        whisper_model = get_whisper_model()
-        if whisper_model is None:
-            raise HTTPException(500, "Whisper model not available")
-        
-        logger.info(f"Transcribing audio file: {tmp_path} (size: {os.path.getsize(tmp_path)} bytes)")
-        
+        # Use VRAM-optimized transcription (automatically handles model loading/unloading)
         try:
-            # Use Whisper's load_audio function to preprocess the audio
-            import whisper
-            audio = whisper.load_audio(tmp_path)
-            logger.info(f"Loaded audio shape: {audio.shape}, duration: {len(audio)/16000:.2f}s")
-            
-            # Check if audio has any non-zero values
-            import numpy as np
-            max_amplitude = np.max(np.abs(audio))
-            logger.info(f"Audio max amplitude: {max_amplitude}")
-            
-            # Amplify quiet audio
-            if max_amplitude < 0.001:  # Very quiet audio
-                logger.warning("Audio appears to be silent or very quiet")
-                raise HTTPException(400, "Audio is too quiet or silent to transcribe")
-            elif max_amplitude < 0.1:  # Quiet audio - amplify it
-                logger.warning(f"Audio appears to be quiet (amplitude: {max_amplitude}), amplifying...")
-                amplification_factor = min(0.5 / max_amplitude, 10.0)  # Cap at 10x amplification
-                audio_amplified = audio * amplification_factor
-                logger.info(f"Applied {amplification_factor:.1f}x amplification")
-                
-                # Save amplified audio to new temp file
-                import soundfile as sf
-                amplified_path = tmp_path.replace('.ogg', '_amplified.wav')
-                sf.write(amplified_path, audio_amplified, 16000)
-                logger.info(f"Saved amplified audio to: {amplified_path}")
-                
-                # Check if amplified audio has actual content
-                rms = np.sqrt(np.mean(audio_amplified**2))
-                logger.info(f"Amplified audio RMS: {rms}")
-                
-                # Check for potential silence or noise patterns
-                non_zero_samples = np.count_nonzero(audio_amplified)
-                logger.info(f"Non-zero samples: {non_zero_samples}/{len(audio_amplified)} ({non_zero_samples/len(audio_amplified)*100:.1f}%)")
-                
-                tmp_path = amplified_path
-            
-            # Try transcription with improved parameters
-            logger.info("Attempting transcription with optimized settings...")
-            
-            # First attempt: Use default parameters but force English
-            result = whisper_model.transcribe(
-                tmp_path,
-                fp16=False,
-                language='en',  # Force English to prevent language misdetection
-                task='transcribe',
-                verbose=True  # Enable verbose for debugging
-            )
-            
-            # If still no good result, try with more aggressive settings
-            if not result.get('text', '').strip() or len(result.get('text', '').strip()) < 3:
-                logger.info("First attempt failed, trying with basic settings...")
-                result = whisper_model.transcribe(
-                    tmp_path,
-                    fp16=False,
-                    language='en',
-                    task='transcribe',
-                    verbose=True
-                )
-            
-            # Final fallback: Force English with maximum flexibility
-            if not result.get('text', '').strip() or len(result.get('text', '').strip()) < 3:
-                logger.info("Final attempt with maximum English flexibility...")
-                result = whisper_model.transcribe(
-                    tmp_path,
-                    fp16=False,
-                    language='en',  # FORCE English - never auto-detect
-                    task='transcribe',
-                    temperature=1.0,  # Maximum creativity
-                    no_speech_threshold=0.01,  # Extremely low threshold
-                    logprob_threshold=-2.0,    # Very lenient
-                    compression_ratio_threshold=2.5,
-                    condition_on_previous_text=False,
-                    verbose=False
-                )
+            result = transcribe_with_whisper_optimized(tmp_path)
         except Exception as e:
-            logger.error(f"Error during transcription: {e}")
+            logger.error(f"VRAM-optimized transcription failed: {e}")
             raise HTTPException(500, f"Transcription failed: {str(e)}")
             
         logger.info(f"Whisper transcription result: {result}")
@@ -1460,13 +1375,6 @@ async def mic_chat(file: UploadFile = File(...), model: str = Form(DEFAULT_MODEL
         # Clean up temp files
         try:
             os.unlink(tmp_path)
-            # Also clean up amplified file if it exists
-            if tmp_path.endswith('_amplified.wav'):
-                original_path = tmp_path.replace('_amplified.wav', '.ogg')
-                try:
-                    os.unlink(original_path)
-                except:
-                    pass
         except:
             pass
 
@@ -1545,12 +1453,10 @@ async def research_chat(req: ResearchChatRequest):
         new_history = req.history + [{"role": "assistant", "content": final_research_answer}]
 
         # ── Generate TTS for research response ──────────────────────────────────────────
-        logger.info("🔊 Research complete - reloading models for TTS generation")
-        reload_models_if_needed()
-        tts = get_tts_model()  # Get TTS model from model_manager
+        logger.info("🔊 Research complete - preparing TTS generation")
 
         # Handle audio prompt path
-        audio_prompt_path = req.audio_prompt or JARVIS_VOICE_PATH
+        audio_prompt_path = req.audio_prompt or HARVIS_VOICE_PATH
         if not os.path.isfile(audio_prompt_path):
             logger.warning(
                 "Audio prompt %s not found, falling back to default voice.",
@@ -1578,9 +1484,8 @@ async def research_chat(req: ResearchChatRequest):
         if len(tts_text) > 800:
             tts_text = tts_text[:800] + "... and more details are available in the sources."
 
-        sr, wav = generate_speech(
+        sr, wav = generate_speech_optimized(
             text=tts_text,
-            model=tts,
             audio_prompt=audio_prompt_path,
             exaggeration=req.exaggeration,
             temperature=req.temperature,
@@ -1762,10 +1667,7 @@ async def synthesize_speech(req: SynthesizeSpeechRequest):
     This endpoint is called by worker nodes.
     """
     try:
-        reload_models_if_needed()
-        tts = get_tts_model()
-
-        audio_prompt_path = req.audio_prompt or JARVIS_VOICE_PATH
+        audio_prompt_path = req.audio_prompt or HARVIS_VOICE_PATH
         if not os.path.isfile(audio_prompt_path):
             logger.warning(
                 "Audio prompt %s not found, falling back to default voice.",
@@ -1773,9 +1675,8 @@ async def synthesize_speech(req: SynthesizeSpeechRequest):
             )
             audio_prompt_path = None
 
-        sr, wav = generate_speech(
+        sr, wav = generate_speech_optimized(
             text=req.text,
-            model=tts,
             audio_prompt=audio_prompt_path,
             exaggeration=req.exaggeration,
             temperature=req.temperature,
@@ -2347,7 +2248,7 @@ async def vibe_coding(req: VibeCodingRequest):
         reload_models_if_needed()
         
         # Generate TTS response
-        audio_prompt_path = req.audio_prompt or JARVIS_VOICE_PATH
+        audio_prompt_path = req.audio_prompt or HARVIS_VOICE_PATH
         if not os.path.isfile(audio_prompt_path):
             audio_prompt_path = None
 
@@ -2356,9 +2257,8 @@ async def vibe_coding(req: VibeCodingRequest):
         if len(tts_text) > 200:
             tts_text = tts_text[:200] + "... I'm ready to help you code this!"
 
-        sr, wav = generate_speech(
+        sr, wav = generate_speech_optimized(
             text=tts_text,
-            model=get_tts_model(),
             audio_prompt=audio_prompt_path,
             exaggeration=req.exaggeration,
             temperature=req.temperature,
@@ -2395,17 +2295,14 @@ async def voice_transcribe(file: UploadFile = File(...), model: str = DEFAULT_MO
     Transcribe voice input for vibe coding with model management.
     """
     try:
-        # Ensure Whisper model is loaded
-        reload_models_if_needed()
-        
         # Save uploaded file to temp
         contents = await file.read()
         tmp_path = os.path.join(tempfile.gettempdir(), f"vibe_{uuid.uuid4()}.wav")
         with open(tmp_path, "wb") as f:
             f.write(contents)
 
-        # Transcribe with Whisper
-        result = get_whisper_model().transcribe(tmp_path)
+        # Use VRAM-optimized transcription
+        result = transcribe_with_whisper_optimized(tmp_path)
         transcription = result.get("text", "").strip()
         
         # Clean up temp file
