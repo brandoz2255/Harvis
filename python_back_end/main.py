@@ -204,12 +204,12 @@ if 'logger' not in locals():
 # ─── Paths ---------------------------------------------------------------------
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 FRONTEND_DIR = os.path.join(PROJECT_ROOT, "front_end")
-JARVIS_VOICE_PATH = os.path.abspath(
-    "jarvis_voice.mp3"
+HARVIS_VOICE_PATH = os.path.abspath(
+    "harvis_voice.mp3"
 )  # Point to the file in project root
 
 # ─── FastAPI init --------------------------------------------------------------
-app = FastAPI(title="Jarves-TTS API")
+app = FastAPI(title="Harvis AI API")
 
 # CORS Middleware must be added before routes
 app.add_middleware(
@@ -293,7 +293,7 @@ class ChatRequest(BaseModel):
     history: List[Dict[str, Any]] = []
     model: str = DEFAULT_MODEL
     session_id: Optional[str] = None  # Chat session ID for history persistence
-    audio_prompt: Optional[str] = None  # overrides JARVIS_VOICE_PATH if provided
+    audio_prompt: Optional[str] = None  # overrides HARVIS_VOICE_PATH if provided
     exaggeration: float = 0.5
     temperature: float = 0.8
     cfg_weight: float = 0.5
@@ -304,7 +304,7 @@ class ResearchChatRequest(BaseModel):
     model: str = DEFAULT_MODEL
     session_id: Optional[str] = None  # Chat session ID for history persistence
     enableWebSearch: bool = True
-    audio_prompt: Optional[str] = None  # overrides JARVIS_VOICE_PATH if provided
+    audio_prompt: Optional[str] = None  # overrides HARVIS_VOICE_PATH if provided
     exaggeration: float = 0.5
     temperature: float = 0.8
     cfg_weight: float = 0.5
@@ -885,7 +885,7 @@ async def chat(req: ChatRequest, request: Request, current_user: UserResponse = 
 
         # ── 7. Text-to-speech -----------------------------------------------------------
         # Handle audio prompt path
-        audio_prompt_path = req.audio_prompt or JARVIS_VOICE_PATH
+        audio_prompt_path = req.audio_prompt or HARVIS_VOICE_PATH
         if not os.path.isfile(audio_prompt_path):
             logger.warning(
                 "Audio prompt %s not found, falling back to default voice.",
@@ -1086,7 +1086,7 @@ async def analyze_and_respond(req: AnalyzeAndRespondRequest):
             
             # Use the selected LLM model to generate a response based on Qwen's analysis
             # Use custom system prompt if provided, otherwise use default
-            system_prompt = req.system_prompt or "You are Jarvis, an AI assistant analyzing what the user is seeing on their screen. Provide helpful insights, suggestions, or commentary about what you observe. Be conversational and helpful."
+            system_prompt = req.system_prompt or "You are Harvis AI, an AI assistant analyzing what the user is seeing on their screen. Provide helpful insights, suggestions, or commentary about what you observe. Be conversational and helpful."
             
             logger.info(f"🤖 Generating response with {req.model}")
             if req.model == "gemini-1.5-flash":
@@ -1232,7 +1232,7 @@ async def analyze_screen_with_tts(req: ScreenAnalysisWithTTSRequest):
         unload_qwen_model()
         
         # Generate LLM response
-        system_prompt = req.system_prompt or "You are Jarvis, an AI assistant. Based on the screen analysis, provide helpful, conversational insights. Keep responses under 100 words for voice output."
+        system_prompt = req.system_prompt or "You are Harvis AI, an AI assistant. Based on the screen analysis, provide helpful, conversational insights. Keep responses under 100 words for voice output."
         
         if req.model == "gemini-1.5-flash":
             llm_response = query_gemini(f"Screen analysis: {qwen_analysis}\n\nProvide helpful insights about this screen.", [])
@@ -1255,7 +1255,7 @@ async def analyze_screen_with_tts(req: ScreenAnalysisWithTTSRequest):
         reload_models_if_needed()
         
         # Generate TTS audio
-        audio_prompt_path = req.audio_prompt or JARVIS_VOICE_PATH
+        audio_prompt_path = req.audio_prompt or HARVIS_VOICE_PATH
         if not os.path.isfile(audio_prompt_path):
             logger.warning(f"Audio prompt {audio_prompt_path} not found, using default voice")
             audio_prompt_path = None
@@ -1456,7 +1456,7 @@ async def research_chat(req: ResearchChatRequest):
         logger.info("🔊 Research complete - preparing TTS generation")
 
         # Handle audio prompt path
-        audio_prompt_path = req.audio_prompt or JARVIS_VOICE_PATH
+        audio_prompt_path = req.audio_prompt or HARVIS_VOICE_PATH
         if not os.path.isfile(audio_prompt_path):
             logger.warning(
                 "Audio prompt %s not found, falling back to default voice.",
@@ -1667,7 +1667,7 @@ async def synthesize_speech(req: SynthesizeSpeechRequest):
     This endpoint is called by worker nodes.
     """
     try:
-        audio_prompt_path = req.audio_prompt or JARVIS_VOICE_PATH
+        audio_prompt_path = req.audio_prompt or HARVIS_VOICE_PATH
         if not os.path.isfile(audio_prompt_path):
             logger.warning(
                 "Audio prompt %s not found, falling back to default voice.",
@@ -2248,7 +2248,7 @@ async def vibe_coding(req: VibeCodingRequest):
         reload_models_if_needed()
         
         # Generate TTS response
-        audio_prompt_path = req.audio_prompt or JARVIS_VOICE_PATH
+        audio_prompt_path = req.audio_prompt or HARVIS_VOICE_PATH
         if not os.path.isfile(audio_prompt_path):
             audio_prompt_path = None
 
