@@ -1,164 +1,81 @@
-"use client"
+'use client';
 
-import { useEffect, useState } from 'react'
-import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
-import { Input } from '@/components/ui/input'
-import { User, LogOut, LogIn } from 'lucide-react'
-
-interface User {
-  id: number
-  name: string
-  email: string
-  avatar?: string
-}
+import Link from 'next/link';
+import Image from 'next/image';
+import { Button } from '@/components/ui/button';
+import { useUser } from '@/lib/auth/UserProvider';
+import { useState } from 'react';
 
 export default function AuthStatus() {
-  const [user, setUser] = useState<User | null>(null)
-  const [isLoading, setIsLoading] = useState(true)
-  const [showLogin, setShowLogin] = useState(false)
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [error, setError] = useState('')
-
-  useEffect(() => {
-    checkAuthStatus()
-  }, [])
-
-  const checkAuthStatus = async () => {
-    try {
-      const token = localStorage.getItem('token')
-      if (!token) {
-        setIsLoading(false)
-        return
-      }
-
-      const response = await fetch('/api/auth/me', {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-      })
-
-      if (response.ok) {
-        const userData = await response.json()
-        setUser(userData)
-      } else {
-        localStorage.removeItem('token')
-      }
-    } catch (error) {
-      console.error('Auth check failed:', error)
-      localStorage.removeItem('token')
-    } finally {
-      setIsLoading(false)
-    }
-  }
-
-  const handleLogin = async (e: React.FormEvent) => {
-    e.preventDefault()
-    setError('')
-    
-    try {
-      const response = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ email, password }),
-      })
-
-      if (response.ok) {
-        const data = await response.json()
-        localStorage.setItem('token', data.access_token)
-        await checkAuthStatus()
-        setShowLogin(false)
-        setEmail('')
-        setPassword('')
-      } else {
-        const errorData = await response.json()
-        setError(errorData.message || 'Login failed')
-      }
-    } catch (error) {
-      setError('Network error')
-    }
-  }
+  const { user, logout, isLoading } = useUser();
+  const [dropdownOpen, setDropdownOpen] = useState(false);
 
   const handleLogout = () => {
-    localStorage.removeItem('token')
-    setUser(null)
-  }
+    logout();
+    setDropdownOpen(false);
+  };
 
   if (isLoading) {
-    return (
-      <div className="flex items-center space-x-2 text-gray-400">
-        <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-500"></div>
-        <span>Checking auth...</span>
-      </div>
-    )
-  }
-
-  if (!user) {
-    return (
-      <div className="flex items-center space-x-2">
-        {!showLogin ? (
-          <Button
-            onClick={() => setShowLogin(true)}
-            size="sm"
-            variant="outline"
-            className="bg-gray-800 border-gray-600 text-gray-300 hover:bg-gray-700"
-          >
-            <LogIn className="w-4 h-4 mr-2" />
-            Login
-          </Button>
-        ) : (
-          <Card className="p-4 bg-gray-800 border-gray-600">
-            <form onSubmit={handleLogin} className="space-y-3">
-              <Input
-                type="email"
-                placeholder="Email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                className="bg-gray-700 border-gray-600 text-white"
-                required
-              />
-              <Input
-                type="password"
-                placeholder="Password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="bg-gray-700 border-gray-600 text-white"
-                required
-              />
-              {error && <p className="text-red-400 text-sm">{error}</p>}
-              <div className="flex space-x-2">
-                <Button type="submit" size="sm">Login</Button>
-                <Button 
-                  type="button" 
-                  size="sm" 
-                  variant="outline"
-                  onClick={() => setShowLogin(false)}
-                >
-                  Cancel
-                </Button>
-              </div>
-            </form>
-          </Card>
-        )}
-      </div>
-    )
+    return null;
   }
 
   return (
-    <div className="flex items-center space-x-2 text-gray-300">
-      <User className="w-4 h-4" />
-      <span className="text-sm">{user.name}</span>
-      <Button
-        onClick={handleLogout}
-        size="sm"
-        variant="ghost"
-        className="h-6 w-6 p-0 text-gray-400 hover:text-white"
-      >
-        <LogOut className="w-3 h-3" />
-      </Button>
+    <div className="flex items-center space-x-4">
+      {user ? (
+        <div className="relative">
+          <button
+            onClick={() => setDropdownOpen(!dropdownOpen)}
+            className="relative w-10 h-10 rounded-full overflow-hidden focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 hover:ring-2 hover:ring-blue-400 bg-gray-800 border border-gray-600"
+          >
+            <Image
+              src={user.avatar || 'https://api.dicebear.com/7.x/initials/svg?seed=' + user.name}
+              alt="User Avatar"
+              className="w-full h-full object-cover"
+              width={40}
+              height={40}
+            />
+          </button>
+          {dropdownOpen && (
+            <>
+              <div 
+                className="fixed inset-0 z-[9998]" 
+                onClick={() => setDropdownOpen(false)}
+              />
+              <div className="absolute right-0 mt-2 w-48 bg-gray-800 border border-gray-600 rounded-md shadow-xl py-1 z-[9999]">
+                <div className="px-4 py-2 text-xs text-gray-400 border-b border-gray-700">
+                  {user.name}
+                </div>
+                <Link 
+                  href="/profile" 
+                  className="block px-4 py-2 text-sm text-gray-200 hover:bg-gray-700 transition-colors"
+                  onClick={() => setDropdownOpen(false)}
+                >
+                  Profile
+                </Link>
+                <button
+                  onClick={handleLogout}
+                  className="block w-full text-left px-4 py-2 text-sm text-gray-200 hover:bg-gray-700 transition-colors"
+                >
+                  Log out
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      ) : (
+        <>
+          <Link href="/login">
+            <Button variant="ghost" className="text-slate-300 hover:text-white bg-gray-800/50 border border-gray-600">
+              Login
+            </Button>
+          </Link>
+          <Link href="/signup">
+            <Button variant="ghost" className="text-slate-300 hover:text-white bg-gray-800/50 border border-gray-600">
+              Sign Up
+            </Button>
+          </Link>
+        </>
+      )}
     </div>
-  )
+  );
 }
