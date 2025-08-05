@@ -191,41 +191,80 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
                 return [];
             }
             
-            // If store has messages, perform proper reconciliation
+            // If store has messages, perform proper reconciliation with content-based duplicate detection
             const localMap = new Map<string, Message>();
+            const contentMap = new Map<string, Message>();
+            
             prevMessages.forEach(m => {
+                // Map by ID/tempId
                 if (m.tempId) localMap.set(m.tempId, m);
                 else if (m.id) localMap.set(m.id, m);
+                
+                // Map by content hash for duplicate detection
+                const contentHash = `${m.role}:${m.content?.substring(0, 100)}`;
+                contentMap.set(contentHash, m);
             });
 
-            const reconciled = storeMessages.map(storeMsg => {
+            const reconciled: Message[] = [];
+            const seenContent = new Set<string>();
+            
+            storeMessages.forEach(storeMsg => {
                 const storeMsgCasted = storeMsg as any;
                 const key = storeMsgCasted.tempId || storeMsgCasted.id;
                 const timestamp = storeMsgCasted.created_at ? new Date(storeMsgCasted.created_at) : new Date();
+                const contentHash = `${storeMsgCasted.role}:${storeMsgCasted.content?.substring(0, 100)}`;
                 
+                // Check for duplicates by ID first, then by content
                 if (key && localMap.has(key)) {
                     console.log(`🔗 [STORE_DEBUG] Found matching local message for key: ${key}`);
-                    return {
+                    if (!seenContent.has(contentHash)) {
+                        seenContent.add(contentHash);
+                        reconciled.push({
+                            ...storeMsg,
+                            status: "sent",
+                            timestamp,
+                        } as Message);
+                    } else {
+                        console.log(`🚫 [STORE_DEBUG] Skipped duplicate content: ${contentHash.substring(0, 50)}...`);
+                    }
+                } else if (contentMap.has(contentHash)) {
+                    console.log(`🔗 [STORE_DEBUG] Found matching content (different ID): ${contentHash.substring(0, 50)}...`);
+                    // Don't add - it's a content duplicate with different ID
+                } else if (!seenContent.has(contentHash)) {
+                    console.log(`➕ [STORE_DEBUG] Adding store message without local match: ${key || 'no-key'}`);
+                    seenContent.add(contentHash);
+                    reconciled.push({
                         ...storeMsg,
                         status: "sent",
                         timestamp,
-                    } as Message;
+                    } as Message);
+                } else {
+                    console.log(`🚫 [STORE_DEBUG] Skipped duplicate store message: ${contentHash.substring(0, 50)}...`);
                 }
-                console.log(`➕ [STORE_DEBUG] Adding store message without local match: ${key || 'no-key'}`);
-                return {
-                    ...storeMsg,
-                    status: "sent",
-                    timestamp,
-                } as Message;
             });
 
-            // Add pending messages that don't have corresponding store messages
+            // Add pending messages that don't have corresponding store messages (by ID or content)
             const unmatchedPending = pendingMessages.filter(pending => {
                 const key = pending.tempId || pending.id;
-                return !storeMessages.some(store => {
+                const pendingContentHash = `${pending.role}:${pending.content?.substring(0, 100)}`;
+                
+                // Check if already exists by ID
+                const hasMatchingId = storeMessages.some(store => {
                     const storeKey = (store as any).tempId || (store as any).id;
                     return storeKey === key;
                 });
+                
+                // Check if already exists by content
+                const hasMatchingContent = seenContent.has(pendingContentHash);
+                
+                if (hasMatchingId || hasMatchingContent) {
+                    console.log(`🚫 [STORE_DEBUG] Skipped pending message (duplicate): ${pendingContentHash.substring(0, 50)}...`);
+                    return false;
+                }
+                
+                // Add to seen content to prevent duplicates in pending messages themselves
+                seenContent.add(pendingContentHash);
+                return true;
             });
 
             const finalMessages = [...reconciled, ...unmatchedPending];
@@ -423,7 +462,13 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
         messageContent.toLowerCase().includes("how to"))
 
     const apiEndpoint = needsWebSearch ? "/api/research-chat" : "/api/chat"
-    const contextMessages = messages
+    
+    // Context logic: 
+    // - If session exists: Send empty context (backend loads from database)
+    // - If no session: Send current frontend messages (excluding pending ones to avoid duplicates)
+    const contextMessages = (currentSession?.id || sessionId) 
+      ? [] 
+      : messages.filter(msg => msg.status !== "pending")
 
     const payload = {
       message: messageContent,
@@ -477,39 +522,36 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
           console.log(`✅ [CHAT_DEBUG] Updated user message status to 'sent'`)
         }
 
-        // Add only the latest assistant message if it's not already present
-        const serverAssistantMessages = data.history.filter(msg => msg.role === "assistant")
-        const latestAssistantMessage = serverAssistantMessages[serverAssistantMessages.length - 1]
-        
-        console.log(`🤖 [CHAT_DEBUG] Server assistant messages: ${serverAssistantMessages.length}`)
-        console.log(`📊 [CHAT_DEBUG] Server history length: ${data.history?.length}, expected context: user + assistant`)
-        
-        if (latestAssistantMessage) {
-          // Improved duplicate detection - check by content hash and recent timestamp
-          const messageHash = latestAssistantMessage.content?.substring(0, 100)
-          const isDuplicate = updatedMessages.some(existingMsg => 
-            existingMsg.role === "assistant" && 
-            existingMsg.content?.substring(0, 100) === messageHash &&
-            Math.abs(existingMsg.timestamp.getTime() - new Date().getTime()) < 10000 // Within 10 seconds
-          )
+        // Extract only the NEW assistant response (last message in history) and add it if not duplicate
+        if (data.history && data.history.length > 0) {
+          const latestMessage = data.history[data.history.length - 1]
           
-          console.log(`🔍 [CHAT_DEBUG] Checking for duplicates:`, {
-            isDuplicate,
-            assistantContent: latestAssistantMessage.content?.substring(0, 50) + '...',
-            existingAssistantCount: updatedMessages.filter(m => m.role === "assistant").length,
-            messageHash: messageHash?.substring(0, 30) + '...'
-          })
-          
-          if (!isDuplicate) {
-            const newAssistantMessage = {
-              ...latestAssistantMessage,
-              status: "sent" as const,
-              timestamp: new Date((latestAssistantMessage as any).timestamp || Date.now())
+          // Only add if it's an assistant message and doesn't duplicate existing content
+          if (latestMessage.role === "assistant") {
+            const messageHash = latestMessage.content?.substring(0, 100)
+            const isDuplicate = updatedMessages.some(existingMsg => 
+              existingMsg.role === "assistant" && 
+              existingMsg.content?.substring(0, 100) === messageHash &&
+              Math.abs(existingMsg.timestamp.getTime() - new Date().getTime()) < 30000 // Within 30 seconds
+            )
+            
+            console.log(`🔍 [CHAT_DEBUG] Checking latest message for duplicates:`, {
+              isDuplicate,
+              assistantContent: latestMessage.content?.substring(0, 50) + '...',
+              messageHash: messageHash?.substring(0, 30) + '...'
+            })
+            
+            if (!isDuplicate) {
+              const newAssistantMessage = {
+                ...latestMessage,
+                status: "sent" as const,
+                timestamp: new Date((latestMessage as any).timestamp || Date.now())
+              }
+              updatedMessages.push(newAssistantMessage)
+              console.log(`✨ [CHAT_DEBUG] Added new assistant message`)
+            } else {
+              console.log(`⚠️ [CHAT_DEBUG] Skipped duplicate assistant message`)
             }
-            updatedMessages.push(newAssistantMessage)
-            console.log(`✨ [CHAT_DEBUG] Added new assistant message`)
-          } else {
-            console.log(`⚠️ [CHAT_DEBUG] Skipped duplicate assistant message`)
           }
         }
 
