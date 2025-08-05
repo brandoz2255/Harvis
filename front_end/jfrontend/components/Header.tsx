@@ -29,7 +29,7 @@ export default function Header() {
       <div className="container mx-auto flex items-center justify-between px-4 py-3">
         <Link href="/">
           <h1 className="text-xl font-bold cursor-pointer hover:text-blue-400 transition-colors duration-200">
-            JARVIS AI
+            HARVIS AI
           </h1>
         </Link>
         <nav className="flex items-center space-x-4">
