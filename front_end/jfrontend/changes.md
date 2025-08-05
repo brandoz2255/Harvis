@@ -171,6 +171,63 @@ if (key && localMap.has(key)) {
 
 ---
 
+## 2025-08-05 - Project Rebrand: Jarvis → Harvis AI
+
+**Timestamp**: 2025-08-05 - Updated project name from Jarvis to Harvis AI across all files
+
+### Changes Made
+
+#### 1. **README.md Updates**
+- Project title: "The Jarvis Project" → "The Harvis AI Project"
+- Feature descriptions updated to reference "Harvis AI"
+- Database name in example: `jarvis` → `harvis`
+- All references updated throughout documentation
+
+#### 2. **Frontend Application Updates**
+**Files Modified:**
+- `package.json`: Package name updated to "harvis-ai-frontend"
+- `app/layout.tsx`: Page title metadata updated to "HARVIS AI"
+- `components/Header.tsx`: Header logo text updated to "HARVIS AI"
+- `app/page.tsx`: Main title updated to "HARVIS AI"
+- `components/CompactScreenShare.tsx`: System prompt updates
+
+#### 3. **Backend Application Updates**
+**Files Modified:**
+- `python_back_end/main.py`: 
+  - FastAPI title: "Jarves-TTS API" → "Harvis AI API"
+  - Voice file path: `JARVIS_VOICE_PATH` → `HARVIS_VOICE_PATH`
+  - Audio file reference: `jarvis_voice.mp3` → `harvis_voice.mp3`
+  - All system prompts: "You are Jarvis" → "You are Harvis AI"
+- `python_back_end/system_prompt.txt`: Assistant name updated to "Harvis AI"
+
+#### 4. **Project Documentation Updates**
+**Files Modified:**
+- `CLAUDE.md`: Repository overview updated to reference "Harvis AI Project"
+- `README.md`: Comprehensive updates throughout all sections
+
+### Result/Status
+
+✅ **COMPLETED**: Project successfully rebranded from Jarvis to Harvis AI  
+✅ **CONSISTENCY**: All user-facing text and documentation updated  
+✅ **CONFIGURATION**: Backend API titles and voice paths updated  
+✅ **FRONTEND**: All UI components display new branding  
+✅ **SYSTEM PROMPTS**: AI assistant identity updated across all endpoints
+
+### Files Modified
+
+1. `README.md` - Complete project documentation update
+2. `CLAUDE.md` - Repository overview update
+3. `front_end/jfrontend/package.json` - Package name update
+4. `front_end/jfrontend/app/layout.tsx` - Page metadata update
+5. `front_end/jfrontend/components/Header.tsx` - Navigation header update
+6. `front_end/jfrontend/app/page.tsx` - Main page title update
+7. `front_end/jfrontend/components/CompactScreenShare.tsx` - System prompt update
+8. `python_back_end/main.py` - API title, voice paths, and system prompts
+9. `python_back_end/system_prompt.txt` - Assistant identity update
+10. `front_end/jfrontend/changes.md` - Documentation update
+
+---
+
 ## 2025-08-05 - VRAM Optimization: Whisper & Chatterbox Model Management for 8GB Systems
 
 **Timestamp**: 2025-08-05 - Implemented VRAM-optimized sequential model loading/unloading

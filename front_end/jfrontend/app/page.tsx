@@ -70,7 +70,7 @@ export default function Home() {
             <div className="flex justify-between items-start mb-6">
               <div className="flex-1">
                 <h1 className="text-6xl font-bold bg-gradient-to-r from-blue-400 to-cyan-300 bg-clip-text text-transparent mb-4">
-                  JARVIS AI
+                  HARVIS AI
                 </h1>
                 <p className="text-gray-300 text-lg mb-6">
                   Advanced AI Assistant with Intelligent Model Orchestration
