@@ -1667,9 +1667,6 @@ async def synthesize_speech(req: SynthesizeSpeechRequest):
     This endpoint is called by worker nodes.
     """
     try:
-        reload_models_if_needed()
-        tts = get_tts_model()
-
         audio_prompt_path = req.audio_prompt or JARVIS_VOICE_PATH
         if not os.path.isfile(audio_prompt_path):
             logger.warning(
@@ -1678,9 +1675,8 @@ async def synthesize_speech(req: SynthesizeSpeechRequest):
             )
             audio_prompt_path = None
 
-        sr, wav = generate_speech(
+        sr, wav = generate_speech_optimized(
             text=req.text,
-            model=tts,
             audio_prompt=audio_prompt_path,
             exaggeration=req.exaggeration,
             temperature=req.temperature,
@@ -2261,9 +2257,8 @@ async def vibe_coding(req: VibeCodingRequest):
         if len(tts_text) > 200:
             tts_text = tts_text[:200] + "... I'm ready to help you code this!"
 
-        sr, wav = generate_speech(
+        sr, wav = generate_speech_optimized(
             text=tts_text,
-            model=get_tts_model(),
             audio_prompt=audio_prompt_path,
             exaggeration=req.exaggeration,
             temperature=req.temperature,
