@@ -1,19 +1,19 @@
-# The Jarvis Project
+# The Harvis AI Project
 
-![Jarvis AI Interface](assets/images/swappy-20250713-001120.png)
+![Harvis AI Interface](assets/images/swappy-20250713-001120.png)
 
-The Jarvis Project is a sophisticated, voice-activated AI assistant designed to be a proactive and interactive partner on your computer. It combines the power of large language models, voice synthesis, and system automation to provide a seamless interface for controlling your digital environment, retrieving information, and assisting with various tasks.
+The Harvis AI Project is a sophisticated, voice-activated AI assistant designed to be a proactive and interactive partner on your computer. It combines the power of large language models, voice synthesis, and system automation to provide a seamless interface for controlling your digital environment, retrieving information, and assisting with various tasks.
 
 ## Core Features
 
-- **Voice-First Interaction:** Control Jarvis and receive responses primarily through natural voice commands.
+- **Voice-First Interaction:** Control Harvis AI and receive responses primarily through natural voice commands.
 - **Vibe Coding (AI-Powered Development):** A dedicated, voice-first, AI-powered development environment. It allows users to write, execute, and debug code through conversational voice and text commands. It operates in two modes:
     - **Assistant Mode:** Turn-by-turn interaction for collaborative, step-by-step coding.
     - **Vibe Mode:** Continuous execution for automating larger tasks with verbal updates and explicit user confirmation for critical actions.
 - **n8n Workflow Automation:** AI-powered natural language to n8n workflow creation system that interprets user requests and automatically generates sophisticated automation workflows.
-- **Desktop Automation:** Jarvis can interact with your operating system, open applications, and manage files.
+- **Desktop Automation:** Harvis AI can interact with your operating system, open applications, and manage files.
 - **Browser Automation:** Perform web searches, navigate to websites, and interact with web pages using simple voice commands.
-- **Real-time Screen Analysis:** Jarvis can "see" your screen, understand the context of your current task, and provide relevant assistance, powered by Qwen2-VL AI for visual understanding.
+- **Real-time Screen Analysis:** Harvis AI can "see" your screen, understand the context of your current task, and provide relevant assistance, powered by Qwen2-VL AI for visual understanding.
 - **AI-Powered Chat:** Engage in contextual conversations, ask questions, and get intelligent responses from a powerful language model such as Mistral.
 - **Reasoning Model Support:** Full integration with reasoning models (DeepSeek R1, QwQ, O1) with automatic separation of thinking process from final answers.
 - **Extensible and Modular:** Built with a modern tech stack that allows for easy expansion and customization.
@@ -65,7 +65,7 @@ The Jarvis Project is a sophisticated, voice-activated AI assistant designed to 
 2.  **Set up environment variables:**
     Create `.env.local` in `front_end/jfrontend/` with:
     ```bash
-    DATABASE_URL=postgresql://user:password@localhost:5432/jarvis
+    DATABASE_URL=postgresql://user:password@localhost:5432/harvis
     JWT_SECRET=your-jwt-secret-key
     BACKEND_URL=http://backend:8000
     ```
@@ -81,7 +81,7 @@ The Jarvis Project is a sophisticated, voice-activated AI assistant designed to 
 
 ## n8n Workflow Automation API
 
-Jarvis includes a sophisticated AI-powered n8n workflow automation system that interprets natural language requests and automatically generates corresponding n8n workflows.
+Harvis AI includes a sophisticated AI-powered n8n workflow automation system that interprets natural language requests and automatically generates corresponding n8n workflows.
 
 ### Architecture Overview
 
@@ -251,7 +251,7 @@ CREATE TABLE n8n_automation_history (
 
 ## Web Search & Research API
 
-Jarvis includes comprehensive web search and research capabilities powered by LangChain and DuckDuckGo:
+Harvis AI includes comprehensive web search and research capabilities powered by LangChain and DuckDuckGo:
 
 ### API Endpoints
 

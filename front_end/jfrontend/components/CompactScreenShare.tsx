@@ -131,7 +131,7 @@ export default function CompactScreenShare({ onAnalysis, onAnalyzeAndRespond }: 
             body: JSON.stringify({
               image: imageData,
               system_prompt:
-                "You are Jarvis, an AI assistant analyzing what the user is seeing on their screen. Provide helpful insights, suggestions, or commentary about what you observe. Be conversational and helpful.",
+                "You are Harvis AI, an AI assistant analyzing what the user is seeing on their screen. Provide helpful insights, suggestions, or commentary about what you observe. Be conversational and helpful.",
               model: "mistral", // You can make this configurable
             }),
           })
