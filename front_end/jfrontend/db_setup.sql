@@ -27,3 +27,35 @@ EXCEPTION WHEN unique_violation THEN
     RETURN FALSE;
 END;
 $$ LANGUAGE plpgsql;
+
+-- Create user_api_keys table for storing encrypted API keys per user
+CREATE TABLE user_api_keys (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    provider_name VARCHAR(50) NOT NULL, -- e.g., 'ollama', 'gemini', 'openai', 'anthropic'
+    api_key_encrypted TEXT NOT NULL, -- Encrypted API key
+    api_url VARCHAR(500), -- Optional: custom API URL (e.g., for Ollama local instances)
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, provider_name) -- One API key per provider per user
+);
+
+-- Create index for faster lookups
+CREATE INDEX idx_user_api_keys_user_id ON user_api_keys(user_id);
+CREATE INDEX idx_user_api_keys_provider ON user_api_keys(provider_name);
+
+-- Function to update the updated_at timestamp
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Trigger to automatically update updated_at
+CREATE TRIGGER update_user_api_keys_updated_at 
+    BEFORE UPDATE ON user_api_keys 
+    FOR EACH ROW 
+    EXECUTE FUNCTION update_updated_at_column();
