@@ -26,24 +26,8 @@ export default function Header() {
 
   return (
     <header className="w-full border-b border-slate-700 bg-[#111827]/80 backdrop-blur-sm relative z-50">
-      <div className="container mx-auto flex items-center justify-between px-4 py-3">
-        <Link href="/">
-          <h1 className="text-xl font-bold cursor-pointer hover:text-blue-400 transition-colors duration-200">
-            HARVIS AI
-          </h1>
-        </Link>
+      <div className="container mx-auto flex items-center justify-end px-4 py-3">
         <nav className="flex items-center space-x-4">
-          <Link href="/versus-mode">
-            <Button variant="ghost" className="text-slate-300 hover:text-white">
-              Versus
-            </Button>
-          </Link>
-          <Link href="/ai-agents">
-            <Button variant="ghost" className="text-slate-300 hover:text-white">
-              Agents
-            </Button>
-          </Link>
-
           {user ? (
             <div className="relative">
               <button
