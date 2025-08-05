@@ -529,7 +529,11 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
           // Only add if it's an assistant message and doesn't duplicate existing content
           if (latestMessage.role === "assistant") {
             const messageHash = latestMessage.content?.substring(0, 100)
-            const isDuplicate = updatedMessages.some(existingMsg => 
+            
+            // For first message (when updatedMessages only has 1 pending/sent user message), always add the response
+            const isFirstResponse = updatedMessages.length <= 1 && updatedMessages.every(msg => msg.role === "user")
+            
+            const isDuplicate = !isFirstResponse && updatedMessages.some(existingMsg => 
               existingMsg.role === "assistant" && 
               existingMsg.content?.substring(0, 100) === messageHash &&
               Math.abs(existingMsg.timestamp.getTime() - new Date().getTime()) < 30000 // Within 30 seconds
@@ -537,8 +541,10 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
             
             console.log(`🔍 [CHAT_DEBUG] Checking latest message for duplicates:`, {
               isDuplicate,
+              isFirstResponse,
               assistantContent: latestMessage.content?.substring(0, 50) + '...',
-              messageHash: messageHash?.substring(0, 30) + '...'
+              messageHash: messageHash?.substring(0, 30) + '...',
+              existingMessages: updatedMessages.length
             })
             
             if (!isDuplicate) {
@@ -548,7 +554,7 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
                 timestamp: new Date((latestMessage as any).timestamp || Date.now())
               }
               updatedMessages.push(newAssistantMessage)
-              console.log(`✨ [CHAT_DEBUG] Added new assistant message`)
+              console.log(`✨ [CHAT_DEBUG] Added new assistant message (first: ${isFirstResponse})`)
             } else {
               console.log(`⚠️ [CHAT_DEBUG] Skipped duplicate assistant message`)
             }
@@ -756,16 +762,73 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
 
         const data = await response.json()
 
-        // Update messages with voice input
-        const updatedHistory = data.history.map((msg: any, index: number) => ({
-          ...msg,
-          timestamp: new Date(),
-          model: msg.role === "assistant" ? modelToUse : undefined,
-          inputType: index === data.history.length - 2 ? "voice" : msg.inputType,
-        }))
-
-        // Update messages for current session only
-        setMessages(updatedHistory)
+        // Apply same smart message handling as text chat to prevent duplicates
+        setMessages(currentMessages => {
+          console.log(`🎤 [MIC_DEBUG] Processing voice response. Current messages: ${currentMessages.length}`)
+          
+          if (data.history && data.history.length >= 2) {
+            // Get the last two messages (user voice + assistant response) from backend
+            const userVoiceMsg = data.history[data.history.length - 2] // Second to last should be user
+            const assistantMsg = data.history[data.history.length - 1]  // Last should be assistant
+            
+            console.log(`🎤 [MIC_DEBUG] Voice messages - User: ${userVoiceMsg?.role}, Assistant: ${assistantMsg?.role}`)
+            
+            const updatedMessages = [...currentMessages]
+            
+            // Add user voice message if not duplicate
+            if (userVoiceMsg && userVoiceMsg.role === "user") {
+              const userContentHash = `user:${userVoiceMsg.content?.substring(0, 100)}`
+              const userExists = updatedMessages.some(msg => 
+                msg.role === "user" && 
+                msg.content?.substring(0, 100) === userVoiceMsg.content?.substring(0, 100) &&
+                Math.abs(msg.timestamp.getTime() - new Date().getTime()) < 30000
+              )
+              
+              if (!userExists) {
+                const newUserMsg = {
+                  ...userVoiceMsg,
+                  timestamp: new Date(),
+                  inputType: "voice" as const,
+                  status: "sent" as const
+                }
+                updatedMessages.push(newUserMsg)
+                console.log(`🎤 [MIC_DEBUG] Added voice user message`)
+              } else {
+                console.log(`🎤 [MIC_DEBUG] Skipped duplicate voice user message`)
+              }
+            }
+            
+            // Add assistant response if not duplicate
+            if (assistantMsg && assistantMsg.role === "assistant") {
+              const assistantContentHash = `assistant:${assistantMsg.content?.substring(0, 100)}`
+              const assistantExists = updatedMessages.some(msg => 
+                msg.role === "assistant" && 
+                msg.content?.substring(0, 100) === assistantMsg.content?.substring(0, 100) &&
+                Math.abs(msg.timestamp.getTime() - new Date().getTime()) < 30000
+              )
+              
+              if (!assistantExists) {
+                const newAssistantMsg = {
+                  ...assistantMsg,
+                  timestamp: new Date(),
+                  model: modelToUse,
+                  inputType: "text" as const,
+                  status: "sent" as const
+                }
+                updatedMessages.push(newAssistantMsg)
+                console.log(`🎤 [MIC_DEBUG] Added voice assistant response`)
+              } else {
+                console.log(`🎤 [MIC_DEBUG] Skipped duplicate voice assistant response`)
+              }
+            }
+            
+            console.log(`🎤 [MIC_DEBUG] Voice message count: ${currentMessages.length} -> ${updatedMessages.length}`)
+            return updatedMessages
+          }
+          
+          console.log(`🎤 [MIC_DEBUG] No valid voice history received`)
+          return currentMessages
+        })
 
         // Persist voice messages to current session
         const userVoiceMsg = data.history.find((msg: any) => msg.role === "user")
