@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Overview
 
-This is the Jarvis Project, a sophisticated AI voice assistant that combines Next.js frontend with Python backend services. The project features voice-first interaction, browser automation, AI-powered coding assistance, and authentication with PostgreSQL.
+This is the Harvis AI Project, a sophisticated AI voice assistant that combines Next.js frontend with Python backend services. The project features voice-first interaction, browser automation, AI-powered coding assistance, and authentication with PostgreSQL.
 
 
 Remember the web app is ran through docker commands and the docker compose is just for the microservices that the web app runs on
