@@ -11,3 +11,17 @@ export function getDb() {
   }
   return pool;
 }
+
+// Default export for compatibility
+const defaultPool = {
+  connect: async () => {
+    const db = getDb();
+    return await db.connect();
+  },
+  query: async (text: string, params?: any[]) => {
+    const db = getDb();
+    return await db.query(text, params);
+  }
+};
+
+export default defaultPool;

@@ -59,3 +59,70 @@ CREATE TRIGGER update_user_api_keys_updated_at
     BEFORE UPDATE ON user_api_keys 
     FOR EACH ROW 
     EXECUTE FUNCTION update_updated_at_column();
+
+-- Vibe Coding Sessions
+CREATE TABLE vibe_sessions (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    is_active BOOLEAN DEFAULT true
+);
+
+-- File Tree Structure (nested folders/files)
+CREATE TABLE vibe_files (
+    id SERIAL PRIMARY KEY,
+    session_id INTEGER REFERENCES vibe_sessions(id) ON DELETE CASCADE,
+    parent_id INTEGER REFERENCES vibe_files(id),
+    name VARCHAR(255) NOT NULL,
+    type VARCHAR(10) CHECK (type IN ('file', 'folder')),
+    content TEXT, -- null for folders
+    language VARCHAR(50),
+    path TEXT NOT NULL, -- full path for quick access
+    size INTEGER DEFAULT 0,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Chat History for Vibe Coding
+CREATE TABLE vibe_chat (
+    id SERIAL PRIMARY KEY,
+    session_id INTEGER REFERENCES vibe_sessions(id) ON DELETE CASCADE,
+    role VARCHAR(20) CHECK (role IN ('user', 'assistant')),
+    content TEXT NOT NULL,
+    type VARCHAR(20) DEFAULT 'text',
+    reasoning TEXT, -- for reasoning models
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Code Execution History
+CREATE TABLE vibe_executions (
+    id SERIAL PRIMARY KEY,
+    session_id INTEGER REFERENCES vibe_sessions(id) ON DELETE CASCADE,
+    command TEXT NOT NULL,
+    output TEXT,
+    exit_code INTEGER,
+    execution_time INTEGER, -- milliseconds
+    language VARCHAR(50),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Create indexes for better performance
+CREATE INDEX idx_vibe_sessions_user_id ON vibe_sessions(user_id);
+CREATE INDEX idx_vibe_files_session_id ON vibe_files(session_id);
+CREATE INDEX idx_vibe_files_parent_id ON vibe_files(parent_id);
+CREATE INDEX idx_vibe_chat_session_id ON vibe_chat(session_id);
+CREATE INDEX idx_vibe_executions_session_id ON vibe_executions(session_id);
+
+-- Triggers for updated_at timestamps
+CREATE TRIGGER update_vibe_sessions_updated_at 
+    BEFORE UPDATE ON vibe_sessions 
+    FOR EACH ROW 
+    EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_vibe_files_updated_at 
+    BEFORE UPDATE ON vibe_files 
+    FOR EACH ROW 
+    EXECUTE FUNCTION update_updated_at_column();
