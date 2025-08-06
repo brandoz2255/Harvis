@@ -20,6 +20,9 @@ from gemini_api import query_gemini, is_gemini_configured
 from typing import List, Optional, Dict, Any
 from vison_models.llm_connector import query_qwen, query_llm, load_qwen_model, unload_qwen_model
 
+# Import vibecoding routers
+from vibecoding import sessions_router, models_router, execution_router, files_router
+
 from pydantic import BaseModel
 import torch, soundfile as sf
 import whisper  # Import Whisper
@@ -228,6 +231,12 @@ app.add_middleware(
 if os.path.exists(FRONTEND_DIR):
     app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
     logger.info("Frontend directory mounted at %s", FRONTEND_DIR)
+
+# Include vibecoding routers
+app.include_router(sessions_router)
+app.include_router(models_router)
+app.include_router(execution_router)
+app.include_router(files_router)
 
 # ─── Database Pool and Chat History Manager Init ─────────────────────────────────────────────────
 db_pool = None
