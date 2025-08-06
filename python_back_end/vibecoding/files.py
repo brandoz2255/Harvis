@@ -1,6 +1,6 @@
 """Vibe Coding Files API Routes"""
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 import uuid
@@ -246,7 +246,7 @@ async def delete_vibe_file(
 
 @router.get("/files")
 async def get_session_files(
-    session_id: str,
+    session_id: str = Query(..., description="Session ID to get files for"),
     user: Dict = Depends(get_current_user)
 ):
     """Get all files for a vibe session"""
