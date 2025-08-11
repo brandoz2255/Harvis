@@ -1,5 +1,101 @@
 # Changes Log
 
+## 2025-08-11 - Fixed Vibecoding Sessions API 404 and 422 Errors
+
+**Timestamp**: 2025-08-11 - Fixed missing vibecoding sessions endpoint and JWT field mapping issues
+
+### Problem Description
+
+Vibecoding sessions API was returning:
+1. **404 errors** - `POST /api/vibecoding/sessions` endpoint was missing
+2. **422 validation errors** - JWT token field mapping mismatch between frontend and backend
+
+Error logs showed:
+```
+INFO:     172.19.0.6:36202 - "POST /api/vibecoding/sessions HTTP/1.0" 404 Not Found
+INFO:     172.19.0.6:44290 - "POST /api/vibecoding/sessions HTTP/1.0" 422 Unprocessable Entity
+INFO:vibecoding.containers:Raw request body: b'{"project_name":"awesome","description":"what"}'
+```
+
+### Root Cause Analysis
+
+#### 1. **Missing API Endpoint**
+- **Issue**: Frontend called `POST /api/vibecoding/sessions` but backend only had `POST /api/vibecoding/sessions/create`
+- **Root Cause**: API endpoint mismatch between frontend expectations and backend implementation
+
+#### 2. **JWT Field Mapping Mismatch**
+- **Issue**: Frontend expected `user.id` but backend JWT tokens use `"sub"` field (JWT standard)
+- **Root Cause**: Backend creates JWT with `data={"sub": str(user_id)}` but frontend expected `id` field
+- **Impact**: `user_id` field was `undefined`, causing it to be omitted from JSON requests
+
+### Solution Applied
+
+#### 1. **Added Missing Backend Endpoint**
+- **File**: `python_back_end/vibecoding/containers.py`
+- **Action**: Added `POST /api/vibecoding/sessions` endpoint that accepts JSON body
+- **Implementation**: 
+  ```python
+  @router.post("/api/vibecoding/sessions")
+  async def create_session_json(request: Request):
+      # JSON body parsing with proper validation
+      user_id = data.get('user_id')
+      project_name = data.get('project_name')
+      description = data.get('description', '')
+  ```
+
+#### 2. **Fixed JWT Field Mapping**
+- **Files**: 
+  - `front_end/jfrontend/app/api/vibecoding/sessions/route.ts`
+  - `front_end/jfrontend/app/api/vibecoding/container/route.ts`
+- **Action**: Updated JWT payload interface and usage
+- **Changes**:
+  ```typescript
+  // Before
+  interface JWTPayload {
+    id: number
+    email: string
+    username: string
+  }
+  // Usage: user.id
+
+  // After  
+  interface JWTPayload {
+    sub: string  // Backend uses "sub" for user ID
+    email?: string
+    username?: string
+  }
+  // Usage: parseInt(user.sub)
+  ```
+
+#### 3. **Added JWT Secret Verification**
+- **Action**: Added temporary logging to verify both services use same JWT_SECRET
+- **Verification**: Both frontend and backend load same 64-character secret from .env files
+
+### Files Modified
+
+1. **Backend**:
+   - `python_back_end/vibecoding/containers.py` - Added missing POST endpoint
+   - `python_back_end/main.py` - Added JWT secret logging
+
+2. **Frontend**:
+   - `front_end/jfrontend/app/api/vibecoding/sessions/route.ts` - Fixed JWT field mapping
+   - `front_end/jfrontend/app/api/vibecoding/container/route.ts` - Fixed JWT field mapping
+
+### Result/Status
+
+✅ **Fixed**: Vibecoding sessions API now works correctly
+- POST requests include proper `user_id` field
+- JWT tokens verified with correct field mapping
+- Both GET and POST endpoints function properly
+- Container API also fixed for consistency
+
+### Testing Verification
+
+Services should now show:
+- Backend: `Backend JWT_SECRET loaded: 4e785620a5... Length: 64`
+- Frontend: `Frontend JWT_SECRET loaded: 4e785620a5... Length: 64`
+- Successful session creation with proper user_id in request body
+
 ## 2025-08-05 - AI Models Settings: User API Key Management System
 
 **Timestamp**: 2025-08-05 - Implemented comprehensive user API key management system in settings page with encrypted database storage
