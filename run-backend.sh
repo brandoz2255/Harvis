@@ -22,7 +22,7 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 # Check if env file exists
-ENV_FILE="/home/guruai/compose/aidev/python_back_end/.env"
+ENV_FILE="/home/dulc3/Documents/github/aidev/python_back_end/.env"
 if [ ! -f "$ENV_FILE" ]; then
   echo -e "${RED}Error: Environment file not found at $ENV_FILE${NC}"
   exit 1
@@ -206,4 +206,3 @@ case "${1:-help}" in
   show_usage
   ;;
 esac
-
