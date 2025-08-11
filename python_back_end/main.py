@@ -20,6 +20,9 @@ from gemini_api import query_gemini, is_gemini_configured
 from typing import List, Optional, Dict, Any
 from vison_models.llm_connector import query_qwen, query_llm, load_qwen_model, unload_qwen_model
 
+# Import vibecoding routers
+from vibecoding import sessions_router, models_router, execution_router, files_router
+
 from pydantic import BaseModel
 import torch, soundfile as sf
 import whisper  # Import Whisper
@@ -38,6 +41,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://pguser:pgpassword@pgsql-d
 class AuthRequest(BaseModel):
     email: str
     password: str
+
 
 class SignupRequest(BaseModel):
     username: str
@@ -229,6 +233,12 @@ if os.path.exists(FRONTEND_DIR):
     app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
     logger.info("Frontend directory mounted at %s", FRONTEND_DIR)
 
+# Include vibecoding routers
+app.include_router(sessions_router)
+app.include_router(models_router)
+app.include_router(execution_router)
+app.include_router(files_router)
+
 # ─── Database Pool and Chat History Manager Init ─────────────────────────────────────────────────
 db_pool = None
 chat_history_manager = None
@@ -239,6 +249,14 @@ async def startup_event():
     try:
         db_pool = await asyncpg.create_pool(DATABASE_URL)
         chat_history_manager = ChatHistoryManager(db_pool)
+        
+        # Initialize vibe files database table
+        try:
+            from vibecoding.files import ensure_vibe_files_table
+            await ensure_vibe_files_table()
+            logger.info("✅ Vibe files database table initialized")
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize vibe files table: {e}")
         
         # Initialize n8n services with database pool
         if n8n_client:
@@ -283,9 +301,105 @@ logger.info("Using device: %s", "cuda" if device == 0 else "cpu")
 
 
 # ─── Config --------------------------------------------------------------------
-OLLAMA_URL = "https://coyotegpt.ngrok.app/ollama"
+CLOUD_OLLAMA_URL = "https://coyotegpt.ngrok.app/ollama"
+LOCAL_OLLAMA_URL = "http://ollama:11434"
 API_KEY = os.getenv("OLLAMA_API_KEY", "key")
 DEFAULT_MODEL = "llama3.2:3b"
+
+def make_ollama_request(endpoint, payload, timeout=90):
+    """Make a POST request to Ollama with automatic fallback from cloud to local.
+    Returns the response object from the successful request."""
+    headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY != "key" else {}
+    
+    # Try cloud first
+    try:
+        logger.info("🌐 Trying cloud Ollama: %s", CLOUD_OLLAMA_URL)
+        response = requests.post(f"{CLOUD_OLLAMA_URL}{endpoint}", json=payload, headers=headers, timeout=timeout)
+        if response.status_code == 200:
+            logger.info("✅ Cloud Ollama request successful")
+            return response
+        else:
+            logger.warning("⚠️ Cloud Ollama returned status %s", response.status_code)
+    except Exception as e:
+        logger.warning("⚠️ Cloud Ollama request failed: %s", e)
+    
+    # Fallback to local
+    try:
+        logger.info("🏠 Falling back to local Ollama: %s", LOCAL_OLLAMA_URL)
+        response = requests.post(f"{LOCAL_OLLAMA_URL}{endpoint}", json=payload, timeout=timeout)
+        if response.status_code == 200:
+            logger.info("✅ Local Ollama request successful")
+            return response
+        else:
+            logger.error("❌ Local Ollama returned status %s", response.status_code)
+            response.raise_for_status()
+    except Exception as e:
+        logger.error("❌ Local Ollama request failed: %s", e)
+        raise
+    
+    return response
+
+def make_ollama_get_request(endpoint, timeout=10):
+    """Make a GET request to Ollama with automatic fallback from cloud to local.
+    Returns the response object from the successful request."""
+    headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY != "key" else {}
+    
+    # Try cloud first
+    try:
+        logger.info("🌐 Trying cloud Ollama GET: %s", CLOUD_OLLAMA_URL)
+        response = requests.get(f"{CLOUD_OLLAMA_URL}{endpoint}", headers=headers, timeout=timeout)
+        if response.status_code == 200:
+            logger.info("✅ Cloud Ollama GET request successful")
+            return response
+        else:
+            logger.warning("⚠️ Cloud Ollama GET returned status %s", response.status_code)
+    except Exception as e:
+        logger.warning("⚠️ Cloud Ollama GET request failed: %s", e)
+    
+    # Fallback to local
+    try:
+        logger.info("🏠 Falling back to local Ollama GET: %s", LOCAL_OLLAMA_URL)
+        response = requests.get(f"{LOCAL_OLLAMA_URL}{endpoint}", timeout=timeout)
+        if response.status_code == 200:
+            logger.info("✅ Local Ollama GET request successful")
+            return response
+        else:
+            logger.error("❌ Local Ollama GET returned status %s", response.status_code)
+            response.raise_for_status()
+    except Exception as e:
+        logger.error("❌ Local Ollama GET request failed: %s", e)
+        raise
+    
+    return response
+
+def get_ollama_url():
+    """Try cloud Ollama first, fallback to local if cloud fails.
+    Returns the working Ollama URL for initialization purposes."""
+    # Try cloud first
+    try:
+        headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY != "key" else {}
+        response = requests.get(f"{CLOUD_OLLAMA_URL}/api/tags", headers=headers, timeout=5)
+        if response.status_code == 200:
+            logger.info("✅ Using cloud Ollama URL: %s", CLOUD_OLLAMA_URL)
+            return CLOUD_OLLAMA_URL
+    except Exception as e:
+        logger.warning("⚠️ Cloud Ollama unavailable: %s", e)
+    
+    # Fallback to local
+    try:
+        response = requests.get(f"{LOCAL_OLLAMA_URL}/api/tags", timeout=5)
+        if response.status_code == 200:
+            logger.info("✅ Using local Ollama URL: %s", LOCAL_OLLAMA_URL)
+            return LOCAL_OLLAMA_URL
+    except Exception as e:
+        logger.error("❌ Local Ollama also unavailable: %s", e)
+    
+    # If both fail, default to cloud (let the actual request handle the error)
+    logger.warning("⚠️ Both Ollama instances unavailable, defaulting to cloud")
+    return CLOUD_OLLAMA_URL
+
+# Get the working Ollama URL for initialization
+OLLAMA_URL = get_ollama_url()
 
 # ─── Pydantic schemas ----------------------------------------------------------
 class ChatRequest(BaseModel):
@@ -786,10 +900,7 @@ async def chat(req: ChatRequest, request: Request, current_user: UserResponse = 
 
             logger.info("💬 CHAT: Using model '%s' for Ollama %s", req.model, OLLAMA_ENDPOINT)
 
-            headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY != "key" else {}
-            resp = requests.post(
-                f"{OLLAMA_URL}{OLLAMA_ENDPOINT}", json=payload, headers=headers, timeout=90
-            )
+            resp = make_ollama_request(OLLAMA_ENDPOINT, payload, timeout=90)
 
             if resp.status_code != 200:
                 logger.error("Ollama error %s: %s", resp.status_code, resp.text)
