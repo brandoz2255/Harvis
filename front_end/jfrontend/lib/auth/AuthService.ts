@@ -54,4 +54,19 @@ export const AuthService = {
       avatar: data.avatar
     };
   },
+
+  async getCurrentUser(request: any): Promise<{ id: string; name: string; email: string; avatar?: string } | null> {
+    try {
+      const authHeader = request.headers.get('authorization')
+      const token = authHeader?.replace('Bearer ', '') || request.cookies?.get('token')?.value
+      
+      if (!token) {
+        return null
+      }
+
+      return await this.fetchUser(token)
+    } catch (error) {
+      return null
+    }
+  },
 };
