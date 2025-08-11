@@ -543,15 +543,13 @@ class SessionCreateRequest(BaseModel):
 async def create_session_json(request: Request):
     """Create a new vibecoding session (JSON endpoint for frontend)."""
     try:
-        # Log the raw request body for debugging
+        # Parse JSON request body
         body = await request.body()
-        logger.info(f"Raw request body: {body}")
+        logger.info(f"[DEBUG] Raw request body: {body}")
         
-        # Parse JSON manually for better error handling
-        import json
         try:
             data = json.loads(body)
-            logger.info(f"Parsed JSON data: {data}")
+            logger.info(f"[DEBUG] Parsed JSON data: {data}")
         except json.JSONDecodeError as e:
             logger.error(f"JSON decode error: {e}")
             raise HTTPException(status_code=422, detail=f"Invalid JSON: {e}")
@@ -561,13 +559,15 @@ async def create_session_json(request: Request):
         project_name = data.get('project_name')
         description = data.get('description', '')
         
+        logger.info(f"[DEBUG] Extracted fields - user_id: {user_id} (type: {type(user_id)}), project_name: {project_name} (type: {type(project_name)}), description: {description}")
+        
         if user_id is None:
+            logger.error(f"[DEBUG] Validation failed: user_id is None")
             raise HTTPException(status_code=422, detail="user_id is required")
         if project_name is None:
+            logger.error(f"[DEBUG] Validation failed: project_name is None")
             raise HTTPException(status_code=422, detail="project_name is required")
             
-        logger.info(f"Creating session with data: user_id={user_id}, project_name={project_name}, description={description}")
-        
         session_id = str(uuid.uuid4())
         volume_name = f"{VOLUME_PREFIX}{session_id}"
         
