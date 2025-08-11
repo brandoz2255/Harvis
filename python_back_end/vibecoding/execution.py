@@ -270,6 +270,235 @@ async def execute_code_in_container(
             except Exception:
                 pass
 
+async def execute_code_fallback(
+    code: str,
+    language: str,
+    filename: str,
+    timeout: int = 30
+) -> Dict[str, Any]:
+    """Fallback execution without Docker - runs code directly on host"""
+    import subprocess
+    import sys
+    
+    start_time = datetime.now()
+    
+    try:
+        # Create temporary directory for code
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Write code to file
+            code_file_path = os.path.join(temp_dir, filename)
+            with open(code_file_path, 'w', encoding='utf-8') as f:
+                f.write(code)
+            
+            # Check for non-executable file types
+            non_executable_languages = ["json", "yaml", "yml", "xml", "html", "css", "md", "txt"]
+            if language.lower() in non_executable_languages:
+                return {
+                    "status": "completed",
+                    "output": f"File content displayed (not executable):\n\n{code}",
+                    "error": None,
+                    "exit_code": 0,
+                    "execution_time": (datetime.now() - start_time).total_seconds()
+                }
+            
+            # Determine execution command based on language
+            lang = language.lower()
+            
+            if lang == "python":
+                cmd = [sys.executable, code_file_path]
+            elif lang in ["javascript", "js"]:
+                cmd = ["node", code_file_path]
+            elif lang in ["typescript", "ts"]:
+                # Try ts-node first, fallback to tsc + node
+                try:
+                    subprocess.run(["ts-node", "--version"], capture_output=True, check=True)
+                    cmd = ["ts-node", code_file_path]
+                except (subprocess.CalledProcessError, FileNotFoundError):
+                    # Fallback: compile with tsc then run with node
+                    js_file = code_file_path.replace('.ts', '.js')
+                    compile_result = subprocess.run(
+                        ["tsc", code_file_path, "--outFile", js_file],
+                        capture_output=True, text=True
+                    )
+                    if compile_result.returncode != 0:
+                        return {
+                            "status": "failed",
+                            "output": "",
+                            "error": f"TypeScript compilation failed: {compile_result.stderr}",
+                            "exit_code": compile_result.returncode,
+                            "execution_time": (datetime.now() - start_time).total_seconds()
+                        }
+                    cmd = ["node", js_file]
+            elif lang == "java":
+                # Compile and run Java
+                class_name = filename.replace('.java', '')
+                compile_result = subprocess.run(
+                    ["javac", code_file_path],
+                    cwd=temp_dir,
+                    capture_output=True,
+                    text=True
+                )
+                if compile_result.returncode != 0:
+                    return {
+                        "status": "failed",
+                        "output": "",
+                        "error": f"Java compilation failed: {compile_result.stderr}",
+                        "exit_code": compile_result.returncode,
+                        "execution_time": (datetime.now() - start_time).total_seconds()
+                    }
+                cmd = ["java", class_name]
+            elif lang in ["cpp", "c++"]:
+                # Compile and run C++
+                exe_file = os.path.join(temp_dir, "program")
+                compile_result = subprocess.run(
+                    ["g++", code_file_path, "-o", exe_file],
+                    capture_output=True,
+                    text=True
+                )
+                if compile_result.returncode != 0:
+                    return {
+                        "status": "failed",
+                        "output": "",
+                        "error": f"C++ compilation failed: {compile_result.stderr}",
+                        "exit_code": compile_result.returncode,
+                        "execution_time": (datetime.now() - start_time).total_seconds()
+                    }
+                cmd = [exe_file]
+            elif lang == "c":
+                # Compile and run C
+                exe_file = os.path.join(temp_dir, "program")
+                compile_result = subprocess.run(
+                    ["gcc", code_file_path, "-o", exe_file],
+                    capture_output=True,
+                    text=True
+                )
+                if compile_result.returncode != 0:
+                    return {
+                        "status": "failed",
+                        "output": "",
+                        "error": f"C compilation failed: {compile_result.stderr}",
+                        "exit_code": compile_result.returncode,
+                        "execution_time": (datetime.now() - start_time).total_seconds()
+                    }
+                cmd = [exe_file]
+            elif lang == "go":
+                cmd = ["go", "run", code_file_path]
+            elif lang == "rust":
+                # Compile and run Rust
+                exe_file = os.path.join(temp_dir, "program")
+                compile_result = subprocess.run(
+                    ["rustc", code_file_path, "-o", exe_file],
+                    capture_output=True,
+                    text=True
+                )
+                if compile_result.returncode != 0:
+                    return {
+                        "status": "failed",
+                        "output": "",
+                        "error": f"Rust compilation failed: {compile_result.stderr}",
+                        "exit_code": compile_result.returncode,
+                        "execution_time": (datetime.now() - start_time).total_seconds()
+                    }
+                cmd = [exe_file]
+            elif lang == "ruby":
+                cmd = ["ruby", code_file_path]
+            elif lang == "php":
+                cmd = ["php", code_file_path]
+            elif lang in ["bash", "shell", "sh"]:
+                cmd = ["bash", code_file_path]
+            elif lang == "perl":
+                cmd = ["perl", code_file_path]
+            elif lang == "lua":
+                cmd = ["lua", code_file_path]
+            elif lang in ["r", "rscript"]:
+                cmd = ["Rscript", code_file_path]
+            elif lang == "scala":
+                cmd = ["scala", code_file_path]
+            elif lang == "kotlin":
+                # Compile and run Kotlin
+                jar_file = os.path.join(temp_dir, "program.jar")
+                compile_result = subprocess.run(
+                    ["kotlinc", code_file_path, "-include-runtime", "-d", jar_file],
+                    capture_output=True,
+                    text=True
+                )
+                if compile_result.returncode != 0:
+                    return {
+                        "status": "failed",
+                        "output": "",
+                        "error": f"Kotlin compilation failed: {compile_result.stderr}",
+                        "exit_code": compile_result.returncode,
+                        "execution_time": (datetime.now() - start_time).total_seconds()
+                    }
+                cmd = ["java", "-jar", jar_file]
+            elif lang in ["powershell", "ps1"]:
+                cmd = ["powershell", "-File", code_file_path]
+            elif lang == "dart":
+                cmd = ["dart", code_file_path]
+            elif lang == "swift":
+                cmd = ["swift", code_file_path]
+            else:
+                return {
+                    "status": "failed",
+                    "output": "",
+                    "error": f"Language {language} not supported in fallback mode. Supported languages: python, javascript, typescript, java, cpp, c, go, rust, ruby, php, bash, shell, perl, lua, r, scala, kotlin, powershell, dart, swift",
+                    "exit_code": -1,
+                    "execution_time": 0.0
+                }
+            
+            # Execute the code
+            try:
+                result = subprocess.run(
+                    cmd,
+                    cwd=temp_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    check=False  # Don't raise exception on non-zero exit
+                )
+                
+                output = result.stdout
+                error = result.stderr
+                exit_code = result.returncode
+                
+                execution_time = (datetime.now() - start_time).total_seconds()
+                status = "completed" if exit_code == 0 else "failed"
+                
+                return {
+                    "status": status,
+                    "output": output.strip(),
+                    "error": error.strip() if error.strip() else None,
+                    "exit_code": exit_code,
+                    "execution_time": execution_time
+                }
+                
+            except subprocess.TimeoutExpired:
+                return {
+                    "status": "timeout",
+                    "output": "",
+                    "error": f"Code execution timed out after {timeout} seconds",
+                    "exit_code": -1,
+                    "execution_time": timeout
+                }
+            except FileNotFoundError as e:
+                return {
+                    "status": "failed",
+                    "output": "",
+                    "error": f"Interpreter not found: {str(e)}. Make sure {language} is installed.",
+                    "exit_code": -1,
+                    "execution_time": (datetime.now() - start_time).total_seconds()
+                }
+                
+    except Exception as e:
+        logger.error(f"Fallback execution error: {e}")
+        return {
+            "status": "failed",
+            "output": "",
+            "error": f"Execution error: {str(e)}",
+            "exit_code": -1,
+            "execution_time": (datetime.now() - start_time).total_seconds()
+        }
+
 @router.post("/execute", response_model=CodeExecutionResponse)
 async def execute_code(
     request: CodeExecutionRequest,
@@ -311,16 +540,25 @@ async def execute_code(
         }
         executions_storage[execution_id] = execution_info
         
-        # Execute code in container
-        result = await execute_code_in_container(
-            code=request.code,
-            language=request.language,
-            filename=filename,
-            docker_image=docker_image,
-            working_dir=request.working_directory or "/workspace",
-            timeout=request.timeout or 30,
-            dependencies=request.dependencies
-        )
+        # Execute code - use fallback if Docker is not available
+        if DOCKER_AVAILABLE:
+            result = await execute_code_in_container(
+                code=request.code,
+                language=request.language,
+                filename=filename,
+                docker_image=docker_image,
+                working_dir=request.working_directory or "/workspace",
+                timeout=request.timeout or 30,
+                dependencies=request.dependencies
+            )
+        else:
+            logger.info(f"Using fallback execution for {request.language} (Docker not available)")
+            result = await execute_code_fallback(
+                code=request.code,
+                language=request.language,
+                filename=filename,
+                timeout=request.timeout or 30
+            )
         
         # Update execution info with results
         execution_info.update({
