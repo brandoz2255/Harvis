@@ -15,16 +15,24 @@ interface JWTPayload {
 
 async function verifyToken(request: NextRequest): Promise<JWTPayload | null> {
   try {
+    console.log('[DEBUG] Starting JWT verification...')
     const authHeader = request.headers.get('authorization')
+    console.log('[DEBUG] Auth header:', authHeader ? authHeader.substring(0, 20) + '...' : 'MISSING')
+    
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      console.log('[DEBUG] No valid auth header found')
       return null
     }
 
     const token = authHeader.substring(7)
+    console.log('[DEBUG] Extracted token:', token.substring(0, 20) + '...')
+    console.log('[DEBUG] Using JWT_SECRET:', JWT_SECRET.substring(0, 10) + '... (length:', JWT_SECRET.length + ')')
+    
     const decoded = jwt.verify(token, JWT_SECRET) as JWTPayload
+    console.log('[DEBUG] JWT decoded successfully:', decoded)
     return decoded
   } catch (error) {
-    console.error('Token verification failed:', error)
+    console.error('[DEBUG] Token verification failed:', error)
     return null
   }
 }
@@ -70,10 +78,12 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    // Verify JWT token
-    const user = await verifyToken(request)
-    console.log('[DEBUG] JWT User object:', user)
-    if (!user) {
+    // Get authorization header (don't verify JWT here, let backend handle it)
+    const authHeader = request.headers.get('authorization')
+    console.log('[DEBUG] Auth header:', authHeader ? authHeader.substring(0, 20) + '...' : 'MISSING')
+    
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      console.log('[DEBUG] No valid auth header found')
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
@@ -88,35 +98,19 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Convert string user ID to number for backend
-    console.log('[DEBUG] user.sub value:', user.sub, 'type:', typeof user.sub)
-    const userId = parseInt(user.sub)
-    console.log('[DEBUG] Parsed userId:', userId, 'isNaN:', isNaN(userId))
-    
-    if (isNaN(userId)) {
-      console.error('[DEBUG] Failed to parse user ID from:', user.sub)
-      return NextResponse.json(
-        { error: 'Invalid user ID' },
-        { status: 400 }
-      )
-    }
+    console.log('[DEBUG] Forwarding to backend with auth header')
 
-    const requestBody = {
-      user_id: userId,
-      project_name,
-      description: description || ''
-    }
-    
-    console.log('[DEBUG] Final request body to backend:', requestBody)
-    console.log('[DEBUG] Stringified body:', JSON.stringify(requestBody))
-
-    // Forward request to backend
-    const backendResponse = await fetch(`${BACKEND_URL}/api/vibecoding/sessions`, {
+    // Forward request to backend with auth header (let backend handle JWT verification and user_id extraction)
+    const backendResponse = await fetch(`${BACKEND_URL}/api/vibecoding/sessions/create`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        'Authorization': authHeader,  // Forward the auth header
       },
-      body: JSON.stringify(requestBody)
+      body: JSON.stringify({
+        project_name,
+        description: description || ''
+      })
     })
 
     if (!backendResponse.ok) {

@@ -12,10 +12,13 @@ import asyncio
 import json
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Request
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Request, Depends
 from pydantic import BaseModel
 import asyncpg
 from .db_session import get_session_db
+
+# Import auth utilities
+from auth_utils import get_current_user
 
 logger = logging.getLogger(__name__)
 
@@ -507,37 +510,37 @@ async def get_user_sessions(user_id: int, active_only: bool = True):
         logger.error(f"Failed to get user sessions: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+class SessionCreateRequest(BaseModel):
+    project_name: str
+    description: str = ""
+
 @router.post("/api/vibecoding/sessions/create")
 async def create_session_endpoint(
-    user_id: int, 
-    project_name: str = "Untitled Project", 
-    description: str = ""
+    request: SessionCreateRequest,
+    current_user: dict = Depends(get_current_user)
 ):
-    """Create a new vibecoding session."""
+    """Create a new vibecoding session with JWT authentication."""
     try:
+        logger.info(f"Creating session for user: {current_user}")
+        
         session_id = str(uuid.uuid4())
         volume_name = f"{VOLUME_PREFIX}{session_id}"
         
         session_db = get_session_db()
         result = await session_db.create_session(
-            session_id, user_id, project_name, description, 
+            session_id, current_user["id"], request.project_name, request.description, 
             volume_name=volume_name
         )
         
         return {
             "session_id": session_id,
-            "project_name": project_name,
+            "project_name": request.project_name,
             "volume_name": volume_name,
             **result
         }
     except Exception as e:
         logger.error(f"Failed to create session: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-class SessionCreateRequest(BaseModel):
-    user_id: int
-    project_name: str
-    description: Optional[str] = ""
 
 @router.post("/api/vibecoding/sessions")
 async def create_session_json(request: Request):
