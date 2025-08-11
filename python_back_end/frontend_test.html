@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vibe Files Frontend Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .container { max-width: 800px; margin: 0 auto; }
+        .section { margin: 20px 0; padding: 15px; border: 1px solid #ddd; border-radius: 5px; }
+        .success { background-color: #d4edda; border-color: #c3e6cb; }
+        .error { background-color: #f8d7da; border-color: #f5c6cb; }
+        .info { background-color: #d1ecf1; border-color: #bee5eb; }
+        button { padding: 10px 15px; margin: 5px; cursor: pointer; }
+        .file-tree { margin-left: 20px; }
+        .folder { font-weight: bold; color: #0066cc; }
+        .file { color: #333; }
+        input, textarea { width: 100%; padding: 5px; margin: 5px 0; }
+        .log { background: #f8f9fa; padding: 10px; border-radius: 3px; font-family: monospace; white-space: pre-wrap; max-height: 200px; overflow-y: auto; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🧪 Vibe Files Frontend Test</h1>
+        <p>This page tests the Vibe Files API directly from the browser to identify frontend issues.</p>
+        
+        <div class="section info">
+            <h3>📋 Test Status</h3>
+            <div id="status">Ready to test...</div>
+        </div>
+        
+        <div class="section">
+            <h3>🔐 Authentication</h3>
+            <input type="text" id="authToken" placeholder="Enter JWT token (get from login or signup)" style="width: 70%;">
+            <button onclick="testAuth()">Test Auth</button>
+            <button onclick="createTestUser()">Create Test User</button>
+            <div id="authResult"></div>
+        </div>
+        
+        <div class="section">
+            <h3>🗄️ Database Test</h3>
+            <button onclick="testDatabase()">Test Database</button>
+            <div id="databaseResult"></div>
+        </div>
+        
+        <div class="section">
+            <h3>📁 File Operations</h3>
+            <input type="text" id="sessionId" placeholder="Session ID" value="test-session-frontend">
+            <br>
+            <button onclick="createFolder()">Create Folder</button>
+            <button onclick="createFile()">Create File</button>
+            <button onclick="getFiles()">Get Files</button>
+            <button onclick="testDragDrop()">Test Drag & Drop</button>
+            <div id="fileResult"></div>
+        </div>
+        
+        <div class="section">
+            <h3>🌳 File Tree</h3>
+            <button onclick="getTree()">Get Tree Structure</button>
+            <div id="treeResult"></div>
+        </div>
+        
+        <div class="section">
+            <h3>📝 Test Log</h3>
+            <div id="testLog" class="log"></div>
+            <button onclick="clearLog()">Clear Log</button>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://localhost:8000';
+        let currentToken = '';
+        let testFolderId = '';
+        let testFileId = '';
+        
+        function log(message) {
+            const logDiv = document.getElementById('testLog');
+            const timestamp = new Date().toLocaleTimeString();
+            logDiv.textContent += `[${timestamp}] ${message}\n`;
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+        
+        function clearLog() {
+            document.getElementById('testLog').textContent = '';
+        }
+        
+        function updateStatus(message, type = 'info') {
+            const statusDiv = document.getElementById('status');
+            statusDiv.textContent = message;
+            statusDiv.className = `section ${type}`;
+        }
+        
+        async function apiCall(endpoint, options = {}) {
+            try {
+                const url = `${API_BASE}${endpoint}`;
+                const headers = {
+                    'Content-Type': 'application/json',
+                    ...options.headers
+                };
+                
+                if (currentToken) {
+                    headers['Authorization'] = `Bearer ${currentToken}`;
+                }
+                
+                log(`Making ${options.method || 'GET'} request to ${endpoint}`);
+                
+                const response = await fetch(url, {
+                    ...options,
+                    headers
+                });
+                
+                const data = await response.json();
+                log(`Response ${response.status}: ${JSON.stringify(data, null, 2)}`);
+                
+                return { status: response.status, data, ok: response.ok };
+            } catch (error) {
+                log(`Error: ${error.message}`);
+                return { status: 0, data: { error: error.message }, ok: false };
+            }
+        }
+        
+        async function createTestUser() {
+            const timestamp = Date.now();
+            const userData = {
+                username: `testuser_${timestamp}`,
+                email: `test_${timestamp}@test.com`,
+                password: 'test123456'
+            };
+            
+            const result = await apiCall('/api/auth/signup', {
+                method: 'POST',
+                body: JSON.stringify(userData)
+            });
+            
+            if (result.ok) {
+                currentToken = result.data.access_token;
+                document.getElementById('authToken').value = currentToken;
+                document.getElementById('authResult').innerHTML = `
+                    <div class="success">✅ Test user created and logged in!</div>
+                `;
+                updateStatus('Test user created and authenticated', 'success');
+            } else {
+                document.getElementById('authResult').innerHTML = `
+                    <div class="error">❌ Failed to create test user: ${JSON.stringify(result.data)}</div>
+                `;
+            }
+        }
+        
+        async function testAuth() {
+            currentToken = document.getElementById('authToken').value;
+            if (!currentToken) {
+                alert('Please enter a JWT token or create a test user first');
+                return;
+            }
+            
+            const result = await apiCall('/api/vibe/debug/auth');
+            
+            if (result.ok) {
+                document.getElementById('authResult').innerHTML = `
+                    <div class="success">✅ Authentication successful!<br>
+                    User ID: ${result.data.user_id}<br>
+                    User Keys: ${result.data.user_keys.join(', ')}</div>
+                `;
+                updateStatus('Authentication successful', 'success');
+            } else {
+                document.getElementById('authResult').innerHTML = `
+                    <div class="error">❌ Authentication failed: ${JSON.stringify(result.data)}</div>
+                `;
+            }
+        }
+        
+        async function testDatabase() {
+            const result = await apiCall('/api/vibe/debug/database');
+            
+            if (result.ok) {
+                const db = result.data;
+                document.getElementById('databaseResult').innerHTML = `
+                    <div class="${db.database_connected ? 'success' : 'error'}">
+                    Database Connected: ${db.database_connected ? '✅' : '❌'}<br>
+                    Table Exists: ${db.table_exists ? '✅' : '❌'}<br>
+                    Total Files: ${db.total_files}<br>
+                    ${db.error ? `Error: ${db.error}` : ''}
+                    </div>
+                `;
+                
+                if (db.database_connected && db.table_exists) {
+                    updateStatus('Database is working correctly', 'success');
+                } else {
+                    updateStatus('Database issues detected', 'error');
+                }
+            } else {
+                document.getElementById('databaseResult').innerHTML = `
+                    <div class="error">❌ Database test failed</div>
+                `;
+            }
+        }
+        
+        async function createFolder() {
+            if (!currentToken) {
+                alert('Please authenticate first');
+                return;
+            }
+            
+            const sessionId = document.getElementById('sessionId').value;
+            const folderData = {
+                sessionId: sessionId,
+                name: 'test_folder',
+                type: 'folder'
+            };
+            
+            const result = await apiCall('/api/vibe/files', {
+                method: 'POST',
+                body: JSON.stringify(folderData)
+            });
+            
+            if (result.ok) {
+                testFolderId = result.data.id;
+                document.getElementById('fileResult').innerHTML = `
+                    <div class="success">✅ Folder created: ${result.data.name} (ID: ${result.data.id})</div>
+                `;
+            } else {
+                document.getElementById('fileResult').innerHTML = `
+                    <div class="error">❌ Failed to create folder: ${JSON.stringify(result.data)}</div>
+                `;
+            }
+        }
+        
+        async function createFile() {
+            if (!currentToken) {
+                alert('Please authenticate first');
+                return;
+            }
+            
+            const sessionId = document.getElementById('sessionId').value;
+            const fileData = {
+                sessionId: sessionId,
+                name: 'test_file.py',
+                type: 'file',
+                content: 'print("Hello from frontend test!")'
+            };
+            
+            const result = await apiCall('/api/vibe/files', {
+                method: 'POST',
+                body: JSON.stringify(fileData)
+            });
+            
+            if (result.ok) {
+                testFileId = result.data.id;
+                document.getElementById('fileResult').innerHTML = `
+                    <div class="success">✅ File created: ${result.data.name} (ID: ${result.data.id})</div>
+                `;
+            } else {
+                document.getElementById('fileResult').innerHTML = `
+                    <div class="error">❌ Failed to create file: ${JSON.stringify(result.data)}</div>
+                `;
+            }
+        }
+        
+        async function getFiles() {
+            if (!currentToken) {
+                alert('Please authenticate first');
+                return;
+            }
+            
+            const sessionId = document.getElementById('sessionId').value;
+            const result = await apiCall(`/api/vibe/files?sessionId=${sessionId}`);
+            
+            if (result.ok) {
+                const files = result.data.files;
+                let html = `<div class="success">✅ Found ${files.length} files:<br>`;
+                files.forEach(file => {
+                    html += `- ${file.name} (${file.type}) - Path: ${file.path}<br>`;
+                });
+                html += '</div>';
+                document.getElementById('fileResult').innerHTML = html;
+            } else {
+                document.getElementById('fileResult').innerHTML = `
+                    <div class="error">❌ Failed to get files: ${JSON.stringify(result.data)}</div>
+                `;
+            }
+        }
+        
+        async function testDragDrop() {
+            if (!currentToken || !testFolderId || !testFileId) {
+                alert('Please create a folder and file first');
+                return;
+            }
+            
+            const moveData = {
+                targetParentId: testFolderId
+            };
+            
+            const result = await apiCall(`/api/vibe/files/${testFileId}/move`, {
+                method: 'PUT',
+                body: JSON.stringify(moveData)
+            });
+            
+            if (result.ok) {
+                document.getElementById('fileResult').innerHTML = `
+                    <div class="success">✅ Drag & Drop successful!<br>
+                    File moved to: ${result.data.path}<br>
+                    Parent ID: ${result.data.parent_id}</div>
+                `;
+                updateStatus('Drag and drop is working!', 'success');
+            } else {
+                document.getElementById('fileResult').innerHTML = `
+                    <div class="error">❌ Drag & Drop failed: ${JSON.stringify(result.data)}</div>
+                `;
+            }
+        }
+        
+        async function getTree() {
+            if (!currentToken) {
+                alert('Please authenticate first');
+                return;
+            }
+            
+            const sessionId = document.getElementById('sessionId').value;
+            const result = await apiCall(`/api/vibe/files/tree?sessionId=${sessionId}`);
+            
+            if (result.ok) {
+                const tree = result.data.tree;
+                let html = `<div class="success">✅ Tree structure (${tree.length} root items):<br>`;
+                
+                function renderTree(items, indent = 0) {
+                    items.forEach(item => {
+                        const prefix = '&nbsp;'.repeat(indent * 4);
+                        const icon = item.type === 'folder' ? '📁' : '📄';
+                        html += `${prefix}${icon} ${item.name}<br>`;
+                        if (item.children && item.children.length > 0) {
+                            renderTree(item.children, indent + 1);
+                        }
+                    });
+                }
+                
+                renderTree(tree);
+                html += '</div>';
+                document.getElementById('treeResult').innerHTML = html;
+            } else {
+                document.getElementById('treeResult').innerHTML = `
+                    <div class="error">❌ Failed to get tree: ${JSON.stringify(result.data)}</div>
+                `;
+            }
+        }
+        
+        // Initialize
+        updateStatus('Ready to test - start by testing database or creating a test user', 'info');
+        log('Frontend test page loaded');
+    </script>
+</body>
+</html>
