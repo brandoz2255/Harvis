@@ -4,10 +4,13 @@ import jwt from 'jsonwebtoken'
 const BACKEND_URL = process.env.BACKEND_URL || 'http://backend:8000'
 const JWT_SECRET = process.env.JWT_SECRET || 'key'
 
+// Temporary logging to verify JWT secret is loaded
+console.log('Container API JWT_SECRET loaded:', JWT_SECRET.substring(0, 10) + '...', 'Length:', JWT_SECRET.length)
+
 interface JWTPayload {
-  id: number
-  email: string
-  username: string
+  sub: string  // Backend uses "sub" for user ID
+  email?: string
+  username?: string
 }
 
 async function verifyToken(request: NextRequest): Promise<JWTPayload | null> {
@@ -77,7 +80,7 @@ export async function POST(request: NextRequest) {
       },
       body: method !== 'GET' ? JSON.stringify({
         session_id,
-        user_id: user.id.toString(),
+        user_id: user.sub,
         ...body
       }) : undefined
     })

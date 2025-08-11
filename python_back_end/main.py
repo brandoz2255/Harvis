@@ -33,6 +33,9 @@ SECRET_KEY = os.getenv("JWT_SECRET", "key")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
+# Temporary logging to verify JWT secret is loaded
+print(f"Backend JWT_SECRET loaded: {SECRET_KEY[:10]}... Length: {len(SECRET_KEY)}")
+
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer(auto_error=False)
 
