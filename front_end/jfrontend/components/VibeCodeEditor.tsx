@@ -126,50 +126,11 @@ export default function VibeCodeEditor({
     })
   }
 
-  // Register AI completion provider
+  // Register AI completion provider (disabled for now)
   const registerCompletionProvider = (monaco: any, language: string) => {
     return monaco.languages.registerCompletionItemProvider(language, {
       provideCompletionItems: async (model: any, position: any) => {
-        try {
-          // Get context around cursor
-          const textUntilPosition = model.getValueInRange({
-            startLineNumber: Math.max(1, position.lineNumber - 10),
-            startColumn: 1,
-            endLineNumber: position.lineNumber,
-            endColumn: position.column
-          })
-
-          const response = await fetch('/api/vibe/ai/completion', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              context: textUntilPosition,
-              language,
-              position: { line: position.lineNumber, column: position.column }
-            })
-          })
-
-          if (response.ok) {
-            const data = await response.json()
-            return {
-              suggestions: data.completions?.map((completion: any) => ({
-                label: completion.label,
-                kind: monaco.languages.CompletionItemKind.Function,
-                insertText: completion.insertText,
-                documentation: completion.documentation,
-                range: {
-                  startLineNumber: position.lineNumber,
-                  endLineNumber: position.lineNumber,
-                  startColumn: position.column - (completion.prefix?.length || 0),
-                  endColumn: position.column
-                }
-              })) || []
-            }
-          }
-        } catch (error) {
-          console.error('AI completion failed:', error)
-        }
-        
+        // AI completion temporarily disabled - return empty suggestions
         return { suggestions: [] }
       },
       triggerCharacters: ['.', '(', ' ', '\n']
