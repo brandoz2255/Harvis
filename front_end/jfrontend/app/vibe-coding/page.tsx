@@ -90,6 +90,10 @@ export default function VibeCodingPage() {
     "Vibe Coding Terminal Ready 🎵",
     "Connected to execution environment",
   ])
+  const [codeExecutionOutput, setCodeExecutionOutput] = useState<string[]>([
+    "Code execution output will appear here...",
+  ])
+  const [terminalTab, setTerminalTab] = useState<'terminal' | 'execution'>('terminal')
 
   // Voice features
   const [isRecording, setIsRecording] = useState(false)
@@ -376,6 +380,52 @@ export default function VibeCodingPage() {
         return
       }
 
+      // Generate appropriate default content based on file extension
+      const getDefaultContent = (filename: string): string => {
+        const extension = filename.split('.').pop()?.toLowerCase()
+        
+        switch (extension) {
+          case 'py':
+            return '# New Python file\nprint("Hello, World!")\n'
+          case 'js':
+            return '// New JavaScript file\nconsole.log("Hello, World!");\n'
+          case 'ts':
+            return '// New TypeScript file\nconsole.log("Hello, World!");\n'
+          case 'java':
+            return '// New Java file\npublic class Main {\n    public static void main(String[] args) {\n        System.out.println("Hello, World!");\n    }\n}\n'
+          case 'cpp':
+          case 'cc':
+            return '// New C++ file\n#include <iostream>\nusing namespace std;\n\nint main() {\n    cout << "Hello, World!" << endl;\n    return 0;\n}\n'
+          case 'c':
+            return '// New C file\n#include <stdio.h>\n\nint main() {\n    printf("Hello, World!\\n");\n    return 0;\n}\n'
+          case 'go':
+            return '// New Go file\npackage main\n\nimport "fmt"\n\nfunc main() {\n    fmt.Println("Hello, World!")\n}\n'
+          case 'rs':
+            return '// New Rust file\nfn main() {\n    println!("Hello, World!");\n}\n'
+          case 'rb':
+            return '# New Ruby file\nputs "Hello, World!"\n'
+          case 'php':
+            return '<?php\n// New PHP file\necho "Hello, World!";\n?>\n'
+          case 'sh':
+            return '#!/bin/bash\n# New shell script\necho "Hello, World!"\n'
+          case 'html':
+            return '<!DOCTYPE html>\n<html>\n<head>\n    <title>New HTML File</title>\n</head>\n<body>\n    <h1>Hello, World!</h1>\n</body>\n</html>\n'
+          case 'css':
+            return '/* New CSS file */\nbody {\n    font-family: Arial, sans-serif;\n    margin: 0;\n    padding: 20px;\n}\n'
+          case 'md':
+            return '# New Markdown File\n\nHello, World!\n'
+          case 'json':
+            return '{\n  "message": "Hello, World!"\n}\n'
+          case 'yaml':
+          case 'yml':
+            return '# New YAML file\nmessage: "Hello, World!"\n'
+          case 'txt':
+            return 'New text file\n'
+          default:
+            return '// New file\n'
+        }
+      }
+
       const response = await fetch('/api/vibe/files', {
         method: 'POST',
         headers: { 
@@ -387,7 +437,7 @@ export default function VibeCodingPage() {
           parentId,
           name,
           type,
-          content: type === 'file' ? '// New file\n' : undefined
+          content: type === 'file' ? getDefaultContent(name) : undefined
         })
       })
 
@@ -460,8 +510,40 @@ export default function VibeCodingPage() {
   }
 
   const handleFileMove = async (fileId: string, newParentId: string | null) => {
-    // Implementation for moving files between folders
-    console.log('Move file:', fileId, 'to parent:', newParentId)
+    try {
+      const token = localStorage.getItem('token')
+      if (!token) {
+        router.push('/login')
+        return
+      }
+
+      console.log('Moving file:', fileId, 'to parent:', newParentId)
+      
+      const response = await fetch(`/api/vibe/files/${fileId}/move`, {
+        method: 'PUT',
+        headers: { 
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json' 
+        },
+        body: JSON.stringify({ 
+          targetParentId: newParentId 
+        })
+      })
+
+      if (response.ok) {
+        const movedFile = await response.json()
+        await refreshFiles()
+        addTerminalOutput(`📁 Moved "${movedFile.name}" to ${newParentId ? 'folder' : 'root'}`)
+        console.log('File moved successfully:', movedFile)
+      } else {
+        const errorData = await response.json().catch(() => ({ detail: 'Unknown error' }))
+        console.error('Failed to move file:', response.status, errorData)
+        addTerminalOutput(`❌ Failed to move file: ${errorData.detail || 'Unknown error'}`)
+      }
+    } catch (error) {
+      console.error('Failed to move file:', error)
+      addTerminalOutput(`❌ Failed to move file: ${error instanceof Error ? error.message : 'Unknown error'}`)
+    }
   }
 
   const handleDownload = (fileId: string, isFolder: boolean) => {
@@ -527,11 +609,21 @@ export default function VibeCodingPage() {
     } else {
       // Fallback to HTTP execution
       try {
+        const token = localStorage.getItem('token')
+        if (!token) {
+          addTerminalOutput(`❌ Authentication required`)
+          router.push('/login')
+          return
+        }
+
         const response = await fetch('/api/vibe/execute', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json' 
+          },
           body: JSON.stringify({
-            sessionId: currentSession?.id,
+            session_id: currentSession?.id,
             code: selectedFile.content,
             language: selectedFile.language,
             filename: selectedFile.name
@@ -540,14 +632,21 @@ export default function VibeCodingPage() {
 
         if (response.ok) {
           const result = await response.json()
-          addTerminalOutput(result.output || 'No output')
-          if (result.exitCode !== 0) {
-            addTerminalOutput(`❌ Exit code: ${result.exitCode}`)
+          addExecutionOutput(result.output || 'No output')
+          if (result.exit_code !== 0) {
+            addExecutionOutput(`❌ Exit code: ${result.exit_code}`)
+            if (result.error) {
+              addExecutionOutput(`Error: ${result.error}`)
+            }
           } else {
-            addTerminalOutput(`✅ Execution completed successfully`)
+            addExecutionOutput(`✅ Execution completed successfully`)
+          }
+          if (result.execution_time) {
+            addExecutionOutput(`⏱️ Execution time: ${result.execution_time.toFixed(3)}s`)
           }
         } else {
-          addTerminalOutput(`❌ Execution failed`)
+          const errorData = await response.json().catch(() => ({ detail: 'Execution failed' }))
+          addExecutionOutput(`❌ Execution failed: ${errorData.detail || 'Unknown error'}`)
         }
       } catch (error) {
         addTerminalOutput(`❌ Error: ${error}`)
@@ -557,6 +656,12 @@ export default function VibeCodingPage() {
 
   const addTerminalOutput = (output: string) => {
     setTerminalOutput(prev => [...prev, output])
+  }
+
+  const addExecutionOutput = (output: string) => {
+    setCodeExecutionOutput(prev => [...prev, output])
+    // Also switch to execution tab when new output arrives
+    setTerminalTab('execution')
   }
 
   // Refresh file tree
@@ -969,10 +1074,37 @@ export default function VibeCodingPage() {
                     <div className="flex items-center justify-between">
                       <div className="flex items-center space-x-2">
                         <Terminal className="w-5 h-5 text-blue-400" />
-                        <h3 className="text-lg font-semibold text-blue-300">Terminal</h3>
+                        <div className="flex space-x-1">
+                          <button
+                            onClick={() => setTerminalTab('terminal')}
+                            className={`px-3 py-1 text-sm rounded ${
+                              terminalTab === 'terminal' 
+                                ? 'bg-blue-600 text-white' 
+                                : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                            }`}
+                          >
+                            Terminal
+                          </button>
+                          <button
+                            onClick={() => setTerminalTab('execution')}
+                            className={`px-3 py-1 text-sm rounded ${
+                              terminalTab === 'execution' 
+                                ? 'bg-purple-600 text-white' 
+                                : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                            }`}
+                          >
+                            Execution
+                          </button>
+                        </div>
                       </div>
                       <Button
-                        onClick={() => setTerminalOutput(["Terminal cleared"])}
+                        onClick={() => {
+                          if (terminalTab === 'terminal') {
+                            setTerminalOutput(["Terminal cleared"])
+                          } else {
+                            setCodeExecutionOutput(["Execution output cleared"])
+                          }
+                        }}
                         size="sm"
                         variant="outline"
                         className="bg-gray-800 border-gray-600 text-gray-300"
@@ -983,11 +1115,19 @@ export default function VibeCodingPage() {
                   </div>
                   <div className="flex-1 p-4 overflow-y-auto bg-black rounded-b-lg">
                     <div className="font-mono text-sm space-y-1">
-                      {terminalOutput.map((line, index) => (
-                        <div key={index} className="text-green-400">
-                          {line}
-                        </div>
-                      ))}
+                      {terminalTab === 'terminal' ? (
+                        terminalOutput.map((line, index) => (
+                          <div key={index} className="text-green-400">
+                            {line}
+                          </div>
+                        ))
+                      ) : (
+                        codeExecutionOutput.map((line, index) => (
+                          <div key={index} className="text-cyan-400">
+                            {line}
+                          </div>
+                        ))
+                      )}
                       <div ref={terminalEndRef} />
                     </div>
                   </div>
@@ -1149,7 +1289,28 @@ export default function VibeCodingPage() {
                   <div className="flex items-center justify-between">
                     <div className="flex items-center space-x-2">
                       <Terminal className="w-5 h-5 text-blue-400" />
-                      <h3 className="text-lg font-semibold text-blue-300">Terminal</h3>
+                      <div className="flex space-x-1">
+                        <button
+                          onClick={() => setTerminalTab('terminal')}
+                          className={`px-3 py-1 text-sm rounded ${
+                            terminalTab === 'terminal' 
+                              ? 'bg-blue-600 text-white' 
+                              : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                          }`}
+                        >
+                          Terminal
+                        </button>
+                        <button
+                          onClick={() => setTerminalTab('execution')}
+                          className={`px-3 py-1 text-sm rounded ${
+                            terminalTab === 'execution' 
+                              ? 'bg-purple-600 text-white' 
+                              : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                          }`}
+                        >
+                          Execution
+                        </button>
+                      </div>
                       <Badge variant="outline" className={`text-xs ${
                         executionConnected ? 'border-green-500 text-green-400' : 'border-red-500 text-red-400'
                       }`}>
@@ -1157,7 +1318,13 @@ export default function VibeCodingPage() {
                       </Badge>
                     </div>
                     <Button
-                      onClick={() => setTerminalOutput(["Terminal cleared"])}
+                      onClick={() => {
+                        if (terminalTab === 'terminal') {
+                          setTerminalOutput(["Terminal cleared"])
+                        } else {
+                          setCodeExecutionOutput(["Execution output cleared"])
+                        }
+                      }}
                       size="sm"
                       variant="outline"
                       className="bg-gray-800 border-gray-600 text-gray-300"
@@ -1169,16 +1336,19 @@ export default function VibeCodingPage() {
 
                 <div className="flex-1 p-4 overflow-y-auto bg-black rounded-b-lg">
                   <div className="font-mono text-sm space-y-1">
-                    {terminalOutput.map((line, index) => (
-                      <div key={index} className="text-green-400">
-                        {line}
-                      </div>
-                    ))}
-                    {executionOutput.map((line, index) => (
-                      <div key={`exec-${index}`} className="text-cyan-400">
-                        {line}
-                      </div>
-                    ))}
+                    {terminalTab === 'terminal' ? (
+                      terminalOutput.map((line, index) => (
+                        <div key={index} className="text-green-400">
+                          {line}
+                        </div>
+                      ))
+                    ) : (
+                      codeExecutionOutput.map((line, index) => (
+                        <div key={index} className="text-cyan-400">
+                          {line}
+                        </div>
+                      ))
+                    )}
                     <div ref={terminalEndRef} />
                   </div>
                 </div>
