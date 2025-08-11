@@ -21,7 +21,8 @@ from typing import List, Optional, Dict, Any
 from vison_models.llm_connector import query_qwen, query_llm, load_qwen_model, unload_qwen_model
 
 # Import vibecoding routers
-from vibecoding import sessions_router, models_router, execution_router, files_router
+from vibecoding import sessions_router, models_router, execution_router, files_router, commands_router, containers_router
+from vibecoding.core import initialize_vibe_agent
 
 from pydantic import BaseModel
 import torch, soundfile as sf
@@ -133,9 +134,7 @@ from uuid import UUID
 import logging
 import time
 
-# Add the ollama_cli directory to the path
-sys.path.append(os.path.join(os.path.dirname(__file__), 'ollama_cli'))
-from vibe_agent import VibeAgent
+# Vibe agent is now handled in vibecoding.core module
 
 # ─── n8n Automation Setup ─────────────────────────────────────────────────────
 from n8n import N8nClient, WorkflowBuilder, N8nAutomationService, N8nStorage
@@ -156,13 +155,8 @@ except ImportError:
     logger.warning("⚠️ python-dotenv not installed, environment variables must be passed via Docker")
 
 # ─── Initialize vibe agent ─────────────────────────────────────────────────────
-# Note: Import VibeAgent after all model_manager imports to avoid circular imports
-try:
-    vibe_agent = VibeAgent(project_dir=os.getcwd())
-    logger.info("✅ VibeAgent initialized successfully")
-except Exception as e:
-    logger.error(f"❌ Failed to initialize VibeAgent: {e}")
-    vibe_agent = None
+# Vibe agent initialization moved to vibecoding.core module
+initialize_vibe_agent(project_dir=os.getcwd())
 
 # ─── Initialize n8n services ──────────────────────────────────────────────────
 n8n_client = None
@@ -238,6 +232,8 @@ app.include_router(sessions_router)
 app.include_router(models_router)
 app.include_router(execution_router)
 app.include_router(files_router)
+app.include_router(commands_router)
+app.include_router(containers_router)
 
 # ─── Database Pool and Chat History Manager Init ─────────────────────────────────────────────────
 db_pool = None
@@ -257,6 +253,14 @@ async def startup_event():
             logger.info("✅ Vibe files database table initialized")
         except Exception as e:
             logger.error(f"❌ Failed to initialize vibe files table: {e}")
+        
+        # Initialize session database
+        try:
+            from vibecoding.db_session import init_session_db
+            await init_session_db(db_pool)
+            logger.info("✅ Vibecoding session database initialized")
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize session database: {e}")
         
         # Initialize n8n services with database pool
         if n8n_client:
@@ -433,9 +437,7 @@ class SynthesizeSpeechRequest(BaseModel):
     temperature: float = 0.8
     cfg_weight: float = 0.5
 
-class VibeCommandRequest(BaseModel):
-    command: str
-    mode: str = "assistant"
+# VibeCommandRequest moved to vibecoding.commands
 
 class AnalyzeAndRespondRequest(BaseModel):
     image: str  # base-64 image (data-URI or raw)
@@ -451,15 +453,7 @@ class ScreenAnalysisWithTTSRequest(BaseModel):
     temperature: float = 0.8
     cfg_weight: float = 0.5
 
-class VibeCodingRequest(BaseModel):
-    message: str
-    files: List[Dict[str, Any]] = []
-    terminalHistory: List[str] = []
-    model: str = DEFAULT_MODEL
-    audio_prompt: Optional[str] = None
-    exaggeration: float = 0.5
-    temperature: float = 0.8
-    cfg_weight: float = 0.5
+# VibeCodingRequest moved to vibecoding.commands
 
 class VoiceTranscribeRequest(BaseModel):
     model: str = DEFAULT_MODEL
@@ -1741,31 +1735,9 @@ async def get_ollama_models():
             status_code=503, detail="Invalid response from Ollama server"
         )
 
-@app.post("/api/vibe/command")
-async def vibe_command(req: VibeCommandRequest):
-    vibe_agent.mode = req.mode
-    response_text, _ = vibe_agent.process_command(req.command)
-    return {"response": response_text}
+# Vibe command endpoint moved to vibecoding.commands
 
-@app.websocket("/api/ws/vibe")
-async def websocket_vibe_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    try:
-        while True:
-            data = await websocket.receive_json()
-            command = data.get("command")
-            mode = data.get("mode", "assistant")
-
-            if command:
-                vibe_agent.mode = mode
-                await vibe_agent.process_command(command, websocket)
-            else:
-                await websocket.send_json({"type": "error", "content": "No command received"})
-    except WebSocketDisconnect:
-        logger.info("WebSocket disconnected")
-    except Exception as e:
-        logger.error(f"WebSocket error: {e}")
-        await websocket.send_json({"type": "error", "content": f"WebSocket error: {e}"})
+# Vibe websocket endpoint moved to vibecoding.commands
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
@@ -2337,291 +2309,13 @@ async def get_vector_db_stats():
 
 # ─── Vibe Coding Endpoints ─────────────────────────────────────────────────────
 
-@app.post("/api/vibe-coding", tags=["vibe-coding"])
-async def vibe_coding(req: VibeCodingRequest):
-    """
-    Voice-enabled vibe coding with intelligent model management.
-    Unloads models → Executes vibe agent → Generates TTS response → Reloads models.
-    """
-    try:
-        # Phase 1: Unload models to free GPU memory for vibe agent processing
-        logger.info("🤖 Phase 1: Starting vibe coding - clearing GPU memory for vibe agent")
-        unload_all_models()
-        
-        # Phase 2: Execute vibe agent processing
-        logger.info("⚡ Phase 2: Executing vibe agent with Mistral")
-        
-        # Use the existing vibe agent for processing
-        vibe_response, steps = await process_vibe_command_with_context(req.message, req.files, req.terminalHistory, req.model)
-        
-        # Phase 4: Unload vibe processing, reload models for TTS
-        logger.info("🔊 Phase 3: Reloading models for TTS generation")
-        reload_models_if_needed()
-        
-        # Generate TTS response
-        audio_prompt_path = req.audio_prompt or HARVIS_VOICE_PATH
-        if not os.path.isfile(audio_prompt_path):
-            audio_prompt_path = None
+# Vibe coding endpoint moved to vibecoding.commands
 
-        # Create speech-friendly version of response
-        tts_text = vibe_response
-        if len(tts_text) > 200:
-            tts_text = tts_text[:200] + "... I'm ready to help you code this!"
+# Voice transcribe endpoint moved to vibecoding.commands
 
-        sr, wav = generate_speech_optimized(
-            text=tts_text,
-            audio_prompt=audio_prompt_path,
-            exaggeration=req.exaggeration,
-            temperature=req.temperature,
-            cfg_weight=req.cfg_weight,
-        )
+# Run command endpoint moved to vibecoding.commands
 
-        # Save audio file
-        filename = f"vibe_coding_{uuid.uuid4()}.wav"
-        filepath = os.path.join(tempfile.gettempdir(), filename)
-        sf.write(filepath, wav, sr)
-        
-        logger.info("✅ Vibe coding complete - all models restored")
-        return {
-            "response": vibe_response,
-            "steps": steps,
-            "audio_path": f"/api/audio/{filename}",
-            "model_used": req.model,
-            "processing_stages": {
-                "vibe_agent": "✅ Completed",
-                "tts_generation": "✅ Completed"
-            }
-        }
+# Save file endpoint moved to vibecoding.commands
 
-    except Exception as e:
-        logger.error("Vibe coding failed: %s", e)
-        # Ensure models are reloaded even on error
-        logger.info("🔄 Reloading models after vibe coding error")
-        reload_models_if_needed()
-        raise HTTPException(500, str(e)) from e
-
-@app.post("/api/voice-transcribe", tags=["vibe-coding"])
-async def voice_transcribe(file: UploadFile = File(...), model: str = DEFAULT_MODEL):
-    """
-    Transcribe voice input for vibe coding with model management.
-    """
-    try:
-        # Save uploaded file to temp
-        contents = await file.read()
-        tmp_path = os.path.join(tempfile.gettempdir(), f"vibe_{uuid.uuid4()}.wav")
-        with open(tmp_path, "wb") as f:
-            f.write(contents)
-
-        # Use VRAM-optimized transcription
-        result = transcribe_with_whisper_optimized(tmp_path)
-        transcription = result.get("text", "").strip()
-        
-        # Clean up temp file
-        os.remove(tmp_path)
-        
-        logger.info(f"🎤 Voice transcribed for vibe coding: {transcription}")
-        return {"transcription": transcription, "model_used": "whisper-base"}
-
-    except Exception as e:
-        logger.error("Voice transcription failed: %s", e)
-        raise HTTPException(500, str(e)) from e
-
-@app.post("/api/run-command", tags=["vibe-coding"])
-async def run_command(req: RunCommandRequest):
-    """
-    Execute terminal commands for vibe coding.
-    """
-    try:
-        logger.info(f"🔧 Executing command: {req.command}")
-        
-        # Security: Basic command filtering
-        dangerous_commands = ["rm -rf", "sudo", "format", "del", "shutdown"]
-        if any(dangerous in req.command.lower() for dangerous in dangerous_commands):
-            return {"output": "❌ Command rejected for security reasons", "error": True}
-        
-        # Import and use existing command execution
-        from os_ops import execute_command
-        result = execute_command(req.command)
-        
-        return {"output": result, "error": False}
-        
-    except Exception as e:
-        logger.error(f"Command execution failed: {e}")
-        return {"output": f"❌ Error: {str(e)}", "error": True}
-
-@app.post("/api/save-file", tags=["vibe-coding"])
-async def save_file(req: SaveFileRequest):
-    """
-    Save file content for vibe coding.
-    """
-    try:
-        logger.info(f"💾 Saving file: {req.filename}")
-        
-        # Security: Basic path validation
-        if ".." in req.filename or req.filename.startswith("/"):
-            return {"success": False, "error": "Invalid filename"}
-        
-        # Save to project directory
-        filepath = os.path.join(os.getcwd(), req.filename)
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write(req.content)
-        
-        return {"success": True, "message": f"File {req.filename} saved successfully"}
-        
-    except Exception as e:
-        logger.error(f"File save failed: {e}")
-        return {"success": False, "error": str(e)}
-
-# ─── Vibe Agent Helper Functions ─────────────────────────────────────────────
-
-async def process_vibe_command_with_context(message: str, files: List[Dict], terminal_history: List[str], model: str) -> tuple[str, List[Dict]]:
-    """
-    Process vibe coding command with full context using the vibe agent logic
-    """
-    # Create context from files and terminal history
-    context = ""
-    if files:
-        context += "CURRENT FILES:\n"
-        for file in files:
-            context += f"=== {file.get('name', 'unknown')} ===\n{file.get('content', '')}\n\n"
-    
-    if terminal_history:
-        context += "TERMINAL HISTORY:\n"
-        context += "\n".join(terminal_history[-5:])  # Last 5 lines
-        context += "\n\n"
-    
-    # Generate vibe agent response using Ollama
-    system_prompt = """You are a Vibe Coding AI assistant. You help users build projects through natural conversation and voice commands.
-
-GUIDELINES:
-- Generate practical, executable coding steps
-- Be conversational and encouraging  
-- Focus on what the user wants to build
-- Provide clear, actionable steps
-- Keep responses under 100 words for voice output
-
-RESPONSE FORMAT:
-Provide your response as conversational text, followed by specific coding steps if needed."""
-
-    user_prompt = f"""
-User request: {message}
-
-Context:
-{context}
-
-Please provide a helpful, conversational response about how to implement this request. If specific code changes are needed, describe them clearly.
-"""
-
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "stream": False,
-    }
-
-    logger.info(f"→ Asking Ollama with model {model} for vibe coding")
-    headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY != "key" else {}
-    resp = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, headers=headers, timeout=120)
-    resp.raise_for_status()
-    
-    vibe_response = resp.json().get("message", {}).get("content", "").strip()
-    
-    # Generate coding steps based on the message
-    steps = generate_vibe_steps(message, vibe_response)
-    
-    return vibe_response, steps
-
-def generate_vibe_steps(message: str, response: str) -> List[Dict]:
-    """
-    Generate coding steps based on the user message and AI response
-    """
-    steps = []
-    message_lower = message.lower()
-    
-    # File creation
-    if "create" in message_lower and "file" in message_lower:
-        filename = "new_file.py"  # Default
-        # Try to extract filename from message
-        words = message.split()
-        for i, word in enumerate(words):
-            if word.lower() in ["file", "create"] and i + 1 < len(words):
-                potential_filename = words[i + 1]
-                if "." in potential_filename:
-                    filename = potential_filename
-                break
-        
-        steps.append({
-            "id": "1",
-            "description": f"Creating file: {filename}",
-            "action": "create_file",
-            "target": filename,
-            "content": f"# Generated by Vibe Coding AI\n# {message}\n\nprint('Hello from {filename}!')",
-            "completed": False
-        })
-    
-    # Web app/API creation
-    elif "api" in message_lower or "web" in message_lower or "flask" in message_lower or "fastapi" in message_lower:
-        steps.extend([
-            {
-                "id": "1",
-                "description": "Creating main API file",
-                "action": "create_file", 
-                "target": "app.py",
-                "content": "# FastAPI/Flask Web Application\nfrom fastapi import FastAPI\n\napp = FastAPI()\n\n@app.get('/')\ndef hello():\n    return {'message': 'Hello from Vibe Coding!'}",
-                "completed": False
-            },
-            {
-                "id": "2", 
-                "description": "Installing dependencies",
-                "action": "install_package",
-                "target": "fastapi uvicorn",
-                "command": "pip install fastapi uvicorn",
-                "completed": False
-            }
-        ])
-    
-    # Data analysis/ML
-    elif "data" in message_lower or "pandas" in message_lower or "analysis" in message_lower:
-        steps.append({
-            "id": "1",
-            "description": "Creating data analysis script",
-            "action": "create_file",
-            "target": "analysis.py",
-            "content": "# Data Analysis Script\nimport pandas as pd\nimport numpy as np\n\n# Load your data here\ndf = pd.DataFrame({'example': [1, 2, 3]})\nprint(df.head())",
-            "completed": False
-        })
-    
-    # Package installation
-    elif "install" in message_lower:
-        # Extract package names
-        packages = []
-        common_packages = ["numpy", "pandas", "requests", "flask", "fastapi", "django", "matplotlib", "seaborn"]
-        for pkg in common_packages:
-            if pkg in message_lower:
-                packages.append(pkg)
-        
-        if packages:
-            steps.append({
-                "id": "1",
-                "description": f"Installing packages: {', '.join(packages)}",
-                "action": "install_package",
-                "target": " ".join(packages),
-                "command": f"pip install {' '.join(packages)}",
-                "completed": False
-            })
-    
-    # Default: create a simple script
-    if not steps:
-        steps.append({
-            "id": "1", 
-            "description": "Creating script based on your request",
-            "action": "create_file",
-            "target": "vibe_script.py",
-            "content": f"# Script for: {message}\n# Generated by Vibe Coding AI\n\nprint('Starting your vibe coding project!')\n# Add your code here",
-            "completed": False
-        })
-    
-    return steps
+# ─── Vibe Agent Helper Functions moved to vibecoding.core ─────────────────────
 
