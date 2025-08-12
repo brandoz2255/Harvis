@@ -1,5 +1,6 @@
 fastapi
-uvicorn
+uvicorn[standard]
+websockets
 python-multipart
 asyncpg
 passlib[bcrypt]==1.7.4
