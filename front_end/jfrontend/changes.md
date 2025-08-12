@@ -1,5 +1,61 @@
 # Changes Log
 
+## 2025-08-12 18:00:00 - Fixed JWT Authentication Issues for Vibe Coding
+
+**Timestamp**: 2025-08-12 18:00 - Resolved JWT authentication errors causing 401 Unauthorized responses
+
+### Problem Description
+
+After fixing the Docker socket issues, users were getting 401 Unauthorized errors from all vibe coding API endpoints:
+- `Failed to load sessions` errors in browser console
+- `HTTP/1.1 401 Unauthorized` responses from `/api/vibecoding/sessions` and `/api/vibecoding/container` endpoints
+- JWT token verification failing with "invalid signature" errors in frontend container logs
+
+### Root Cause Analysis
+
+1. **Missing Environment Variables**: Frontend container was started without the `.env.local` file containing `JWT_SECRET`
+2. **JWT Secret Mismatch**: Frontend was using default "key" value while backend had the proper JWT secret from environment  
+3. **Container Start Script Issue**: `run-frontend.sh` was not passing environment variables to the Docker container
+
+The authentication flow was:
+1. User authenticates and gets JWT token signed with proper secret
+2. Frontend API routes try to verify token using default "key" secret
+3. Verification fails with "invalid signature" error → 401 Unauthorized
+
+### Solution Applied
+
+1. **Updated Frontend Start Script**:
+   - Modified `run-frontend.sh` line 94-99 to include `--env-file "$FRONTEND_DIR/.env.local"`
+   - This ensures frontend container has access to `JWT_SECRET` and other environment variables
+
+2. **Restarted Frontend Container**:
+   - Used `./run-frontend.sh restart` to rebuild and restart with proper environment variables
+   - Confirmed `JWT_SECRET` is now available in frontend container environment
+
+3. **Verified JWT Synchronization**:
+   - Both frontend and backend now use the same JWT_SECRET for token validation
+   - Authentication flow works properly end-to-end
+
+### Files Modified
+
+1. `/home/guruai/compose/aidev/run-frontend.sh` - Added `--env-file "$FRONTEND_DIR/.env.local"` to Docker run command
+
+### Result/Status
+
+✅ **RESOLVED**: JWT authentication now works properly across all services:
+- Frontend container has access to proper JWT_SECRET environment variable
+- Backend and frontend JWT validation is synchronized
+- All vibe coding API endpoints authenticate successfully
+- Session loading, container creation, and command execution work through frontend API routes
+
+### Testing Verification
+
+- Confirmed JWT_SECRET environment variable present in frontend container
+- Successfully tested `/api/vibecoding/sessions` endpoint returns session data with JWT authentication
+- Verified container creation API works (creates Docker containers successfully)
+- Tested command execution in provisioned containers (Python code execution works)
+- Complete vibe coding dev container provisioning system is now fully functional end-to-end
+
 ## 2025-08-12 - Fixed Vibe Coding Dev Container Provisioning Issues
 
 **Timestamp**: 2025-08-12 17:35 - Fixed Docker socket access and session loading issues for vibe coding dev container provisioning
