@@ -1,5 +1,60 @@
 # Changes Log
 
+## 2025-08-12 - Fixed Vibe Coding Dev Container Provisioning Issues
+
+**Timestamp**: 2025-08-12 17:35 - Fixed Docker socket access and session loading issues for vibe coding dev container provisioning
+
+### Problem Description
+
+Vibe coding development container provisioning was failing with multiple issues:
+1. **Docker not available error** - Backend container couldn't access Docker daemon to create dev containers
+2. **Session loading issue** - Frontend was calling wrong API endpoint for loading user sessions  
+3. **Container status not updating** - Container status changes weren't being persisted to database
+
+Error symptoms:
+- `{"detail":"Docker not available"}` when trying to create dev containers
+- Sessions not loading in the vibe coding session manager UI
+- Container status always showing as "stopped" even after successful creation
+
+### Root Cause Analysis
+
+1. **Docker Socket Missing**: Backend container was missing `/var/run/docker.sock` mount needed for Docker-in-Docker operations
+2. **API Endpoint Mismatch**: Frontend was calling `/api/vibecoding/sessions/${userId}` but should call `/api/vibecoding/sessions` (JWT-authenticated)
+3. **Database Updates Working**: Container status persistence was actually working correctly once Docker access was fixed
+
+### Solution Applied
+
+1. **Fixed Docker Socket Access**:
+   - Updated `run-backend.sh` to mount Docker socket: `-v /var/run/docker.sock:/var/run/docker.sock`
+   - Applied to all three backend startup modes: `start`, `start-bg`, and `shell`
+   - Restarted backend with proper Docker access
+
+2. **Fixed Session Loading**:
+   - Updated `VibeSessionManager.tsx` frontend component
+   - Changed API call from `/api/vibecoding/sessions/${userId}` to `/api/vibecoding/sessions`
+   - This allows JWT token to be properly validated and user ID extracted server-side
+
+3. **Verified Container Lifecycle**:
+   - Tested dev container creation: ✅ Working
+   - Tested container status persistence: ✅ Working  
+   - Tested session database integration: ✅ Working
+
+### Files Modified
+
+1. `/home/guruai/compose/aidev/run-backend.sh` - Added Docker socket mounts to all container start commands
+2. `/home/guruai/compose/aidev/front_end/jfrontend/components/VibeSessionManager.tsx` - Fixed session loading API endpoint
+
+### Result/Status
+
+✅ **RESOLVED**: Vibe coding dev container provisioning now works end-to-end:
+- Users can create new vibe coding sessions through the UI
+- Backend properly provisions isolated Docker dev containers for each session
+- Container lifecycle (create/start/stop) works correctly
+- Session persistence and database updates working properly  
+- Each session gets its own development environment with persistent storage
+
+The web IDE provisioning system is now fully functional for local development environments.
+
 ## 2025-08-11 - Fixed Vibecoding Sessions API 404 and 422 Errors
 
 **Timestamp**: 2025-08-11 - Fixed missing vibecoding sessions endpoint and JWT field mapping issues

@@ -22,7 +22,7 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 # Check if env file exists
-ENV_FILE="/home/dulc3/Documents/github/aidev/python_back_end/.env"
+ENV_FILE="/home/guruai/compose/aidev/python_back_end/.env"
 if [ ! -f "$ENV_FILE" ]; then
   echo -e "${RED}Error: Environment file not found at $ENV_FILE${NC}"
   exit 1
@@ -74,6 +74,7 @@ start_backend() {
     -v "$(pwd)/python_back_end:/app" \
     -v "$(pwd)/embedding:/app/embedding" \
     -v /tmp:/tmp \
+    -v /var/run/docker.sock:/var/run/docker.sock \
     dulc3/jarvis-backend:latest \
     uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 }
@@ -101,6 +102,7 @@ start_backend_detached() {
     -v "$(pwd)/python_back_end:/app" \
     -v "$(pwd)/embedding:/app/embedding" \
     -v /tmp:/tmp \
+    -v /var/run/docker.sock:/var/run/docker.sock \
     dulc3/jarvis-backend:latest \
     uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
@@ -171,6 +173,7 @@ open_shell() {
       -v "$(pwd)/python_back_end:/app" \
       -v "$(pwd)/embedding:/app/embedding" \
       -v /tmp:/tmp \
+      -v /var/run/docker.sock:/var/run/docker.sock \
       dulc3/jarvis-backend:latest \
       /bin/bash
   else
