@@ -70,7 +70,7 @@ export default function VibeSessionManager({
       const token = localStorage.getItem('token')
       if (!token) return
 
-      const response = await fetch(`/api/vibecoding/sessions/${userId}`, {
+      const response = await fetch('/api/vibecoding/sessions', {
         headers: {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json'
