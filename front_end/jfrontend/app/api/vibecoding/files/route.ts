@@ -5,9 +5,9 @@ const BACKEND_URL = process.env.BACKEND_URL || 'http://backend:8000'
 const JWT_SECRET = process.env.JWT_SECRET || 'key'
 
 interface JWTPayload {
-  id: number
-  email: string
-  username: string
+  sub: string  // Backend uses "sub" for user ID
+  email?: string
+  username?: string
 }
 
 async function verifyToken(request: NextRequest): Promise<JWTPayload | null> {
