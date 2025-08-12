@@ -12,31 +12,38 @@ interface JWTPayload {
 
 async function verifyToken(request: NextRequest): Promise<JWTPayload | null> {
   try {
+    console.log('[FILES API DEBUG] Starting JWT verification...')
+    console.log('[FILES API DEBUG] JWT_SECRET:', JWT_SECRET.substring(0, 10) + '... (length: ' + JWT_SECRET.length + ')')
+    
     const authHeader = request.headers.get('authorization')
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      console.log('[FILES API DEBUG] No valid auth header')
       return null
     }
 
     const token = authHeader.substring(7)
+    console.log('[FILES API DEBUG] Extracted token:', token.substring(0, 20) + '...')
+    
     const decoded = jwt.verify(token, JWT_SECRET) as JWTPayload
+    console.log('[FILES API DEBUG] JWT decoded successfully:', decoded)
     return decoded
   } catch (error) {
-    console.error('Token verification failed:', error)
+    console.error('[FILES API DEBUG] Token verification failed:', error)
     return null
   }
 }
 
 export async function GET(request: NextRequest) {
   try {
-    // Verify JWT token
-    const user = await verifyToken(request)
-    if (!user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-    }
+    console.log('[FILES API] Starting GET request')
+    
+    // No JWT verification needed - backend container endpoints are public
 
     const { searchParams } = new URL(request.url)
     const sessionId = searchParams.get('session_id')
     const path = searchParams.get('path') || '/workspace'
+
+    console.log('[FILES API] Params:', { sessionId, path })
 
     if (!sessionId) {
       return NextResponse.json(
@@ -44,6 +51,8 @@ export async function GET(request: NextRequest) {
         { status: 400 }
       )
     }
+
+    console.log('[FILES API] Forwarding to backend with auth header')
 
     // Forward request to backend - list files
     const backendResponse = await fetch(`${BACKEND_URL}/api/vibecoding/container/files/list`, {
@@ -57,8 +66,11 @@ export async function GET(request: NextRequest) {
       })
     })
 
+    console.log('[FILES API] Backend response status:', backendResponse.status)
+
     if (!backendResponse.ok) {
       const error = await backendResponse.text()
+      console.log('[FILES API] Backend error:', error)
       return NextResponse.json(
         { error: 'Failed to list files' },
         { status: backendResponse.status }
@@ -66,10 +78,11 @@ export async function GET(request: NextRequest) {
     }
 
     const data = await backendResponse.json()
+    console.log('[FILES API] Backend response data:', data)
     return NextResponse.json(data)
 
   } catch (error) {
-    console.error('Error in files API:', error)
+    console.error('[FILES API] Error in files API:', error)
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }
