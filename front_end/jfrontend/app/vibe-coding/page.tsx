@@ -96,6 +96,7 @@ export default function VibeCodingPage() {
 
   // UI state
   const [activeTab, setActiveTab] = useState<'files' | 'chat'>('files')
+  const [terminalHeight, setTerminalHeight] = useState(200) // Terminal height in pixels
   
   // Refs
   const chatEndRef = useRef<HTMLDivElement>(null)
@@ -630,21 +631,54 @@ export default function VibeCodingPage() {
           {/* Main Content */}
           {!currentSession ? (
             <div className="flex-1 flex items-center justify-center">
-              <div className="text-center">
-                <Container className="w-16 h-16 text-gray-600 mx-auto mb-4" />
-                <h3 className="text-xl font-semibold text-gray-400 mb-2">No Session Selected</h3>
-                <p className="text-gray-500 mb-4">Create or select a development session to start coding</p>
-                <Button
-                  onClick={() => setShowSessionManager(true)}
-                  className="bg-purple-600 hover:bg-purple-700 text-white"
-                >
-                  <Plus className="w-4 h-4 mr-2" />
-                  Manage Sessions
-                </Button>
+              <div className="text-center max-w-md">
+                <Container className="w-16 h-16 text-gray-600 mx-auto mb-6" />
+                <h3 className="text-2xl font-semibold text-white mb-4">Welcome to Vibe Coding</h3>
+                <p className="text-gray-400 mb-6">
+                  AI-powered development environment with isolated containers for each project.
+                </p>
+                
+                {/* Quick Start Actions */}
+                <div className="space-y-3 mb-8">
+                  <Button
+                    onClick={() => setShowSessionManager(true)}
+                    className="w-full bg-purple-600 hover:bg-purple-700 text-white py-3"
+                  >
+                    <Plus className="w-5 h-5 mr-2" />
+                    Create New Project
+                  </Button>
+                  <Button
+                    onClick={() => setShowSessionManager(true)}
+                    variant="outline"
+                    className="w-full bg-gray-800 border-gray-600 text-gray-300 hover:bg-gray-700 py-3"
+                  >
+                    <Folder className="w-5 h-5 mr-2" />
+                    Open Existing Project
+                  </Button>
+                </div>
+
+                {/* Features Overview */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-sm">
+                  <div className="bg-gray-800/50 p-4 rounded-lg">
+                    <Terminal className="w-6 h-6 text-green-400 mx-auto mb-2" />
+                    <p className="text-gray-300 font-medium">Interactive Terminal</p>
+                    <p className="text-gray-500">Full shell access</p>
+                  </div>
+                  <div className="bg-gray-800/50 p-4 rounded-lg">
+                    <Code className="w-6 h-6 text-blue-400 mx-auto mb-2" />
+                    <p className="text-gray-300 font-medium">Code Editor</p>
+                    <p className="text-gray-500">Syntax highlighting</p>
+                  </div>
+                  <div className="bg-gray-800/50 p-4 rounded-lg">
+                    <Sparkles className="w-6 h-6 text-purple-400 mx-auto mb-2" />
+                    <p className="text-gray-300 font-medium">AI Assistant</p>
+                    <p className="text-gray-500">Code with AI help</p>
+                  </div>
+                </div>
               </div>
             </div>
           ) : (
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 lg:gap-6 flex-1 min-h-0">
+            <div className="flex flex-col flex-1 min-h-0">
               {/* Mobile: Show stacked layout */}
               <div className="lg:hidden space-y-4 overflow-y-auto">
                 {/* Mobile Model Selector */}
@@ -656,26 +690,26 @@ export default function VibeCodingPage() {
                   className="h-auto"
                 />
 
-                {/* Mobile Tabs */}
+                {/* Mobile Navigation */}
                 <div className="flex space-x-2 mb-4">
                   <Button
                     onClick={() => setActiveTab('files')}
                     size="sm"
-                    className={activeTab === 'files' 
-                      ? 'bg-blue-600 text-white' 
-                      : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-                    }
+                    className={`flex-1 ${activeTab === 'files' 
+                      ? 'bg-blue-600 text-white shadow-lg' 
+                      : 'bg-gray-800 text-gray-300 hover:bg-gray-700 border border-gray-600'
+                    }`}
                   >
                     <Code className="w-4 h-4 mr-2" />
-                    Editor
+                    Code Editor
                   </Button>
                   <Button
                     onClick={() => setActiveTab('chat')}
                     size="sm"
-                    className={activeTab === 'chat' 
-                      ? 'bg-purple-600 text-white' 
-                      : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-                    }
+                    className={`flex-1 ${activeTab === 'chat' 
+                      ? 'bg-purple-600 text-white shadow-lg' 
+                      : 'bg-gray-800 text-gray-300 hover:bg-gray-700 border border-gray-600'
+                    }`}
                   >
                     <Sparkles className="w-4 h-4 mr-2" />
                     AI Assistant
@@ -817,147 +851,197 @@ export default function VibeCodingPage() {
               </div>
 
               {/* Desktop Layout */}
-              <div className="hidden lg:contents">
-                {/* Left Panel: File Explorer */}
-                <div className="lg:col-span-3 min-h-0">
-                  <VibeContainerFileExplorer
-                    sessionId={currentSession.session_id}
-                    onFileSelect={handleFileSelect}
-                    selectedFilePath={selectedFile?.path || null}
-                    className="h-full"
-                  />
-                </div>
-
-                {/* Center Panel: Code Editor */}
-                <div className="lg:col-span-6 min-h-0">
-                  <VibeContainerCodeEditor
-                    sessionId={currentSession.session_id}
-                    selectedFile={selectedFile}
-                    onExecute={handleFileExecute}
-                    className="h-full"
-                  />
-                </div>
-
-                {/* Right Panel: Terminal and AI Chat */}
-                <div className="lg:col-span-3 flex flex-col space-y-4 min-h-0">
-                  {/* AI Chat */}
-                  <Card className="bg-gray-900/50 backdrop-blur-sm border-purple-500/30 flex-[0.4] flex flex-col min-h-0">
-                    <div className="p-4 border-b border-purple-500/30">
-                      <div className="flex items-center justify-between">
-                        <h3 className="text-lg font-semibold text-purple-300">AI Assistant</h3>
-                        <div className="flex items-center space-x-2">
-                          <Button
-                            onClick={toggleRecording}
-                            disabled={isProcessingVoice}
-                            size="sm"
-                            className={`${
-                              isRecording ? "bg-red-600 hover:bg-red-700 animate-pulse" : "bg-purple-600 hover:bg-purple-700"
-                            } text-white`}
-                          >
-                            {isRecording ? <MicOff className="w-3 h-3" /> : <Mic className="w-3 h-3" />}
-                          </Button>
-                          {audioUrl && (
-                            <Button
-                              onClick={toggleAudio}
-                              size="sm"
-                              variant="outline"
-                              className="bg-gray-800 border-gray-600 text-gray-300"
-                            >
-                              {isPlaying ? <VolumeX className="w-3 h-3" /> : <Volume2 className="w-3 h-3" />}
-                            </Button>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="flex-1 overflow-y-auto p-4 space-y-3">
-                      <AnimatePresence>
-                        {chatMessages.map((message, index) => (
-                          <motion.div
-                            key={index}
-                            initial={{ opacity: 0, y: 10 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}
-                          >
-                            <div
-                              className={`max-w-[90%] p-2 rounded text-sm ${
-                                message.role === "user" ? "bg-purple-600 text-white" : "bg-gray-700 text-gray-100"
-                              }`}
-                            >
-                              <div className="flex items-center space-x-2 mb-1">
-                                {message.type === "voice" && <Mic className="w-3 h-3 text-purple-400" />}
-                                {message.type === "code" && <Code className="w-3 h-3 text-green-400" />}
-                                <span className="text-xs opacity-70">{message.timestamp.toLocaleTimeString()}</span>
-                              </div>
-                              <p>{message.content}</p>
-                              {message.reasoning && (
-                                <details className="mt-2 text-xs opacity-75">
-                                  <summary className="cursor-pointer">Reasoning</summary>
-                                  <p className="mt-1 pl-2 border-l border-purple-400/30">{message.reasoning}</p>
-                                </details>
-                              )}
-                            </div>
-                          </motion.div>
-                        ))}
-                      </AnimatePresence>
-
-                      {(isAIProcessing || isProcessingVoice) && (
-                        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex justify-start">
-                          <div className="bg-gray-700 p-2 rounded">
-                            <div className="flex space-x-1">
-                              <div className="w-1 h-1 bg-purple-400 rounded-full animate-bounce"></div>
-                              <div className="w-1 h-1 bg-purple-400 rounded-full animate-bounce" style={{ animationDelay: "0.1s" }}></div>
-                              <div className="w-1 h-1 bg-purple-400 rounded-full animate-bounce" style={{ animationDelay: "0.2s" }}></div>
-                            </div>
-                          </div>
-                        </motion.div>
-                      )}
-                      <div ref={chatEndRef} />
-                    </div>
-
-                    <div className="p-4 border-t border-purple-500/30">
-                      <div className="flex space-x-2">
-                        <Input
-                          value={chatInput}
-                          onChange={(e) => setChatInput(e.target.value)}
-                          onKeyPress={(e) => e.key === "Enter" && !isAIProcessing && sendVibeCommand()}
-                          placeholder="Tell me what to code..."
-                          className="flex-1 bg-gray-800 border-gray-600 text-white text-sm"
-                          disabled={isAIProcessing || isProcessingVoice}
-                        />
-                        <Button
-                          onClick={() => sendVibeCommand()}
-                          disabled={isAIProcessing || !chatInput.trim() || isProcessingVoice}
-                          size="sm"
-                          className="bg-purple-600 hover:bg-purple-700 text-white"
-                        >
-                          <Zap className="w-3 h-3" />
-                        </Button>
-                      </div>
-                    </div>
-
-                    {audioUrl && (
-                      <audio
-                        ref={audioRef}
-                        src={audioUrl}
-                        onPlay={() => setIsPlaying(true)}
-                        onPause={() => setIsPlaying(false)}
-                        onEnded={() => setIsPlaying(false)}
-                        className="hidden"
-                      />
-                    )}
-                  </Card>
-
-                  {/* Terminal */}
-                  <div className="flex-[0.6] min-h-0">
-                    <VibeTerminal
+              <div className="hidden lg:flex flex-col flex-1 min-h-0">
+                {/* Top Section: Sidebar + Main Content + AI Chat */}
+                <div className="flex flex-1 min-h-0 gap-4">
+                  {/* Left Sidebar: File Explorer */}
+                  <div className="w-80 flex-shrink-0">
+                    <VibeContainerFileExplorer
                       sessionId={currentSession.session_id}
-                      isContainerRunning={isContainerRunning}
-                      onContainerStart={handleContainerStart}
-                      onContainerStop={handleContainerStop}
+                      onFileSelect={handleFileSelect}
+                      selectedFilePath={selectedFile?.path || null}
                       className="h-full"
                     />
                   </div>
+
+                  {/* Main Content: Code Editor */}
+                  <div className="flex-1 min-w-0">
+                    <VibeContainerCodeEditor
+                      sessionId={currentSession.session_id}
+                      selectedFile={selectedFile}
+                      onExecute={handleFileExecute}
+                      className="h-full"
+                    />
+                  </div>
+
+                  {/* Right Sidebar: AI Assistant */}
+                  <div className="w-96 flex-shrink-0">
+                    <Card className="bg-gray-900/50 backdrop-blur-sm border-purple-500/30 h-full flex flex-col">
+                      <div className="p-4 border-b border-purple-500/30 flex-shrink-0">
+                        <div className="flex items-center justify-between">
+                          <h3 className="text-lg font-semibold text-purple-300">AI Assistant</h3>
+                          <div className="flex items-center space-x-2">
+                            <Button
+                              onClick={toggleRecording}
+                              disabled={isProcessingVoice}
+                              size="sm"
+                              className={`${
+                                isRecording ? "bg-red-600 hover:bg-red-700 animate-pulse" : "bg-purple-600 hover:bg-purple-700"
+                              } text-white`}
+                            >
+                              {isRecording ? <MicOff className="w-3 h-3" /> : <Mic className="w-3 h-3" />}
+                            </Button>
+                            {audioUrl && (
+                              <Button
+                                onClick={toggleAudio}
+                                size="sm"
+                                variant="outline"
+                                className="bg-gray-800 border-gray-600 text-gray-300"
+                              >
+                                {isPlaying ? <VolumeX className="w-3 h-3" /> : <Volume2 className="w-3 h-3" />}
+                              </Button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex-1 overflow-y-auto p-4 space-y-3 min-h-0">
+                        <AnimatePresence>
+                          {chatMessages.map((message, index) => (
+                            <motion.div
+                              key={index}
+                              initial={{ opacity: 0, y: 10 }}
+                              animate={{ opacity: 1, y: 0 }}
+                              className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}
+                            >
+                              <div
+                                className={`max-w-[90%] p-3 rounded-lg text-sm ${
+                                  message.role === "user" ? "bg-purple-600 text-white" : "bg-gray-700 text-gray-100"
+                                }`}
+                              >
+                                <div className="flex items-center space-x-2 mb-1">
+                                  {message.type === "voice" && <Mic className="w-3 h-3 text-purple-400" />}
+                                  {message.type === "code" && <Code className="w-3 h-3 text-green-400" />}
+                                  <span className="text-xs opacity-70">{message.timestamp.toLocaleTimeString()}</span>
+                                </div>
+                                <p className="leading-relaxed">{message.content}</p>
+                                {message.reasoning && (
+                                  <details className="mt-2 text-xs opacity-75">
+                                    <summary className="cursor-pointer hover:text-purple-300">💭 View Reasoning</summary>
+                                    <p className="mt-2 pl-3 border-l-2 border-purple-400/30 text-gray-300">{message.reasoning}</p>
+                                  </details>
+                                )}
+                              </div>
+                            </motion.div>
+                          ))}
+                        </AnimatePresence>
+
+                        {(isAIProcessing || isProcessingVoice) && (
+                          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex justify-start">
+                            <div className="bg-gray-700 p-3 rounded-lg">
+                              <div className="flex items-center space-x-2 text-gray-400">
+                                <div className="flex space-x-1">
+                                  <div className="w-2 h-2 bg-purple-400 rounded-full animate-bounce"></div>
+                                  <div className="w-2 h-2 bg-purple-400 rounded-full animate-bounce" style={{ animationDelay: "0.1s" }}></div>
+                                  <div className="w-2 h-2 bg-purple-400 rounded-full animate-bounce" style={{ animationDelay: "0.2s" }}></div>
+                                </div>
+                                <span className="text-sm">AI is thinking...</span>
+                              </div>
+                            </div>
+                          </motion.div>
+                        )}
+                        <div ref={chatEndRef} />
+                      </div>
+
+                      <div className="p-4 border-t border-purple-500/30 flex-shrink-0">
+                        <div className="flex space-x-2">
+                          <Input
+                            value={chatInput}
+                            onChange={(e) => setChatInput(e.target.value)}
+                            onKeyPress={(e) => e.key === "Enter" && !isAIProcessing && sendVibeCommand()}
+                            placeholder="Ask AI to help with your code..."
+                            className="flex-1 bg-gray-800 border-gray-600 text-white"
+                            disabled={isAIProcessing || isProcessingVoice}
+                          />
+                          <Button
+                            onClick={() => sendVibeCommand()}
+                            disabled={isAIProcessing || !chatInput.trim() || isProcessingVoice}
+                            size="sm"
+                            className="bg-purple-600 hover:bg-purple-700 text-white px-3"
+                          >
+                            <Zap className="w-4 h-4" />
+                          </Button>
+                        </div>
+                      </div>
+
+                      {audioUrl && (
+                        <audio
+                          ref={audioRef}
+                          src={audioUrl}
+                          onPlay={() => setIsPlaying(true)}
+                          onPause={() => setIsPlaying(false)}
+                          onEnded={() => setIsPlaying(false)}
+                          className="hidden"
+                        />
+                      )}
+                    </Card>
+                  </div>
+                </div>
+
+                {/* Bottom Section: Development Terminal */}
+                <div 
+                  className="mt-4 border-t border-gray-700 pt-4"
+                  style={{ height: `${terminalHeight}px`, minHeight: '150px', maxHeight: '400px' }}
+                >
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center space-x-2">
+                      <Terminal className="w-4 h-4 text-green-400" />
+                      <h3 className="text-sm font-semibold text-green-300">Development Terminal</h3>
+                      <Badge 
+                        variant="outline" 
+                        className={`text-xs ${
+                          isContainerRunning 
+                            ? 'border-green-500 text-green-400' 
+                            : 'border-red-500 text-red-400'
+                        }`}
+                      >
+                        {isContainerRunning ? 'Running' : 'Stopped'}
+                      </Badge>
+                    </div>
+                    
+                    <div className="flex items-center space-x-2">
+                      {!isContainerRunning ? (
+                        <Button
+                          onClick={handleContainerStart}
+                          size="sm"
+                          className="bg-green-600 hover:bg-green-700 text-white"
+                          disabled={currentSession?.container_status === 'starting'}
+                        >
+                          <Play className="w-3 h-3 mr-1" />
+                          {currentSession?.container_status === 'starting' ? 'Starting...' : 'Start Container'}
+                        </Button>
+                      ) : (
+                        <Button
+                          onClick={handleContainerStop}
+                          size="sm"
+                          variant="outline"
+                          className="border-red-600 text-red-400 hover:bg-red-600 hover:text-white"
+                          disabled={currentSession?.container_status === 'stopping'}
+                        >
+                          <X className="w-3 h-3 mr-1" />
+                          {currentSession?.container_status === 'stopping' ? 'Stopping...' : 'Stop'}
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                  
+                  <VibeTerminal
+                    sessionId={currentSession.session_id}
+                    isContainerRunning={isContainerRunning}
+                    onContainerStart={handleContainerStart}
+                    onContainerStop={handleContainerStop}
+                    className="h-full"
+                  />
                 </div>
               </div>
             </div>
