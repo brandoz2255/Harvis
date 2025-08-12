@@ -90,10 +90,11 @@ start_frontend() {
     # Build the image first
     build_frontend
     
-    # Start the frontend service
+    # Start the frontend service with environment variables
     docker run -d \
         --name "$CONTAINER_NAME" \
         --network ollama-n8n-network \
+        --env-file "$FRONTEND_DIR/.env.local" \
         -p 3000:3000 \
         "$IMAGE_NAME"
     
