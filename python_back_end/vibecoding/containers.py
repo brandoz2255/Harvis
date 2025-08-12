@@ -51,6 +51,43 @@ class ContainerManager:
             container_name = f"vibecoding_{session_id}"
             volume_name = f"{VOLUME_PREFIX}{session_id}"
             
+            # Check if container already exists
+            try:
+                existing_container = self.docker_client.containers.get(container_name)
+                logger.info(f"🔄 Found existing container: {container_name}")
+                
+                # If container exists but is stopped, start it
+                if existing_container.status == "exited":
+                    existing_container.start()
+                    logger.info(f"▶️ Started existing container: {container_name}")
+                elif existing_container.status == "running":
+                    logger.info(f"✅ Container already running: {container_name}")
+                
+                # Store container info and return
+                container_info = {
+                    "container_id": existing_container.id,
+                    "container_name": container_name,
+                    "session_id": session_id,
+                    "user_id": user_id,
+                    "volume_name": volume_name,
+                    "created_at": datetime.now(),
+                    "last_activity": datetime.now(),
+                    "status": existing_container.status
+                }
+                self.active_containers[session_id] = container_info
+                
+                return {
+                    "session_id": session_id,
+                    "container_id": existing_container.id,
+                    "container_name": container_name,
+                    "status": existing_container.status,
+                    "workspace_path": "/workspace"
+                }
+                
+            except docker.errors.NotFound:
+                # Container doesn't exist, create new one
+                logger.info(f"🆕 Creating new container: {container_name}")
+            
             # Create volume for persistent storage
             try:
                 volume = self.docker_client.volumes.create(name=volume_name)
@@ -141,24 +178,51 @@ class ContainerManager:
     
     async def get_container(self, session_id: str) -> Optional[docker.models.containers.Container]:
         """Get container by session ID."""
-        if not self.docker_client or session_id not in self.active_containers:
+        if not self.docker_client:
             return None
-            
+        
+        # First try to get from active_containers if we have it
+        if session_id in self.active_containers:
+            try:
+                container_info = self.active_containers[session_id]
+                container = self.docker_client.containers.get(container_info["container_id"])
+                
+                # Update last activity
+                container_info["last_activity"] = datetime.now()
+                
+                return container
+            except docker.errors.NotFound:
+                # Container was removed externally
+                del self.active_containers[session_id]
+            except Exception as e:
+                logger.error(f"Error getting tracked container: {e}")
+        
+        # If not in active_containers or failed, try to find by container name
         try:
-            container_info = self.active_containers[session_id]
-            container = self.docker_client.containers.get(container_info["container_id"])
+            container_name = f"vibecoding_{session_id}"
+            container = self.docker_client.containers.get(container_name)
             
-            # Update last activity
-            container_info["last_activity"] = datetime.now()
+            # Container exists but not tracked, add it to active_containers
+            volume_name = f"{VOLUME_PREFIX}{session_id}"
+            container_info = {
+                "container_id": container.id,
+                "container_name": container_name,
+                "session_id": session_id,
+                "user_id": "unknown",  # We don't know the user_id from existing containers
+                "volume_name": volume_name,
+                "created_at": datetime.now(),
+                "last_activity": datetime.now(),
+                "status": container.status
+            }
+            self.active_containers[session_id] = container_info
+            logger.info(f"🔄 Re-tracked existing container: {container_name}")
             
             return container
         except docker.errors.NotFound:
-            # Container was removed externally
-            if session_id in self.active_containers:
-                del self.active_containers[session_id]
+            logger.info(f"🚫 Container not found for session: {session_id}")
             return None
         except Exception as e:
-            logger.error(f"Error getting container: {e}")
+            logger.error(f"Error finding container by name: {e}")
             return None
     
     async def execute_command(self, session_id: str, command: str) -> Dict[str, Any]:
@@ -466,7 +530,8 @@ async def terminal_websocket(websocket: WebSocket, session_id: str):
         async def read_from_container():
             try:
                 while True:
-                    data = socket.recv(1024)
+                    # Use read() method for SocketIO object, not recv()
+                    data = socket._sock.recv(1024)
                     if not data:
                         break
                     await websocket.send_text(data.decode("utf-8", errors="replace"))
@@ -478,7 +543,7 @@ async def terminal_websocket(websocket: WebSocket, session_id: str):
             try:
                 while True:
                     message = await websocket.receive_text()
-                    socket.send(message.encode("utf-8"))
+                    socket._sock.send(message.encode("utf-8"))
             except WebSocketDisconnect:
                 logger.info("Terminal WebSocket disconnected")
             except Exception as e:
