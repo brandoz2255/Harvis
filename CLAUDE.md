@@ -19,48 +19,62 @@ Remember the web app is ran through docker commands and the docker compose is ju
 
 These are the correct URLs for inter-service communication within the Docker network.
 
-### Browser-to-Docker Communication Pattern
+### Architecture: Nginx Proxy + Backend Authentication
 
-**IMPORTANT**: Browsers cannot directly access Docker internal network addresses. Use this pattern for browser-to-backend communication:
+**IMPORTANT**: The application uses Nginx as a reverse proxy to handle all frontend-backend communication. All authentication logic is handled by the Python backend.
 
-#### ❌ Incorrect (Browser cannot reach Docker network):
+#### ❌ Incorrect (Direct backend calls):
 ```javascript
-// This will fail in the browser:
-fetch("http://backend:8000/api/endpoint")
+// This will fail due to CORS:
+fetch("http://localhost:8000/api/auth/login")
 ```
 
-#### ✅ Correct (Use Frontend Proxy Pattern):
+#### ✅ Correct (Nginx Proxy Pattern):
 
-1. **Create Next.js API route** (`app/api/endpoint/route.ts`):
-```typescript
-export async function GET() {
-  const backendUrl = process.env.BACKEND_URL || 'http://backend:8000'
-  const response = await fetch(`${backendUrl}/api/endpoint`)
-  const data = await response.json()
-  return NextResponse.json(data)
+**Nginx Configuration**: All API calls are proxied to the backend:
+```nginx
+location /api/ {
+    proxy_pass http://backend:8000/api/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
 }
 ```
 
-2. **Browser calls frontend route**:
+**Frontend Calls**: Use relative paths that Nginx proxies:
 ```javascript
-// Browser calls Next.js route, which proxies to backend:
-fetch("/api/endpoint")
+// Browser calls are proxied by Nginx to backend:
+fetch("/api/auth/login", {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ email, password })
+})
 ```
 
 #### Communication Flow:
 ```
-Browser → Frontend Route → Backend → Ollama/DB
-   ↑         (Proxy)        ↑         ↑
-   └─────────────────────────┴─────────┴─ Docker Network
+Browser → Nginx Proxy → Backend → Ollama/DB
+   ↑         (Proxy)      ↑         ↑
+   └──────────────────────┴─────────┴─ Docker Network
 ```
 
-#### Example Implementation (Ollama Models):
-1. **Browser**: `fetch("/api/ollama-models")`
-2. **Frontend Route**: Proxies to `http://backend:8000/api/ollama-models`
-3. **Backend**: Calls `http://ollama:11434/api/tags`
-4. **Response**: Array flows back: `["model1", "model2"]`
+#### Authentication Architecture:
+- **Backend-Only Authentication**: All auth logic in Python FastAPI backend
+- **No Frontend API Routes**: Frontend only handles UI and calls backend via Nginx
+- **CORS Configuration**: Backend properly configured for Nginx proxy
+- **JWT Tokens**: Generated and validated entirely by backend
+- **Database Access**: Only backend connects to PostgreSQL
 
-This pattern maintains Docker network security while enabling browser access.
+#### **IMPORTANT: Access Pattern**
+**✅ Correct Way to Access the Application:**
+- Access via Nginx proxy: `http://localhost:9000`
+- All API calls use relative paths: `/api/auth/login`, `/api/chat`, etc.
+- Nginx handles all proxying and CORS headers
+
+**❌ Incorrect (Will cause CORS errors):**
+- Accessing backend directly: `http://localhost:8000` 
+- Making direct backend API calls from browser
+
+This pattern eliminates CORS issues and centralizes all logic in the backend.
 
 ### Reasoning Model Integration
 
