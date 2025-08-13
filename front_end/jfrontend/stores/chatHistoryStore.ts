@@ -78,10 +78,10 @@ const getAuthHeaders = (): Record<string, string> => {
 }
 
 // Request deduplication and robustness helpers
-const MIN_REQUEST_INTERVAL = 1000 // Minimum 1 second between requests
-const CIRCUIT_BREAKER_THRESHOLD = 5 // Open circuit after 5 failures
-const CIRCUIT_BREAKER_TIMEOUT = 30000 // 30 seconds
-const MAX_RETRIES = 3 // Maximum retry attempts
+const MIN_REQUEST_INTERVAL = 500 // Minimum 0.5 seconds between requests
+const CIRCUIT_BREAKER_THRESHOLD = 3 // Open circuit after 3 failures
+const CIRCUIT_BREAKER_TIMEOUT = 10000 // 10 seconds
+const MAX_RETRIES = 2 // Maximum retry attempts
 
 export const useChatHistoryStore = create<ChatHistoryState>((set, get) => ({
   // Initial state
@@ -123,8 +123,8 @@ export const useChatHistoryStore = create<ChatHistoryState>((set, get) => ({
       return
     }
     
-    // Rate limiting - prevent requests too close together
-    if (now - state.lastFetchTime < MIN_REQUEST_INTERVAL) {
+    // Rate limiting - only for rapid successive calls
+    if (now - state.lastFetchTime < MIN_REQUEST_INTERVAL && state.sessions.length > 0) {
       console.log('⏰ Rate limited - too soon since last request')
       return
     }
@@ -154,7 +154,7 @@ export const useChatHistoryStore = create<ChatHistoryState>((set, get) => ({
           'Content-Type': 'application/json',
           ...getAuthHeaders(),
         },
-        signal: AbortSignal.timeout(30000), // 30 second timeout
+        signal: AbortSignal.timeout(10000), // 10 second timeout
       })
       
       if (response.ok) {
@@ -250,7 +250,7 @@ export const useChatHistoryStore = create<ChatHistoryState>((set, get) => ({
         body: JSON.stringify({
           title,
         }),
-        signal: AbortSignal.timeout(30000), // 30 second timeout
+        signal: AbortSignal.timeout(10000), // 10 second timeout
       })
       
       if (response.ok) {
@@ -492,7 +492,7 @@ export const useChatHistoryStore = create<ChatHistoryState>((set, get) => ({
           'Content-Type': 'application/json',
           ...(authHeaders.Authorization ? { 'Authorization': authHeaders.Authorization } : {}),
         },
-        signal: AbortSignal.timeout(30000), // 30 second timeout
+        signal: AbortSignal.timeout(10000), // 10 second timeout
       })
       
       console.log(`🌐 API response status: ${response.status} ${response.statusText}`)
