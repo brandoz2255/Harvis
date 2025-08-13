@@ -173,13 +173,41 @@ export default function VibeCodeEditor({
         showKeywords: true,
         showSnippets: true,
         showFunctions: true,
-        showVariables: true
+        showVariables: true,
+        showClasses: true,
+        showStructs: true,
+        showInterfaces: true,
+        showModules: true,
+        showProperties: true,
+        showEvents: true,
+        showOperators: true,
+        showUnits: true,
+        showValues: true,
+        showConstants: true,
+        showEnums: true,
+        showEnumMembers: true,
+        showColors: true,
+        showFiles: true,
+        showReferences: true,
+        showFolders: true,
+        showTypeParameters: true,
+        filterGraceful: true,
+        snippetsPreventQuickSuggestions: false
       },
       quickSuggestions: {
         other: true,
-        comments: false,
-        strings: false
-      }
+        comments: true,
+        strings: true
+      },
+      parameterHints: {
+        enabled: true,
+        cycle: true
+      },
+      autoClosingBrackets: 'always',
+      autoClosingQuotes: 'always',
+      autoIndent: 'full',
+      formatOnType: true,
+      formatOnPaste: true
     })
 
     // Add keyboard shortcuts
@@ -262,6 +290,21 @@ export default function VibeCodeEditor({
         </div>
 
         <div className="flex items-center space-x-2">
+          {/* Theme Selector */}
+          <Button
+            onClick={() => {
+              // This would cycle through themes, but since theme is a prop, 
+              // the parent component would need to handle theme changes
+              console.log(`Current theme: ${theme}`)
+            }}
+            variant="outline"
+            size="sm"
+            className="bg-gray-700 border-gray-600 text-gray-300 hover:bg-gray-600"
+            title={`Theme: ${theme}`}
+          >
+            <Settings className="w-4 h-4" />
+          </Button>
+
           <Button
             onClick={() => setWordWrap(wordWrap === 'on' ? 'off' : 'on')}
             variant="outline"

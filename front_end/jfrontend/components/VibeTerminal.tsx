@@ -231,149 +231,143 @@ export default function VibeTerminal({
   }
 
   return (
-    <Card className={`bg-gray-900/95 backdrop-blur-sm border-green-500/30 flex flex-col ${className}`}>
-      {/* Header */}
-      <div className="p-4 border-b border-green-500/30 flex-shrink-0">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center space-x-3">
-            <Terminal className="w-5 h-5 text-green-400" />
-            <h3 className="text-lg font-semibold text-green-300">Development Terminal</h3>
-            <Badge 
-              variant="outline" 
-              className={`text-xs ${
-                isConnected 
-                  ? 'border-green-500 text-green-400' 
-                  : isConnecting 
-                    ? 'border-yellow-500 text-yellow-400' 
-                    : 'border-red-500 text-red-400'
-              }`}
-            >
-              {isConnected ? 'Connected' : isConnecting ? 'Connecting...' : 'Disconnected'}
-            </Badge>
+    <div className={`bg-black border border-gray-700 rounded-lg overflow-hidden flex flex-col shadow-2xl ${className}`}>
+      {/* Terminal Title Bar - macOS style */}
+      <div className="bg-gray-800 px-4 py-2 flex items-center justify-between border-b border-gray-700">
+        {/* Traffic Light Buttons */}
+        <div className="flex items-center space-x-2">
+          <div className="flex space-x-2">
+            <div className="w-3 h-3 rounded-full bg-red-500"></div>
+            <div className="w-3 h-3 rounded-full bg-yellow-500"></div>
+            <div className="w-3 h-3 rounded-full bg-green-500"></div>
           </div>
+          <span className="ml-4 text-gray-300 text-sm font-medium">Terminal</span>
+          <Badge 
+            variant="outline" 
+            className={`text-xs border-0 ${
+              isConnected 
+                ? 'bg-green-900/50 text-green-400' 
+                : isConnecting 
+                  ? 'bg-yellow-900/50 text-yellow-400' 
+                  : 'bg-red-900/50 text-red-400'
+            }`}
+          >
+            {isConnected ? '●' : isConnecting ? '○' : '○'}
+          </Badge>
+        </div>
+        
+        {/* Terminal Controls */}
+        <div className="flex items-center space-x-1">
+          {!isContainerRunning ? (
+            <Button
+              onClick={handleContainerStart}
+              size="sm"
+              className="h-6 px-2 bg-green-600 hover:bg-green-700 text-white text-xs"
+              disabled={!sessionId}
+            >
+              <Power className="w-3 h-3 mr-1" />
+              Start
+            </Button>
+          ) : (
+            <Button
+              onClick={handleContainerStop}
+              size="sm"
+              className="h-6 px-2 bg-red-600 hover:bg-red-700 text-white text-xs"
+            >
+              <PowerOff className="w-3 h-3 mr-1" />
+              Stop
+            </Button>
+          )}
           
-          <div className="flex items-center space-x-2">
-            {/* Container Controls */}
-            {!isContainerRunning ? (
-              <Button
-                onClick={handleContainerStart}
-                size="sm"
-                className="bg-green-600 hover:bg-green-700 text-white"
-                disabled={!sessionId}
-              >
-                <Power className="w-3 h-3 mr-1" />
-                Start Container
-              </Button>
+          <Button
+            onClick={reconnectTerminal}
+            size="sm"
+            variant="ghost"
+            className="h-6 px-2 text-gray-400 hover:text-white hover:bg-gray-700"
+            disabled={isConnecting || !sessionId}
+          >
+            {isConnecting ? (
+              <Loader2 className="w-3 h-3 animate-spin" />
             ) : (
-              <Button
-                onClick={handleContainerStop}
-                size="sm"
-                variant="outline"
-                className="border-red-500 text-red-400 hover:bg-red-500/20"
-              >
-                <PowerOff className="w-3 h-3 mr-1" />
-                Stop Container
-              </Button>
+              <RefreshCw className="w-3 h-3" />
             )}
-            
-            <Button
-              onClick={reconnectTerminal}
-              size="sm"
-              variant="outline"
-              className="bg-gray-800 border-gray-600 text-gray-300"
-              disabled={isConnecting || !sessionId}
-            >
-              {isConnecting ? (
-                <Loader2 className="w-3 h-3 animate-spin" />
-              ) : (
-                <RefreshCw className="w-3 h-3" />
-              )}
-            </Button>
-            
-            <Button
-              onClick={clearTerminal}
-              size="sm"
-              variant="outline"
-              className="bg-gray-800 border-gray-600 text-gray-300"
-            >
-              Clear
-            </Button>
-          </div>
+          </Button>
+          
+          <Button
+            onClick={clearTerminal}
+            size="sm"
+            variant="ghost"
+            className="h-6 px-2 text-gray-400 hover:text-white hover:bg-gray-700 text-xs"
+          >
+            Clear
+          </Button>
         </div>
       </div>
 
-      {/* Terminal Output */}
-      <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
-        <div className="flex-1 overflow-y-auto bg-black p-4 font-mono text-sm">
-          <div className="space-y-1">
+      {/* Terminal Content */}
+      <div className="flex-1 min-h-0 bg-black text-green-400 font-mono text-sm overflow-hidden flex flex-col">
+        {/* Terminal Output */}
+        <div className="flex-1 overflow-y-auto p-4 scrollbar-thin scrollbar-thumb-gray-600 scrollbar-track-gray-900">
+          <div className="space-y-0">
             {lines.map((line) => (
               <div
                 key={line.id}
-                className={`whitespace-pre-wrap break-words ${
+                className={`leading-relaxed ${
                   line.type === 'input'
-                    ? 'text-cyan-300 font-semibold'
+                    ? 'text-white'
                     : line.type === 'error'
                       ? 'text-red-400'
                       : line.type === 'system'
-                        ? 'text-yellow-400'
-                        : 'text-green-300'
+                        ? 'text-blue-400'
+                        : 'text-green-400'
                 }`}
               >
-                {line.content}
+                <span className="whitespace-pre-wrap break-words">{line.content}</span>
               </div>
             ))}
             
             {isExecutingCommand && (
-              <div className="text-yellow-400 flex items-center space-x-2">
+              <div className="text-yellow-400 flex items-center space-x-2 my-1">
                 <Loader2 className="w-3 h-3 animate-spin" />
-                <span>Executing command...</span>
+                <span>Executing...</span>
               </div>
             )}
-            
-            <div ref={terminalEndRef} />
           </div>
+          <div ref={terminalEndRef} />
         </div>
 
-        {/* Command Input */}
-        <div className="flex-shrink-0 p-4 border-t border-green-500/30 bg-gray-900/50">
-          <div className="flex items-center space-x-2">
-            <span className="text-green-400 font-mono text-sm select-none">$</span>
-            <Input
+        {/* Current Command Line */}
+        <div className="border-t border-gray-800 bg-black px-4 py-2">
+          <div className="flex items-center">
+            <span className="text-green-400 mr-2 select-none">
+              user@container:~$
+            </span>
+            <input
               ref={inputRef}
               value={currentCommand}
               onChange={(e) => setCurrentCommand(e.target.value)}
               onKeyDown={handleKeyDown}
+              className="flex-1 bg-transparent text-white outline-none font-mono text-sm caret-green-400"
               placeholder={
-                isConnected 
-                  ? "Enter command..." 
-                  : sessionId 
-                    ? "Terminal not connected" 
-                    : "No session selected"
+                !isConnected 
+                  ? (sessionId ? "Terminal not connected" : "No session selected")
+                  : ""
               }
-              className="flex-1 bg-black border-gray-600 text-green-300 font-mono text-sm focus:border-green-500"
               disabled={!isConnected || isExecutingCommand}
+              style={{ caretColor: '#4ade80' }}
             />
-            <Button
-              onClick={() => executeCommand(currentCommand)}
-              disabled={!isConnected || !currentCommand.trim() || isExecutingCommand}
-              size="sm"
-              className="bg-green-600 hover:bg-green-700 text-white"
-            >
-              {isExecutingCommand ? (
-                <Loader2 className="w-3 h-3 animate-spin" />
-              ) : (
-                <Send className="w-3 h-3" />
-              )}
-            </Button>
+            {isExecutingCommand && (
+              <Loader2 className="w-4 h-4 text-green-400 animate-spin ml-2" />
+            )}
           </div>
           
           {!sessionId && (
-            <p className="text-xs text-gray-400 mt-2">
+            <div className="text-xs text-gray-500 mt-2 ml-[120px]">
               Select or create a session to access the terminal
-            </p>
+            </div>
           )}
         </div>
       </div>
-    </Card>
+    </div>
   )
 }
