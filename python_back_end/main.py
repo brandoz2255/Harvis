@@ -221,13 +221,26 @@ async def lifespan(app: FastAPI):
             dsn=database_url,
             min_size=1, 
             max_size=10,
-            command_timeout=5,
+            command_timeout=30,  # Increased from 5 to 30 seconds
         )
         logger.info("✅ Database connection pool created")
         
         # Initialize session database
         from vibecoding.db_session import init_session_db
         await init_session_db(app.state.pg_pool)
+        
+        # Initialize chat history manager
+        global chat_history_manager
+        chat_history_manager = ChatHistoryManager(app.state.pg_pool)
+        logger.info("✅ ChatHistoryManager initialized in lifespan")
+        
+        # Initialize vibe files database table
+        try:
+            from vibecoding.files import ensure_vibe_files_table
+            await ensure_vibe_files_table()
+            logger.info("✅ Vibe files database table initialized")
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize vibe files table: {e}")
         
     except Exception as e:
         logger.error(f"❌ Failed to create database pool: {e}")
@@ -274,10 +287,12 @@ app.include_router(containers_router)
 db_pool = None
 chat_history_manager = None
 
-@app.on_event("startup")
-async def startup_event():
+# @app.on_event("startup")  # Disabled - using lifespan instead
+async def startup_event_disabled():
     global db_pool, chat_history_manager, n8n_storage, n8n_automation_service, n8n_ai_agent
     try:
+        logger.info("🚀 Starting startup event initialization...")
+        
         # Use the connection pool created in lifespan
         db_pool = app.state.pg_pool
         if db_pool is None:
@@ -285,8 +300,12 @@ async def startup_event():
             # Fix database hostname: use pgsql-db instead of pgsql
             database_url = os.getenv("DATABASE_URL", "postgresql://pguser:pgpassword@pgsql-db:5432/database")
             db_pool = await asyncpg.create_pool(database_url)
+        else:
+            logger.info("✅ Using database pool from lifespan")
         
+        logger.info("🔄 Initializing ChatHistoryManager...")
         chat_history_manager = ChatHistoryManager(db_pool)
+        logger.info("✅ ChatHistoryManager initialized successfully")
         
         # Initialize vibe files database table
         try:
