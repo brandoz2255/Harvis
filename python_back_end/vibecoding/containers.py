@@ -325,6 +325,7 @@ class ContainerManager:
             raise HTTPException(status_code=404, detail="Container not found")
         
         try:
+            import os
             # Create directory if it doesn't exist
             dir_path = os.path.dirname(file_path)
             if dir_path:
@@ -340,7 +341,6 @@ class ContainerManager:
             if success:
                 # Update file metadata in database
                 try:
-                    import os
                     file_name = os.path.basename(file_path)
                     file_ext = os.path.splitext(file_name)[1].lower()
                     

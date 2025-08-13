@@ -40,7 +40,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
             )
         
         # Get user from database
-        conn = await asyncpg.connect(DATABASE_URL)
+        conn = await asyncpg.connect(DATABASE_URL, timeout=10)
         try:
             user_record = await conn.fetchrow(
                 "SELECT id, username, email, avatar FROM users WHERE id = $1",
