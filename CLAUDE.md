@@ -76,6 +76,99 @@ Browser → Nginx Proxy → Backend → Ollama/DB
 
 This pattern eliminates CORS issues and centralizes all logic in the backend.
 
+## Database Safety and Management
+
+**🚨 CRITICAL: Database data protection measures are now in place to prevent accidental data loss.**
+
+### Database Safety Features
+
+#### **Production-Safe Schema Script**
+- **Location**: `front_end/jfrontend/db_setup.sql`
+- **Safety**: Now uses `CREATE TABLE IF NOT EXISTS` (safe)
+- **Previous Danger**: Contained `DROP TABLE CASCADE` (removed)
+- **Purpose**: Safe table creation for production deployments
+
+#### **Development Reset Script**
+- **Location**: `dev-setup/db_reset_dev_only.sql` 
+- **⚠️ DESTRUCTIVE**: Drops all tables and data
+- **Use Case**: Development environment database reset only
+- **Safety**: Clearly marked as development-only with warnings
+
+### **Backup and Restore System**
+
+#### **Automatic Backup Script**
+```bash
+./database-backup/backup.sh
+```
+- Creates timestamped backups: `harvis_backup_20250113_143022.sql`
+- Automatic cleanup (keeps 10 most recent)
+- Backup verification and size reporting
+
+#### **Safe Restore Script**
+```bash
+# List available backups
+./database-backup/restore.sh
+
+# Restore latest backup  
+./database-backup/restore.sh latest
+
+# Restore specific backup
+./database-backup/restore.sh harvis_backup_20250113_143022.sql
+```
+- **Safety backup**: Creates backup before restore
+- **Confirmation prompts**: Prevents accidental restores
+- **Verification**: Confirms restore completed successfully
+
+### **Database Safety Workflow**
+
+#### **Before Any Database Changes:**
+1. **Always backup first**: `./database-backup/backup.sh`
+2. **Make changes**: Schema updates, migrations, etc.
+3. **If problems occur**: `./database-backup/restore.sh latest`
+
+#### **Development Database Reset:**
+```bash
+# DEVELOPMENT ONLY - destroys all data
+docker exec -i pgsql-db psql -U pguser -d database < dev-setup/db_reset_dev_only.sql
+
+# Recreate tables safely
+docker exec -i pgsql-db psql -U pguser -d database < front_end/jfrontend/db_setup.sql
+```
+
+#### **Production Database Updates:**
+1. **Backup**: `./database-backup/backup.sh`
+2. **Test on staging**: Never test on production first
+3. **Apply changes**: Use migration scripts, not DROP commands
+4. **Verify**: Check data integrity after changes
+
+### **Database Security Considerations**
+
+#### **Access Control**
+- Database connection only from backend services
+- No direct frontend database access
+- Connection pooling with proper timeout settings
+- Environment variables for sensitive credentials
+
+#### **Data Protection**
+- Password hashing with bcrypt
+- JWT token expiration (configurable)
+- No sensitive data in logs or error messages
+- Database volume persistence with Docker
+
+### **Common Issues Prevention**
+
+#### **Data Loss Prevention**
+- ✅ Removed dangerous `DROP TABLE CASCADE` from production scripts
+- ✅ Separated development reset from production setup
+- ✅ Added backup/restore system with safety measures
+- ✅ Clear documentation of destructive vs safe operations
+
+#### **Recovery Procedures**
+- Regular automated backups (recommended: daily)
+- Quick restore capability with verification
+- Safety backups before any restore operation
+- Clear documentation of backup/restore workflows
+
 ### Reasoning Model Integration
 
 **IMPORTANT**: The application now fully supports reasoning models (DeepSeek R1, QwQ, O1, etc.) with proper separation of thinking process from final answers.
