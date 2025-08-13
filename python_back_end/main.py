@@ -7,6 +7,9 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn, os, sys, tempfile, uuid, base64, io, logging, re, requests, random
 
+# Import optimized auth module
+from auth_optimized import get_current_user_optimized, auth_optimizer, get_auth_stats
+
 # Load environment variables from .env file
 try:
     from dotenv import load_dotenv
@@ -81,7 +84,8 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     return encoded_jwt
 
 async def get_db_connection():
-    return await asyncpg.connect(DATABASE_URL)
+    """Get database connection with timeout optimization"""
+    return await asyncpg.connect(DATABASE_URL, timeout=5)
 
 async def get_current_user(request: Request, credentials: HTTPAuthorizationCredentials | None = Depends(security)):
     logger.info(f"get_current_user called with credentials: {credentials}")
@@ -262,9 +266,12 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
-        "http://localhost:3001",
+        "http://localhost:3001", 
         "http://127.0.0.1:3000",
         "http://127.0.0.1:3001",
+        "http://frontend:3000",  # Docker network
+        "http://localhost:8000",  # Backend self
+        "http://127.0.0.1:8000",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -583,12 +590,12 @@ async def root() -> FileResponse:
 @app.post("/api/chat-history/sessions", response_model=ChatSession, tags=["chat-history"])
 async def create_chat_session(
     request: CreateSessionRequest,
-    current_user: UserResponse = Depends(get_current_user)
+    current_user: Dict = Depends(get_current_user_optimized)
 ):
     """Create a new chat session"""
     try:
         session = await chat_history_manager.create_session(
-            user_id=current_user.id,
+            user_id=current_user['id'],
             title=request.title,
             model_used=request.model_used
         )
@@ -601,12 +608,12 @@ async def create_chat_session(
 async def get_user_chat_sessions(
     limit: int = 50,
     offset: int = 0,
-    current_user: UserResponse = Depends(get_current_user)
+    current_user: Dict = Depends(get_current_user_optimized)
 ):
     """Get all chat sessions for the current user"""
     try:
         sessions_response = await chat_history_manager.get_user_sessions(
-            user_id=current_user.id,
+            user_id=current_user['id'],
             limit=limit,
             offset=offset
         )
@@ -777,8 +784,21 @@ async def add_message_to_session(
 
 # ─── Authentication Endpoints ─────────────────────────────────────────────────────
 @app.post("/api/auth/signup", response_model=TokenResponse, tags=["auth"])
-async def signup(request: SignupRequest):
-    conn = await get_db_connection()
+async def signup(request: SignupRequest, app_request: Request):
+    # Use connection pool if available
+    pool = getattr(app_request.app.state, 'pg_pool', None)
+    
+    if pool:
+        async with pool.acquire() as conn:
+            return await _signup_with_connection(request, conn)
+    else:
+        conn = await get_db_connection()
+        try:
+            return await _signup_with_connection(request, conn)
+        finally:
+            await conn.close()
+
+async def _signup_with_connection(request: SignupRequest, conn):
     try:
         # Check if user already exists
         existing_user = await conn.fetchrow(
@@ -808,12 +828,23 @@ async def signup(request: SignupRequest):
     except Exception as e:
         logger.error(f"Signup error: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
-    finally:
-        await conn.close()
 
 @app.post("/api/auth/login", tags=["auth"])
-async def login(request: AuthRequest):
-    conn = await get_db_connection()
+async def login(request: AuthRequest, app_request: Request):
+    # Use connection pool if available
+    pool = getattr(app_request.app.state, 'pg_pool', None)
+    
+    if pool:
+        async with pool.acquire() as conn:
+            return await _login_with_connection(request, conn)
+    else:
+        conn = await get_db_connection()
+        try:
+            return await _login_with_connection(request, conn)
+        finally:
+            await conn.close()
+
+async def _login_with_connection(request: AuthRequest, conn):
     try:
         user = await conn.fetchrow(
             "SELECT id, password FROM users WHERE email = $1",
@@ -846,12 +877,16 @@ async def login(request: AuthRequest):
     except Exception as e:
         logger.error(f"Login error: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
-    finally:
-        await conn.close()
 
 @app.get("/api/auth/me", response_model=UserResponse, tags=["auth"])
-async def get_current_user_info(current_user: UserResponse = Depends(get_current_user)):
-    return current_user
+async def get_current_user_info(current_user: Dict = Depends(get_current_user_optimized)):
+    """Optimized user info endpoint with caching"""
+    return UserResponse(**current_user)
+
+@app.get("/api/auth/stats", tags=["auth"])
+async def get_authentication_stats():
+    """Get authentication performance statistics"""
+    return get_auth_stats()
 
 # Import new modules
 
@@ -859,13 +894,13 @@ async def get_current_user_info(current_user: UserResponse = Depends(get_current
 
 
 @app.post("/api/chat", tags=["chat"])
-async def chat(req: ChatRequest, request: Request, current_user: UserResponse = Depends(get_current_user)):
+async def chat(req: ChatRequest, request: Request, current_user: Dict = Depends(get_current_user_optimized)):
     """
     Main conversational endpoint with persistent chat history.
     Produces: JSON {history, audio_path, session_id}
     """
     try:
-        logger.info(f"Chat endpoint reached - User: {current_user.username}, Message: {req.message[:50]}...")
+        logger.info(f"Chat endpoint reached - User: {current_user['username']}, Message: {req.message[:50]}...")
         # ── 1. Handle chat session and history ──────────────────────────────────────────
         session_id = req.session_id
         
@@ -879,7 +914,7 @@ async def chat(req: ChatRequest, request: Request, current_user: UserResponse = 
                 # Get recent messages from database for context
                 recent_messages = await chat_history_manager.get_recent_messages(
                     session_id=session_uuid, 
-                    user_id=current_user.id, 
+                    user_id=current_user['id'], 
                     limit=10
                 )
             except (ValueError, Exception) as e:
