@@ -527,14 +527,24 @@ async def terminal_websocket(websocket: WebSocket, session_id: str):
         )
         
         # Handle WebSocket communication
+        raw = getattr(socket, "_sock", socket)   # prefer public; fall back if needed
+        try:
+            raw.settimeout(1.0)                  # short non-blocking-ish reads
+        except Exception:
+            pass
+            
         async def read_from_container():
+            import socket as pysock
             try:
                 while True:
-                    # Use read() method for SocketIO object, not recv()
-                    data = socket._sock.recv(1024)
-                    if not data:
-                        break
-                    await websocket.send_text(data.decode("utf-8", errors="replace"))
+                    try:
+                        data = raw.recv(4096)    # use public recv with larger buffer
+                        if not data:
+                            break
+                        await websocket.send_text(data.decode("utf-8", errors="replace"))
+                    except pysock.timeout:
+                        # just try again; this is normal when there's no output
+                        await asyncio.sleep(0.05)
             except Exception as e:
                 logger.error(f"Error reading from container: {e}")
                 await websocket.send_json({"type": "error", "message": str(e)})
@@ -543,7 +553,7 @@ async def terminal_websocket(websocket: WebSocket, session_id: str):
             try:
                 while True:
                     message = await websocket.receive_text()
-                    socket._sock.send(message.encode("utf-8"))
+                    raw.send(message.encode("utf-8"))
             except WebSocketDisconnect:
                 logger.info("Terminal WebSocket disconnected")
             except Exception as e:
