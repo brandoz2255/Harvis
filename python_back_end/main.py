@@ -265,12 +265,15 @@ app = FastAPI(title="Harvis AI API", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        "http://localhost:9000",   # Main nginx proxy access point
+        "http://127.0.0.1:9000",   # Main nginx proxy access point
         "http://localhost:3000",
         "http://localhost:3001", 
         "http://127.0.0.1:3000",
         "http://127.0.0.1:3001",
-        "http://frontend:3000",  # Docker network
-        "http://localhost:8000",  # Backend self
+        "http://frontend:3000",    # Docker network
+        "http://nginx-proxy:80",   # Docker network nginx
+        "http://localhost:8000",   # Backend self
         "http://127.0.0.1:8000",
     ],
     allow_credentials=True,
