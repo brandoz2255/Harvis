@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, WebSocket, Depends, Form
+from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.websockets import WebSocketDisconnect
@@ -209,8 +210,39 @@ HARVIS_VOICE_PATH = os.path.abspath(
     "harvis_voice.mp3"
 )  # Point to the file in project root
 
+# ─── Database Connection Pool -------------------------------------------------
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: create connection pool
+    try:
+        # Fix database hostname: use pgsql-db instead of pgsql
+        database_url = os.getenv("DATABASE_URL", "postgresql://pguser:pgpassword@pgsql-db:5432/database")
+        app.state.pg_pool = await asyncpg.create_pool(
+            dsn=database_url,
+            min_size=1, 
+            max_size=10,
+            command_timeout=5,
+        )
+        logger.info("✅ Database connection pool created")
+        
+        # Initialize session database
+        from vibecoding.db_session import init_session_db
+        await init_session_db(app.state.pg_pool)
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to create database pool: {e}")
+        # Continue without pool - will fall back to direct connections
+        app.state.pg_pool = None
+    
+    yield
+    
+    # Shutdown: close connection pool
+    if hasattr(app.state, 'pg_pool') and app.state.pg_pool:
+        await app.state.pg_pool.close()
+        logger.info("🔒 Database connection pool closed")
+
 # ─── FastAPI init --------------------------------------------------------------
-app = FastAPI(title="Harvis AI API")
+app = FastAPI(title="Harvis AI API", lifespan=lifespan)
 
 # CORS Middleware must be added before routes
 app.add_middleware(
@@ -246,7 +278,14 @@ chat_history_manager = None
 async def startup_event():
     global db_pool, chat_history_manager, n8n_storage, n8n_automation_service, n8n_ai_agent
     try:
-        db_pool = await asyncpg.create_pool(DATABASE_URL)
+        # Use the connection pool created in lifespan
+        db_pool = app.state.pg_pool
+        if db_pool is None:
+            logger.error("❌ No database pool available - falling back to direct connection")
+            # Fix database hostname: use pgsql-db instead of pgsql
+            database_url = os.getenv("DATABASE_URL", "postgresql://pguser:pgpassword@pgsql-db:5432/database")
+            db_pool = await asyncpg.create_pool(database_url)
+        
         chat_history_manager = ChatHistoryManager(db_pool)
         
         # Initialize vibe files database table
@@ -257,13 +296,8 @@ async def startup_event():
         except Exception as e:
             logger.error(f"❌ Failed to initialize vibe files table: {e}")
         
-        # Initialize session database
-        try:
-            from vibecoding.db_session import init_session_db
-            await init_session_db(db_pool)
-            logger.info("✅ Vibecoding session database initialized")
-        except Exception as e:
-            logger.error(f"❌ Failed to initialize session database: {e}")
+        # Session database already initialized in lifespan
+        logger.info("📋 Using session database initialized in lifespan")
         
         # Initialize n8n services with database pool
         if n8n_client:
