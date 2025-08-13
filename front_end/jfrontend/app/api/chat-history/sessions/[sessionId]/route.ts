@@ -35,7 +35,7 @@ export async function GET(
         'Content-Type': 'application/json',
         'Authorization': authorization,
       },
-      signal: AbortSignal.timeout(10000),
+      signal: AbortSignal.timeout(30000),
     })
 
     console.log(`🔗 Backend response status: ${response.status} ${response.statusText}`)
@@ -79,7 +79,7 @@ export async function DELETE(
         'Content-Type': 'application/json',
         'Authorization': authorization,
       },
-      signal: AbortSignal.timeout(10000),
+      signal: AbortSignal.timeout(30000),
     })
 
     console.log(`🔗 Backend response status: ${response.status} ${response.statusText}`)

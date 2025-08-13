@@ -13,11 +13,15 @@ import {
   Download,
   Copy,
   Maximize2,
-  Minimize2
+  Minimize2,
+  Settings,
+  Palette
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
+import Editor from "@monaco-editor/react"
+import { configureMonacoLanguages, setupLSPFeatures } from '@/lib/monaco-config'
 
 interface ContainerFile {
   name: string
@@ -48,7 +52,11 @@ export default function VibeContainerCodeEditor({
   const [isModified, setIsModified] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'error' | null>(null)
+  const [editorTheme, setEditorTheme] = useState<'vibe-dark' | 'vibe-light' | 'github-dark' | 'github-light' | 'vs-dark' | 'light' | 'monokai' | 'dracula'>('vibe-dark')
+  const [fontSize, setFontSize] = useState(14)
+  const [wordWrap, setWordWrap] = useState<'on' | 'off'>('off')
   
+  const editorRef = useRef<any>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   // Load file content when selected file changes
@@ -60,6 +68,17 @@ export default function VibeContainerCodeEditor({
       setIsModified(false)
     }
   }, [selectedFile, sessionId])
+
+  // Update Monaco editor options when settings change
+  useEffect(() => {
+    if (editorRef.current) {
+      editorRef.current.updateOptions({
+        fontSize: fontSize,
+        wordWrap: wordWrap,
+        minimap: { enabled: fontSize >= 14, scale: fontSize >= 16 ? 0.7 : 0.5 }
+      })
+    }
+  }, [fontSize, wordWrap])
 
   const loadFileContent = async () => {
     if (!selectedFile || !sessionId || selectedFile.type !== 'file') return
@@ -212,6 +231,142 @@ export default function VibeContainerCodeEditor({
     }
   }
 
+  // Enhanced Monaco editor theme definitions (same as VibeCodeEditor)
+  const defineCustomThemes = (monaco: any) => {
+    // Vibe Dark Theme (Enhanced)
+    monaco.editor.defineTheme('vibe-dark', {
+      base: 'vs-dark',
+      inherit: true,
+      rules: [
+        { token: 'comment', foreground: '6A737D', fontStyle: 'italic' },
+        { token: 'keyword', foreground: 'F97583' },
+        { token: 'string', foreground: '9ECBFF' },
+        { token: 'number', foreground: 'B392F0' },
+        { token: 'type', foreground: 'FFD700' },
+        { token: 'function', foreground: 'E1E4E8' },
+        { token: 'variable', foreground: 'F0F6FC' },
+        { token: 'operator', foreground: 'F97583' },
+        { token: 'delimiter', foreground: 'E1E4E8' },
+        { token: 'class', foreground: 'FFAB70' },
+        { token: 'interface', foreground: 'FFB86C' },
+        { token: 'namespace', foreground: 'FF79C6' }
+      ],
+      colors: {
+        'editor.background': '#0D1117',
+        'editor.foreground': '#F0F6FC',
+        'editorLineNumber.foreground': '#6E7681',
+        'editorCursor.foreground': '#7C3AED',
+        'editor.selectionBackground': '#7C3AED33',
+        'editor.inactiveSelectionBackground': '#7C3AED22',
+        'editorLineNumber.activeForeground': '#B392F0',
+        'editor.lineHighlightBackground': '#21262D',
+        'editorGutter.background': '#0D1117',
+        'editorWhitespace.foreground': '#6E768166',
+        'editorIndentGuide.background': '#21262D',
+        'editorIndentGuide.activeBackground': '#7C3AED',
+        'editor.findMatchBackground': '#FFD70033',
+        'editor.findMatchHighlightBackground': '#FFD70022',
+        'editorBracketMatch.background': '#7C3AED33',
+        'editorBracketMatch.border': '#7C3AED',
+        'editorSuggestWidget.background': '#161B22',
+        'editorSuggestWidget.border': '#30363D',
+        'editorSuggestWidget.foreground': '#F0F6FC',
+        'editorSuggestWidget.selectedBackground': '#7C3AED33',
+        'editorHoverWidget.background': '#161B22',
+        'editorHoverWidget.border': '#30363D'
+      }
+    })
+
+    // Vibe Light Theme
+    monaco.editor.defineTheme('vibe-light', {
+      base: 'vs',
+      inherit: true,
+      rules: [
+        { token: 'comment', foreground: '6A737D', fontStyle: 'italic' },
+        { token: 'keyword', foreground: 'D73A49' },
+        { token: 'string', foreground: '032F62' },
+        { token: 'number', foreground: '005CC5' },
+        { token: 'type', foreground: 'B31D28' },
+        { token: 'function', foreground: '6F42C1' },
+        { token: 'variable', foreground: '24292E' },
+        { token: 'operator', foreground: 'D73A49' },
+        { token: 'delimiter', foreground: '24292E' }
+      ],
+      colors: {
+        'editor.background': '#FFFFFF',
+        'editor.foreground': '#24292E',
+        'editorLineNumber.foreground': '#959DA5',
+        'editorCursor.foreground': '#7C3AED',
+        'editor.selectionBackground': '#7C3AED33',
+        'editor.lineHighlightBackground': '#F6F8FA',
+        'editorGutter.background': '#FFFFFF'
+      }
+    })
+
+    // GitHub Dark Theme
+    monaco.editor.defineTheme('github-dark', {
+      base: 'vs-dark',
+      inherit: true,
+      rules: [
+        { token: 'comment', foreground: '8B949E', fontStyle: 'italic' },
+        { token: 'keyword', foreground: 'FF7B72' },
+        { token: 'string', foreground: 'A5D6FF' },
+        { token: 'number', foreground: '79C0FF' },
+        { token: 'type', foreground: 'FFA657' },
+        { token: 'function', foreground: 'D2A8FF' },
+        { token: 'variable', foreground: 'FFA657' }
+      ],
+      colors: {
+        'editor.background': '#0D1117',
+        'editor.foreground': '#F0F6FC',
+        'editorLineNumber.foreground': '#7D8590',
+        'editor.lineHighlightBackground': '#161B22'
+      }
+    })
+
+    // Dracula Theme
+    monaco.editor.defineTheme('dracula', {
+      base: 'vs-dark',
+      inherit: true,
+      rules: [
+        { token: 'comment', foreground: '6272A4', fontStyle: 'italic' },
+        { token: 'keyword', foreground: 'FF79C6' },
+        { token: 'string', foreground: 'F1FA8C' },
+        { token: 'number', foreground: 'BD93F9' },
+        { token: 'type', foreground: '8BE9FD' },
+        { token: 'function', foreground: '50FA7B' },
+        { token: 'variable', foreground: 'F8F8F2' }
+      ],
+      colors: {
+        'editor.background': '#282A36',
+        'editor.foreground': '#F8F8F2',
+        'editorLineNumber.foreground': '#6272A4',
+        'editor.lineHighlightBackground': '#44475A'
+      }
+    })
+
+    // Monokai Theme
+    monaco.editor.defineTheme('monokai', {
+      base: 'vs-dark',
+      inherit: true,
+      rules: [
+        { token: 'comment', foreground: '75715E', fontStyle: 'italic' },
+        { token: 'keyword', foreground: 'F92672' },
+        { token: 'string', foreground: 'E6DB74' },
+        { token: 'number', foreground: 'AE81FF' },
+        { token: 'type', foreground: '66D9EF' },
+        { token: 'function', foreground: 'A6E22E' },
+        { token: 'variable', foreground: 'F8F8F2' }
+      ],
+      colors: {
+        'editor.background': '#272822',
+        'editor.foreground': '#F8F8F2',
+        'editorLineNumber.foreground': '#90908A',
+        'editor.lineHighlightBackground': '#3E3D32'
+      }
+    })
+  }
+
   const getLanguageFromFileName = (fileName: string) => {
     const extension = fileName.split('.').pop()?.toLowerCase()
     
@@ -235,49 +390,74 @@ export default function VibeContainerCodeEditor({
       'yaml': 'yaml',
       'yml': 'yaml',
       'sh': 'bash',
-      'sql': 'sql'
+      'sql': 'sql',
+      'dockerfile': 'dockerfile',
+      'Dockerfile': 'dockerfile',
+      'vue': 'vue',
+      'svelte': 'svelte'
     }
     
-    return languageMap[extension || ''] || 'text'
+    return languageMap[extension || ''] || 'plaintext'
   }
 
-  const handleContentChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setContent(e.target.value)
-    setIsModified(true)
-    setSaveStatus(null)
-  }
+  const handleEditorDidMount = (editor: any, monaco: any) => {
+    editorRef.current = editor
+    
+    // Define custom themes (same as VibeCodeEditor)
+    defineCustomThemes(monaco)
+    
+    // Configure language features
+    configureMonacoLanguages(monaco)
+    
+    // Setup LSP features for current language
+    if (selectedFile) {
+      const language = getLanguageFromFileName(selectedFile.name)
+      setupLSPFeatures(monaco, language)
+    }
+    
+    // Configure editor
+    editor.updateOptions({
+      fontSize: fontSize,
+      wordWrap: wordWrap,
+      minimap: { enabled: false },
+      scrollBeyondLastLine: false,
+      automaticLayout: true,
+      tabSize: 2,
+      insertSpaces: true,
+      renderWhitespace: 'selection',
+      lineNumbers: 'on',
+      cursorStyle: 'line',
+      smoothScrolling: true,
+      contextmenu: true,
+      mouseWheelZoom: true
+    })
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    // Ctrl+S to save
-    if (e.ctrlKey && e.key === 's') {
-      e.preventDefault()
+    // Add keyboard shortcuts
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
       saveFile()
-    }
-    
-    // Ctrl+Enter to execute
-    if (e.ctrlKey && e.key === 'Enter') {
-      e.preventDefault()
+    })
+
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => {
       executeFile()
-    }
-    
-    // Tab handling
-    if (e.key === 'Tab') {
-      e.preventDefault()
-      const start = e.currentTarget.selectionStart
-      const end = e.currentTarget.selectionEnd
-      
-      const newContent = content.substring(0, start) + '  ' + content.substring(end)
-      setContent(newContent)
+    })
+
+    // Auto-save on focus loss
+    editor.onDidBlurEditorText(() => {
+      if (isModified) {
+        saveFile()
+      }
+    })
+  }
+
+  const handleEditorChange = (value: string | undefined) => {
+    if (value !== undefined) {
+      setContent(value)
       setIsModified(true)
-      
-      // Set cursor position after tab
-      setTimeout(() => {
-        if (textareaRef.current) {
-          textareaRef.current.selectionStart = textareaRef.current.selectionEnd = start + 2
-        }
-      }, 0)
+      setSaveStatus(null)
     }
   }
+
+  // Legacy textarea handlers - removed in favor of Monaco Editor
 
   const copyContent = () => {
     navigator.clipboard.writeText(content)
@@ -351,34 +531,67 @@ export default function VibeContainerCodeEditor({
               </span>
             )}
             
-            <Button
-              onClick={copyContent}
-              size="sm"
-              variant="outline"
-              className="bg-gray-800 border-gray-600 text-gray-300"
-              disabled={!selectedFile || isLoading}
-            >
-              <Copy className="w-3 h-3" />
-            </Button>
+            {/* Theme Controls */}
+            <div className="flex items-center space-x-1 border-l border-gray-600 pl-2">
+              <Button
+                onClick={() => {
+                  const themes: typeof editorTheme[] = ['vibe-dark', 'vibe-light', 'github-dark', 'dracula', 'monokai', 'vs-dark', 'light']
+                  const currentIndex = themes.indexOf(editorTheme)
+                  const nextTheme = themes[(currentIndex + 1) % themes.length]
+                  setEditorTheme(nextTheme)
+                }}
+                size="sm"
+                variant="ghost"
+                className="h-8 px-2 text-gray-400 hover:text-white"
+                title={`Current: ${editorTheme} (click to cycle)`}
+              >
+                <Palette className="w-3 h-3" />
+              </Button>
+              
+              <Button
+                onClick={() => setFontSize(fontSize === 14 ? 16 : fontSize === 16 ? 12 : 14)}
+                size="sm"
+                variant="ghost"
+                className="h-8 px-2 text-gray-400 hover:text-white text-xs"
+                title="Font Size"
+              >
+                {fontSize}px
+              </Button>
+            </div>
             
-            <Button
-              onClick={downloadFile}
-              size="sm"
-              variant="outline"
-              className="bg-gray-800 border-gray-600 text-gray-300"
-              disabled={!selectedFile || isLoading}
-            >
-              <Download className="w-3 h-3" />
-            </Button>
-            
-            <Button
-              onClick={() => setIsFullscreen(!isFullscreen)}
-              size="sm"
-              variant="outline"
-              className="bg-gray-800 border-gray-600 text-gray-300"
-            >
-              {isFullscreen ? <Minimize2 className="w-3 h-3" /> : <Maximize2 className="w-3 h-3" />}
-            </Button>
+            <div className="flex items-center space-x-1 border-l border-gray-600 pl-2">
+              <Button
+                onClick={copyContent}
+                size="sm"
+                variant="outline"
+                className="bg-gray-800 border-gray-600 text-gray-300"
+                disabled={!selectedFile || isLoading}
+                title="Copy Content"
+              >
+                <Copy className="w-3 h-3" />
+              </Button>
+              
+              <Button
+                onClick={downloadFile}
+                size="sm"
+                variant="outline"
+                className="bg-gray-800 border-gray-600 text-gray-300"
+                disabled={!selectedFile || isLoading}
+                title="Download File"
+              >
+                <Download className="w-3 h-3" />
+              </Button>
+              
+              <Button
+                onClick={() => setIsFullscreen(!isFullscreen)}
+                size="sm"
+                variant="outline"
+                className="bg-gray-800 border-gray-600 text-gray-300"
+                title="Toggle Fullscreen"
+              >
+                {isFullscreen ? <Minimize2 className="w-3 h-3" /> : <Maximize2 className="w-3 h-3" />}
+              </Button>
+            </div>
             
             <Button
               onClick={saveFile}
@@ -431,46 +644,113 @@ export default function VibeContainerCodeEditor({
             </div>
           </div>
         ) : (
-          <div className="flex-1 relative">
-            <textarea
-              ref={textareaRef}
+          <div className="flex-1 bg-gray-950 border border-gray-800 rounded-lg overflow-hidden">
+            <Editor
+              height="100%"
+              language={getLanguageFromFileName(selectedFile.name)}
               value={content}
-              onChange={handleContentChange}
-              onKeyDown={handleKeyDown}
-              className="w-full h-full bg-gray-950 text-green-300 font-mono text-sm p-4 border-none outline-none resize-none"
-              placeholder="Start typing your code..."
-              spellCheck={false}
-              style={{
-                lineHeight: '1.6',
-                tabSize: 2
+              onChange={handleEditorChange}
+              onMount={handleEditorDidMount}
+              theme={editorTheme}
+              options={{
+                fontSize: fontSize,
+                wordWrap: wordWrap,
+                minimap: { enabled: true, scale: 0.5 },
+                scrollBeyondLastLine: false,
+                automaticLayout: true,
+                tabSize: 2,
+                insertSpaces: true,
+                renderWhitespace: 'selection',
+                lineNumbers: 'on',
+                cursorStyle: 'line',
+                smoothScrolling: true,
+                contextmenu: true,
+                mouseWheelZoom: true,
+                bracketPairColorization: { enabled: true },
+                autoIndent: 'full',
+                formatOnPaste: true,
+                formatOnType: true,
+                suggestOnTriggerCharacters: true,
+                acceptSuggestionOnCommitCharacter: true,
+                acceptSuggestionOnEnter: 'on',
+                quickSuggestions: {
+                  other: true,
+                  comments: true,
+                  strings: true
+                },
+                parameterHints: { 
+                  enabled: true,
+                  cycle: true 
+                },
+                codeLens: true,
+                folding: true,
+                foldingStrategy: 'auto',
+                showFoldingControls: 'mouseover',
+                unfoldOnClickAfterEndOfLine: true,
+                disableLayerHinting: false,
+                renderLineHighlight: 'all',
+                suggest: {
+                  showKeywords: true,
+                  showSnippets: true,
+                  showFunctions: true,
+                  showVariables: true,
+                  showClasses: true,
+                  showStructs: true,
+                  showInterfaces: true,
+                  showModules: true,
+                  showProperties: true,
+                  showEvents: true,
+                  showOperators: true,
+                  showUnits: true,
+                  showValues: true,
+                  showConstants: true,
+                  showEnums: true,
+                  showEnumMembers: true,
+                  showColors: true,
+                  showFiles: true,
+                  showReferences: true,
+                  showFolders: true,
+                  showTypeParameters: true,
+                  filterGraceful: true,
+                  snippetsPreventQuickSuggestions: false
+                },
+                autoClosingBrackets: 'always',
+                autoClosingQuotes: 'always'
               }}
-            />
-            
-            {/* Line numbers overlay - simplified */}
-            <div className="absolute left-0 top-0 p-4 pointer-events-none select-none">
-              <div className="font-mono text-sm text-gray-600 leading-6">
-                {content.split('\n').map((_, index) => (
-                  <div key={index} className="text-right pr-3" style={{ minWidth: '2rem' }}>
-                    {index + 1}
+              loading={
+                <div className="flex items-center justify-center h-full bg-gray-950">
+                  <div className="text-center">
+                    <Loader2 className="w-8 h-8 animate-spin text-blue-400 mx-auto mb-4" />
+                    <p className="text-gray-400">Loading Monaco Editor...</p>
                   </div>
-                ))}
-              </div>
-            </div>
+                </div>
+              }
+            />
           </div>
         )}
       </div>
 
-      {/* Footer with keyboard shortcuts */}
+      {/* Footer with keyboard shortcuts and file info */}
       {selectedFile && (
-        <div className="px-4 py-2 border-t border-green-500/30 bg-gray-900/50 text-xs text-gray-500 flex justify-between items-center">
+        <div className="px-4 py-2 border-t border-gray-700 bg-gray-900 text-xs text-gray-400 flex justify-between items-center">
           <div className="flex space-x-4">
             <span>Ctrl+S: Save</span>
             {canExecute && <span>Ctrl+Enter: Run</span>}
-            <span>Tab: Indent</span>
+            <span>Ctrl+/: Comment</span>
+            <span>Alt+Shift+F: Format</span>
+            <span>Ctrl+D: Multi-cursor</span>
           </div>
-          <div className="flex items-center space-x-2">
-            <span>{content.split('\n').length} lines</span>
-            <span>{content.length} characters</span>
+          <div className="flex items-center space-x-4">
+            <span className="flex items-center space-x-2">
+              <Badge variant="outline" className="border-gray-600 text-gray-400 text-xs">
+                {getLanguageFromFileName(selectedFile.name)}
+              </Badge>
+              <span>{content.split('\n').length} lines</span>
+              <span>{content.length} chars</span>
+            </span>
+            <span className="text-blue-400">
+              {editorTheme === 'vs-dark' ? 'Dark' : editorTheme === 'light' ? 'Light' : 'High Contrast'} • {fontSize}px
+            </span>
           </div>
         </div>
       )}
