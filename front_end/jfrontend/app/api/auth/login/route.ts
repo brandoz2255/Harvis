@@ -25,8 +25,8 @@ export async function POST(request: NextRequest) {
     const data = await response.json()
     console.log('Login: Success, got access_token:', data.access_token ? 'YES' : 'NO')
     
-    // Convert backend response format to frontend expected format
-    return NextResponse.json({ token: data.access_token })
+    // Pass through backend response unchanged
+    return NextResponse.json(data)
   } catch (error) {
     console.error('Login proxy error:', error)
     return NextResponse.json({ message: 'Login failed' }, { status: 500 })

@@ -35,7 +35,7 @@ export const AuthService = {
   },
 
   async fetchUser(token: string): Promise<{ id: string; name: string; email: string; avatar?: string }> {
-    const response = await fetch('/api/auth/me', {
+    const response = await fetch('/api/me', {
       headers: {
         'Authorization': `Bearer ${token}`,
       },

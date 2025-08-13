@@ -154,7 +154,7 @@ export const useChatHistoryStore = create<ChatHistoryState>((set, get) => ({
           'Content-Type': 'application/json',
           ...getAuthHeaders(),
         },
-        signal: AbortSignal.timeout(10000), // 10 second timeout
+        signal: AbortSignal.timeout(30000), // 30 second timeout
       })
       
       if (response.ok) {
@@ -250,7 +250,7 @@ export const useChatHistoryStore = create<ChatHistoryState>((set, get) => ({
         body: JSON.stringify({
           title,
         }),
-        signal: AbortSignal.timeout(10000), // 10 second timeout
+        signal: AbortSignal.timeout(30000), // 30 second timeout
       })
       
       if (response.ok) {
@@ -492,7 +492,7 @@ export const useChatHistoryStore = create<ChatHistoryState>((set, get) => ({
           'Content-Type': 'application/json',
           ...(authHeaders.Authorization ? { 'Authorization': authHeaders.Authorization } : {}),
         },
-        signal: AbortSignal.timeout(15000), // Increased timeout to 15 seconds
+        signal: AbortSignal.timeout(30000), // 30 second timeout
       })
       
       console.log(`🌐 API response status: ${response.status} ${response.statusText}`)

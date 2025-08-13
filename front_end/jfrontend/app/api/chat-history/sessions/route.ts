@@ -33,7 +33,7 @@ export async function GET(request: NextRequest) {
         'Content-Type': 'application/json',
         'Authorization': backendAuth,
       },
-      signal: AbortSignal.timeout(10000),
+      signal: AbortSignal.timeout(30000),
     })
 
     console.log(`🔗 Backend response status: ${response.status} ${response.statusText}`)
@@ -76,7 +76,7 @@ export async function POST(request: NextRequest) {
         'Authorization': backendAuth,
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(10000),
+      signal: AbortSignal.timeout(30000),
     })
 
     console.log(`🔗 Backend response status: ${response.status} ${response.statusText}`)

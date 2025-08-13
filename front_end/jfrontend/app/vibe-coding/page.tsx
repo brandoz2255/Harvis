@@ -548,7 +548,7 @@ export default function VibeCodingPage() {
                 onSessionSelect={handleSessionSelect}
                 onSessionCreate={handleSessionCreate}
                 onSessionDelete={handleSessionDelete}
-                userId={user.id}
+                userId={Number(user.id)}
                 className="h-full"
               />
             </motion.div>
@@ -1049,7 +1049,7 @@ export default function VibeCodingPage() {
         </div>
 
         {/* Settings Modal */}
-        <SettingsModal isOpen={showSettings} onClose={() => setShowSettings(false)} context="container" />
+        <SettingsModal isOpen={showSettings} onClose={() => setShowSettings(false)} context="global" />
       </div>
     </div>
   )
