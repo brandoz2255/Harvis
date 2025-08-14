@@ -178,29 +178,3 @@ export async function POST(request: NextRequest) {
   
 }
 
-// In your React component
-const [fileTypeConfig, setFileTypeConfig] = useState({});
-
-useEffect(() => {
-  // Load file type config on mount
-  fetch('/api/vibecoding/file-type-config')
-    .then(res => res.json())
-    .then(setFileTypeConfig);
-  
-  // Optional: Connect to WebSocket for real-time updates
-  const ws = new WebSocket('ws://localhost:9000/api/vibecoding/file-type-config/ws');
-  ws.onmessage = (event) => {
-    const data = JSON.parse(event.data);
-    if (data.type === 'config_update') {
-      setFileTypeConfig(data.config);
-    }
-  };
-  
-  return () => ws.close();
-}, []);
-
-// Use the dynamic config
-const getFileIcon = (file) => {
-  const ext = file.name.split('.').pop()?.toLowerCase();
-  return fileTypeConfig[ext]?.icon || 'File';
-};
