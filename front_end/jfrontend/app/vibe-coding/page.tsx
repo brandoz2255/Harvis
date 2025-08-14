@@ -36,8 +36,8 @@ import SettingsModal from "@/components/SettingsModal"
 import Aurora from "@/components/Aurora"
 import VibeModelSelector from "@/components/VibeModelSelector"
 import VibeSessionManager from "@/components/VibeSessionManager"
-import VibeTerminal from "@/components/VibeTerminal"
-import VibeContainerFileExplorer from "@/components/VibeContainerFileExplorer"
+import MonacoVibeFileTree from "@/components/MonacoVibeFileTree"
+import OptimizedVibeTerminal from "@/components/OptimizedVibeTerminal"
 import VibeContainerCodeEditor from "@/components/VibeContainerCodeEditor"
 
 interface ChatMessage {
@@ -323,11 +323,20 @@ export default function VibeCodingPage() {
   }
 
   // File Management
-  const handleFileSelect = (file: ContainerFile) => {
-    if (file.type === 'file') {
-      setSelectedFile(file)
-      setActiveTab('files')
-    }
+  const handleFileSelect = (filePath: string, content: string) => {
+    setSelectedFile({
+      name: filePath.split('/').pop() || '',
+      type: 'file',
+      size: content.length,
+      permissions: '',
+      path: filePath
+    })
+    setActiveTab('files')
+  }
+
+  const handleFileContentChange = (filePath: string, content: string) => {
+    // Handle real-time file changes from the file system watcher
+    console.log('📄 File content changed:', filePath)
   }
 
   const handleFileExecute = (filePath: string) => {
@@ -720,10 +729,10 @@ export default function VibeCodingPage() {
                   <div className="space-y-4">
                     {/* File Explorer */}
                     <div className="h-64">
-                      <VibeContainerFileExplorer
+                      <MonacoVibeFileTree
                         sessionId={currentSession.session_id}
                         onFileSelect={handleFileSelect}
-                        selectedFilePath={selectedFile?.path || null}
+                        onFileContentChange={handleFileContentChange}
                         className="h-full"
                       />
                     </div>
@@ -740,7 +749,7 @@ export default function VibeCodingPage() {
                     
                     {/* Terminal */}
                     <div className="h-64">
-                      <VibeTerminal
+                      <OptimizedVibeTerminal
                         sessionId={currentSession.session_id}
                         isContainerRunning={isContainerRunning}
                         onContainerStart={handleContainerStart}
@@ -856,10 +865,10 @@ export default function VibeCodingPage() {
                 <div className="flex flex-1 min-h-0 gap-4">
                   {/* Left Sidebar: File Explorer */}
                   <div className="w-80 flex-shrink-0">
-                    <VibeContainerFileExplorer
+                    <MonacoVibeFileTree
                       sessionId={currentSession.session_id}
                       onFileSelect={handleFileSelect}
-                      selectedFilePath={selectedFile?.path || null}
+                      onFileContentChange={handleFileContentChange}
                       className="h-full"
                     />
                   </div>
@@ -1035,7 +1044,7 @@ export default function VibeCodingPage() {
                     </div>
                   </div>
                   
-                  <VibeTerminal
+                  <OptimizedVibeTerminal
                     sessionId={currentSession.session_id}
                     isContainerRunning={isContainerRunning}
                     onContainerStart={handleContainerStart}
