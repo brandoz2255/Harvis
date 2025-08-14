@@ -171,11 +171,17 @@ export default function VibeContainerFileExplorer({
       const token = localStorage.getItem('token')
       if (!token) return
 
-      const response = await fetch(`/api/vibecoding/files?session_id=${sessionId}&path=${encodeURIComponent(path)}`, {
+      const response = await fetch('/api/vibecoding/files', {
+        method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json'
-        }
+        },
+        body: JSON.stringify({
+          action: 'list',
+          session_id: sessionId,
+          path: path
+        })
       })
 
       if (response.ok) {
