@@ -11,6 +11,44 @@ import json
 
 logger = logging.getLogger(__name__)
 
+# ─── Ollama Configuration with Cloud/Local Fallback ──────────────────────────
+CLOUD_OLLAMA_URL = "https://coyotegpt.ngrok.app/ollama"
+LOCAL_OLLAMA_URL = "http://ollama:11434"
+API_KEY = os.getenv("OLLAMA_API_KEY", "key")
+
+def make_ollama_request(endpoint, payload, timeout=90):
+    """Make a POST request to Ollama with automatic fallback from cloud to local.
+    Returns the response object from the successful request."""
+    headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY != "key" else {}
+    
+    # Try cloud first
+    try:
+        logger.info("🌐 Trying cloud Ollama: %s", CLOUD_OLLAMA_URL)
+        response = requests.post(f"{CLOUD_OLLAMA_URL}{endpoint}", json=payload, headers=headers, timeout=timeout)
+        if response.status_code == 200:
+            logger.info("✅ Cloud Ollama request successful")
+            return response
+        else:
+            logger.warning("⚠️ Cloud Ollama returned status %s", response.status_code)
+    except Exception as e:
+        logger.warning("⚠️ Cloud Ollama request failed: %s", e)
+    
+    # Fallback to local
+    try:
+        logger.info("🏠 Falling back to local Ollama: %s", LOCAL_OLLAMA_URL)
+        response = requests.post(f"{LOCAL_OLLAMA_URL}{endpoint}", json=payload, timeout=timeout)
+        if response.status_code == 200:
+            logger.info("✅ Local Ollama request successful")
+            return response
+        else:
+            logger.error("❌ Local Ollama returned status %s", response.status_code)
+            response.raise_for_status()
+    except Exception as e:
+        logger.error("❌ Local Ollama request failed: %s", e)
+        raise
+    
+    return response
+
 class ResearchAgent:
     """
     Advanced research agent that combines web search with LLM analysis
@@ -66,12 +104,7 @@ class ResearchAgent:
         }
         
         try:
-            response = requests.post(
-                f"{self.ollama_url}/api/chat",
-                json=payload,
-                timeout=120
-            )
-            response.raise_for_status()
+            response = make_ollama_request("/api/chat", payload, timeout=120)
             
             result = response.json()
             return result.get("message", {}).get("content", "").strip()
