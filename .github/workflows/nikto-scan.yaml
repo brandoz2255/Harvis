@@ -1,0 +1,24 @@
+# .github/workflows/nikto-scan.yml
+name: 🕵️ Nikto Server Scan
+
+on:
+  workflow_dispatch:
+
+jobs:
+  nikto:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pull and Start Frontend
+        run: |
+          docker pull dulc3/jarvis-frontend:latest
+          docker run -d --rm \
+            --name frontend \
+            -p 3000:3000 \
+            dulc3/jarvis-frontend:latest
+          sleep 10
+
+      - name: Install Nikto
+        run: sudo apt-get update && sudo apt-get install -y nikto
+
+      - name: Run Nikto Scan
+        run: nikto -host http://localhost:3000

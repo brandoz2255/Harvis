@@ -274,6 +274,8 @@ This document outlines the system architecture of the AI Voice Assistant, detail
 - Stream management
 - Quality control
 
+For detailed information about the implementation of the core system and its integration with Chatterbox TTS, see [Main and Chatterbox TTS Integration](main-chatterbox-integration.md).
+
 ## Data Flow
 
 ### 1. Voice Input Flow
