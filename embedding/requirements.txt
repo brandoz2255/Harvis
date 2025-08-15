@@ -1,0 +1,19 @@
+# n8n Workflow Embedding Requirements
+
+# Core dependencies
+langchain>=0.2.0
+langchain-community>=0.2.0
+langchain-postgres>=0.0.6
+langchain-core>=0.2.0
+
+# Embedding model
+sentence-transformers>=2.2.0
+torch>=2.0.0
+transformers>=4.21.0
+psycopg2-binary
+# Database  
+pgvector>=0.2.0
+
+# Utilities
+numpy>=1.21.0
+pathlib2>=2.3.0

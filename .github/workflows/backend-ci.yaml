@@ -1,0 +1,57 @@
+name: Python Backend CI/CD 🚀
+
+on:
+  push:
+    paths:
+      - "python_back_end/**"
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend-build-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: python_back_end
+
+    steps:
+      - name: ⏬ Checkout code
+        uses: actions/checkout@v3
+
+      - name: 🐍 Set up Python 3.11
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: 📦 Install Python dependencies + Bandit
+        run: |
+          pip install -r requirements.txt
+          pip install bandit
+
+      - name: 🔐 Run Bandit Security Scan
+        run: bandit -r . -ll
+
+      - name: 📖 Read semantic version
+        id: get_version
+        run: |
+          VERSION="v$(cat VERSION)"
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "Using VERSION: $VERSION"
+
+      - name: 🐳 Docker build with semantic version
+        run: |
+          docker build -t dulc3/jarvis-backend:$VERSION .
+          docker tag dulc3/jarvis-backend:$VERSION dulc3/jarvis-backend:latest
+
+      - name: 🔐 DockerHub Login
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: 📤 Push image to DockerHub
+        run: |
+          docker push dulc3/jarvis-backend:$VERSION
+          docker push dulc3/jarvis-backend:latest
+

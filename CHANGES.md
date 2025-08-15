@@ -2,6 +2,19 @@
 
 This file documents the key improvements and additions made to the project.
 
+## Vibe Coding Feature
+
+1.  **VibeAgent Implementation:**
+    -   Introduced `VibeAgent` in `python_back_end/ollama_cli/vibe_agent.py` to manage AI-powered coding workflows.
+    -   Enabled plan generation from high-level objectives using Ollama LLM.
+    -   Implemented a robust user confirmation mechanism for sensitive actions.
+    -   **Enhanced File Operations:** Modified LLM prompt to encourage use of `create_file` and `write_to_file` for safer file manipulation.
+    -   **Autonomous Error Diagnosis:** Implemented logic to capture `stderr` from command execution, prompt LLM for diagnosis, and suggest fixes.
+    -   **Completed Assistant Mode:** `execute_assistant_command` now fully executes and streams command output, including error diagnosis.
+2.  **FastAPI Integration:**
+    -   Added `/api/ws/vibe` WebSocket endpoint to `python_back_end/main.py` for real-time communication with the `VibeAgent`.
+    -   Integrated `VibeAgent` instance into the main FastAPI application.
+
 ## Code Improvements
 
 1. **CUDA Error Handling**:
