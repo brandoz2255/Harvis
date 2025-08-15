@@ -1,0 +1,27 @@
+# OWASP ZAP DAST Scanner Requirements
+
+# ZAP API client
+python-owasp-zap-v2.4>=0.0.21
+
+# Rich TUI framework
+rich>=13.0.0
+
+# HTTP requests
+requests>=2.28.0
+
+# YAML configuration support
+PyYAML>=6.0
+
+# Additional utility libraries
+pathlib2>=2.3.0
+dataclasses>=0.6
+typing-extensions>=4.0.0
+
+# Optional: For advanced reporting
+jinja2>=3.0.0
+matplotlib>=3.5.0
+plotly>=5.0.0
+
+# Optional: For PDF reports
+reportlab>=3.6.0
+weasyprint>=57.0

@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Assistant</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #f4f4f9;
+            color: #333;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .button {
+            padding: 10px 20px;
+            font-size: 16px;
+            cursor: pointer;
+            border: none;
+            border-radius: 5px;
+            margin: 5px;
+            transition: background-color 0.2s;
+        }
+        .button:hover:not(:disabled) {
+            opacity: 0.9;
+        }
+        .button:disabled {
+            background-color: #cccccc;
+            color: #666;
+            cursor: not-allowed;
+        }
+        .start-sharing-btn { background-color: #4CAF50; color: white; }
+        .stop-sharing-btn { background-color: #f44336; color: white; }
+        .commentary-toggle { background-color: #2196F3; color: white; }
+        .send-btn { background-color: #008CBA; color: white; }
+        .record-btn { background-color: #553c9a; color: white; }
+        .record-btn.recording {
+            background-color: #c53030; /* Red when recording */
+        }
+
+        #commentary {
+            margin: 20px 0;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            background-color: #f9f9f9;
+            display: none;
+        }
+        .controls {
+            margin: 20px 0;
+            padding: 15px;
+            background-color: #fff;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            text-align: center;
+        }
+        #videoElement {
+            width: 100%;
+            margin: 20px 0;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            display: none;
+            background-color: #000;
+        }
+        .chat-container {
+            margin: 20px 0;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            background-color: #ffffff;
+        }
+        .chat-messages {
+            height: 350px;
+            overflow-y: auto;
+            margin-bottom: 15px;
+            padding: 10px;
+            border: 1px solid #eee;
+            border-radius: 4px;
+            background-color: #fcfcfc;
+        }
+        .message {
+            max-width: 75%;
+            margin: 8px 0;
+            padding: 10px 15px;
+            border-radius: 15px;
+            line-height: 1.4;
+        }
+        .user-message {
+            background-color: #007bff;
+            color: white;
+            margin-left: auto; /* Aligns to the right */
+            border-bottom-right-radius: 3px;
+        }
+        .assistant-message {
+            background-color: #e9ecef;
+            color: #333;
+            margin-right: auto; /* Aligns to the left */
+            border-bottom-left-radius: 3px;
+        }
+        .chat-input {
+            display: flex;
+            gap: 10px;
+        }
+        .chat-input input {
+            flex: 1;
+            padding: 10px;
+            font-size: 16px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>AI Assistant</h1>
+
+        <div class="controls">
+            <button id="startButton" class="button start-sharing-btn">Start Sharing</button>
+            <button id="stopButton" class="button stop-sharing-btn" disabled>Stop Sharing</button>
+            <button id="commentaryButton" class="button commentary-toggle" disabled>Toggle Commentary</button>
+        </div>
+        <video id="videoElement" autoplay></video>
+        <div id="commentary"></div>
+
+        <div class="chat-container">
+            <div class="chat-messages" id="chatMessages"></div>
+            <div class="chat-input">
+                <input type="text" id="chatInput" placeholder="Type or record a message...">
+                <button id="recordButton" class="button record-btn">🎤</button>
+                <button id="sendButton" class="button send-btn">Send</button>
+            </div>
+        </div>
+    </div>
+    <script>
+    document.addEventListener("DOMContentLoaded", () => {
+        // Element selection
+        const videoElement = document.getElementById("videoElement");
+        const startButton = document.getElementById("startButton");
+        const stopButton = document.getElementById("stopButton");
+        const commentaryButton = document.getElementById("commentaryButton");
+        const commentaryDiv = document.getElementById("commentary");
+        const chatMessages = document.getElementById("chatMessages");
+        const chatInput = document.getElementById("chatInput");
+        const sendButton = document.getElementById("sendButton");
+        const recordButton = document.getElementById("recordButton"); // This will now be found
+
+        // --- State variables ---
+        let mediaStream = null;
+        let commentaryEnabled = false;
+        let chatHistory = [];
+        let mediaRecorder;
+        let audioChunks = [];
+
+        // --- Screen analysis ---
+        async function analyzeScreenContent() {
+            if (!mediaStream || !commentaryEnabled) return;
+
+            const maxRetries = 3;
+            for (let retry = 0; retry < maxRetries; retry++) {
+                try {
+                    const canvas = document.createElement("canvas");
+                    canvas.width = videoElement.videoWidth;
+                    canvas.height = videoElement.videoHeight;
+                    canvas.getContext("2d").drawImage(videoElement, 0, 0);
+                    const imageData = canvas.toDataURL("image/jpeg", 0.8);
+
+                    const res = await fetch("/api/analyze-screen", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json", Accept: "application/json" },
+                        body: JSON.stringify({ image: imageData }),
+                    });
+
+                    if (res.ok) {
+                        const data = await res.json();
+                        if (data.commentary) {
+                            commentaryDiv.textContent = data.commentary;
+                            commentaryDiv.style.display = "block";
+                        }
+                        break;
+                    } else if (retry === maxRetries - 1) {
+                        commentaryDiv.textContent = "Sorry, I'm having trouble analyzing the screen.";
+                        commentaryDiv.style.display = "block";
+                    }
+                } catch (err) {
+                    if (retry === maxRetries - 1) {
+                        commentaryDiv.textContent = "Sorry, I'm having trouble connecting to the server.";
+                        commentaryDiv.style.display = "block";
+                    }
+                }
+                await new Promise((r) => setTimeout(r, 1000 * (retry + 1)));
+            }
+        }
+
+        function requestCommentary() {
+            if (!mediaStream) {
+                commentaryDiv.textContent = "No screen is currently being shared.";
+                commentaryDiv.style.display = "block";
+                return;
+            }
+            analyzeScreenContent();
+        }
+
+        // --- Chat helpers ---
+        function addMessage(msg, isUser = false) {
+            const div = document.createElement("div");
+            div.className = `message ${isUser ? "user-message" : "assistant-message"}`;
+            div.textContent = msg;
+            chatMessages.appendChild(div);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+
+        async function sendMessage() {
+            const message = chatInput.value.trim();
+            if (!message) return;
+
+            addMessage(message, true);
+            const newUserMessage = { role: "user", content: message };
+            chatHistory.push(newUserMessage);
+            chatInput.value = "";
+
+            try {
+                const res = await fetch("/api/chat", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ message, history: chatHistory }),
+                });
+
+                if (res.ok) {
+                    const data = await res.json();
+                    chatHistory = data.history;
+                    const lastMsg = chatHistory[chatHistory.length - 1];
+                    if (lastMsg?.role === "assistant") {
+                        addMessage(lastMsg.content, false);
+                    }
+                    if (data.audio_path) {
+                        const audio = new Audio(`/api/audio/${data.audio_path}`);
+                        audio.play();
+                    }
+                } else {
+                    addMessage("Error: Could not get a response.", false);
+                    chatHistory.pop(); // Remove the message we added if the call fails
+                }
+            } catch (err) {
+                addMessage("Connection error. Is the server running?", false);
+                chatHistory.pop(); // Remove the message we added if the call fails
+            }
+        }
+
+        // --- Voice Input Logic ---
+        async function sendAudio(audioBlob) {
+            const formData = new FormData();
+            formData.append("file", audioBlob, "recording.wav");
+            formData.append("history_str", JSON.stringify(chatHistory));
+            addMessage("...Processing voice...", true);
+
+            try {
+                const res = await fetch("/api/transcribe", {
+                    method: "POST",
+                    body: formData,
+                });
+                
+                chatMessages.removeChild(chatMessages.lastChild); // Remove the "...Processing..." message
+
+                if (res.ok) {
+                    const data = await res.json();
+                    chatHistory = data.history;
+
+                    const userMessage = chatHistory[chatHistory.length - 2];
+                    const assistantMessage = chatHistory[chatHistory.length - 1];
+
+                    if(userMessage && userMessage.role === 'user') {
+                        addMessage(userMessage.content, true);
+                    }
+                    if(assistantMessage && assistantMessage.role === 'assistant') {
+                        addMessage(assistantMessage.content, false);
+                    }
+
+                    if (data.audio_path) {
+                        const audio = new Audio(`/api/audio/${data.audio_path}`);
+                        audio.play();
+                    }
+                } else {
+                    const error = await res.json();
+                    addMessage(`Error: ${error.detail || 'Failed to process audio.'}`, false);
+                }
+            } catch (err) {
+                addMessage("Connection error during transcription.", false);
+            }
+        }
+
+        // --- Event Listeners ---
+
+        // This check prevents the script from crashing if the button isn't found
+        if (recordButton) {
+            recordButton.addEventListener("click", () => {
+                if (mediaRecorder && mediaRecorder.state === "recording") {
+                    mediaRecorder.stop();
+                    recordButton.textContent = "🎤";
+                    recordButton.classList.remove("recording");
+                } else {
+                    navigator.mediaDevices.getUserMedia({ audio: true })
+                        .then(stream => {
+                            mediaRecorder = new MediaRecorder(stream);
+                            mediaRecorder.start();
+                            audioChunks = [];
+                            recordButton.textContent = "🛑";
+                            recordButton.classList.add("recording");
+
+                            mediaRecorder.addEventListener("dataavailable", event => {
+                                audioChunks.push(event.data);
+                            });
+
+                            mediaRecorder.addEventListener("stop", () => {
+                                const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+                                sendAudio(audioBlob);
+                                stream.getTracks().forEach(track => track.stop());
+                            });
+                        })
+                        .catch(err => {
+                            console.error("Error accessing microphone:", err);
+                            alert("Could not access the microphone. Please check permissions.");
+                        });
+                }
+            });
+        }
+
+        if (startButton) {
+            startButton.addEventListener("click", async () => {
+                try {
+                    mediaStream = await navigator.mediaDevices.getDisplayMedia({
+                        video: { cursor: "always" },
+                        audio: false,
+                    });
+                    videoElement.srcObject = mediaStream;
+                    videoElement.style.display = "block";
+                    startButton.disabled = true;
+                    stopButton.disabled = false;
+                    commentaryButton.disabled = false;
+                    mediaStream.getVideoTracks()[0].addEventListener("ended", stopSharing);
+                } catch (err) {
+                    alert("Error accessing screen: " + err.message);
+                }
+            });
+        }
+
+        function stopSharing() {
+            if (!mediaStream) return;
+            mediaStream.getTracks().forEach((t) => t.stop());
+            videoElement.srcObject = null;
+            videoElement.style.display = "none";
+            startButton.disabled = false;
+            stopButton.disabled = true;
+            commentaryButton.disabled = true;
+            commentaryDiv.style.display = "none";
+            mediaStream = null;
+        }
+
+        if (stopButton) stopButton.addEventListener("click", stopSharing);
+        if (commentaryButton) commentaryButton.addEventListener("click", requestCommentary);
+        if (sendButton) sendButton.addEventListener("click", sendMessage);
+        if (chatInput) chatInput.addEventListener("keypress", (e) => {
+            if (e.key === "Enter") sendMessage();
+        });
+
+        document.addEventListener("keydown", (e) => {
+            if ((e.ctrlKey || e.metaKey) && e.key === "c" && mediaStream) {
+                e.preventDefault();
+                requestCommentary();
+            }
+        });
+    });
+    </script>
+</body>
+</html>
