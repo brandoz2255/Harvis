@@ -8,6 +8,7 @@ import soundfile as sf
 import re
 from transformers import pipeline
 from chatterbox.tts import ChatterboxTTS, punc_norm
+from dotenv import load_dotenv
 # Only import what's needed for the chat functionality
 
 # NOTE: This application requires the 'ffmpeg' command-line tool for audio processing.
@@ -67,7 +68,7 @@ stt_pipeline = None
 # ─── Ollama Status & Model Fetching ─────────────────────────────────────────────
 def check_ollama_status():
     try:
-        r = requests.get(f"{OLLAMA_URL}/api/tags")
+        r = requests.get(f"{OLLAMA_URL}/api/tags", timeout=30)
         return r.ok
     except requests.exceptions.RequestException:
         return False
@@ -77,7 +78,7 @@ def fetch_ollama_models():
         logger.error("Ollama server is not running or accessible")
         return [], "⚠️ Ollama server is not running. Please start Ollama first."
     try:
-        r = requests.get(f"{OLLAMA_URL}/api/tags")
+        r = requests.get(f"{OLLAMA_URL}/api/tags", timeout=30)
         if not r.ok:
             msg = f"Error fetching models: {r.status_code} - {r.text}"
             logger.error(msg)
@@ -355,7 +356,8 @@ Current user message: {message}"""
                 "prompt": message,
                 "system": enhanced_prompt,
                 "stream": False
-            }
+            },
+            timeout=90
         )
         
         if response.ok:
@@ -485,4 +487,6 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
 if __name__ == "__main__":
     if os.environ.get("CUDA_LAUNCH_BLOCKING") != "1":
         logger.info("Run with CUDA_LAUNCH_BLOCKING=1 for detailed CUDA errors.")
+    load_dotenv()
     demo.queue().launch(debug=True)
+
