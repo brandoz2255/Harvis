@@ -1,30 +1,71 @@
-# Use Python 3.11 as base image
-FROM python:3.11-slim
+############################
+# 🐳 Base with CUDA libs
+############################
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
 
-# Set working directory
-WORKDIR /app
-
-# Install system dependencies
+############################
+# 🐧 OS packages
+############################
 RUN apt-get update && apt-get install -y \
-    build-essential \
-    libgl1 \
-    && rm -rf /var/lib/apt/lists/*
+  build-essential curl libgl1 ffmpeg tesseract-ocr tesseract-ocr-eng \
+  python3 python3-pip \
+  && rm -rf /var/lib/apt/lists/*
 
-# Install core dependencies first
-RUN pip install --no-cache-dir \
-    chatterbox-tts \
-    selenium-stealth \
-    webdriver-manager
-
-# Copy requirements first to leverage Docker cache
+############################
+# 🐍 Python deps
+############################
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the application
+# Multi-stage pip installation with retry mechanism and dependency resolution
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+
+# Install PyTorch first (specific CUDA version) to avoid conflicts
+RUN pip install --no-cache-dir \
+  torch==2.6.0+cu124 \
+  torchvision==0.21.0+cu124 \
+  torchaudio==2.6.0 \
+  --index-url https://download.pytorch.org/whl/cu124
+
+# Create requirements without torch to avoid conflicts
+RUN grep -v "^torch" requirements.txt > requirements_no_torch.txt
+
+# Copy the robust installation script
+COPY install_deps.py .
+
+# Install remaining requirements using robust Python script with fallback
+RUN python3 install_deps.py || \
+  (echo "Python script failed, falling back to traditional method..." && \
+  pip install --no-cache-dir -r requirements_no_torch.txt && \
+  pip install --no-cache-dir -r requirements_no_torch.txt)  
+
+# Add this section after your OS packages installation
+############################
+# 👤 Create non-root user
+############################
+RUN useradd -m -u 1001 -s /bin/bash appuser
+WORKDIR /app
+USER appuser
+
+############################
+# 📦 Copy app code
+############################
+WORKDIR /app
 COPY . .
 
-# Expose the port the app runs on
-EXPOSE 8000
+############################
+# 🚀 Pre-warm models into Hugging Face cache (BuildKit required!)
+############################
+RUN --mount=type=cache,id=model-cache,target=/root/.cache \
+  set -eux; \
+  python3 -c 'import whisper'; \
+  python3 -c 'from chatterbox.tts import ChatterboxTTS; ChatterboxTTS.from_pretrained(device="cpu")'
 
-# Command to run the application
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"] 
+############################
+# 🌐 Expose + launch
+############################
+EXPOSE 8000
+ENV PYTHONPATH=/app
+ENV TRANSFORMERS_CACHE=/root/.cache/huggingface
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+

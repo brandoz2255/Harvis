@@ -257,3 +257,4 @@ wrapt==1.17.2
 wsproto==1.2.0
 xxhash==3.5.0
 yarl==1.20.1
+google-generativeai

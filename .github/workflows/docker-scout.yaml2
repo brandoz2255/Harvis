@@ -1,0 +1,29 @@
+# .github/workflows/docker-scout.yml
+name: 🛡 Docker Scout CVE Scan
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  scout:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pull Images
+        run: |
+          docker pull dulc3/jarvis-backend:latest
+          docker pull dulc3/jarvis-frontend:latest
+
+      - name: Run Docker Scout
+        uses: docker/scout-action@v1
+        with:
+          command: cves
+          image: dulc3/jarvis-backend:latest
+          only-severities: critical,high
+
+      - name: Run Docker Scout on Frontend
+        uses: docker/scout-action@v1
+        with:
+          command: cves
+          image: dulc3/jarvis-frontend:latest
+          only-severities: critical,high

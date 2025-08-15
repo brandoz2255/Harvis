@@ -1,0 +1,29 @@
+name: Security Scan 🛡️
+
+on:
+  schedule:
+    - cron: '0 6 * * *'   # Daily at 6 AM UTC
+  workflow_dispatch:
+
+jobs:
+  scan-backend:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: dulc3/jarvis-backend:latest
+          format: table
+          exit-code: 1
+          ignore-unfixed: true
+
+  scan-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: dulc3/jarvis-frontend:latest
+          format: table
+          exit-code: 1
+          ignore-unfixed: true

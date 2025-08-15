@@ -62,6 +62,8 @@ def transcribe_audio(audio_path, stt_pipeline):
 - Customizable voice parameters
 - Streaming capabilities
 
+For detailed information about the Chatterbox TTS implementation and its integration with the main module, see [Main and Chatterbox TTS Integration](main-chatterbox-integration.md).
+
 #### Implementation
 ```python
 from chatterbox.tts import ChatterboxTTS, punc_norm
@@ -160,7 +162,40 @@ def manage_audio_memory():
    - Process prioritization
    - Resource cleanup
 
-## Error Handling
+## Microphone Recording Implementation
+
+The microphone recording feature was implemented in `front_end/script.js`. Here's a breakdown of how it works:
+
+1. **Button Creation**: We add a microphone button to the chat container that users can click to start/stop recording.
+2. **Recording State Management**:
+   - We use an `isRecording` flag to track whether we're currently recording or not.
+   - When in recording mode, clicking the button will stop the recording and process the audio.
+3. **MediaRecorder API**:
+   - We use the MediaRecorder API to capture audio data from the user's microphone.
+   - The recorded chunks are stored in an array until the recording stops.
+4. **Audio Processing**:
+   - When recording stops, we create a Blob with the collected audio chunks and send it to our backend via a POST request.
+5. **Backend Response Handling**:
+   - After sending the audio, we handle the response by updating the chat history and playing any returned audio.
+
+## Challenges & Solutions
+
+1. **Stopping Recording Issue**: Initially, users couldn't stop recording once started. This was resolved by:
+   - Moving the `mediaRecorder` declaration outside the event handler to maintain its reference across clicks.
+   - Using a flag (`isRecording`) to track the recording state and toggle between start/stop actions.
+
+2. **Backend Communication**: Ensuring proper communication with the backend for audio processing involved:
+   - Creating a Blob from the recorded data with the correct MIME type
+   - Setting up FormData correctly for the POST request
+
+## CSS Styling
+
+The microphone button is styled to be easily identifiable:
+- Background color: Orange (#ff9800)
+- Text color: White (#fff)
+- Hover effect changes background to a darker orange (#e68900)
+
+This styling is defined in `front_end/style.css` under the `.mic-button` class.
 
 ### Common Issues
 1. **Audio Input**

@@ -1,0 +1,63 @@
+version: '3.8'
+
+services:
+  embedding-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: n8n-embedding-service
+    networks:
+      - ollama-n8n-network
+    volumes:
+      # Mount the local workflow repositories
+      - /home/guruai/compose/rag-info:/data/workflows:ro
+      # Optional: Mount logs directory
+      - ./logs:/app/logs
+    environment:
+      # Database connection (Docker network)
+      - VECTOR_DATABASE_URL=postgresql://pguser:pgpassword@pgsql:5432/database
+      - VECTOR_COLLECTION_NAME=n8n_workflows
+      
+      # Workflow paths (mounted volumes)
+      - N8N_WORKFLOWS_PATH=/data/workflows/n8n-workflows/workflows
+      - TEST_WORKFLOWS_PATH=/data/workflows/test-workflows
+      
+      # Embedding configuration
+      - EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
+      - CHUNK_SIZE=1000
+      - CHUNK_OVERLAP=200
+      
+      # Processing limits
+      - MAX_WORKFLOWS=
+      
+      # Logging
+      - PYTHONUNBUFFERED=1
+    
+    depends_on:
+      - pgsql
+    
+    # Keep container running for interactive use
+    tty: true
+    stdin_open: true
+
+  # Reference to existing services (they should already exist in main docker-compose.yaml)
+  pgsql:
+    image: pgvector/pgvector:pg16
+    container_name: pgsql
+    environment:
+      - POSTGRES_USER=pguser
+      - POSTGRES_PASSWORD=pgpassword
+      - POSTGRES_DB=database
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - ollama-n8n-network
+    ports:
+      - "5432:5432"
+
+networks:
+  ollama-n8n-network:
+    external: true
+
+volumes:
+  postgres_data:
