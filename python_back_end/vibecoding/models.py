@@ -41,7 +41,9 @@ async def get_available_models(
         
         try:
             # Query Ollama for available models
-            response = requests.get(f"{ollama_url}/api/tags", timeout=5)
+            api_key = os.getenv("OLLAMA_API_KEY", "key")
+            headers = {"Authorization": f"Bearer {api_key}"} if api_key != "key" else {}
+            response = requests.get(f"{ollama_url}/api/tags", headers=headers, timeout=5)
             
             if response.status_code == 200:
                 ollama_status = "online"
@@ -185,7 +187,9 @@ async def get_models_status(
         ollama_url = os.getenv("OLLAMA_URL", "http://ollama:11434")
         
         try:
-            response = requests.get(f"{ollama_url}/api/version", timeout=5)
+            api_key = os.getenv("OLLAMA_API_KEY", "key")
+            headers = {"Authorization": f"Bearer {api_key}"} if api_key != "key" else {}
+            response = requests.get(f"{ollama_url}/api/version", headers=headers, timeout=5)
             if response.status_code == 200:
                 version_info = response.json()
                 return {
@@ -228,6 +232,8 @@ async def load_model(
         ollama_url = os.getenv("OLLAMA_URL", "http://ollama:11434")
         
         # Send generate request with empty prompt to load model
+        api_key = os.getenv("OLLAMA_API_KEY", "key")
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key != "key" else {}
         response = requests.post(
             f"{ollama_url}/api/generate",
             json={
@@ -235,6 +241,7 @@ async def load_model(
                 "prompt": "",
                 "stream": False
             },
+            headers=headers,
             timeout=30
         )
         

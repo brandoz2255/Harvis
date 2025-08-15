@@ -1,10 +1,14 @@
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, WebSocket, Depends, Form
+from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.websockets import WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn, os, sys, tempfile, uuid, base64, io, logging, re, requests, random
+
+# Import optimized auth module
+from auth_optimized import get_current_user_optimized, auth_optimizer, get_auth_stats
 
 # Load environment variables from .env file
 try:
@@ -21,7 +25,8 @@ from typing import List, Optional, Dict, Any
 from vison_models.llm_connector import query_qwen, query_llm, load_qwen_model, unload_qwen_model
 
 # Import vibecoding routers
-from vibecoding import sessions_router, models_router, execution_router, files_router
+from vibecoding import sessions_router, models_router, execution_router, files_router, commands_router, containers_router
+from vibecoding.core import initialize_vibe_agent
 
 from pydantic import BaseModel
 import torch, soundfile as sf
@@ -32,6 +37,9 @@ SECRET_KEY = os.getenv("JWT_SECRET", "key")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
+# Temporary logging to verify JWT secret is loaded
+print(f"Backend JWT_SECRET loaded: {SECRET_KEY[:10]}... Length: {len(SECRET_KEY)}")
+
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer(auto_error=False)
 
@@ -41,6 +49,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://pguser:pgpassword@pgsql-d
 class AuthRequest(BaseModel):
     email: str
     password: str
+
 
 class SignupRequest(BaseModel):
     username: str
@@ -74,8 +83,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-async def get_db_connection():
-    return await asyncpg.connect(DATABASE_URL)
+# Removed get_db_connection() - using connection pool instead
 
 async def get_current_user(request: Request, credentials: HTTPAuthorizationCredentials | None = Depends(security)):
     logger.info(f"get_current_user called with credentials: {credentials}")
@@ -105,16 +113,29 @@ async def get_current_user(request: Request, credentials: HTTPAuthorizationCrede
         logger.error(f"JWT decode error: {e}")
         raise credentials_exception
     
-    conn = await get_db_connection()
-    try:
-        user = await conn.fetchrow("SELECT id, username, email, avatar FROM users WHERE id = $1", user_id)
-        if user is None:
-            logger.error(f"User not found for ID: {user_id}")
-            raise credentials_exception
-        logger.info(f"User found: {dict(user)}")
-        return UserResponse(**dict(user))
-    finally:
-        await conn.close()
+    # Use connection pool instead of individual connections
+    pool = getattr(request.app.state, 'pg_pool', None)
+    if pool:
+        async with pool.acquire() as conn:
+            user = await conn.fetchrow("SELECT id, username, email, avatar FROM users WHERE id = $1", user_id)
+            if user is None:
+                logger.error(f"User not found for ID: {user_id}")
+                raise credentials_exception
+            logger.info(f"User found: {dict(user)}")
+            return UserResponse(**dict(user))
+    else:
+        # Fallback to direct connection if pool unavailable
+        logger.warning("Connection pool unavailable, using direct connection")
+        conn = await asyncpg.connect(DATABASE_URL, timeout=10)
+        try:
+            user = await conn.fetchrow("SELECT id, username, email, avatar FROM users WHERE id = $1", user_id)
+            if user is None:
+                logger.error(f"User not found for ID: {user_id}")
+                raise credentials_exception
+            logger.info(f"User found: {dict(user)}")
+            return UserResponse(**dict(user))
+        finally:
+            await conn.close()
 
 # ─── Model Management -----------------------------------------------------------
 from model_manager import (
@@ -132,9 +153,7 @@ from uuid import UUID
 import logging
 import time
 
-# Add the ollama_cli directory to the path
-sys.path.append(os.path.join(os.path.dirname(__file__), 'ollama_cli'))
-from vibe_agent import VibeAgent
+# Vibe agent is now handled in vibecoding.core module
 
 # ─── n8n Automation Setup ─────────────────────────────────────────────────────
 from n8n import N8nClient, WorkflowBuilder, N8nAutomationService, N8nStorage
@@ -155,13 +174,8 @@ except ImportError:
     logger.warning("⚠️ python-dotenv not installed, environment variables must be passed via Docker")
 
 # ─── Initialize vibe agent ─────────────────────────────────────────────────────
-# Note: Import VibeAgent after all model_manager imports to avoid circular imports
-try:
-    vibe_agent = VibeAgent(project_dir=os.getcwd())
-    logger.info("✅ VibeAgent initialized successfully")
-except Exception as e:
-    logger.error(f"❌ Failed to initialize VibeAgent: {e}")
-    vibe_agent = None
+# Vibe agent initialization moved to vibecoding.core module
+initialize_vibe_agent(project_dir=os.getcwd())
 
 # ─── Initialize n8n services ──────────────────────────────────────────────────
 n8n_client = None
@@ -211,17 +225,67 @@ HARVIS_VOICE_PATH = os.path.abspath(
     "harvis_voice.mp3"
 )  # Point to the file in project root
 
+# ─── Database Connection Pool -------------------------------------------------
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: create connection pool
+    try:
+        # Fix database hostname: use pgsql-db instead of pgsql
+        database_url = os.getenv("DATABASE_URL", "postgresql://pguser:pgpassword@pgsql-db:5432/database")
+        app.state.pg_pool = await asyncpg.create_pool(
+            dsn=database_url,
+            min_size=1, 
+            max_size=10,
+            command_timeout=30,  # Increased from 5 to 30 seconds
+        )
+        logger.info("✅ Database connection pool created")
+        
+        # Initialize session database
+        from vibecoding.db_session import init_session_db
+        await init_session_db(app.state.pg_pool)
+        
+        # Initialize chat history manager
+        global chat_history_manager
+        chat_history_manager = ChatHistoryManager(app.state.pg_pool)
+        logger.info("✅ ChatHistoryManager initialized in lifespan")
+        
+        # Initialize vibe files database table
+        try:
+            from vibecoding.files import ensure_vibe_files_table
+            await ensure_vibe_files_table()
+            logger.info("✅ Vibe files database table initialized")
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize vibe files table: {e}")
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to create database pool: {e}")
+        # Continue without pool - will fall back to direct connections
+        app.state.pg_pool = None
+    
+    yield
+    
+    # Shutdown: close connection pool
+    if hasattr(app.state, 'pg_pool') and app.state.pg_pool:
+        await app.state.pg_pool.close()
+        logger.info("🔒 Database connection pool closed")
+
 # ─── FastAPI init --------------------------------------------------------------
-app = FastAPI(title="Harvis AI API")
+app = FastAPI(title="Harvis AI API", lifespan=lifespan)
 
 # CORS Middleware must be added before routes
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        "http://localhost:9000",   # Main nginx proxy access point
+        "http://127.0.0.1:9000",   # Main nginx proxy access point
         "http://localhost:3000",
-        "http://localhost:3001",
+        "http://localhost:3001", 
         "http://127.0.0.1:3000",
         "http://127.0.0.1:3001",
+        "http://frontend:3000",    # Docker network
+        "http://nginx-proxy:80",   # Docker network nginx
+        "http://localhost:8000",   # Backend self
+        "http://127.0.0.1:8000",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -237,17 +301,43 @@ app.include_router(sessions_router)
 app.include_router(models_router)
 app.include_router(execution_router)
 app.include_router(files_router)
+app.include_router(commands_router)
+app.include_router(containers_router)
 
 # ─── Database Pool and Chat History Manager Init ─────────────────────────────────────────────────
 db_pool = None
 chat_history_manager = None
 
-@app.on_event("startup")
-async def startup_event():
+# @app.on_event("startup")  # Disabled - using lifespan instead
+async def startup_event_disabled():
     global db_pool, chat_history_manager, n8n_storage, n8n_automation_service, n8n_ai_agent
     try:
-        db_pool = await asyncpg.create_pool(DATABASE_URL)
+        logger.info("🚀 Starting startup event initialization...")
+        
+        # Use the connection pool created in lifespan
+        db_pool = app.state.pg_pool
+        if db_pool is None:
+            logger.error("❌ No database pool available - falling back to direct connection")
+            # Fix database hostname: use pgsql-db instead of pgsql
+            database_url = os.getenv("DATABASE_URL", "postgresql://pguser:pgpassword@pgsql-db:5432/database")
+            db_pool = await asyncpg.create_pool(database_url)
+        else:
+            logger.info("✅ Using database pool from lifespan")
+        
+        logger.info("🔄 Initializing ChatHistoryManager...")
         chat_history_manager = ChatHistoryManager(db_pool)
+        logger.info("✅ ChatHistoryManager initialized successfully")
+        
+        # Initialize vibe files database table
+        try:
+            from vibecoding.files import ensure_vibe_files_table
+            await ensure_vibe_files_table()
+            logger.info("✅ Vibe files database table initialized")
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize vibe files table: {e}")
+        
+        # Session database already initialized in lifespan
+        logger.info("📋 Using session database initialized in lifespan")
         
         # Initialize n8n services with database pool
         if n8n_client:
@@ -292,9 +382,105 @@ logger.info("Using device: %s", "cuda" if device == 0 else "cpu")
 
 
 # ─── Config --------------------------------------------------------------------
-OLLAMA_URL = "https://coyotegpt.ngrok.app/ollama"
+CLOUD_OLLAMA_URL = "https://coyotegpt.ngrok.app/ollama"
+LOCAL_OLLAMA_URL = "http://ollama:11434"
 API_KEY = os.getenv("OLLAMA_API_KEY", "key")
 DEFAULT_MODEL = "llama3.2:3b"
+
+def make_ollama_request(endpoint, payload, timeout=90):
+    """Make a POST request to Ollama with automatic fallback from cloud to local.
+    Returns the response object from the successful request."""
+    headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY != "key" else {}
+    
+    # Try cloud first
+    try:
+        logger.info("🌐 Trying cloud Ollama: %s", CLOUD_OLLAMA_URL)
+        response = requests.post(f"{CLOUD_OLLAMA_URL}{endpoint}", json=payload, headers=headers, timeout=timeout)
+        if response.status_code == 200:
+            logger.info("✅ Cloud Ollama request successful")
+            return response
+        else:
+            logger.warning("⚠️ Cloud Ollama returned status %s", response.status_code)
+    except Exception as e:
+        logger.warning("⚠️ Cloud Ollama request failed: %s", e)
+    
+    # Fallback to local
+    try:
+        logger.info("🏠 Falling back to local Ollama: %s", LOCAL_OLLAMA_URL)
+        response = requests.post(f"{LOCAL_OLLAMA_URL}{endpoint}", json=payload, timeout=timeout)
+        if response.status_code == 200:
+            logger.info("✅ Local Ollama request successful")
+            return response
+        else:
+            logger.error("❌ Local Ollama returned status %s", response.status_code)
+            response.raise_for_status()
+    except Exception as e:
+        logger.error("❌ Local Ollama request failed: %s", e)
+        raise
+    
+    return response
+
+def make_ollama_get_request(endpoint, timeout=10):
+    """Make a GET request to Ollama with automatic fallback from cloud to local.
+    Returns the response object from the successful request."""
+    headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY != "key" else {}
+    
+    # Try cloud first
+    try:
+        logger.info("🌐 Trying cloud Ollama GET: %s", CLOUD_OLLAMA_URL)
+        response = requests.get(f"{CLOUD_OLLAMA_URL}{endpoint}", headers=headers, timeout=timeout)
+        if response.status_code == 200:
+            logger.info("✅ Cloud Ollama GET request successful")
+            return response
+        else:
+            logger.warning("⚠️ Cloud Ollama GET returned status %s", response.status_code)
+    except Exception as e:
+        logger.warning("⚠️ Cloud Ollama GET request failed: %s", e)
+    
+    # Fallback to local
+    try:
+        logger.info("🏠 Falling back to local Ollama GET: %s", LOCAL_OLLAMA_URL)
+        response = requests.get(f"{LOCAL_OLLAMA_URL}{endpoint}", timeout=timeout)
+        if response.status_code == 200:
+            logger.info("✅ Local Ollama GET request successful")
+            return response
+        else:
+            logger.error("❌ Local Ollama GET returned status %s", response.status_code)
+            response.raise_for_status()
+    except Exception as e:
+        logger.error("❌ Local Ollama GET request failed: %s", e)
+        raise
+    
+    return response
+
+def get_ollama_url():
+    """Try cloud Ollama first, fallback to local if cloud fails.
+    Returns the working Ollama URL for initialization purposes."""
+    # Try cloud first
+    try:
+        headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY != "key" else {}
+        response = requests.get(f"{CLOUD_OLLAMA_URL}/api/tags", headers=headers, timeout=5)
+        if response.status_code == 200:
+            logger.info("✅ Using cloud Ollama URL: %s", CLOUD_OLLAMA_URL)
+            return CLOUD_OLLAMA_URL
+    except Exception as e:
+        logger.warning("⚠️ Cloud Ollama unavailable: %s", e)
+    
+    # Fallback to local
+    try:
+        response = requests.get(f"{LOCAL_OLLAMA_URL}/api/tags", timeout=5)
+        if response.status_code == 200:
+            logger.info("✅ Using local Ollama URL: %s", LOCAL_OLLAMA_URL)
+            return LOCAL_OLLAMA_URL
+    except Exception as e:
+        logger.error("❌ Local Ollama also unavailable: %s", e)
+    
+    # If both fail, default to cloud (let the actual request handle the error)
+    logger.warning("⚠️ Both Ollama instances unavailable, defaulting to cloud")
+    return CLOUD_OLLAMA_URL
+
+# Get the working Ollama URL for initialization
+OLLAMA_URL = get_ollama_url()
 
 # ─── Pydantic schemas ----------------------------------------------------------
 class ChatRequest(BaseModel):
@@ -328,9 +514,7 @@ class SynthesizeSpeechRequest(BaseModel):
     temperature: float = 0.8
     cfg_weight: float = 0.5
 
-class VibeCommandRequest(BaseModel):
-    command: str
-    mode: str = "assistant"
+# VibeCommandRequest moved to vibecoding.commands
 
 class AnalyzeAndRespondRequest(BaseModel):
     image: str  # base-64 image (data-URI or raw)
@@ -346,15 +530,7 @@ class ScreenAnalysisWithTTSRequest(BaseModel):
     temperature: float = 0.8
     cfg_weight: float = 0.5
 
-class VibeCodingRequest(BaseModel):
-    message: str
-    files: List[Dict[str, Any]] = []
-    terminalHistory: List[str] = []
-    model: str = DEFAULT_MODEL
-    audio_prompt: Optional[str] = None
-    exaggeration: float = 0.5
-    temperature: float = 0.8
-    cfg_weight: float = 0.5
+# VibeCodingRequest moved to vibecoding.commands
 
 class VoiceTranscribeRequest(BaseModel):
     model: str = DEFAULT_MODEL
@@ -428,12 +604,12 @@ async def root() -> FileResponse:
 @app.post("/api/chat-history/sessions", response_model=ChatSession, tags=["chat-history"])
 async def create_chat_session(
     request: CreateSessionRequest,
-    current_user: UserResponse = Depends(get_current_user)
+    current_user: Dict = Depends(get_current_user_optimized)
 ):
     """Create a new chat session"""
     try:
         session = await chat_history_manager.create_session(
-            user_id=current_user.id,
+            user_id=current_user['id'],
             title=request.title,
             model_used=request.model_used
         )
@@ -446,12 +622,12 @@ async def create_chat_session(
 async def get_user_chat_sessions(
     limit: int = 50,
     offset: int = 0,
-    current_user: UserResponse = Depends(get_current_user)
+    current_user: Dict = Depends(get_current_user_optimized)
 ):
     """Get all chat sessions for the current user"""
     try:
         sessions_response = await chat_history_manager.get_user_sessions(
-            user_id=current_user.id,
+            user_id=current_user['id'],
             limit=limit,
             offset=offset
         )
@@ -622,8 +798,21 @@ async def add_message_to_session(
 
 # ─── Authentication Endpoints ─────────────────────────────────────────────────────
 @app.post("/api/auth/signup", response_model=TokenResponse, tags=["auth"])
-async def signup(request: SignupRequest):
-    conn = await get_db_connection()
+async def signup(request: SignupRequest, app_request: Request):
+    # Use connection pool if available
+    pool = getattr(app_request.app.state, 'pg_pool', None)
+    
+    if pool:
+        async with pool.acquire() as conn:
+            return await _signup_with_connection(request, conn)
+    else:
+        conn = await asyncpg.connect(DATABASE_URL, timeout=10)
+        try:
+            return await _signup_with_connection(request, conn)
+        finally:
+            await conn.close()
+
+async def _signup_with_connection(request: SignupRequest, conn):
     try:
         # Check if user already exists
         existing_user = await conn.fetchrow(
@@ -653,12 +842,23 @@ async def signup(request: SignupRequest):
     except Exception as e:
         logger.error(f"Signup error: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
-    finally:
-        await conn.close()
 
 @app.post("/api/auth/login", tags=["auth"])
-async def login(request: AuthRequest):
-    conn = await get_db_connection()
+async def login(request: AuthRequest, app_request: Request):
+    # Use connection pool if available
+    pool = getattr(app_request.app.state, 'pg_pool', None)
+    
+    if pool:
+        async with pool.acquire() as conn:
+            return await _login_with_connection(request, conn)
+    else:
+        conn = await asyncpg.connect(DATABASE_URL, timeout=10)
+        try:
+            return await _login_with_connection(request, conn)
+        finally:
+            await conn.close()
+
+async def _login_with_connection(request: AuthRequest, conn):
     try:
         user = await conn.fetchrow(
             "SELECT id, password FROM users WHERE email = $1",
@@ -691,12 +891,16 @@ async def login(request: AuthRequest):
     except Exception as e:
         logger.error(f"Login error: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
-    finally:
-        await conn.close()
 
 @app.get("/api/auth/me", response_model=UserResponse, tags=["auth"])
-async def get_current_user_info(current_user: UserResponse = Depends(get_current_user)):
-    return current_user
+async def get_current_user_info(current_user: Dict = Depends(get_current_user_optimized)):
+    """Optimized user info endpoint with caching"""
+    return UserResponse(**current_user)
+
+@app.get("/api/auth/stats", tags=["auth"])
+async def get_authentication_stats():
+    """Get authentication performance statistics"""
+    return get_auth_stats()
 
 # Import new modules
 
@@ -704,13 +908,13 @@ async def get_current_user_info(current_user: UserResponse = Depends(get_current
 
 
 @app.post("/api/chat", tags=["chat"])
-async def chat(req: ChatRequest, request: Request, current_user: UserResponse = Depends(get_current_user)):
+async def chat(req: ChatRequest, request: Request, current_user: Dict = Depends(get_current_user_optimized)):
     """
     Main conversational endpoint with persistent chat history.
     Produces: JSON {history, audio_path, session_id}
     """
     try:
-        logger.info(f"Chat endpoint reached - User: {current_user.username}, Message: {req.message[:50]}...")
+        logger.info(f"Chat endpoint reached - User: {current_user['username']}, Message: {req.message[:50]}...")
         # ── 1. Handle chat session and history ──────────────────────────────────────────
         session_id = req.session_id
         
@@ -724,7 +928,7 @@ async def chat(req: ChatRequest, request: Request, current_user: UserResponse = 
                 # Get recent messages from database for context
                 recent_messages = await chat_history_manager.get_recent_messages(
                     session_id=session_uuid, 
-                    user_id=current_user.id, 
+                    user_id=current_user['id'], 
                     limit=10
                 )
             except (ValueError, Exception) as e:
@@ -795,10 +999,7 @@ async def chat(req: ChatRequest, request: Request, current_user: UserResponse = 
 
             logger.info("💬 CHAT: Using model '%s' for Ollama %s", req.model, OLLAMA_ENDPOINT)
 
-            headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY != "key" else {}
-            resp = requests.post(
-                f"{OLLAMA_URL}{OLLAMA_ENDPOINT}", json=payload, headers=headers, timeout=90
-            )
+            resp = make_ollama_request(OLLAMA_ENDPOINT, payload, timeout=90)
 
             if resp.status_code != 200:
                 logger.error("Ollama error %s: %s", resp.status_code, resp.text)
@@ -1639,31 +1840,9 @@ async def get_ollama_models():
             status_code=503, detail="Invalid response from Ollama server"
         )
 
-@app.post("/api/vibe/command")
-async def vibe_command(req: VibeCommandRequest):
-    vibe_agent.mode = req.mode
-    response_text, _ = vibe_agent.process_command(req.command)
-    return {"response": response_text}
+# Vibe command endpoint moved to vibecoding.commands
 
-@app.websocket("/api/ws/vibe")
-async def websocket_vibe_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    try:
-        while True:
-            data = await websocket.receive_json()
-            command = data.get("command")
-            mode = data.get("mode", "assistant")
-
-            if command:
-                vibe_agent.mode = mode
-                await vibe_agent.process_command(command, websocket)
-            else:
-                await websocket.send_json({"type": "error", "content": "No command received"})
-    except WebSocketDisconnect:
-        logger.info("WebSocket disconnected")
-    except Exception as e:
-        logger.error(f"WebSocket error: {e}")
-        await websocket.send_json({"type": "error", "content": f"WebSocket error: {e}"})
+# Vibe websocket endpoint moved to vibecoding.commands
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
@@ -2235,291 +2414,13 @@ async def get_vector_db_stats():
 
 # ─── Vibe Coding Endpoints ─────────────────────────────────────────────────────
 
-@app.post("/api/vibe-coding", tags=["vibe-coding"])
-async def vibe_coding(req: VibeCodingRequest):
-    """
-    Voice-enabled vibe coding with intelligent model management.
-    Unloads models → Executes vibe agent → Generates TTS response → Reloads models.
-    """
-    try:
-        # Phase 1: Unload models to free GPU memory for vibe agent processing
-        logger.info("🤖 Phase 1: Starting vibe coding - clearing GPU memory for vibe agent")
-        unload_all_models()
-        
-        # Phase 2: Execute vibe agent processing
-        logger.info("⚡ Phase 2: Executing vibe agent with Mistral")
-        
-        # Use the existing vibe agent for processing
-        vibe_response, steps = await process_vibe_command_with_context(req.message, req.files, req.terminalHistory, req.model)
-        
-        # Phase 4: Unload vibe processing, reload models for TTS
-        logger.info("🔊 Phase 3: Reloading models for TTS generation")
-        reload_models_if_needed()
-        
-        # Generate TTS response
-        audio_prompt_path = req.audio_prompt or HARVIS_VOICE_PATH
-        if not os.path.isfile(audio_prompt_path):
-            audio_prompt_path = None
+# Vibe coding endpoint moved to vibecoding.commands
 
-        # Create speech-friendly version of response
-        tts_text = vibe_response
-        if len(tts_text) > 200:
-            tts_text = tts_text[:200] + "... I'm ready to help you code this!"
+# Voice transcribe endpoint moved to vibecoding.commands
 
-        sr, wav = generate_speech_optimized(
-            text=tts_text,
-            audio_prompt=audio_prompt_path,
-            exaggeration=req.exaggeration,
-            temperature=req.temperature,
-            cfg_weight=req.cfg_weight,
-        )
+# Run command endpoint moved to vibecoding.commands
 
-        # Save audio file
-        filename = f"vibe_coding_{uuid.uuid4()}.wav"
-        filepath = os.path.join(tempfile.gettempdir(), filename)
-        sf.write(filepath, wav, sr)
-        
-        logger.info("✅ Vibe coding complete - all models restored")
-        return {
-            "response": vibe_response,
-            "steps": steps,
-            "audio_path": f"/api/audio/{filename}",
-            "model_used": req.model,
-            "processing_stages": {
-                "vibe_agent": "✅ Completed",
-                "tts_generation": "✅ Completed"
-            }
-        }
+# Save file endpoint moved to vibecoding.commands
 
-    except Exception as e:
-        logger.error("Vibe coding failed: %s", e)
-        # Ensure models are reloaded even on error
-        logger.info("🔄 Reloading models after vibe coding error")
-        reload_models_if_needed()
-        raise HTTPException(500, str(e)) from e
-
-@app.post("/api/voice-transcribe", tags=["vibe-coding"])
-async def voice_transcribe(file: UploadFile = File(...), model: str = DEFAULT_MODEL):
-    """
-    Transcribe voice input for vibe coding with model management.
-    """
-    try:
-        # Save uploaded file to temp
-        contents = await file.read()
-        tmp_path = os.path.join(tempfile.gettempdir(), f"vibe_{uuid.uuid4()}.wav")
-        with open(tmp_path, "wb") as f:
-            f.write(contents)
-
-        # Use VRAM-optimized transcription
-        result = transcribe_with_whisper_optimized(tmp_path)
-        transcription = result.get("text", "").strip()
-        
-        # Clean up temp file
-        os.remove(tmp_path)
-        
-        logger.info(f"🎤 Voice transcribed for vibe coding: {transcription}")
-        return {"transcription": transcription, "model_used": "whisper-base"}
-
-    except Exception as e:
-        logger.error("Voice transcription failed: %s", e)
-        raise HTTPException(500, str(e)) from e
-
-@app.post("/api/run-command", tags=["vibe-coding"])
-async def run_command(req: RunCommandRequest):
-    """
-    Execute terminal commands for vibe coding.
-    """
-    try:
-        logger.info(f"🔧 Executing command: {req.command}")
-        
-        # Security: Basic command filtering
-        dangerous_commands = ["rm -rf", "sudo", "format", "del", "shutdown"]
-        if any(dangerous in req.command.lower() for dangerous in dangerous_commands):
-            return {"output": "❌ Command rejected for security reasons", "error": True}
-        
-        # Import and use existing command execution
-        from os_ops import execute_command
-        result = execute_command(req.command)
-        
-        return {"output": result, "error": False}
-        
-    except Exception as e:
-        logger.error(f"Command execution failed: {e}")
-        return {"output": f"❌ Error: {str(e)}", "error": True}
-
-@app.post("/api/save-file", tags=["vibe-coding"])
-async def save_file(req: SaveFileRequest):
-    """
-    Save file content for vibe coding.
-    """
-    try:
-        logger.info(f"💾 Saving file: {req.filename}")
-        
-        # Security: Basic path validation
-        if ".." in req.filename or req.filename.startswith("/"):
-            return {"success": False, "error": "Invalid filename"}
-        
-        # Save to project directory
-        filepath = os.path.join(os.getcwd(), req.filename)
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write(req.content)
-        
-        return {"success": True, "message": f"File {req.filename} saved successfully"}
-        
-    except Exception as e:
-        logger.error(f"File save failed: {e}")
-        return {"success": False, "error": str(e)}
-
-# ─── Vibe Agent Helper Functions ─────────────────────────────────────────────
-
-async def process_vibe_command_with_context(message: str, files: List[Dict], terminal_history: List[str], model: str) -> tuple[str, List[Dict]]:
-    """
-    Process vibe coding command with full context using the vibe agent logic
-    """
-    # Create context from files and terminal history
-    context = ""
-    if files:
-        context += "CURRENT FILES:\n"
-        for file in files:
-            context += f"=== {file.get('name', 'unknown')} ===\n{file.get('content', '')}\n\n"
-    
-    if terminal_history:
-        context += "TERMINAL HISTORY:\n"
-        context += "\n".join(terminal_history[-5:])  # Last 5 lines
-        context += "\n\n"
-    
-    # Generate vibe agent response using Ollama
-    system_prompt = """You are a Vibe Coding AI assistant. You help users build projects through natural conversation and voice commands.
-
-GUIDELINES:
-- Generate practical, executable coding steps
-- Be conversational and encouraging  
-- Focus on what the user wants to build
-- Provide clear, actionable steps
-- Keep responses under 100 words for voice output
-
-RESPONSE FORMAT:
-Provide your response as conversational text, followed by specific coding steps if needed."""
-
-    user_prompt = f"""
-User request: {message}
-
-Context:
-{context}
-
-Please provide a helpful, conversational response about how to implement this request. If specific code changes are needed, describe them clearly.
-"""
-
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "stream": False,
-    }
-
-    logger.info(f"→ Asking Ollama with model {model} for vibe coding")
-    headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY != "key" else {}
-    resp = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, headers=headers, timeout=120)
-    resp.raise_for_status()
-    
-    vibe_response = resp.json().get("message", {}).get("content", "").strip()
-    
-    # Generate coding steps based on the message
-    steps = generate_vibe_steps(message, vibe_response)
-    
-    return vibe_response, steps
-
-def generate_vibe_steps(message: str, response: str) -> List[Dict]:
-    """
-    Generate coding steps based on the user message and AI response
-    """
-    steps = []
-    message_lower = message.lower()
-    
-    # File creation
-    if "create" in message_lower and "file" in message_lower:
-        filename = "new_file.py"  # Default
-        # Try to extract filename from message
-        words = message.split()
-        for i, word in enumerate(words):
-            if word.lower() in ["file", "create"] and i + 1 < len(words):
-                potential_filename = words[i + 1]
-                if "." in potential_filename:
-                    filename = potential_filename
-                break
-        
-        steps.append({
-            "id": "1",
-            "description": f"Creating file: {filename}",
-            "action": "create_file",
-            "target": filename,
-            "content": f"# Generated by Vibe Coding AI\n# {message}\n\nprint('Hello from {filename}!')",
-            "completed": False
-        })
-    
-    # Web app/API creation
-    elif "api" in message_lower or "web" in message_lower or "flask" in message_lower or "fastapi" in message_lower:
-        steps.extend([
-            {
-                "id": "1",
-                "description": "Creating main API file",
-                "action": "create_file", 
-                "target": "app.py",
-                "content": "# FastAPI/Flask Web Application\nfrom fastapi import FastAPI\n\napp = FastAPI()\n\n@app.get('/')\ndef hello():\n    return {'message': 'Hello from Vibe Coding!'}",
-                "completed": False
-            },
-            {
-                "id": "2", 
-                "description": "Installing dependencies",
-                "action": "install_package",
-                "target": "fastapi uvicorn",
-                "command": "pip install fastapi uvicorn",
-                "completed": False
-            }
-        ])
-    
-    # Data analysis/ML
-    elif "data" in message_lower or "pandas" in message_lower or "analysis" in message_lower:
-        steps.append({
-            "id": "1",
-            "description": "Creating data analysis script",
-            "action": "create_file",
-            "target": "analysis.py",
-            "content": "# Data Analysis Script\nimport pandas as pd\nimport numpy as np\n\n# Load your data here\ndf = pd.DataFrame({'example': [1, 2, 3]})\nprint(df.head())",
-            "completed": False
-        })
-    
-    # Package installation
-    elif "install" in message_lower:
-        # Extract package names
-        packages = []
-        common_packages = ["numpy", "pandas", "requests", "flask", "fastapi", "django", "matplotlib", "seaborn"]
-        for pkg in common_packages:
-            if pkg in message_lower:
-                packages.append(pkg)
-        
-        if packages:
-            steps.append({
-                "id": "1",
-                "description": f"Installing packages: {', '.join(packages)}",
-                "action": "install_package",
-                "target": " ".join(packages),
-                "command": f"pip install {' '.join(packages)}",
-                "completed": False
-            })
-    
-    # Default: create a simple script
-    if not steps:
-        steps.append({
-            "id": "1", 
-            "description": "Creating script based on your request",
-            "action": "create_file",
-            "target": "vibe_script.py",
-            "content": f"# Script for: {message}\n# Generated by Vibe Coding AI\n\nprint('Starting your vibe coding project!')\n# Add your code here",
-            "completed": False
-        })
-    
-    return steps
+# ─── Vibe Agent Helper Functions moved to vibecoding.core ─────────────────────
 

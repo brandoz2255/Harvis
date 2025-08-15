@@ -1,8 +1,12 @@
--- Drop the existing users table if it exists, to ensure a clean slate
-DROP TABLE IF EXISTS users CASCADE;
+-- DANGER: This script previously contained DROP TABLE commands that destroy all user data!
+-- The DROP TABLE commands have been removed to prevent accidental data loss.
+-- For development reset, use the dev-setup scripts instead.
 
--- Create the users table with the correct schema
-CREATE TABLE users (
+-- WARNING: Only run this in a clean/new database environment
+-- This script will NOT recreate tables if they already exist (safe for production)
+
+-- Create the users table with the correct schema (safe - only if not exists)
+CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
     username VARCHAR(255) UNIQUE NOT NULL,
     email VARCHAR(255) UNIQUE NOT NULL,
@@ -29,7 +33,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- Create user_api_keys table for storing encrypted API keys per user
-CREATE TABLE user_api_keys (
+CREATE TABLE IF NOT EXISTS user_api_keys (
     id SERIAL PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     provider_name VARCHAR(50) NOT NULL, -- e.g., 'ollama', 'gemini', 'openai', 'anthropic'
@@ -61,7 +65,7 @@ CREATE TRIGGER update_user_api_keys_updated_at
     EXECUTE FUNCTION update_updated_at_column();
 
 -- Vibe Coding Sessions
-CREATE TABLE vibe_sessions (
+CREATE TABLE IF NOT EXISTS vibe_sessions (
     id SERIAL PRIMARY KEY,
     user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
     name VARCHAR(255) NOT NULL,
@@ -72,9 +76,10 @@ CREATE TABLE vibe_sessions (
 );
 
 -- File Tree Structure (nested folders/files)
-CREATE TABLE vibe_files (
+CREATE TABLE IF NOT EXISTS vibe_files (
     id SERIAL PRIMARY KEY,
     session_id INTEGER REFERENCES vibe_sessions(id) ON DELETE CASCADE,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
     parent_id INTEGER REFERENCES vibe_files(id),
     name VARCHAR(255) NOT NULL,
     type VARCHAR(10) CHECK (type IN ('file', 'folder')),
@@ -87,7 +92,7 @@ CREATE TABLE vibe_files (
 );
 
 -- Chat History for Vibe Coding
-CREATE TABLE vibe_chat (
+CREATE TABLE IF NOT EXISTS vibe_chat (
     id SERIAL PRIMARY KEY,
     session_id INTEGER REFERENCES vibe_sessions(id) ON DELETE CASCADE,
     role VARCHAR(20) CHECK (role IN ('user', 'assistant')),
@@ -98,7 +103,7 @@ CREATE TABLE vibe_chat (
 );
 
 -- Code Execution History
-CREATE TABLE vibe_executions (
+CREATE TABLE IF NOT EXISTS vibe_executions (
     id SERIAL PRIMARY KEY,
     session_id INTEGER REFERENCES vibe_sessions(id) ON DELETE CASCADE,
     command TEXT NOT NULL,
