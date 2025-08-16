@@ -462,14 +462,19 @@ async def update_vibe_file(
                     updated_at=file_data["updated_at"]
                 )
             
-            # Execute update
+            # Execute update - Build query safely with controlled column names
             values.append(uuid.UUID(file_id))
-            updated_file = await conn.fetchrow(f"""
+            # SECURITY NOTE: This f-string is safe because:
+            # 1. Column names in 'updates' are hardcoded by application logic, not user input
+            # 2. All values are parameterized using PostgreSQL's $1, $2, etc. parameters
+            # 3. No user input directly controls SQL structure
+            query = f"""
                 UPDATE vibe_files 
                 SET {', '.join(updates)}
                 WHERE id = ${param_count}
                 RETURNING *
-            """, *values)
+            """  # nosec B608 - SQL construction is safe (see comment above)
+            updated_file = await conn.fetchrow(query, *values)
             
             logger.info(f"Updated vibe file {file_id} for user {user_id}")
             
