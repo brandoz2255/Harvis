@@ -53,18 +53,15 @@ export default function ChatHistory({ onSessionSelect, currentSessionId }: ChatH
   const fetchSessionsRef = useRef(fetchSessions)
   fetchSessionsRef.current = fetchSessions
   
-  const debouncedFetchSessions = useCallback(
-    (() => {
-      let timeoutId: NodeJS.Timeout
-      return () => {
-        clearTimeout(timeoutId)
-        timeoutId = setTimeout(() => {
-          fetchSessionsRef.current()
-        }, 500) // 500ms debounce
-      }
-    })(),
-    []
-  )
+  const debouncedFetchSessions = (() => {
+    let timeoutId: NodeJS.Timeout
+    return () => {
+      clearTimeout(timeoutId)
+      timeoutId = setTimeout(() => {
+        fetchSessionsRef.current()
+      }, 500) // 500ms debounce
+    }
+  })()
   
   // Fetch sessions on mount only to prevent infinite loops
   useEffect(() => {

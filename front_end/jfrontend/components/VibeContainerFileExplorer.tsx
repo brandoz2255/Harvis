@@ -163,6 +163,17 @@ export default function VibeContainerFileExplorer({
     return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i]
   }
 
+  const updateDirectoryInTree = useCallback((tree: FileNode[], targetPath: string, newFiles: FileNode[]): FileNode[] => {
+    return tree.map(node => {
+      if (node.path === targetPath && node.type === 'directory') {
+        return { ...node, children: newFiles }
+      } else if (node.children) {
+        return { ...node, children: updateDirectoryInTree(node.children, targetPath, newFiles) }
+      }
+      return node
+    })
+  }, [])
+
   const loadFiles = useCallback(async (path: string = '/workspace') => {
     if (!sessionId) return
 
@@ -199,18 +210,7 @@ export default function VibeContainerFileExplorer({
     } finally {
       setIsLoading(false)
     }
-  }, [sessionId, expandedPaths])
-
-  const updateDirectoryInTree = (tree: FileNode[], targetPath: string, newFiles: FileNode[]): FileNode[] => {
-    return tree.map(node => {
-      if (node.path === targetPath && node.type === 'directory') {
-        return { ...node, children: newFiles }
-      } else if (node.children) {
-        return { ...node, children: updateDirectoryInTree(node.children, targetPath, newFiles) }
-      }
-      return node
-    })
-  }
+  }, [sessionId, expandedPaths, updateDirectoryInTree])
 
   useEffect(() => {
     if (sessionId) {
