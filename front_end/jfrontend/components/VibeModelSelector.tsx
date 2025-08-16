@@ -1,6 +1,6 @@
 "use client"
 
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Bot,
@@ -84,7 +84,7 @@ export default function VibeModelSelector({
   const [showDetails, setShowDetails] = useState(false)
 
   // Fetch available models
-  const fetchModels = async () => {
+  const fetchModels = useCallback(async () => {
     setIsLoading(true)
     setError(null)
     
@@ -149,7 +149,7 @@ export default function VibeModelSelector({
     } finally {
       setIsLoading(false)
     }
-  }
+  }, [selectedModel, onModelChange])
 
   // Auto-refresh models
   useEffect(() => {
@@ -159,7 +159,7 @@ export default function VibeModelSelector({
       const interval = setInterval(fetchModels, 30000) // Refresh every 30 seconds
       return () => clearInterval(interval)
     }
-  }, [autoRefresh])
+  }, [autoRefresh, fetchModels])
 
   const getStatusColor = (status: ModelInfo['status']) => {
     switch (status) {

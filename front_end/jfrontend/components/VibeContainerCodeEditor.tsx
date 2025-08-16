@@ -1,6 +1,6 @@
 "use client"
 
-import React, { useState, useEffect, useRef } from "react"
+import React, { useState, useEffect, useRef, useCallback } from "react"
 import { motion } from "framer-motion"
 import {
   Save,
@@ -67,7 +67,7 @@ export default function VibeContainerCodeEditor({
       setContent('')
       setIsModified(false)
     }
-  }, [selectedFile, sessionId])
+  }, [selectedFile, sessionId, loadFileContent])
 
   // Update Monaco editor options when settings change
   useEffect(() => {
@@ -80,7 +80,7 @@ export default function VibeContainerCodeEditor({
     }
   }, [fontSize, wordWrap])
 
-  const loadFileContent = async () => {
+  const loadFileContent = useCallback(async () => {
     if (!selectedFile || !sessionId || selectedFile.type !== 'file') return
 
     try {
@@ -116,7 +116,7 @@ export default function VibeContainerCodeEditor({
     } finally {
       setIsLoading(false)
     }
-  }
+  }, [selectedFile, sessionId])
 
   const saveFile = async () => {
     if (!selectedFile || !sessionId || !isModified) return
