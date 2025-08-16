@@ -92,14 +92,8 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    // Verify JWT token
-    const user = await verifyToken(request)
-    if (!user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-    }
-
     const body = await request.json()
-    const { session_id, action, file_path, content } = body
+    const { session_id, action, file_path, content, path } = body
 
     if (!session_id) {
       return NextResponse.json(
@@ -110,18 +104,40 @@ export async function POST(request: NextRequest) {
 
     let endpoint: string
     let requestBody: any = { session_id }
+    let needsAuth = true
 
     switch (action) {
+      case 'list':
+        endpoint = '/api/vibecoding/container/files/list'
+        requestBody.path = path || '/workspace'
+        needsAuth = false // File listing doesn't require auth in container endpoints
+        break
+      case 'tree':
+        endpoint = '/api/vibecoding/container/files/tree'
+        requestBody.file_path = path || '/workspace'
+        needsAuth = false
+        break
       case 'read':
         endpoint = '/api/vibecoding/container/files/read'
         requestBody.file_path = file_path
+        needsAuth = false
         break
       case 'write':
+        // Verify JWT token for write operations
+        const user = await verifyToken(request)
+        if (!user) {
+          return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+        }
         endpoint = '/api/vibecoding/container/files/write'
         requestBody.file_path = file_path
         requestBody.content = content
         break
       case 'execute':
+        // Verify JWT token for command execution
+        const userExec = await verifyToken(request)
+        if (!userExec) {
+          return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+        }
         endpoint = '/api/vibecoding/container/execute'
         requestBody.command = body.command
         break
@@ -159,4 +175,6 @@ export async function POST(request: NextRequest) {
       { status: 500 }
     )
   }
+  
 }
+
