@@ -162,7 +162,7 @@ export default function ResearchAssistantPage() {
               Enter a research query above to get started with AI-powered web search and analysis.
             </p>
             <div className="text-sm text-gray-500">
-              Try searching for topics like: "latest AI developments", "climate change research", "quantum computing breakthroughs"
+              Try searching for topics like: &quot;latest AI developments&quot;, &quot;climate change research&quot;, &quot;quantum computing breakthroughs&quot;
             </div>
           </Card>
         )}
