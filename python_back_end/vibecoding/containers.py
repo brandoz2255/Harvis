@@ -471,6 +471,89 @@ async def write_file(req: FileOperationRequest):
     success = await container_manager.write_file(req.session_id, req.file_path, req.content)
     return {"success": success, "file_path": req.file_path}
 
+@router.post("/api/vibecoding/container/files/tree")
+async def get_file_tree(req: ListFilesRequest):
+    """Get complete file tree structure for better performance."""
+    container = await container_manager.get_container(req.session_id)
+    if not container:
+        raise HTTPException(status_code=404, detail="Container not found")
+    
+    try:
+        # Get full directory tree in one command for better performance
+        result = container.exec_run(
+            f"find {req.path} -type f -o -type d 2>/dev/null | head -1000"
+        )
+        
+        if result.exit_code != 0:
+            return {"files": [], "path": req.path}
+        
+        paths = result.output.decode("utf-8").strip().split("\n")
+        paths = [p for p in paths if p and p != req.path]
+        
+        # Build tree structure
+        tree_dict = {}
+        for path in paths:
+            if path:
+                relative_path = path.replace(req.path, "").strip("/")
+                if relative_path:
+                    parts = relative_path.split("/")
+                    current = tree_dict
+                    
+                    for i, part in enumerate(parts):
+                        if part not in current:
+                            # Check if it's the final part (file/directory)
+                            is_final = i == len(parts) - 1
+                            if is_final:
+                                # Check if it's a directory
+                                stat_result = container.exec_run(f"test -d '{path}' && echo dir || echo file")
+                                is_dir = "dir" in stat_result.output.decode().strip()
+                                
+                                current[part] = {
+                                    "type": "directory" if is_dir else "file",
+                                    "path": path,
+                                    "name": part,
+                                    "children": {} if is_dir else None
+                                }
+                            else:
+                                # Intermediate directory
+                                current[part] = current.get(part, {
+                                    "type": "directory",
+                                    "path": "/".join(path.split("/")[:-len(parts)+i+1]),
+                                    "name": part,
+                                    "children": {}
+                                })
+                                current = current[part]["children"]
+                        else:
+                            if "children" in current[part]:
+                                current = current[part]["children"]
+        
+        def tree_to_list(tree_dict):
+            result = []
+            for name, node in tree_dict.items():
+                node_data = {
+                    "name": name,
+                    "type": node["type"],
+                    "path": node["path"],
+                }
+                if node["type"] == "directory" and node.get("children"):
+                    node_data["children"] = tree_to_list(node["children"])
+                else:
+                    node_data["children"] = []
+                result.append(node_data)
+            
+            # Sort: directories first, then files, both alphabetically
+            result.sort(key=lambda x: (x["type"] == "file", x["name"].lower()))
+            return result
+        
+        file_list = tree_to_list(tree_dict)
+        logger.info(f"Built file tree with {len(file_list)} root items for {req.session_id}")
+        
+        return {"files": file_list, "path": req.path}
+        
+    except Exception as e:
+        logger.error(f"File tree listing failed: {e}")
+        return {"files": [], "path": req.path}
+
 @router.delete("/api/vibecoding/container/{session_id}")
 async def stop_container(session_id: str):
     """Stop and remove development container."""
