@@ -8,6 +8,8 @@ import os
 import uuid
 import tempfile
 import soundfile as sf
+import shlex
+import subprocess
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
@@ -181,21 +183,33 @@ async def run_command(req: RunCommandRequest):
     try:
         logger.info(f"🔧 Executing command: {req.command}")
         
-        # Security: Basic command filtering
-        dangerous_commands = ["rm -rf", "sudo", "chmod 777", "mkfs", "dd if="]
-        if any(cmd in req.command.lower() for cmd in dangerous_commands):
+        # Security: Enhanced command filtering
+        dangerous_commands = ["rm -rf", "sudo", "chmod 777", "mkfs", "dd if=", "format", "fdisk", "sfdisk"]
+        dangerous_chars = [";", "&", "|", "`", "$", "$(", ")", ">", "<", ">>"]
+        
+        # Check for dangerous commands and characters
+        command_lower = req.command.lower()
+        if any(cmd in command_lower for cmd in dangerous_commands):
             return {"output": "❌ Command blocked for security reasons", "error": True}
         
-        # Execute command safely
-        import subprocess
-        result = subprocess.run(
-            req.command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            cwd=os.getcwd()
-        )
+        if any(char in req.command for char in dangerous_chars):
+            return {"output": "❌ Command contains potentially dangerous characters", "error": True}
+        
+        # Execute command safely without shell=True
+        try:
+            # Split command into arguments safely
+            cmd_args = shlex.split(req.command)
+            result = subprocess.run(
+                cmd_args,
+                shell=False,  # Safer: no shell interpretation
+                capture_output=True,
+                text=True,
+                timeout=30,
+                cwd=os.getcwd()
+            )
+        except ValueError as e:
+            # shlex.split failed - command has invalid syntax
+            return {"output": f"❌ Invalid command syntax: {str(e)}", "error": True}
         
         output = result.stdout + result.stderr
         return {"output": output, "error": result.returncode != 0}
