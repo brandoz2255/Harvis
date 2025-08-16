@@ -286,7 +286,7 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
         console.error('Failed to create session:', error)
       }
     }
-  }, [sessionId, selectedModel]) // Removed createSession from deps to prevent recreation
+  }, [sessionId, selectedModel, createSession])
 
   // Create new session when first message is sent and no session exists - stabilized
   useEffect(() => {
@@ -299,7 +299,7 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
       
       return () => clearTimeout(timeoutId)
     }
-  }, [messages.length, sessionId, currentSession, isUsingStoreMessages]) // Removed handleCreateSession from deps
+  }, [messages.length, sessionId, currentSession, isUsingStoreMessages, handleCreateSession])
 
   const handleSessionSelect = async (selectedSessionId: string) => {
     try {
