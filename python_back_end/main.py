@@ -83,9 +83,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-async def get_db_connection():
-    """Get database connection with timeout optimization"""
-    return await asyncpg.connect(DATABASE_URL, timeout=5)
+# Removed get_db_connection() - using connection pool instead
 
 async def get_current_user(request: Request, credentials: HTTPAuthorizationCredentials | None = Depends(security)):
     logger.info(f"get_current_user called with credentials: {credentials}")
@@ -115,16 +113,29 @@ async def get_current_user(request: Request, credentials: HTTPAuthorizationCrede
         logger.error(f"JWT decode error: {e}")
         raise credentials_exception
     
-    conn = await get_db_connection()
-    try:
-        user = await conn.fetchrow("SELECT id, username, email, avatar FROM users WHERE id = $1", user_id)
-        if user is None:
-            logger.error(f"User not found for ID: {user_id}")
-            raise credentials_exception
-        logger.info(f"User found: {dict(user)}")
-        return UserResponse(**dict(user))
-    finally:
-        await conn.close()
+    # Use connection pool instead of individual connections
+    pool = getattr(request.app.state, 'pg_pool', None)
+    if pool:
+        async with pool.acquire() as conn:
+            user = await conn.fetchrow("SELECT id, username, email, avatar FROM users WHERE id = $1", user_id)
+            if user is None:
+                logger.error(f"User not found for ID: {user_id}")
+                raise credentials_exception
+            logger.info(f"User found: {dict(user)}")
+            return UserResponse(**dict(user))
+    else:
+        # Fallback to direct connection if pool unavailable
+        logger.warning("Connection pool unavailable, using direct connection")
+        conn = await asyncpg.connect(DATABASE_URL, timeout=10)
+        try:
+            user = await conn.fetchrow("SELECT id, username, email, avatar FROM users WHERE id = $1", user_id)
+            if user is None:
+                logger.error(f"User not found for ID: {user_id}")
+                raise credentials_exception
+            logger.info(f"User found: {dict(user)}")
+            return UserResponse(**dict(user))
+        finally:
+            await conn.close()
 
 # ─── Model Management -----------------------------------------------------------
 from model_manager import (
@@ -265,12 +276,15 @@ app = FastAPI(title="Harvis AI API", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        "http://localhost:9000",   # Main nginx proxy access point
+        "http://127.0.0.1:9000",   # Main nginx proxy access point
         "http://localhost:3000",
         "http://localhost:3001", 
         "http://127.0.0.1:3000",
         "http://127.0.0.1:3001",
-        "http://frontend:3000",  # Docker network
-        "http://localhost:8000",  # Backend self
+        "http://frontend:3000",    # Docker network
+        "http://nginx-proxy:80",   # Docker network nginx
+        "http://localhost:8000",   # Backend self
         "http://127.0.0.1:8000",
     ],
     allow_credentials=True,
@@ -792,7 +806,7 @@ async def signup(request: SignupRequest, app_request: Request):
         async with pool.acquire() as conn:
             return await _signup_with_connection(request, conn)
     else:
-        conn = await get_db_connection()
+        conn = await asyncpg.connect(DATABASE_URL, timeout=10)
         try:
             return await _signup_with_connection(request, conn)
         finally:
@@ -838,7 +852,7 @@ async def login(request: AuthRequest, app_request: Request):
         async with pool.acquire() as conn:
             return await _login_with_connection(request, conn)
     else:
-        conn = await get_db_connection()
+        conn = await asyncpg.connect(DATABASE_URL, timeout=10)
         try:
             return await _login_with_connection(request, conn)
         finally:
