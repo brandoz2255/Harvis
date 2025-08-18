@@ -397,13 +397,36 @@ Generate the full JSON response following the exact structure above. The workflo
             logger.info(f"Analyzing prompt with {model}")
             logger.debug(f"Prompt length: {len(user_prompt)} characters")
             
-            response = make_ollama_request("/api/chat", payload, timeout=120)
-            response.raise_for_status()
-            
-            response_json = response.json()
-            logger.debug(f"Full Ollama response: {response_json}")
-            
-            ai_response = response_json.get("message", {}).get("content", "")
+            # Check if this is a Gemini model
+            if model.startswith("gemini"):
+                logger.info(f"🔮 Using Gemini API for model: {model}")
+                response = make_gemini_request(model, payload["messages"], timeout=120)
+                response.raise_for_status()
+                
+                response_json = response.json()
+                logger.debug(f"Full Gemini response: {response_json}")
+                
+                # Extract content from Gemini response format
+                candidates = response_json.get("candidates", [])
+                if not candidates:
+                    raise Exception("No candidates in Gemini response")
+                
+                content = candidates[0].get("content", {})
+                parts = content.get("parts", [])
+                if not parts:
+                    raise Exception("No parts in Gemini response content")
+                
+                ai_response = parts[0].get("text", "")
+                
+            else:
+                # Use Ollama for non-Gemini models
+                response = make_ollama_request("/api/chat", payload, timeout=120)
+                response.raise_for_status()
+                
+                response_json = response.json()
+                logger.debug(f"Full Ollama response: {response_json}")
+                
+                ai_response = response_json.get("message", {}).get("content", "")
             
             # Handle empty or whitespace-only responses
             if not ai_response or not ai_response.strip():
