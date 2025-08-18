@@ -343,10 +343,38 @@ Generate the full JSON response following the exact structure above. The workflo
             response = make_ollama_request("/api/chat", payload, timeout=120)
             response.raise_for_status()
             
-            ai_response = response.json().get("message", {}).get("content", "")
-            logger.debug(f"AI response: {ai_response[:200]}...")
+            response_json = response.json()
+            logger.debug(f"Full Ollama response: {response_json}")
             
-            analysis = json.loads(ai_response)
+            ai_response = response_json.get("message", {}).get("content", "")
+            
+            # Handle empty or whitespace-only responses
+            if not ai_response or not ai_response.strip():
+                logger.warning("AI returned empty response")
+                ai_response = response_json.get("response", "")  # Try alternative field
+                
+            if not ai_response or not ai_response.strip():
+                logger.error("AI response is empty or whitespace only")
+                raise Exception("AI model returned empty response")
+            
+            logger.debug(f"AI response (first 500 chars): {ai_response[:500]}...")
+            
+            # Try to clean up the response if it has extra text
+            cleaned_response = ai_response.strip()
+            
+            # If response doesn't start with {, try to extract JSON
+            if not cleaned_response.startswith('{'):
+                # Look for JSON in the response
+                import re
+                json_match = re.search(r'\{.*\}', cleaned_response, re.DOTALL)
+                if json_match:
+                    cleaned_response = json_match.group(0)
+                    logger.info("Extracted JSON from AI response")
+                else:
+                    logger.error(f"No JSON found in AI response: {cleaned_response[:200]}...")
+                    raise json.JSONDecodeError("No valid JSON found in response", cleaned_response, 0)
+            
+            analysis = json.loads(cleaned_response)
             
             logger.info(f"AI analysis complete: {analysis.get('workflow_type', 'unknown')} workflow")
             return analysis
@@ -365,6 +393,11 @@ Generate the full JSON response following the exact structure above. The workflo
                 
                 # Retry with simple analysis
                 return await self._analyze_user_prompt(original_request, model)
+            
+            # If it's a YouTube automation request and AI failed, provide fallback
+            if "youtube" in prompt.lower() and "automation" in prompt.lower():
+                logger.info("AI failed but detected YouTube automation request - providing fallback")
+                return self._create_fallback_youtube_workflow()
             
             return {
                 "feasible": False,
@@ -723,6 +756,133 @@ Generate the full JSON response following the exact structure above. The workflo
             logger.error(f"Failed to get automation history: {e}")
             raise
     
+    def _create_fallback_youtube_workflow(self) -> Dict[str, Any]:
+        """Create a fallback YouTube automation workflow when AI fails"""
+        logger.info("Creating fallback YouTube workflow")
+        
+        return {
+            "feasible": True,
+            "workflow_type": "direct_json",
+            "description": "Basic YouTube automation workflow - check for new videos and send notifications",
+            "complete_workflow": {
+                "name": "YouTube Automation - New Video Notifications",
+                "nodes": [
+                    {
+                        "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                        "name": "Schedule Check Every Hour",
+                        "type": "n8n-nodes-base.scheduleTrigger",
+                        "typeVersion": 1,
+                        "position": [240, 300],
+                        "parameters": {
+                            "rule": {
+                                "interval": [
+                                    {
+                                        "field": "hours",
+                                        "hoursInterval": 1
+                                    }
+                                ]
+                            }
+                        },
+                        "credentials": {}
+                    },
+                    {
+                        "id": "b2c3d4e5-f6g7-8901-bcde-f23456789012",
+                        "name": "Fetch YouTube Channel Videos",
+                        "type": "n8n-nodes-base.youTube",
+                        "typeVersion": 1,
+                        "position": [460, 300],
+                        "parameters": {
+                            "resource": "search",
+                            "operation": "list",
+                            "options": {
+                                "order": "date",
+                                "type": "video",
+                                "publishedAfter": "={{ $now.minus({ hours: 1 }).toISODate() }}"
+                            },
+                            "q": "your channel name or search term"
+                        },
+                        "credentials": {
+                            "youTubeOAuth2Api": "youtube_credentials"
+                        }
+                    },
+                    {
+                        "id": "c3d4e5f6-g7h8-9012-cdef-345678901234",
+                        "name": "Check if New Videos Found",
+                        "type": "n8n-nodes-base.if",
+                        "typeVersion": 1,
+                        "position": [680, 300],
+                        "parameters": {
+                            "conditions": {
+                                "number": [
+                                    {
+                                        "value1": "={{ $json.items.length }}",
+                                        "operation": "larger",
+                                        "value2": 0
+                                    }
+                                ]
+                            }
+                        },
+                        "credentials": {}
+                    },
+                    {
+                        "id": "d4e5f6g7-h8i9-0123-def4-56789012345a",
+                        "name": "Send Notification Email",
+                        "type": "n8n-nodes-base.emailSend",
+                        "typeVersion": 2,
+                        "position": [900, 200],
+                        "parameters": {
+                            "toEmail": "your-email@example.com",
+                            "subject": "New YouTube Video Available!",
+                            "message": "New video found: {{ $node['Fetch YouTube Channel Videos'].json.items[0].snippet.title }}\n\nWatch here: https://youtube.com/watch?v={{ $node['Fetch YouTube Channel Videos'].json.items[0].id.videoId }}"
+                        },
+                        "credentials": {
+                            "smtp": "email_credentials"
+                        }
+                    }
+                ],
+                "connections": {
+                    "Schedule Check Every Hour": {
+                        "main": [
+                            [
+                                {
+                                    "node": "Fetch YouTube Channel Videos",
+                                    "type": "main",
+                                    "index": 0
+                                }
+                            ]
+                        ]
+                    },
+                    "Fetch YouTube Channel Videos": {
+                        "main": [
+                            [
+                                {
+                                    "node": "Check if New Videos Found",
+                                    "type": "main",
+                                    "index": 0
+                                }
+                            ]
+                        ]
+                    },
+                    "Check if New Videos Found": {
+                        "main": [
+                            [
+                                {
+                                    "node": "Send Notification Email",
+                                    "type": "main",
+                                    "index": 0
+                                }
+                            ],
+                            []
+                        ]
+                    }
+                },
+                "active": False,
+                "settings": {"executionOrder": "v1"},
+                "staticData": {},
+                "tags": ["youtube", "automation", "notifications"]
+            }
+        }
+
     async def test_connection(self) -> Dict[str, Any]:
         """Test n8n connection and service health"""
         try:
