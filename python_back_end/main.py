@@ -226,6 +226,90 @@ HARVIS_VOICE_PATH = os.path.abspath(
 )  # Point to the file in project root
 
 # ─── Database Connection Pool -------------------------------------------------
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: create connection pool
+    global db_pool, chat_history_manager, n8n_storage, n8n_automation_service, n8n_ai_agent
+    try:
+        # Fix database hostname: use pgsql-db instead of pgsql
+        database_url = os.getenv("DATABASE_URL", "postgresql://pguser:pgpassword@pgsql-db:5432/database")
+        app.state.pg_pool = await asyncpg.create_pool(
+            dsn=database_url,
+            min_size=1, 
+            max_size=10,
+            command_timeout=30,  # Increased from 5 to 30 seconds
+        )
+        db_pool = app.state.pg_pool
+        logger.info("✅ Database connection pool created")
+        
+        # Initialize session database
+        from vibecoding.db_session import init_session_db
+        await init_session_db(app.state.pg_pool)
+        
+        # Initialize chat history manager
+        chat_history_manager = ChatHistoryManager(app.state.pg_pool)
+        logger.info("✅ ChatHistoryManager initialized in lifespan")
+        
+        # Initialize vibe files database table
+        try:
+            from vibecoding.files import ensure_vibe_files_table
+            await ensure_vibe_files_table()
+            logger.info("✅ Vibe files database table initialized")
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize vibe files table: {e}")
+
+        # Initialize n8n services with database pool
+        if n8n_client:
+            n8n_storage = N8nStorage(db_pool)
+            await n8n_storage.ensure_tables()
+            
+            workflow_builder = WorkflowBuilder()
+            n8n_automation_service = N8nAutomationService(
+                n8n_client=n8n_client,
+                workflow_builder=workflow_builder,
+                storage=n8n_storage,
+                ollama_url=OLLAMA_URL
+            )
+            logger.info("✅ n8n automation service fully initialized")
+            
+            # Initialize AI agent with vector database
+            try:
+                from n8n import initialize_ai_agent
+                n8n_ai_agent = await initialize_ai_agent(n8n_automation_service)
+                logger.info("✅ n8n AI agent with vector database initialized")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to initialize n8n AI agent: {e}")
+                logger.warning("n8n automation will work without vector database enhancement")
+        
+        logger.info("Database pool and all services initialized successfully")
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to create database pool or initialize n8n services: {e}")
+        # Continue without pool - will fall back to direct connections
+        app.state.pg_pool = None
+    
+    yield
+    
+    # Shutdown: close connection pool
+    if hasattr(app.state, 'pg_pool') and app.state.pg_pool:
+        await app.state.pg_pool.close()
+        logger.info("🔒 Database connection pool closed")
+
+
+app = FastAPI(title="Harvis AI API", lifespan=lifespan)
+
+db_pool = None
+chat_history_manager = None
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    global db_pool
+    if db_pool:
+        await db_pool.close()
+        logger.info("Database pool closed")
+
+""" 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: create connection pool
@@ -272,6 +356,9 @@ async def lifespan(app: FastAPI):
 # ─── FastAPI init --------------------------------------------------------------
 app = FastAPI(title="Harvis AI API", lifespan=lifespan)
 
+db_pool = None 
+chat_history_manager = None  """
+
 # CORS Middleware must be added before routes
 app.add_middleware(
     CORSMiddleware,
@@ -303,77 +390,6 @@ app.include_router(execution_router)
 app.include_router(files_router)
 app.include_router(commands_router)
 app.include_router(containers_router)
-
-# ─── Database Pool and Chat History Manager Init ─────────────────────────────────────────────────
-db_pool = None
-chat_history_manager = None
-
-# @app.on_event("startup")  # Disabled - using lifespan instead
-async def startup_event_disabled():
-    global db_pool, chat_history_manager, n8n_storage, n8n_automation_service, n8n_ai_agent
-    try:
-        logger.info("🚀 Starting startup event initialization...")
-        
-        # Use the connection pool created in lifespan
-        db_pool = app.state.pg_pool
-        if db_pool is None:
-            logger.error("❌ No database pool available - falling back to direct connection")
-            # Fix database hostname: use pgsql-db instead of pgsql
-            database_url = os.getenv("DATABASE_URL", "postgresql://pguser:pgpassword@pgsql-db:5432/database")
-            db_pool = await asyncpg.create_pool(database_url)
-        else:
-            logger.info("✅ Using database pool from lifespan")
-        
-        logger.info("🔄 Initializing ChatHistoryManager...")
-        chat_history_manager = ChatHistoryManager(db_pool)
-        logger.info("✅ ChatHistoryManager initialized successfully")
-        
-        # Initialize vibe files database table
-        try:
-            from vibecoding.files import ensure_vibe_files_table
-            await ensure_vibe_files_table()
-            logger.info("✅ Vibe files database table initialized")
-        except Exception as e:
-            logger.error(f"❌ Failed to initialize vibe files table: {e}")
-        
-        # Session database already initialized in lifespan
-        logger.info("📋 Using session database initialized in lifespan")
-        
-        # Initialize n8n services with database pool
-        if n8n_client:
-            n8n_storage = N8nStorage(db_pool)
-            await n8n_storage.ensure_tables()
-            
-            workflow_builder = WorkflowBuilder()
-            n8n_automation_service = N8nAutomationService(
-                n8n_client=n8n_client,
-                workflow_builder=workflow_builder,
-                storage=n8n_storage,
-                ollama_url=OLLAMA_URL
-            )
-            logger.info("✅ n8n automation service fully initialized")
-            
-            # Initialize AI agent with vector database
-            try:
-                from n8n import initialize_ai_agent
-                n8n_ai_agent = await initialize_ai_agent(n8n_automation_service)
-                logger.info("✅ n8n AI agent with vector database initialized")
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to initialize n8n AI agent: {e}")
-                logger.warning("n8n automation will work without vector database enhancement")
-        
-        logger.info("Database pool and all services initialized successfully")
-    except Exception as e:
-        logger.error(f"Failed to initialize services: {e}")
-        raise
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    global db_pool
-    if db_pool:
-        await db_pool.close()
-        logger.info("Database pool closed")
-logger.info("Chat history manager initialized")
 
 # ─── Device & models -----------------------------------------------------------
 device = 0 if torch.cuda.is_available() else -1
