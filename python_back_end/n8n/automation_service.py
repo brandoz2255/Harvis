@@ -9,6 +9,7 @@ import time
 import logging
 import requests
 import json
+import os
 from typing import Dict, List, Optional, Any, Tuple
 from .client import N8nClient, N8nClientError
 from .workflow_builder import WorkflowBuilder
@@ -57,6 +58,62 @@ def make_ollama_request(endpoint, payload, timeout=90):
         logger.error("❌ Local Ollama request failed: %s", e)
         raise
     
+    return response
+
+
+def make_gemini_request(model_name: str, messages: List[Dict], timeout=90):
+    """Make a request to Google Gemini API"""
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise Exception("GEMINI_API_KEY environment variable not set")
+    
+    # Convert messages to Gemini format
+    system_prompt = ""
+    user_prompt = ""
+    
+    for message in messages:
+        if message["role"] == "system":
+            system_prompt = message["content"]
+        elif message["role"] == "user":
+            user_prompt = message["content"]
+    
+    # Combine system and user prompts for Gemini
+    combined_prompt = f"{system_prompt}\n\n{user_prompt}" if system_prompt else user_prompt
+    
+    # Gemini API endpoint
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+    
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {
+                        "text": combined_prompt
+                    }
+                ]
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.1,
+            "topK": 40,
+            "topP": 0.95,
+            "maxOutputTokens": 8192,
+            "responseMimeType": "application/json"
+        }
+    }
+    
+    headers = {
+        "Content-Type": "application/json"
+    }
+    
+    logger.info(f"🔮 Making Gemini API request to {model_name}")
+    response = requests.post(url, json=payload, headers=headers, timeout=timeout)
+    
+    if response.status_code != 200:
+        logger.error(f"Gemini API error {response.status_code}: {response.text}")
+        response.raise_for_status()
+    
+    logger.info("✅ Gemini API request successful")
     return response
 
 
