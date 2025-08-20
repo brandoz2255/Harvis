@@ -66,7 +66,7 @@ export default function ChatHistory({ onSessionSelect, currentSessionId }: ChatH
   // Fetch sessions on mount only to prevent infinite loops
   useEffect(() => {
     debouncedFetchSessions()
-  }, [debouncedFetchSessions])
+  }, []) // Remove dependency to prevent infinite loops
 
   // Stabilized selectSession to prevent recreation
   const selectSessionRef = useRef(selectSession)
