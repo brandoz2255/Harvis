@@ -49,9 +49,12 @@ class EmbeddingManager:
         try:
             logger.info(f"Connecting to vector database: {self.config.collection_name}")
             
-            # Initialize PGVector
+            # Add connection parameters for better stability
+            connection_string = f"{self.config.database_url}?application_name=embedding_manager&connect_timeout=30"
+            
+            # Initialize PGVector with enhanced connection settings
             self.vector_store = PGVector(
-                connection=self.config.database_url,
+                connection=connection_string,
                 embeddings=self.embeddings,
                 collection_name=self.config.collection_name,
                 distance_strategy=self.config.distance_strategy,
@@ -59,7 +62,15 @@ class EmbeddingManager:
                 use_jsonb=self.config.use_jsonb
             )
             
-            logger.info("Vector store initialized successfully")
+            # Test the connection
+            try:
+                # Try a simple query to verify the connection works
+                self.vector_store.similarity_search("test", k=1)
+                logger.info("Vector store initialized and tested successfully")
+            except Exception as test_e:
+                logger.warning(f"Vector store initialized but test query failed: {test_e}")
+                logger.info("Vector store connection should still work for basic operations")
+                
         except Exception as e:
             logger.error(f"Failed to initialize vector store: {e}")
             raise
@@ -217,9 +228,31 @@ class EmbeddingManager:
         """Fallback keyword search when vector search fails"""
         try:
             import psycopg2
+            from psycopg2 import pool
             
-            conn = psycopg2.connect(self.config.database_url)
-            cur = conn.cursor()
+            # Use connection with proper error handling and retry logic
+            conn = None
+            cur = None
+            max_retries = 3
+            
+            for attempt in range(max_retries):
+                try:
+                    conn = psycopg2.connect(
+                        self.config.database_url,
+                        connect_timeout=10,
+                        application_name="embedding_manager"
+                    )
+                    cur = conn.cursor()
+                    break
+                except psycopg2.OperationalError as e:
+                    logger.warning(f"Connection attempt {attempt + 1} failed: {e}")
+                    if attempt == max_retries - 1:
+                        raise
+                    import time
+                    time.sleep(1)  # Wait 1 second before retry
+            
+            if not conn or not cur:
+                raise Exception("Failed to establish database connection")
             
             # Search for workflows containing keywords from the query
             keywords = query.lower().split()
@@ -232,9 +265,12 @@ class EmbeddingManager:
             
             where_clause = " AND ".join(like_conditions) if like_conditions else "true"
             
+            # Use table name that exists in current schema
+            table_name = f"langchain_pg_embedding"
+            
             cur.execute(f'''
                 SELECT e.document, e.cmetadata
-                FROM langchain_pg_embedding e
+                FROM {table_name} e
                 JOIN langchain_pg_collection c ON e.collection_id = c.uuid
                 WHERE c.name = %s 
                 AND ({where_clause})
@@ -246,15 +282,24 @@ class EmbeddingManager:
                 doc = Document(page_content=doc_content, metadata=metadata or {})
                 results.append((doc, 1.0))  # Dummy score
             
-            cur.close()
-            conn.close()
-            
-            logger.info(f"📊 Fallback search found {len(results)} YouTube workflows")
+            logger.info(f"📊 Fallback search found {len(results)} workflows")
             return results
             
         except Exception as e:
             logger.error(f"❌ Fallback search failed: {e}")
             return []
+        finally:
+            # Always close connections properly
+            if cur:
+                try:
+                    cur.close()
+                except:
+                    pass
+            if conn:
+                try:
+                    conn.close()
+                except:
+                    pass
     
     def get_collection_stats(self) -> Dict[str, Any]:
         """Get statistics about the current collection."""
