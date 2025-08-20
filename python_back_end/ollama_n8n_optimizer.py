@@ -40,7 +40,7 @@ class OllamaN8NOptimizer:
     def get_available_models(self) -> List[str]:
         """Get list of available Ollama models"""
         try:
-            response = requests.get(f"{self.ollama_url}/api/tags")
+            response = requests.get(f"{self.ollama_url}/api/tags", timeout=10)
             if response.status_code == 200:
                 models = response.json().get('models', [])
                 return [model['name'] for model in models]
