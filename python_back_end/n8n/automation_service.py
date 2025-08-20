@@ -9,6 +9,7 @@ import time
 import logging
 import requests
 import json
+import os
 from typing import Dict, List, Optional, Any, Tuple
 from .client import N8nClient, N8nClientError
 from .workflow_builder import WorkflowBuilder
@@ -57,6 +58,62 @@ def make_ollama_request(endpoint, payload, timeout=90):
         logger.error("❌ Local Ollama request failed: %s", e)
         raise
     
+    return response
+
+
+def make_gemini_request(model_name: str, messages: List[Dict], timeout=90):
+    """Make a request to Google Gemini API"""
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise Exception("GEMINI_API_KEY environment variable not set")
+    
+    # Convert messages to Gemini format
+    system_prompt = ""
+    user_prompt = ""
+    
+    for message in messages:
+        if message["role"] == "system":
+            system_prompt = message["content"]
+        elif message["role"] == "user":
+            user_prompt = message["content"]
+    
+    # Combine system and user prompts for Gemini
+    combined_prompt = f"{system_prompt}\n\n{user_prompt}" if system_prompt else user_prompt
+    
+    # Gemini API endpoint
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+    
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {
+                        "text": combined_prompt
+                    }
+                ]
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.1,
+            "topK": 40,
+            "topP": 0.95,
+            "maxOutputTokens": 8192,
+            "responseMimeType": "application/json"
+        }
+    }
+    
+    headers = {
+        "Content-Type": "application/json"
+    }
+    
+    logger.info(f"🔮 Making Gemini API request to {model_name}")
+    response = requests.post(url, json=payload, headers=headers, timeout=timeout)
+    
+    if response.status_code != 200:
+        logger.error(f"Gemini API error {response.status_code}: {response.text}")
+        response.raise_for_status()
+    
+    logger.info("✅ Gemini API request successful")
     return response
 
 
@@ -340,13 +397,64 @@ Generate the full JSON response following the exact structure above. The workflo
             logger.info(f"Analyzing prompt with {model}")
             logger.debug(f"Prompt length: {len(user_prompt)} characters")
             
-            response = make_ollama_request("/api/chat", payload, timeout=120)
-            response.raise_for_status()
+            # Check if this is a Gemini model
+            if model.startswith("gemini"):
+                logger.info(f"🔮 Using Gemini API for model: {model}")
+                response = make_gemini_request(model, payload["messages"], timeout=120)
+                response.raise_for_status()
+                
+                response_json = response.json()
+                logger.debug(f"Full Gemini response: {response_json}")
+                
+                # Extract content from Gemini response format
+                candidates = response_json.get("candidates", [])
+                if not candidates:
+                    raise Exception("No candidates in Gemini response")
+                
+                content = candidates[0].get("content", {})
+                parts = content.get("parts", [])
+                if not parts:
+                    raise Exception("No parts in Gemini response content")
+                
+                ai_response = parts[0].get("text", "")
+                
+            else:
+                # Use Ollama for non-Gemini models
+                response = make_ollama_request("/api/chat", payload, timeout=120)
+                response.raise_for_status()
+                
+                response_json = response.json()
+                logger.debug(f"Full Ollama response: {response_json}")
+                
+                ai_response = response_json.get("message", {}).get("content", "")
             
-            ai_response = response.json().get("message", {}).get("content", "")
-            logger.debug(f"AI response: {ai_response[:200]}...")
+            # Handle empty or whitespace-only responses
+            if not ai_response or not ai_response.strip():
+                logger.warning("AI returned empty response")
+                ai_response = response_json.get("response", "")  # Try alternative field
+                
+            if not ai_response or not ai_response.strip():
+                logger.error("AI response is empty or whitespace only")
+                raise Exception("AI model returned empty response")
             
-            analysis = json.loads(ai_response)
+            logger.debug(f"AI response (first 500 chars): {ai_response[:500]}...")
+            
+            # Try to clean up the response if it has extra text
+            cleaned_response = ai_response.strip()
+            
+            # If response doesn't start with {, try to extract JSON
+            if not cleaned_response.startswith('{'):
+                # Look for JSON in the response
+                import re
+                json_match = re.search(r'\{.*\}', cleaned_response, re.DOTALL)
+                if json_match:
+                    cleaned_response = json_match.group(0)
+                    logger.info("Extracted JSON from AI response")
+                else:
+                    logger.error(f"No JSON found in AI response: {cleaned_response[:200]}...")
+                    raise json.JSONDecodeError("No valid JSON found in response", cleaned_response, 0)
+            
+            analysis = json.loads(cleaned_response)
             
             logger.info(f"AI analysis complete: {analysis.get('workflow_type', 'unknown')} workflow")
             return analysis
@@ -365,6 +473,7 @@ Generate the full JSON response following the exact structure above. The workflo
                 
                 # Retry with simple analysis
                 return await self._analyze_user_prompt(original_request, model)
+            
             
             return {
                 "feasible": False,
@@ -723,6 +832,7 @@ Generate the full JSON response following the exact structure above. The workflo
             logger.error(f"Failed to get automation history: {e}")
             raise
     
+
     async def test_connection(self) -> Dict[str, Any]:
         """Test n8n connection and service health"""
         try:

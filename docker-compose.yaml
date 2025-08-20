@@ -13,15 +13,17 @@ services:
       - ollama-n8n-network
 
   pgsql:
-    image: postgres:15
+    image: pgvector/pgvector:pg15
     container_name: pgsql-db
     restart: unless-stopped
     environment:
       POSTGRES_USER: pguser
       POSTGRES_PASSWORD: pgpassword
       POSTGRES_DB: database
+      POSTGRES_INITDB_ARGS: "-E UTF8 --locale=C"
     volumes:
       - pgsql_data:/var/lib/postgresql/data
+      - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh
     networks:
       - ollama-n8n-network
 
