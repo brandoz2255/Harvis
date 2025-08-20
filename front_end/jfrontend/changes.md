@@ -1,5 +1,83 @@
 # Changes Log
 
+## 2025-08-20 - Fixed Chat Stuck Issue and Audio Processing Errors
+
+**Timestamp**: 2025-08-20 - Resolved chat message hanging and audio processing 500 errors
+
+### Problem Description
+
+1. **Chat Messages Getting Stuck**: After sending a message, the chat interface would hang and not respond
+2. **Audio Processing Failing**: `/api/mic-chat` endpoint returning 500 Internal Server Error
+3. **Excessive Database Polling**: Frontend making repetitive calls to `/api/chat-history/sessions` causing log spam
+
+### Root Cause Analysis
+
+1. **useAIInsights.ts JavaScript Error**: 
+   - Undefined variable `e` used instead of `s` in regex test (line 86)
+   - Missing return value `false` in `isReasoningModel` function (line 75)
+   - This caused frontend JavaScript to crash, breaking chat functionality
+
+2. **Authentication Mismatch in mic-chat**:
+   - `/api/mic-chat` endpoint using old `get_current_user` dependency
+   - Other endpoints upgraded to `get_current_user_optimized`
+   - Inconsistent auth handling causing 500 errors
+
+3. **Infinite useEffect Loop in ChatHistory**:
+   - `useEffect` dependency array included `debouncedFetchSessions` function
+   - Function recreated on every render, triggering endless API calls
+   - Not related to logging changes as initially suspected
+
+### Solution Applied
+
+1. **Fixed useAIInsights.ts**:
+   ```typescript
+   // Fixed undefined variable error
+   ].some(rx => rx.test(s))  // was: rx.test(e)
+   
+   // Fixed missing return value
+   if (!name) return false  // was: return
+   ```
+
+2. **Updated mic-chat Authentication**:
+   ```python
+   # Updated endpoint to use optimized auth
+   current_user: Dict = Depends(get_current_user_optimized)
+   # was: current_user: UserResponse = Depends(get_current_user)
+   ```
+
+3. **Fixed ChatHistory Polling**:
+   ```typescript
+   // Removed function from dependency array to prevent infinite loops
+   useEffect(() => {
+     debouncedFetchSessions()
+   }, []) // was: }, [debouncedFetchSessions])
+   ```
+
+4. **Reduced Backend Log Verbosity**:
+   - Set uvicorn access logs to WARNING level only
+   - Commented out verbose auth cache logging
+   - Maintained functionality while reducing noise
+
+### Files Modified
+
+- `front_end/jfrontend/hooks/useAIInsights.ts`
+- `python_back_end/main.py` (mic-chat endpoint auth)
+- `front_end/jfrontend/components/ChatHistory.tsx`
+- `python_back_end/auth_optimized.py` (logging)
+
+### Result/Status
+
+✅ **COMPLETE** - Chat functionality restored, audio processing working, reduced log spam
+
+### Key Lessons
+
+1. **Frontend JavaScript errors can silently break backend communication**
+2. **Authentication dependencies must be consistent across all endpoints**
+3. **useEffect dependency arrays with functions require careful consideration**
+4. **Logging changes alone don't cause functional issues - look deeper**
+
+---
+
 ## 2025-08-15 - Fixed All ESLint Warnings and Errors
 
 **Timestamp**: 2025-08-15 - Resolved all React Hook dependency warnings and unescaped entity errors
