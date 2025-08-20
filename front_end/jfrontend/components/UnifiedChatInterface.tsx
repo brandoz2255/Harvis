@@ -761,8 +761,20 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
           formData.append("session_id", currentSession?.id || sessionId || "")
         }
 
+        // Get auth token for API request
+        const token = localStorage.getItem('token')
+        console.log('🔥🔥🔥 UnifiedChatInterface: Token exists:', !!token, token ? `${token.substring(0, 20)}...` : 'null')
+        
+        const headers: Record<string, string> = {}
+        if (token) {
+          headers['Authorization'] = `Bearer ${token}`
+        } else {
+          console.error('UnifiedChatInterface: No auth token found in localStorage')
+        }
+
         const response = await fetch("/api/mic-chat", {
           method: "POST",
+          headers,
           body: formData,
           credentials: 'include',
         })
