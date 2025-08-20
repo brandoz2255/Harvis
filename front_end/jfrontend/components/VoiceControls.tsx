@@ -106,8 +106,21 @@ export default function VoiceControls({ selectedModel = "llama3.2:3b" }: VoiceCo
         formData.append("file", audioBlob, filename)
         formData.append("model", selectedModel)
 
+        // Get auth token for API request
+        const token = localStorage.getItem('token')
+        console.log('🔥🔥🔥 VoiceControls: Token exists:', !!token, token ? `${token.substring(0, 20)}...` : 'null')
+        alert('VoiceControls: AUTH CHECK - Token exists: ' + !!token)
+        
+        const headers: Record<string, string> = {}
+        if (token) {
+          headers['Authorization'] = `Bearer ${token}`
+        } else {
+          console.error('VoiceControls: No auth token found in localStorage')
+        }
+
         const response = await fetch("/api/mic-chat", {
           method: "POST",
+          headers,
           body: formData,
         })
 
