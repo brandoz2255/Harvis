@@ -166,6 +166,9 @@ from n8n.models import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Reduce uvicorn access log verbosity
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+
 # Log environment loading status
 try:
     import dotenv
@@ -217,6 +220,8 @@ initialize_n8n_services()
 if 'logger' not in locals():
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
+    # Reduce uvicorn access log verbosity
+    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 
 # ─── Paths ---------------------------------------------------------------------
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -1521,7 +1526,7 @@ async def analyze_screen_with_tts(req: ScreenAnalysisWithTTSRequest):
 # Whisper model will be loaded on demand
 
 @app.post("/api/mic-chat", tags=["voice"])
-async def mic_chat(file: UploadFile = File(...), model: str = Form(DEFAULT_MODEL), session_id: Optional[str] = Form(None), current_user: UserResponse = Depends(get_current_user)):
+async def mic_chat(file: UploadFile = File(...), model: str = Form(DEFAULT_MODEL), session_id: Optional[str] = Form(None), current_user: Dict = Depends(get_current_user_optimized)):
     try:
         # DEBUG: Log the received model parameter
         logger.info(f"🎤 MIC-CHAT: Received model parameter: '{model}' (type: {type(model)})")
