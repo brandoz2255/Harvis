@@ -43,18 +43,18 @@ class AuthOptimizer:
         if (user_id in self._user_cache and 
             user_id in self._cache_timestamps and 
             current_time - self._cache_timestamps[user_id] < self.cache_ttl):
-            logger.info(f"🚀 Cache hit for user {user_id}")
+            logger.debug(f"Cache hit for user {user_id}")
             return self._user_cache[user_id]
         
         # Cache miss or expired - fetch from database
-        logger.info(f"🔄 Cache miss for user {user_id}, fetching from DB")
+        # logger.info(f"🔄 Cache miss for user {user_id}, fetching from DB")
         user_data = await self._fetch_user_from_db(user_id)
         
         if user_data:
             # Update cache
             self._user_cache[user_id] = user_data
             self._cache_timestamps[user_id] = current_time
-            logger.info(f"✅ Cached user {user_id}")
+            # logger.info(f"✅ Cached user {user_id}")
         
         return user_data
     
@@ -108,7 +108,7 @@ def decode_token_fast(token: str) -> Optional[Dict]:
     if token in TOKEN_CACHE:
         cached_data = TOKEN_CACHE[token]
         if current_time - cached_data['timestamp'] < CACHE_EXPIRY:
-            logger.info("🚀 Token cache hit")
+            # logger.info("🚀 Token cache hit")
             return cached_data['payload']
         else:
             # Remove expired token from cache
@@ -128,7 +128,7 @@ def decode_token_fast(token: str) -> Optional[Dict]:
         if len(TOKEN_CACHE) > 1000:
             cleanup_expired_tokens()
         
-        logger.info("✅ Token decoded and cached")
+        # logger.info("✅ Token decoded and cached")
         return payload
         
     except JWTError as e:
@@ -146,7 +146,7 @@ def cleanup_expired_tokens():
     for token in expired_tokens:
         del TOKEN_CACHE[token]
     
-    logger.info(f"🧹 Cleaned up {len(expired_tokens)} expired tokens")
+    # logger.info(f"🧹 Cleaned up {len(expired_tokens)} expired tokens")
 
 async def get_db_pool(request: Request) -> Optional[asyncpg.Pool]:
     """Get database connection pool from app state"""
