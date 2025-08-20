@@ -13,7 +13,7 @@ export const useAIInsights = () => {
     
     const insightId = addInsight({
       type,
-      status: 'thinking',
+      status: 'thinking...',
       title,
       content,
       model
@@ -34,20 +34,21 @@ export const useAIInsights = () => {
   }, [updateInsight])
 
   const logUserInteraction = useCallback((
-    userPrompt: string,
-    selectedModel?: string
-  ) => {
-    // Generate thought process based on user input
-    const thoughtProcess = generateThoughtProcess(userPrompt, selectedModel)
-    
-    const insightId = logThoughtProcess(
-      thoughtProcess,
-      selectedModel || 'Qwen2.VL',
-      'thought'
-    )
-    
-    return insightId
-  }, [logThoughtProcess])
+  userPrompt: string,
+  selectedModel?: string
+) => {
+  const thoughtProcess = generateThoughtProcess(userPrompt, selectedModel)
+
+  const type: 'thought' | 'reasoning' = isReasoningModel(selectedModel) ? 'reasoning' : 'thought'
+
+  const insightId = logThoughtProcess(
+    thoughtProcess,
+    selectedModel || 'Unknown Model',
+    type
+  )
+
+  return insightId
+}, [logThoughtProcess])
 
   const logReasoningProcess = useCallback((
     reasoning: string,
@@ -68,6 +69,21 @@ export const useAIInsights = () => {
     logUserInteraction,
     logReasoningProcess
   }
+}
+
+function isReasoningModel(name?: string): boolean {
+  if (!name) return false
+  const s = name.toLowerCase()
+
+  return [
+    /\breason(ing|er)?\b/,   // reasoning, reasoner
+    /\bo[13]\b/,             // o1, o3 (OpenAI style)
+    /\br1\b/,                // DeepSeek R1
+    /\bthink(ing)?\b/,       // "thinking" SKUs
+    /\bdeepseek\b/,          // DeepSeek family
+    /\bqwen.*thinking\b/,    // Qwen Thinking
+    /\bgpt-?5.*thinking\b/   // GPT-5 Thinking style names
+  ].some(rx => rx.test(s))
 }
 
 function getInsightTitle(type: string, model?: string): string {
@@ -92,10 +108,10 @@ function generateThoughtProcess(userPrompt: string, model?: string): string {
                    userPrompt.toLowerCase().includes('why') ||
                    userPrompt.toLowerCase().includes('explain')
 
-  const modelType = model?.toLowerCase() || 'qwen2.vl'
+  const modelType = (model || '').toLowerCase()
   
-  if (isComplex) {
-    if (modelType.includes('reasoning') || modelType.includes('o1')) {
+ if (isComplex) {
+    if (isReasoningModel(model)) {
       return `Analyzing complex query: "${userPrompt.substring(0, 50)}${promptLength > 50 ? '...' : ''}". Breaking down into components, considering context, and planning multi-step reasoning approach. Evaluating best response strategy.`
     } else if (modelType.includes('qwen') || modelType.includes('vision')) {
       return `Processing user request: "${userPrompt.substring(0, 50)}${promptLength > 50 ? '...' : ''}". Analyzing intent, checking for visual context, and determining optimal response path using multimodal capabilities.`
