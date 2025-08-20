@@ -33,6 +33,10 @@ class EnhancedVectorOptimizer:
         self.conn = psycopg2.connect(db_conn_string)
         register_vector(self.conn)
         self.embedder = SentenceTransformer(embedding_model)
+        
+        # Validate table name to prevent SQL injection
+        if not self._is_valid_table_name(table_name):
+            raise ValueError(f"Invalid table name: {table_name}")
         self.table_name = table_name
         
         # Optimization configurations for different scenarios
@@ -228,10 +232,20 @@ class EnhancedVectorOptimizer:
         
         return keywords
     
+    def _is_valid_table_name(self, table_name: str) -> bool:
+        """Validate table name to prevent SQL injection"""
+        import re
+        # Allow only alphanumeric characters, underscores, and specific known table names
+        if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', table_name):
+            return False
+        # Additional whitelist of allowed table names
+        allowed_tables = ['n8n_automations', 'automations', 'workflows', 'test_automations']
+        return table_name in allowed_tables
+    
     def _generate_id(self, automation: Dict[str, Any]) -> str:
-        """Generate consistent ID for automation"""
+        """Generate consistent ID for automation (not for security purposes)"""
         content = json.dumps(automation, sort_keys=True)
-        return hashlib.md5(content.encode()).hexdigest()[:16]
+        return hashlib.md5(content.encode(), usedforsecurity=False).hexdigest()[:16]
     
     def create_optimized_searchable_text(self, automation: Dict[str, Any], features: Dict[str, Any]) -> str:
         """Create optimized searchable text for embedding"""
