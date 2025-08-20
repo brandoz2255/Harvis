@@ -1,0 +1,95 @@
+# Optimized Dockerfile for fast VibeCoading container startup
+# Pre-bakes all development tools to eliminate runtime installation delays
+FROM python:3.10-slim
+
+LABEL maintainer="vibecoading"
+LABEL purpose="Pre-built development environment for fast container startup"
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    PATH="/root/.local/bin:$PATH" \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Create workspace directory
+WORKDIR /workspace
+
+# Install system dependencies with proper caching
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        git \
+        curl \
+        wget \
+        nano \
+        vim \
+        nodejs \
+        npm \
+        build-essential \
+        sqlite3 \
+        htop \
+        tree \
+        unzip \
+        ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Node.js LTS and global packages
+RUN --mount=type=cache,target=/root/.npm \
+    npm install -g \
+        typescript \
+        tsx \
+        nodemon \
+        prettier \
+        eslint \
+        create-react-app \
+        @nestjs/cli \
+        http-server
+
+# Install Python packages with caching
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --upgrade pip && \
+    pip install \
+        requests \
+        fastapi \
+        uvicorn[standard] \
+        flask \
+        django \
+        pandas \
+        numpy \
+        matplotlib \
+        jupyter \
+        pytest \
+        black \
+        flake8 \
+        mypy \
+        httpx \
+        aiofiles \
+        python-multipart \
+        websockets \
+        pydantic \
+        sqlalchemy \
+        psycopg2-binary \
+        redis \
+        celery
+
+# Create a basic project structure and initialization
+RUN mkdir -p /workspace/{src,tests,docs,scripts} && \
+    echo "# Welcome to VibeCoading" > /workspace/README.md && \
+    echo "print('🚀 VibeCoading environment ready!')" > /workspace/hello.py && \
+    echo '{"name": "vibecoading-project", "version": "1.0.0", "description": "Fast-start development environment"}' > /workspace/package.json
+
+# Create readiness probe script
+RUN echo '#!/bin/bash\ntest -d /workspace && touch /tmp/ready && echo "READY" || echo "NOT_READY"' > /usr/local/bin/ready-check && \
+    chmod +x /usr/local/bin/ready-check
+
+# Set proper ownership
+RUN chown -R root:root /workspace && chmod -R 755 /workspace
+
+# Default command that creates readiness marker and keeps container alive
+CMD ["bash", "-c", "ready-check && tail -f /dev/null"]
+
+# Health check
+HEALTHCHECK --interval=5s --timeout=3s --start-period=10s --retries=3 \
+    CMD test -f /tmp/ready || exit 1

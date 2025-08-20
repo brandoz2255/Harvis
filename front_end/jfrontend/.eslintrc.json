@@ -1,5 +1,33 @@
 {
   "extends": [
     "next/core-web-vitals"
-  ]
+  ],
+  "plugins": ["import"],
+  "rules": {
+    "import/no-cycle": ["error", { "maxDepth": 10 }],
+    "import/no-self-import": "error",
+    "import/no-useless-path-segments": "error",
+    "import/no-relative-parent-imports": "off",
+    "no-restricted-imports": ["error", {
+      "patterns": [{
+        "group": ["@/components/index*"],
+        "message": "Avoid barrel imports from @/components/index - import components directly to prevent circular dependencies"
+      }]
+    }],
+    "no-restricted-syntax": [
+      "error",
+      {
+        "selector": "CallExpression[callee.name='fetch'] Literal[value^='/api/vibecoding']",
+        "message": "Use apiRequest() from @/lib/api instead of direct fetch() calls to /api/vibecoding endpoints. This ensures proper absolute URLs to the FastAPI backend."
+      }
+    ]
+  },
+  "settings": {
+    "import/resolver": {
+      "typescript": {
+        "alwaysTryTypes": true,
+        "project": "./tsconfig.json"
+      }
+    }
+  }
 }

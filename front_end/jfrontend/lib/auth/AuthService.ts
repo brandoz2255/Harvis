@@ -55,5 +55,18 @@ export const AuthService = {
     };
   },
 
-  // getCurrentUser removed - auth is now handled entirely by backend
+  async getCurrentUser(request: Request): Promise<{ id: string; name: string; email: string; avatar?: string } | null> {
+    try {
+      const authHeader = request.headers.get('authorization');
+      if (!authHeader) {
+        return null;
+      }
+
+      const token = authHeader.replace('Bearer ', '');
+      return await this.fetchUser(token);
+    } catch (error) {
+      console.error('Error getting current user:', error);
+      return null;
+    }
+  },
 };

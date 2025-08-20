@@ -39,6 +39,7 @@ import VibeSessionManager from "@/components/VibeSessionManager"
 import MonacoVibeFileTree from "@/components/MonacoVibeFileTree"
 import OptimizedVibeTerminal from "@/components/OptimizedVibeTerminal"
 import VibeContainerCodeEditor from "@/components/VibeContainerCodeEditor"
+import { waitReady, safeJson, apiRequest } from "@/lib/api"
 
 interface ChatMessage {
   role: "user" | "assistant"
@@ -53,7 +54,7 @@ interface Session {
   session_id: string
   project_name: string
   description?: string
-  container_status: 'running' | 'stopped' | 'starting' | 'stopping'
+  container_status: 'running' | 'stopped' | 'starting' | 'stopping' | 'error'
   created_at: string
   updated_at: string
   last_activity: string
@@ -144,33 +145,47 @@ export default function VibeCodingPage() {
       const token = localStorage.getItem('token')
       if (!token) throw new Error('No authentication token')
 
-      const response = await fetch('/api/vibecoding/sessions', {
+      // Use apiRequest for consistent error handling and absolute URLs
+      const result = await apiRequest('/api/vibecoding/sessions/create', {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
+          'Authorization': `Bearer ${token}`
         },
         body: JSON.stringify({
           project_name: projectName,
           description: description || ''
         })
       })
+      
+      if (!result.ok) {
+        throw new Error(result.error || 'Failed to create session')
+      }
 
-      if (!response.ok) throw new Error('Failed to create session')
-
-      const data = await response.json()
+      const data = result.data
       
       const session: Session = {
-        id: data.id,
+        id: data.session_id,  // Use session_id as the ID
         session_id: data.session_id,
         project_name: projectName,
         description: description,
-        container_status: 'stopped',
+        container_status: 'starting',
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
         last_activity: new Date().toISOString(),
         file_count: 0,
         activity_status: 'active'
+      }
+
+      // Wait for session to be ready before returning
+      console.log('⏳ Waiting for session to be ready...')
+      const readyResult = await waitReady(data.session_id, { timeoutMs: 15000 })
+      
+      if (readyResult.ready) {
+        session.container_status = 'running'
+        console.log('✅ Session is ready!')
+      } else {
+        console.warn('⚠️ Session took longer than expected to be ready')
+        session.container_status = 'starting'
       }
 
       return session
@@ -186,11 +201,10 @@ export default function VibeCodingPage() {
       if (!token) return
 
       // Stop container first
-      await fetch('/api/vibecoding/container', {
+      await apiRequest('/api/vibecoding/container', {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
+          'Authorization': `Bearer ${token}`
         },
         body: JSON.stringify({
           session_id: sessionId,
@@ -215,11 +229,10 @@ export default function VibeCodingPage() {
       const token = localStorage.getItem('token')
       if (!token) return
 
-      const response = await fetch('/api/vibecoding/container', {
+      const result = await apiRequest('/api/vibecoding/container', {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
+          'Authorization': `Bearer ${token}`
         },
         body: JSON.stringify({
           session_id: sessionId,
@@ -227,14 +240,13 @@ export default function VibeCodingPage() {
         })
       })
 
-      if (response.ok) {
-        const data = await response.json()
-        setIsContainerRunning(data.status === 'running')
+      if (result.ok) {
+        setIsContainerRunning(result.data?.status === 'running')
         
         if (currentSession) {
           setCurrentSession(prev => prev ? {
             ...prev,
-            container_status: data.status
+            container_status: result.data?.status
           } : null)
         }
       }
@@ -252,11 +264,10 @@ export default function VibeCodingPage() {
 
       setCurrentSession(prev => prev ? { ...prev, container_status: 'starting' } : null)
 
-      const response = await fetch('/api/vibecoding/container', {
+      const result = await apiRequest('/api/vibecoding/container', {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
+          'Authorization': `Bearer ${token}`
         },
         body: JSON.stringify({
           session_id: currentSession.session_id,
@@ -264,7 +275,7 @@ export default function VibeCodingPage() {
         })
       })
 
-      if (response.ok) {
+      if (result.ok) {
         setIsContainerRunning(true)
         setCurrentSession(prev => prev ? { ...prev, container_status: 'running' } : null)
         
@@ -293,11 +304,10 @@ export default function VibeCodingPage() {
 
       setCurrentSession(prev => prev ? { ...prev, container_status: 'stopping' } : null)
 
-      const response = await fetch('/api/vibecoding/container', {
+      const result = await apiRequest('/api/vibecoding/container', {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
+          'Authorization': `Bearer ${token}`
         },
         body: JSON.stringify({
           session_id: currentSession.session_id,
@@ -305,7 +315,7 @@ export default function VibeCodingPage() {
         })
       })
 
-      if (response.ok) {
+      if (result.ok) {
         setIsContainerRunning(false)
         setCurrentSession(prev => prev ? { ...prev, container_status: 'stopped' } : null)
         
@@ -734,6 +744,7 @@ export default function VibeCodingPage() {
                         onFileSelect={handleFileSelect}
                         onFileContentChange={handleFileContentChange}
                         className="h-full"
+                        token={localStorage.getItem('token') || undefined}
                       />
                     </div>
                     
@@ -870,6 +881,7 @@ export default function VibeCodingPage() {
                       onFileSelect={handleFileSelect}
                       onFileContentChange={handleFileContentChange}
                       className="h-full"
+                      token={localStorage.getItem('token') || undefined}
                     />
                   </div>
 

@@ -19,6 +19,7 @@ import {
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { safeJson, waitReady, apiRequest } from '@/lib/api'
 
 interface FileTreeNode {
   name: string
@@ -33,13 +34,15 @@ interface MonacoVibeFileTreeProps {
   onFileSelect: (filePath: string, content: string) => void
   onFileContentChange?: (filePath: string, content: string) => void
   className?: string
+  token?: string
 }
 
 export default function MonacoVibeFileTree({ 
   sessionId, 
   onFileSelect, 
   onFileContentChange,
-  className = "" 
+  className = "",
+  token
 }: MonacoVibeFileTreeProps) {
   const [fileTree, setFileTree] = useState<FileTreeNode[]>([])
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set(['/workspace']))
@@ -48,6 +51,7 @@ export default function MonacoVibeFileTree({
   const [isLoading, setIsLoading] = useState(false)
   const [searchTerm, setSearchTerm] = useState('')
   const [filteredTree, setFilteredTree] = useState<FileTreeNode[]>([])
+  const [error, setError] = useState<string>('')
   
   const wsRef = useRef<WebSocket | null>(null)
 
@@ -150,19 +154,30 @@ export default function MonacoVibeFileTree({
     }
   }, [sessionId, onFileContentChange])
 
-  // Load file tree with improved error handling
+  // Load file tree with improved error handling and readiness gating
   const loadFileTree = useCallback(async () => {
     if (!sessionId) return
 
     try {
       setIsLoading(true)
-      const token = localStorage.getItem('token')
       
-      const response = await fetch('/api/vibecoding/files', {
+      // Wait for session to be ready before loading files
+      console.log('🔍 Checking session readiness before loading files...')
+      const authToken = token || localStorage.getItem('token') || undefined
+      const readyResult = await waitReady(sessionId, { timeoutMs: 30000 })
+      
+      if (!readyResult.ready) {
+        console.warn('⚠️ Session not ready, skipping file tree load')
+        setError('Session is not ready yet. Please wait...')
+        setIsLoading(false)
+        return
+      }
+      
+      // Use apiRequest for consistent error handling and absolute URLs
+      const result = await apiRequest('/api/vibecoding/files', {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json',
-          ...(token && { 'Authorization': `Bearer ${token}` })
+          ...(authToken && { 'Authorization': `Bearer ${authToken}` })
         },
         body: JSON.stringify({
           action: 'list',
@@ -170,9 +185,9 @@ export default function MonacoVibeFileTree({
           path: '/workspace'
         })
       })
-
-      if (response.ok) {
-        const data = await response.json()
+      
+      if (result.ok) {
+        const data = result.data
         
         // Convert flat file list to tree structure
         const buildTree = (files: any[]): FileTreeNode[] => {
@@ -208,9 +223,12 @@ export default function MonacoVibeFileTree({
         
         const tree = buildTree(data.files || [])
         setFileTree(tree)
+        setError('')
         console.log('📁 Loaded file tree:', tree.length, 'items')
       } else {
-        console.error('Failed to load file tree:', response.status)
+        const errorMsg = result.error || 'Failed to load file tree'
+        console.error('Failed to load file tree:', errorMsg)
+        setError(errorMsg)
       }
     } catch (error) {
       console.error('Error loading file tree:', error)
@@ -227,12 +245,11 @@ export default function MonacoVibeFileTree({
     }
 
     try {
-      const token = localStorage.getItem('token')
-      const response = await fetch('/api/vibecoding/files', {
+      const authToken = token || localStorage.getItem('token')
+      const result = await apiRequest('/api/vibecoding/files', {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json',
-          ...(token && { 'Authorization': `Bearer ${token}` })
+          ...(authToken && { 'Authorization': `Bearer ${authToken}` })
         },
         body: JSON.stringify({
           action: 'read',
@@ -241,15 +258,14 @@ export default function MonacoVibeFileTree({
         })
       })
 
-      if (response.ok) {
-        const data = await response.json()
-        const content = data.content || ''
+      if (result.ok) {
+        const content = result.data?.content || ''
         
         // Cache the content
         setFileCache(prev => new Map(prev.set(filePath, content)))
         return content
       } else {
-        console.error('Failed to load file content:', response.status)
+        console.error('Failed to load file content:', result.error || 'Unknown error')
         return ''
       }
     } catch (error) {
@@ -267,11 +283,10 @@ export default function MonacoVibeFileTree({
         return false
       }
 
-      const response = await fetch('/api/vibecoding/files', {
+      const result = await apiRequest('/api/vibecoding/files', {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
+          'Authorization': `Bearer ${token}`
         },
         body: JSON.stringify({
           action: 'write',
@@ -281,13 +296,13 @@ export default function MonacoVibeFileTree({
         })
       })
 
-      if (response.ok) {
+      if (result.ok) {
         // Update cache
         setFileCache(prev => new Map(prev.set(filePath, content)))
         console.log('💾 File saved:', filePath)
         return true
       } else {
-        console.error('Failed to save file:', response.status)
+        console.error('Failed to save file:', result.error || 'Unknown error')
         return false
       }
     } catch (error) {

@@ -22,6 +22,7 @@ import { Card } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import Editor from "@monaco-editor/react"
 import { configureMonacoLanguages, setupLSPFeatures } from '@/lib/monaco-config'
+import { apiRequest } from '@/lib/api'
 
 interface ContainerFile {
   name: string
@@ -59,6 +60,43 @@ export default function VibeContainerCodeEditor({
   const editorRef = useRef<any>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
+  // Define loadFileContent before using it in useEffect
+  const loadFileContent = useCallback(async () => {
+    if (!selectedFile || !sessionId || selectedFile.type !== 'file') return
+
+    try {
+      setIsLoading(true)
+      const token = localStorage.getItem('token')
+      if (!token) return
+
+      const result = await apiRequest('/api/vibecoding/files', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          session_id: sessionId,
+          action: 'read',
+          file_path: selectedFile.path
+        })
+      })
+
+      if (result.ok) {
+        setContent(result.data?.content || '')
+        setIsModified(false)
+        setLastSaved(new Date())
+      } else {
+        console.error('Failed to load file content')
+        setContent('// Failed to load file content')
+      }
+    } catch (error) {
+      console.error('Error loading file:', error)
+      setContent('// Error loading file')
+    } finally {
+      setIsLoading(false)
+    }
+  }, [selectedFile, sessionId])
+
   // Load file content when selected file changes
   useEffect(() => {
     if (selectedFile && sessionId) {
@@ -80,44 +118,6 @@ export default function VibeContainerCodeEditor({
     }
   }, [fontSize, wordWrap])
 
-  const loadFileContent = useCallback(async () => {
-    if (!selectedFile || !sessionId || selectedFile.type !== 'file') return
-
-    try {
-      setIsLoading(true)
-      const token = localStorage.getItem('token')
-      if (!token) return
-
-      const response = await fetch('/api/vibecoding/files', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          session_id: sessionId,
-          action: 'read',
-          file_path: selectedFile.path
-        })
-      })
-
-      if (response.ok) {
-        const data = await response.json()
-        setContent(data.content || '')
-        setIsModified(false)
-        setLastSaved(new Date())
-      } else {
-        console.error('Failed to load file content')
-        setContent('// Failed to load file content')
-      }
-    } catch (error) {
-      console.error('Error loading file:', error)
-      setContent('// Error loading file')
-    } finally {
-      setIsLoading(false)
-    }
-  }, [selectedFile, sessionId])
-
   const saveFile = async () => {
     if (!selectedFile || !sessionId || !isModified) return
 
@@ -127,11 +127,10 @@ export default function VibeContainerCodeEditor({
       const token = localStorage.getItem('token')
       if (!token) return
 
-      const response = await fetch('/api/vibecoding/files', {
+      const result = await apiRequest('/api/vibecoding/files', {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
+          'Authorization': `Bearer ${token}`
         },
         body: JSON.stringify({
           session_id: sessionId,
@@ -141,7 +140,7 @@ export default function VibeContainerCodeEditor({
         })
       })
 
-      if (response.ok) {
+      if (result.ok) {
         setIsModified(false)
         setLastSaved(new Date())
         setSaveStatus('saved')
@@ -179,11 +178,10 @@ export default function VibeContainerCodeEditor({
       // Alternative: execute via API
       const token = localStorage.getItem('token')
       if (token) {
-        const response = await fetch('/api/vibecoding/files', {
+        const result = await apiRequest('/api/vibecoding/files', {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json'
+            'Authorization': `Bearer ${token}`
           },
           body: JSON.stringify({
             session_id: sessionId,
@@ -192,9 +190,8 @@ export default function VibeContainerCodeEditor({
           })
         })
 
-        if (response.ok) {
-          const data = await response.json()
-          console.log('Execution result:', data)
+        if (result.ok) {
+          console.log('Execution result:', result.data)
         }
       }
     } catch (error) {

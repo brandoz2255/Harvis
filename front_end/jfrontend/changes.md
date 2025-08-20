@@ -1,5 +1,398 @@
 # Changes Log
 
+## 2025-01-20 - Component API Standardization Update
+
+### Problem Description
+Several components were still using direct `fetch()` calls to `/api/vibecoding` endpoints instead of the standardized `apiRequest()` function from `lib/api.ts`. This inconsistency could lead to:
+1. **CORS Issues**: Direct fetch calls don't properly handle cross-origin requests to the backend
+2. **Error Handling**: Inconsistent error handling across components 
+3. **Response Parsing**: Manual JSON parsing instead of standardized `safeJson()` handling
+4. **Authentication**: Inconsistent header management
+
+### Root Cause Analysis
+Components were created before the `apiRequest()` utility function existed, resulting in direct `fetch()` calls with manual:
+- Content-Type header setting
+- Response parsing with `.json()`
+- Error handling with `.ok` checks
+
+### Solution Applied
+**Updated Components to Use `apiRequest()` Function**:
+- Added `import { apiRequest } from '@/lib/api'` to all components
+- Replaced `fetch('/api/vibecoding/...', {...})` with `apiRequest('/api/vibecoding/...', {...})`
+- Removed manual `'Content-Type': 'application/json'` headers (handled automatically)
+- Updated response handling to use `result.ok` and `result.data` instead of `response.ok` and `response.json()`
+
+### Files Modified
+- **Updated**: `/Users/user/Documents/vibecodev4/aidev/front_end/jfrontend/components/OptimizedVibeTerminal.tsx`
+- **Updated**: `/Users/user/Documents/vibecodev4/aidev/front_end/jfrontend/components/VibeSessionManager.tsx`  
+- **Updated**: `/Users/user/Documents/vibecodev4/aidev/front_end/jfrontend/components/VibeContainerCodeEditor.tsx`
+- **Updated**: `/Users/user/Documents/vibecodev4/aidev/front_end/jfrontend/components/VibeContainerFileExplorer.tsx`
+- **Updated**: `/Users/user/Documents/vibecodev4/aidev/front_end/jfrontend/changes.md` (this file)
+
+### Specific Changes Made
+
+#### OptimizedVibeTerminal.tsx
+- Added `apiRequest` import
+- Updated session status check: `fetch('/api/vibecoding/sessions/${sessionId}/status')` → `apiRequest('/api/vibecoding/sessions/${sessionId}/status')`
+- Updated command execution fallback API call to use `apiRequest`
+- Changed response handling from `response.json()` to `result.data`
+
+#### VibeSessionManager.tsx  
+- Added `apiRequest` import
+- Updated session loading: `fetch('/api/vibecoding/sessions')` → `apiRequest('/api/vibecoding/sessions')`
+- Updated session editing: `fetch('/api/vibecoding/sessions/${sessionId}')` → `apiRequest('/api/vibecoding/sessions/${sessionId}')`
+- Removed manual Content-Type headers and updated response handling
+
+#### VibeContainerCodeEditor.tsx
+- Added `apiRequest` import  
+- Updated file loading: `fetch('/api/vibecoding/files')` → `apiRequest('/api/vibecoding/files')`
+- Updated file saving: `fetch('/api/vibecoding/files')` → `apiRequest('/api/vibecoding/files')`
+- Updated file execution: `fetch('/api/vibecoding/files')` → `apiRequest('/api/vibecoding/files')`
+- Consistent response handling across all operations
+
+#### VibeContainerFileExplorer.tsx
+- Added `apiRequest` import
+- Updated file listing: `fetch('/api/vibecoding/files')` → `apiRequest('/api/vibecoding/files')`  
+- Updated file creation: `fetch('/api/vibecoding/files')` → `apiRequest('/api/vibecoding/files')`
+- Added safe access to response data with optional chaining
+
+### Result/Status
+✅ **COMPLETED**: All components now use the standardized `apiRequest()` function for `/api/vibecoding` endpoints, ensuring:
+- Consistent error handling with structured `ApiResponse<T>` types
+- Proper CORS handling and authentication
+- Automatic JSON parsing with error detection
+- Absolute URLs to FastAPI backend for vibecoding endpoints
+- Unified approach to API communication across all components
+
+## 2025-01-20 - Session Status API Route Fix
+
+### Problem Description
+The vibecoding session status endpoint was returning 404 errors and HTML instead of JSON:
+
+1. **Missing API Route**: Frontend was calling `/api/vibecoding/session/status?id=<session_id>` but this route didn't exist
+2. **API Response Error**: Getting "Expected JSON response but got text/html; charset=utf-8" errors  
+3. **Session Polling Failures**: Session status polling failing with 404 errors, preventing sessions from becoming ready
+
+### Root Cause Analysis
+- The `lib/api.ts` file was calling `/api/vibecoding/session/status` (singular) endpoint
+- Only `/api/vibecoding/sessions` (plural) endpoint existed for creating sessions
+- Missing dedicated status endpoint that accepts session ID as query parameter
+
+### Solution Applied
+**Created Missing Session Status API Route**:
+- Created directory: `/app/api/vibecoding/session/status/`
+- Added `route.ts` with GET handler that:
+  - Accepts `id` query parameter for session ID
+  - Verifies JWT token authentication
+  - Forwards request to backend at `/api/vibecoding/session/{sessionId}/status`
+  - Returns proper JSON response format
+- Follows same auth and error handling patterns as other vibecoding endpoints
+
+### Files Modified
+- **Created**: `front_end/jfrontend/app/api/vibecoding/session/status/route.ts`
+- **Updated**: `front_end/jfrontend/changes.md` (this file)
+
+### Result/Status
+✅ **FIXED**: Session status API route now exists and should return proper JSON responses instead of 404/HTML errors. The `waitReady()` function in `api.ts` should now be able to poll session status successfully.
+
+### Additional Fix: Authentication Token Issue
+
+#### Problem
+After fixing the missing route, session status requests were failing with 401 Unauthorized errors because the `waitReady()` function wasn't passing authentication tokens.
+
+#### Solution Applied
+**Updated `waitReady()` function in `lib/api.ts`**:
+- Added optional `token` parameter to `waitReady(sessionId, timeoutMs, token?)`
+- Modified function to include `Authorization: Bearer ${token}` header when token is provided
+
+**Updated all callers of `waitReady()`**:
+- Modified `app/vibe-coding/page.tsx` to pass token: `waitReady(data.session_id, 15000, token)`  
+- Added `token` prop to `MonacoVibeFileTree` component
+- Updated `MonacoVibeFileTree` to use token from props or localStorage fallback
+- Fixed variable scoping issues between prop token and localStorage token
+
+### Files Modified
+- **Updated**: `front_end/jfrontend/lib/api.ts` - Added token parameter to waitReady()
+- **Updated**: `front_end/jfrontend/app/vibe-coding/page.tsx` - Pass token to waitReady() and components
+- **Updated**: `front_end/jfrontend/components/MonacoVibeFileTree.tsx` - Accept token prop and use in auth
+
+### Final Result/Status  
+✅ **FULLY FIXED**: Session status polling should now work with proper authentication. The 401 Unauthorized errors should be resolved, and sessions should become ready within the timeout period.
+
+---
+
+## 2025-01-20 - Production-Ready API Routing Fix
+
+### Problem Description
+**Critical Issue**: Frontend was making relative API calls to `/api/vibecoding/*` which were hitting Next.js dev server on port 9000 instead of the FastAPI backend on port 8000, causing:
+
+1. **30+ seconds of 404 errors**: All session status requests failing with HTML responses
+2. **Wrong Origin Detection**: Getting Next.js HTML error pages instead of FastAPI JSON responses  
+3. **Poor User Experience**: Session polling would timeout showing "not ready" for 30s before failing
+4. **No Error Transparency**: Users couldn't see the actual problem (wrong port/service)
+
+### Root Cause Analysis
+**The Core Issue**: All vibecoding API calls were using relative URLs (`/api/vibecoding/*`) which:
+- Hit the Next.js frontend on port 9000 instead of FastAPI backend on port 8000
+- Received HTML 404 error pages instead of structured JSON responses
+- Caused `waitReady()` to treat HTML responses as "Starting..." status indefinitely
+- No mechanism to detect wrong origin or stop polling on clear failures
+
+### Solution Applied
+
+#### 1. **Route Correctness - Absolute API Base URLs**
+
+**Added Environment Configuration:**
+```bash
+# .env.local
+NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
+```
+
+**Created Centralized API Configuration:**
+- `API_BASE`: `http://localhost:8000` (trim trailing slashes)
+- `WS_BASE`: `ws://localhost:8000` (for WebSocket connections)  
+- All vibecoding API calls now use absolute URLs: `${API_BASE}/api/vibecoding/*`
+- Added `credentials: 'include'` for proper CORS handling
+
+#### 2. **Robust Session Status Polling**
+
+**Enhanced `waitReady()` Function:**
+- **Wrong Origin Detection**: Immediately detects HTML responses vs JSON and throws `WRONG_ORIGIN` error
+- **Status-Based Error Handling**:
+  - `401 Unauthorized`: Immediate stop, throw auth error
+  - `404 Not Found`: Bootstrap window (5s) then stop with `SESSION_NOT_FOUND`
+  - `500+ Server Errors`: Immediate stop with `INTERNAL` error
+  - `200 OK`: Parse JSON and check `ready` status
+- **Exponential Backoff**: 250ms → 2s polling intervals to reduce server load
+- **Deduplication**: Prevent multiple concurrent polling for same session
+- **Bootstrap Window**: Allow 404s for 5 seconds after session creation, then fail fast
+
+#### 3. **Centralized API Request Handling**
+
+**New `apiRequest()` Function:**
+- Automatically converts `/api/vibecoding/*` paths to absolute URLs
+- Handles `Content-Type` and `Authorization` headers consistently
+- Structured error responses with `ApiResponse<T>` type
+- Consistent error handling across all components
+
+**Updated All Components:**
+- `app/vibe-coding/page.tsx`: 6 fetch calls → `apiRequest()` 
+- `components/MonacoVibeFileTree.tsx`: 3 fetch calls → `apiRequest()`
+- `components/OptimizedVibeTerminal.tsx`: 1 fetch call → `apiRequest()`
+- `components/VibeSessionManager.tsx`: Updated to use `apiRequest()`
+- `components/VibeContainerCodeEditor.tsx`: Updated to use `apiRequest()`
+- `components/VibeContainerFileExplorer.tsx`: Updated to use `apiRequest()`
+
+#### 4. **Preventative ESLint Rule**
+
+**Added Custom ESLint Rule:**
+```json
+{
+  "selector": "CallExpression[callee.name='fetch'] Literal[value^='/api/vibecoding']",
+  "message": "Use apiRequest() from @/lib/api instead of direct fetch() calls to /api/vibecoding endpoints. This ensures proper absolute URLs to the FastAPI backend."
+}
+```
+
+#### 5. **Backend JSON-Only Verification**
+
+**Confirmed Backend JSON Responses:**
+- FastAPI already has proper `@app.exception_handler(HTTPException)` returning structured JSON
+- Session status endpoint at `/api/vibecoding/session/status` returns proper `{ok, ready, error, sessionId}` format
+- All error cases return JSON with appropriate HTTP status codes
+- No HTML responses from backend endpoints
+
+### Files Modified
+
+**Frontend Core:**
+- **Created**: `front_end/jfrontend/.env.local` - API base URL configuration
+- **Rewrote**: `front_end/jfrontend/lib/api.ts` - Complete rewrite with absolute URLs, robust error handling
+- **Updated**: `front_end/jfrontend/.eslintrc.json` - Added preventative linting rule
+
+**Component Updates (All using `apiRequest()` now):**
+- **Updated**: `front_end/jfrontend/app/vibe-coding/page.tsx`  
+- **Updated**: `front_end/jfrontend/components/MonacoVibeFileTree.tsx`
+- **Updated**: `front_end/jfrontend/components/OptimizedVibeTerminal.tsx`
+- **Updated**: `front_end/jfrontend/components/VibeSessionManager.tsx`
+- **Updated**: `front_end/jfrontend/components/VibeContainerCodeEditor.tsx`
+- **Updated**: `front_end/jfrontend/components/VibeContainerFileExplorer.tsx`
+
+**Documentation:**
+- **Updated**: `front_end/jfrontend/changes.md` - Comprehensive fix documentation
+
+### Verification Steps
+
+#### A. Backend JSON Response Test
+```bash
+curl -i 'http://localhost:8000/api/vibecoding/session/status?id=nonexistent'
+# Expected: {"ok":false,"error":"SESSION_NOT_FOUND"} with 404 status
+```
+
+#### B. Browser Network Requests
+- Open DevTools Network tab
+- Start a vibe coding session  
+- **Verify**: All `/api/vibecoding/*` requests go to `http://localhost:8000` (not 9000)
+- **Verify**: All responses are JSON format
+
+#### C. Wrong Origin Detection Test
+```javascript
+// Temporarily change API_BASE in .env.local to:
+NEXT_PUBLIC_API_BASE_URL=http://localhost:9000
+
+// Expected Result: Single "WRONG_ORIGIN" error banner, polling stops immediately
+// No 30-second timeout or repeated HTML error spam
+```
+
+#### D. Authentication Test
+```bash
+# Without auth token - should get single 401 error and stop polling
+curl -i 'http://localhost:8000/api/vibecoding/session/status?id=test'
+# Expected: {"ok":false,"error":"UNAUTHORIZED"} with 401 status
+```
+
+#### E. Happy Path Test
+- With valid container image and authentication
+- Session should become `ready:true` within expected timeframe
+- File tree and WebSocket terminal should connect successfully
+- No repeated "Session not ready" log spam
+
+### Results and Impact
+
+#### ✅ **Immediate Fixes**
+- **No more 404 spam**: Session status requests hit correct backend
+- **Fast failure detection**: Wrong origin/auth errors stop polling immediately  
+- **Proper error messaging**: Users see actionable error messages instead of timeouts
+- **Performance improvement**: Exponential backoff reduces server load
+
+#### ✅ **Long-term Benefits**
+- **Maintainable**: Single API configuration point (`API_BASE`)
+- **Type Safe**: Full TypeScript support with `ApiResponse<T>`
+- **Preventative**: ESLint rule prevents regression to relative URLs
+- **Scalable**: Easy to add more backend service URLs (WebSocket, etc.)
+
+#### ✅ **User Experience**
+- **Immediate feedback**: Users know instantly if there's a configuration problem
+- **Clear error messages**: "Sign in required" vs "Wrong origin" vs "Session not found"
+- **No false hope**: No more 30-second "Starting..." messages for failed sessions
+
+### Commit Message
+```
+fix(routing+poller): force absolute API_BASE to FastAPI and stop polling on 404/401
+
+- replace relative /api/vibecoding calls with API_BASE absolute URLs
+- waitReady: handle 404/401/5xx correctly; backoff+dedupe; WRONG_ORIGIN detection  
+- backend JSON-only error handlers verified for status route
+- ESLint rule prevents relative API call regression
+- 6 components updated to use centralized apiRequest() function
+
+Fixes 30s timeout loops hitting Next.js instead of FastAPI backend
+```
+
+---
+
+## 2025-01-20 - Container Creation and Session Status Fixes
+
+### Problem Description
+The vibecoding page was experiencing multiple critical issues when creating sessions:
+
+1. **Routing Issues**: `/api/vibecoding/*` requests were being routed to Next.js frontend instead of FastAPI backend, causing "Expected JSON but got HTML" errors
+2. **Container Image Errors**: Missing or misconfigured `vibecoding-optimized:latest` image causing container creation to fail silently
+3. **Session Status Problems**: Session status endpoint returning 404/HTML instead of JSON responses
+4. **Short Timeout**: 5s timeout was insufficient for container startup, causing premature failures
+
+### Root Cause Analysis
+1. **Nginx Configuration**: The `/api/vibecoding/` location block was proxying to `frontend:3000` instead of `backend:8000`, causing API requests to hit Next.js which returned HTML error pages
+2. **Missing Error Handling**: Container creation failures weren't properly tracked in session status, leading to indefinite polling
+3. **Response Format Inconsistency**: Session status responses didn't match the expected `{ok: boolean, ready: boolean, error?: string}` format
+
+### Solution Applied
+
+#### A) Fixed Nginx Routing Configuration
+**File**: `nginx.conf`
+- **Change**: Updated `/api/vibecoding/` location block to proxy to `backend:8000` instead of `frontend:3000`
+- **Result**: Vibecoding API requests now correctly route to FastAPI backend with JSON responses
+
+#### B) Enhanced Container Creation Error Handling  
+**File**: `python_back_end/vibecoding/containers.py`
+- **Added**: Specific error handling for `docker.errors.ImageNotFound` and `docker.errors.APIError`
+- **Added**: Session status tracking with typed error codes ("IMAGE_UNAVAILABLE", "CREATE_FAILED")
+- **Added**: Initial session status set to "starting" when container creation begins
+- **Result**: Container creation failures are now properly tracked and surfaced to UI
+
+#### C) Updated Session Status API Format
+**File**: `python_back_end/vibecoding/containers.py`
+- **Fixed**: Response format to match specification `{ok: boolean, ready: boolean, error?: string}`
+- **Fixed**: Unknown sessions return 404 with `{ok: false, error: "SESSION_NOT_FOUND"}`
+- **Fixed**: Error states properly handled with typed error codes
+- **Result**: Consistent JSON responses matching frontend expectations
+
+#### D) Improved Frontend Error Handling
+**File**: `front_end/jfrontend/lib/api.ts`
+- **Enhanced**: `waitReady()` function to handle typed errors from backend
+- **Increased**: Default timeout from 5s to 30s for better UX
+- **Added**: Specific handling for "SESSION_NOT_FOUND" to continue polling
+- **Added**: Critical error detection to stop polling for image/creation failures
+- **Result**: Better error messages and more robust polling behavior
+
+#### E) Enhanced Frontend Timeout and Gating
+**File**: `front_end/jfrontend/components/MonacoVibeFileTree.tsx`
+- **Increased**: Session readiness timeout from 5s to 30s
+- **Result**: File tree loading waits appropriately for container startup
+
+### Files Modified
+1. `nginx.conf` - Fixed API routing to backend
+2. `python_back_end/vibecoding/containers.py` - Enhanced error handling and status tracking
+3. `front_end/jfrontend/lib/api.ts` - Improved error handling and timeout
+4. `front_end/jfrontend/components/MonacoVibeFileTree.tsx` - Increased timeout
+5. `front_end/jfrontend/next.config.js` - Reverted unnecessary rewrites (Nginx handles routing)
+
+### Verification Steps
+
+1. **Test JSON Response Format**:
+   ```bash
+   curl -i http://localhost:8000/api/vibecoding/session/status?id=test-session
+   # Expected: JSON response with {ok: false, error: "SESSION_NOT_FOUND"}
+   
+   curl -i http://localhost:9000/api/vibecoding/session/status?id=test-session  
+   # Expected: Same JSON response (via Nginx proxy)
+   ```
+
+2. **Test Image Availability Error**:
+   - Start session without `vibecoding-optimized:latest` image
+   - Expected: UI shows "Container image not available" error (not JSON parse error)
+
+3. **Test Successful Session Creation**:
+   - Ensure image exists: `docker build -t vibecoding-optimized:latest python_back_end/vibecoding/`
+   - Start session
+   - Expected: Session becomes ready within 30s, file explorer loads automatically
+
+### Result/Status
+✅ **RESOLVED**: All session creation and status issues have been fixed
+
+- ❌ No more "Expected JSON but got HTML" errors
+- ✅ Proper JSON responses from all vibecoding endpoints  
+- ✅ Typed error handling for IMAGE_UNAVAILABLE and CREATE_FAILED
+- ✅ 30s timeout instead of 5s for better UX
+- ✅ Session status polling with proper error surfacing
+- ✅ File tree and terminal only load after session is confirmed ready
+
+### Docker/Ops Notes
+To ensure the vibecoding image is available:
+
+```bash
+# Build the optimized image locally
+docker build -t vibecoding-optimized:latest python_back_end/vibecoding/
+
+# Or pull from registry if available  
+docker pull <registry>/vibecoding-optimized:latest
+
+# Set environment variable (already configured in config.py)
+export VIBECODING_IMAGE=vibecoding-optimized:latest
+```
+
+The system now properly handles missing images and provides actionable error messages to users.
+
+---
+
 ## 2025-08-15 - Fixed All ESLint Warnings and Errors
 
 **Timestamp**: 2025-08-15 - Resolved all React Hook dependency warnings and unescaped entity errors

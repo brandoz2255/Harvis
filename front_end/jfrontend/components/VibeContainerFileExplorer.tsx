@@ -28,6 +28,7 @@ import { Card } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
+import { apiRequest } from '@/lib/api'
 
 interface ContainerFile {
   name: string
@@ -182,11 +183,10 @@ export default function VibeContainerFileExplorer({
       const token = localStorage.getItem('token')
       if (!token) return
 
-      const response = await fetch('/api/vibecoding/files', {
+      const result = await apiRequest('/api/vibecoding/files', {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
+          'Authorization': `Bearer ${token}`
         },
         body: JSON.stringify({
           action: 'list',
@@ -195,14 +195,13 @@ export default function VibeContainerFileExplorer({
         })
       })
 
-      if (response.ok) {
-        const data = await response.json()
-        const fileNodes: FileNode[] = data.files.map((file: ContainerFile) => ({
+      if (result.ok) {
+        const fileNodes: FileNode[] = result.data?.files?.map((file: ContainerFile) => ({
           ...file,
           depth: path.split('/').length - 1,
           isExpanded: expandedPaths.has(file.path),
           children: file.type === 'directory' ? [] : undefined
-        }))
+        })) || []
         
         if (path === '/workspace') {
           setFiles(fileNodes)
@@ -258,11 +257,10 @@ export default function VibeContainerFileExplorer({
 
       const filePath = `${currentPath}/${newFileName}`.replace('//', '/')
       
-      const response = await fetch('/api/vibecoding/files', {
+      const result = await apiRequest('/api/vibecoding/files', {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
+          'Authorization': `Bearer ${token}`
         },
         body: JSON.stringify({
           session_id: sessionId,
@@ -272,7 +270,7 @@ export default function VibeContainerFileExplorer({
         })
       })
 
-      if (response.ok) {
+      if (result.ok) {
         await loadFiles(currentPath)
         setNewFileName('')
         setShowCreateDialog(false)

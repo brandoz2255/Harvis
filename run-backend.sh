@@ -22,7 +22,7 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 # Check if env file exists
-ENV_FILE="/home/user/compose/aidev/python_back_end/.env"
+ENV_FILE="/Users/user/documents/vibecodev4/aidev/python_back_end/.env"
 if [ ! -f "$ENV_FILE" ]; then
   echo -e "${RED}Error: Environment file not found at $ENV_FILE${NC}"
   exit 1
@@ -67,7 +67,6 @@ start_backend() {
   # Start the backend service
   docker run --rm -it \
     --name backend \
-    --gpus all \
     -p 8000:8000 \
     --env-file "$ENV_FILE" \
     --network ollama-n8n-network \
@@ -95,7 +94,6 @@ start_backend_detached() {
   # Start the backend service in detached mode
   docker run -d \
     --name backend \
-    --gpus all \
     -p 8000:8000 \
     --env-file "$ENV_FILE" \
     --network ollama-n8n-network \

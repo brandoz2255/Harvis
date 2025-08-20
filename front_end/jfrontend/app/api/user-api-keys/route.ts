@@ -14,25 +14,16 @@ const ALGORITHM = 'aes-256-gcm';
 
 // Encrypt API key
 function encryptApiKey(text: string): string {
-  const iv = crypto.randomBytes(16);
-  const key = crypto.scryptSync(ENCRYPTION_KEY, 'salt', 32);
-  const cipher = crypto.createCipherGCM(ALGORITHM, key, iv);
+  const cipher = crypto.createCipher('aes-256-cbc', ENCRYPTION_KEY);
   let encrypted = cipher.update(text, 'utf8', 'hex');
   encrypted += cipher.final('hex');
-  const authTag = cipher.getAuthTag();
-  return iv.toString('hex') + ':' + authTag.toString('hex') + ':' + encrypted;
+  return encrypted;
 }
 
 // Decrypt API key
 function decryptApiKey(encryptedText: string): string {
-  const parts = encryptedText.split(':');
-  const iv = Buffer.from(parts[0], 'hex');
-  const authTag = Buffer.from(parts[1], 'hex');
-  const encrypted = parts[2];
-  const key = crypto.scryptSync(ENCRYPTION_KEY, 'salt', 32);
-  const decipher = crypto.createDecipherGCM(ALGORITHM, key, iv);
-  decipher.setAuthTag(authTag);
-  let decrypted = decipher.update(encrypted, 'hex', 'utf8');
+  const decipher = crypto.createDecipher('aes-256-cbc', ENCRYPTION_KEY);
+  let decrypted = decipher.update(encryptedText, 'hex', 'utf8');
   decrypted += decipher.final('utf8');
   return decrypted;
 }

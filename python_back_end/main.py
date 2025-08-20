@@ -6,6 +6,7 @@ from starlette.websockets import WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn, os, sys, tempfile, uuid, base64, io, logging, re, requests, random
+import docker.errors
 
 # Import optimized auth module
 from auth_optimized import get_current_user_optimized, auth_optimizer, get_auth_stats
@@ -17,6 +18,7 @@ try:
 except ImportError:
     pass  # Will log after logger is set up
 from datetime import datetime, timedelta
+
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 import asyncpg
@@ -295,6 +297,75 @@ app.add_middleware(
 if os.path.exists(FRONTEND_DIR):
     app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
     logger.info("Frontend directory mounted at %s", FRONTEND_DIR)
+
+# Add comprehensive JSON-only exception handlers for consistent error responses
+from fastapi.exceptions import RequestValidationError
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """Ensure all HTTP exceptions return JSON, never HTML."""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "ok": False,
+            "error": exc.detail if isinstance(exc.detail, str) else str(exc.detail),
+            "code": "HTTP_ERROR"
+        }
+    )
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Handle Pydantic validation errors with structured response."""
+    errors = {}
+    for error in exc.errors():
+        field = ".".join(str(x) for x in error["loc"])
+        errors[field] = error["msg"]
+    
+    return JSONResponse(
+        status_code=422,
+        content={
+            "ok": False,
+            "error": "VALIDATION_ERROR",
+            "details": errors
+        }
+    )
+
+@app.exception_handler(docker.errors.ImageNotFound)
+async def image_not_found_handler(request: Request, exc: docker.errors.ImageNotFound):
+    return JSONResponse(
+        status_code=404,
+        content={
+            "ok": False,
+            "error": "IMAGE_UNAVAILABLE",
+            "details": str(exc)
+        }
+    )
+
+@app.exception_handler(docker.errors.APIError)
+async def docker_api_error_handler(request: Request, exc: docker.errors.APIError):
+    return JSONResponse(
+        status_code=500,
+        content={
+            "ok": False,
+            "error": "CREATE_FAILED",
+            "details": str(exc)
+        }
+    )
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Catch-all exception handler to ensure JSON-only responses."""
+    logger.error(f"Unhandled exception: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "ok": False,
+            "error": "INTERNAL",
+            "details": "Internal server error"
+        }
+    )
+
+# Duplicate handlers removed - using the comprehensive ones above
 
 # Include vibecoding routers
 app.include_router(sessions_router)

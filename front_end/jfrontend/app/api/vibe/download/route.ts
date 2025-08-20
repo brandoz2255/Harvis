@@ -92,7 +92,7 @@ async function downloadFolderAsZip(client: any, folder: any) {
   const archive = archiver('zip', { zlib: { level: 9 } })
   const chunks: Buffer[] = []
 
-  return new Promise((resolve, reject) => {
+  return new Promise<NextResponse>((resolve, reject) => {
     archive.on('data', (chunk) => chunks.push(chunk))
     archive.on('end', () => {
       const zipBuffer = Buffer.concat(chunks)
@@ -149,7 +149,7 @@ async function downloadSessionAsZip(client: any, sessionId: string, userId: stri
   const archive = archiver('zip', { zlib: { level: 9 } })
   const chunks: Buffer[] = []
 
-  return new Promise((resolve, reject) => {
+  return new Promise<NextResponse>((resolve, reject) => {
     archive.on('data', (chunk) => chunks.push(chunk))
     archive.on('end', () => {
       const zipBuffer = Buffer.concat(chunks)

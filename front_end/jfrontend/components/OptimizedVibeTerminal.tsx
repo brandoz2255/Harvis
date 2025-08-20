@@ -4,6 +4,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react'
 import { Terminal, Power, RefreshCw, Maximize2, Minimize2, Copy, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { apiRequest } from '@/lib/api'
 
 interface OptimizedVibeTerminalProps {
   sessionId: string
@@ -42,12 +43,15 @@ export default function OptimizedVibeTerminal({
   const [isConnecting, setIsConnecting] = useState(false)
   const [isExecutingCommand, setIsExecutingCommand] = useState(false)
   const [isMaximized, setIsMaximized] = useState(false)
+  const [sessionReady, setSessionReady] = useState(false)
+  const [readinessChecking, setReadinessChecking] = useState(false)
   
   const websocketRef = useRef<WebSocket | null>(null)
   const terminalEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const commandHistoryRef = useRef<string[]>([])
   const historyIndexRef = useRef(-1)
+  const readinessIntervalRef = useRef<NodeJS.Timeout | null>(null)
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null)
 
   const addLine = useCallback((content: string, type: TerminalLine['type'] = 'output') => {
@@ -76,8 +80,52 @@ export default function OptimizedVibeTerminal({
     scrollToBottom()
   }, [lines, scrollToBottom])
 
+  // Check session readiness before allowing terminal connection
+  const checkSessionReadiness = useCallback(async () => {
+    if (!sessionId || readinessChecking) return false
+    
+    setReadinessChecking(true)
+    try {
+      const result = await apiRequest(`/api/vibecoding/sessions/${sessionId}/status`)
+      
+      if (result.ok && result.data?.ready) {
+        setSessionReady(true)
+        if (readinessIntervalRef.current) {
+          clearInterval(readinessIntervalRef.current)
+          readinessIntervalRef.current = null
+        }
+        return true
+      } else {
+        addLine(`Session starting: ${result.data?.message || 'Preparing container...'}`, 'system')
+        return false
+      }
+    } catch (error) {
+      console.error('Error checking session readiness:', error)
+      addLine(`Error checking session status: ${error}`, 'error')
+      return false
+    } finally {
+      setReadinessChecking(false)
+    }
+  }, [sessionId, readinessChecking, addLine])
+
   const connectWebSocket = useCallback(async () => {
     if (!sessionId || websocketRef.current?.readyState === WebSocket.OPEN) return
+
+    // Check readiness first
+    const ready = await checkSessionReadiness()
+    if (!ready) {
+      addLine('⏳ Waiting for session to be ready...', 'system')
+      // Set up periodic readiness checking
+      if (!readinessIntervalRef.current) {
+        readinessIntervalRef.current = setInterval(async () => {
+          const isReady = await checkSessionReadiness()
+          if (isReady) {
+            connectWebSocket()
+          }
+        }, 2000)
+      }
+      return
+    }
 
     setIsConnecting(true)
     addLine('🔌 Establishing optimized terminal connection...', 'system')
@@ -87,6 +135,8 @@ export default function OptimizedVibeTerminal({
       const wsUrl = `${wsProtocol}//${window.location.host}/api/vibecoding/container/${sessionId}/terminal`
       
       const ws = new WebSocket(wsUrl)
+      // Configure for binary support and better performance
+      ws.binaryType = 'arraybuffer'
       websocketRef.current = ws
 
       let connectionTimeout = setTimeout(() => {
@@ -115,21 +165,41 @@ export default function OptimizedVibeTerminal({
 
       ws.onmessage = (event) => {
         try {
-          // Try to parse as JSON first (for structured messages)
-          const data = JSON.parse(event.data)
-          if (data.type === 'error') {
-            addLine(`❌ Error: ${data.message}`, 'error')
-          } else if (data.type === 'system') {
-            addLine(data.message, 'system')
-          } else {
-            addLine(data.content || event.data, 'output')
+          // Handle binary messages for optimized terminal I/O
+          if (event.data instanceof ArrayBuffer) {
+            const decoder = new TextDecoder('utf-8', { fatal: false })
+            const content = decoder.decode(event.data)
+            if (content.trim()) {
+              addLine(content, 'output')
+            }
+            return
           }
-        } catch {
-          // Raw terminal output - handle ANSI escape codes if needed
-          const content = event.data
-          if (content.trim()) {
-            addLine(content, 'output')
+          
+          // Handle text messages
+          if (typeof event.data === 'string') {
+            try {
+              // Try to parse as JSON first (for structured messages)
+              const data = JSON.parse(event.data)
+              if (data.type === 'error') {
+                addLine(`❌ Error: ${data.message}`, 'error')
+              } else if (data.type === 'system') {
+                addLine(data.message, 'system')
+              } else if (data.type === 'ready') {
+                addLine('🚀 Terminal ready for input', 'system')
+              } else {
+                addLine(data.content || event.data, 'output')
+              }
+            } catch {
+              // Raw terminal output - handle ANSI escape codes if needed
+              const content = event.data
+              if (content.trim()) {
+                addLine(content, 'output')
+              }
+            }
           }
+        } catch (error) {
+          console.error('Error processing terminal message:', error)
+          addLine('Error processing terminal output', 'error')
         }
       }
 
@@ -202,14 +272,16 @@ export default function OptimizedVibeTerminal({
     try {
       // Try WebSocket first (faster)
       if (websocketRef.current?.readyState === WebSocket.OPEN) {
-        websocketRef.current.send(command + '\n')
+        // Send as binary for better performance
+        const encoder = new TextEncoder()
+        const data = encoder.encode(command + '\n')
+        websocketRef.current.send(data)
       } else {
         // Fallback to HTTP API
         const token = localStorage.getItem('token')
-        const response = await fetch('/api/vibecoding/files', {
+        const result = await apiRequest('/api/vibecoding/files', {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/json',
             ...(token && { 'Authorization': `Bearer ${token}` })
           },
           body: JSON.stringify({
@@ -219,9 +291,8 @@ export default function OptimizedVibeTerminal({
           })
         })
 
-        if (response.ok) {
-          const data = await response.json()
-          addLine(data.output || '', data.success ? 'output' : 'error')
+        if (result.ok) {
+          addLine(result.data?.output || '', result.data?.success ? 'output' : 'error')
         } else {
           addLine('❌ Command execution failed', 'error')
         }
@@ -268,11 +339,14 @@ export default function OptimizedVibeTerminal({
       e.preventDefault()
       // Send interrupt signal
       if (websocketRef.current?.readyState === WebSocket.OPEN) {
-        websocketRef.current.send('\x03') // Ctrl+C
+        // Send Ctrl+C as binary
+        const encoder = new TextEncoder()
+        const data = encoder.encode('\x03')
+        websocketRef.current.send(data)
       }
       addLine('^C', 'input')
     }
-  }, [currentCommand, executeCommandDirect])
+  }, [currentCommand, executeCommandDirect, addLine])
 
   const clearTerminal = useCallback(() => {
     setLines([{
@@ -292,16 +366,22 @@ export default function OptimizedVibeTerminal({
     })
   }, [lines, addLine])
 
-  // Auto-connect when sessionId changes and container is running
+  // Auto-connect when sessionId changes and container is running with readiness check
   useEffect(() => {
     if (sessionId && isContainerRunning && !websocketRef.current) {
+      // Start with readiness check, then connect
       connectWebSocket()
     }
     
     return () => {
       disconnectWebSocket()
+      // Clean up readiness checking
+      if (readinessIntervalRef.current) {
+        clearInterval(readinessIntervalRef.current)
+        readinessIntervalRef.current = null
+      }
     }
-  }, [sessionId, isContainerRunning, connectWebSocket, disconnectWebSocket])
+  }, [sessionId, isContainerRunning, connectWebSocket, disconnectWebSocket, checkSessionReadiness])
 
   const handleContainerStart = async () => {
     if (onContainerStart) {

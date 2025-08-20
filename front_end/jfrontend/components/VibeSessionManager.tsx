@@ -23,13 +23,21 @@ import { Card } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
+import { apiRequest, waitReady, safeJson, createSession, getSessionStatus, CreateSessionPayload } from "@/lib/api"
+import SessionProgress, { useSessionProgress } from "@/components/SessionProgress"
+
+// Simple notification helper (replace with proper toast library later)
+const showNotification = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
+  console.log(`${type.toUpperCase()}: ${message}`)
+  // For now, just console log. In production, integrate with proper toast library
+}
 
 interface Session {
   id: string
   session_id: string
   project_name: string
   description?: string
-  container_status: 'running' | 'stopped' | 'starting' | 'stopping'
+  container_status: 'running' | 'stopped' | 'starting' | 'stopping' | 'error'
   created_at: string
   updated_at: string
   last_activity: string
@@ -57,6 +65,9 @@ export default function VibeSessionManager({
   const [sessions, setSessions] = useState<Session[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [isCreating, setIsCreating] = useState(false)
+  const [creatingSessionId, setCreatingSessionId] = useState<string | null>(null)
+  const [showProgress, setShowProgress] = useState(false)
+  const [progressError, setProgressError] = useState<string | null>(null)
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null)
   const [newProjectName, setNewProjectName] = useState("")
   const [newDescription, setNewDescription] = useState("")
@@ -70,16 +81,14 @@ export default function VibeSessionManager({
       const token = localStorage.getItem('token')
       if (!token) return
 
-      const response = await fetch('/api/vibecoding/sessions', {
+      const result = await apiRequest('/api/vibecoding/sessions', {
         headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
+          'Authorization': `Bearer ${token}`
         }
       })
 
-      if (response.ok) {
-        const data = await response.json()
-        setSessions(data.sessions || [])
+      if (result.ok) {
+        setSessions(result.data?.sessions || [])
       } else {
         console.error('Failed to load sessions')
       }
@@ -99,21 +108,81 @@ export default function VibeSessionManager({
   const handleCreateSession = async () => {
     if (!newProjectName.trim() || isCreating) return
 
+    // Clear any previous error state
+    setProgressError(null)
+    
     try {
       setIsCreating(true)
-      const session = await onSessionCreate(newProjectName, newDescription)
+      setShowCreateDialog(false) // Hide dialog immediately
       
-      // Refresh sessions list
-      await loadSessions()
+      // Create session payload
+      const payload: CreateSessionPayload = {
+        workspace_id: String(userId),
+        project_name: newProjectName,
+        description: newDescription,
+        template: undefined,
+        image: "vibecoding-optimized:latest"
+      }
       
+      console.log("Creating session with payload:", payload)
+      
+      // Call createSession API - this validates payload and returns sessionId immediately
+      const sessionId = await createSession(payload)
+      
+      // Guard against undefined sessionId
+      if (!sessionId || typeof sessionId !== 'string') {
+        throw new Error('SESSION_ID_MISSING: No session ID returned from server')
+      }
+      
+      setCreatingSessionId(sessionId)
+      setShowProgress(true)
+      
+      // Start polling for ready status with progress updates
+      try {
+        const result = await waitReady(sessionId, { timeoutMs: 300000, intervalMs: 500 })
+        
+        if (result.ready) {
+          // Session is ready - create session object for compatibility
+          const session: Session = {
+            id: sessionId,
+            session_id: sessionId,
+            project_name: newProjectName,
+            description: newDescription,
+            container_status: 'running',
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            last_activity: new Date().toISOString(),
+            file_count: 0,
+            activity_status: 'active'
+          }
+          
+          // Refresh sessions list and select new session
+          await loadSessions()
+          onSessionSelect(session)
+          showNotification(`Session "${newProjectName}" is ready!`, 'success')
+          
+          // Hide progress and clean up
+          setShowProgress(false)
+          setCreatingSessionId(null)
+        } else {
+          throw new Error('Session creation timed out')
+        }
+      } catch (waitError) {
+        const errorMessage = waitError instanceof Error ? waitError.message : 'Session creation failed'
+        console.error('Session creation failed:', errorMessage)
+        setProgressError(errorMessage)
+        showNotification(`Failed to create session: ${errorMessage}`, 'error')
+      }
+      
+      // Clear form
       setNewProjectName("")
       setNewDescription("")
-      setShowCreateDialog(false)
       
-      // Select the new session
-      onSessionSelect(session)
-    } catch (error) {
-      console.error('Failed to create session:', error)
+    } catch (createError) {
+      const errorMessage = createError instanceof Error ? createError.message : 'Session creation failed'
+      console.error('Failed to create session:', errorMessage)
+      setProgressError(errorMessage)
+      showNotification(`Failed to create session: ${errorMessage}`, 'error')
     } finally {
       setIsCreating(false)
     }
@@ -125,6 +194,7 @@ export default function VibeSessionManager({
     try {
       await onSessionDelete(sessionId)
       await loadSessions()
+      showNotification('Session deleted successfully', 'success')
       
       // If we deleted the current session, clear selection
       if (currentSessionId === sessionId) {
@@ -132,6 +202,7 @@ export default function VibeSessionManager({
       }
     } catch (error) {
       console.error('Failed to delete session:', error)
+      showNotification('Failed to delete session', 'error')
     }
   }
 
@@ -146,11 +217,10 @@ export default function VibeSessionManager({
       const token = localStorage.getItem('token')
       if (!token) return
 
-      const response = await fetch(`/api/vibecoding/sessions/${sessionId}`, {
+      const result = await apiRequest(`/api/vibecoding/sessions/${sessionId}`, {
         method: 'PUT',
         headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
+          'Authorization': `Bearer ${token}`
         },
         body: JSON.stringify({
           project_name: editProjectName,
@@ -158,7 +228,7 @@ export default function VibeSessionManager({
         })
       })
 
-      if (response.ok) {
+      if (result.ok) {
         await loadSessions()
         setEditingSessionId(null)
       }
@@ -171,6 +241,30 @@ export default function VibeSessionManager({
     setEditingSessionId(null)
     setEditProjectName("")
     setEditDescription("")
+  }
+  
+  const handleProgressCancel = () => {
+    setShowProgress(false)
+    setCreatingSessionId(null)
+    setProgressError(null)
+    setIsCreating(false)
+    showNotification('Session creation cancelled', 'info')
+  }
+  
+  const handleProgressRetry = () => {
+    if (creatingSessionId) {
+      setProgressError(null)
+      // Restart the session creation flow
+      handleCreateSession()
+    }
+  }
+  
+  const handleProgressComplete = async (sessionId: string) => {
+    // Session is ready - refresh the list and hide progress
+    await loadSessions()
+    setShowProgress(false)
+    setCreatingSessionId(null)
+    setProgressError(null)
   }
 
   const getActivityColor = (status: string) => {
@@ -214,23 +308,37 @@ export default function VibeSessionManager({
   }
 
   return (
-    <Card className={`bg-gray-900/50 backdrop-blur-sm border-purple-500/30 flex flex-col ${className}`}>
-      {/* Header */}
-      <div className="p-4 border-b border-purple-500/30 flex-shrink-0">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center space-x-2">
-            <FolderOpen className="w-5 h-5 text-purple-400" />
-            <h3 className="text-lg font-semibold text-purple-300">Sessions</h3>
-            <Badge variant="outline" className="border-gray-500 text-gray-400">
-              {sessions.length}
-            </Badge>
-          </div>
+    <>
+      <Card className={`bg-gray-900/50 backdrop-blur-sm border-purple-500/30 flex flex-col ${className}`}>
+        {/* Header */}
+        <div className="p-4 border-b border-purple-500/30 flex-shrink-0">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-2">
+              <FolderOpen className="w-5 h-5 text-purple-400" />
+              <h3 className="text-lg font-semibold text-purple-300">Sessions</h3>
+              <Badge variant="outline" className="border-gray-500 text-gray-400">
+                {sessions.length}
+              </Badge>
+            </div>
           
           <Dialog open={showCreateDialog} onOpenChange={setShowCreateDialog}>
             <DialogTrigger asChild>
-              <Button size="sm" className="bg-purple-600 hover:bg-purple-700 text-white">
-                <Plus className="w-3 h-3 mr-1" />
-                New
+              <Button 
+                size="sm" 
+                className="bg-purple-600 hover:bg-purple-700 text-white"
+                disabled={isCreating || showProgress}
+              >
+                {isCreating ? (
+                  <>
+                    <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                    Creating...
+                  </>
+                ) : (
+                  <>
+                    <Plus className="w-3 h-3 mr-1" />
+                    New
+                  </>
+                )}
               </Button>
             </DialogTrigger>
             <DialogContent className="bg-gray-900 border-purple-500/30 text-white">
@@ -265,15 +373,20 @@ export default function VibeSessionManager({
                 <div className="flex space-x-2 pt-4">
                   <Button
                     onClick={handleCreateSession}
-                    disabled={!newProjectName.trim() || isCreating}
+                    disabled={!newProjectName.trim() || isCreating || showProgress}
                     className="bg-purple-600 hover:bg-purple-700 text-white flex-1"
                   >
                     {isCreating ? (
-                      <Loader2 className="w-4 h-4 animate-spin mr-2" />
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin mr-2" />
+                        Creating...
+                      </>
                     ) : (
-                      <Plus className="w-4 h-4 mr-2" />
+                      <>
+                        <Plus className="w-4 h-4 mr-2" />
+                        Create Session
+                      </>
                     )}
-                    Create Session
                   </Button>
                   <Button
                     onClick={() => setShowCreateDialog(false)}
@@ -298,9 +411,19 @@ export default function VibeSessionManager({
             <Button
               onClick={() => setShowCreateDialog(true)}
               className="bg-purple-600 hover:bg-purple-700 text-white"
+              disabled={isCreating || showProgress}
             >
-              <Plus className="w-4 h-4 mr-2" />
-              Create Your First Session
+              {isCreating ? (
+                <>
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  Creating...
+                </>
+              ) : (
+                <>
+                  <Plus className="w-4 h-4 mr-2" />
+                  Create Your First Session
+                </>
+              )}
             </Button>
           </div>
         ) : (
@@ -434,11 +557,27 @@ export default function VibeSessionManager({
           variant="outline"
           size="sm"
           className="w-full bg-gray-800 border-gray-600 text-gray-300 hover:bg-gray-700"
+          disabled={isCreating || showProgress}
         >
           <Settings className="w-3 h-3 mr-2" />
           Refresh Sessions
         </Button>
-      </div>
-    </Card>
+        </div>
+      </Card>
+      
+      {/* Session Creation Progress Modal */}
+      {showProgress && creatingSessionId && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="w-full max-w-md">
+            <SessionProgress
+              sessionId={creatingSessionId}
+              onCancel={handleProgressCancel}
+              onRetry={progressError ? handleProgressRetry : undefined}
+              onComplete={handleProgressComplete}
+            />
+          </div>
+        </div>
+      )}
+    </>
   )
 }
