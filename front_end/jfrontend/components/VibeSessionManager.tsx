@@ -139,7 +139,7 @@ export default function VibeSessionManager({
       
       // Start polling for ready status with progress updates
       try {
-        const result = await waitReady(sessionId, { timeoutMs: 300000, intervalMs: 500 })
+        const result = await waitReady(sessionId, { timeoutMs: 300000 })
         
         if (result.ready) {
           // Session is ready - create session object for compatibility

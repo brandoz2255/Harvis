@@ -1,13 +1,17 @@
 /**
  * Production-ready API utilities for Vibe Coding frontend
- * Forces all vibecoding API calls to hit FastAPI backend directly
+ * Option A: Uses Next.js proxy for same-origin requests (eliminates CORS)
+ * Option B: Direct backend calls with Bearer tokens for production
  * Handles JSON responses consistently with proper error handling
  */
 
-// API Configuration - Always use absolute URLs to FastAPI backend
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000'
+// API Configuration 
+// Option A: Use relative URLs (proxied by Next.js to backend)
+// Option B: Use absolute URLs for direct backend access
+const USE_PROXY = process.env.NODE_ENV === 'development' || process.env.NEXT_PUBLIC_USE_PROXY === 'true'
+const API_BASE_URL = USE_PROXY ? '' : (process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000')
 export const API_BASE = API_BASE_URL.replace(/\/+$/, '') // Remove trailing slashes
-export const WS_BASE = API_BASE.replace(/^https?:/, 'ws:') // Convert http->ws for WebSocket
+export const WS_BASE = USE_PROXY ? 'ws://localhost:9000' : API_BASE.replace(/^https?:/, 'ws:') // WebSocket URL
 
 // Error types for structured error handling
 export type ApiErrorCode = 
@@ -17,6 +21,20 @@ export type ApiErrorCode =
   | 'INTERNAL' 
   | 'PARSE_ERROR'
   | 'NETWORK_ERROR'
+
+// Global error handler for UI notifications
+export type ErrorHandler = (error: { code: ApiErrorCode; message: string; sessionId?: string }) => void
+let globalErrorHandler: ErrorHandler | null = null
+
+export function setGlobalErrorHandler(handler: ErrorHandler) {
+  globalErrorHandler = handler
+}
+
+function notifyGlobalError(code: ApiErrorCode, message: string, sessionId?: string) {
+  if (globalErrorHandler) {
+    globalErrorHandler({ code, message, sessionId })
+  }
+}
 
 export interface ApiResponse<T = any> {
   ok: boolean;
@@ -100,22 +118,22 @@ function getErrorCodeFromMessage(error?: string): ApiErrorCode {
 }
 
 /**
- * Enhanced fetch wrapper with absolute URLs and credentials
+ * Enhanced fetch wrapper with proxy-aware URLs and credentials
  */
 export async function apiRequest<T = any>(
   endpoint: string, 
   options: RequestInit = {}
 ): Promise<ApiResponse<T>> {
   try {
-    // Ensure absolute URL for vibecoding endpoints
-    const url = endpoint.startsWith('/api/vibecoding') 
-      ? `${API_BASE}${endpoint}`
-      : endpoint;
+    // Use proxy in development, absolute URLs in production
+    const url = USE_PROXY 
+      ? endpoint // Relative URL, proxied by Next.js
+      : (endpoint.startsWith('/api/vibecoding') ? `${API_BASE}${endpoint}` : endpoint);
 
-    console.log(`[API] Making request to: ${url}`);
+    console.log(`[API] Making request to: ${url} (proxy: ${USE_PROXY})`);
 
     const response = await fetch(url, {
-      credentials: 'include', // Important for CORS cookies/auth
+      credentials: 'include', // Important for cookies/auth
       headers: {
         'Content-Type': 'application/json',
         ...options.headers,
@@ -169,7 +187,12 @@ export async function createSession(payload: CreateSessionPayload): Promise<stri
       throw new Error('UNAUTHORIZED: No authentication token found. Please sign in.');
     }
     
-    const response = await fetch(`${API_BASE}/api/vibecoding/sessions/create`, {
+    // Use proxy-aware URL
+    const url = USE_PROXY 
+      ? '/api/vibecoding/sessions/create'
+      : `${API_BASE}/api/vibecoding/sessions/create`;
+    
+    const response = await fetch(url, {
       method: 'POST',
       credentials: 'include',
       headers: {
@@ -190,6 +213,13 @@ export async function createSession(payload: CreateSessionPayload): Promise<stri
       throw new Error('SERVER_ERROR: No session ID returned from server');
     }
     
+    // Store API token for Option B (if provided)
+    const apiToken = result.data?.api_token;
+    if (apiToken && !USE_PROXY) {
+      localStorage.setItem(`session_token_${sessionId}`, apiToken);
+      console.log(`🔑 Session token stored for ${sessionId}`);
+    }
+    
     console.log(`✅ Session created: ${sessionId}`);
     return sessionId;
   } catch (error) {
@@ -208,15 +238,29 @@ export async function getSessionStatus(sessionId: string): Promise<SessionStatus
   }
   
   try {
-    // Get auth token from localStorage
-    const token = localStorage.getItem('token');
+    // Get auth token (session-specific for Option B, general for Option A)
+    let token = localStorage.getItem('token');
+    
+    // In production mode (Option B), prefer session-specific token
+    if (!USE_PROXY) {
+      const sessionToken = localStorage.getItem(`session_token_${sessionId}`);
+      if (sessionToken) {
+        token = sessionToken;
+      }
+    }
+    
     if (!token) {
       throw new Error('UNAUTHORIZED: No authentication token found. Please sign in.');
     }
     
-    const response = await fetch(`${API_BASE}/api/vibecoding/session/status?id=${sessionId}`, {
+    // Use proxy-aware URL
+    const url = USE_PROXY 
+      ? `/api/vibecoding/session/status?id=${sessionId}`
+      : `${API_BASE}/api/vibecoding/session/status?id=${sessionId}`;
+    
+    const response = await fetch(url, {
       method: 'GET',
-      credentials: 'include',
+      credentials: USE_PROXY ? 'include' : 'omit', // Include credentials only for proxy mode
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${token}`,
@@ -255,14 +299,14 @@ export async function getSessionStatus(sessionId: string): Promise<SessionStatus
 }
 
 /**
- * Wait for session to become ready with robust error handling and backoff
- * Stops immediately on wrong origin, auth errors, or non-existent sessions
+ * Wait for session to become ready with backoff polling and terminal state handling
+ * Stops immediately on terminal states (ready, error) and auth errors
  */
 export async function waitReady(
   sessionId: string, 
-  options: { timeoutMs?: number; intervalMs?: number } = {}
+  options: { timeoutMs?: number; signal?: AbortSignal } = {}
 ): Promise<{ ready: boolean; status?: SessionStatusResponse }> {
-  const { timeoutMs = 300000, intervalMs = 400 } = options;
+  const { timeoutMs = 300000, signal } = options;
   
   // Guard against undefined/empty session ID immediately
   if (!sessionId || typeof sessionId !== 'string') {
@@ -275,7 +319,7 @@ export async function waitReady(
     return activePollers.get(sessionId)!;
   }
 
-  const pollerPromise = waitReadyInternal(sessionId, timeoutMs, intervalMs);
+  const pollerPromise = waitSessionReady(sessionId, timeoutMs, signal);
   activePollers.set(sessionId, pollerPromise);
   
   try {
@@ -285,74 +329,94 @@ export async function waitReady(
   }
 }
 
-async function waitReadyInternal(
+async function waitSessionReady(
   sessionId: string, 
-  timeoutMs: number, 
-  intervalMs: number
+  timeoutMs: number,
+  signal?: AbortSignal
 ): Promise<{ ready: boolean; status?: SessionStatusResponse }> {
+  let delay = 800; // ms - start with 800ms
+  const maxDelay = 5000; // max 5s between polls
   const startTime = Date.now();
-  let pollInterval = intervalMs; // Start with specified interval, exponential backoff to max 2s
-  const maxInterval = 2000;
-  const bootstrapWindow = 5000; // Allow SESSION_NOT_FOUND for 5s after creation
   
   console.log(`⏳ Waiting for session ${sessionId} to be ready (timeout: ${timeoutMs}ms)`);
-  
-  while (Date.now() - startTime < timeoutMs) {
+
+  for (let i = 0; i < 30; i++) {
+    // Check for cancellation
+    if (signal?.aborted) {
+      throw new Error('ABORTED');
+    }
+    
+    // Check timeout
+    if (Date.now() - startTime > timeoutMs) {
+      throw new Error('TIMEOUT_WAITING_FOR_SESSION');
+    }
+
     try {
-      const status = await getSessionStatus(sessionId);
+      // Use proxy-aware URL  
+      const url = USE_PROXY 
+        ? `/api/vibecoding/sessions/${sessionId}/status`
+        : `${API_BASE}/api/vibecoding/sessions/${sessionId}/status`;
       
-      if (status.error) {
-        // Session has permanent error - stop polling
-        console.error(`❌ Session ${sessionId} has error: ${status.error}`);
-        return { ready: false, status };
+      const response = await fetch(url, {
+        credentials: USE_PROXY ? 'include' : 'omit',
+        headers: { 
+          'Accept': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('token')}`,
+        },
+        signal,
+      });
+
+      if (response.status === 404) {
+        throw new Error('SESSION_NOT_FOUND');
       }
-      
-      if (status.ready) {
+      if (response.status === 401) {
+        notifyGlobalError('UNAUTHORIZED', 'Sign in required to check session status.', sessionId);
+        throw new Error('UNAUTHORIZED');
+      }
+
+      const data = await response.json();
+
+      // Terminal states - stop polling
+      if (data.status === 'ready') {
         console.log(`✅ Session ${sessionId} is ready!`);
-        return { ready: true, status };
+        return { ready: true, status: data };
       }
       
-      // Session exists but not ready yet - log progress
-      const progressInfo = status.progress?.percent !== undefined 
-        ? `${status.progress.percent}%` 
-        : 'calculating...';
-      const etaInfo = status.progress?.eta_ms 
-        ? `ETA: ${Math.round(status.progress.eta_ms / 1000)}s` 
-        : '';
-      
-      console.log(`⏳ Session ${sessionId}: ${status.phase} (${progressInfo}) ${etaInfo}`);
+      if (data.status === 'error') {
+        console.error(`❌ Session ${sessionId} failed: ${data.error}`);
+        throw new Error(data.error || 'CREATE_FAILED');
+      }
+
+      // Non-terminal states (starting, stopped, etc.) → backoff and continue
+      console.log(`⏳ Session ${sessionId}: ${data.status}`);
       
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       
-      // Stop immediately on critical errors
-      if (errorMessage.startsWith('WRONG_ORIGIN:') || 
-          errorMessage.startsWith('UNAUTHORIZED:') ||
-          errorMessage.startsWith('INTERNAL:')) {
-        console.error(`❌ Critical error for session ${sessionId}: ${errorMessage}`);
+      // Terminal errors - stop immediately
+      if (errorMessage === 'SESSION_NOT_FOUND') {
+        console.error(`❌ Session not found: ${sessionId}`);
+        notifyGlobalError('SESSION_NOT_FOUND', 'Session not found. Please create a new session.', sessionId);
+        throw new Error('SESSION_NOT_FOUND');
+      }
+      
+      if (errorMessage === 'UNAUTHORIZED') {
+        throw error; // Already notified above
+      }
+      
+      if (errorMessage.includes('CREATE_FAILED') || errorMessage === 'ABORTED') {
         throw error;
       }
       
-      // Handle SESSION_NOT_FOUND with bootstrap window
-      if (errorMessage.startsWith('SESSION_NOT_FOUND:')) {
-        const elapsed = Date.now() - startTime;
-        if (elapsed > bootstrapWindow) {
-          console.error(`❌ Session not found: ${errorMessage}`);
-          throw error;
-        }
-        // Within bootstrap window, continue polling
-        console.log(`⏳ Session ${sessionId} not found yet (${elapsed}ms elapsed), continuing to poll...`);
-      } else {
-        // For network errors or other issues, continue polling but warn
-        console.warn(`Error checking session status (continuing to poll): ${errorMessage}`);
-      }
+      // Network errors - continue with backoff
+      console.warn(`Network error checking session status (retrying): ${errorMessage}`);
     }
-    
-    // Wait before next poll with exponential backoff
-    await new Promise(resolve => setTimeout(resolve, pollInterval));
-    pollInterval = Math.min(pollInterval * 1.5, maxInterval);
+
+    // Exponential backoff
+    await new Promise(resolve => setTimeout(resolve, delay));
+    delay = Math.min(maxDelay, Math.round(delay * 1.5));
   }
   
-  console.error(`❌ Session ${sessionId} did not become ready within ${timeoutMs}ms`);
-  return { ready: false };
+  console.error(`❌ Session ${sessionId} did not become ready after maximum attempts`);
+  throw new Error('TIMEOUT_WAITING_FOR_SESSION');
 }

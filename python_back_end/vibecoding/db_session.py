@@ -92,6 +92,52 @@ class VibeCodingSessionDB:
             except Exception as e:
                 logger.error(f"Failed to update container status: {e}")
                 return False
+
+    async def update_session_status(
+        self, 
+        session_id: str, 
+        status: str, 
+        error_message: Optional[str] = None,
+        container_id: Optional[str] = None
+    ) -> bool:
+        """Update session status with lifecycle states: starting, ready, error, stopped."""
+        async with self.db_pool.acquire() as conn:
+            try:
+                if container_id:
+                    await conn.execute("""
+                        UPDATE vibecoding_sessions 
+                        SET container_status = $1, error_message = $2, container_id = $3, last_activity = CURRENT_TIMESTAMP
+                        WHERE session_id = $4
+                    """, status, error_message, container_id, session_id)
+                else:
+                    await conn.execute("""
+                        UPDATE vibecoding_sessions 
+                        SET container_status = $1, error_message = $2, last_activity = CURRENT_TIMESTAMP
+                        WHERE session_id = $3
+                    """, status, error_message, session_id)
+                
+                if status != "starting":
+                    logger.info(f"📊 Session {session_id} status: {status}")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to update session status: {e}")
+                return False
+
+    async def get_session_with_user_check(self, session_id: str, user_id: int) -> Optional[Dict[str, Any]]:
+        """Get session by session_id with user ownership check."""
+        async with self.db_pool.acquire() as conn:
+            try:
+                row = await conn.fetchrow("""
+                    SELECT *, container_status, error_message FROM vibecoding_sessions 
+                    WHERE session_id = $1 AND user_id = $2
+                """, session_id, user_id)
+                
+                if row:
+                    return dict(row)
+                return None
+            except Exception as e:
+                logger.error(f"Failed to get session {session_id} for user {user_id}: {e}")
+                return None
     
     async def list_user_sessions(self, user_id: int, active_only: bool = True) -> List[Dict[str, Any]]:
         """List sessions for a user."""

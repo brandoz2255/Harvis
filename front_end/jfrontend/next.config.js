@@ -8,6 +8,12 @@ const nextConfig = {
   },
   async rewrites() {
     return [
+      // Proxy vibecoding API calls to backend (eliminates CORS)
+      {
+        source: "/api/vibecoding/:path*",
+        destination: "http://localhost:8000/api/vibecoding/:path*",
+      },
+      // Keep existing API routes
       {
         source: "/api/:path*",
         destination: "/api/:path*",

@@ -13,6 +13,7 @@ import json
 import time
 from typing import Dict, List, Optional, Any, Union
 from datetime import datetime, timedelta
+from contextlib import asynccontextmanager
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Request, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -20,9 +21,101 @@ import asyncpg
 from .db_session import get_session_db
 
 # Import auth utilities
-from auth_utils import get_current_user
+from auth_utils import get_current_user, get_user_bearer_or_cookie
+
+# JWT utilities for session tokens
+import os
+from jose import jwt
+from datetime import datetime, timedelta
+
+SECRET_KEY = os.getenv("JWT_SECRET", "key")
+ALGORITHM = "HS256"
+
+def create_session_token(user_id: int, session_id: str) -> str:
+    """Create a JWT token for session access (Option B)"""
+    to_encode = {
+        "sub": str(user_id),
+        "session_id": session_id,
+        "exp": datetime.utcnow() + timedelta(hours=2)  # Session tokens expire in 2 hours
+    }
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+async def docker_container_exists(session_id: str) -> bool:
+    """Check if container exists using labels (robust and fast)."""
+    try:
+        docker_client = docker.from_env()
+        containers = docker_client.containers.list(
+            all=True,
+            filters={"label": f"vibecoding.session_id={session_id}"}
+        )
+        return len(containers) > 0
+    except Exception as e:
+        logger.debug(f"Error checking container existence: {e}")
+        return False
+
+async def get_container_health(session_id: str) -> Optional[str]:
+    """Get container health status (quick check)."""
+    try:
+        docker_client = docker.from_env()
+        containers = docker_client.containers.list(
+            all=True,
+            filters={"label": f"vibecoding.session_id={session_id}"}
+        )
+        if containers:
+            container = containers[0]  # Should only be one per session
+            container.reload()
+            return container.status
+        return None
+    except Exception as e:
+        logger.debug(f"Error getting container health: {e}")
+        return None
+
+async def ensure_container_once(session_id: str, user_id: int, image: str = None) -> tuple[bool, Optional[str]]:
+    """
+    Idempotent container creation with throttling and locking.
+    Returns (success: bool, error_message: Optional[str])
+    """
+    now = time.time()
+    last = _last_attempt.get(session_id, 0)
+    
+    # Throttle attempts
+    if now - last < ATTEMPT_COOLDOWN:
+        logger.debug(f"Container creation throttled for session {session_id}")
+        return (False, None)  # Too soon, caller will report "starting"
+    
+    _last_attempt[session_id] = now
+
+    async with session_lock(session_id):
+        # Re-check after acquiring lock
+        if await docker_container_exists(session_id):
+            logger.debug(f"Container already exists for session {session_id}")
+            return (True, None)
+
+        try:
+            # Create container using the existing container manager
+            global container_manager
+            container_info = await container_manager.create_dev_container(session_id, image, str(user_id))
+            logger.info(f"✅ Container created for session {session_id}")
+            return (True, None)
+        except Exception as e:
+            # Log ONCE at warning; detailed trace at debug
+            logger.warning(f"Container create failed for session {session_id}: {e}")
+            logger.debug("Create stack", exc_info=True)
+            return (False, str(e))
 
 logger = logging.getLogger(__name__)
+
+# Session-level locks and throttling for container creation
+_session_locks: Dict[str, asyncio.Lock] = {}
+_last_attempt: Dict[str, float] = {}
+ATTEMPT_COOLDOWN = 3.0  # seconds between container creation attempts
+
+@asynccontextmanager
+async def session_lock(session_id: str):
+    """Get or create a lock for a specific session."""
+    lock = _session_locks.setdefault(session_id, asyncio.Lock())
+    async with lock:
+        yield
 
 router = APIRouter(tags=["vibe-dev-containers"])
 
@@ -76,6 +169,7 @@ class CreateSessionResponse(BaseModel):
     session_id: str
     phase: str = "Starting"
     message: Optional[str] = None
+    api_token: Optional[str] = None  # For Option B: Bearer token for session access
 
 def update_session_status(session_id: str, phase: str, percent: Optional[int] = None, 
                          eta_ms: Optional[int] = None, ready: bool = False, 
@@ -549,7 +643,7 @@ class ContainerManager:
             
             return container
         except docker.errors.NotFound:
-            logger.info(f"🚫 Container not found for session: {session_id}")
+            logger.debug(f"Container not found for session: {session_id}")
             return None
         except Exception as e:
             logger.error(f"Error finding container by name: {e}")
@@ -778,24 +872,30 @@ async def create_session_new(
         
         logger.info(f"Creating session {session_id} for user {user_id} with image {request.image}")
         
-        # Create session in database first
-        if request.project_name:
-            session_db = get_session_db()
-            await session_db.create_session(
-                session_id, current_user["id"], request.project_name, 
-                request.description or "", volume_name=f"{VOLUME_PREFIX}{session_id}"
-            )
+        # Create session in database first with 'starting' state
+        session_db = get_session_db()
+        await session_db.create_session(
+            session_id, current_user["id"], 
+            request.project_name or "Untitled Project", 
+            request.description or "", 
+            volume_name=f"{VOLUME_PREFIX}{session_id}"
+        )
         
-        # Start container creation asynchronously (don't await here)
-        asyncio.create_task(container_manager.create_dev_container(
-            session_id, request.image, user_id
-        ))
+        # Set initial state to 'starting' immediately
+        await session_db.update_session_status(session_id, "starting")
+        
+        # Start container creation in background (fire-and-forget)
+        asyncio.create_task(background_container_boot(session_id, current_user["id"], request.image))
+        
+        # Create API token for Option B (Bearer auth for production)
+        api_token = create_session_token(current_user["id"], session_id)
         
         return CreateSessionResponse(
             ok=True,
             session_id=session_id,
             phase="Starting",
-            message="Session creation started"
+            message="Session creation started",
+            api_token=api_token
         )
         
     except Exception as e:
@@ -948,114 +1048,7 @@ async def get_container_status(session_id: str):
         logger.error(f"Error getting container status: {e}")
         return {"status": "error", "session_id": session_id, "error": str(e), "ready": False}
 
-@router.get("/api/vibecoding/session/status")
-async def get_session_status_by_query(id: str):
-    """Get comprehensive session status for UI gating (query param version)."""
-    return await get_session_status_internal(id)
-
-@router.get("/api/vibecoding/sessions/{session_id}/status")
-async def get_session_status(session_id: str):
-    """Get comprehensive session status for UI gating (path param version)."""
-    return await get_session_status_internal(session_id)
-
-async def get_session_status_internal(session_id: str) -> JSONResponse:
-    """Internal function for session status checking - always returns JSON."""
-    try:
-        # Guard against empty/undefined session ID
-        if not session_id or session_id == "undefined":
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "ok": False,
-                    "ready": False,
-                    "error": "SESSION_ID_MISSING",
-                    "message": "Session ID is required"
-                }
-            )
-        
-        # Check session status store first
-        if session_id in SESSION_STATUS_STORE:
-            session_status = SESSION_STATUS_STORE[session_id]
-            
-            # If session has error, return it
-            if session_status.get("error"):
-                return JSONResponse(
-                    status_code=200,
-                    content={
-                        "ok": False,
-                        "ready": False,
-                        "phase": session_status["phase"],
-                        "progress": session_status["progress"],
-                        "error": session_status["error"],
-                        "session_id": session_id,
-                        "message": f"Session failed: {session_status['error']}"
-                    }
-                )
-            
-            # Return current status with progress
-            return JSONResponse(
-                status_code=200,
-                content={
-                    "ok": True,
-                    "ready": session_status["ready"],
-                    "phase": session_status["phase"],
-                    "progress": session_status["progress"],
-                    "error": None,
-                    "session_id": session_id,
-                    "message": "Session is ready" if session_status["ready"] else f"Session {session_status['phase'].lower()}..."
-                }
-            )
-        
-        # Session not in store - check if container exists
-        container = await container_manager.get_container(session_id)
-        if not container:
-            return JSONResponse(
-                status_code=404,
-                content={
-                    "ok": False,
-                    "ready": False,
-                    "error": "SESSION_NOT_FOUND",
-                    "session_id": session_id,
-                    "message": "Session not found"
-                }
-            )
-        
-        # Container exists but not tracked - assume ready if running
-        container.reload()
-        container_ready = container.status == "running"
-        
-        if container_ready:
-            try:
-                result = container.exec_run("test -f /tmp/ready && echo READY || echo WAIT", workdir="/")
-                container_ready = result.exit_code == 0 and b"READY" in result.output
-            except Exception:
-                container_ready = False
-        
-        return JSONResponse(
-            status_code=200,
-            content={
-                "ok": True,
-                "ready": container_ready,
-                "phase": "Ready" if container_ready else "Starting",
-                "progress": {"percent": 100 if container_ready else 0, "eta_ms": 0},
-                "error": None,
-                "session_id": session_id,
-                "message": "Session is ready" if container_ready else "Session starting..."
-            }
-        )
-        
-    except Exception as e:
-        logger.error(f"Error getting session status for {session_id}: {e}")
-        return JSONResponse(
-            status_code=500,
-            content={
-                "ok": False,
-                "ready": False,
-                "error": "INTERNAL",
-                "session_id": session_id,
-                "message": f"Internal server error: {str(e)}"
-            }
-        )
+# Session status endpoints removed - using authenticated versions below
 
 # WebSocket endpoint for real-time terminal with binary optimization
 @router.websocket("/api/vibecoding/container/{session_id}/terminal")
@@ -1252,24 +1245,30 @@ async def create_session_new(
         
         logger.info(f"Creating session {session_id} for user {user_id} with image {request.image}")
         
-        # Create session in database first
-        if request.project_name:
-            session_db = get_session_db()
-            await session_db.create_session(
-                session_id, current_user["id"], request.project_name, 
-                request.description or "", volume_name=f"{VOLUME_PREFIX}{session_id}"
-            )
+        # Create session in database first with 'starting' state
+        session_db = get_session_db()
+        await session_db.create_session(
+            session_id, current_user["id"], 
+            request.project_name or "Untitled Project", 
+            request.description or "", 
+            volume_name=f"{VOLUME_PREFIX}{session_id}"
+        )
         
-        # Start container creation asynchronously (don't await here)
-        asyncio.create_task(container_manager.create_dev_container(
-            session_id, request.image, user_id
-        ))
+        # Set initial state to 'starting' immediately
+        await session_db.update_session_status(session_id, "starting")
+        
+        # Start container creation in background (fire-and-forget)
+        asyncio.create_task(background_container_boot(session_id, current_user["id"], request.image))
+        
+        # Create API token for Option B (Bearer auth for production)
+        api_token = create_session_token(current_user["id"], session_id)
         
         return CreateSessionResponse(
             ok=True,
             session_id=session_id,
             phase="Starting",
-            message="Session creation started"
+            message="Session creation started",
+            api_token=api_token
         )
         
     except Exception as e:
@@ -1353,130 +1352,118 @@ async def get_session_files_endpoint(session_id: str):
 @router.get("/api/vibecoding/session/status")
 async def get_session_status_by_query(
     id: str,
-    current_user: dict = Depends(get_current_user)
+    user_id: int = Depends(get_user_bearer_or_cookie)
 ):
     """Get comprehensive session status for UI gating (query param version)."""
-    return await get_session_status_internal(id, current_user["id"])
+    return await get_session_status_idempotent(id, user_id)
 
 @router.get("/api/vibecoding/sessions/{session_id}/status")
 async def get_session_status(
     session_id: str,
-    current_user: dict = Depends(get_current_user)
+    user_id: int = Depends(get_user_bearer_or_cookie)
 ):
     """Get comprehensive session status for UI gating (path param version)."""
-    return await get_session_status_internal(session_id, current_user["id"])
+    return await get_session_status_idempotent(session_id, user_id)
 
-async def get_session_status_internal(session_id: str, user_id: int) -> JSONResponse:
-    """Internal function for session status checking - always returns JSON."""
+async def get_session_status_idempotent(session_id: str, user_id: int) -> JSONResponse:
+    """Idempotent session status checking - uses database state, no Docker spam."""
     try:
         # Guard against empty/undefined session ID
         if not session_id or session_id == "undefined":
             return JSONResponse(
                 status_code=400,
-                content={
-                    "ok": False,
-                    "ready": False,
-                    "error": "SESSION_ID_MISSING",
-                    "message": "Session ID is required"
-                }
+                content={"ok": False, "status": "error", "error": "SESSION_ID_MISSING"}
             )
         
-        # Check session status store first
-        if session_id in SESSION_STATUS_STORE:
-            session_status = SESSION_STATUS_STORE[session_id]
-            
-            # Verify session ownership
-            if session_status.get("owner_user_id") != str(user_id):
-                return JSONResponse(
-                    status_code=403,
-                    content={
-                        "ok": False,
-                        "ready": False,
-                        "error": "FORBIDDEN",
-                        "session_id": session_id,
-                        "message": "Access denied"
-                    }
-                )
-            
-            # If session has error, return it
-            if session_status.get("error"):
-                return JSONResponse(
-                    status_code=200,
-                    content={
-                        "ok": False,
-                        "ready": False,
-                        "phase": session_status["phase"],
-                        "progress": session_status["progress"],
-                        "error": session_status["error"],
-                        "session_id": session_id,
-                        "message": f"Session failed: {session_status['error']}"
-                    }
-                )
-            
-            # Return current status with progress
-            return JSONResponse(
-                status_code=200,
-                content={
-                    "ok": True,
-                    "ready": session_status["ready"],
-                    "phase": session_status["phase"],
-                    "progress": session_status["progress"],
-                    "error": None,
-                    "session_id": session_id,
-                    "message": "Session is ready" if session_status["ready"] else f"Session {session_status['phase'].lower()}..."
-                }
-            )
+        # Get session from database with user ownership check
+        session_db = get_session_db()
+        sess = await session_db.get_session_with_user_check(session_id, user_id)
         
-        # Session not in store - check if container exists
-        container = await container_manager.get_container(session_id)
-        if not container:
+        if not sess:
             return JSONResponse(
                 status_code=404,
-                content={
-                    "ok": False,
-                    "ready": False,
-                    "error": "SESSION_NOT_FOUND",
-                    "session_id": session_id,
-                    "message": "Session not found"
-                }
+                content={"ok": False, "status": "not_found", "error": "SESSION_NOT_FOUND"}
             )
         
-        # Container exists but not tracked - assume ready if running
-        container.reload()
-        container_ready = container.status == "running"
+        # Get current status from database
+        current_status = sess.get("container_status", "starting")
+        error_message = sess.get("error_message")
         
-        if container_ready:
-            try:
-                result = container.exec_run("test -f /tmp/ready && echo READY || echo WAIT", workdir="/")
-                container_ready = result.exit_code == 0 and b"READY" in result.output
-            except Exception:
-                container_ready = False
+        # Fast path: already ready → return quickly
+        if current_status == "ready":
+            health = await get_container_health(session_id)
+            return JSONResponse(
+                status_code=200,
+                content={"ok": True, "status": "ready", "health": health}
+            )
         
+        # If starting or stopped, try a *throttled* ensure
+        if current_status in ("starting", "stopped"):
+            created_or_exists, error = await ensure_container_once(session_id, user_id, None)
+            
+            if error:
+                await session_db.update_session_status(session_id, "error", error)
+                return JSONResponse(
+                    status_code=200,
+                    content={"ok": False, "status": "error", "error": error}
+                )
+            
+            if created_or_exists:
+                await session_db.update_session_status(session_id, "ready")
+                return JSONResponse(
+                    status_code=200,
+                    content={"ok": True, "status": "ready"}
+                )
+            
+            # Still spinning up → don't log at INFO every poll
+            return JSONResponse(
+                status_code=200,
+                content={"ok": True, "status": "starting"}
+            )
+        
+        if current_status == "error":
+            return JSONResponse(
+                status_code=200,
+                content={"ok": False, "status": "error", "error": error_message or "Unknown error"}
+            )
+        
+        # Default fallback
         return JSONResponse(
             status_code=200,
-            content={
-                "ok": True,
-                "ready": container_ready,
-                "phase": "Ready" if container_ready else "Starting",
-                "progress": {"percent": 100 if container_ready else 0, "eta_ms": 0},
-                "error": None,
-                "session_id": session_id,
-                "message": "Session is ready" if container_ready else "Session starting..."
-            }
+            content={"ok": True, "status": current_status}
         )
         
     except Exception as e:
         logger.error(f"Error getting session status for {session_id}: {e}")
         return JSONResponse(
             status_code=500,
-            content={
-                "ok": False,
-                "ready": False,
-                "error": "INTERNAL",
-                "session_id": session_id,
-                "message": f"Internal server error: {str(e)}"
-            }
+            content={"ok": False, "status": "error", "error": "INTERNAL"}
         )
+
+async def background_container_boot(session_id: str, user_id: int, image: str = None):
+    """Background task to boot container and update session state."""
+    try:
+        session_db = get_session_db()
+        
+        # Create container
+        container_info = await container_manager.create_dev_container(
+            session_id, image, str(user_id)
+        )
+        
+        # Update to ready state
+        await session_db.update_session_status(
+            session_id, "ready", 
+            container_id=container_info.get("container_id")
+        )
+        logger.info(f"✅ Session {session_id} container ready")
+        
+    except Exception as e:
+        # Update to error state
+        session_db = get_session_db()
+        await session_db.update_session_status(
+            session_id, "error", str(e)
+        )
+        logger.error(f"❌ Session {session_id} container failed: {e}")
 
 # Cleanup task (should be called periodically)
 @router.post("/api/vibecoding/container/cleanup")
