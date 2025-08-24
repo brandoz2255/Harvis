@@ -238,7 +238,42 @@ Common fix categories:
 - Authentication issues (n8n, database, JWT)
 - API integration problems  
 - Docker networking and configuration
-- Frontend-backend communication errors 
+- Frontend-backend communication errors
+- Voice/Audio processing authentication issues
+
+### Voice Processing Authentication Fix
+
+**CRITICAL**: When voice/audio processing fails with 401 Unauthorized errors:
+
+**Problem**: The audio processing functionality in `UnifiedChatInterface.tsx` calls `/api/mic-chat` without including the Authorization header, causing authentication failures.
+
+**Location**: `/home/guruai/compose/aidev/front_end/jfrontend/components/UnifiedChatInterface.tsx`
+
+**Fix**: In the `sendAudioToBackend` function (around line 764-780), add authentication headers:
+
+```typescript
+// Get auth token for API request
+const token = localStorage.getItem('token')
+console.log('🔥🔥🔥 UnifiedChatInterface: Token exists:', !!token, token ? `${token.substring(0, 20)}...` : 'null')
+
+const headers: Record<string, string> = {}
+if (token) {
+  headers['Authorization'] = `Bearer ${token}`
+} else {
+  console.error('UnifiedChatInterface: No auth token found in localStorage')
+}
+
+const response = await fetch("/api/mic-chat", {
+  method: "POST",
+  headers,  // <- Add this line
+  body: formData,
+  credentials: 'include',
+})
+```
+
+**Root Cause**: The voice processing was implemented directly in `UnifiedChatInterface.tsx`, not in the separate `VoiceControls.tsx` component, so authentication fixes must be applied to the correct file.
+
+**Verification**: Look for the console log `🔥🔥🔥 UnifiedChatInterface: Token exists: true` to confirm the fix is active. 
 
 
 ## Key Commands
