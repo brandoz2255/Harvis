@@ -403,8 +403,8 @@ logger.info("Using device: %s", "cuda" if device == 0 else "cpu")
 
 
 # ─── Config --------------------------------------------------------------------
-CLOUD_OLLAMA_URL = "https://coyotegpt.ngrok.app/ollama"
-LOCAL_OLLAMA_URL = "http://ollama:11434"
+CLOUD_OLLAMA_URL = os.getenv("OLLAMA_CLOUD_URL", "https://coyotegpt.ngrok.app")
+LOCAL_OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
 API_KEY = os.getenv("OLLAMA_API_KEY", "key")
 DEFAULT_MODEL = "llama3.2:3b"
 

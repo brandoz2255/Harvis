@@ -1,0 +1,281 @@
+# Global configuration
+global:
+  imageRegistry: ""
+  storageClass: ""
+
+# Target namespace (use ai-agents to match existing setup)
+namespace: "ai-agents"
+
+# Merged Ollama + Backend deployment (shares GPU)
+mergedOllamaBackend:
+  enabled: true
+  resources:
+    gpu: 1
+  ollama:
+    image:
+      repository: ollama/ollama
+      tag: latest
+    models:
+      - "mistral:7b"
+      - "deepseek-r1:8b"
+    resources:
+      requests:
+        memory: "2Gi"
+        cpu: "1"
+  persistence:
+    existingClaim: "ollama-model-cache"
+
+# Nginx Proxy configuration
+nginx:
+  enabled: true
+  image:
+    repository: nginx
+    tag: alpine
+    pullPolicy: IfNotPresent
+  service:
+    type: LoadBalancer
+    port: 80
+    targetPort: 80
+    nodePort: 30900
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "256Mi"
+      cpu: "200m"
+
+# Backend service configuration (disabled - using merged deployment)
+backend:
+  enabled: false
+  image:
+    repository: dulc3/jarvis-backend
+    tag: latest
+    pullPolicy: Always
+  service:
+    type: ClusterIP
+    port: 8000
+    targetPort: 8000
+  resources:
+    requests:
+      memory: "1Gi"
+      cpu: "500m"
+      nvidia.com/gpu: 1
+    limits:
+      memory: "4Gi"
+      cpu: "2"
+      nvidia.com/gpu: 1
+  env:
+    # Environment variables will be loaded from ConfigMap and Secrets
+    DATABASE_URL: "postgresql://pguser:pgpassword@pgsql:5432/database"
+    BACKEND_URL: "http://backend:8000"
+    OLLAMA_URL: "http://ollama:11434"
+    # Cloud Ollama configuration for external model access
+    OLLAMA_CLOUD_URL: "https://coyotegpt.ngrok.app"  # Cloud Ollama endpoint
+    OLLAMA_API_KEY: ""  # Set this value during helm install/upgrade with --set backend.env.OLLAMA_API_KEY="your-key"
+    OPENAI_API_KEY: ""  # Optional: for OpenAI models
+  volumeMounts:
+    - name: backend-code
+      mountPath: /app
+    - name: embedding
+      mountPath: /app/embedding
+    - name: tmp
+      mountPath: /tmp
+  persistence:
+    enabled: true
+    storageClass: ""
+    accessMode: ReadWriteOnce
+    size: 10Gi
+
+# Frontend service configuration
+frontend:
+  enabled: true
+  image:
+    repository: dulc3/jarvis-frontend
+    tag: dev
+    pullPolicy: Always
+  service:
+    type: ClusterIP
+    port: 3000
+    targetPort: 3000
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "500m"
+  env:
+    DATABASE_URL: "postgresql://pguser:pgpassword@pgsql:5432/database"
+    JWT_SECRET: "4e785620a58e91a9e0f59f4d57ccd8aff912870620242c59c808c8b2db1a4988"
+    BACKEND_URL: "http://backend:8000"
+  build:
+    enabled: false  # Using pre-built image
+    context: "./front_end/jfrontend"
+
+# PostgreSQL configuration
+postgresql:
+  enabled: true
+  image:
+    repository: pgvector/pgvector
+    tag: pg15
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 5432
+    targetPort: 5432
+  auth:
+    username: pguser
+    password: pgpassword
+    database: database
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "500m"
+  persistence:
+    enabled: true
+    storageClass: ""
+    accessMode: ReadWriteOnce
+    size: 20Gi
+  initdbArgs: "-E UTF8 --locale=C"
+
+# n8n workflow automation configuration
+n8n:
+  enabled: true
+  image:
+    repository: n8nio/n8n
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    type: LoadBalancer
+    port: 5678
+    targetPort: 5678
+    nodePort: 30678
+  auth:
+    basicAuthActive: "true"
+    basicAuthUser: "admin"
+    basicAuthPassword: "adminpass"
+  database:
+    type: "postgres"
+    host: "pgsql"
+    port: "5432"
+    database: "database"
+    username: "pguser"
+    password: "pgpassword"
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "250m"
+    limits:
+      memory: "2Gi"
+      cpu: "1"
+  persistence:
+    enabled: true
+    storageClass: ""
+    accessMode: ReadWriteOnce
+    size: 5Gi
+  env:
+    N8N_PERSONAL_API_KEY: ""
+
+# Persistent Volume Claims
+persistence:
+  pgsqlData:
+    enabled: true
+    storageClass: ""
+    accessMode: ReadWriteOnce
+    size: 20Gi
+  n8nData:
+    enabled: true
+    storageClass: ""
+    accessMode: ReadWriteOnce
+    size: 5Gi
+  backendData:
+    enabled: true
+    storageClass: ""
+    accessMode: ReadWriteOnce
+    size: 10Gi
+
+# Security context
+securityContext:
+  runAsNonRoot: false
+  runAsUser: 0
+  fsGroup: 0
+
+# Pod security context
+podSecurityContext:
+  fsGroup: 0
+
+# Service account
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+# RBAC
+rbac:
+  create: true
+
+# Network policies
+networkPolicy:
+  enabled: false
+
+# Ingress configuration
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+  hosts:
+    - host: harvis.dulc3.tech
+      paths:
+        - path: /
+          pathType: Prefix
+          service:
+            name: nginx
+            port: 80
+    - host: harvis-api.dulc3.tech
+      paths:
+        - path: /api
+          pathType: Prefix
+          service:
+            name: merged-backend
+            port: 8000
+    - host: n8n.dulc3.tech
+      paths:
+        - path: /
+          pathType: Prefix
+          service:
+            name: n8n
+            port: 5678
+  tls: []
+
+# Node selector for GPU nodes
+nodeSelector:
+  # nvidia.com/gpu: "true"
+
+# Tolerations for GPU nodes
+tolerations: []
+
+# Affinity rules
+affinity: {}
+
+# Resource limits and requests defaults
+resources:
+  requests:
+    memory: "128Mi"
+    cpu: "100m"
+  limits:
+    memory: "256Mi"
+    cpu: "200m"
+
+# Autoscaling
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: 80
