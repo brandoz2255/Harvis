@@ -1,0 +1,61 @@
+{{- if .Values.nginx.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "harvis-ai.fullname" . }}-nginx
+  labels:
+    {{- include "harvis-ai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nginx
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "harvis-ai.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: nginx
+  template:
+    metadata:
+      labels:
+        {{- include "harvis-ai.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: nginx
+    spec:
+      containers:
+        - name: nginx
+          image: "{{ .Values.nginx.image.repository }}:{{ .Values.nginx.image.tag }}"
+          imagePullPolicy: {{ .Values.nginx.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.nginx.resources | nindent 12 }}
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+              readOnly: true
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: {{ include "harvis-ai.fullname" . }}-nginx-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "harvis-ai.fullname" . }}-nginx
+  labels:
+    {{- include "harvis-ai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nginx
+spec:
+  type: {{ .Values.nginx.service.type }}
+  ports:
+    - port: {{ .Values.nginx.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+      {{- if and (eq .Values.nginx.service.type "NodePort") .Values.nginx.service.nodePort }}
+      nodePort: {{ .Values.nginx.service.nodePort }}
+      {{- end }}
+  selector:
+    {{- include "harvis-ai.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: nginx
+{{- end }}
