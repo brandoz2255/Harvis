@@ -68,6 +68,7 @@ class ResearchAgent:
             default_model: Default LLM model to use
             max_search_results: Maximum number of search results to process
         """
+        self.search_engine = search_engine
         self.ollama_url = ollama_url
         self.default_model = default_model
         self.max_search_results = max_search_results
