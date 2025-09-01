@@ -462,6 +462,7 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
         messageContent.toLowerCase().includes("when did") ||
         messageContent.toLowerCase().includes("how to"))
 
+    setIsActivelyResearching(needsWebSearch)
     const apiEndpoint = needsWebSearch ? "/api/research-chat" : "/api/chat"
     
     // Context logic: 
@@ -674,6 +675,7 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
       completeInsight(userInsightId, `Error: ${error}`, "error")
     } finally {
       setIsLoading(false)
+      setIsActivelyResearching(false)
     }
   }
 
@@ -1302,7 +1304,7 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
                     style={{ animationDelay: "0.2s" }}
                   ></div>
                 </div>
-                {isResearchMode && (
+                {isActivelyResearching && (
                   <div className="flex items-center space-x-2 text-xs text-gray-300">
                     <Search className="w-3 h-3" />
                     <span>Researching and analyzing... (this may take a few minutes)</span>
