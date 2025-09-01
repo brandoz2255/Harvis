@@ -1,0 +1,115 @@
+{{- if .Values.frontend.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "harvis-ai.fullname" . }}-frontend
+  labels:
+    {{- include "harvis-ai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "harvis-ai.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: frontend
+  template:
+    metadata:
+      labels:
+        {{- include "harvis-ai.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: frontend
+    spec:
+      {{- if .Values.frontend.build.enabled }}
+      initContainers:
+        - name: build-frontend
+          image: node:18-alpine
+          workingDir: /build
+          command: ["sh", "-c"]
+          args:
+            - |
+              npm ci --only=production
+              npm run build
+              cp -r .next /app/
+              cp -r public /app/
+              cp package.json /app/
+              cp next.config.js /app/ 2>/dev/null || true
+          volumeMounts:
+            - name: build-context
+              mountPath: /build
+            - name: app-built
+              mountPath: /app
+          env:
+            - name: NODE_ENV
+              value: "production"
+      {{- end }}
+      containers:
+        - name: frontend
+          image: "{{ .Values.frontend.image.repository }}:{{ .Values.frontend.image.tag }}"
+          imagePullPolicy: {{ .Values.frontend.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          env:
+            - name: DATABASE_URL
+              value: {{ .Values.frontend.env.DATABASE_URL | quote }}
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "harvis-ai.fullname" . }}-frontend-secret
+                  key: jwt-secret
+            - name: BACKEND_URL
+              value: {{ .Values.frontend.env.BACKEND_URL | quote }}
+            - name: NODE_ENV
+              value: "production"
+          envFrom:
+            - configMapRef:
+                name: {{ include "harvis-ai.fullname" . }}-frontend-config
+          resources:
+            {{- toYaml .Values.frontend.resources | nindent 12 }}
+          {{- if .Values.frontend.build.enabled }}
+          volumeMounts:
+            - name: app-built
+              mountPath: /app
+          command: ["node"]
+          args: ["server.js"]
+          {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      {{- if .Values.frontend.build.enabled }}
+      volumes:
+        - name: build-context
+          hostPath:
+            path: {{ .Values.frontend.build.context }}
+            type: Directory
+        - name: app-built
+          emptyDir: {}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "harvis-ai.fullname" . }}-frontend
+  labels:
+    {{- include "harvis-ai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+spec:
+  type: {{ .Values.frontend.service.type }}
+  ports:
+    - port: {{ .Values.frontend.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "harvis-ai.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+{{- end }}

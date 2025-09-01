@@ -1,0 +1,63 @@
+{{- if .Values.nginx.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "harvis-ai.fullname" . }}-nginx-config
+  labels:
+    {{- include "harvis-ai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nginx
+data:
+  nginx.conf: |
+    events {
+        worker_connections 1024;
+    }
+
+    http {
+        upstream backend {
+            server {{ include "harvis-ai.fullname" . }}-merged-backend:8000;
+        }
+
+        upstream frontend {
+            server {{ include "harvis-ai.fullname" . }}-frontend:3000;
+        }
+
+        server {
+            listen 80;
+            server_name _;
+
+            # Frontend routes
+            location / {
+                proxy_pass http://frontend;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+            }
+
+            # API routes - proxy to backend
+            location /api/ {
+                proxy_pass http://backend/api/;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                
+                # Handle CORS
+                add_header Access-Control-Allow-Origin *;
+                add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS";
+                add_header Access-Control-Allow-Headers "Authorization, Content-Type";
+                
+                if ($request_method = 'OPTIONS') {
+                    return 204;
+                }
+            }
+
+            # Health check
+            location /health {
+                access_log off;
+                return 200 "healthy\n";
+                add_header Content-Type text/plain;
+            }
+        }
+    }
+{{- end }}

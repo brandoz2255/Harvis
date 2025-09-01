@@ -1,0 +1,90 @@
+---
+apiVersion: image.toolkit.fluxcd.io/v1beta2
+kind: ImageRepository
+metadata:
+  name: harvis-backend
+  namespace: flux-system
+spec:
+  image: dulc3/jarvis-backend
+  interval: 1m0s
+---
+apiVersion: image.toolkit.fluxcd.io/v1beta2
+kind: ImageRepository
+metadata:
+  name: harvis-frontend
+  namespace: flux-system
+spec:
+  image: dulc3/jarvis-frontend
+  interval: 1m0s
+---
+apiVersion: image.toolkit.fluxcd.io/v1beta2
+kind: ImagePolicy
+metadata:
+  name: harvis-backend-policy
+  namespace: flux-system
+spec:
+  imageRepositoryRef:
+    name: harvis-backend
+  policy:
+    semver:
+      range: '>=1.0.0'
+  filterTags:
+    pattern: '^(?P<version>.*)$'
+    extract: '$version'
+---
+apiVersion: image.toolkit.fluxcd.io/v1beta2
+kind: ImagePolicy
+metadata:
+  name: harvis-frontend-policy
+  namespace: flux-system
+spec:
+  imageRepositoryRef:
+    name: harvis-frontend
+  policy:
+    alphabetical:
+      order: asc
+  filterTags:
+    pattern: '^(dev|latest|v.+)$'
+---
+apiVersion: image.toolkit.fluxcd.io/v1beta1
+kind: ImageUpdateAutomation
+metadata:
+  name: harvis-automation
+  namespace: flux-system
+spec:
+  interval: 30m
+  sourceRef:
+    kind: GitRepository
+    name: harvis-source
+  git:
+    checkout:
+      ref:
+        branch: main
+    commit:
+      author:
+        email: fluxcdbot@users.noreply.github.com
+        name: fluxcdbot
+      messageTemplate: |
+        Automated image update
+        
+        Automation name: {{ .AutomationObject }}
+        
+        Files:
+        {{ range $filename, $_ := .Updated.Files -}}
+        - {{ $filename }}
+        {{ end -}}
+        
+        Objects:
+        {{ range $resource, $_ := .Updated.Objects -}}
+        - {{ $resource.Kind }} {{ $resource.Name }}
+        {{ end -}}
+        
+        Images:
+        {{ range .Updated.Images -}}
+        - {{.}}
+        {{ end -}}
+    push:
+      branch: main
+  update:
+    path: "./flux-config/harvis"
+    strategy: Setters
