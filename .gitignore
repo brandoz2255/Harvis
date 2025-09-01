@@ -68,3 +68,16 @@ docker-compose.local.yml
 *.swo
 *~
 
+# ==========================================
+# Large Model Files
+# ==========================================
+
+# Whisper models (too large for GitHub)
+python_back_end/whisper_models/
+**/*.pt
+
+# Other large model files
+**/*.bin
+**/*.safetensors
+**/*.ckpt
+

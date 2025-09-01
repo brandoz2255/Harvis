@@ -1,5 +1,90 @@
 # Changes Log
 
+## 2025-09-01 - Fixed Research Mode 504 Gateway Timeout Issue
+
+**Timestamp**: 2025-09-01 05:35:00 UTC - Fixed 504 Gateway Timeout errors during research processing
+
+### Problem Description
+
+1. **Research Requests Timing Out**: Research mode queries failing with 504 Gateway Timeout from Nginx
+2. **Backend Processing Successfully**: Backend successfully completed research, web search, and TTS generation
+3. **Frontend Not Receiving Response**: 504 timeout occurred after ~60 seconds despite backend success
+4. **Poor User Experience**: No indication that research processing takes longer than normal chat
+
+### Root Cause Analysis
+
+1. **Nginx Proxy Timeout**: Default 60-second proxy timeout insufficient for research processing
+2. **Research Processing Time**: Research workflow takes 2-5 minutes for web search, AI analysis, and TTS generation
+3. **No Extended Timeout Configuration**: Research endpoints not configured with longer timeouts
+4. **Inadequate Progress Indication**: Users not informed about longer processing time
+
+### Solution Applied
+
+**Multi-layer Timeout and UX Fix**
+
+1. **Nginx Configuration Updates**:
+   ```nginx
+   # Extended timeouts for research endpoints (5 minutes)
+   location ~ ^/api/(research|research-chat|fact-check|comparative-research|web-search|research/) {
+       proxy_connect_timeout 300s;
+       proxy_send_timeout 300s;
+       proxy_read_timeout 300s;
+   }
+   
+   # Global proxy timeout settings (1 minute default)
+   http {
+       proxy_connect_timeout 60s;
+       proxy_send_timeout 60s; 
+       proxy_read_timeout 60s;
+   }
+   ```
+
+2. **Frontend Timeout Handling**:
+   ```javascript
+   // Extended timeout for research requests (5 minutes), normal timeout for chat (60 seconds)
+   const timeoutDuration = needsWebSearch ? 300000 : 60000
+   const controller = new AbortController()
+   const timeoutId = setTimeout(() => controller.abort(), timeoutDuration)
+   ```
+
+3. **Enhanced Progress Indicators**:
+   ```javascript
+   {isActivelyResearching && (
+     <div className="flex items-center space-x-2 text-xs text-gray-300">
+       <Search className="w-3 h-3" />
+       <span>Researching and analyzing... (this may take a few minutes)</span>
+     </div>
+   )}
+   ```
+
+4. **Improved Error Handling**:
+   - Specific timeout error messages for research vs chat
+   - Clear indication of timeout duration to users
+   - Graceful fallback messaging
+
+### Files Modified
+
+1. `/nginx.conf` - Added research-specific timeout configuration
+2. `/front_end/jfrontend/components/UnifiedChatInterface.tsx` - Enhanced timeout handling and progress indicators  
+3. `/front_end/jfrontend/components/ResearchAssistant.tsx` - Added timeout handling for summary generation
+
+### Result/Status
+
+✅ **RESOLVED**: Research mode now properly handles long processing times
+- Nginx allows up to 5 minutes for research endpoints
+- Frontend shows clear progress indication during research
+- Better error messages for timeout scenarios
+- Maintained 60-second timeout for regular chat requests
+
+### Test Plan
+
+- [x] Test research query with extended processing time
+- [x] Verify progress indicator displays during research
+- [x] Confirm 5-minute timeout allows completion
+- [x] Test regular chat maintains 60-second timeout
+
+---
+
 ## 2025-09-01 - Fixed Whisper Model Download Timeouts (Voice Transcription)
 
 **Timestamp**: 2025-09-01 02:00:00 UTC - Fixed Whisper STT model loading failures due to network timeouts
