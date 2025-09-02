@@ -53,6 +53,16 @@ WORKDIR /app
 COPY . .
 
 ############################
+# 🎯 Pre-seed Whisper models for offline operation
+############################
+USER root
+RUN mkdir -p /root/.cache/whisper
+COPY whisper_models/tiny.pt /root/.cache/whisper/tiny.pt
+COPY whisper_models/base.pt /root/.cache/whisper/base.pt
+RUN chown -R appuser:appuser /root/.cache
+USER appuser
+
+############################
 # 🚀 Pre-warm models into Hugging Face cache (BuildKit required!)
 ############################
 RUN --mount=type=cache,id=model-cache,target=/root/.cache \
