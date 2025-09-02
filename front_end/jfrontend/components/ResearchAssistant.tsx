@@ -91,11 +91,16 @@ export default function ResearchAssistant() {
     setIsGeneratingSummary(true)
 
     try {
+      // Extended timeout for research requests (5 minutes)
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 300000) // 5 minutes
+
       const response = await fetch("/api/research-chat", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
+        signal: controller.signal,
         body: JSON.stringify({
           message: `Please provide a comprehensive summary of the following search results for the query "${session.query}": ${JSON.stringify(session.results.map((r) => ({ title: r.title, snippet: r.snippet })))}`,
           history: [],
@@ -103,6 +108,8 @@ export default function ResearchAssistant() {
           enableWebSearch: false,
         }),
       })
+
+      clearTimeout(timeoutId)
 
       if (response.ok) {
         const data = await response.json()
@@ -119,6 +126,9 @@ export default function ResearchAssistant() {
       }
     } catch (error) {
       console.error("Summary generation failed:", error)
+      if (error.name === 'AbortError') {
+        console.warn("Research request timed out after 5 minutes")
+      }
     } finally {
       setIsGeneratingSummary(false)
     }
