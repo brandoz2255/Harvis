@@ -19,6 +19,7 @@ services:
     image: dulc3/jarvis-backend:latest
     container_name: backend
     restart: unless-stopped
+    runtime: nvidia
     ports:
       - "8000:8000"
     env_file:
@@ -31,13 +32,9 @@ services:
       - /tmp:/tmp
       - /var/run/docker.sock:/var/run/docker.sock
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
   frontend:
     image: frontend

@@ -1,0 +1,42 @@
+✦ Based on the code in python_back_end/research/, here's the logic for how the LLM performs research:
+
+  The process is split between two main files: research_agent.py and web_search.py.
+
+  research_agent.py - The Brains of the Operation
+
+  This file acts as the orchestrator. It defines a ResearchAgent that manages the research process from start to finish. Here's its workflow:
+
+   1. Generates Search Queries: When you give it a topic, it first uses an LLM to generate a set of 3 optimized search queries. It tries to create queries that
+      will find the most relevant and authoritative information.
+   2. Searches the Web: It then uses a "search agent" (from the other file) to execute these queries.
+   3. Analyzes the Results: It takes the search results, prepares them as context, and then uses an LLM to analyze the information.
+   4. Provides an Answer: Finally, it generates a comprehensive analysis, citing the sources it used.
+
+  This agent also has functions for:
+   * Fact-checking: To verify a specific claim.
+   * Comparative research: To compare multiple topics.
+
+  It also includes a fallback system for the LLM, trying a cloud-based one first and then a local one if the cloud fails.
+
+  web_search.py - The Search Tool
+
+  This file provides the tools for actually searching the web. It has two different search agents:
+
+   1. `WebSearchAgent`:
+       * Uses the DuckDuckGo search engine.
+       * Intelligently optimizes search queries by adding keywords for authoritative sources (like arxiv.org for AI topics or github.com for code).
+       * Scores and filters search results to find the most relevant ones.
+       * Can extract the full content from web pages using the newspaper library.
+
+   2. `TavilySearchAgent`:
+       * An alternative that uses the Tavily search API, which is a search engine built specifically for LLMs.
+       * It can fall back to using the WebSearchAgent if the Tavily API is not available.
+
+  How They Work Together
+
+  The ResearchAgent is the "brains" and the WebSearchAgent or TavilySearchAgent is the "legs." The ResearchAgent decides what to look for, the search agent
+  fetches the data, and then the ResearchAgent analyzes that data to give you an answer.
+
+  In short, yes, this code defines the logic for the LLM to perform research by searching the web, analyzing the content, and synthesizing an answer.
+
+
