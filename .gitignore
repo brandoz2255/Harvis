@@ -29,7 +29,7 @@ harvis-helm-chart/*.tgz
 flux-config/**/overlays/personal/
 flux-config/**/secrets/
 flux-config/**/*-secret.yaml
-flux-config/**/external-secret.yaml
+flux-config/**/external-secret*.yaml
 
 # Kubeconfig and kubectl contexts
 kubeconfig
