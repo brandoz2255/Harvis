@@ -59,27 +59,6 @@ export default function VibeContainerCodeEditor({
   const editorRef = useRef<any>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
-  // Load file content when selected file changes
-  useEffect(() => {
-    if (selectedFile && sessionId) {
-      loadFileContent()
-    } else {
-      setContent('')
-      setIsModified(false)
-    }
-  }, [selectedFile, sessionId, loadFileContent])
-
-  // Update Monaco editor options when settings change
-  useEffect(() => {
-    if (editorRef.current) {
-      editorRef.current.updateOptions({
-        fontSize: fontSize,
-        wordWrap: wordWrap,
-        minimap: { enabled: fontSize >= 14, scale: fontSize >= 16 ? 0.7 : 0.5 }
-      })
-    }
-  }, [fontSize, wordWrap])
-
   const loadFileContent = useCallback(async () => {
     if (!selectedFile || !sessionId || selectedFile.type !== 'file') return
 
@@ -117,6 +96,27 @@ export default function VibeContainerCodeEditor({
       setIsLoading(false)
     }
   }, [selectedFile, sessionId])
+
+  // Load file content when selected file changes
+  useEffect(() => {
+    if (selectedFile && sessionId) {
+      loadFileContent()
+    } else {
+      setContent('')
+      setIsModified(false)
+    }
+  }, [selectedFile, sessionId, loadFileContent])
+
+  // Update Monaco editor options when settings change
+  useEffect(() => {
+    if (editorRef.current) {
+      editorRef.current.updateOptions({
+        fontSize: fontSize,
+        wordWrap: wordWrap,
+        minimap: { enabled: fontSize >= 14, scale: fontSize >= 16 ? 0.7 : 0.5 }
+      })
+    }
+  }, [fontSize, wordWrap])
 
   const saveFile = async () => {
     if (!selectedFile || !sessionId || !isModified) return

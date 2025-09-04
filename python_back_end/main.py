@@ -27,6 +27,7 @@ from vison_models.llm_connector import query_qwen, query_llm, load_qwen_model, u
 # Import vibecoding routers
 from vibecoding import sessions_router, models_router, execution_router, files_router, commands_router, containers_router
 from vibecoding.core import initialize_vibe_agent
+from vibecoding.websockets import router as websockets_router
 
 from pydantic import BaseModel
 import torch, soundfile as sf
@@ -404,6 +405,11 @@ app.include_router(execution_router)
 app.include_router(files_router)
 app.include_router(commands_router)
 app.include_router(containers_router)
+app.include_router(websockets_router, prefix="/ws")
+
+# Include session lifecycle routes
+from routes.vibe_sessions import router as session_lifecycle_router
+app.include_router(session_lifecycle_router)
 
 # ─── Device & models -----------------------------------------------------------
 device = 0 if torch.cuda.is_available() else -1

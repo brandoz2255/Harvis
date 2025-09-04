@@ -27,6 +27,46 @@ services:
     networks:
       - ollama-n8n-network
 
+  frontend:
+    build:
+      context: ./front_end/jfrontend
+      dockerfile: Dockerfile
+    container_name: harvis-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: "postgresql://pguser:pgpassword@pgsql-db:5432/database"
+      JWT_SECRET: "${JWT_SECRET:-key}"
+      BACKEND_URL: "http://backend:8000"
+    networks:
+      - ollama-n8n-network
+    depends_on:
+      - pgsql
+      - backend
+
+  backend:
+    build:
+      context: ./python_back_end
+      dockerfile: Dockerfile
+    container_name: harvis-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: "postgresql://pguser:pgpassword@pgsql-db:5432/database"
+      JWT_SECRET: "${JWT_SECRET:-key}"
+      DOCKER_HOST: "unix:///var/run/docker.sock"
+      TERMINAL_IMAGE: "python:3.12-alpine"
+      CONTAINERS_NETWORK: "ollama-n8n-network"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - backend_temp:/tmp
+    networks:
+      - ollama-n8n-network
+    depends_on:
+      - pgsql
+
   n8n:
     image: n8nio/n8n
     container_name: n8n
@@ -59,5 +99,6 @@ volumes:
   ollama:
   n8n_data:
   pgsql_data:
+  backend_temp:
 
 

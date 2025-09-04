@@ -474,6 +474,22 @@ async def write_file(req: FileOperationRequest):
 @router.post("/api/vibecoding/container/files/tree")
 async def get_file_tree(req: ListFilesRequest):
     """Get complete file tree structure for better performance."""
+    
+    # PREFLIGHT CHECK: Ensure session is running before proceeding
+    from vibecoding.session_lifecycle import session_manager
+    
+    if not session_manager.is_session_ready(req.session_id):
+        logger.warning(f"Container file tree requested for non-running session {req.session_id}")
+        raise HTTPException(
+            status_code=409, 
+            detail={
+                "error": "Session not ready",
+                "message": "Session must be in 'running' state before accessing container file tree",
+                "session_id": req.session_id,
+                "suggestion": "Check session status and start if needed"
+            }
+        )
+    
     container = await container_manager.get_container(req.session_id)
     if not container:
         raise HTTPException(status_code=404, detail="Container not found")
