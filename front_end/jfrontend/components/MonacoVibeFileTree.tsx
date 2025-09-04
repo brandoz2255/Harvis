@@ -15,10 +15,13 @@ import {
   Search,
   ChevronRight,
   ChevronDown,
-  Loader2
+  Loader2,
+  AlertTriangle,
+  Clock
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { useSessionStatus } from '@/hooks/useSessionStatus'
 
 interface FileTreeNode {
   name: string
@@ -48,6 +51,15 @@ export default function MonacoVibeFileTree({
   const [isLoading, setIsLoading] = useState(false)
   const [searchTerm, setSearchTerm] = useState('')
   const [filteredTree, setFilteredTree] = useState<FileTreeNode[]>([])
+  const [loadError, setLoadError] = useState<string | null>(null)
+  
+  // Use session status hook
+  const { 
+    isReady,
+    isStarting, 
+    sessionStatus,
+    startSession
+  } = useSessionStatus({ sessionId, pollWhenNotRunning: true })
   
   const wsRef = useRef<WebSocket | null>(null)
 
@@ -150,12 +162,22 @@ export default function MonacoVibeFileTree({
     }
   }, [sessionId, onFileContentChange])
 
-  // Load file tree with improved error handling
+  // Load file tree with session status check
   const loadFileTree = useCallback(async () => {
     if (!sessionId) return
+    
+    // SESSION GUARD: Only load if session is ready
+    if (!isReady) {
+      console.log(`🚫 MonacoVibeFileTree: Session ${sessionId} not ready, current state: ${sessionStatus?.state}`)
+      setLoadError(`Session is ${sessionStatus?.state || 'unknown'}. Please wait for session to be ready.`)
+      return
+    }
 
     try {
       setIsLoading(true)
+      setLoadError(null)
+      console.log(`📂 MonacoVibeFileTree: Loading file tree for ready session ${sessionId}`)
+      
       const token = localStorage.getItem('token')
       
       const response = await fetch('/api/vibecoding/files', {
@@ -209,15 +231,26 @@ export default function MonacoVibeFileTree({
         const tree = buildTree(data.files || [])
         setFileTree(tree)
         console.log('📁 Loaded file tree:', tree.length, 'items')
+      } else if (response.status === 409) {
+        // Session not ready - this should be handled by our guard above, but just in case
+        try {
+          const errorData = await response.json()
+          console.log('🚫 File tree 409 response:', errorData)
+          setLoadError(errorData.detail?.message || 'Session not ready for file tree access')
+        } catch {
+          setLoadError('Session not ready - please wait for container to start')
+        }
       } else {
         console.error('Failed to load file tree:', response.status)
+        setLoadError(`Failed to load file tree: HTTP ${response.status}`)
       }
     } catch (error) {
       console.error('Error loading file tree:', error)
+      setLoadError(`Error loading file tree: ${error}`)
     } finally {
       setIsLoading(false)
     }
-  }, [sessionId])
+  }, [sessionId, isReady, sessionStatus])
 
   // Load file content with caching
   const loadFileContent = useCallback(async (filePath: string): Promise<string> => {
@@ -375,14 +408,23 @@ export default function MonacoVibeFileTree({
     )
   }, [expandedNodes, selectedFile, getFileIcon, handleFileClick])
 
-  // Initialize component
+  // Load file tree when session becomes ready
   useEffect(() => {
-    if (sessionId) {
+    if (sessionId && isReady) {
+      console.log(`✅ MonacoVibeFileTree: Session ${sessionId} is ready, loading file tree`)
       loadFileTree()
       const cleanup = setupFileWatcher()
       return cleanup
     }
-  }, [sessionId, loadFileTree, setupFileWatcher])
+  }, [sessionId, isReady, loadFileTree, setupFileWatcher])
+
+  // Clear file tree when session is not ready
+  useEffect(() => {
+    if (!isReady) {
+      setFileTree([])
+      setLoadError(null)
+    }
+  }, [isReady])
 
   return (
     <div className={`bg-gray-800 border-r border-gray-700 flex flex-col h-full ${className}`}>
@@ -429,6 +471,53 @@ export default function MonacoVibeFileTree({
       
       {/* File Tree */}
       <div className="flex-1 overflow-y-auto">
+        {/* Session Status Indicator */}
+        {!isReady && (
+          <div className="p-3 bg-gray-700 border-b border-gray-600">
+            <div className="flex items-center text-sm text-gray-300">
+              {isStarting ? (
+                <>
+                  <Clock size={16} className="mr-2 text-yellow-500" />
+                  Session starting...
+                </>
+              ) : sessionStatus?.state === 'stopped' ? (
+                <>
+                  <AlertTriangle size={16} className="mr-2 text-red-500" />
+                  Session stopped
+                  <Button
+                    onClick={startSession}
+                    size="sm"
+                    variant="ghost"
+                    className="ml-auto text-xs h-auto p-1 hover:bg-gray-600"
+                  >
+                    Start
+                  </Button>
+                </>
+              ) : sessionStatus?.state === 'error' ? (
+                <>
+                  <AlertTriangle size={16} className="mr-2 text-red-500" />
+                  Session error
+                </>
+              ) : (
+                <>
+                  <Clock size={16} className="mr-2 text-gray-500" />
+                  Waiting for session...
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Error Message */}
+        {loadError && (
+          <div className="p-3 bg-red-900/20 border-b border-red-700">
+            <div className="flex items-center text-sm text-red-300">
+              <AlertTriangle size={16} className="mr-2" />
+              {loadError}
+            </div>
+          </div>
+        )}
+
         {isLoading && fileTree.length === 0 ? (
           <div className="flex items-center justify-center h-32 text-gray-500">
             <Loader2 size={20} className="animate-spin mr-2" />
@@ -437,7 +526,7 @@ export default function MonacoVibeFileTree({
         ) : (
           <div className="p-2">
             {(searchTerm ? filteredTree : fileTree).map(node => renderFileNode(node))}
-            {fileTree.length === 0 && !isLoading && (
+            {fileTree.length === 0 && !isLoading && isReady && (
               <div className="text-gray-500 text-sm text-center py-8">
                 No files found
               </div>

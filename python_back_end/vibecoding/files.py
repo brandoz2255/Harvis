@@ -671,6 +671,21 @@ async def get_session_files_tree(
 ):
     """Get all files for a vibe session organized in a tree structure"""
     try:
+        # PREFLIGHT CHECK: Ensure session is running before proceeding
+        from vibecoding.session_lifecycle import session_manager
+        
+        if not session_manager.is_session_ready(sessionId):
+            logger.warning(f"File tree requested for non-running session {sessionId}")
+            raise HTTPException(
+                status_code=409, 
+                detail={
+                    "error": "Session not ready",
+                    "message": "Session must be in 'running' state before accessing file tree",
+                    "session_id": sessionId,
+                    "suggestion": "Check session status and start if needed"
+                }
+            )
+        
         # Get user ID - handle both dict formats
         user_id = int(user.get("id")) if user.get("id") is not None else int(user.get("user_id", 0))
         

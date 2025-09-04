@@ -37,7 +37,7 @@ import Aurora from "@/components/Aurora"
 import VibeModelSelector from "@/components/VibeModelSelector"
 import VibeSessionManager from "@/components/VibeSessionManager"
 import MonacoVibeFileTree from "@/components/MonacoVibeFileTree"
-import OptimizedVibeTerminal from "@/components/OptimizedVibeTerminal"
+import TerminalClient from "@/components/terminal/TerminalClient"
 import VibeContainerCodeEditor from "@/components/VibeContainerCodeEditor"
 
 interface ChatMessage {
@@ -252,6 +252,14 @@ export default function VibeCodingPage() {
 
       setCurrentSession(prev => prev ? { ...prev, container_status: 'starting' } : null)
 
+      // Add building indicator message
+      setChatMessages(prev => [...prev, {
+        role: "assistant",
+        content: "🚀 Building development container... This may take a few moments for first-time setup.",
+        timestamp: new Date(),
+        type: "text",
+      }])
+
       const response = await fetch('/api/vibecoding/container', {
         method: 'POST',
         headers: {
@@ -276,11 +284,28 @@ export default function VibeCodingPage() {
           type: "text",
         }])
       } else {
+        const errorData = await response.json().catch(() => ({}))
         setCurrentSession(prev => prev ? { ...prev, container_status: 'stopped' } : null)
+        
+        // Add error message
+        setChatMessages(prev => [...prev, {
+          role: "assistant",
+          content: `❌ Failed to start container: ${errorData.detail || 'Unknown error'}. Please try again.`,
+          timestamp: new Date(),
+          type: "text",
+        }])
       }
     } catch (error) {
       console.error('Failed to start container:', error)
       setCurrentSession(prev => prev ? { ...prev, container_status: 'stopped' } : null)
+      
+      // Add error message
+      setChatMessages(prev => [...prev, {
+        role: "assistant",
+        content: "❌ Network error while starting container. Please check your connection and try again.",
+        timestamp: new Date(),
+        type: "text",
+      }])
     }
   }
 
@@ -749,7 +774,7 @@ export default function VibeCodingPage() {
                     
                     {/* Terminal */}
                     <div className="h-64">
-                      <OptimizedVibeTerminal
+                      <TerminalClient
                         sessionId={currentSession.session_id}
                         isContainerRunning={isContainerRunning}
                         onContainerStart={handleContainerStart}
@@ -1044,7 +1069,7 @@ export default function VibeCodingPage() {
                     </div>
                   </div>
                   
-                  <OptimizedVibeTerminal
+                  <TerminalClient
                     sessionId={currentSession.session_id}
                     isContainerRunning={isContainerRunning}
                     onContainerStart={handleContainerStart}

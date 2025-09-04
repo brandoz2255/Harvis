@@ -1,14 +1,39 @@
 """Vibe Coding Models API Routes"""
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, Query
 from typing import List, Optional, Dict, Any
 import logging
 import requests
 import os
 from pydantic import BaseModel
+from jose import JWTError, jwt
 
 # Import auth dependencies
 from auth_utils import get_current_user
+
+# WebSocket auth dependency
+async def get_current_user_websocket(
+    websocket: WebSocket,
+    token: Optional[str] = Query(None)
+) -> Dict:
+    """
+    WebSocket authentication dependency.
+    Can be extended to use JWT tokens from query params or cookies.
+    For now, returns a development user for testing.
+    """
+    if token:
+        try:
+            # Decode JWT token if provided
+            SECRET_KEY = os.getenv("JWT_SECRET", "key")
+            payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+            user_id = payload.get("sub")
+            if user_id:
+                return {"user_id": user_id, "id": user_id}
+        except JWTError:
+            pass
+    
+    # Development fallback - replace with proper auth in production
+    return {"user_id": "dev", "id": "dev", "username": "developer"}
 
 logger = logging.getLogger(__name__)
 
