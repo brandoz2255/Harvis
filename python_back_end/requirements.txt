@@ -42,7 +42,7 @@ docker>=7.0.0
 requests-cache>=1.0.0
 trafilatura>=1.6.0
 rank-bm25>=0.2.2
-difflib
+
 youtube-transcript-api>=0.6.0
 pypdf>=3.0.0
 python-magic>=0.4.27
