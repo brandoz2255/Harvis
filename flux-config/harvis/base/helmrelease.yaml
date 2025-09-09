@@ -95,13 +95,11 @@ spec:
   test:
     enable: false
   
-  # Post-install and post-upgrade hooks
-  postInstall:
-    - metadata:
-        name: harvis-post-install
-      exec:
-        onFailure: recreate
-        timeout: 5m
+  # Install configuration
+  install:
+    remediation:
+      retries: 3
+    timeout: 10m
   
   # Dependencies - ensure namespace exists
   dependsOn:
