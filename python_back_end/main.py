@@ -21,7 +21,7 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 import asyncpg
 from gemini_api import query_gemini, is_gemini_configured
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 from vison_models.llm_connector import query_qwen, query_llm, load_qwen_model, unload_qwen_model
 
 # Import vibecoding routers
@@ -256,6 +256,15 @@ async def lifespan(app: FastAPI):
         chat_history_manager = ChatHistoryManager(app.state.pg_pool)
         logger.info("✅ ChatHistoryManager initialized in lifespan")
         
+        # Initialize Whisper cache for offline operation
+        try:
+            from init_whisper_cache import init_whisper_cache
+            init_whisper_cache()
+            logger.info("✅ Whisper cache initialized for offline operation")
+        except Exception as e:
+            logger.warning(f"⚠️ Whisper cache initialization failed: {e}")
+            logger.info("🔄 Whisper will fall back to online downloads")
+        
         # Initialize vibe files database table
         try:
             from vibecoding.files import ensure_vibe_files_table
@@ -403,8 +412,8 @@ logger.info("Using device: %s", "cuda" if device == 0 else "cpu")
 
 
 # ─── Config --------------------------------------------------------------------
-CLOUD_OLLAMA_URL = "https://coyotegpt.ngrok.app/ollama"
-LOCAL_OLLAMA_URL = "http://ollama:11434"
+CLOUD_OLLAMA_URL = os.getenv("OLLAMA_CLOUD_URL", "https://coyotegpt.ngrok.app/ollama")
+LOCAL_OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
 API_KEY = os.getenv("OLLAMA_API_KEY", "key")
 DEFAULT_MODEL = "llama3.2:3b"
 
@@ -1631,46 +1640,93 @@ async def mic_chat(file: UploadFile = File(...), model: str = Form(DEFAULT_MODEL
             pass
         raise HTTPException(500, str(e))
 
-# Research endpoints using the new research module with LangChain
+# Research endpoints using the enhanced research module with advanced pipeline
 from agent_research import research_agent, fact_check_agent, comparative_research_agent
+from agent_research import async_research_agent, async_fact_check_agent, async_comparative_research_agent
+from agent_research import get_research_agent_stats, get_mcp_tool
 from research.web_search import WebSearchAgent
-# from research.research_agent import ResearchAgent  # Not used directly
+from pydantic import Field
+from typing import Optional, List
+
+class AdvancedResearchRequest(BaseModel):
+    """Enhanced research request with advanced options"""
+    message: str
+    model: str = "mistral"
+    history: List[Dict[str, str]] = []
+    use_advanced: bool = Field(default=False, description="Use advanced research pipeline")
+    enable_streaming: bool = Field(default=False, description="Enable streaming progress")
+    enable_verification: bool = Field(default=True, description="Enable response verification")
 
 @app.post("/api/research-chat", tags=["research"])
-async def research_chat(req: ResearchChatRequest):
+async def research_chat(req: Union[ResearchChatRequest, AdvancedResearchRequest]):
     """
-    Enhanced research chat endpoint with comprehensive web search and analysis
+    Enhanced research chat endpoint with advanced pipeline support
     """
     try:
         if not req.message:
             return {"error": "Message is required"}, 400
 
+        # Check if using advanced features
+        use_advanced = getattr(req, 'use_advanced', False)
+        enable_streaming = getattr(req, 'enable_streaming', False)
+        enable_verification = getattr(req, 'enable_verification', True)
+
         # Unload models to free GPU memory for research processing
-        logger.info("🔍 Starting research - unloading models to free GPU memory")
+        logger.info(f"🔍 Starting research (advanced: {use_advanced}) - unloading models to free GPU memory")
         unload_models()
 
-        # Call the enhanced research agent
-        response_data = research_agent(req.message, req.model)
-
-        # Format response for chat interface
-        if "error" in response_data:
-            response_content = f"Research Error: {response_data['error']}"
+        # Call the appropriate research agent
+        if use_advanced:
+            # Use advanced async research agent
+            response_data = await async_research_agent(
+                query=req.message, 
+                model=req.model,
+                enable_streaming=enable_streaming
+            )
+            
+            # Handle streaming response
+            if enable_streaming and hasattr(response_data, '__aiter__'):
+                # For streaming, we need to collect the final result
+                final_response = ""
+                async for chunk in response_data:
+                    final_response += chunk
+                response_content = final_response
+            else:
+                response_content = response_data
+                
+            # Format advanced response
+            if isinstance(response_content, str) and not response_content.startswith("Research failed"):
+                sources = []  # Sources are embedded in advanced response
+                sources_found = "embedded"
+            else:
+                response_content = f"Advanced Research Error: {response_content}"
+                sources = []
+                sources_found = 0
         else:
-            # Format the comprehensive research response
-            analysis = response_data.get("analysis", "No analysis available")
-            sources = response_data.get("sources", [])
-            sources_found = response_data.get("sources_found", 0)
+            # Use backward compatible research agent
+            response_data = research_agent(req.message, req.model, use_advanced=False)
             
-            response_content = f"{analysis}\n\n"
-            
-            if sources:
-                response_content += f"**Sources ({sources_found} found):**\n"
-                logger.info(f"Formatting {len(sources)} sources for display")
-                for i, source in enumerate(sources[:5], 1):  # Limit to top 5 sources
-                    title = source.get('title', 'Unknown Title')
-                    url = source.get('url', 'No URL')
-                    logger.info(f"Source {i}: title='{title}', url='{url}'")
-                    response_content += f"{i}. [{title}]({url})\n"
+            # Format response for chat interface
+            if "error" in response_data:
+                response_content = f"Research Error: {response_data['error']}"
+                sources = []
+                sources_found = 0
+            else:
+                # Format the comprehensive research response
+                analysis = response_data.get("analysis", "No analysis available")
+                sources = response_data.get("sources", [])
+                sources_found = response_data.get("sources_found", 0)
+                
+                response_content = f"{analysis}\n\n"
+                
+                if sources:
+                    response_content += f"**Sources ({sources_found} found):**\n"
+                    logger.info(f"Formatting {len(sources)} sources for display")
+                    for i, source in enumerate(sources[:5], 1):  # Limit to top 5 sources
+                        title = source.get('title', 'Unknown Title')
+                        url = source.get('url', 'No URL')
+                        logger.info(f"Source {i}: title='{title}', url='{url}'")
+                        response_content += f"{i}. [{title}]({url})\n"
 
         # ── Process reasoning content if present in research response
         research_reasoning = ""
@@ -1865,6 +1921,96 @@ async def get_ollama_models():
 
 # Vibe websocket endpoint moved to vibecoding.commands
 
+# ─── User Ollama Settings ──────────────────────────────────────────────────────
+class OllamaSettings(BaseModel):
+    cloud_url: str
+    local_url: str
+    api_key: str
+    preferred_endpoint: str  # "cloud", "local", or "auto"
+
+# Global settings dict (in production, this would be stored in database per user)
+user_ollama_settings = {}
+
+@app.get("/api/user/ollama-settings", tags=["settings"])
+async def get_ollama_settings(current_user: dict = Depends(get_current_user_optimized)):
+    """Get current user's Ollama settings"""
+    user_id = current_user.get("id")
+    default_settings = {
+        "cloud_url": CLOUD_OLLAMA_URL,
+        "local_url": LOCAL_OLLAMA_URL,
+        "api_key": "****" if API_KEY != "key" else "",
+        "preferred_endpoint": "auto"
+    }
+    
+    user_settings = user_ollama_settings.get(str(user_id), default_settings)
+    logger.info(f"Retrieved Ollama settings for user {user_id}: {user_settings}")
+    return user_settings
+
+@app.post("/api/user/ollama-settings", tags=["settings"])
+async def update_ollama_settings(
+    settings: OllamaSettings,
+    current_user: dict = Depends(get_current_user_optimized)
+):
+    """Update current user's Ollama settings"""
+    user_id = current_user.get("id")
+    
+    # Store settings for user (in production, save to database)
+    user_ollama_settings[str(user_id)] = {
+        "cloud_url": settings.cloud_url,
+        "local_url": settings.local_url,
+        "api_key": settings.api_key,
+        "preferred_endpoint": settings.preferred_endpoint
+    }
+    
+    logger.info(f"Updated Ollama settings for user {user_id}: {settings.dict()}")
+    return {"message": "Ollama settings updated successfully", "settings": settings.dict()}
+
+@app.post("/api/user/ollama-test-connection", tags=["settings"])
+async def test_ollama_connection(
+    settings: OllamaSettings,
+    current_user: dict = Depends(get_current_user_optimized)
+):
+    """Test connection to Ollama with provided settings"""
+    user_id = current_user.get("id")
+    results = {"cloud": None, "local": None}
+    
+    # Test cloud connection
+    if settings.cloud_url and settings.cloud_url.strip():
+        try:
+            headers = {"Authorization": f"Bearer {settings.api_key}"} if settings.api_key and settings.api_key != "key" else {}
+            response = requests.get(f"{settings.cloud_url}/api/tags", headers=headers, timeout=10)
+            if response.status_code == 200:
+                models = response.json().get("models", [])
+                results["cloud"] = {
+                    "status": "success",
+                    "model_count": len(models),
+                    "models": [m.get("name", "unknown") for m in models[:5]]  # First 5 models
+                }
+            else:
+                results["cloud"] = {"status": "error", "message": f"HTTP {response.status_code}"}
+        except Exception as e:
+            results["cloud"] = {"status": "error", "message": str(e)}
+    
+    # Test local connection
+    if settings.local_url and settings.local_url.strip():
+        try:
+            response = requests.get(f"{settings.local_url}/api/tags", timeout=10)
+            if response.status_code == 200:
+                models = response.json().get("models", [])
+                results["local"] = {
+                    "status": "success", 
+                    "model_count": len(models),
+                    "models": [m.get("name", "unknown") for m in models[:5]]  # First 5 models
+                }
+            else:
+                results["local"] = {"status": "error", "message": f"HTTP {response.status_code}"}
+        except Exception as e:
+            results["local"] = {"status": "error", "message": str(e)}
+    
+    logger.info(f"Connection test results for user {user_id}: {results}")
+    return results
+
+>>>>>>> 8f285fa5da2353068181e4ccb6a4047063a71a4e
 if __name__ == "__main__":
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
 # huh2.0
@@ -2433,6 +2579,183 @@ async def get_vector_db_stats():
             "stats": {}
         }
 
+# ─── Advanced Research Endpoints ─────────────────────────────────────────────
+
+class StreamingResearchRequest(BaseModel):
+    """Request for streaming research"""
+    query: str
+    model: str = "mistral"
+    enable_verification: bool = True
+
+class ResearchStatsResponse(BaseModel):
+    """Research system statistics"""
+    pipeline_stats: dict
+    cache_stats: dict
+    system_info: dict
+
+@app.post("/api/research/stream", tags=["research"])
+async def streaming_research(req: StreamingResearchRequest):
+    """
+    Streaming research endpoint with real-time progress events
+    """
+    try:
+        logger.info(f"🌊 Starting streaming research for: {req.query}")
+        
+        response = await async_research_agent(
+            query=req.query,
+            model=req.model,
+            enable_streaming=True
+        )
+        
+        if hasattr(response, '__aiter__'):
+            # Return streaming response
+            from fastapi.responses import StreamingResponse
+            import json
+            
+            async def generate_stream():
+                async for chunk in response:
+                    # Format as server-sent events
+                    if isinstance(chunk, str):
+                        yield f"data: {json.dumps({'type': 'content', 'data': chunk})}\n\n"
+                    else:
+                        yield f"data: {json.dumps({'type': 'event', 'data': str(chunk)})}\n\n"
+                
+                # Send completion event
+                yield f"data: {json.dumps({'type': 'complete'})}\n\n"
+            
+            return StreamingResponse(
+                generate_stream(),
+                media_type="text/plain",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "Content-Type": "text/event-stream"
+                }
+            )
+        else:
+            # Fallback to regular response
+            return {"content": response, "streaming": False}
+            
+    except Exception as e:
+        logger.error(f"Streaming research error: {e}")
+        return {"error": f"Streaming research failed: {str(e)}"}
+
+@app.post("/api/research/advanced-fact-check", tags=["research"])
+async def advanced_fact_check(claim: str, model: str = "mistral"):
+    """
+    Advanced fact-checking with authority scoring and evidence analysis
+    """
+    try:
+        logger.info(f"🔍 Advanced fact-check for: {claim}")
+        
+        result = await async_fact_check_agent(claim, model)
+        
+        return {
+            "claim": claim,
+            "analysis": result,
+            "model_used": model,
+            "advanced": True,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Advanced fact-check error: {e}")
+        return {"error": f"Advanced fact-check failed: {str(e)}"}
+
+@app.post("/api/research/advanced-compare", tags=["research"])
+async def advanced_compare(topics: List[str], context: str = None, model: str = "mistral"):
+    """
+    Advanced comparison with structured analysis
+    """
+    try:
+        if len(topics) < 2:
+            return {"error": "At least 2 topics required for comparison"}
+        
+        logger.info(f"🔄 Advanced comparison of: {topics}")
+        
+        result = await async_comparative_research_agent(topics, model, context)
+        
+        return {
+            "topics": topics,
+            "context": context,
+            "analysis": result,
+            "model_used": model,
+            "advanced": True,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Advanced comparison error: {e}")
+        return {"error": f"Advanced comparison failed: {str(e)}"}
+
+@app.get("/api/research/stats", response_model=ResearchStatsResponse, tags=["research"])
+async def research_stats():
+    """
+    Get research system statistics and performance metrics
+    """
+    try:
+        stats = get_research_agent_stats()
+        
+        # Add cache stats if available
+        try:
+            from research.cache.http_cache import get_cache
+            cache = get_cache()
+            cache_stats = cache.get_cache_info()
+        except Exception:
+            cache_stats = {"error": "Cache stats unavailable"}
+        
+        # System info
+        import psutil
+        system_info = {
+            "memory_usage": psutil.virtual_memory().percent,
+            "cpu_usage": psutil.cpu_percent(),
+            "disk_usage": psutil.disk_usage('/').percent
+        }
+        
+        return ResearchStatsResponse(
+            pipeline_stats=stats.get("advanced_pipeline_stats", {}),
+            cache_stats=cache_stats,
+            system_info=system_info
+        )
+        
+    except Exception as e:
+        logger.error(f"Research stats error: {e}")
+        return {"error": f"Could not get research stats: {str(e)}"}
+
+@app.get("/api/research/health", tags=["research"])
+async def research_health_check():
+    """
+    Health check for research system components
+    """
+    try:
+        health = {
+            "status": "healthy",
+            "components": {
+                "web_search": "available",
+                "llm_client": "available", 
+                "cache": "available",
+                "advanced_pipeline": "available"
+            },
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        # Test basic functionality
+        try:
+            stats = get_research_agent_stats()
+            health["components"]["stats"] = "available"
+        except Exception:
+            health["components"]["stats"] = "unavailable"
+            health["status"] = "degraded"
+        
+        return health
+        
+    except Exception as e:
+        logger.error(f"Research health check error: {e}")
+        return {
+            "status": "unhealthy", 
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
 # ─── Vibe Coding Endpoints ─────────────────────────────────────────────────────
 
 # Vibe coding endpoint moved to vibecoding.commands

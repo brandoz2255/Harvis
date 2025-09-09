@@ -1,0 +1,103 @@
+# version: "3.9"
+
+services:
+  nginx:
+    image: nginx:alpine
+    container_name: nginx-proxy
+    restart: unless-stopped
+    ports:
+      - "9000:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      - ollama-n8n-network
+    depends_on:
+      - backend
+      - frontend
+
+  backend:
+    image: dulc3/jarvis-backend:latest
+    container_name: backend
+    restart: unless-stopped
+    runtime: nvidia
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./python_back_end/.env
+    networks:
+      - ollama-n8n-network
+    volumes:
+      - ./python_back_end:/app
+      - ./embedding:/app/embedding
+      - /tmp:/tmp
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+  frontend:
+    image: frontend
+    container_name: frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    env_file:
+      - ./front_end/jfrontend/.env.local
+    networks:
+      - ollama-n8n-network
+    depends_on:
+      - backend
+      - pgsql
+    build:
+      context: ./front_end/jfrontend
+      dockerfile: Dockerfile
+
+  pgsql:
+    image: pgvector/pgvector:pg15
+    container_name: pgsql-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: pguser
+      POSTGRES_PASSWORD: pgpassword
+      POSTGRES_DB: database
+      POSTGRES_INITDB_ARGS: "-E UTF8 --locale=C"
+    volumes:
+      - pgsql_data:/var/lib/postgresql/data
+      - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh
+    networks:
+      - ollama-n8n-network
+
+  n8n:
+    image: n8nio/n8n
+    container_name: n8n
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    volumes:
+      - n8n_data:/home/node/.n8n2
+    environment:
+      N8N_BASIC_AUTH_ACTIVE: "true"
+      N8N_BASIC_AUTH_USER: "admin"
+      N8N_BASIC_AUTH_PASSWORD: "adminpass"
+      N8N_PERSONAL_API_KEY: "${N8N_PERSONAL_API_KEY}"
+      DB_TYPE: "postgres"
+      DB_POSTGRES_HOST: "pgsql-db"
+      DB_POSTGRES_PORT: "5432"
+      DB_POSTGRES_DATABASE: "database"
+      DB_POSTGRES_USER: "pguser"
+      DB_POSTGRES_PASSWORD: "pgpassword"
+    networks:
+      - ollama-n8n-network
+    depends_on:
+      - pgsql
+
+networks:
+  ollama-n8n-network:
+    external: true
+
+volumes:
+  ollama:
+  n8n_data:
+  pgsql_data:
+

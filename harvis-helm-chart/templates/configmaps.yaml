@@ -1,0 +1,96 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "harvis-ai.fullname" . }}-backend-config
+  labels:
+    {{- include "harvis-ai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backend
+data:
+  # Backend configuration
+  ENVIRONMENT: "production"
+  LOG_LEVEL: "INFO"
+  CORS_ORIGINS: "*"
+  MAX_WORKERS: "4"
+  UVICORN_WORKERS: "1"
+  # Ollama configuration
+  OLLAMA_CLOUD_URL: {{ .Values.backend.env.OLLAMA_CLOUD_URL | quote }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "harvis-ai.fullname" . }}-frontend-config
+  labels:
+    {{- include "harvis-ai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+data:
+  # Frontend configuration
+  NODE_ENV: "production"
+  NEXT_TELEMETRY_DISABLED: "1"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "harvis-ai.fullname" . }}-postgresql-init
+  labels:
+    {{- include "harvis-ai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgresql
+data:
+  init-db.sh: |
+    #!/bin/bash
+    set -e
+    
+    echo "Starting PostgreSQL database initialization..."
+    echo "POSTGRES_USER: $POSTGRES_USER"
+    echo "POSTGRES_DB: $POSTGRES_DB"
+    
+    # Ensure the database exists (this should be automatic with POSTGRES_DB env var)
+    # But let's verify it exists and create if not
+    psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "postgres" <<-EOSQL
+        SELECT 'CREATE DATABASE "'$POSTGRES_DB'"'
+        WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '$POSTGRES_DB')\gexec
+    EOSQL
+    
+    # Create extensions in the target database
+    echo "Creating extensions in database: $POSTGRES_DB"
+    psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL
+        CREATE EXTENSION IF NOT EXISTS vector;
+        CREATE EXTENSION IF NOT EXISTS pg_trgm;
+        CREATE EXTENSION IF NOT EXISTS btree_gin;
+    EOSQL
+    
+    # Create application tables if they don't exist
+    echo "Creating application tables..."
+    psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL
+        CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
+            username VARCHAR(255) UNIQUE NOT NULL,
+            email VARCHAR(255) UNIQUE NOT NULL,
+            password VARCHAR(255) NOT NULL,
+            avatar VARCHAR(255),
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+        
+        CREATE TABLE IF NOT EXISTS chat_sessions (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER REFERENCES users(id),
+            title VARCHAR(255),
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+        
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id SERIAL PRIMARY KEY,
+            session_id INTEGER REFERENCES chat_sessions(id),
+            role VARCHAR(50) NOT NULL,
+            content TEXT NOT NULL,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+        
+        -- Add indexes for better performance
+        CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+        CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+        CREATE INDEX IF NOT EXISTS idx_chat_sessions_user_id ON chat_sessions(user_id);
+        CREATE INDEX IF NOT EXISTS idx_chat_messages_session_id ON chat_messages(session_id);
+    EOSQL
+    
+    echo "✅ Database initialization completed successfully"

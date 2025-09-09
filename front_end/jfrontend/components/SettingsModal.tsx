@@ -71,11 +71,26 @@ interface Provider {
   icon: React.ElementType
 }
 
+interface OllamaSettings {
+  cloud_url: string
+  local_url: string
+  api_key: string
+  preferred_endpoint: 'cloud' | 'local' | 'auto'
+}
+
+interface ConnectionTest {
+  status: 'success' | 'error'
+  model_count?: number
+  models?: string[]
+  message?: string
+}
+
 /* ------------------------- Sidebar configuration ------------------------- */
 
 type SectionId =
   | "general"
   | "models"
+  | "ollama"
   | "appearance"
   | "notifications"
   | "security"
@@ -86,6 +101,7 @@ type SectionId =
 const sections: { id: SectionId; label: string; icon: React.ElementType }[] = [
   { id: "general", label: "General", icon: User },
   { id: "models", label: "AI Models", icon: BrainCircuit },
+  { id: "ollama", label: "Ollama Settings", icon: Globe },
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "notifications", label: "Notifications", icon: Bell },
   { id: "security", label: "Security", icon: Shield },
@@ -172,6 +188,20 @@ const SettingsModal: FC<SettingsModalProps> = ({
   const [newApiUrl, setNewApiUrl] = useState<{ [provider: string]: string }>({})
   const [saving, setSaving] = useState<{ [provider: string]: boolean }>({})
 
+  // Ollama settings state
+  const [ollamaSettings, setOllamaSettings] = useState<OllamaSettings>({
+    cloud_url: '',
+    local_url: '',
+    api_key: '',
+    preferred_endpoint: 'auto'
+  })
+  const [ollamaLoading, setOllamaLoading] = useState(false)
+  const [ollamaSaving, setOllamaSaving] = useState(false)
+  const [connectionTest, setConnectionTest] = useState<{cloud: ConnectionTest | null, local: ConnectionTest | null}>({
+    cloud: null,
+    local: null
+  })
+  const [testing, setTesting] = useState(false)
   // Load API keys when modal opens
   useEffect(() => {
     if (isOpen && activeSection === "models") {
@@ -179,6 +209,12 @@ const SettingsModal: FC<SettingsModalProps> = ({
     }
   }, [isOpen, activeSection])
 
+  // Load Ollama settings when modal opens
+  useEffect(() => {
+    if (isOpen && activeSection === "ollama") {
+      loadOllamaSettings()
+    }
+  }, [isOpen, activeSection])
   const loadApiKeys = async () => {
     setLoading(true)
     try {
@@ -312,6 +348,83 @@ const SettingsModal: FC<SettingsModalProps> = ({
     }
   }
 
+  // Ollama settings functions
+  const loadOllamaSettings = async () => {
+    setOllamaLoading(true)
+    try {
+      const token = localStorage.getItem('token')
+      if (!token) return
+
+      const response = await fetch('/api/user/ollama-settings', {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        },
+      })
+
+      if (response.ok) {
+        const data = await response.json()
+        setOllamaSettings(data)
+      }
+    } catch (error) {
+      console.error('Error loading Ollama settings:', error)
+    } finally {
+      setOllamaLoading(false)
+    }
+  }
+
+  const saveOllamaSettings = async () => {
+    setOllamaSaving(true)
+    try {
+      const token = localStorage.getItem('token')
+      if (!token) return
+
+      const response = await fetch('/api/user/ollama-settings', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(ollamaSettings),
+      })
+
+      if (response.ok) {
+        const data = await response.json()
+        console.log('Ollama settings saved:', data)
+      }
+    } catch (error) {
+      console.error('Error saving Ollama settings:', error)
+    } finally {
+      setOllamaSaving(false)
+    }
+  }
+
+  const testOllamaConnection = async () => {
+    setTesting(true)
+    setConnectionTest({ cloud: null, local: null })
+    
+    try {
+      const token = localStorage.getItem('token')
+      if (!token) return
+
+      const response = await fetch('/api/user/ollama-test-connection', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(ollamaSettings),
+      })
+
+      if (response.ok) {
+        const data = await response.json()
+        setConnectionTest(data)
+      }
+    } catch (error) {
+      console.error('Error testing Ollama connection:', error)
+    } finally {
+      setTesting(false)
+    }
+  }
   const resetDefaults = () => {
     setName("User")
     setEmail("user@example.com")
@@ -465,6 +578,182 @@ const SettingsModal: FC<SettingsModalProps> = ({
       )
     }
 
+    if (activeSection === "ollama") {
+      return (
+        <Fragment>
+          <h3 className="text-xl font-semibold mb-6">Ollama Configuration</h3>
+          <p className="text-slate-400 mb-6">
+            Configure your Ollama endpoints for local and cloud AI models. No .env file needed!
+          </p>
+
+          {ollamaLoading ? (
+            <div className="flex items-center justify-center py-8">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
+            </div>
+          ) : (
+            <div className="space-y-6">
+              {/* Cloud URL */}
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Cloud Ollama URL</label>
+                <Input
+                  value={ollamaSettings.cloud_url}
+                  onChange={e => setOllamaSettings(prev => ({ ...prev, cloud_url: e.target.value }))}
+                  placeholder="https://your-ollama-cloud.com/ollama"
+                  className={`${PANEL_BG} ${BORDER} placeholder:text-slate-500`}
+                />
+                <p className="text-xs text-slate-500">URL for cloud-hosted Ollama instance</p>
+              </div>
+
+              {/* Local URL */}
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Local Ollama URL</label>
+                <Input
+                  value={ollamaSettings.local_url}
+                  onChange={e => setOllamaSettings(prev => ({ ...prev, local_url: e.target.value }))}
+                  placeholder="http://ollama:11434"
+                  className={`${PANEL_BG} ${BORDER} placeholder:text-slate-500`}
+                />
+                <p className="text-xs text-slate-500">URL for local Ollama instance</p>
+              </div>
+
+              {/* API Key */}
+              <div className="space-y-2">
+                <label className="text-sm font-medium">API Key (for cloud)</label>
+                <div className="relative">
+                  <Input
+                    type={showApiKey['ollama'] ? "text" : "password"}
+                    value={ollamaSettings.api_key}
+                    onChange={e => setOllamaSettings(prev => ({ ...prev, api_key: e.target.value }))}
+                    placeholder="sk-your-api-key"
+                    className={`${PANEL_BG} ${BORDER} placeholder:text-slate-500 pr-10`}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowApiKey(prev => ({ ...prev, ollama: !prev.ollama }))}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-300"
+                  >
+                    {showApiKey['ollama'] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+                <p className="text-xs text-slate-500">API key for cloud Ollama authentication</p>
+              </div>
+
+              {/* Preferred Endpoint */}
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Preferred Endpoint</label>
+                <Select 
+                  value={ollamaSettings.preferred_endpoint} 
+                  onValueChange={value => setOllamaSettings(prev => ({ ...prev, preferred_endpoint: value as 'cloud' | 'local' | 'auto' }))}
+                >
+                  <SelectTrigger className={`${PANEL_BG} ${BORDER} text-left`}>
+                    <SelectValue placeholder="Select preferred endpoint" />
+                  </SelectTrigger>
+                  <SelectContent className={WRAP_BG}>
+                    <SelectItem value="auto">Auto (try cloud first, fallback to local)</SelectItem>
+                    <SelectItem value="cloud">Cloud only</SelectItem>
+                    <SelectItem value="local">Local only</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-slate-500">How to choose between cloud and local endpoints</p>
+              </div>
+
+              {/* Action buttons */}
+              <div className="flex space-x-4 pt-4">
+                <Button
+                  onClick={saveOllamaSettings}
+                  disabled={ollamaSaving}
+                  className="bg-blue-600 hover:bg-blue-700"
+                >
+                  {ollamaSaving ? (
+                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                  ) : null}
+                  Save Settings
+                </Button>
+                
+                <Button
+                  onClick={testOllamaConnection}
+                  disabled={testing}
+                  variant="outline"
+                  className={`${BORDER} bg-[#0F172A] text-slate-300 hover:bg-[#1E293B]`}
+                >
+                  {testing ? (
+                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-500 mr-2"></div>
+                  ) : null}
+                  Test Connection
+                </Button>
+              </div>
+
+              {/* Connection test results */}
+              {(connectionTest.cloud || connectionTest.local) && (
+                <div className="space-y-4 pt-4 border-t border-slate-700">
+                  <h4 className="font-medium">Connection Test Results</h4>
+                  
+                  {connectionTest.cloud && (
+                    <div className={`${PANEL_BG} ${BORDER} rounded-lg p-4`}>
+                      <div className="flex items-center space-x-2 mb-2">
+                        <Globe className="w-4 h-4" />
+                        <span className="font-medium">Cloud Endpoint</span>
+                        <span className={`text-sm px-2 py-1 rounded ${
+                          connectionTest.cloud.status === 'success' 
+                            ? 'bg-green-600/20 text-green-400' 
+                            : 'bg-red-600/20 text-red-400'
+                        }`}>
+                          {connectionTest.cloud.status}
+                        </span>
+                      </div>
+                      {connectionTest.cloud.status === 'success' ? (
+                        <div>
+                          <p className="text-sm text-slate-300">
+                            Found {connectionTest.cloud.model_count} models
+                          </p>
+                          {connectionTest.cloud.models && connectionTest.cloud.models.length > 0 && (
+                            <p className="text-xs text-slate-500 mt-1">
+                              Available: {connectionTest.cloud.models.join(', ')}
+                            </p>
+                          )}
+                        </div>
+                      ) : (
+                        <p className="text-sm text-red-400">{connectionTest.cloud.message}</p>
+                      )}
+                    </div>
+                  )}
+
+                  {connectionTest.local && (
+                    <div className={`${PANEL_BG} ${BORDER} rounded-lg p-4`}>
+                      <div className="flex items-center space-x-2 mb-2">
+                        <Monitor className="w-4 h-4" />
+                        <span className="font-medium">Local Endpoint</span>
+                        <span className={`text-sm px-2 py-1 rounded ${
+                          connectionTest.local.status === 'success' 
+                            ? 'bg-green-600/20 text-green-400' 
+                            : 'bg-red-600/20 text-red-400'
+                        }`}>
+                          {connectionTest.local.status}
+                        </span>
+                      </div>
+                      {connectionTest.local.status === 'success' ? (
+                        <div>
+                          <p className="text-sm text-slate-300">
+                            Found {connectionTest.local.model_count} models
+                          </p>
+                          {connectionTest.local.models && connectionTest.local.models.length > 0 && (
+                            <p className="text-xs text-slate-500 mt-1">
+                              Available: {connectionTest.local.models.join(', ')}
+                            </p>
+                          )}
+                        </div>
+                      ) : (
+                        <p className="text-sm text-red-400">{connectionTest.local.message}</p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </Fragment>
+      )
+    }
     if (activeSection !== "general")
       return (
         <div className="flex items-center justify-center h-full text-slate-400">

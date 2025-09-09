@@ -613,3 +613,11 @@ For backend authentication, also add to Python backend environment:
 3. **Database Security**: Direct backend-to-database connection
 4. **Token Security**: JWT secrets never exposed to frontend
 5. **Consistent Validation**: Same auth validation across all endpoints
+
+## Future Development Plans
+
+### MCP Server Integration
+
+New thing I want to add is to make this a full MCP server and interface I want to give it basic vison as  well i already have screenshare but I want vision for human interaction rather than just its screenshare 
+
+Ima add a  Plans.md to show u what i mean with what I want to add

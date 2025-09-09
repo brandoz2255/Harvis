@@ -1,0 +1,108 @@
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: harvis-ai
+  namespace: ai-agents
+spec:
+  interval: 5m
+  releaseName: harvis-ai
+  chart:
+    spec:
+      chart: ./harvis-helm-chart
+      version: "*"
+      sourceRef:
+        kind: GitRepository
+        name: harvis-source
+        namespace: flux-system
+  values:
+    # Override values from the Helm chart
+    namespace: ai-agents
+    
+    # Backend configuration with environment variables
+    backend:
+      enabled: false  # Using merged deployment
+      env:
+        OLLAMA_CLOUD_URL: "https://coyotegpt.ngrok.app"
+        OLLAMA_API_KEY: ""  # Set via external secret or --set flag
+        OPENAI_API_KEY: ""
+    
+    # Merged Ollama + Backend deployment
+    mergedOllamaBackend:
+      enabled: true
+      resources:
+        gpu: 1
+    
+    # Frontend configuration
+    frontend:
+      enabled: true
+      image:
+        repository: dulc3/jarvis-frontend
+        tag: dev # {"$imagepolicy": "flux-system:harvis-frontend-policy:tag"}
+        pullPolicy: Always
+    
+    # PostgreSQL configuration
+    postgresql:
+      enabled: true
+      persistence:
+        enabled: true
+        size: 20Gi
+    
+    # n8n configuration  
+    n8n:
+      enabled: true
+      persistence:
+        enabled: true
+        size: 5Gi
+    
+    # Ingress configuration
+    ingress:
+      enabled: true
+      className: "nginx"
+      hosts:
+        - host: harvis.dulc3.tech
+          paths:
+            - path: /
+              pathType: Prefix
+              service:
+                name: nginx
+                port: 80
+        - host: harvis-api.dulc3.tech
+          paths:
+            - path: /api
+              pathType: Prefix
+              service:
+                name: merged-backend
+                port: 8000
+        - host: n8n.dulc3.tech
+          paths:
+            - path: /
+              pathType: Prefix
+              service:
+                name: n8n
+                port: 5678
+  
+  # Automated upgrade configuration
+  upgrade:
+    remediation:
+      retries: 3
+  
+  # Rollback configuration
+  rollback:
+    cleanupOnFail: true
+  
+  # Health checks
+  test:
+    enable: false
+  
+  # Post-install and post-upgrade hooks
+  postInstall:
+    - metadata:
+        name: harvis-post-install
+      exec:
+        onFailure: recreate
+        timeout: 5m
+  
+  # Dependencies - ensure namespace exists
+  dependsOn:
+    - name: ai-agents-namespace

@@ -69,7 +69,26 @@ def load_tts_model(force_cpu=False):
     if tts_model is None:
         try:
             logger.info(f"🔊 Loading TTS model on device: {tts_device}")
-            tts_model = ChatterboxTTS.from_pretrained(device=tts_device)
+            # Add timeout for CUDA loading to prevent hanging
+            import signal
+            
+            def timeout_handler(signum, frame):
+                raise TimeoutError("TTS model loading timed out")
+            
+            if tts_device == "cuda":
+                # Set 30 second timeout for CUDA loading
+                signal.signal(signal.SIGALRM, timeout_handler)
+                signal.alarm(30)
+                try:
+                    tts_model = ChatterboxTTS.from_pretrained(device=tts_device)
+                    signal.alarm(0)  # Cancel timeout
+                except TimeoutError:
+                    signal.alarm(0)  # Cancel timeout
+                    logger.warning("⏰ TTS CUDA loading timed out, falling back to CPU...")
+                    tts_device = "cpu"
+                    tts_model = ChatterboxTTS.from_pretrained(device="cpu")
+            else:
+                tts_model = ChatterboxTTS.from_pretrained(device=tts_device)
         except Exception as e:
             if "cuda" in str(e).lower():
                 logger.warning(f"⚠️ CUDA load failed: {e}. Falling back to CPU...")
@@ -91,27 +110,185 @@ def load_whisper_model():
         if whisper is None:
             logger.error("❌ Whisper not available - install with: pip install openai-whisper")
             return None
+        
         try:
-            logger.info("🔄 Loading Whisper model")
-            # Try a larger model for better transcription accuracy
-            try:
-                whisper_model = whisper.load_model("medium")
-                logger.info("✅ Loaded Whisper 'medium' model")
-            except Exception as e:
-                logger.warning(f"Failed to load 'medium' model, falling back to 'small': {e}")
+            logger.info("🔄 Loading Whisper model with surgical GPU fixes")
+            
+            # SURGICAL FIX 1: Force CUDA init early to prevent hanging
+            import signal
+            def cuda_timeout_handler(signum, frame):
+                raise TimeoutError("CUDA operation timed out")
+            
+            if torch.cuda.is_available():
+                logger.info("🔧 Pre-warming CUDA to prevent init hangs...")
+                signal.signal(signal.SIGALRM, cuda_timeout_handler)
+                signal.alarm(15)  # 15 second timeout for CUDA init
                 try:
-                    whisper_model = whisper.load_model("small")
-                    logger.info("✅ Loaded Whisper 'small' model")
-                except Exception as e2:
-                    logger.warning(f"Failed to load 'small' model, falling back to 'base': {e2}")
-                    whisper_model = whisper.load_model("base")
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                    _ = torch.cuda.current_device()
+                    logger.info("✅ CUDA pre-warm successful")
+                    signal.alarm(0)
+                except Exception as cuda_e:
+                    signal.alarm(0)
+                    logger.error(f"❌ CUDA pre-warm failed: {cuda_e}")
+                    raise RuntimeError(f"CUDA initialization failed: {cuda_e}")
+            
+            # SURGICAL FIX 2: Check if model already exists in cache (avoids download entirely)
+            import os
+            cache_dir = os.path.expanduser("~/.cache/whisper")
+            logger.info(f"📁 Checking Whisper cache directory: {cache_dir}")
+            
+            if os.path.exists(cache_dir):
+                files = os.listdir(cache_dir)
+                logger.info(f"📁 Whisper cache contents: {files}")
+                # Look for any .pt files (model files)
+                model_files = [f for f in files if f.endswith('.pt')]
+                if model_files:
+                    logger.info(f"✅ Found existing Whisper models: {model_files}")
+                    # SURGICAL FIX 3: Validate cached models and load with timeout
+                    for model_name in ['tiny', 'base', 'small']:  # Start with smallest for faster testing
+                        expected_file = f"{model_name}.pt"
+                        if expected_file in model_files:
+                            model_path = os.path.join(cache_dir, expected_file)
+                            file_size = os.path.getsize(model_path)
+                            
+                            # Check minimum expected sizes to detect corruption
+                            min_sizes = {'tiny': 30_000_000, 'base': 140_000_000, 'small': 460_000_000}
+                            if file_size < min_sizes.get(model_name, 30_000_000):
+                                logger.warning(f"🗑️ Corrupted cache detected for {model_name}: {file_size} bytes (expected >{min_sizes[model_name]})")
+                                os.remove(model_path)
+                                continue
+                            
+                            logger.info(f"🎯 Loading cached Whisper '{model_name}' model ({file_size} bytes)...")
+                            
+                            # Load with timeout protection
+                            signal.signal(signal.SIGALRM, cuda_timeout_handler)
+                            signal.alarm(45)  # 45 second timeout for model loading
+                            try:
+                                whisper_model = whisper.load_model(model_name, device="cuda")
+                                logger.info(f"✅ Successfully loaded cached Whisper '{model_name}' model")
+                                signal.alarm(0)
+                                return whisper_model
+                            except Exception as load_e:
+                                signal.alarm(0)
+                                logger.warning(f"⚠️ Failed to load cached {model_name}: {load_e}")
+                                continue
+            else:
+                logger.info("📁 Creating Whisper cache directory...")
+                os.makedirs(cache_dir, exist_ok=True)
+            
+            # If no cached models found, download directly with timeout
+            logger.warning("⚠️ No cached Whisper models found - downloading directly")
+            
+            def download_whisper_model_direct(model_name):
+                """Download Whisper model directly using requests with timeout"""
+                import requests
+                from tqdm import tqdm
+                
+                # Whisper model URLs (from the documentation)
+                model_urls = {
+                    'tiny': 'https://openaipublic.azureedge.net/main/whisper/models/65147644a518d12f04e32d6f3b26facc3f8dd46e5390956a9424a650c0ce22b9/tiny.pt',
+                    'base': 'https://openaipublic.azureedge.net/main/whisper/models/ed3a0b6b1c0edf879ad9b11b1af5a0e6ab5db9205f891f668f8b0e6c6326e34e/base.pt', 
+                    'small': 'https://openaipublic.azureedge.net/main/whisper/models/9ecf779972d90ba49c06d968637d720dd632c55bbf19d441fb42bf17a411e794/small.pt'
+                }
+                
+                if model_name not in model_urls:
+                    return False, f"Model '{model_name}' not supported"
+                
+                url = model_urls[model_name]
+                model_path = os.path.join(cache_dir, f"{model_name}.pt")
+                
+                try:
+                    logger.info(f"🌐 Downloading Whisper '{model_name}' model from: {url}")
+                    
+                    # Download with progress bar and extended timeout for large models
+                    response = requests.get(url, stream=True, timeout=(30, 300))  # 30s connect, 5min read timeout
+                    response.raise_for_status()
+                    
+                    total_size = int(response.headers.get('content-length', 0))
+                    logger.info(f"📦 Model size: {total_size / 1024 / 1024:.1f} MB")
+                    
+                    with open(model_path, 'wb') as f:
+                        if total_size == 0:
+                            f.write(response.content)
+                        else:
+                            downloaded = 0
+                            for chunk in response.iter_content(chunk_size=8192):
+                                if chunk:
+                                    f.write(chunk)
+                                    downloaded += len(chunk)
+                                    # Log progress every 10MB
+                                    if downloaded % (10 * 1024 * 1024) < 8192:
+                                        progress = (downloaded / total_size) * 100
+                                        logger.info(f"📥 Download progress: {progress:.1f}% ({downloaded / 1024 / 1024:.1f}MB)")
+                    
+                    logger.info(f"✅ Successfully downloaded Whisper '{model_name}' model")
+                    return True, None
+                    
+                except requests.exceptions.Timeout:
+                    logger.error(f"⏰ Download timeout for '{model_name}' model")
+                    return False, "timeout"
+                except Exception as e:
+                    logger.error(f"❌ Download failed for '{model_name}': {e}")
+                    return False, str(e)
+            
+            # SURGICAL FIX 4: Start with tiny model for fastest download, force GPU loading
+            logger.info("🎯 Starting with tiny model for fastest initialization")
+            
+            for model_name in ['tiny', 'base', 'small']:
+                logger.info(f"📥 Attempting to download {model_name} model...")
+                success, error = download_whisper_model_direct(model_name)
+                
+                if success:
+                    logger.info(f"✅ Downloaded {model_name} model, now loading with GPU...")
+                    
+                    # Load with timeout and force GPU
+                    signal.signal(signal.SIGALRM, cuda_timeout_handler)
+                    signal.alarm(60)  # 60 second timeout for fresh model loading
+                    try:
+                        whisper_model = whisper.load_model(model_name, device="cuda")
+                        logger.info(f"✅ Successfully loaded Whisper '{model_name}' model on GPU")
+                        signal.alarm(0)
+                        break
+                    except Exception as load_e:
+                        signal.alarm(0)
+                        logger.error(f"❌ Failed to load downloaded {model_name}: {load_e}")
+                        # Remove corrupted download
+                        try:
+                            corrupted_path = os.path.join(cache_dir, f"{model_name}.pt")
+                            if os.path.exists(corrupted_path):
+                                os.remove(corrupted_path)
+                                logger.info(f"🗑️ Removed corrupted {model_name} model")
+                        except:
+                            pass
+                        continue
+                else:
+                    logger.warning(f"{model_name} model download failed: {error}")
+                    if model_name == 'small':  # Last attempt
+                        logger.error(f"❌ All Whisper model downloads failed: {error}")
+                        return None
+            
             logger.info("✅ Whisper model loaded successfully")
-        except AttributeError as e:
-            logger.error(f"❌ Whisper module missing load_model: {e}")
-            logger.error(f"Available whisper attributes: {dir(whisper)}")
-            return None
+            
         except Exception as e:
             logger.error(f"❌ Failed to load Whisper model: {e}")
+            import traceback
+            logger.error(f"❌ Full traceback: {traceback.format_exc()}")
+            
+            # Try system whisper as fallback
+            logger.info("🔄 Trying system whisper command as fallback...")
+            try:
+                import subprocess
+                result = subprocess.run(['which', 'whisper'], capture_output=True, text=True)
+                if result.returncode == 0:
+                    logger.info("✅ System whisper found, using as fallback")
+                    return "system_whisper"  # Special marker for system whisper
+                else:
+                    logger.warning("⚠️ System whisper not found")
+            except Exception as fallback_e:
+                logger.error(f"❌ System whisper fallback failed: {fallback_e}")
+            
             return None
     return whisper_model
 
@@ -267,17 +444,58 @@ def generate_speech(text, model=None, audio_prompt=None, exaggeration=0.5, tempe
         raise
 
 # ─── VRAM-Optimized Sequential Model Functions ─────────────────────────────
+def diagnose_whisper_issues():
+    """Quick diagnostic to identify Whisper loading issues"""
+    logger.info("🔍 WHISPER DIAGNOSTIC START")
+    
+    # Test 1: Check network connectivity
+    try:
+        import requests
+        response = requests.get("https://openaipublic.azureedge.net", timeout=10)
+        logger.info(f"✅ Network OK: {response.status_code}")
+    except Exception as e:
+        logger.error(f"❌ Network issue: {e}")
+    
+    # Test 2: Check cache directory
+    import os
+    cache_dir = os.path.expanduser("~/.cache/whisper")
+    if os.path.exists(cache_dir):
+        files = os.listdir(cache_dir)
+        logger.info(f"📁 Cache files: {files}")
+        # Check for corrupted files
+        for f in files:
+            if f.endswith('.pt'):
+                size = os.path.getsize(os.path.join(cache_dir, f))
+                logger.info(f"📦 {f}: {size} bytes")
+    else:
+        logger.info("📁 No cache directory found")
+    
+    # Test 3: Check CUDA availability
+    try:
+        import torch
+        logger.info(f"🔧 CUDA available: {torch.cuda.is_available()}")
+        if torch.cuda.is_available():
+            logger.info(f"🔧 CUDA devices: {torch.cuda.device_count()}")
+            logger.info(f"🔧 Current device: {torch.cuda.current_device()}")
+    except Exception as e:
+        logger.error(f"❌ CUDA check failed: {e}")
+    
+    logger.info("🔍 WHISPER DIAGNOSTIC END")
+
 def use_whisper_model_optimized():
-    """Load Whisper model with VRAM optimization (unload TTS first)"""
+    """Load Whisper model with VRAM optimization and surgical fixes"""
     global whisper_model, tts_model
     
     logger.info("🔄 Starting VRAM-optimized Whisper loading")
     log_gpu_memory("before Whisper optimization")
     
+    # Run diagnostics first
+    diagnose_whisper_issues()
+    
     # Unload TTS model to free VRAM for Whisper
     unload_tts_model()
     
-    # Load Whisper model
+    # Load Whisper model with timeout and fallbacks
     if whisper_model is None:
         load_whisper_model()
     
@@ -312,25 +530,60 @@ def transcribe_with_whisper_optimized(audio_path):
         raise RuntimeError("Failed to load Whisper model")
     
     try:
-        # Perform transcription
-        result = whisper_model.transcribe(
-            audio_path,
-            fp16=False,
-            language='en',
-            task='transcribe',
-            verbose=True
-        )
-        
-        logger.info(f"✅ Transcription completed: {result.get('text', '')[:100]}...")
-        return result
+        # Check if using system whisper fallback
+        if whisper_model == "system_whisper":
+            logger.info("🔧 Using system whisper command for transcription")
+            import subprocess
+            import json
+            import tempfile
+            
+            # Use system whisper command with JSON output
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as tmp_json:
+                cmd = ['whisper', audio_path, '--output_format', 'json', '--output_dir', '/tmp', '--model', 'tiny']
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                
+                if result.returncode == 0:
+                    # Parse the output JSON file
+                    json_file = audio_path.replace('.ogg', '.json').replace('/tmp/', '/tmp/')
+                    base_name = os.path.splitext(os.path.basename(audio_path))[0]
+                    json_file = f"/tmp/{base_name}.json"
+                    
+                    try:
+                        with open(json_file, 'r') as f:
+                            json_result = json.load(f)
+                        os.unlink(json_file)  # Cleanup
+                        logger.info(f"✅ System whisper transcription completed: {json_result.get('text', '')[:100]}...")
+                        return json_result
+                    except Exception as parse_e:
+                        logger.error(f"❌ Failed to parse system whisper JSON: {parse_e}")
+                        # Fallback to stdout parsing
+                        if result.stdout:
+                            return {"text": result.stdout.strip()}
+                        else:
+                            raise RuntimeError(f"System whisper failed: {result.stderr}")
+                else:
+                    raise RuntimeError(f"System whisper command failed: {result.stderr}")
+        else:
+            # Use Python whisper library
+            result = whisper_model.transcribe(
+                audio_path,
+                fp16=False,
+                language='en',
+                task='transcribe',
+                verbose=True
+            )
+            
+            logger.info(f"✅ Transcription completed: {result.get('text', '')[:100]}...")
+            return result
         
     except Exception as e:
         logger.error(f"❌ Transcription failed: {e}")
         raise
     finally:
-        # Unload Whisper to free VRAM
-        logger.info("🗑️ Unloading Whisper after transcription")
-        unload_whisper_model()
+        # Unload Whisper to free VRAM (only if using Python whisper)
+        if whisper_model != "system_whisper":
+            logger.info("🗑️ Unloading Whisper after transcription")
+            unload_whisper_model()
 
 def generate_speech_optimized(text, audio_prompt=None, exaggeration=0.5, temperature=0.8, cfg_weight=0.5):
     """Generate speech with VRAM optimization"""
