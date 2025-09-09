@@ -101,6 +101,7 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
 
   const [isResearchMode, setIsResearchMode] = useState(false)
   const [isSearching, setIsSearching] = useState(false)
+  const [isActivelyResearching, setIsActivelyResearching] = useState(false)
   const [searchResults, setSearchResults] = useState<any[]>([])
   const [lastSearchQuery, setLastSearchQuery] = useState("")
 
@@ -461,6 +462,7 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
         messageContent.toLowerCase().includes("when did") ||
         messageContent.toLowerCase().includes("how to"))
 
+    setIsActivelyResearching(needsWebSearch)
     const apiEndpoint = needsWebSearch ? "/api/research-chat" : "/api/chat"
     
     // Context logic: 
@@ -493,6 +495,10 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
     }
 
     try {
+      // Extended timeout for research requests (5 minutes), normal timeout for chat (60 seconds)
+      const timeoutDuration = needsWebSearch ? 300000 : 60000
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), timeoutDuration)
       const response = await fetch(apiEndpoint, {
         method: "POST",
         headers: {
@@ -501,8 +507,10 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
         },
         body: JSON.stringify(payload),
         credentials: 'include',
+        signal: controller.signal,
       })
 
+      clearTimeout(timeoutId)
       if (!response.ok) throw new Error(await response.text())
 
       const data: ResearchChatResponse = await response.json()
@@ -639,6 +647,20 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
       }
     } catch (error) {
       console.error(`❌ [CHAT_DEBUG] Chat attempt failed:`, error)
+      
+      // Handle specific timeout errors
+      if (error.name === 'AbortError') {
+        const timeoutType = needsWebSearch ? "Research" : "Chat"
+        const timeoutDuration = needsWebSearch ? "5 minutes" : "1 minute"
+        console.warn(`⏰ ${timeoutType} request timed out after ${timeoutDuration}`)
+        
+        // Update the message with timeout info
+        setMessages(prev => prev.map(msg => 
+          msg.tempId === tempId 
+            ? { ...msg, content: `${timeoutType} request timed out after ${timeoutDuration}. Please try again with a shorter query.`, status: "failed" }
+            : msg
+        ))
+      }
       setMessages(currentMessages => {
         console.log(`💥 [CHAT_DEBUG] Marking message as failed for tempId: ${tempId}`)
         return currentMessages.map(msg =>
@@ -651,6 +673,7 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
       completeInsight(userInsightId, `Error: ${error}`, "error")
     } finally {
       setIsLoading(false)
+      setIsActivelyResearching(false)
     }
   }
 
@@ -1267,16 +1290,24 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
         {(isLoading || isProcessing) && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex justify-start">
             <div className="bg-gray-700 p-3 rounded-lg">
-              <div className="flex space-x-1">
-                <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce"></div>
-                <div
-                  className="w-2 h-2 bg-blue-400 rounded-full animate-bounce"
-                  style={{ animationDelay: "0.1s" }}
-                ></div>
-                <div
-                  className="w-2 h-2 bg-blue-400 rounded-full animate-bounce"
-                  style={{ animationDelay: "0.2s" }}
-                ></div>
+              <div className="flex items-center space-x-3">
+                <div className="flex space-x-1">
+                  <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce"></div>
+                  <div
+                    className="w-2 h-2 bg-blue-400 rounded-full animate-bounce"
+                    style={{ animationDelay: "0.1s" }}
+                  ></div>
+                  <div
+                    className="w-2 h-2 bg-blue-400 rounded-full animate-bounce"
+                    style={{ animationDelay: "0.2s" }}
+                  ></div>
+                </div>
+                {isActivelyResearching && (
+                  <div className="flex items-center space-x-2 text-xs text-gray-300">
+                    <Search className="w-3 h-3" />
+                    <span>Researching and analyzing... (this may take a few minutes)</span>
+                  </div>
+                )}
               </div>
             </div>
           </motion.div>

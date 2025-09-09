@@ -1,0 +1,20 @@
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: harvis-source
+  namespace: flux-system
+spec:
+  interval: 1m0s
+  ref:
+    branch: main
+  url: https://github.com/brandoz2255/aidev.git
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: harvis-helm
+  namespace: flux-system
+spec:
+  interval: 5m0s
+  url: oci://registry-1.docker.io/dulc3

@@ -1,0 +1,158 @@
+{{- if .Values.mergedOllamaBackend.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "harvis-ai.fullname" . }}-merged-ollama-backend
+  namespace: {{ .Values.namespace | default .Release.Namespace }}
+  labels:
+    {{- include "harvis-ai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: merged-ollama-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "harvis-ai.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: merged-ollama-backend
+  template:
+    metadata:
+      labels:
+        {{- include "harvis-ai.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: merged-ollama-backend
+    spec:
+      runtimeClassName: nvidia
+      containers:
+        # Ollama container (existing functionality)
+        - name: ollama
+          image: "{{ .Values.mergedOllamaBackend.ollama.image.repository }}:{{ .Values.mergedOllamaBackend.ollama.image.tag }}"
+          resources:
+            limits:
+              nvidia.com/gpu: {{ .Values.mergedOllamaBackend.resources.gpu }}
+            requests:
+              memory: {{ .Values.mergedOllamaBackend.ollama.resources.requests.memory }}
+              cpu: {{ .Values.mergedOllamaBackend.ollama.resources.requests.cpu }}
+          ports:
+            - name: ollama
+              containerPort: 11434
+              protocol: TCP
+          volumeMounts:
+            - name: ollama-models
+              mountPath: /root/.ollama
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -ex
+              ollama serve && ollama &&
+              sleep 2
+              {{- range .Values.mergedOllamaBackend.ollama.models }}
+              ollama pull {{ . }}
+              {{- end }}
+              wait -n
+          livenessProbe:
+            httpGet:
+              path: /api/tags
+              port: 11434
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /api/tags
+              port: 11434
+            initialDelaySeconds: 30
+            periodSeconds: 10
+        
+        # Harvis Backend container (shares GPU with Ollama)
+        - name: harvis-backend
+          image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
+          imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          env:
+            - name: DATABASE_URL
+              value: "postgresql://{{ .Values.postgresql.auth.username }}:{{ .Values.postgresql.auth.password }}@{{ include "harvis-ai.fullname" . }}-pgsql:5432/{{ .Values.postgresql.auth.database }}"
+            - name: OLLAMA_URL
+              value: "http://localhost:11434"
+            - name: BACKEND_URL
+              value: "http://{{ include "harvis-ai.fullname" . }}-merged-backend:8000"
+          envFrom:
+            - configMapRef:
+                name: {{ include "harvis-ai.fullname" . }}-backend-config
+            - secretRef:
+                name: {{ include "harvis-ai.fullname" . }}-backend-secret
+          resources:
+            requests:
+              memory: {{ .Values.backend.resources.requests.memory }}
+              cpu: {{ .Values.backend.resources.requests.cpu }}
+            limits:
+              memory: {{ .Values.backend.resources.limits.memory }}
+              cpu: {{ .Values.backend.resources.limits.cpu }}
+          volumeMounts:
+            - name: embedding
+              mountPath: /app/embedding
+            - name: tmp
+              mountPath: /tmp
+            - name: docker-sock
+              mountPath: /var/run/docker.sock
+          command: ["uvicorn"]
+          args: ["main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+          livenessProbe:
+            httpGet:
+              path: /docs
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /docs
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+      
+      volumes:
+        - name: ollama-models
+          persistentVolumeClaim:
+            claimName: {{ .Values.mergedOllamaBackend.persistence.existingClaim | default "ollama-model-cache" }}
+        - name: embedding
+          persistentVolumeClaim:
+            claimName: {{ include "harvis-ai.fullname" . }}-embedding-pvc
+        - name: tmp
+          emptyDir: {}
+        - name: docker-sock
+          hostPath:
+            path: /var/run/docker.sock
+            type: Socket
+      
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+# Service for the merged deployment
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "harvis-ai.fullname" . }}-merged-backend
+  namespace: {{ .Values.namespace | default .Release.Namespace }}
+  labels:
+    {{- include "harvis-ai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: merged-ollama-backend
+spec:
+  type: ClusterIP
+  ports:
+    - name: backend
+      port: 8000
+      targetPort: http
+      protocol: TCP
+    - name: ollama
+      port: 11434
+      targetPort: ollama
+      protocol: TCP
+  selector:
+    {{- include "harvis-ai.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: merged-ollama-backend
+{{- end }}

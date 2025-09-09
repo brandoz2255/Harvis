@@ -8,3 +8,75 @@ python_back_end/**/*.pyd
 .gradio/
 __pycache__
 
+# ==========================================
+# FluxCD and Kubernetes Secrets Protection
+# ==========================================
+
+# Ignore personal values files with secrets/API keys
+**/values-personal.yaml
+**/values-secret.yaml
+**/values-local.yaml
+**/secrets.yaml
+**/secret-*.yaml
+
+# Ignore Helm chart values with personal info
+harvis-helm-chart/values-production.yaml
+harvis-helm-chart/values-staging.yaml
+harvis-helm-chart/charts/
+harvis-helm-chart/*.tgz
+
+# Ignore FluxCD personal configurations
+flux-config/**/overlays/personal/
+flux-config/**/secrets/
+flux-config/**/*-secret.yaml
+flux-config/**/external-secret*.yaml
+
+# Kubeconfig and kubectl contexts
+kubeconfig
+kubeconfig.*
+.kube/config
+
+# ==========================================
+# Personal/Sensitive Files
+# ==========================================
+
+# API Keys and tokens
+**/*api-key*
+**/*token*
+**/credentials*
+*.pem
+*.key
+*.crt
+*.p12
+
+# Database dumps with potential sensitive data
+*.sql.gz
+*.dump
+backup-*.sql
+
+# Personal development overrides
+docker-compose.override.yml
+docker-compose.local.yml
+.env.local
+.env.personal
+.env.secret
+
+# IDE and editor files
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+*~
+
+# ==========================================
+# Large Model Files
+# ==========================================
+
+# Whisper models (too large for GitHub)
+python_back_end/whisper_models/
+**/*.pt
+
+# Other large model files
+**/*.bin
+**/*.safetensors
+**/*.ckpt

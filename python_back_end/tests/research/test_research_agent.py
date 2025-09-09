@@ -70,8 +70,11 @@ class TestResearchAgent:
         # Mock timestamp
         mock_timestamp.return_value = "2024-01-01T12:00:00"
         
-        # Mock LLM response
-        mock_query_llm.return_value = "This is a comprehensive analysis of the research topic."
+        # Mock LLM responses - first call generates search queries, second call analyzes results
+        mock_query_llm.side_effect = [
+            "test topic\ntest topic search\ntest topic information",  # Search query generation
+            "This is a comprehensive analysis of the research topic."  # Final analysis
+        ]
         
         # Mock search agent
         mock_search_agent = Mock()
@@ -100,8 +103,11 @@ class TestResearchAgent:
         assert "sources" in result
         assert len(result["sources"]) == 2
         
-        # Verify search agent was called
-        mock_search_agent.search_and_extract.assert_called_once_with("test topic", extract_content=True)
+        # Verify search agent was called (it gets called for each generated query)
+        assert mock_search_agent.search_and_extract.call_count >= 1  # At least once for generated queries
+        
+        # Verify query_llm was called twice (once for query generation, once for analysis)
+        assert mock_query_llm.call_count == 2
     
     @patch('research.research_agent.ResearchAgent.query_llm')
     @patch('research.research_agent.ResearchAgent._get_timestamp')
