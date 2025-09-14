@@ -316,8 +316,8 @@ class EnhancedVectorOptimizer:
             query_normalized = query_embedding / np.linalg.norm(query_embedding)
             
             # Build SQL query with filters
-            # Note: table_name is validated in __init__ against whitelist - safe from SQL injection  # nosec B608
-            sql_base = f"""
+            # Note: table_name is validated in __init__ against whitelist - safe from SQL injection
+            sql_base = f"""  # nosec B608
                 SELECT
                     automation_id, name, full_json, searchable_text,
                     1 - (embedding <=> %s) AS similarity,
@@ -393,8 +393,8 @@ class EnhancedVectorOptimizer:
                 keyword_conditions.append("(searchable_text ILIKE %s OR name ILIKE %s)")
                 params.extend([f'%{keyword}%', f'%{keyword}%'])
             
-            # Note: table_name is validated in __init__ against whitelist - safe from SQL injection  # nosec B608
-            sql_query = f"""
+            # Note: table_name is validated in __init__ against whitelist - safe from SQL injection
+            sql_query = f"""  # nosec B608
                 SELECT
                     automation_id, name, full_json, searchable_text,
                     trigger_type, workflow_pattern, complexity_score
