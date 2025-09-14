@@ -48,6 +48,7 @@ psycopg[binary]>=3.1.0
 psycopg-pool>=3.1.0
 pgvector>=0.2.0
 docker>=7.0.0
+defusedxml>=0.7.0
 
 # Advanced research system dependencies
 requests-cache>=1.0.0

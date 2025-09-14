@@ -10,7 +10,7 @@ def call_tool(name, args_json):
         return f"Args JSON error: {e}"
     req = {"jsonrpc":"2.0","id":str(uuid.uuid4()),"method":"tool.invoke",
            "params":{"name":name,"args":args}}
-    r = requests.post(API, json=req, headers={"Authorization": f"Bearer {KEY}"})
+    r = requests.post(API, json=req, headers={"Authorization": f"Bearer {KEY}"}, timeout=30)
     try:
         return json.dumps(r.json(), indent=2)
     except Exception:
