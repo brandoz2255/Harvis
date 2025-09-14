@@ -19,12 +19,18 @@ COPY requirements.txt .
 # Multi-stage pip installation with retry mechanism and dependency resolution
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
+# Install build dependencies for chatterbox-tts (pkuseg needs numpy pre-installed)
+RUN pip install --no-cache-dir numpy Cython
+
 # Install PyTorch first (specific CUDA version) to avoid conflicts
 RUN pip install --no-cache-dir \
   torch==2.6.0+cu124 \
   torchvision==0.21.0+cu124 \
   torchaudio==2.6.0 \
   --index-url https://download.pytorch.org/whl/cu124
+
+# Install pkuseg separately with no build isolation (critical for chatterbox-tts)
+RUN pip install --no-cache-dir pkuseg==0.0.25 --no-build-isolation
 
 # Create requirements without torch to avoid conflicts
 RUN grep -v "^torch" requirements.txt > requirements_no_torch.txt
