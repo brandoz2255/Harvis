@@ -23,7 +23,7 @@ spec:
     backend:
       enabled: false  # Using merged deployment
       env:
-        OLLAMA_CLOUD_URL: "https://coyotegpt.ngrok.app"
+        OLLAMA_CLOUD_URL: "https://coyotegpt.ngrok.app/ollama"
         OLLAMA_API_KEY: ""  # Set via external secret or --set flag
         OPENAI_API_KEY: ""
     
@@ -48,12 +48,18 @@ spec:
         enabled: true
         size: 20Gi
     
-    # n8n configuration  
+    # n8n configuration
     n8n:
       enabled: true
       persistence:
         enabled: true
         size: 5Gi
+
+    # Service account configuration
+    serviceAccount:
+      create: true
+      name: ""
+      annotations: {}
     
     # Ingress configuration
     ingress:
