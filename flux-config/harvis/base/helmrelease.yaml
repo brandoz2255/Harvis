@@ -101,6 +101,5 @@ spec:
       retries: 3
     timeout: 10m
   
-  # Dependencies - ensure namespace exists
-  dependsOn:
-    - name: ai-agents-namespace
+  # Dependencies removed - namespace already exists
+  dependsOn: []
