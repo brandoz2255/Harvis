@@ -317,13 +317,13 @@ class EnhancedVectorOptimizer:
             
             # Build SQL query with filters
             # Note: table_name is validated in __init__ against whitelist - safe from SQL injection
-            sql_base = f"""  # nosec B608
+            sql_base = f"""
                 SELECT
                     automation_id, name, full_json, searchable_text,
                     1 - (embedding <=> %s) AS similarity,
                     trigger_type, workflow_pattern, complexity_score
                 FROM {self.table_name}
-            """
+            """  # nosec B608
             
             params = [query_normalized]
             where_clauses = [f"1 - (embedding <=> %s) >= %s"]
@@ -394,7 +394,7 @@ class EnhancedVectorOptimizer:
                 params.extend([f'%{keyword}%', f'%{keyword}%'])
             
             # Note: table_name is validated in __init__ against whitelist - safe from SQL injection
-            sql_query = f"""  # nosec B608
+            sql_query = f"""
                 SELECT
                     automation_id, name, full_json, searchable_text,
                     trigger_type, workflow_pattern, complexity_score
@@ -407,7 +407,7 @@ class EnhancedVectorOptimizer:
                         ELSE 3
                     END
                 LIMIT %s
-            """
+            """  # nosec B608
             
             # Add relevance scoring parameters
             main_keyword = query_keywords[0] if query_keywords else query
