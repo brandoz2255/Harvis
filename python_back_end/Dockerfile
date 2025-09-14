@@ -63,8 +63,8 @@ COPY . .
 ############################
 USER root
 RUN mkdir -p /root/.cache/whisper
-COPY whisper_models/tiny.pt /root/.cache/whisper/tiny.pt
-COPY whisper_models/base.pt /root/.cache/whisper/base.pt
+COPY ./whisper_models/tiny.pt /root/.cache/whisper/tiny.pt
+COPY ./whisper_models/base.pt /root/.cache/whisper/base.pt
 RUN chown -R appuser:appuser /root/.cache
 USER appuser
 
