@@ -316,13 +316,14 @@ class EnhancedVectorOptimizer:
             query_normalized = query_embedding / np.linalg.norm(query_embedding)
             
             # Build SQL query with filters
+            # Note: table_name is validated in __init__ against whitelist - safe from SQL injection
             sql_base = f"""
-                SELECT 
+                SELECT
                     automation_id, name, full_json, searchable_text,
                     1 - (embedding <=> %s) AS similarity,
                     trigger_type, workflow_pattern, complexity_score
                 FROM {self.table_name}
-            """
+            """  # nosec B608
             
             params = [query_normalized]
             where_clauses = [f"1 - (embedding <=> %s) >= %s"]
@@ -392,20 +393,21 @@ class EnhancedVectorOptimizer:
                 keyword_conditions.append("(searchable_text ILIKE %s OR name ILIKE %s)")
                 params.extend([f'%{keyword}%', f'%{keyword}%'])
             
+            # Note: table_name is validated in __init__ against whitelist - safe from SQL injection
             sql_query = f"""
-                SELECT 
+                SELECT
                     automation_id, name, full_json, searchable_text,
                     trigger_type, workflow_pattern, complexity_score
                 FROM {self.table_name}
                 WHERE {' OR '.join(keyword_conditions)}
-                ORDER BY 
-                    CASE 
+                ORDER BY
+                    CASE
                         WHEN name ILIKE %s THEN 1
                         WHEN searchable_text ILIKE %s THEN 2
                         ELSE 3
                     END
                 LIMIT %s
-            """
+            """  # nosec B608
             
             # Add relevance scoring parameters
             main_keyword = query_keywords[0] if query_keywords else query

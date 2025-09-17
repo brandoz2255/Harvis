@@ -76,32 +76,66 @@ def is_package_installed(package_name: str) -> bool:
 def install_packages(packages: List[str]) -> bool:
     """Install packages with comprehensive retry logic"""
     print(f"Installing {len(packages)} packages...")
-    
-    # First attempt: install all packages at once
-    print("Attempting batch installation...")
-    if run_command([sys.executable, '-m', 'pip', 'install', '--no-cache-dir'] + packages):
-        print("Batch installation successful!")
-        return True
-    
-    # Second attempt: install all packages with force-reinstall
-    print("Batch installation failed, trying with force-reinstall...")
-    if run_command([sys.executable, '-m', 'pip', 'install', '--no-cache-dir', '--force-reinstall'] + packages):
-        print("Force-reinstall successful!")
-        return True
-    
-    # Third attempt: install packages individually
-    print("Batch installation failed, trying individual packages...")
-    failed_packages = []
-    
+
+    # Special handling for chatterbox-tts dependencies
+    special_packages = {
+        'pkuseg==0.0.25': ['--no-build-isolation'],  # Already installed in Dockerfile
+        'chatterbox-tts': []  # Requires pkuseg to be pre-installed
+    }
+
+    # Separate special packages from regular ones
+    regular_packages = []
+    special_installs = []
+
     for package in packages:
-        print(f"Installing individual package: {package}")
-        if not run_command([sys.executable, '-m', 'pip', 'install', '--no-cache-dir', package]):
-            failed_packages.append(package)
-    
-    if failed_packages:
-        print(f"Failed to install {len(failed_packages)} packages: {failed_packages}")
-        return False
-    
+        found_special = False
+        for special_pkg, flags in special_packages.items():
+            if package.startswith(special_pkg.split('==')[0]):
+                if special_pkg == 'pkuseg==0.0.25':
+                    # Skip pkuseg as it's already installed in Dockerfile
+                    print(f"Skipping {package} - already installed with --no-build-isolation")
+                else:
+                    special_installs.append((package, flags))
+                found_special = True
+                break
+
+        if not found_special:
+            regular_packages.append(package)
+
+    # Install regular packages first
+    if regular_packages:
+        print("Installing regular packages...")
+        # First attempt: install all regular packages at once
+        print("Attempting batch installation...")
+        if run_command([sys.executable, '-m', 'pip', 'install', '--no-cache-dir'] + regular_packages):
+            print("Batch installation successful!")
+        else:
+            # Second attempt: install all packages with force-reinstall
+            print("Batch installation failed, trying with force-reinstall...")
+            if run_command([sys.executable, '-m', 'pip', 'install', '--no-cache-dir', '--force-reinstall'] + regular_packages):
+                print("Force-reinstall successful!")
+            else:
+                # Third attempt: install packages individually
+                print("Batch installation failed, trying individual packages...")
+                failed_packages = []
+
+                for package in regular_packages:
+                    print(f"Installing individual package: {package}")
+                    if not run_command([sys.executable, '-m', 'pip', 'install', '--no-cache-dir', package]):
+                        failed_packages.append(package)
+
+                if failed_packages:
+                    print(f"Failed to install {len(failed_packages)} regular packages: {failed_packages}")
+                    return False
+
+    # Install special packages with their specific flags
+    for package, flags in special_installs:
+        print(f"Installing special package: {package} with flags: {flags}")
+        cmd = [sys.executable, '-m', 'pip', 'install', '--no-cache-dir'] + flags + [package]
+        if not run_command(cmd):
+            print(f"Failed to install special package: {package}")
+            return False
+
     return True
 
 def verify_installation(packages: List[str]) -> Set[str]:

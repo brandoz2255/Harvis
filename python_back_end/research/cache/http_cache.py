@@ -152,7 +152,7 @@ class HTTPCache:
             sorted_params = json.dumps(params, sort_keys=True)
             key_data += sorted_params
         
-        return hashlib.md5(key_data.encode()).hexdigest()
+        return hashlib.md5(key_data.encode(), usedforsecurity=False).hexdigest()
     
     def get(
         self,
