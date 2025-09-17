@@ -42,20 +42,24 @@ spec:
                   name: {{ include "harvis-ai.fullname" . }}-n8n-secret
                   key: personal-api-key
             - name: DB_TYPE
-              value: {{ .Values.n8n.database.type | quote }}
-            - name: DB_POSTGRES_HOST
-              value: "{{ include "harvis-ai.fullname" . }}-pgsql"
-            - name: DB_POSTGRES_PORT
-              value: {{ .Values.n8n.database.port | quote }}
-            - name: DB_POSTGRES_DATABASE
-              value: {{ .Values.n8n.database.database | quote }}
-            - name: DB_POSTGRES_USER
-              value: {{ .Values.n8n.database.username | quote }}
-            - name: DB_POSTGRES_PASSWORD
+              value: {{ .Values.n8n.env.DB_TYPE | quote }}
+            - name: DB_POSTGRESDB_HOST
+              value: {{ .Values.n8n.env.DB_POSTGRESDB_HOST | quote }}
+            - name: DB_POSTGRESDB_PORT
+              value: {{ .Values.n8n.env.DB_POSTGRESDB_PORT | quote }}
+            - name: DB_POSTGRESDB_DATABASE
+              value: {{ .Values.n8n.env.DB_POSTGRESDB_DATABASE | quote }}
+            - name: DB_POSTGRESDB_USER
+              value: {{ .Values.n8n.env.DB_POSTGRESDB_USER | quote }}
+            - name: DB_POSTGRESDB_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ include "harvis-ai.fullname" . }}-postgresql-secret
                   key: postgres-password
+            - name: WEBHOOK_URL
+              value: {{ .Values.n8n.env.WEBHOOK_URL | quote }}
+            - name: GENERIC_TIMEZONE
+              value: {{ .Values.n8n.env.GENERIC_TIMEZONE | quote }}
           resources:
             {{- toYaml .Values.n8n.resources | nindent 12 }}
           volumeMounts:
