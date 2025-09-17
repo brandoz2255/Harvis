@@ -1,6 +1,7 @@
 from pydantic import BaseModel
 from typing import List, Any, Dict
-import csv, json, io, xml.etree.ElementTree as ET
+import csv, json, io
+import defusedxml.ElementTree as ET
 from ...registry import Tool, register
 from ...sandbox import assert_in_jail
 

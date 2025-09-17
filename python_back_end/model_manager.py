@@ -539,14 +539,15 @@ def transcribe_with_whisper_optimized(audio_path):
             
             # Use system whisper command with JSON output
             with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as tmp_json:
-                cmd = ['whisper', audio_path, '--output_format', 'json', '--output_dir', '/tmp', '--model', 'tiny']
+                # Use system temp directory instead of hardcoded /tmp for security
+                temp_dir = tempfile.gettempdir()
+                cmd = ['whisper', audio_path, '--output_format', 'json', '--output_dir', temp_dir, '--model', 'tiny']
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
                 
                 if result.returncode == 0:
                     # Parse the output JSON file
-                    json_file = audio_path.replace('.ogg', '.json').replace('/tmp/', '/tmp/')
                     base_name = os.path.splitext(os.path.basename(audio_path))[0]
-                    json_file = f"/tmp/{base_name}.json"
+                    json_file = os.path.join(temp_dir, f"{base_name}.json")
                     
                     try:
                         with open(json_file, 'r') as f:
