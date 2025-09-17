@@ -5,23 +5,55 @@
 # Global configuration
 global:
   namespace: ai-agents
+  storageClass: ""  # Use default storage class
 
 # Backend configuration
 backend:
   enabled: false  # Using merged deployment instead
   env:
-    JWT_SECRET: "change-this-jwt-secret-in-production"
-    OLLAMA_CLOUD_URL: "https://harvis.example.com"
-    OLLAMA_API_KEY: ""
-    OPENAI_API_KEY: ""
+    # Secrets will be provided via external secrets or at deployment time
+    # Do not commit actual secret values to Git!
+    JWT_SECRET: ""  # Will be set via --set flag or external secret
+    OLLAMA_CLOUD_URL: "https://harvis.example.com/ollama"
+    OLLAMA_API_KEY: ""  # Will be set via --set flag or external secret
+    OPENAI_API_KEY: ""  # Will be set via --set flag or external secret
+  image:
+    repository: dulc3/jarvis-backend
+    tag: latest
+    pullPolicy: Always
+  resources:
+    requests:
+      cpu: 250m
+      memory: 1Gi
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+  persistence:
+    enabled: false  # Backend persistence disabled since using merged deployment
+    size: 5Gi
+    storageClass: ""
+    accessMode: ReadWriteOnce
 
 # Merged Ollama + Backend deployment configuration
 mergedOllamaBackend:
   enabled: true
-  image:
-    repository: dulc3/jarvis-backend
-    tag: dev
-    pullPolicy: Always
+  # Ollama container configuration
+  ollama:
+    image:
+      repository: ollama/ollama
+      tag: latest
+      pullPolicy: IfNotPresent
+    resources:
+      requests:
+        cpu: 500m
+        memory: 2Gi
+      limits:
+        cpu: 1000m
+        memory: 4Gi
+    models:
+      - mistral
+      - codellama
+  # Overall resource configuration (GPU allocation)
   resources:
     requests:
       cpu: 500m
@@ -35,6 +67,8 @@ mergedOllamaBackend:
   service:
     type: ClusterIP
     port: 8000
+  persistence:
+    existingClaim: ""  # Use default claim name if empty
 
 # Frontend configuration
 frontend:
@@ -44,9 +78,12 @@ frontend:
     tag: dev
     pullPolicy: Always
   env:
-    JWT_SECRET: "***REMOVED***"
+    # Secrets will be provided via external secrets or at deployment time
+    JWT_SECRET: ""  # Will be set via --set flag or external secret
     NODE_ENV: "production"
     NEXT_TELEMETRY_DISABLED: "1"
+  build:
+    enabled: false  # Disable build init container - use pre-built images
   service:
     type: ClusterIP
     port: 3000
@@ -67,7 +104,8 @@ postgresql:
     pullPolicy: IfNotPresent
   auth:
     username: pguser
-    password: pgpassword
+    # Password will be provided via external secrets or at deployment time
+    password: ""  # Will be set via --set flag or external secret
     database: database
   initdbArgs: "-E UTF8 --locale=C"
   service:
@@ -94,7 +132,11 @@ n8n:
     tag: latest
     pullPolicy: Always
   auth:
-    basicAuthPassword: "admin123"
+    # Basic auth configuration
+    basicAuthActive: "true"
+    basicAuthUser: "admin"
+    # Password will be provided via external secrets or at deployment time
+    basicAuthPassword: ""  # Will be set via --set flag or external secret
   env:
     N8N_PERSONAL_API_KEY: ""
     DB_TYPE: "postgresdb"
@@ -102,7 +144,7 @@ n8n:
     DB_POSTGRESDB_PORT: "5432"
     DB_POSTGRESDB_DATABASE: "n8n"
     DB_POSTGRESDB_USER: "pguser"
-    DB_POSTGRESDB_PASSWORD: "pgpassword"
+    DB_POSTGRESDB_PASSWORD: ""  # Will be set via --set flag or external secret
     N8N_BASIC_AUTH_ACTIVE: "true"
     N8N_BASIC_AUTH_USER: "admin"
     WEBHOOK_URL: "https://n8n.dulc3.tech/"
@@ -131,7 +173,7 @@ nginx:
     tag: alpine
     pullPolicy: IfNotPresent
   service:
-    type: ClusterIP
+    type: LoadBalancer
     port: 80
   resources:
     requests:
@@ -152,7 +194,11 @@ ingress:
     nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
   tls:
-    enabled: true
+    - secretName: harvis-tls-cert
+      hosts:
+        - harvis.dulc3.tech
+        - harvis-api.dulc3.tech
+        - n8n.dulc3.tech
   hosts:
     - host: harvis.dulc3.tech
       paths:

@@ -1,4 +1,4 @@
-{{- if .Values.persistence.pgsqlData.enabled }}
+{{- if .Values.postgresql.persistence.enabled }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -8,20 +8,20 @@ metadata:
     app.kubernetes.io/component: postgresql
 spec:
   accessModes:
-    - {{ .Values.persistence.pgsqlData.accessMode }}
+    - {{ .Values.postgresql.persistence.accessMode }}
   resources:
     requests:
-      storage: {{ .Values.persistence.pgsqlData.size }}
-  {{- if .Values.persistence.pgsqlData.storageClass }}
-  {{- if (eq "-" .Values.persistence.pgsqlData.storageClass) }}
+      storage: {{ .Values.postgresql.persistence.size }}
+  {{- if .Values.postgresql.persistence.storageClass }}
+  {{- if (eq "-" .Values.postgresql.persistence.storageClass) }}
   storageClassName: ""
   {{- else }}
-  storageClassName: {{ .Values.persistence.pgsqlData.storageClass }}
+  storageClassName: {{ .Values.postgresql.persistence.storageClass }}
   {{- end }}
   {{- end }}
 ---
 {{- end }}
-{{- if .Values.persistence.n8nData.enabled }}
+{{- if .Values.n8n.persistence.enabled }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -31,20 +31,20 @@ metadata:
     app.kubernetes.io/component: n8n
 spec:
   accessModes:
-    - {{ .Values.persistence.n8nData.accessMode }}
+    - {{ .Values.n8n.persistence.accessMode }}
   resources:
     requests:
-      storage: {{ .Values.persistence.n8nData.size }}
-  {{- if .Values.persistence.n8nData.storageClass }}
-  {{- if (eq "-" .Values.persistence.n8nData.storageClass) }}
+      storage: {{ .Values.n8n.persistence.size }}
+  {{- if .Values.n8n.persistence.storageClass }}
+  {{- if (eq "-" .Values.n8n.persistence.storageClass) }}
   storageClassName: ""
   {{- else }}
-  storageClassName: {{ .Values.persistence.n8nData.storageClass }}
+  storageClassName: {{ .Values.n8n.persistence.storageClass }}
   {{- end }}
   {{- end }}
 ---
 {{- end }}
-{{- if .Values.persistence.backendData.enabled }}
+{{- if .Values.backend.persistence.enabled }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -54,15 +54,15 @@ metadata:
     app.kubernetes.io/component: backend
 spec:
   accessModes:
-    - {{ .Values.persistence.backendData.accessMode }}
+    - {{ .Values.backend.persistence.accessMode }}
   resources:
     requests:
-      storage: {{ .Values.persistence.backendData.size }}
-  {{- if .Values.persistence.backendData.storageClass }}
-  {{- if (eq "-" .Values.persistence.backendData.storageClass) }}
+      storage: {{ .Values.backend.persistence.size }}
+  {{- if .Values.backend.persistence.storageClass }}
+  {{- if (eq "-" .Values.backend.persistence.storageClass) }}
   storageClassName: ""
   {{- else }}
-  storageClassName: {{ .Values.persistence.backendData.storageClass }}
+  storageClassName: {{ .Values.backend.persistence.storageClass }}
   {{- end }}
   {{- end }}
 ---
