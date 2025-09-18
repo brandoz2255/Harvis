@@ -9,6 +9,7 @@ Maintains backward compatibility while adding advanced features.
 """
 
 import os
+import tempfile
 import logging
 from typing import Dict, List, Any, Optional, Union, AsyncGenerator
 import asyncio
@@ -64,7 +65,7 @@ class EnhancedResearchAgent:
         if enable_advanced_features:
             # Setup caching
             cache_config = CacheConfig(
-                cache_dir="/tmp/research_cache",
+                cache_dir=os.path.join(tempfile.gettempdir(), "research_cache"),
                 expire_after=3600,  # 1 hour default
                 max_cache_size=1000
             )
