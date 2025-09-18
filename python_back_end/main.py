@@ -323,7 +323,6 @@ async def shutdown_event():
         await db_pool.close()
         logger.info("Database pool closed")
 
-""" 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: create connection pool
@@ -367,11 +366,7 @@ async def lifespan(app: FastAPI):
         await app.state.pg_pool.close()
         logger.info("🔒 Database connection pool closed")
 
-# ─── FastAPI init --------------------------------------------------------------
-app = FastAPI(title="Harvis AI API", lifespan=lifespan)
-
-db_pool = None 
-chat_history_manager = None  """
+# App already initialized above with lifespan
 
 # CORS Middleware must be added before routes
 app.add_middleware(
@@ -2010,7 +2005,6 @@ async def test_ollama_connection(
     logger.info(f"Connection test results for user {user_id}: {results}")
     return results
 
->>>>>>> 8f285fa5da2353068181e4ccb6a4047063a71a4e
 if __name__ == "__main__":
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
 # huh2.0

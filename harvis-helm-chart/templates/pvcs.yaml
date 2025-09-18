@@ -70,6 +70,27 @@ spec:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
+  name: ollama-model-cache
+  labels:
+    {{- include "harvis-ai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ollama
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+  {{- if .Values.global.storageClass }}
+  {{- if (eq "-" .Values.global.storageClass) }}
+  storageClassName: ""
+  {{- else }}
+  storageClassName: {{ .Values.global.storageClass }}
+  {{- end }}
+  {{- end }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
   name: {{ include "harvis-ai.fullname" . }}-embedding-pvc
   labels:
     {{- include "harvis-ai.labels" . | nindent 4 }}

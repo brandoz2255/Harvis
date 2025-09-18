@@ -1,0 +1,17 @@
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: harvis-ip-pool
+  namespace: metallb-system
+spec:
+  addresses:
+  - 203.0.113.200-203.0.113.210
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: harvis-l2-adv
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+  - harvis-ip-pool

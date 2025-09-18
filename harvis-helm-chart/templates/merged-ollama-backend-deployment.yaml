@@ -100,8 +100,6 @@ spec:
               mountPath: /app/embedding
             - name: tmp
               mountPath: /tmp
-            - name: docker-sock
-              mountPath: /var/run/docker.sock
           command: ["uvicorn"]
           args: ["main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
           livenessProbe:
@@ -126,10 +124,6 @@ spec:
             claimName: {{ include "harvis-ai.fullname" . }}-embedding-pvc
         - name: tmp
           emptyDir: {}
-        - name: docker-sock
-          hostPath:
-            path: /var/run/docker.sock
-            type: Socket
       
       {{- with .Values.nodeSelector }}
       nodeSelector:
