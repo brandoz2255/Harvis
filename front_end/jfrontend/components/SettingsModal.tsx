@@ -202,7 +202,6 @@ const SettingsModal: FC<SettingsModalProps> = ({
     local: null
   })
   const [testing, setTesting] = useState(false)
-
   // Load API keys when modal opens
   useEffect(() => {
     if (isOpen && activeSection === "models") {
@@ -216,7 +215,6 @@ const SettingsModal: FC<SettingsModalProps> = ({
       loadOllamaSettings()
     }
   }, [isOpen, activeSection])
-
   const loadApiKeys = async () => {
     setLoading(true)
     try {
@@ -427,7 +425,6 @@ const SettingsModal: FC<SettingsModalProps> = ({
       setTesting(false)
     }
   }
-
   const resetDefaults = () => {
     setName("User")
     setEmail("user@example.com")
@@ -757,7 +754,6 @@ const SettingsModal: FC<SettingsModalProps> = ({
         </Fragment>
       )
     }
-
     if (activeSection !== "general")
       return (
         <div className="flex items-center justify-center h-full text-slate-400">

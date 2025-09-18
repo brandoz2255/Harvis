@@ -70,7 +70,15 @@ spec:
               protocol: TCP
           env:
             - name: DATABASE_URL
-              value: "postgresql://{{ .Values.postgresql.auth.username }}:{{ .Values.postgresql.auth.password }}@{{ include "harvis-ai.fullname" . }}-pgsql:5432/{{ .Values.postgresql.auth.database }}"
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "harvis-ai.fullname" . }}-backend-secret
+                  key: database-url
+            - name: OLLAMA_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "harvis-ai.fullname" . }}-backend-secret
+                  key: ollama-api-key
             - name: OLLAMA_URL
               value: "http://localhost:11434"
             - name: BACKEND_URL
@@ -92,8 +100,6 @@ spec:
               mountPath: /app/embedding
             - name: tmp
               mountPath: /tmp
-            - name: docker-sock
-              mountPath: /var/run/docker.sock
           command: ["uvicorn"]
           args: ["main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
           livenessProbe:
@@ -118,10 +124,6 @@ spec:
             claimName: {{ include "harvis-ai.fullname" . }}-embedding-pvc
         - name: tmp
           emptyDir: {}
-        - name: docker-sock
-          hostPath:
-            path: /var/run/docker.sock
-            type: Socket
       
       {{- with .Values.nodeSelector }}
       nodeSelector:

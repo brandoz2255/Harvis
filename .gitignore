@@ -80,4 +80,3 @@ python_back_end/whisper_models/
 **/*.bin
 **/*.safetensors
 **/*.ckpt
-

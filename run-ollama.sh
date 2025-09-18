@@ -91,7 +91,7 @@ start_ollama() {
         --network ollama-n8n-network \
         -v ollama:/root/.ollama \
         -p 11434:11434 \
-        ollama-gpu
+        ollama/ollama
     
     echo -e "${GREEN}Ollama service started successfully!${NC}"
     echo -e "${BLUE}Ollama API available at: http://localhost:11434${NC}"

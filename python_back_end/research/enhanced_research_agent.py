@@ -64,7 +64,7 @@ class EnhancedResearchAgent:
         if enable_advanced_features:
             # Setup caching
             cache_config = CacheConfig(
-                cache_dir="research_cache",
+                cache_dir="/tmp/research_cache",
                 expire_after=3600,  # 1 hour default
                 max_cache_size=1000
             )

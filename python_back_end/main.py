@@ -323,7 +323,6 @@ async def shutdown_event():
         await db_pool.close()
         logger.info("Database pool closed")
 
-""" 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: create connection pool
@@ -367,11 +366,7 @@ async def lifespan(app: FastAPI):
         await app.state.pg_pool.close()
         logger.info("🔒 Database connection pool closed")
 
-# ─── FastAPI init --------------------------------------------------------------
-app = FastAPI(title="Harvis AI API", lifespan=lifespan)
-
-db_pool = None 
-chat_history_manager = None  """
+# App already initialized above with lifespan
 
 # CORS Middleware must be added before routes
 app.add_middleware(
@@ -2755,7 +2750,6 @@ async def research_health_check():
             "error": str(e),
             "timestamp": datetime.now().isoformat()
         }
-
 # ─── Vibe Coding Endpoints ─────────────────────────────────────────────────────
 
 # Vibe coding endpoint moved to vibecoding.commands

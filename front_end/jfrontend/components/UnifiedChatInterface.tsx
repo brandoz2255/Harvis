@@ -499,7 +499,6 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
       const timeoutDuration = needsWebSearch ? 300000 : 60000
       const controller = new AbortController()
       const timeoutId = setTimeout(() => controller.abort(), timeoutDuration)
-
       const response = await fetch(apiEndpoint, {
         method: "POST",
         headers: {
@@ -512,7 +511,6 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
       })
 
       clearTimeout(timeoutId)
-
       if (!response.ok) throw new Error(await response.text())
 
       const data: ResearchChatResponse = await response.json()

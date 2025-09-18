@@ -57,7 +57,6 @@ class TestWebSearchAgent:
         mock_response = Mock()
         mock_response.status_code = 200
         mock_requests_head.return_value = mock_response
-        
         # Mock the Article instance
         mock_article = Mock()
         mock_article.title = "Test Article"
@@ -90,7 +89,6 @@ class TestWebSearchAgent:
         mock_response = Mock()
         mock_response.status_code = 404
         mock_requests_head.return_value = mock_response
-
         # Mock the Article instance to raise an exception
         mock_article = Mock()
         mock_article.download.side_effect = Exception("Download failed")

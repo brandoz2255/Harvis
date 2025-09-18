@@ -1,0 +1,5 @@
+# Secrets file - contains actual secret values
+secrets.yaml
+
+# Original ignored values file
+values.yaml

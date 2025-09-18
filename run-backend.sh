@@ -22,7 +22,7 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 # Check if env file exists
-ENV_FILE="/home/dulc3/Documents/github/aidev/python_back_end/.env"
+ENV_FILE="$(pwd)/python_back_end/.env"
 if [ ! -f "$ENV_FILE" ]; then
   echo -e "${RED}Error: Environment file not found at $ENV_FILE${NC}"
   exit 1
@@ -67,7 +67,7 @@ start_backend() {
   # Start the backend service
   docker run --rm -it \
     --name backend \
-    --runtime=nvidia \
+    --gpus all \
     -p 8000:8000 \
     --env-file "$ENV_FILE" \
     --network ollama-n8n-network \

@@ -10,7 +10,7 @@ global:
 backend:
   enabled: false  # Using merged deployment instead
   env:
-    JWT_SECRET: "change-this-jwt-secret-in-production"
+    JWT_SECRET: ""
     OLLAMA_CLOUD_URL: "https://harvis.example.com"
     OLLAMA_API_KEY: ""
     OPENAI_API_KEY: ""
@@ -44,7 +44,7 @@ frontend:
     tag: dev
     pullPolicy: Always
   env:
-    JWT_SECRET: "***REMOVED***"
+    JWT_SECRET: " "
     NODE_ENV: "production"
     NEXT_TELEMETRY_DISABLED: "1"
   service:

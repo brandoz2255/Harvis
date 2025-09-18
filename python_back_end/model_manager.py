@@ -290,7 +290,6 @@ def load_whisper_model():
                 logger.error(f"❌ System whisper fallback failed: {fallback_e}")
             
             return None
-            
     return whisper_model
 
 # ─── Model Unloading Functions ──────────────────────────────────────────────
