@@ -35,7 +35,7 @@ mergedOllamaBackend:
   service:
     type: ClusterIP
     port: 8000
-
+#bruh
 # Frontend configuration
 frontend:
   enabled: true
