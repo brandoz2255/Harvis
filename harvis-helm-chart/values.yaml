@@ -14,14 +14,48 @@ backend:
     OLLAMA_CLOUD_URL: "https://harvis.example.com"
     OLLAMA_API_KEY: ""
     OPENAI_API_KEY: ""
+  image:
+    repository: dulc3/jarvis-backend
+    tag: latest
+    pullPolicy: Always
+  resources:
+    requests:
+      cpu: 250m
+      memory: 1Gi
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+  persistence:
+    enabled: false  # Backend persistence disabled since using merged deployment
+    size: 5Gi
+    storageClass: ""
+    accessMode: ReadWriteOnce
 
 # Merged Ollama + Backend deployment configuration
 mergedOllamaBackend:
   enabled: true
+  # Ollama container configuration
+  ollama:
+    image:
+      repository: ollama/ollama
+      tag: latest
+      pullPolicy: IfNotPresent
+    resources:
+      requests:
+        cpu: 500m
+        memory: 2Gi
+      limits:
+        cpu: 1000m
+        memory: 4Gi
+    models:
+      - mistral
+      - codellama
+  # Backend container configuration
   image:
     repository: dulc3/jarvis-backend
     tag: dev
     pullPolicy: Always
+  # Overall resource configuration (GPU allocation)
   resources:
     requests:
       cpu: 500m
@@ -35,6 +69,8 @@ mergedOllamaBackend:
   service:
     type: ClusterIP
     port: 8000
+  persistence:
+    existingClaim: ""  # Use default claim name if empty
 #bruh
 # Frontend configuration
 frontend:
@@ -47,6 +83,8 @@ frontend:
     JWT_SECRET: " "
     NODE_ENV: "production"
     NEXT_TELEMETRY_DISABLED: "1"
+  build:
+    enabled: false  # Disable build init container - use pre-built images
   service:
     type: ClusterIP
     port: 3000
@@ -131,7 +169,7 @@ nginx:
     tag: alpine
     pullPolicy: IfNotPresent
   service:
-    type: ClusterIP
+    type: LoadBalancer
     port: 80
   resources:
     requests:
@@ -141,9 +179,9 @@ nginx:
       cpu: 200m
       memory: 256Mi
 
-# Ingress configuration
+# Ingress configuration  
 ingress:
-  enabled: true
+  enabled: false  # Using MetalLB LoadBalancer instead
   className: "nginx"
   annotations:
     cert-manager.io/cluster-issuer: "letsencrypt-prod"
