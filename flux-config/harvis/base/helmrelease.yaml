@@ -73,6 +73,18 @@ spec:
     ingress:
       enabled: true
       className: "nginx"
+      annotations:
+        cert-manager.io/cluster-issuer: "letsencrypt-prod"
+        nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+        nginx.ingress.kubernetes.io/proxy-connect-timeout: "300"
+        nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+        nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+      tls:
+        - hosts:
+            - harvis.dulc3.tech
+            - harvis-api.dulc3.tech
+            - n8n.dulc3.tech
+          secretName: harvis-tls
       hosts:
         - host: harvis.dulc3.tech
           paths:
