@@ -6,7 +6,7 @@ metadata:
   namespace: flux-system
 spec:
   image: dulc3/jarvis-backend
-  interval: 1m0s
+  interval: 30s
 ---
 apiVersion: image.toolkit.fluxcd.io/v1beta2
 kind: ImageRepository
@@ -15,7 +15,7 @@ metadata:
   namespace: flux-system
 spec:
   image: dulc3/jarvis-frontend
-  interval: 1m0s
+  interval: 30s
 ---
 apiVersion: image.toolkit.fluxcd.io/v1beta2
 kind: ImagePolicy
@@ -26,11 +26,10 @@ spec:
   imageRepositoryRef:
     name: harvis-backend
   policy:
-    semver:
-      range: '>=1.0.0'
+    alphabetical:
+      order: asc
   filterTags:
-    pattern: '^(?P<version>.*)$'
-    extract: '$version'
+    pattern: '^latest$'
 ---
 apiVersion: image.toolkit.fluxcd.io/v1beta2
 kind: ImagePolicy
@@ -44,7 +43,7 @@ spec:
     alphabetical:
       order: asc
   filterTags:
-    pattern: '^(dev|latest|v.+)$'
+    pattern: '^latest$'
 ---
 apiVersion: image.toolkit.fluxcd.io/v1beta1
 kind: ImageUpdateAutomation
@@ -52,7 +51,7 @@ metadata:
   name: harvis-automation
   namespace: flux-system
 spec:
-  interval: 30m
+  interval: 5m
   sourceRef:
     kind: GitRepository
     name: harvis-source
