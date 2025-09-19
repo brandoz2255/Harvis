@@ -30,6 +30,10 @@ spec:
     # Merged Ollama + Backend deployment
     mergedOllamaBackend:
       enabled: true
+      image:
+        repository: dulc3/jarvis-backend
+        tag: latest # {"$imagepolicy": "flux-system:harvis-backend-policy:tag"}
+        pullPolicy: Always
       resources:
         gpu: 1
     
@@ -38,7 +42,7 @@ spec:
       enabled: true
       image:
         repository: dulc3/jarvis-frontend
-        tag: dev # {"$imagepolicy": "flux-system:harvis-frontend-policy:tag"}
+        tag: latest # {"$imagepolicy": "flux-system:harvis-frontend-policy:tag"}
         pullPolicy: Always
     
     # PostgreSQL configuration
@@ -47,6 +51,8 @@ spec:
       persistence:
         enabled: true
         size: 20Gi
+        accessMode: ReadWriteOnce
+        storageClass: ""
     
     # n8n configuration
     n8n:
@@ -54,6 +60,8 @@ spec:
       persistence:
         enabled: true
         size: 5Gi
+        accessMode: ReadWriteOnce
+        storageClass: ""
 
     # Service account configuration
     serviceAccount:
