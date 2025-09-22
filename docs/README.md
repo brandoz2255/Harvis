@@ -4,6 +4,7 @@ This documentation provides comprehensive information about the AI Voice Assista
 
 ## Table of Contents
 
+### Core Documentation
 1. [Project Overview](project-overview.md)
 2. [Core Technologies](core-technologies.md)
 3. [Voice Processing](voice-processing.md)
@@ -11,11 +12,18 @@ This documentation provides comprehensive information about the AI Voice Assista
 5. [LLM Integration](llm-integration.md)
 6. [System Architecture](system-architecture.md)
 7. [Main and Chatterbox TTS Integration](main-chatterbox-integration.md)
-8. [CI/CD Pipelines](ci-cd-pipelines.md)
-9. [Docker Deployment](docker-deployment.md)
-10. [Interview Preparation](interview-prep.md)
-11. [Troubleshooting Guide](troubleshooting.md)
-12. [Chat History 422 Error Fix](chat-history-422-error-fix.md)
+
+### Deployment & Operations
+8. [FluxCD GitOps Setup](flux/README.md) 🆕
+9. [CI/CD Pipelines](ci-cd-pipelines.md)
+10. [Docker Deployment](docker-deployment.md)
+11. [Helm Charts Guide](HELM_CHARTS_GUIDE.md)
+
+### Troubleshooting & Fixes
+12. [General Troubleshooting](troubleshooting.md)
+13. [FluxCD Troubleshooting](flux/troubleshooting.md) 🆕
+14. [Chat History 422 Error Fix](chat-history-422-error-fix.md)
+15. [Interview Preparation](interview-prep.md)
 
 ## Quick Start
 
