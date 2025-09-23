@@ -85,7 +85,7 @@ RECENT_YEARS = ["2025", "2024", "2023"]
 class Settings:
     # endpoints
     cloud_ollama_url: str = os.getenv("CLOUD_OLLAMA_URL", "https://harvis.example.com/ollama")
-    local_ollama_url: str = os.getenv("LOCAL_OLLAMA_URL", "http://ollama:11434")
+    local_ollama_url: str = os.getenv("OLLAMA_URL", "http://ollama:11434")  # Use OLLAMA_URL for consistency with main chat
 
     # keys
     ollama_api_key: str = OLLAMA_API_KEY

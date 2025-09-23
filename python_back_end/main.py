@@ -144,6 +144,36 @@ from model_manager import (
     transcribe_with_whisper_optimized, generate_speech_optimized,
     unload_tts_model, unload_whisper_model
 )
+
+# TTS Helper Function with graceful error handling
+def safe_generate_speech_optimized(text, audio_prompt=None, exaggeration=0.5, temperature=0.8, cfg_weight=0.5):
+    """Generate speech with graceful error handling - never crashes the app"""
+    try:
+        result = generate_speech_optimized(text, audio_prompt, exaggeration, temperature, cfg_weight)
+        if result is None or result == (None, None):
+            logger.warning("⚠️ TTS unavailable - skipping audio generation")
+            return None, None
+        return result
+    except Exception as tts_e:
+        logger.error(f"❌ TTS generation failed gracefully: {tts_e}")
+        logger.warning("⚠️ Continuing without TTS - chat will work without audio")
+        return None, None
+
+def safe_save_audio(sr, wav, prefix="response"):
+    """Safely save audio to file, returning filepath or None if TTS unavailable"""
+    if sr is None or wav is None:
+        logger.warning("⚠️ TTS unavailable - no audio to save")
+        return None
+
+    try:
+        filename = f"{prefix}_{uuid.uuid4()}.wav"
+        filepath = os.path.join(tempfile.gettempdir(), filename)
+        sf.write(filepath, wav, sr)
+        logger.info("Audio written to %s", filepath)
+        return f"/api/audio/{filename}"
+    except Exception as e:
+        logger.error(f"❌ Failed to save audio file: {e}")
+        return None
 from chat_history_module import (
     ChatHistoryManager, ChatMessage, ChatSession, CreateSessionRequest, 
     CreateMessageRequest, MessageHistoryResponse, SessionListResponse,
@@ -672,10 +702,10 @@ async def get_session_messages(
     try:
         # Convert string session_id to UUID
         session_uuid = UUID(session_id)
-        logger.info(f"Getting messages for session {session_uuid}, user {current_user.id}")
+        logger.info(f"Getting messages for session {session_uuid}, user {current_user["id"]}")
         response = await chat_history_manager.get_session_messages(
             session_id=session_uuid,
-            user_id=current_user.id,
+            user_id=current_user["id"],
             limit=limit,
             offset=offset
         )
@@ -707,7 +737,7 @@ async def update_session_title(
         session_uuid = UUID(session_id)
         success = await chat_history_manager.update_session_title(
             session_id=session_uuid,
-            user_id=current_user.id,
+            user_id=current_user["id"],
             title=request.title
         )
         if not success:
@@ -730,7 +760,7 @@ async def delete_chat_session(
         session_uuid = UUID(session_id)
         success = await chat_history_manager.delete_session(
             session_id=session_uuid,
-            user_id=current_user.id
+            user_id=current_user["id"]
         )
         if not success:
             raise HTTPException(status_code=404, detail="Session not found")
@@ -752,7 +782,7 @@ async def clear_session_messages(
         session_uuid = UUID(session_id)
         deleted_count = await chat_history_manager.clear_session_messages(
             session_id=session_uuid,
-            user_id=current_user.id
+            user_id=current_user["id"]
         )
         return {"success": True, "message": f"Deleted {deleted_count} messages"}
     except Exception as e:
@@ -769,7 +799,7 @@ async def search_messages(
     """Search messages by content"""
     try:
         messages = await chat_history_manager.search_messages(
-            user_id=current_user.id,
+            user_id=current_user["id"],
             query=query,
             session_id=session_id,
             limit=limit
@@ -785,7 +815,7 @@ async def get_user_chat_stats(
 ):
     """Get user chat statistics"""
     try:
-        stats = await chat_history_manager.get_user_stats(current_user.id)
+        stats = await chat_history_manager.get_user_stats(current_user["id"])
         return stats
     except Exception as e:
         logger.error(f"Error getting user stats: {e}")
@@ -799,13 +829,13 @@ async def add_message_to_session(
     """Add a message to a chat session"""
     try:
         # Verify the user owns the session
-        session = await chat_history_manager.get_session(message_request.session_id, current_user.id)
+        session = await chat_history_manager.get_session(message_request.session_id, current_user["id"])
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
         
         # Add the message using the new manager API
         added_message = await chat_history_manager.add_message(
-            user_id=current_user.id,
+            user_id=current_user["id"],
             session_id=message_request.session_id,
             role=message_request.role,
             content=message_request.content,
@@ -1044,10 +1074,10 @@ async def chat(req: ChatRequest, request: Request, current_user: Dict = Depends(
         if session_id:
             try:
                 # Create session if it doesn't exist
-                session = await chat_history_manager.get_session(session_id, current_user.id)
+                session = await chat_history_manager.get_session(session_id, current_user["id"])
                 if not session:
                     session = await chat_history_manager.create_session(
-                        user_id=current_user.id,
+                        user_id=current_user["id"],
                         title="New Chat",
                         model_used=req.model
                     )
@@ -1055,17 +1085,17 @@ async def chat(req: ChatRequest, request: Request, current_user: Dict = Depends(
                 
                 # Save user message
                 await chat_history_manager.add_message(
-                    user_id=current_user.id,
+                    user_id=current_user["id"],
                     session_id=session_id,
                     role="user",
                     content=req.message,
                     model_used=req.model,
                     input_type="text"
                 )
-                
+
                 # Save assistant message
                 await chat_history_manager.add_message(
-                    user_id=current_user.id,
+                    user_id=current_user["id"],
                     session_id=session_id,
                     role="assistant",
                     content=final_answer,
@@ -1083,7 +1113,7 @@ async def chat(req: ChatRequest, request: Request, current_user: Dict = Depends(
             # Create new session for this conversation if none provided
             try:
                 session = await chat_history_manager.create_session(
-                    user_id=current_user.id,
+                    user_id=current_user["id"],
                     title="New Chat",
                     model_used=req.model
                 )
@@ -1091,7 +1121,7 @@ async def chat(req: ChatRequest, request: Request, current_user: Dict = Depends(
                 
                 # Save messages to new session
                 await chat_history_manager.add_message(
-                    user_id=current_user.id,
+                    user_id=current_user["id"],
                     session_id=session_id,
                     role="user",
                     content=req.message,
@@ -1100,7 +1130,7 @@ async def chat(req: ChatRequest, request: Request, current_user: Dict = Depends(
                 )
                 
                 await chat_history_manager.add_message(
-                    user_id=current_user.id,
+                    user_id=current_user["id"],
                     session_id=session_id,
                     role="assistant",
                     content=final_answer,
@@ -1136,7 +1166,7 @@ async def chat(req: ChatRequest, request: Request, current_user: Dict = Depends(
                 logger.info(f"Cloning voice using prompt: {audio_prompt_path}")
 
         # Use VRAM-optimized TTS generation with only final_answer (not the reasoning process)
-        sr, wav = generate_speech_optimized(
+        sr, wav = safe_generate_speech_optimized(
             text=final_answer,
             audio_prompt=audio_prompt_path,
             exaggeration=req.exaggeration,
@@ -1495,7 +1525,7 @@ async def analyze_screen_with_tts(req: ScreenAnalysisWithTTSRequest):
             logger.warning(f"Audio prompt {audio_prompt_path} not found, using default voice")
             audio_prompt_path = None
 
-        sr, wav = generate_speech_optimized(
+        sr, wav = safe_generate_speech_optimized(
             text=llm_response,
             audio_prompt=audio_prompt_path,
             exaggeration=req.exaggeration,
@@ -1766,7 +1796,7 @@ async def research_chat(req: Union[ResearchChatRequest, AdvancedResearchRequest]
         if len(tts_text) > 800:
             tts_text = tts_text[:800] + "... and more details are available in the sources."
 
-        sr, wav = generate_speech_optimized(
+        sr, wav = safe_generate_speech_optimized(
             text=tts_text,
             audio_prompt=audio_prompt_path,
             exaggeration=req.exaggeration,
@@ -2024,7 +2054,7 @@ async def synthesize_speech(req: SynthesizeSpeechRequest):
             )
             audio_prompt_path = None
 
-        sr, wav = generate_speech_optimized(
+        sr, wav = safe_generate_speech_optimized(
             text=req.text,
             audio_prompt=audio_prompt_path,
             exaggeration=req.exaggeration,
@@ -2073,7 +2103,7 @@ async def create_n8n_automation(
         logger.info(f"n8n automation request from user {current_user.username}: {request.prompt[:100]}...")
         
         result = await n8n_automation_service.process_automation_request(
-            request, user_id=current_user.id
+            request, user_id=current_user["id"]
         )
         
         if result.get("success"):
@@ -2114,7 +2144,7 @@ async def create_simple_workflow(
         logger.info(f"Creating simple n8n workflow '{request.name}' for user {current_user.username}")
         
         result = await n8n_automation_service.create_simple_workflow(
-            request, user_id=current_user.id
+            request, user_id=current_user["id"]
         )
         
         if result.get("success"):
@@ -2144,7 +2174,7 @@ async def list_user_n8n_workflows(
         raise HTTPException(status_code=503, detail="n8n automation service not available")
     
     try:
-        workflows = await n8n_automation_service.list_user_workflows(current_user.id)
+        workflows = await n8n_automation_service.list_user_workflows(current_user["id"])
         return {
             "success": True,
             "workflows": workflows,
@@ -2196,7 +2226,7 @@ async def execute_n8n_workflow(
         
         # Verify user owns workflow
         if n8n_storage:
-            workflow_record = await n8n_storage.get_workflow(workflow_id, current_user.id)
+            workflow_record = await n8n_storage.get_workflow(workflow_id, current_user["id"])
             if not workflow_record:
                 raise HTTPException(status_code=404, detail="Workflow not found")
         
@@ -2231,7 +2261,7 @@ async def get_workflow_executions(
     try:
         # Verify user owns workflow
         if n8n_storage:
-            workflow_record = await n8n_storage.get_workflow(workflow_id, current_user.id)
+            workflow_record = await n8n_storage.get_workflow(workflow_id, current_user["id"])
             if not workflow_record:
                 raise HTTPException(status_code=404, detail="Workflow not found")
         
@@ -2260,7 +2290,7 @@ async def get_automation_history(
         raise HTTPException(status_code=503, detail="n8n automation service not available")
     
     try:
-        history = await n8n_automation_service.get_automation_history(current_user.id)
+        history = await n8n_automation_service.get_automation_history(current_user["id"])
         return {
             "success": True,
             "history": history,
@@ -2443,7 +2473,7 @@ async def create_n8n_automation_with_ai(
         
         # Process request with AI agent and vector context
         result = await n8n_ai_agent.process_automation_request_with_context(
-            request, user_id=current_user.id
+            request, user_id=current_user["id"]
         )
         
         if result.get("success"):

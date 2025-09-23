@@ -11,6 +11,7 @@ Wraps the existing make_ollama_request function with additional features:
 
 import asyncio
 import logging
+import os
 import time
 from typing import Optional, Dict, Any, List, Union, AsyncGenerator
 from dataclasses import dataclass
@@ -61,7 +62,7 @@ class OllamaClient:
     
     def __init__(
         self,
-        base_url: str = "http://ollama:11434",
+        base_url: str = os.getenv("OLLAMA_URL", "http://ollama:11434"),
         default_model: str = "mistral",
         fallback_models: Optional[List[str]] = None,
         max_retries: int = 3,

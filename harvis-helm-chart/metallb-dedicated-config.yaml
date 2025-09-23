@@ -1,0 +1,38 @@
+---
+# Update existing IP pool to exclude the dedicated IP
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: harvis-ip-pool
+  namespace: metallb-system
+spec:
+  addresses:
+  - 203.0.113.200/32   # First available IP
+  - 203.0.113.202-203.0.113.210  # Range excluding dedicated IP 201
+  autoAssign: true       # Auto-assign for other LoadBalancer services
+  avoidBuggyIPs: false
+
+---
+# Dedicated IP pool for Harvis AI - guarantees 203.0.113.201 availability
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: harvis-dedicated-ip
+  namespace: metallb-system
+spec:
+  addresses:
+  - 203.0.113.201/32  # Single dedicated IP
+  autoAssign: false      # Disable auto-assignment - only for specific service requests
+  avoidBuggyIPs: false
+
+---
+# L2 Advertisement for both pools
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: harvis-l2-adv
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+  - harvis-ip-pool
+  - harvis-dedicated-ip

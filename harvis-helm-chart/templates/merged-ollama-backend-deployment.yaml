@@ -90,11 +90,11 @@ spec:
                 name: {{ include "harvis-ai.fullname" . }}-backend-secret
           resources:
             requests:
-              memory: {{ .Values.backend.resources.requests.memory }}
-              cpu: {{ .Values.backend.resources.requests.cpu }}
+              memory: {{ .Values.mergedOllamaBackend.resources.requests.memory }}
+              cpu: {{ .Values.mergedOllamaBackend.resources.requests.cpu }}
             limits:
-              memory: {{ .Values.backend.resources.limits.memory }}
-              cpu: {{ .Values.backend.resources.limits.cpu }}
+              memory: {{ .Values.mergedOllamaBackend.resources.limits.memory }}
+              cpu: {{ .Values.mergedOllamaBackend.resources.limits.cpu }}
           volumeMounts:
             - name: embedding
               mountPath: /app/embedding

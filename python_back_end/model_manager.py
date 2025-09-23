@@ -76,17 +76,103 @@ def load_tts_model(force_cpu=False):
                 raise TimeoutError("TTS model loading timed out")
             
             if tts_device == "cuda":
+                # COMPREHENSIVE CUDA DIAGNOSTICS
+                logger.info("🔧 Starting comprehensive CUDA diagnostics for TTS...")
+
+                if torch.cuda.is_available():
+                    try:
+                        # Test basic CUDA operations
+                        logger.info(f"📊 CUDA Device Count: {torch.cuda.device_count()}")
+                        logger.info(f"📊 Current CUDA Device: {torch.cuda.current_device()}")
+                        logger.info(f"📊 CUDA Device Name: {torch.cuda.get_device_name()}")
+
+                        # Test CUDA memory operations
+                        logger.info("🧪 Testing basic CUDA memory operations...")
+                        test_tensor = torch.ones(100, device='cuda')
+                        logger.info(f"✅ Basic CUDA tensor creation successful: {test_tensor.device}")
+                        del test_tensor
+
+                        # Check for active CUDA contexts
+                        try:
+                            import pynvml
+                            pynvml.nvmlInit()
+                            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+                            info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                            logger.info(f"📊 GPU Memory via NVML: {info.used/1024**3:.2f}GB used / {info.total/1024**3:.2f}GB total")
+                        except ImportError:
+                            logger.warning("⚠️ pynvml not available, skipping NVML memory check")
+                        except Exception as nvml_e:
+                            logger.warning(f"⚠️ NVML check failed: {nvml_e}")
+
+                    except Exception as cuda_test_e:
+                        logger.error(f"❌ Basic CUDA test failed: {cuda_test_e}")
+                        raise RuntimeError(f"CUDA is broken: {cuda_test_e}")
+
+                # CRITICAL: Force GPU memory cleanup before TTS loading
+                logger.info("🔧 Performing aggressive GPU memory cleanup before TTS...")
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                    # Force garbage collection
+                    import gc
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                    # Wait for cleanup to complete
+                    import time
+                    time.sleep(1.0)
+                    log_gpu_memory("before TTS load after cleanup")
+
                 # Set 30 second timeout for CUDA loading
                 signal.signal(signal.SIGALRM, timeout_handler)
                 signal.alarm(30)
                 try:
+                    logger.info("🚀 Attempting ChatterboxTTS.from_pretrained(device='cuda')...")
+
+                    # Additional safety: Test ChatterboxTTS import first
+                    try:
+                        from chatterbox.tts import ChatterboxTTS
+                        logger.info("✅ ChatterboxTTS import successful")
+                    except Exception as import_e:
+                        logger.error(f"❌ ChatterboxTTS import failed: {import_e}")
+                        raise ImportError(f"ChatterboxTTS unavailable: {import_e}")
+
+                    # Attempt TTS model loading with additional error context
                     tts_model = ChatterboxTTS.from_pretrained(device=tts_device)
                     signal.alarm(0)  # Cancel timeout
+                    logger.info("✅ TTS model loaded successfully on CUDA")
+
                 except TimeoutError:
                     signal.alarm(0)  # Cancel timeout
                     logger.warning("⏰ TTS CUDA loading timed out, falling back to CPU...")
                     tts_device = "cpu"
-                    tts_model = ChatterboxTTS.from_pretrained(device="cpu")
+                    try:
+                        tts_model = ChatterboxTTS.from_pretrained(device="cpu")
+                        logger.info("✅ TTS model loaded successfully on CPU (timeout fallback)")
+                    except Exception as cpu_fallback_e:
+                        logger.error(f"❌ CPU fallback also failed: {cpu_fallback_e}")
+                        raise RuntimeError("TTS loading failed on both CUDA (timeout) and CPU") from cpu_fallback_e
+
+                except Exception as cuda_load_e:
+                    signal.alarm(0)  # Cancel timeout
+                    logger.error(f"❌ TTS CUDA loading failed: {cuda_load_e}")
+                    logger.error(f"❌ Exception type: {type(cuda_load_e).__name__}")
+                    logger.error(f"❌ Exception args: {cuda_load_e.args}")
+
+                    # Try to get more detailed error information
+                    import traceback
+                    logger.error(f"❌ Full traceback: {traceback.format_exc()}")
+
+                    # Attempt CPU fallback with detailed logging
+                    logger.warning("🔄 Attempting CPU fallback after CUDA failure...")
+                    try:
+                        tts_device = "cpu"
+                        tts_model = ChatterboxTTS.from_pretrained(device="cpu")
+                        logger.info("✅ TTS model loaded successfully on CPU (CUDA failure fallback)")
+                    except Exception as cpu_fallback_e:
+                        logger.error(f"❌ CPU fallback also failed: {cpu_fallback_e}")
+                        # DON'T RAISE - return None and handle gracefully
+                        logger.error("❌ TTS completely unavailable - continuing without TTS")
+                        return None
             else:
                 tts_model = ChatterboxTTS.from_pretrained(device=tts_device)
         except Exception as e:
@@ -589,12 +675,14 @@ def transcribe_with_whisper_optimized(audio_path):
 def generate_speech_optimized(text, audio_prompt=None, exaggeration=0.5, temperature=0.8, cfg_weight=0.5):
     """Generate speech with VRAM optimization"""
     logger.info(f"🔊 Starting VRAM-optimized TTS generation for: {text[:50]}...")
-    
-    # Load TTS with optimization  
+
+    # Load TTS with optimization
     tts_model = use_tts_model_optimized()
-    
+
     if tts_model is None:
-        raise RuntimeError("Failed to load TTS model")
+        logger.error("❌ TTS model is unavailable - cannot generate speech")
+        # Return a placeholder response instead of crashing
+        return None, None
     
     try:
         # Generate speech

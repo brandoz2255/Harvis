@@ -45,8 +45,15 @@ metadata:
   labels:
     {{- include "harvis-ai.labels" . | nindent 4 }}
     app.kubernetes.io/component: nginx
+  annotations:
+    {{- if and (eq .Values.nginx.service.type "LoadBalancer") .Values.nginx.service.loadBalancerIP }}
+    metallb.universe.tf/address-pool: harvis-dedicated-ip
+    {{- end }}
 spec:
   type: {{ .Values.nginx.service.type }}
+  {{- if and (eq .Values.nginx.service.type "LoadBalancer") .Values.nginx.service.loadBalancerIP }}
+  loadBalancerIP: {{ .Values.nginx.service.loadBalancerIP }}
+  {{- end }}
   ports:
     - port: {{ .Values.nginx.service.port }}
       targetPort: http

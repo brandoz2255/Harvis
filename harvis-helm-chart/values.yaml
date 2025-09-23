@@ -11,7 +11,7 @@ backend:
   enabled: false  # Using merged deployment instead
   env:
     JWT_SECRET: ""
-    OLLAMA_CLOUD_URL: "https://harvis.example.com"
+    OLLAMA_CLOUD_URL: "http://ollama:11434"
     OLLAMA_API_KEY: ""
     OPENAI_API_KEY: ""
   image:
@@ -43,10 +43,10 @@ mergedOllamaBackend:
     resources:
       requests:
         cpu: 500m
-        memory: 2Gi
+        memory: 8Gi
       limits:
-        cpu: 1000m
-        memory: 4Gi
+        cpu: 2000m
+        memory: 16Gi
     models:
       - mistral
       - codellama
@@ -58,12 +58,12 @@ mergedOllamaBackend:
   # Overall resource configuration (GPU allocation)
   resources:
     requests:
-      cpu: 500m
-      memory: 2Gi
+      cpu: 1000m
+      memory: 8Gi
       nvidia.com/gpu: 1
     limits:
-      cpu: 2000m
-      memory: 8Gi
+      cpu: 12000m
+      memory: 32Gi
       nvidia.com/gpu: 1
     gpu: 1
   service:
@@ -171,6 +171,7 @@ nginx:
   service:
     type: LoadBalancer
     port: 80
+    loadBalancerIP: "203.0.113.201"  # Fixed IP for consistent access
   resources:
     requests:
       cpu: 50m

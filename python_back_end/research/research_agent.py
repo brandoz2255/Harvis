@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 # ─── Ollama Configuration with Cloud/Local Fallback ──────────────────────────
 CLOUD_OLLAMA_URL = "https://harvis.example.com/ollama"
-LOCAL_OLLAMA_URL = "http://ollama:11434"
+LOCAL_OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")  # Use environment variable for merged deployment
 API_KEY = os.getenv("OLLAMA_API_KEY", "key")
 
 def make_ollama_request(endpoint, payload, timeout=90):

@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 # Initialize the research agent
 research_agent_instance = ResearchAgent(
     search_engine="duckduckgo",  # or "tavily" if API key is available
-    ollama_url="http://ollama:11434",
+    ollama_url=os.getenv("OLLAMA_URL", "http://ollama:11434"),
     default_model="mistral",
     max_search_results=5
 )
@@ -22,7 +22,7 @@ research_agent_instance = ResearchAgent(
 # Initialize the enhanced research agent for advanced features
 enhanced_research_agent_instance = get_enhanced_research_agent(
     search_engine="duckduckgo",  # or "tavily" if API key is available
-    ollama_url="http://ollama:11434",
+    ollama_url=os.getenv("OLLAMA_URL", "http://ollama:11434"),
     default_model="mistral",
     max_search_results=20,  # Increased for better results
     enable_advanced_features=True  # Enable advanced pipeline
