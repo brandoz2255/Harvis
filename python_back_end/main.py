@@ -702,7 +702,7 @@ async def get_session_messages(
     try:
         # Convert string session_id to UUID
         session_uuid = UUID(session_id)
-        logger.info(f"Getting messages for session {session_uuid}, user {current_user["id"]}")
+        logger.info(f"Getting messages for session {session_uuid}, user {current_user['id']}")
         response = await chat_history_manager.get_session_messages(
             session_id=session_uuid,
             user_id=current_user["id"],
