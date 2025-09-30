@@ -47,8 +47,8 @@ metadata:
     app.kubernetes.io/component: nginx
   annotations:
     {{- if and (eq .Values.nginx.service.type "LoadBalancer") .Values.nginx.service.loadBalancerIP }}
-    metallb.universe.tf/address-pool: harvis-dedicated-ip
-    {{- end }}
+    metallb.universe.tf/address-pool: {{ .Values.nginx.addresspool.poolName }}
+  {{- end }}
 spec:
   type: {{ .Values.nginx.service.type }}
   {{- if and (eq .Values.nginx.service.type "LoadBalancer") .Values.nginx.service.loadBalancerIP }}

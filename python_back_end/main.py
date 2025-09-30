@@ -22,7 +22,7 @@ from passlib.context import CryptContext
 import asyncpg
 from gemini_api import query_gemini, is_gemini_configured
 from typing import List, Optional, Dict, Any, Union
-from vison_models.llm_connector import query_qwen, query_llm, load_qwen_model, unload_qwen_model
+from vison_models.llm_connector import query_qwen, query_llm, load_qwen_model, unload_qwen_model, unload_ollama_model
 
 # Import vibecoding routers
 from vibecoding import sessions_router, models_router, execution_router, files_router, commands_router, containers_router
@@ -142,7 +142,8 @@ from model_manager import (
     unload_models, unload_all_models, reload_models_if_needed, log_gpu_memory,
     get_tts_model, get_whisper_model, generate_speech, wait_for_vram,
     transcribe_with_whisper_optimized, generate_speech_optimized,
-    unload_tts_model, unload_whisper_model
+    unload_tts_model, unload_whisper_model, get_gpu_memory_stats,
+    check_memory_pressure, auto_cleanup_if_needed
 )
 
 # TTS Helper Function with graceful error handling
@@ -1945,6 +1946,141 @@ async def get_ollama_models():
 # Vibe command endpoint moved to vibecoding.commands
 
 # Vibe websocket endpoint moved to vibecoding.commands
+
+# ─── Model Management API Endpoints ────────────────────────────────────────────
+
+class MemoryStatsResponse(BaseModel):
+    available: bool
+    allocated_gb: Optional[float] = None
+    reserved_gb: Optional[float] = None
+    total_gb: Optional[float] = None
+    free_gb: Optional[float] = None
+    usage_percent: Optional[float] = None
+    device_name: Optional[str] = None
+    device_count: Optional[int] = None
+    message: Optional[str] = None
+
+class MemoryPressureResponse(BaseModel):
+    pressure_level: str
+    usage_percent: Optional[float] = None
+    free_gb: Optional[float] = None
+    allocated_gb: Optional[float] = None
+    total_gb: Optional[float] = None
+    recommendations: List[str]
+    auto_cleanup_suggested: bool
+
+class ModelStatusResponse(BaseModel):
+    tts_loaded: bool
+    whisper_loaded: bool
+    qwen_loaded: bool
+    total_models_loaded: int
+
+class UnloadModelRequest(BaseModel):
+    model_type: str  # "tts", "whisper", "qwen", "all", "ollama"
+    model_name: Optional[str] = None  # For Ollama model unloading
+
+@app.get("/api/models/memory-stats", response_model=MemoryStatsResponse, tags=["model-management"])
+async def get_memory_stats():
+    """Get detailed GPU memory statistics"""
+    from model_manager import get_gpu_memory_stats
+    stats = get_gpu_memory_stats()
+    return MemoryStatsResponse(**stats)
+
+@app.get("/api/models/memory-pressure", response_model=MemoryPressureResponse, tags=["model-management"])
+async def get_memory_pressure():
+    """Check memory pressure and get recommendations"""
+    from model_manager import check_memory_pressure
+    pressure = check_memory_pressure()
+    return MemoryPressureResponse(**pressure)
+
+@app.post("/api/models/auto-cleanup", tags=["model-management"])
+async def trigger_auto_cleanup():
+    """Manually trigger automatic model cleanup"""
+    from model_manager import auto_cleanup_if_needed
+
+    cleanup_performed = auto_cleanup_if_needed(threshold_percent=50)  # Lower threshold for manual trigger
+
+    if cleanup_performed:
+        return {"message": "Automatic cleanup performed successfully", "cleanup_performed": True}
+    else:
+        return {"message": "No cleanup needed - memory usage is healthy", "cleanup_performed": False}
+
+@app.get("/api/models/status", response_model=ModelStatusResponse, tags=["model-management"])
+async def get_model_status():
+    """Get current status of all loaded models"""
+    from model_manager import tts_model, whisper_model
+    from vison_models.llm_connector import qwen_model
+
+    tts_loaded = tts_model is not None
+    whisper_loaded = whisper_model is not None
+    qwen_loaded = qwen_model is not None
+
+    total_loaded = sum([tts_loaded, whisper_loaded, qwen_loaded])
+
+    return ModelStatusResponse(
+        tts_loaded=tts_loaded,
+        whisper_loaded=whisper_loaded,
+        qwen_loaded=qwen_loaded,
+        total_models_loaded=total_loaded
+    )
+
+@app.post("/api/models/unload", tags=["model-management"])
+async def unload_model(request: UnloadModelRequest):
+    """Unload specific models to free memory"""
+    from model_manager import unload_tts_model, unload_whisper_model, unload_models
+
+    unloaded_models = []
+
+    if request.model_type == "all":
+        # Unload all models
+        unload_models()
+        unload_qwen_model()
+        unloaded_models = ["TTS", "Whisper", "Qwen2VL"]
+
+        # Also try to unload Ollama models if model_name provided
+        if request.model_name:
+            success = unload_ollama_model(request.model_name)
+            if success:
+                unloaded_models.append(f"Ollama-{request.model_name}")
+
+    elif request.model_type == "tts":
+        unload_tts_model()
+        unloaded_models.append("TTS")
+
+    elif request.model_type == "whisper":
+        unload_whisper_model()
+        unloaded_models.append("Whisper")
+
+    elif request.model_type == "qwen":
+        unload_qwen_model()
+        unloaded_models.append("Qwen2VL")
+
+    elif request.model_type == "ollama":
+        if not request.model_name:
+            raise HTTPException(400, "model_name required for Ollama model unloading")
+
+        success = unload_ollama_model(request.model_name)
+        if success:
+            unloaded_models.append(f"Ollama-{request.model_name}")
+        else:
+            raise HTTPException(500, f"Failed to unload Ollama model: {request.model_name}")
+
+    else:
+        raise HTTPException(400, f"Invalid model_type: {request.model_type}")
+
+    return {
+        "message": f"Successfully unloaded models: {', '.join(unloaded_models)}",
+        "unloaded_models": unloaded_models
+    }
+
+@app.post("/api/models/reload", tags=["model-management"])
+async def reload_models():
+    """Reload models if they were unloaded"""
+    from model_manager import reload_models_if_needed
+
+    reload_models_if_needed()
+
+    return {"message": "Models reloaded successfully"}
 
 # ─── User Ollama Settings ──────────────────────────────────────────────────────
 class OllamaSettings(BaseModel):

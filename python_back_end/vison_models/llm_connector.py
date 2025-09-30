@@ -89,7 +89,54 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-def query_llm(prompt: str, model_name: str = "mistral", system_prompt: str = "") -> str:
+def unload_ollama_model(model_name: str) -> bool:
+    """Unload specific Ollama model to free VRAM"""
+    try:
+        api_key = os.getenv("OLLAMA_API_KEY", "key")
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key != "key" else {}
+
+        logger.info(f"🗑️ Unloading Ollama model: {model_name}")
+
+        # Use generate with empty prompt and keep_alive=0 to force unload
+        res = requests.post(
+            f"{OLLAMA_URL}/api/generate",
+            json={
+                "model": model_name,
+                "prompt": "",
+                "keep_alive": 0,  # This tells Ollama to unload immediately
+                "stream": False
+            },
+            headers=headers,
+            timeout=30
+        )
+
+        if res.status_code == 200:
+            logger.info(f"✅ Successfully unloaded Ollama model: {model_name}")
+            return True
+        else:
+            logger.warning(f"⚠️ Failed to unload Ollama model {model_name}: HTTP {res.status_code}")
+
+            # Try alternative method: POST to /api/keep-alive
+            try:
+                res2 = requests.post(
+                    f"{OLLAMA_URL}/api/keep-alive",
+                    json={"model": model_name, "keep_alive": 0},
+                    headers=headers,
+                    timeout=30
+                )
+                if res2.status_code == 200:
+                    logger.info(f"✅ Successfully unloaded Ollama model {model_name} (alternative method)")
+                    return True
+            except Exception:
+                pass
+
+            return False
+
+    except Exception as e:
+        logger.error(f"❌ Error unloading Ollama model {model_name}: {e}")
+        return False
+
+def query_llm(prompt: str, model_name: str = "mistral", system_prompt: str = "", auto_unload: bool = True) -> str:
     if model_name.startswith("gemini"):
         if not GEMINI_API_KEY:
             return "[LLM error] Gemini API key not configured."
@@ -103,6 +150,9 @@ def query_llm(prompt: str, model_name: str = "mistral", system_prompt: str = "")
         try:
             api_key = os.getenv("OLLAMA_API_KEY", "key")
             headers = {"Authorization": f"Bearer {api_key}"} if api_key != "key" else {}
+
+            logger.info(f"🤖 Querying Ollama model: {model_name}")
+
             res = requests.post(
                 f"{OLLAMA_URL}/api/generate",
                 json={
@@ -115,7 +165,16 @@ def query_llm(prompt: str, model_name: str = "mistral", system_prompt: str = "")
                 timeout=60
             )
             res.raise_for_status()
-            return res.json().get("response", "").strip()
+
+            response_text = res.json().get("response", "").strip()
+
+            # Automatically unload model after generation to free VRAM
+            if auto_unload:
+                logger.info(f"🧹 Auto-unloading Ollama model {model_name} to free VRAM")
+                unload_ollama_model(model_name)
+
+            return response_text
+
         except Exception as e:
             return f"[LLM error] Ollama: {e}"
 
