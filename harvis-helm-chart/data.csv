@@ -1,0 +1,6 @@
+NAME                                TYPE                 DATA   AGE
+harvis-ai-backend-secret            Opaque               3      6d4h
+harvis-ai-frontend-secret           Opaque               1      5d23h
+harvis-ai-postgresql-secret         Opaque               1      5d23h
+harvis-backend-env                  Opaque               10     6d4h
+sh.helm.release.v1.harvis-prod.v1   helm.sh/release.v1   1      3d2h

@@ -60,6 +60,132 @@ def log_gpu_memory(stage: str):
         free = total - allocated
         logger.info(f"🔍 GPU Memory {stage}: {allocated:.2f}GB allocated, {reserved:.2f}GB reserved, {free:.2f}GB free")
 
+def get_gpu_memory_stats():
+    """Get detailed GPU memory statistics"""
+    if not torch.cuda.is_available():
+        return {
+            "available": False,
+            "message": "CUDA not available"
+        }
+
+    allocated = torch.cuda.memory_allocated()
+    reserved = torch.cuda.memory_reserved()
+    total = torch.cuda.get_device_properties(0).total_memory
+    free = total - allocated
+
+    stats = {
+        "available": True,
+        "allocated_gb": allocated / 1024**3,
+        "reserved_gb": reserved / 1024**3,
+        "total_gb": total / 1024**3,
+        "free_gb": free / 1024**3,
+        "allocated_bytes": allocated,
+        "reserved_bytes": reserved,
+        "total_bytes": total,
+        "free_bytes": free,
+        "usage_percent": (allocated / total) * 100,
+        "device_name": torch.cuda.get_device_name(0),
+        "device_count": torch.cuda.device_count()
+    }
+
+    return stats
+
+def check_memory_pressure():
+    """Check if system is under memory pressure and suggest actions"""
+    stats = get_gpu_memory_stats()
+
+    if not stats["available"]:
+        return {
+            "pressure_level": "unknown",
+            "message": "CUDA not available",
+            "recommendations": []
+        }
+
+    usage_percent = stats["usage_percent"]
+    recommendations = []
+
+    if usage_percent > 90:
+        pressure_level = "critical"
+        recommendations = [
+            "Unload all models immediately",
+            "Enable aggressive auto-unloading",
+            "Consider using smaller models",
+            "Check for memory leaks"
+        ]
+    elif usage_percent > 75:
+        pressure_level = "high"
+        recommendations = [
+            "Unload unused models",
+            "Enable auto-unloading for all models",
+            "Monitor model usage patterns"
+        ]
+    elif usage_percent > 50:
+        pressure_level = "moderate"
+        recommendations = [
+            "Consider enabling auto-unloading",
+            "Monitor memory usage trends"
+        ]
+    else:
+        pressure_level = "low"
+        recommendations = ["Memory usage is healthy"]
+
+    return {
+        "pressure_level": pressure_level,
+        "usage_percent": usage_percent,
+        "free_gb": stats["free_gb"],
+        "allocated_gb": stats["allocated_gb"],
+        "total_gb": stats["total_gb"],
+        "recommendations": recommendations,
+        "auto_cleanup_suggested": pressure_level in ["high", "critical"]
+    }
+
+def auto_cleanup_if_needed(threshold_percent=75):
+    """Automatically cleanup models if memory usage exceeds threshold"""
+    pressure = check_memory_pressure()
+
+    if not pressure.get("auto_cleanup_suggested", False):
+        return False
+
+    logger.warning(f"🚨 Memory pressure detected: {pressure['pressure_level']} ({pressure['usage_percent']:.1f}% used)")
+    logger.info("🧹 Performing automatic model cleanup...")
+
+    # Unload models in order of priority
+    cleanup_actions = []
+
+    global tts_model, whisper_model
+
+    if tts_model is not None:
+        unload_tts_model()
+        cleanup_actions.append("TTS model unloaded")
+
+    if whisper_model is not None:
+        unload_whisper_model()
+        cleanup_actions.append("Whisper model unloaded")
+
+    # Also unload Qwen model if available
+    try:
+        from vison_models.llm_connector import unload_qwen_model
+        unload_qwen_model()
+        cleanup_actions.append("Qwen2VL model unloaded")
+    except Exception as e:
+        logger.warning(f"Could not unload Qwen model: {e}")
+
+    # Force aggressive cleanup
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        gc.collect()
+        torch.cuda.empty_cache()
+        cleanup_actions.append("GPU cache cleared")
+
+    logger.info(f"✅ Cleanup completed: {', '.join(cleanup_actions)}")
+
+    # Check memory again
+    new_pressure = check_memory_pressure()
+    logger.info(f"📊 Memory after cleanup: {new_pressure['usage_percent']:.1f}% used, {new_pressure['free_gb']:.2f}GB free")
+
+    return True
+
 # ─── Model Loading Functions ────────────────────────────────────────────────
 def load_tts_model(force_cpu=False):
     """Load TTS model with memory management"""
@@ -605,16 +731,16 @@ def use_tts_model_optimized():
     log_gpu_memory("after TTS loaded")
     return tts_model
 
-def transcribe_with_whisper_optimized(audio_path):
-    """Transcribe audio with VRAM optimization"""
+def transcribe_with_whisper_optimized(audio_path, auto_unload=True):
+    """Transcribe audio with VRAM optimization and optional auto-unload"""
     logger.info(f"🎤 Starting VRAM-optimized transcription for: {audio_path}")
-    
+
     # Load Whisper with optimization
     whisper_model = use_whisper_model_optimized()
-    
+
     if whisper_model is None:
         raise RuntimeError("Failed to load Whisper model")
-    
+
     try:
         # Check if using system whisper fallback
         if whisper_model == "system_whisper":
@@ -622,19 +748,19 @@ def transcribe_with_whisper_optimized(audio_path):
             import subprocess
             import json
             import tempfile
-            
+
             # Use system whisper command with JSON output
             with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as tmp_json:
                 # Use system temp directory instead of hardcoded /tmp for security
                 temp_dir = tempfile.gettempdir()
                 cmd = ['whisper', audio_path, '--output_format', 'json', '--output_dir', temp_dir, '--model', 'tiny']
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-                
+
                 if result.returncode == 0:
                     # Parse the output JSON file
                     base_name = os.path.splitext(os.path.basename(audio_path))[0]
                     json_file = os.path.join(temp_dir, f"{base_name}.json")
-                    
+
                     try:
                         with open(json_file, 'r') as f:
                             json_result = json.load(f)
@@ -659,21 +785,24 @@ def transcribe_with_whisper_optimized(audio_path):
                 task='transcribe',
                 verbose=True
             )
-            
+
             logger.info(f"✅ Transcription completed: {result.get('text', '')[:100]}...")
             return result
-        
+
     except Exception as e:
         logger.error(f"❌ Transcription failed: {e}")
         raise
     finally:
-        # Unload Whisper to free VRAM (only if using Python whisper)
-        if whisper_model != "system_whisper":
-            logger.info("🗑️ Unloading Whisper after transcription")
+        # Automatically unload Whisper to free VRAM (configurable)
+        if whisper_model != "system_whisper" and auto_unload:
+            logger.info("🗑️ Auto-unloading Whisper after transcription")
             unload_whisper_model()
+        elif whisper_model != "system_whisper":
+            logger.info("ℹ️ Keeping Whisper model loaded (auto_unload=False)")
+        # System whisper doesn't need unloading since it's not loaded in Python
 
-def generate_speech_optimized(text, audio_prompt=None, exaggeration=0.5, temperature=0.8, cfg_weight=0.5):
-    """Generate speech with VRAM optimization"""
+def generate_speech_optimized(text, audio_prompt=None, exaggeration=0.5, temperature=0.8, cfg_weight=0.5, auto_unload=True):
+    """Generate speech with VRAM optimization and optional auto-unload"""
     logger.info(f"🔊 Starting VRAM-optimized TTS generation for: {text[:50]}...")
 
     # Load TTS with optimization
@@ -683,21 +812,24 @@ def generate_speech_optimized(text, audio_prompt=None, exaggeration=0.5, tempera
         logger.error("❌ TTS model is unavailable - cannot generate speech")
         # Return a placeholder response instead of crashing
         return None, None
-    
+
     try:
         # Generate speech
         result = generate_speech(text, tts_model, audio_prompt, exaggeration, temperature, cfg_weight)
-        
+
         logger.info("✅ TTS generation completed")
         return result
-        
+
     except Exception as e:
         logger.error(f"❌ TTS generation failed: {e}")
         raise
     finally:
-        # Unload TTS to free VRAM
-        logger.info("🗑️ Unloading TTS after generation")
-        unload_tts_model()
+        # Automatically unload TTS to free VRAM (configurable)
+        if auto_unload:
+            logger.info("🗑️ Auto-unloading TTS after generation")
+            unload_tts_model()
+        else:
+            logger.info("ℹ️ Keeping TTS model loaded (auto_unload=False)")
 
 # ─── Model Access Functions ─────────────────────────────────────────────────
 def get_tts_model():

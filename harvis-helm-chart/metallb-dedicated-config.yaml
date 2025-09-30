@@ -7,8 +7,8 @@ metadata:
   namespace: metallb-system
 spec:
   addresses:
-  - 203.0.113.200/32   # First available IP
-  - 203.0.113.202-203.0.113.210  # Range excluding dedicated IP 201
+  - 192.168.10.241/32   # First available IP
+  - 192.168.10.240-192.168.10.250  # Range excluding dedicated IP 201
   autoAssign: true       # Auto-assign for other LoadBalancer services
   avoidBuggyIPs: false
 
@@ -21,7 +21,7 @@ metadata:
   namespace: metallb-system
 spec:
   addresses:
-  - 203.0.113.201/32  # Single dedicated IP
+  - 192.168.10.241/32  # Single dedicated IP
   autoAssign: false      # Disable auto-assignment - only for specific service requests
   avoidBuggyIPs: false
 
