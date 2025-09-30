@@ -19,6 +19,36 @@ jobs:
       - name: ⏬ Checkout code
         uses: actions/checkout@v3
 
+      - name: 💾 Free up disk space
+        run: |
+          echo "Disk usage before cleanup:"
+          df -h
+
+          # Remove unnecessary packages and caches
+          sudo apt-get clean
+          sudo apt-get autoremove -y
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+
+          echo "Disk usage after cleanup:"
+          df -h
+
+      - name: 🐳 Install Podman
+        run: |
+          # Install Podman
+          sudo apt-get update
+          sudo apt-get install -y podman
+
+          # Configure Podman for rootless operation
+          echo "unqualified-search-registries = [\"docker.io\"]" | sudo tee /etc/containers/registries.conf
+
+          # Verify Podman installation
+          podman --version
+          podman info
+
       - name: 🐍 Set up Python 3.11
         uses: actions/setup-python@v4
         with:
@@ -51,19 +81,27 @@ jobs:
           echo "VERSION=$VERSION" >> $GITHUB_ENV
           echo "Using VERSION: $VERSION"
 
-      - name: 🐳 Docker build with semantic version
+      - name: 🐳 Podman build with semantic version
         run: |
-          docker build -t dulc3/jarvis-backend:$VERSION .
-          docker tag dulc3/jarvis-backend:$VERSION dulc3/jarvis-backend:latest
+          echo "Disk usage before Podman build:"
+          df -h
 
-      - name: 🔐 DockerHub Login
-        uses: docker/login-action@v2
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
+          # Build images with Podman
+          podman build -t dulc3/jarvis-backend:$VERSION .
+          podman tag dulc3/jarvis-backend:$VERSION dulc3/jarvis-backend:latest
+
+          echo "Disk usage after Podman build:"
+          df -h
+
+      - name: 🔐 Login to registry with Podman
+        run: |
+          echo "${{ secrets.DOCKER_PASSWORD }}" | podman login docker.io -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
 
       - name: 📤 Push image to DockerHub
         run: |
-          docker push dulc3/jarvis-backend:$VERSION
-          docker push dulc3/jarvis-backend:latest
+          podman push dulc3/jarvis-backend:$VERSION
+          podman push dulc3/jarvis-backend:latest
+
+          # Clean up images after successful push
+          podman system prune -a -f
 

@@ -1,7 +1,7 @@
 
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { useUser } from '@/lib/auth/UserProvider';
@@ -24,7 +24,29 @@ export default function SignUpPage() {
     }
   }, [user, router]);
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  // Memoize Aurora props to prevent unnecessary re-renders
+  const auroraProps = useMemo(() => ({
+    className: "w-full h-full",
+    colorStops: ['#059669', '#0D9488', '#0F766E'],
+    blend: 0.4,
+    amplitude: 1.0,
+    speed: 0.6,
+  }), []);
+
+  // Use useCallback for event handlers to prevent Aurora re-renders
+  const handleUsernameChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    setUsername(e.target.value);
+  }, []);
+
+  const handleEmailChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    setEmail(e.target.value);
+  }, []);
+
+  const handlePasswordChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    setPassword(e.target.value);
+  }, []);
+
+  const handleSubmit = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
     setSuccess('');
@@ -42,7 +64,7 @@ export default function SignUpPage() {
     } catch (err: any) {
       setError(err.message || 'Signup failed.');
     }
-  };
+  }, [username, email, password, login, router]);
 
   if (isLoading) {
     return <div className="min-h-screen flex items-center justify-center">Loading...</div>
@@ -52,13 +74,7 @@ export default function SignUpPage() {
     <div className="relative min-h-screen overflow-hidden">
       {/* Aurora Background */}
       <div className="fixed inset-0 -z-10 pointer-events-none select-none">
-        <Aurora
-          className="w-full h-full"
-          colorStops={['#059669', '#0D9488', '#0F766E']}
-          blend={0.4}
-          amplitude={1.0}
-          speed={0.6}
-        />
+        <Aurora {...auroraProps} />
         <div className="absolute inset-0 bg-black/20 pointer-events-none [mask-image:radial-gradient(ellipse_at_center,white,transparent_80%)]" />
       </div>
 
@@ -73,7 +89,7 @@ export default function SignUpPage() {
               id="username"
               type="text"
               value={username}
-              onChange={(e) => setUsername(e.target.value)}
+              onChange={handleUsernameChange}
               required
               className="bg-gray-700 text-white border-gray-600"
             />
@@ -84,7 +100,7 @@ export default function SignUpPage() {
               id="email"
               type="email"
               value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              onChange={handleEmailChange}
               required
               className="bg-gray-700 text-white border-gray-600"
             />
@@ -95,7 +111,7 @@ export default function SignUpPage() {
               id="password"
               type="password"
               value={password}
-              onChange={(e) => setPassword(e.target.value)}
+              onChange={handlePasswordChange}
               required
               className="bg-gray-700 text-white border-gray-600"
             />

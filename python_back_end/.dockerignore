@@ -1,2 +1,101 @@
-Dockerfile
+# Git and version control
+.git
+.gitignore
+.gitmodules
+
+# Documentation
+README.md
+*.md
+docs/
+
+# Python cache and build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
 .env
+.venv
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Operating system files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Test files and coverage
+.pytest_cache/
+.coverage
+.tox/
+.cache
+htmlcov/
+.pytest_cache
+
+# Logs and temp files
+*.log
+logs/
+temp/
+tmp/
+.tmp/
+
+# Model caches (downloaded at runtime)
+models/
+.cache/
+.huggingface/
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Environment and config files that shouldn't be in image
+.env.local
+.env.development
+.env.production
+secrets/
+
+# CI/CD files
+.github/
+.gitlab-ci.yml
+.travis.yml
+
+# Docker files (avoid recursion)
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# Large data files
+data/
+datasets/
+checkpoints/
+weights/

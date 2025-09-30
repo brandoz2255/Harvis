@@ -1,7 +1,7 @@
 
 'use client';
 
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, ReactNode, useCallback } from 'react';
 import { AuthService } from './AuthService';
 
 interface User {
@@ -26,43 +26,47 @@ export const UserProvider = ({ children }: { children: ReactNode }) => {
   const [lastAuthCheck, setLastAuthCheck] = useState<number>(0);
   const [cachedToken, setCachedToken] = useState<string | null>(null);
 
-  useEffect(() => {
-    const checkUser = async () => {
-      console.log('UserProvider: Checking for existing token...');
-      const token = localStorage.getItem('token');
-      const now = Date.now();
-      
-      // Cache validation for 5 minutes to avoid repeated checks
-      if (token && token === cachedToken && (now - lastAuthCheck) < 300000 && user) {
-        console.log('UserProvider: Using cached user data');
-        setIsLoading(false);
-        return;
-      }
-      
-      if (token) {
-        try {
-          const userData = await AuthService.fetchUser(token);
-          setUser(userData);
-          setCachedToken(token);
-          setLastAuthCheck(now);
-          console.log('UserProvider: User data restored from token:', userData);
-        } catch (error) {
-          console.error('UserProvider: Token validation failed:', error);
-          localStorage.removeItem('token');
-          setCachedToken(null);
-          setUser(null);
-        }
-      } else {
-        setUser(null);
-        setCachedToken(null);
-      }
-      setIsLoading(false);
-      console.log('UserProvider: Auth check complete.');
-    };
-    checkUser();
-  }, [user, cachedToken, lastAuthCheck]);
+  // Use useCallback to prevent function recreation on every render
+  const checkUser = useCallback(async () => {
+    console.log('UserProvider: Checking for existing token...');
+    const token = localStorage.getItem('token');
+    const now = Date.now();
 
-  const login = async (token: string) => {
+    // Cache validation for 5 minutes to avoid repeated checks
+    if (token && token === cachedToken && (now - lastAuthCheck) < 300000 && user) {
+      console.log('UserProvider: Using cached user data');
+      setIsLoading(false);
+      return;
+    }
+
+    if (token) {
+      try {
+        const userData = await AuthService.fetchUser(token);
+        setUser(userData);
+        setCachedToken(token);
+        setLastAuthCheck(now);
+        console.log('UserProvider: User data restored from token:', userData);
+      } catch (error) {
+        console.error('UserProvider: Token validation failed:', error);
+        localStorage.removeItem('token');
+        setCachedToken(null);
+        setUser(null);
+      }
+    } else {
+      setUser(null);
+      setCachedToken(null);
+    }
+    setIsLoading(false);
+    console.log('UserProvider: Auth check complete.');
+  }, [cachedToken, lastAuthCheck, user]);
+
+  // Remove circular dependencies - only run checkUser on mount
+  useEffect(() => {
+    checkUser();
+  }, []); // Empty dependency array to run only on mount
+
+  // Use useCallback to stabilize function references
+  const login = useCallback(async (token: string) => {
     localStorage.setItem('token', token);
     console.log('UserProvider: New token stored. Fetching user data...');
     try {
@@ -78,15 +82,15 @@ export const UserProvider = ({ children }: { children: ReactNode }) => {
       setUser(null);
       throw error;
     }
-  };
+  }, []);
 
-  const logout = () => {
+  const logout = useCallback(() => {
     localStorage.removeItem('token');
     setCachedToken(null);
     setLastAuthCheck(0);
     setUser(null);
     console.log('UserProvider: User logged out.');
-  };
+  }, []);
 
   return (
     <UserContext.Provider value={{ user, login, logout, isLoading }}>

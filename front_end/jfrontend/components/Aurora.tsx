@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useRef, useMemo } from "react";
+import { useEffect, useRef, useMemo, memo } from "react";
 import { Renderer, Program, Mesh, Color, Triangle } from "ogl";
 
 const VERT = `#version 300 es
@@ -102,17 +102,32 @@ interface AuroraProps {
 }
 
 // Add className to props to allow styling from parent
-export default function Aurora(props: AuroraProps) {
+function Aurora(props: AuroraProps) {
   const {
     className,
     colorStops = ["#5227FF", "#7cff67", "#5227FF"],
     amplitude = 1.0,
     blend = 0.5,
+    speed = 1.0,
   } = props;
-  const propsRef = useRef<AuroraProps>(props);
-  propsRef.current = props;
 
   const ctnDom = useRef<HTMLDivElement>(null);
+
+  // Memoize color stops array to prevent recreation on every render
+  const memoizedColorStops = useMemo(() => {
+    return colorStops.map((hex) => {
+      const c = new Color(hex);
+      return [c.r, c.g, c.b];
+    });
+  }, [colorStops]);
+
+  // Memoize props to prevent WebGL context recreation
+  const stableProps = useMemo(() => ({
+    amplitude,
+    blend,
+    speed,
+    colorStops: memoizedColorStops
+  }), [amplitude, blend, speed, memoizedColorStops]);
 
   useEffect(() => {
     const ctn = ctnDom.current;
@@ -135,32 +150,36 @@ export default function Aurora(props: AuroraProps) {
       if (!ctn) return;
       const width = ctn.offsetWidth;
       const height = ctn.offsetHeight;
+
+      // Only resize if dimensions actually changed to prevent unnecessary operations
+      const currentSize = program?.uniforms.uResolution.value;
+      if (currentSize && currentSize[0] === width && currentSize[1] === height) {
+        return;
+      }
+
       renderer.setSize(width, height);
       if (program) {
         program.uniforms.uResolution.value = [width, height];
       }
     }
-    window.addEventListener("resize", resize);
+
+    // Use passive listener for better performance
+    window.addEventListener("resize", resize, { passive: true });
 
     const geometry = new Triangle(gl);
     if ((geometry.attributes as any).uv) {
       delete (geometry.attributes as any).uv;
     }
 
-    const colorStopsArray = colorStops.map((hex) => {
-      const c = new Color(hex);
-      return [c.r, c.g, c.b];
-    });
-
     program = new Program(gl, {
       vertex: VERT,
       fragment: FRAG,
       uniforms: {
         uTime: { value: 0 },
-        uAmplitude: { value: amplitude },
-        uColorStops: { value: colorStopsArray },
+        uAmplitude: { value: stableProps.amplitude },
+        uColorStops: { value: stableProps.colorStops },
         uResolution: { value: [ctn.offsetWidth, ctn.offsetHeight] },
-        uBlend: { value: blend },
+        uBlend: { value: stableProps.blend },
       },
     });
 
@@ -170,16 +189,12 @@ export default function Aurora(props: AuroraProps) {
     let animateId = 0;
     const update = (t: number) => {
       animateId = requestAnimationFrame(update);
-      const { time = t * 0.01, speed = 1.0 } = propsRef.current;
+      const time = props.time ?? t * 0.01;
       if (program) {
-        program.uniforms.uTime.value = time * speed * 0.1;
-        program.uniforms.uAmplitude.value = propsRef.current.amplitude ?? 1.0;
-        program.uniforms.uBlend.value = propsRef.current.blend ?? blend;
-        const stops = propsRef.current.colorStops ?? colorStops;
-        program.uniforms.uColorStops.value = stops.map((hex: string) => {
-          const c = new Color(hex);
-          return [c.r, c.g, c.b];
-        });
+        program.uniforms.uTime.value = time * stableProps.speed * 0.1;
+        program.uniforms.uAmplitude.value = stableProps.amplitude;
+        program.uniforms.uBlend.value = stableProps.blend;
+        program.uniforms.uColorStops.value = stableProps.colorStops;
         renderer.render({ scene: mesh });
       }
     };
@@ -193,10 +208,24 @@ export default function Aurora(props: AuroraProps) {
       if (ctn && gl.canvas.parentNode === ctn) {
         ctn.removeChild(gl.canvas);
       }
+      // Proper WebGL context cleanup to prevent memory leaks
       gl.getExtension("WEBGL_lose_context")?.loseContext();
     };
-  }, [amplitude, blend, colorStops]);
+  }, [stableProps]); // Only re-create WebGL context when stable props actually change
 
   // Pass className to the container div
   return <div ref={ctnDom} className={`w-full h-full ${className || ''}`} />;
 }
+
+// Memoize the component with a custom comparison function
+export default memo(Aurora, (prevProps, nextProps) => {
+  // Only re-render if meaningful props have changed
+  return (
+    prevProps.className === nextProps.className &&
+    prevProps.amplitude === nextProps.amplitude &&
+    prevProps.blend === nextProps.blend &&
+    prevProps.speed === nextProps.speed &&
+    prevProps.time === nextProps.time &&
+    JSON.stringify(prevProps.colorStops) === JSON.stringify(nextProps.colorStops)
+  );
+});

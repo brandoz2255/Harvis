@@ -1,7 +1,7 @@
 
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useCallback, useMemo } from "react"
 import { useRouter } from "next/navigation"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
@@ -22,7 +22,25 @@ export default function LoginPage() {
     }
   }, [user, router]);
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  // Memoize Aurora props to prevent unnecessary re-renders
+  const auroraProps = useMemo(() => ({
+    className: "w-full h-full",
+    colorStops: ['#3B82F6', '#1D4ED8', '#1E40AF'],
+    blend: 0.4,
+    amplitude: 1.0,
+    speed: 0.6,
+  }), []);
+
+  // Use useCallback for event handlers to prevent Aurora re-renders
+  const handleEmailChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    setEmail(e.target.value);
+  }, []);
+
+  const handlePasswordChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    setPassword(e.target.value);
+  }, []);
+
+  const handleSubmit = useCallback(async (e: React.FormEvent) => {
     e.preventDefault()
     setError("")
 
@@ -33,7 +51,7 @@ export default function LoginPage() {
     } catch (err: any) {
       setError(err.message || "Login failed.");
     }
-  }
+  }, [email, password, login, router])
 
   if (isLoading) {
     return <div className="min-h-screen flex items-center justify-center">Loading...</div>
@@ -43,13 +61,7 @@ export default function LoginPage() {
     <div className="relative min-h-screen overflow-hidden">
       {/* Aurora Background */}
       <div className="fixed inset-0 -z-10 pointer-events-none select-none">
-        <Aurora
-          className="w-full h-full"
-          colorStops={['#3B82F6', '#1D4ED8', '#1E40AF']}
-          blend={0.4}
-          amplitude={1.0}
-          speed={0.6}
-        />
+        <Aurora {...auroraProps} />
         <div className="absolute inset-0 bg-black/20 pointer-events-none [mask-image:radial-gradient(ellipse_at_center,white,transparent_80%)]" />
       </div>
 
@@ -64,7 +76,7 @@ export default function LoginPage() {
             <Input
               type="email"
               value={email}
-              onChange={e => setEmail(e.target.value)}
+              onChange={handleEmailChange}
               className="bg-slate-800 border-slate-600 text-white"
               required
             />
@@ -75,7 +87,7 @@ export default function LoginPage() {
             <Input
               type="password"
               value={password}
-              onChange={e => setPassword(e.target.value)}
+              onChange={handlePasswordChange}
               className="bg-slate-800 border-slate-600 text-white"
               required
             />

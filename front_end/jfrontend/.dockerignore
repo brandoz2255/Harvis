@@ -1,14 +1,75 @@
-Dockerfile
+# Docker files
+Dockerfile*
 .dockerignore
-node_modules
-npm-debug.log
-README.md
-.env
-.env.local
-.env.production.local
-.env.staging.local
-.git
+docker-compose*.yml
+
+# Dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Next.js build output
+.next/
+out/
+
+# Production builds (already handled in multi-stage)
+build/
+dist/
+
+# Environment files
+.env*
+!.env.example
+
+# Git and version control
+.git/
 .gitignore
-.next
-.vercel
+.gitmodules
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Operating system files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs and temp files
 *.log
+logs/
+temp/
+tmp/
+.tmp/
+
+# Test files and coverage
+coverage/
+.nyc_output/
+.jest/
+test-results/
+
+# Deployment platforms
+.vercel/
+.netlify/
+
+# Documentation
+README.md
+*.md
+docs/
+
+# CI/CD files
+.github/
+.gitlab-ci.yml
+.travis.yml
+
+# Package manager files (keep package.json but ignore locks during development)
+# Note: package-lock.json should be included for reproducible builds
+.pnpm-store/
+.yarn/
