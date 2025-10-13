@@ -1,5 +1,5 @@
 # Core dependencies - numpy must be first for other packages
-numpy
+numpy #==1.26.0
 setuptools
 wheel
 Cython
@@ -39,7 +39,7 @@ pytest-mock
 pytest-cov
 httpx
 responses
-accelerate>=0.26.0
+accelerate #==0.34.0
 lxml_html_clean
 python-dotenv
 google-generativeai
