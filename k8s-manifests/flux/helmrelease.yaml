@@ -1,0 +1,49 @@
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: harvis-prod
+  namespace: ai-agents
+spec:
+  interval: 5m
+  releaseName: harvis-prod
+  chart:
+    spec:
+      chart: ./harvis-helm-chart
+      version: "*"
+      sourceRef:
+        kind: GitRepository
+        name: harvis-source
+        namespace: flux-system
+  values:
+    # Minimal overrides - let most values come from values.yaml and secrets.yaml
+    # Only override image tags for automated updates
+    mergedOllamaBackend:
+      image:
+        tag: latest # {"$imagepolicy": "flux-system:harvis-backend-policy:tag"}
+
+    frontend:
+      image:
+        tag: latest # {"$imagepolicy": "flux-system:harvis-frontend-policy:tag"}
+  
+  # Automated upgrade configuration
+  upgrade:
+    remediation:
+      retries: 3
+  
+  # Rollback configuration
+  rollback:
+    cleanupOnFail: true
+  
+  # Health checks
+  test:
+    enable: false
+  
+  # Install configuration
+  install:
+    remediation:
+      retries: 3
+    timeout: 10m
+  
+  # Dependencies removed - namespace already exists
+  dependsOn: []

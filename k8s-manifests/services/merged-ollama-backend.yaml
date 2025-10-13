@@ -1,0 +1,150 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: harvis-ai-merged-ollama-backend
+  namespace: ai-agents
+  labels:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: merged-ollama-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: harvis-ai
+      app.kubernetes.io/component: merged-ollama-backend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: harvis-ai
+        app.kubernetes.io/component: merged-ollama-backend
+    spec:
+      runtimeClassName: nvidia
+      nodeSelector:
+        environment: "dulc3-os"
+      containers:
+        # Ollama container (existing functionality)
+        - name: ollama
+          image: "ollama/ollama:latest"
+          imagePullPolicy: IfNotPresent
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+            requests:
+              memory: 8Gi
+              cpu: 500m
+          ports:
+            - name: ollama
+              containerPort: 11434
+              protocol: TCP
+          volumeMounts:
+            - name: ollama-model-cache
+              mountPath: /root/.ollama
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -ex
+              ollama serve && ollama &&
+              sleep 2
+              ollama pull mistral
+              ollama pull codellama
+              wait -n
+          livenessProbe:
+            httpGet:
+              path: /api/tags
+              port: 11434
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /api/tags
+              port: 11434
+            initialDelaySeconds: 30
+            periodSeconds: 10
+
+        # Harvis Backend container (shares GPU with Ollama)
+        - name: harvis-backend
+          image: "dulc3/jarvis-backend:latest"
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-backend-secret
+                  key: database-url
+            - name: OLLAMA_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-backend-secret
+                  key: ollama-api-key
+            - name: OLLAMA_URL
+              value: "http://localhost:11434"
+            - name: BACKEND_URL
+              value: "http://harvis-ai-merged-backend:8000"
+          envFrom:
+            - configMapRef:
+                name: harvis-ai-backend-config
+            - secretRef:
+                name: harvis-ai-backend-secret
+          resources:
+            requests:
+              memory: 8Gi
+              cpu: 1000m
+            limits:
+              memory: 32Gi
+              cpu: 12000m
+          volumeMounts:
+            - name: embedding
+              mountPath: /app/embedding
+            - name: tmp
+              mountPath: /tmp
+          command: ["uvicorn"]
+          args: ["main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+          livenessProbe:
+            httpGet:
+              path: /docs
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /docs
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+
+      volumes:
+        - name: ollama-models
+          persistentVolumeClaim:
+            claimName: ollama-model-cache
+        - name: embedding
+          persistentVolumeClaim:
+            claimName: harvis-ai-embedding-pvc
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: harvis-ai-merged-backend
+  namespace: ai-agents
+  labels:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: merged-ollama-backend
+spec:
+  type: ClusterIP
+  ports:
+    - name: backend
+      port: 8000
+      targetPort: http
+      protocol: TCP
+    - name: ollama
+      port: 11434
+      targetPort: ollama
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: merged-ollama-backend
