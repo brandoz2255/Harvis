@@ -1,0 +1,32 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: ai-agents
+
+resources:
+  # Base configuration
+  - base/configmaps.yaml
+  - base/nginx-configmap.yaml
+  - base/secrets.yaml
+
+  # Storage
+  - storage/pvcs.yaml
+
+  # Services
+  - services/postgresql.yaml
+  - services/merged-ollama-backend.yaml
+  - services/frontend.yaml
+  - services/n8n.yaml
+  - services/nginx.yaml
+
+commonLabels:
+  app.kubernetes.io/name: harvis-ai
+  app.kubernetes.io/managed-by: kustomize
+
+# You can override values using patches or replacements
+# Example: To change image tags for a different environment
+# images:
+#   - name: dulc3/jarvis-frontend
+#     newTag: latest
+#   - name: dulc3/jarvis-backend
+#     newTag: latest

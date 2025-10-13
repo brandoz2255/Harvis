@@ -1,0 +1,107 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: harvis-ai-n8n
+  namespace: ai-agents
+  labels:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: n8n
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: harvis-ai
+      app.kubernetes.io/component: n8n
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: harvis-ai
+        app.kubernetes.io/component: n8n
+    spec:
+      containers:
+        - name: n8n
+          image: "n8nio/n8n:latest"
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 5678
+              protocol: TCP
+          env:
+            - name: N8N_BASIC_AUTH_ACTIVE
+              value: "true"
+            - name: N8N_BASIC_AUTH_USER
+              value: "admin"
+            - name: N8N_BASIC_AUTH_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-n8n-secret
+                  key: basic-auth-password
+            - name: N8N_PERSONAL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-n8n-secret
+                  key: personal-api-key
+            - name: DB_TYPE
+              value: "postgresdb"
+            - name: DB_POSTGRESDB_HOST
+              value: "harvis-ai-pgsql"
+            - name: DB_POSTGRESDB_PORT
+              value: "5432"
+            - name: DB_POSTGRESDB_DATABASE
+              value: "n8n"
+            - name: DB_POSTGRESDB_USER
+              value: "pguser"
+            - name: DB_POSTGRESDB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-postgresql-secret
+                  key: postgres-password
+            - name: WEBHOOK_URL
+              value: "https://n8n.dulc3.tech/"
+            - name: GENERIC_TIMEZONE
+              value: "America/Los_Angeles"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+          volumeMounts:
+            - name: n8n-data
+              mountPath: /home/node/.n8n
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: n8n-data
+          persistentVolumeClaim:
+            claimName: harvis-ai-n8n-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: harvis-ai-n8n
+  namespace: ai-agents
+  labels:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: n8n
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5678
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: n8n
