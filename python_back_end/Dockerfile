@@ -1,46 +1,50 @@
 # ---------- Builder: compile any source wheels ----------
-FROM docker.io/nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS builder
+# Use PyTorch base image with CUDA 12.4 pre-installed (eliminates ~8GB PyTorch installation)
+FROM docker.io/pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime AS builder
+
+# Install build tools for compiling source wheels
 RUN apt-get update && apt-get install -y --no-install-recommends \
-  build-essential python3 python3-pip python3-dev curl \
+  build-essential curl \
   && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /w
 COPY requirements.txt .
-RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel
+
 # Pre-reqs for pkuseg build
-RUN pip install --no-cache-dir Cython
-# Install Torch (CUDA) explicitly so it doesn't reappear later
-RUN pip install --no-cache-dir \
-  torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0 \
-  --index-url https://download.pytorch.org/whl/cu124
-# Build wheels for the rest (excluding torch and numpy to prevent conflicts)
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel Cython
+
+# Build wheels for the rest (excluding torch/torchvision/torchaudio and numpy to prevent conflicts)
+# PyTorch is already installed in base image, so skip it
 RUN grep -v "^torch" requirements.txt | grep -v "^numpy" > requirements_no_torch_numpy.txt \
   && pip wheel --no-cache-dir -r requirements_no_torch_numpy.txt -w /wheels
+
 # Also build a wheel for pkuseg if it comes from source
 RUN pip wheel --no-cache-dir pkuseg==0.0.25 --no-build-isolation -w /wheels
+
 # Remove any numpy wheels that got built as dependencies (keep only one version)
 RUN rm -f /wheels/numpy-*.whl
 
-# ---------- Runtime: no compilers, minimal OS deps ----------
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
+# ---------- Runtime: PyTorch pre-installed, minimal OS deps ----------
+# Use same PyTorch base image for runtime (PyTorch 2.6.0 + CUDA 12.4 + cuDNN 9)
+FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
+
+# Install system dependencies for AI services
 RUN apt-get update && apt-get install -y --no-install-recommends \
-  python3 python3-pip libgl1 ffmpeg tesseract-ocr tesseract-ocr-eng curl \
+  libgl1 ffmpeg tesseract-ocr tesseract-ocr-eng curl \
   && rm -rf /var/lib/apt/lists/*
 
 # Install dependencies in controlled order to avoid conflicts
-RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
 # Install numpy first with constraint compatible with chatterbox-tts (<1.26.0)
 RUN pip install --no-cache-dir "numpy>=1.24.0,<1.26.0"
 
-# Install torch from PyTorch repo (with CUDA support)
-RUN pip install --no-cache-dir \
-  torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0 \
-  --index-url https://download.pytorch.org/whl/cu124
+# NOTE: PyTorch (torch, torchvision, torchaudio) already installed in base image
+# No need to install PyTorch separately - saves ~8GB and eliminates CI/CD layer size issues
 
 # Install all other prebuilt wheels (numpy already installed, wheels removed from builder)
 COPY --from=builder /wheels /wheels
-RUN rm -f /wheels/torch-*.whl /wheels/torchvision-*.whl /wheels/torchaudio-*.whl \
-  && pip install --no-cache-dir --no-index --find-links=/wheels /wheels/* \
+RUN pip install --no-cache-dir --no-index --find-links=/wheels /wheels/* \
   && rm -rf /wheels \
   && pip cache purge
 

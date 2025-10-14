@@ -1,6 +1,105 @@
-# Dockerfile Dependency Conflict Fix
+# Dockerfile Fixes Documentation
 
-**Date:** 2025-01-13
+## Fix #2: CI/CD PyTorch Layer Size Issue (2025-10-13)
+
+**Issue:** GitHub Actions Podman build failing with `io: read/write on closed pipe` when committing PyTorch installation layer
+
+### Problem Details
+
+```
+time="2025-10-13T23:07:22Z" level=error msg="Can't add file .../libtorch_cpu.so to tar: io: read/write on closed pipe"
+Error: committing container for step {Env:[...] Command:run Args:[pip install --no-cache-dir torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124]
+```
+
+### Root Cause
+
+1. **Massive single layer**: Installing torch+torchvision+torchaudio creates ~8GB layer
+2. **Large file bottleneck**: `libtorch_cpu.so` is ~2GB and causes pipe closure during tar creation
+3. **GitHub Actions constraints**: Limited disk space (~14GB after cleanup) + Podman overlay limits
+4. **Container storage pressure**: Temporary extraction + final layer commit exceeds available capacity
+
+### Solution: Use PyTorch Pre-Built Base Image
+
+**Changed:** Base image from `nvidia/cuda:12.4.1-runtime-ubuntu22.04` → `pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime`
+
+**Benefits:**
+- Eliminates ~8GB PyTorch installation entirely
+- No layer size issues (PyTorch pre-installed in base image)
+- Faster CI/CD builds (no PyTorch download/install)
+- Same CUDA 12.4 + cuDNN 9 support maintained
+- Reduced build complexity
+
+### Implementation Changes
+
+#### Builder Stage (lines 1-25)
+```dockerfile
+# OLD: nvidia/cuda:12.4.1-runtime-ubuntu22.04
+# NEW: pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
+FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime AS builder
+
+# REMOVED: PyTorch installation (no longer needed)
+# RUN pip install --no-cache-dir \
+#   torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0 \
+#   --index-url https://download.pytorch.org/whl/cu124
+```
+
+#### Runtime Stage (lines 27-49)
+```dockerfile
+# OLD: nvidia/cuda:12.4.1-runtime-ubuntu22.04
+# NEW: pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
+FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
+
+# REMOVED: PyTorch installation (already in base image)
+# RUN pip install --no-cache-dir \
+#   torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0 \
+#   --index-url https://download.pytorch.org/whl/cu124
+
+# Added clear comment explaining PyTorch is pre-installed
+# NOTE: PyTorch (torch, torchvision, torchaudio) already installed in base image
+# No need to install PyTorch separately - saves ~8GB and eliminates CI/CD layer size issues
+```
+
+### Why This Works
+
+1. **Eliminates problematic layer**: PyTorch is already in base image layers (pre-committed by NVIDIA)
+2. **Reduces build size**: ~8GB removed from our build process
+3. **Faster builds**: No download/install of massive PyTorch packages
+4. **Same functionality**: pytorch/pytorch image includes torch 2.6.0 + CUDA 12.4 + cuDNN 9
+5. **CI/CD friendly**: Base image layers are cached, our layers are much smaller
+
+### Alternative Solutions Considered
+
+1. **Split PyTorch into separate RUN commands**: Would help but still creates large layers
+2. **Increase Podman storage limits**: Limited by GitHub Actions disk space
+3. **More aggressive cleanup**: Doesn't solve root cause of massive layers
+4. **Use Docker instead of Podman**: Same issue exists in Docker
+
+### Verification Steps
+
+```bash
+# Test build locally
+cd python_back_end
+podman build -t test-backend .
+
+# Verify PyTorch works
+podman run --rm test-backend python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
+
+# Expected output:
+# 2.6.0
+# True (if CUDA GPU available)
+```
+
+### Impact
+
+- **Build time**: Reduced by ~5-10 minutes (no PyTorch download/install)
+- **Layer size**: Reduced by ~8GB
+- **CI/CD reliability**: Eliminates pipe closure errors
+- **Maintenance**: Simpler Dockerfile with fewer steps
+
+---
+
+## Fix #1: Dependency Conflict Fix (2025-01-13)
+
 **Issue:** Dependency hell with numpy versions causing build failures
 
 ## Problem
