@@ -195,6 +195,24 @@ def load_tts_model(force_cpu=False):
     if tts_model is None:
         try:
             logger.info(f"🔊 Loading TTS model on device: {tts_device}")
+
+            # LOG CACHE CONFIGURATION
+            hf_cache = os.environ.get('TRANSFORMERS_CACHE', os.environ.get('HF_HOME', '~/.cache/huggingface'))
+            hf_cache_expanded = os.path.expanduser(hf_cache)
+            logger.info(f"📁 HuggingFace cache directory: {hf_cache_expanded}")
+
+            if os.path.exists(hf_cache_expanded):
+                try:
+                    cache_contents = os.listdir(hf_cache_expanded)
+                    logger.info(f"📦 HF cache contains {len(cache_contents)} items: {cache_contents[:5]}")
+                    # Check for model directories
+                    model_dirs = [d for d in cache_contents if d.startswith('models--')]
+                    if model_dirs:
+                        logger.info(f"✅ Found {len(model_dirs)} cached models: {model_dirs}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Could not list cache contents: {e}")
+            else:
+                logger.warning(f"⚠️ HF cache directory does not exist: {hf_cache_expanded}")
             # Add timeout for CUDA loading to prevent hanging
             import signal
             
@@ -248,9 +266,9 @@ def load_tts_model(force_cpu=False):
                     time.sleep(1.0)
                     log_gpu_memory("before TTS load after cleanup")
 
-                # Set 30 second timeout for CUDA loading
+                # Set 180 second timeout for CUDA loading (TTS takes ~90-120s to load from cache)
                 signal.signal(signal.SIGALRM, timeout_handler)
-                signal.alarm(30)
+                signal.alarm(180)
                 try:
                     logger.info("🚀 Attempting ChatterboxTTS.from_pretrained(device='cuda')...")
 
@@ -263,9 +281,19 @@ def load_tts_model(force_cpu=False):
                         raise ImportError(f"ChatterboxTTS unavailable: {import_e}")
 
                     # Attempt TTS model loading with additional error context
+                    # Enable transformers logging to see what's happening
+                    import transformers
+                    transformers.logging.set_verbosity_info()
+
+                    logger.info(f"🔄 Loading ChatterboxTTS with cache_dir={hf_cache_expanded}")
+                    logger.info("📥 This may use cached models or download if cache is missing...")
+
                     tts_model = ChatterboxTTS.from_pretrained(device=tts_device)
                     signal.alarm(0)  # Cancel timeout
                     logger.info("✅ TTS model loaded successfully on CUDA")
+
+                    # Reset logging verbosity
+                    transformers.logging.set_verbosity_warning()
 
                 except TimeoutError:
                     signal.alarm(0)  # Cancel timeout
@@ -322,9 +350,25 @@ def load_whisper_model():
         if whisper is None:
             logger.error("❌ Whisper not available - install with: pip install openai-whisper")
             return None
-        
+
         try:
             logger.info("🔄 Loading Whisper model with surgical GPU fixes")
+
+            # LOG WHISPER CACHE CONFIGURATION
+            whisper_cache = os.environ.get('WHISPER_CACHE', os.path.expanduser('~/.cache/whisper'))
+            logger.info(f"📁 Whisper cache directory: {whisper_cache}")
+
+            if os.path.exists(whisper_cache):
+                try:
+                    cache_files = os.listdir(whisper_cache)
+                    logger.info(f"📦 Whisper cache contains: {cache_files}")
+                    pt_files = [f for f in cache_files if f.endswith('.pt')]
+                    if pt_files:
+                        logger.info(f"✅ Found {len(pt_files)} cached Whisper models: {pt_files}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Could not list Whisper cache: {e}")
+            else:
+                logger.warning(f"⚠️ Whisper cache directory does not exist: {whisper_cache}")
             
             # SURGICAL FIX 1: Force CUDA init early to prevent hanging
             import signal
@@ -373,13 +417,14 @@ def load_whisper_model():
                                 continue
                             
                             logger.info(f"🎯 Loading cached Whisper '{model_name}' model ({file_size} bytes)...")
-                            
-                            # Load with timeout protection
+
+                            # Load with timeout protection and explicit cache dir
                             signal.signal(signal.SIGALRM, cuda_timeout_handler)
                             signal.alarm(45)  # 45 second timeout for model loading
                             try:
-                                whisper_model = whisper.load_model(model_name, device="cuda")
-                                logger.info(f"✅ Successfully loaded cached Whisper '{model_name}' model")
+                                logger.info(f"📥 Loading from cache: {whisper_cache}")
+                                whisper_model = whisper.load_model(model_name, device="cuda", download_root=whisper_cache)
+                                logger.info(f"✅ Successfully loaded cached Whisper '{model_name}' model on GPU")
                                 signal.alarm(0)
                                 return whisper_model
                             except Exception as load_e:
@@ -609,14 +654,17 @@ def reload_models_if_needed():
 def generate_speech(text, model=None, audio_prompt=None, exaggeration=0.5, temperature=0.8, cfg_weight=0.5):
     """Generate speech using TTS model"""
     from chatterbox.tts import punc_norm
-    
+
     if model is None:
         model = load_tts_model()
-    
+
     try:
+        logger.info(f"🎙️ Generating speech for text (length: {len(text)} chars)")
         normalized = punc_norm(text)
+        logger.info(f"📝 Normalized text: {normalized[:100]}...")
         if torch.cuda.is_available():
             try:
+                logger.info(f"🔊 Starting TTS generation on CUDA (exaggeration={exaggeration}, temp={temperature})")
                 wav = model.generate(
                     normalized,
                     audio_prompt_path=audio_prompt,
@@ -624,6 +672,7 @@ def generate_speech(text, model=None, audio_prompt=None, exaggeration=0.5, tempe
                     temperature=temperature,
                     cfg_weight=cfg_weight
                 )
+                logger.info(f"✅ TTS generation completed, audio shape: {wav.shape}")
             except RuntimeError as e:
                 if "CUDA" in str(e):
                     logger.error(f"CUDA Error: {e}")
@@ -778,6 +827,9 @@ def transcribe_with_whisper_optimized(audio_path, auto_unload=True):
                     raise RuntimeError(f"System whisper command failed: {result.stderr}")
         else:
             # Use Python whisper library
+            logger.info(f"🎤 Starting Whisper transcription for: {audio_path}")
+            logger.info(f"🔧 Using model on device: {whisper_model.device}")
+
             result = whisper_model.transcribe(
                 audio_path,
                 fp16=False,
@@ -787,6 +839,7 @@ def transcribe_with_whisper_optimized(audio_path, auto_unload=True):
             )
 
             logger.info(f"✅ Transcription completed: {result.get('text', '')[:100]}...")
+            logger.info(f"📊 Transcription segments: {len(result.get('segments', []))}")
             return result
 
     except Exception as e:

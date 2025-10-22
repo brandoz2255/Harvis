@@ -21,6 +21,30 @@ spec:
       runtimeClassName: nvidia
       nodeSelector:
         environment: "dulc3-os"
+      initContainers:
+        # Init container to pre-download TTS and Whisper models
+        - name: download-models
+          image: "localhost:5000/jarvis-backend:v1.3"
+          imagePullPolicy: Always
+          command: ["/app/entrypoint.sh", "download-models"]
+          env:
+            # Ensure init container uses same cache paths
+            - name: HF_HOME
+              value: "/models-cache/huggingface"
+            - name: TRANSFORMERS_CACHE
+              value: "/models-cache/huggingface"
+            - name: WHISPER_CACHE
+              value: "/models-cache/whisper"
+          volumeMounts:
+            - name: ml-models-cache
+              mountPath: /models-cache
+          resources:
+            requests:
+              memory: 2Gi
+              cpu: 500m
+            limits:
+              memory: 4Gi
+              cpu: 2000m
       containers:
         # Ollama container (existing functionality)
         - name: ollama
@@ -37,7 +61,7 @@ spec:
               containerPort: 11434
               protocol: TCP
           volumeMounts:
-            - name: ollama-model-cache
+            - name: ollama-models
               mountPath: /root/.ollama
           command: ["/bin/bash", "-c"]
           args:
@@ -63,7 +87,7 @@ spec:
 
         # Harvis Backend container (shares GPU with Ollama)
         - name: harvis-backend
-          image: "dulc3/jarvis-backend:latest"
+          image: "localhost:5000/jarvis-backend:latest"
           imagePullPolicy: Always
           ports:
             - name: http
@@ -84,6 +108,18 @@ spec:
               value: "http://localhost:11434"
             - name: BACKEND_URL
               value: "http://harvis-ai-merged-backend:8000"
+            # Model cache configuration - HF_HOME is preferred by transformers library
+            - name: HF_HOME
+              value: "/models-cache/huggingface"
+            - name: TRANSFORMERS_CACHE
+              value: "/models-cache/huggingface"
+            - name: WHISPER_CACHE
+              value: "/models-cache/whisper"
+            # Production uvicorn settings
+            - name: UVICORN_WORKERS
+              value: "1"
+            - name: UVICORN_TIMEOUT_KEEP_ALIVE
+              value: "120"
           envFrom:
             - configMapRef:
                 name: harvis-ai-backend-config
@@ -101,8 +137,19 @@ spec:
               mountPath: /app/embedding
             - name: tmp
               mountPath: /tmp
+            - name: ml-models-cache
+              mountPath: /models-cache
           command: ["uvicorn"]
-          args: ["main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+          args:
+            - "main:app"
+            - "--host"
+            - "0.0.0.0"
+            - "--port"
+            - "8000"
+            - "--timeout-keep-alive"
+            - "120"
+            - "--log-level"
+            - "info"
           livenessProbe:
             httpGet:
               path: /docs
@@ -123,6 +170,9 @@ spec:
         - name: embedding
           persistentVolumeClaim:
             claimName: harvis-ai-embedding-pvc
+        - name: ml-models-cache
+          persistentVolumeClaim:
+            claimName: ml-models-cache
         - name: tmp
           emptyDir: {}
 ---

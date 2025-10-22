@@ -86,26 +86,26 @@ export default function Home() {
 
           </motion.div>
 
-          {/* Main grid */}
-          <div className="grid gap-6 grid-cols-1 lg:grid-cols-3">
-            {/* Chat */}
+          {/* Main content - Full width chat interface */}
+          <div className="flex flex-col lg:flex-row gap-6">
+            {/* Primary Chat Interface - Takes most of the space */}
             <motion.div
-              initial={{ opacity: 0, x: -50 }}
-              animate={{ opacity: isLoaded ? 1 : 0, x: isLoaded ? 0 : -50 }}
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: isLoaded ? 1 : 0, y: isLoaded ? 0 : 20 }}
               transition={{ duration: 0.8, delay: 0.2 }}
-              className="lg:col-span-2"
+              className="flex-1 max-w-full"
             >
               <UnifiedChatInterface
                 ref={chatInterfaceRef}
               />
             </motion.div>
 
-            {/* Right column */}
+            {/* Secondary Tools - Compact sidebar */}
             <motion.div
               initial={{ opacity: 0, x: 50 }}
               animate={{ opacity: isLoaded ? 1 : 0, x: isLoaded ? 0 : 50 }}
               transition={{ duration: 0.8, delay: 0.4 }}
-              className="space-y-6"
+              className="w-full lg:w-64 space-y-4"
             >
               <CompactScreenShare
                 onAnalysis={handleScreenAnalysis}

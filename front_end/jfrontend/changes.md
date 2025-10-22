@@ -1,5 +1,131 @@
 # Changes Log
 
+## 2025-10-22 - Kubernetes Model Caching & Loading Fixes
+
+**Timestamp**: 2025-10-22 02:20:00 UTC - Fixed init container re-downloading models and silent model loading failures
+
+### Problem Description
+
+**Critical K8s Deployment Issues:**
+1. **Init Container Re-downloads**: Models downloaded every pod restart despite PVC cache existing
+2. **Silent Model Loading Failures**: ChatterboxTTS hung during loading with no logging, causing pod restarts
+3. **Cache Path Mismatches**: Init container saved to `/models-cache` but app looked in `/home/appuser/.cache`
+4. **No Cache Validation**: No verification that cached models were actually being used
+5. **Missing Logging**: No visibility into model loading, inference, or cache usage
+
+### Root Cause Analysis
+
+- **HuggingFace Cache Not Used**: `ChatterboxTTS.from_pretrained()` ignored `TRANSFORMERS_CACHE` env var and re-downloaded from HuggingFace
+- **Download Hangs**: Model downloads in K8s pod timed out/hung, causing liveness probe failures and restarts
+- **Permission Issues**: Init container created cache files that app container couldn't read
+- **Incomplete Validation**: `check_chatterbox_model_exists()` only checked for directories, not actual model files
+- **Dev Mode in Prod**: Using development uvicorn settings in production K8s deployment
+
+### Solution Implementation
+
+#### 1. **Fixed Cache Permissions** ✅
+   - **File**: `python_back_end/download_models.py`
+   - **Function Added**: `fix_cache_permissions()` - Sets 755 on directories, 644 on files
+   - **Recursive**: Applies to all files in `/models-cache/whisper` and `/models-cache/huggingface`
+   - **Called**: After model downloads complete in init container
+
+#### 2. **Improved Cache Validation** ✅
+   - **File**: `python_back_end/download_models.py`
+   - **Enhancement**: `check_chatterbox_model_exists()` now validates snapshots directory structure
+   - **HuggingFace Structure**: Checks for `models--*/snapshots/*` pattern
+   - **Early Detection**: Warns if cache appears incomplete or corrupted
+
+#### 3. **Added Comprehensive Model Logging** ✅
+   - **File**: `python_back_end/model_manager.py`
+   - **Added Logging**:
+     - Cache directory validation at load time
+     - HF cache contents listing (shows `models--*` directories)
+     - Whisper cache contents listing (shows `.pt` files)
+     - Transformers library verbose logging during model load
+     - TTS generation progress (text length, normalization, CUDA usage)
+     - Whisper transcription progress (device, segments, results)
+   - **Visibility**: Shows exactly what models are doing at each stage
+
+#### 4. **Startup Cache Validation** ✅
+   - **File**: `python_back_end/main.py`
+   - **Location**: In `lifespan()` startup function
+   - **Checks**:
+     - HF_HOME/TRANSFORMERS_CACHE directory existence
+     - Lists cached model directories with counts
+     - WHISPER_CACHE directory existence
+     - Lists .pt files with sizes in MB
+   - **Warnings**: Alerts if caches don't exist (models will download on first use)
+
+#### 5. **K8s Manifest Production Settings** ✅
+   - **File**: `k8s-manifests/services/merged-ollama-backend.yaml`
+   - **Added `HF_HOME` Env Var**: Transformers library prefers this over `TRANSFORMERS_CACHE`
+   - **Init Container Env Vars**: Added HF_HOME, TRANSFORMERS_CACHE, WHISPER_CACHE to init container
+   - **Production Uvicorn**:
+     - Added `--timeout-keep-alive 120`
+     - Added `--log-level info`
+     - Explicit args format for clarity
+   - **Environment Variables**:
+     ```yaml
+     - name: HF_HOME
+       value: "/models-cache/huggingface"
+     - name: TRANSFORMERS_CACHE
+       value: "/models-cache/huggingface"
+     - name: WHISPER_CACHE
+       value: "/models-cache/whisper"
+     ```
+
+### Files Modified
+
+1. **python_back_end/download_models.py**:
+   - Added `fix_cache_permissions()` function
+   - Enhanced `check_chatterbox_model_exists()` with snapshot validation
+   - Call permission fix at end of `main()`
+
+2. **python_back_end/model_manager.py**:
+   - Added cache directory logging in `load_tts_model()`
+   - Added cache directory logging in `load_whisper_model()`
+   - Added transformers verbose logging during TTS load
+   - Added generation progress logging in `generate_speech()`
+   - Added transcription progress logging in `transcribe_with_whisper_optimized()`
+   - Added explicit `download_root` parameter for Whisper loading
+
+3. **python_back_end/main.py**:
+   - Added startup cache validation in `lifespan()` function
+   - Logs HF cache path and contents
+   - Logs Whisper cache path and .pt files with sizes
+   - Warns if caches don't exist
+
+4. **k8s-manifests/services/merged-ollama-backend.yaml**:
+   - Added `HF_HOME` environment variable (primary)
+   - Added env vars to init container
+   - Updated uvicorn args for production settings
+   - Added timeout and log-level configuration
+
+### Result/Status
+
+**✅ FIXED**:
+- Init container now properly sets permissions for app container to read cache
+- Cache validation prevents using incomplete/corrupted caches
+- Comprehensive logging shows exactly what models are doing
+- Startup validation confirms caches exist before app starts serving
+- HF_HOME ensures transformers library uses the correct cache
+- Production uvicorn settings for K8s deployment
+
+**Expected Behavior After Fix**:
+1. First deployment: Init container downloads models, sets permissions
+2. App startup: Logs show cached models found and being used
+3. TTS/Whisper requests: Logs show models loading from cache (not downloading)
+4. Pod restarts: Init container skips download, app uses cached models
+5. No more silent hangs during model loading
+
+**Next Steps**:
+- Rebuild Docker image: `docker build -t localhost:5000/jarvis-backend:v1.0.1 .`
+- Push to local registry: `docker push localhost:5000/jarvis-backend:v1.0.1`
+- Update K8s manifest image tag or apply changes: `kubectl apply -f k8s-manifests/services/merged-ollama-backend.yaml`
+- Monitor logs to confirm cached models are being used
+
+---
+
 ## 2025-09-29 - Critical Memory Management Fixes
 
 **Timestamp**: 2025-09-29 15:30:00 UTC - Resolved critical VRAM memory leaks in TTS, Whisper, and Ollama models

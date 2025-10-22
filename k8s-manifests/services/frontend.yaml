@@ -20,7 +20,7 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: "dulc3/jarvis-frontend:dev"
+          image: "localhost:5000/jarvis-frontend:latest"
           imagePullPolicy: Always
           ports:
             - name: http

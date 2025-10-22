@@ -495,8 +495,8 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
     }
 
     try {
-      // Extended timeout for research requests (5 minutes), normal timeout for chat (60 seconds)
-      const timeoutDuration = needsWebSearch ? 300000 : 60000
+      // Extended timeout for research requests (5 minutes), normal timeout for chat (3 minutes for TTS)
+      const timeoutDuration = needsWebSearch ? 300000 : 180000
       const controller = new AbortController()
       const timeoutId = setTimeout(() => controller.abort(), timeoutDuration)
       const response = await fetch(apiEndpoint, {
@@ -780,9 +780,13 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
         const formData = new FormData()
         formData.append("file", audioBlob, "mic.wav")
         formData.append("model", modelToUse)
+        formData.append("research_mode", isResearchMode.toString())  // Add research mode flag
         if (currentSession?.id || sessionId) {
           formData.append("session_id", currentSession?.id || sessionId || "")
         }
+
+        // Log voice request details
+        console.log("🎤 Voice input - Research mode:", isResearchMode, "Model:", modelToUse)
 
         // Get auth token for API request
         const token = localStorage.getItem('token')
@@ -988,7 +992,7 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
         </div>
       )}
       
-      <Card className="bg-gray-900/50 backdrop-blur-sm border-blue-500/30 h-[700px] flex flex-col">
+      <Card className="bg-gray-900/50 backdrop-blur-sm border-blue-500/30 h-[calc(90vh-2rem)] min-h-[1000px] flex flex-col">
       <div className="p-4 border-b border-blue-500/30">
         <div className="flex justify-between items-center mb-3">
           <div className="flex items-center space-x-3">

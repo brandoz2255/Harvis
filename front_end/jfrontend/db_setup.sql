@@ -59,9 +59,31 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- Trigger to automatically update updated_at
-CREATE TRIGGER update_user_api_keys_updated_at 
-    BEFORE UPDATE ON user_api_keys 
-    FOR EACH ROW 
+CREATE TRIGGER update_user_api_keys_updated_at
+    BEFORE UPDATE ON user_api_keys
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- Create user_ollama_settings table for per-user Ollama configuration
+CREATE TABLE IF NOT EXISTS user_ollama_settings (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    cloud_url VARCHAR(500), -- Cloud Ollama URL (e.g., https://cloud-ollama.com/ollama)
+    local_url VARCHAR(500), -- Local Ollama URL (e.g., http://ollama:11434)
+    api_key_encrypted TEXT, -- Encrypted API key for cloud Ollama
+    preferred_endpoint VARCHAR(20) DEFAULT 'auto' CHECK (preferred_endpoint IN ('cloud', 'local', 'auto')),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id) -- One Ollama configuration per user
+);
+
+-- Create index for faster lookups
+CREATE INDEX idx_user_ollama_settings_user_id ON user_ollama_settings(user_id);
+
+-- Trigger to automatically update updated_at
+CREATE TRIGGER update_user_ollama_settings_updated_at
+    BEFORE UPDATE ON user_ollama_settings
+    FOR EACH ROW
     EXECUTE FUNCTION update_updated_at_column();
 
 -- Vibe Coding Sessions

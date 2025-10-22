@@ -54,10 +54,9 @@ metadata:
     app.kubernetes.io/name: harvis-ai
     app.kubernetes.io/component: nginx
   annotations:
-    metallb.universe.tf/address-pool: local-pool
+    metallb.universe.tf/address-pool: harvis-ip-pool
 spec:
   type: LoadBalancer
-  loadBalancerIP: 192.168.10.241
   ports:
     - port: 80
       targetPort: http

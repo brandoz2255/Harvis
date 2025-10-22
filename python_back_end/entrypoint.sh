@@ -11,12 +11,12 @@ MODE="${1:-app}"
 
 case "$MODE" in
 download-models)
-  echo " Running  in DOWNLOAD MODE - downloading models...."
-  python3 /app/download-models.py
+  echo "🚀 Running in DOWNLOAD MODE - downloading models...."
+  python3 /app/download_models.py
   ;;
 
 app)
-  echo " Running in APP MODE - starting uvicorn server..."
+  echo "🚀 Running in APP MODE - starting uvicorn server..."
   shift
   exec uvicorn main:app --host 0.0.0.0 --port 8000 "$@"
   ;;

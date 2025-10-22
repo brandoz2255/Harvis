@@ -62,8 +62,8 @@ spec:
         
         # Harvis Backend container (shares GPU with Ollama)
         - name: harvis-backend
-          image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
-          imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+          image: "{{ .Values.mergedOllamaBackend.image.repository }}:{{ .Values.mergedOllamaBackend.image.tag }}"
+          imagePullPolicy: {{ .Values.mergedOllamaBackend.image.pullPolicy }}
           ports:
             - name: http
               containerPort: 8000

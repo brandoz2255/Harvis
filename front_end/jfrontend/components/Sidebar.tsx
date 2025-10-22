@@ -4,13 +4,8 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useState } from 'react';
 import * as React from 'react';
-import { 
-  MessageSquare, 
-  Zap, 
-  Users, 
-  Gamepad2, 
-  Search, 
-  Shield, 
+import {
+  Users,
   Menu,
   X,
   Home,
@@ -30,37 +25,13 @@ const navigationItems = [
     name: 'Vibe Coding',
     href: '/vibe-coding',
     icon: Code2,
-    description: 'AI-powered development environment'
-  },
-  {
-    name: 'Versus Mode',
-    href: '/versus-mode',
-    icon: Zap,
-    description: 'Competitive AI challenges'
+    description: 'Under Development'
   },
   {
     name: 'AI Agents',
     href: '/ai-agents',
     icon: Users,
-    description: 'Specialized AI assistants'
-  },
-  {
-    name: 'AI Games',
-    href: '/ai-games',
-    icon: Gamepad2,
-    description: 'Interactive AI-powered games'
-  },
-  {
-    name: 'Research Assistant',
-    href: '/research-assistant',
-    icon: Search,
-    description: 'Advanced research capabilities'
-  },
-  {
-    name: 'Adversary Emulation',
-    href: '/adversary-emulation',
-    icon: Shield,
-    description: 'Security testing and emulation'
+    description: 'Under Development'
   }
 ];
 
