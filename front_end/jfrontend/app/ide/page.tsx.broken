@@ -1,0 +1,960 @@
+'use client'
+
+import React, { useState, useEffect, useRef, useCallback } from 'react'
+import { useRouter } from 'next/navigation'
+import { useUser } from '@/lib/auth/UserProvider'
+import { Mosaic, MosaicWindow } from 'react-mosaic-component'
+import { Editor } from '@monaco-editor/react'
+import dynamic from 'next/dynamic'
+import { 
+  FileText, 
+  Terminal as TerminalIcon, 
+  Bot, 
+  Settings, 
+  Play, 
+  Square, 
+  Plus, 
+  X, 
+  ChevronDown,
+  Command,
+  Monitor,
+  Palette,
+  Type,
+  Maximize2,
+  Minimize2
+} from 'lucide-react'
+import AIAssistantPanel from '@/components/AIAssistantPanel'
+
+// Types
+interface FileNode {
+  name: string
+  path: string
+  type: 'file' | 'directory'
+  children?: FileNode[]
+  content?: string
+}
+
+interface EditorTab {
+  id: string
+  name: string
+  path: string
+  content: string
+  isDirty: boolean
+  language: string
+}
+
+interface TerminalTab {
+  id: string
+  name: string
+  instanceId: string
+}
+
+interface ChatMessage {
+  role: "user" | "assistant"
+  content: string
+  timestamp: Date
+  reasoning?: string
+}
+
+interface UserPreferences {
+  theme: 'dark' | 'light'
+  fontSize: number
+  terminalFontSize: number
+  layout: any
+  panelSizes: {
+    left: number
+    right: number
+    bottom: number
+  }
+}
+
+// Main IDE Workbench Component
+export default function IDEWorkbench() {
+  const router = useRouter()
+  const { user, loading: userLoading } = useUser()
+  
+  // State management
+  const [activeSession, setActiveSession] = useState<any>(null)
+  const [fileTree, setFileTree] = useState<FileNode[]>([])
+  const [editorTabs, setEditorTabs] = useState<EditorTab[]>([])
+  const [activeTab, setActiveTab] = useState<string | null>(null)
+  const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>([])
+  const [activeTerminal, setActiveTerminal] = useState<string | null>(null)
+  const [selectedModel, setSelectedModel] = useState<string>('gpt-4')
+  const [availableModels, setAvailableModels] = useState<Array<{ name: string; provider: string; type: string }>>([])
+  const [showCommandPalette, setShowCommandPalette] = useState(false)
+  const [showFullIDE, setShowFullIDE] = useState(false)
+  const [isContainerRunning, setIsContainerRunning] = useState(false)
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
+  const [isProcessing, setIsProcessing] = useState(false)
+  const [commandPaletteQuery, setCommandPaletteQuery] = useState('')
+  
+  // Layout state
+  const [layout, setLayout] = useState<any>({
+    direction: 'row',
+    first: {
+      direction: 'column',
+      first: 'file-explorer',
+      second: {
+        direction: 'row',
+        first: 'editor',
+        second: 'ai-assistant'
+      }
+    },
+    second: 'terminal'
+  })
+  
+  // User preferences
+  const [preferences, setPreferences] = useState<UserPreferences>({
+    theme: 'dark',
+    fontSize: 14,
+    terminalFontSize: 12,
+    layout: null,
+    panelSizes: { left: 250, right: 300, bottom: 200 }
+  })
+  
+  // Refs
+  const terminalRefs = useRef<Map<string, Terminal>>(new Map())
+  const editorRef = useRef<any>(null)
+  const commandPaletteRef = useRef<HTMLInputElement>(null)
+
+  // Authentication guard
+  useEffect(() => {
+    if (!userLoading && !user) {
+      router.push('/login')
+    }
+  }, [user, userLoading, router])
+
+  // Load user preferences
+  useEffect(() => {
+    const savedPrefs = localStorage.getItem('ide-preferences')
+    if (savedPrefs) {
+      try {
+        const parsed = JSON.parse(savedPrefs)
+        setPreferences(prev => ({ ...prev, ...parsed }))
+      } catch (e) {
+        console.warn('Failed to parse saved preferences')
+      }
+    }
+  }, [])
+
+  // Save preferences
+  const savePreferences = useCallback((newPrefs: Partial<UserPreferences>) => {
+    const updated = { ...preferences, ...newPrefs }
+    setPreferences(updated)
+    localStorage.setItem('ide-preferences', JSON.stringify(updated))
+  }, [preferences])
+
+  // Load available AI models
+  useEffect(() => {
+    const fetchModels = async () => {
+      try {
+        const response = await fetch('/api/vibecode/models')
+        if (response.ok) {
+          const data = await response.json()
+          setAvailableModels(data.models || [])
+        }
+      } catch (error) {
+        console.error('Failed to fetch models:', error)
+      }
+    }
+    fetchModels()
+  }, [])
+
+  // Send AI message
+  const sendAIMessage = useCallback(async (message: string) => {
+    if (!activeSession || !message.trim()) return
+
+    const userMessage: ChatMessage = {
+      role: 'user',
+      content: message,
+      timestamp: new Date()
+    }
+
+    setChatMessages(prev => [...prev, userMessage])
+    setIsProcessing(true)
+
+    try {
+      const response = await fetch('/api/vibecode/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: activeSession.id,
+          message,
+          model: selectedModel
+        })
+      })
+
+      if (response.ok) {
+        const data = await response.json()
+        const assistantMessage: ChatMessage = {
+          role: 'assistant',
+          content: data.response,
+          timestamp: new Date(),
+          reasoning: data.reasoning
+        }
+        setChatMessages(prev => [...prev, assistantMessage])
+      }
+    } catch (error) {
+      console.error('Failed to send message:', error)
+      const errorMessage: ChatMessage = {
+        role: 'assistant',
+        content: 'Sorry, I encountered an error. Please try again.',
+        timestamp: new Date()
+      }
+      setChatMessages(prev => [...prev, errorMessage])
+    } finally {
+      setIsProcessing(false)
+    }
+  }, [activeSession, selectedModel])
+
+  // Load file tree
+  const loadFileTree = useCallback(async (sessionId: string) => {
+    try {
+      const response = await fetch(`/api/vibecode/files/list?session_id=${sessionId}`)
+      if (response.ok) {
+        const data = await response.json()
+        setFileTree(data.files || [])
+      }
+    } catch (error) {
+      console.error('Failed to load file tree:', error)
+    }
+  }, [])
+
+  // Open file in editor
+  const openFile = useCallback(async (filePath: string) => {
+    if (!activeSession) return
+    
+    try {
+      const response = await fetch(`/api/vibecode/files/read?session_id=${activeSession.id}&path=${encodeURIComponent(filePath)}`)
+      if (response.ok) {
+        const data = await response.json()
+        const newTab: EditorTab = {
+          id: filePath,
+          name: filePath.split('/').pop() || 'untitled',
+          path: filePath,
+          content: data.content || '',
+          isDirty: false,
+          language: getLanguageFromPath(filePath)
+        }
+        
+        setEditorTabs(prev => {
+          const existing = prev.find(tab => tab.id === filePath)
+          if (existing) {
+            setActiveTab(filePath)
+            return prev
+          }
+          return [...prev, newTab]
+        })
+        setActiveTab(filePath)
+      }
+    } catch (error) {
+      console.error('Failed to open file:', error)
+    }
+  }, [activeSession])
+
+  // Get language from file path
+  const getLanguageFromPath = (path: string): string => {
+    const ext = path.split('.').pop()?.toLowerCase()
+    const languageMap: Record<string, string> = {
+      'js': 'javascript',
+      'jsx': 'javascript',
+      'ts': 'typescript',
+      'tsx': 'typescript',
+      'py': 'python',
+      'java': 'java',
+      'cpp': 'cpp',
+      'c': 'c',
+      'cs': 'csharp',
+      'php': 'php',
+      'rb': 'ruby',
+      'go': 'go',
+      'rs': 'rust',
+      'html': 'html',
+      'css': 'css',
+      'scss': 'scss',
+      'json': 'json',
+      'xml': 'xml',
+      'yaml': 'yaml',
+      'yml': 'yaml',
+      'md': 'markdown',
+      'sql': 'sql',
+      'sh': 'shell',
+      'bash': 'shell'
+    }
+    return languageMap[ext || ''] || 'plaintext'
+  }
+
+  // Save file
+  const saveFile = useCallback(async (tabId: string) => {
+    if (!activeSession) return
+    
+    const tab = editorTabs.find(t => t.id === tabId)
+    if (!tab) return
+    
+    try {
+      const response = await fetch('/api/vibecode/files/write', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: activeSession.id,
+          path: tab.path,
+          content: tab.content
+        })
+      })
+      
+      if (response.ok) {
+        setEditorTabs(prev => prev.map(t => 
+          t.id === tabId ? { ...t, isDirty: false } : t
+        ))
+      }
+    } catch (error) {
+      console.error('Failed to save file:', error)
+    }
+  }, [activeSession, editorTabs])
+
+  // Close tab
+  const closeTab = useCallback((tabId: string) => {
+    setEditorTabs(prev => {
+      const newTabs = prev.filter(t => t.id !== tabId)
+      if (activeTab === tabId) {
+        setActiveTab(newTabs.length > 0 ? newTabs[newTabs.length - 1].id : null)
+      }
+      return newTabs
+    })
+  }, [activeTab])
+
+  // Create new terminal
+  const createTerminal = useCallback(() => {
+    const newTerminal: TerminalTab = {
+      id: `terminal-${Date.now()}`,
+      name: `Terminal ${terminalTabs.length + 1}`,
+      instanceId: `term-${Date.now()}`
+    }
+    setTerminalTabs(prev => [...prev, newTerminal])
+    setActiveTerminal(newTerminal.id)
+  }, [terminalTabs.length])
+
+  // Close terminal
+  const closeTerminal = useCallback((terminalId: string) => {
+    setTerminalTabs(prev => {
+      const newTabs = prev.filter(t => t.id !== terminalId)
+      if (activeTerminal === terminalId) {
+        setActiveTerminal(newTabs.length > 0 ? newTabs[newTabs.length - 1].id : null)
+      }
+      return newTabs
+    })
+  }, [activeTerminal])
+
+  // Global keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey) {
+        switch (e.key) {
+          case 'p':
+            e.preventDefault()
+            setShowCommandPalette(true)
+            break
+          case 's':
+            e.preventDefault()
+            if (activeTab) saveFile(activeTab)
+            break
+          case 'b':
+            e.preventDefault()
+            // Toggle left panel
+            break
+          case 'j':
+            e.preventDefault()
+            // Toggle bottom panel
+            break
+        }
+      }
+    }
+
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [activeTab, saveFile])
+
+  // Command palette commands
+  const commandPaletteCommands = [
+    { id: 'toggle-full-ide', label: 'Toggle Full IDE', action: () => setShowFullIDE(!showFullIDE) },
+    { id: 'start-container', label: 'Start Container', action: () => {/* Start container logic */} },
+    { id: 'stop-container', label: 'Stop Container', action: () => {/* Stop container logic */} },
+    { id: 'toggle-theme', label: 'Toggle Theme', action: () => savePreferences({ theme: preferences.theme === 'dark' ? 'light' : 'dark' }) },
+    { id: 'new-terminal', label: 'New Terminal', action: createTerminal },
+    { id: 'new-file', label: 'New File', action: () => {/* New file logic */} },
+    { id: 'save-file', label: 'Save File', action: () => activeTab && saveFile(activeTab) },
+    { id: 'close-tab', label: 'Close Tab', action: () => activeTab && closeTab(activeTab) },
+    { id: 'increase-font', label: 'Increase Font Size', action: () => savePreferences({ fontSize: Math.min(preferences.fontSize + 2, 24) }) },
+    { id: 'decrease-font', label: 'Decrease Font Size', action: () => savePreferences({ fontSize: Math.max(preferences.fontSize - 2, 8) }) },
+    { id: 'increase-terminal-font', label: 'Increase Terminal Font', action: () => savePreferences({ terminalFontSize: Math.min(preferences.terminalFontSize + 2, 24) }) },
+    { id: 'decrease-terminal-font', label: 'Decrease Terminal Font', action: () => savePreferences({ terminalFontSize: Math.max(preferences.terminalFontSize - 2, 8) }) },
+    { id: 'toggle-left-panel', label: 'Toggle Left Panel', action: () => {/* Toggle left panel logic */} },
+    { id: 'toggle-bottom-panel', label: 'Toggle Bottom Panel', action: () => {/* Toggle bottom panel logic */} },
+    { id: 'toggle-right-panel', label: 'Toggle Right Panel', action: () => {/* Toggle right panel logic */} }
+  ]
+
+  // Render file explorer
+  const renderFileExplorer = () => (
+    <div className="h-full bg-gray-900 border-r border-gray-700">
+      <div className="p-3 border-b border-gray-700">
+        <h3 className="text-sm font-medium text-gray-200">Explorer</h3>
+      </div>
+      <div className="p-2">
+        {fileTree.length === 0 ? (
+          <div className="text-gray-400 text-sm">No files loaded</div>
+        ) : (
+          <div className="space-y-1">
+            {fileTree.map((node, index) => (
+              <FileTreeNode 
+                key={index} 
+                node={node} 
+                onFileClick={openFile}
+                level={0}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+
+  // Render editor area
+  const renderEditor = () => (
+    <div className="h-full bg-gray-900">
+      {/* Editor tabs */}
+      <div className="flex bg-gray-800 border-b border-gray-700 overflow-x-auto">
+        {editorTabs.map(tab => (
+          <div
+            key={tab.id}
+            className={`flex items-center px-3 py-2 text-sm border-r border-gray-700 cursor-pointer min-w-0 ${
+              activeTab === tab.id ? 'bg-gray-900 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
+            }`}
+            onClick={() => setActiveTab(tab.id)}
+          >
+            <FileText className="w-4 h-4 mr-2 flex-shrink-0" />
+            <span className="truncate">{tab.name}</span>
+            {tab.isDirty && <span className="ml-1 text-yellow-400">•</span>}
+            <button
+              className="ml-2 hover:bg-gray-600 rounded p-1"
+              onClick={(e) => {
+                e.stopPropagation()
+                closeTab(tab.id)
+              }}
+            >
+              <X className="w-3 h-3" />
+            </button>
+          </div>
+        ))}
+        <button
+          className="px-3 py-2 text-gray-400 hover:bg-gray-700"
+          onClick={() => {/* New file logic */}}
+        >
+          <Plus className="w-4 h-4" />
+        </button>
+      </div>
+      
+      {/* Monaco Editor */}
+      <div className="h-full">
+        {activeTab ? (
+          <Editor
+            height="100%"
+            language={editorTabs.find(t => t.id === activeTab)?.language || 'plaintext'}
+            value={editorTabs.find(t => t.id === activeTab)?.content || ''}
+            theme={preferences.theme === 'dark' ? 'vs-dark' : 'vs-light'}
+            options={{
+              fontSize: preferences.fontSize,
+              minimap: { enabled: false },
+              scrollBeyondLastLine: false,
+              automaticLayout: true,
+              tabSize: 2,
+              insertSpaces: true,
+              renderWhitespace: 'selection',
+              lineNumbers: 'on',
+              cursorStyle: 'line',
+              smoothScrolling: false,
+              contextmenu: true,
+              mouseWheelZoom: true,
+              pixelRatio: 1
+            }}
+            onChange={(value) => {
+              if (activeTab) {
+                setEditorTabs(prev => prev.map(tab => 
+                  tab.id === activeTab ? { ...tab, content: value || '', isDirty: true } : tab
+                ))
+              }
+            }}
+            onMount={(editor) => {
+              editorRef.current = editor
+            }}
+          />
+        ) : (
+          <div className="flex items-center justify-center h-full text-gray-400">
+            <div className="text-center">
+              <FileText className="w-16 h-16 mx-auto mb-4 opacity-50" />
+              <p>Open a file to start editing</p>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+
+  // Render AI assistant
+  const renderAIAssistant = () => (
+    <AIAssistantPanel
+      sessionId={activeSession?.id || null}
+      containerStatus={isContainerRunning ? 'running' : 'stopped'}
+      selectedFile={activeTab}
+      onSendMessage={sendAIMessage}
+      messages={chatMessages}
+      isProcessing={isProcessing}
+      selectedModel={selectedModel}
+      availableModels={availableModels}
+      onModelChange={setSelectedModel}
+      className="h-full"
+    />
+  )
+
+  // Render terminal
+  const renderTerminal = () => (
+    <div className="h-full bg-gray-900">
+      {/* Terminal tabs */}
+      <div className="flex bg-gray-800 border-b border-gray-700">
+        {terminalTabs.map(tab => (
+          <div
+            key={tab.id}
+            className={`flex items-center px-3 py-2 text-sm border-r border-gray-700 cursor-pointer ${
+              activeTerminal === tab.id ? 'bg-gray-900 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
+            }`}
+            onClick={() => setActiveTerminal(tab.id)}
+          >
+            <TerminalIcon className="w-4 h-4 mr-2" />
+            <span>{tab.name}</span>
+            <button
+              className="ml-2 hover:bg-gray-600 rounded p-1"
+              onClick={(e) => {
+                e.stopPropagation()
+                closeTerminal(tab.id)
+              }}
+            >
+              <X className="w-3 h-3" />
+            </button>
+          </div>
+        ))}
+        <button
+          className="px-3 py-2 text-gray-400 hover:bg-gray-700"
+          onClick={createTerminal}
+        >
+          <Plus className="w-4 h-4" />
+        </button>
+      </div>
+      
+      {/* Terminal content */}
+      <div className="h-full p-2">
+        {activeTerminal ? (
+          <TerminalComponent
+            instanceId={terminalTabs.find(t => t.id === activeTerminal)?.instanceId || ''}
+            sessionId={activeSession?.id}
+            fontSize={preferences.terminalFontSize}
+          />
+        ) : (
+          <div className="flex items-center justify-center h-full text-gray-400">
+            <div className="text-center">
+              <TerminalIcon className="w-16 h-16 mx-auto mb-4 opacity-50" />
+              <p>Create a terminal to start</p>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+
+  // Render status bar
+  const renderStatusBar = () => {
+    const activeEditorTab = editorTabs.find(tab => tab.id === activeTab)
+    const lineCol = activeEditorTab ? '1:1' : '0:0' // Would need to get from Monaco editor
+    
+    return (
+      <div className="flex items-center justify-between px-4 py-2 bg-gray-800 border-t border-gray-700 text-sm text-gray-300">
+        <div className="flex items-center space-x-4">
+          <span className="flex items-center space-x-1">
+            <span className="text-gray-400">Session:</span>
+            <span className="text-blue-400">{activeSession?.name || 'None'}</span>
+          </span>
+          <span className="flex items-center space-x-1">
+            <span className="text-gray-400">Model:</span>
+            <span className="text-purple-400">{selectedModel}</span>
+          </span>
+          <span className="flex items-center space-x-1">
+            <span className="text-gray-400">Container:</span>
+            <span className={`${isContainerRunning ? 'text-green-400' : 'text-red-400'}`}>
+              {isContainerRunning ? 'Running' : 'Stopped'}
+            </span>
+          </span>
+          {activeEditorTab && (
+            <span className="flex items-center space-x-1">
+              <span className="text-gray-400">File:</span>
+              <span className="text-yellow-400">{activeEditorTab.name}</span>
+            </span>
+          )}
+        </div>
+        <div className="flex items-center space-x-4">
+          <span className="flex items-center space-x-1">
+            <span className="text-gray-400">Line:</span>
+            <span>{lineCol}</span>
+          </span>
+          <span className="flex items-center space-x-1">
+            <span className="text-gray-400">Theme:</span>
+            <span className="capitalize">{preferences.theme}</span>
+          </span>
+          <span className="flex items-center space-x-1">
+            <span className="text-gray-400">Font:</span>
+            <span>{preferences.fontSize}px</span>
+          </span>
+          <button
+            className="hover:bg-gray-700 px-2 py-1 rounded"
+            onClick={() => setShowCommandPalette(true)}
+            title="Command Palette (Ctrl+P)"
+          >
+            <Command className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  if (userLoading) {
+    return (
+      <div className="flex items-center justify-center h-screen bg-gray-900">
+        <div className="text-white">Loading IDE...</div>
+      </div>
+    )
+  }
+
+  if (!user) {
+    return null
+  }
+
+  return (
+    <div className="h-screen bg-gray-900 flex flex-col">
+      {/* Top toolbar */}
+      <div className="flex items-center justify-between px-4 py-2 bg-gray-800 border-b border-gray-700">
+        <div className="flex items-center space-x-4">
+          <button
+            className="flex items-center space-x-2 px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm"
+            onClick={() => {/* Start container logic */}}
+          >
+            <Play className="w-4 h-4" />
+            <span>Start</span>
+          </button>
+          <button
+            className="flex items-center space-x-2 px-3 py-1 bg-red-600 hover:bg-red-700 text-white rounded text-sm"
+            onClick={() => {/* Stop container logic */}}
+          >
+            <Square className="w-4 h-4" />
+            <span>Stop</span>
+          </button>
+          <button
+            className="flex items-center space-x-2 px-3 py-1 bg-gray-600 hover:bg-gray-700 text-white rounded text-sm"
+            onClick={() => setShowFullIDE(!showFullIDE)}
+          >
+            <Monitor className="w-4 h-4" />
+            <span>{showFullIDE ? 'Hide' : 'Show'} Full IDE</span>
+          </button>
+        </div>
+        <div className="flex items-center space-x-2">
+          <button
+            className="p-2 hover:bg-gray-700 rounded"
+            onClick={() => setShowCommandPalette(true)}
+            title="Command Palette (Ctrl+P)"
+          >
+            <Command className="w-4 h-4" />
+          </button>
+          <button
+            className="p-2 hover:bg-gray-700 rounded"
+            onClick={() => savePreferences({ theme: preferences.theme === 'dark' ? 'light' : 'dark' })}
+            title="Toggle Theme"
+          >
+            <Palette className="w-4 h-4" />
+          </button>
+          <button
+            className="p-2 hover:bg-gray-700 rounded"
+            onClick={() => {/* Settings */}}
+            title="Settings"
+          >
+            <Settings className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+
+      {/* Main workbench */}
+      <div className="flex-1 overflow-hidden">
+        {showFullIDE ? (
+          <div className="h-full">
+            <iframe
+              src="/api/vibecode/code-server"
+              className="w-full h-full border-0"
+              title="Full IDE"
+            />
+          </div>
+        ) : (
+          <Mosaic
+            renderTile={(id, path) => {
+              switch (id) {
+                case 'file-explorer':
+                  return (
+                    <MosaicWindow path={path} title="Explorer">
+                      {renderFileExplorer()}
+                    </MosaicWindow>
+                  )
+                case 'editor':
+                  return (
+                    <MosaicWindow path={path} title="Editor">
+                      {renderEditor()}
+                    </MosaicWindow>
+                  )
+                case 'ai-assistant':
+                  return (
+                    <MosaicWindow path={path} title="AI Assistant">
+                      {renderAIAssistant()}
+                    </MosaicWindow>
+                  )
+                case 'terminal':
+                  return (
+                    <MosaicWindow path={path} title="Terminal">
+                      {renderTerminal()}
+                    </MosaicWindow>
+                  )
+                default:
+                  return null
+              }
+            }}
+            value={layout}
+            onChange={setLayout}
+            className="h-full"
+          />
+        )}
+      </div>
+
+      {/* Status bar */}
+      {renderStatusBar()}
+
+      {/* Command Palette */}
+      {showCommandPalette && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-start justify-center pt-20 z-50">
+          <div className="bg-gray-800 rounded-lg shadow-xl w-96 max-w-md">
+            <div className="p-3 border-b border-gray-700">
+              <input
+                ref={commandPaletteRef}
+                type="text"
+                placeholder="Type a command..."
+                value={commandPaletteQuery}
+                onChange={(e) => setCommandPaletteQuery(e.target.value)}
+                className="w-full bg-transparent text-white placeholder-gray-400 outline-none"
+                autoFocus
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') {
+                    setShowCommandPalette(false)
+                    setCommandPaletteQuery('')
+                  }
+                }}
+              />
+            </div>
+            <div className="max-h-64 overflow-y-auto">
+              {commandPaletteCommands
+                .filter(cmd => 
+                  cmd.label.toLowerCase().includes(commandPaletteQuery.toLowerCase())
+                )
+                .map(cmd => (
+                  <button
+                    key={cmd.id}
+                    className="w-full text-left px-3 py-2 hover:bg-gray-700 text-gray-200"
+                    onClick={() => {
+                      cmd.action()
+                      setShowCommandPalette(false)
+                      setCommandPaletteQuery('')
+                    }}
+                  >
+                    {cmd.label}
+                  </button>
+                ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// File tree node component
+function FileTreeNode({ 
+  node, 
+  onFileClick, 
+  level 
+}: { 
+  node: FileNode
+  onFileClick: (path: string) => void
+  level: number 
+}) {
+  const [expanded, setExpanded] = useState(false)
+  
+  return (
+    <div>
+      <div
+        className={`flex items-center py-1 px-2 hover:bg-gray-700 cursor-pointer text-sm ${
+          level > 0 ? `ml-${level * 4}` : ''
+        }`}
+        onClick={() => {
+          if (node.type === 'directory') {
+            setExpanded(!expanded)
+          } else {
+            onFileClick(node.path)
+          }
+        }}
+      >
+        <ChevronDown 
+          className={`w-4 h-4 mr-1 transition-transform ${
+            expanded ? 'rotate-0' : '-rotate-90'
+          }`}
+        />
+        <FileText className="w-4 h-4 mr-2" />
+        <span className="text-gray-200">{node.name}</span>
+      </div>
+      {expanded && node.children && (
+        <div>
+          {node.children.map((child, index) => (
+            <FileTreeNode
+              key={index}
+              node={child}
+              onFileClick={onFileClick}
+              level={level + 1}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// Terminal component with dynamic imports
+function TerminalComponent({
+  instanceId,
+  sessionId,
+  fontSize
+}: {
+  instanceId: string
+  sessionId?: string
+  fontSize: number
+}) {
+  const terminalRef = useRef<HTMLDivElement>(null)
+  const terminalInstance = useRef<any>(null)
+  const fitAddon = useRef<any>(null)
+  const [isClient, setIsClient] = useState(false)
+
+  useEffect(() => {
+    setIsClient(true)
+  }, [])
+
+  useEffect(() => {
+    if (!isClient || !terminalRef.current || !sessionId) return
+
+    let terminal: any
+    let fit: any
+    let ws: WebSocket
+
+    const initTerminal = async () => {
+      try {
+        // Dynamic imports for browser-only libraries
+        const { Terminal } = await import('@xterm/xterm')
+        const { FitAddon } = await import('@xterm/addon-fit')
+        const { WebLinksAddon } = await import('@xterm/addon-web-links')
+        const { SearchAddon } = await import('@xterm/addon-search')
+        const { Unicode11Addon } = await import('@xterm/addon-unicode11')
+
+        // Import CSS dynamically
+        await import('xterm/css/xterm.css')
+
+        terminal = new Terminal({
+          fontSize,
+          fontFamily: 'Monaco, "Cascadia Code", "Fira Code", Consolas, "Courier New", monospace',
+          theme: {
+            background: '#1a1a1a',
+            foreground: '#ffffff',
+            cursor: '#ffffff',
+            selection: '#264f78'
+          },
+          cursorBlink: true,
+          scrollback: 1000
+        })
+
+        fit = new FitAddon()
+        const webLinks = new WebLinksAddon()
+        const search = new SearchAddon()
+        const unicode11 = new Unicode11Addon()
+
+        terminal.loadAddon(fit)
+        terminal.loadAddon(webLinks)
+        terminal.loadAddon(search)
+        terminal.loadAddon(unicode11)
+
+        terminal.open(terminalRef.current)
+        fit.fit()
+
+        terminalInstance.current = terminal
+        fitAddon.current = fit
+
+        // WebSocket connection
+        ws = new WebSocket(`ws://localhost:9000/api/vibecode/ws/terminal?session_id=${sessionId}&token=${localStorage.getItem('token')}`)
+
+        ws.onopen = () => {
+          console.log('Terminal WebSocket connected')
+        }
+
+        ws.onmessage = (event) => {
+          if (event.data instanceof Blob) {
+            event.data.text().then(text => terminal.write(text))
+          } else if (event.data instanceof ArrayBuffer) {
+            const text = new TextDecoder().decode(event.data)
+            terminal.write(text)
+          } else {
+            terminal.write(event.data)
+          }
+        }
+
+        ws.onerror = (error) => {
+          console.error('Terminal WebSocket error:', error)
+        }
+
+        ws.onclose = () => {
+          console.log('Terminal WebSocket closed')
+        }
+
+        terminal.onData((data: string) => {
+          ws.send(data)
+        })
+      } catch (error) {
+        console.error('Failed to initialize terminal:', error)
+      }
+    }
+
+    initTerminal()
+
+    return () => {
+      if (ws) ws.close()
+      if (terminal) terminal.dispose()
+    }
+  }, [isClient, instanceId, sessionId, fontSize])
+
+  useEffect(() => {
+    if (isClient && fitAddon.current) {
+      fitAddon.current.fit()
+    }
+  }, [isClient, fontSize])
+
+  if (!isClient) {
+    return <div className="h-full w-full flex items-center justify-center text-gray-400">Loading terminal...</div>
+  }
+
+  return <div ref={terminalRef} className="h-full w-full" />
+}

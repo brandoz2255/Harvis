@@ -17,6 +17,19 @@ RUN apt-get update && apt-get install -y \
 RUN useradd -m -u 1001 -s /bin/bash appuser
 
 ############################
+# 🐳 Docker socket access setup
+############################
+# Install Docker CLI for container management
+RUN apt-get update && apt-get install -y \
+  docker.io \
+  && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Add appuser to docker group (GID will be set at runtime)
+# Note: The actual docker group GID from host will be mapped via volume mount
+RUN groupadd -g 999 docker || true && \
+  usermod -aG docker appuser || true
+
+############################
 # 🐍 Python deps (as root, then switch to appuser)
 ############################
 COPY requirements.txt .

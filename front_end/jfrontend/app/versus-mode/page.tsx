@@ -626,7 +626,7 @@ export default function VersusModePage() {
                           message.role === "user" ? `${teamBgClass} text-white` : "bg-gray-700 text-gray-100"
                         }`}
                       >
-                        <p>{message.content}</p>
+                        <p>{typeof message.content === 'string' ? message.content : String(message.content || '')}</p>
                         <span className="text-xs opacity-70 mt-1 block">{message.timestamp}</span>
                       </div>
                     </div>

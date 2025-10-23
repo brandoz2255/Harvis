@@ -475,7 +475,7 @@ export default function ChatHistory({ onSessionSelect, currentSessionId }: ChatH
                         )}
                       </div>
                       <p className="text-sm text-gray-200 leading-relaxed">
-                        {message.content}
+                        {typeof message.content === 'string' ? message.content : String(message.content || '')}
                       </p>
                       {message.reasoning && (
                         <details className="mt-2">

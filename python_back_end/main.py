@@ -25,7 +25,8 @@ from typing import List, Optional, Dict, Any, Union
 from vison_models.llm_connector import query_qwen, query_llm, load_qwen_model, unload_qwen_model, unload_ollama_model
 
 # Import vibecoding routers
-from vibecoding import sessions_router, models_router, execution_router, files_router, commands_router, containers_router
+from vibecoding import sessions_router, models_router, execution_router, files_router, commands_router, containers_router, user_prefs_router, file_api_router, terminal_router, ai_assistant_router, proxy_router
+from vibecoding.containers import container_manager
 from vibecoding.core import initialize_vibe_agent
 
 from pydantic import BaseModel
@@ -86,7 +87,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
 # Removed get_db_connection() - using connection pool instead
 
 async def get_current_user(request: Request, credentials: HTTPAuthorizationCredentials | None = Depends(security)):
-    logger.info(f"get_current_user called with credentials: {credentials}")
+    logger.debug(f"get_current_user called with credentials: {credentials}")
     token = request.cookies.get("access_token")
     if token is None and credentials is not None:
         token = credentials.credentials
@@ -108,7 +109,7 @@ async def get_current_user(request: Request, credentials: HTTPAuthorizationCrede
         if user_id_str is None:
             raise credentials_exception
         user_id: int = int(user_id_str)
-        logger.info(f"User ID from token: {user_id}")
+        logger.debug(f"User ID from token: {user_id}")
     except (JWTError, ValueError) as e:
         logger.error(f"JWT decode error: {e}")
         raise credentials_exception
@@ -121,7 +122,7 @@ async def get_current_user(request: Request, credentials: HTTPAuthorizationCrede
             if user is None:
                 logger.error(f"User not found for ID: {user_id}")
                 raise credentials_exception
-            logger.info(f"User found: {dict(user)}")
+            logger.debug(f"User found: {dict(user)}")
             return UserResponse(**dict(user))
     else:
         # Fallback to direct connection if pool unavailable
@@ -132,7 +133,7 @@ async def get_current_user(request: Request, credentials: HTTPAuthorizationCrede
             if user is None:
                 logger.error(f"User not found for ID: {user_id}")
                 raise credentials_exception
-            logger.info(f"User found: {dict(user)}")
+            logger.debug(f"User found: {dict(user)}")
             return UserResponse(**dict(user))
         finally:
             await conn.close()
@@ -344,6 +345,9 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Harvis AI API", lifespan=lifespan)
 
+# ─── Rate Limiting Setup (Removed) ───────────────────────────────────────────────────────
+# Rate limiting has been removed - slowapi dependency eliminated
+
 db_pool = None
 chat_history_manager = None
 
@@ -353,6 +357,25 @@ async def shutdown_event():
     if db_pool:
         await db_pool.close()
         logger.info("Database pool closed")
+
+# Start/stop background cleanup for dev containers
+@app.on_event("startup")
+async def start_vibecode_cleanup():
+    try:
+        interval = int(os.getenv("IDE_CLEANUP_INTERVAL_MINUTES", "30"))
+    except Exception:
+        interval = 30
+    try:
+        await container_manager.start_cleanup_task(interval_minutes=interval)
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to start container cleanup task: {e}")
+
+@app.on_event("shutdown")
+async def stop_vibecode_cleanup():
+    try:
+        await container_manager.stop_cleanup_task()
+    except Exception:
+        pass
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -430,6 +453,11 @@ app.include_router(execution_router)
 app.include_router(files_router)
 app.include_router(commands_router)
 app.include_router(containers_router)
+app.include_router(user_prefs_router)
+app.include_router(file_api_router)
+app.include_router(terminal_router)
+app.include_router(ai_assistant_router)
+app.include_router(proxy_router)
 
 # ─── Device & models -----------------------------------------------------------
 device = 0 if torch.cuda.is_available() else -1

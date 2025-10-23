@@ -1,108 +1,139 @@
-"""Vibecoding Development Container Management
+"""Vibecoding Container Management
 
-This module manages Docker containers for vibecoding sessions, providing isolated
-development environments with real terminal access and file system management.
+This module manages Docker containers for VibeCode IDE sessions, providing isolated
+development environments with persistent storage, resource limits, and security controls.
 """
 
 import docker
 import os
-import uuid
+import socket
 import logging
+import time
 import asyncio
-import json
-from typing import Dict, List, Optional, Any
+from typing import Dict, Optional, Any
 from datetime import datetime, timedelta
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Request, Depends
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
-import asyncpg
-from .db_session import get_session_db
 
 # Import auth utilities
 from auth_utils import get_current_user
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["vibe-dev-containers"])
+router = APIRouter(tags=["vibecode-containers"])
 
-# Container configuration
-DEV_CONTAINER_IMAGE = "python:3.10-slim"
-CONTAINER_TIMEOUT = timedelta(hours=2)  # Auto-cleanup after 2 hours of inactivity
-VOLUME_PREFIX = "vibecoding_"
+
+class ContainerInfo:
+    """Container information data class"""
+    def __init__(self, container_id: str, container_name: str, session_id: str, 
+                 user_id: str, volume_name: str, status: str):
+        self.container_id = container_id
+        self.container_name = container_name
+        self.session_id = session_id
+        self.user_id = user_id
+        self.volume_name = volume_name
+        self.status = status
+        self.created_at = datetime.now()
+        self.last_activity = datetime.now()
+
+
+class ExecutionResult:
+    """Command execution result data class"""
+    def __init__(self, command: str, stdout: str, stderr: str, exit_code: int, 
+                 execution_time_ms: int):
+        self.command = command
+        self.stdout = stdout
+        self.stderr = stderr
+        self.exit_code = exit_code
+        self.execution_time_ms = execution_time_ms
+        self.started_at = int(time.time() * 1000)
+        self.finished_at = self.started_at + execution_time_ms
+
 
 class ContainerManager:
-    """Manages Docker containers for vibecoding sessions."""
+    """Manages Docker containers for VibeCode sessions
+    
+    Provides container lifecycle management including creation, starting, stopping,
+    and cleanup. Ensures containers are properly configured with resource limits,
+    security options, and persistent volumes.
+    """
     
     def __init__(self):
+        """Initialize Docker client and container tracking"""
         try:
             self.docker_client = docker.from_env()
-            logger.info("✅ Docker client initialized")
+            logger.info("✅ Docker client initialized successfully")
         except Exception as e:
             logger.error(f"❌ Failed to initialize Docker client: {e}")
             self.docker_client = None
         
-        self.active_containers: Dict[str, Dict[str, Any]] = {}
+        # Track active IDE containers in memory for fast reconnection
+        self.active_containers: Dict[str, ContainerInfo] = {}
+        # Track active runner containers (language/runtime) per session
+        self.active_runner_containers: Dict[str, ContainerInfo] = {}
         
-    async def create_dev_container(self, session_id: str, user_id: str = None) -> Dict[str, Any]:
-        """Create a new development container for a vibecoding session."""
+        # Background cleanup task
+        self._cleanup_task = None
+        self._cleanup_running = False
+    
+    async def create_container(
+        self, 
+        session_id: str, 
+        user_id: str, 
+        template: str = "base"
+    ) -> ContainerInfo:
+        """Create a new Docker container for a VibeCode session
+        
+        Args:
+            session_id: Unique session identifier
+            user_id: User ID for container ownership
+            template: Container template (default: "base")
+            
+        Returns:
+            ContainerInfo object with container details
+            
+        Raises:
+            HTTPException: If Docker is unavailable or container creation fails
+        """
         if not self.docker_client:
-            raise HTTPException(status_code=503, detail="Docker not available")
+            raise HTTPException(status_code=503, detail="Docker service unavailable")
         
         try:
-            container_name = f"vibecoding_{session_id}"
-            volume_name = f"{VOLUME_PREFIX}{session_id}"
+            # Generate container and volume names following spec format
+            container_name = f"vibecode-{user_id}-{session_id}"
+            volume_name = f"vibecode-{user_id}-{session_id}-ws"
             
-            # Check if container already exists
-            try:
-                existing_container = self.docker_client.containers.get(container_name)
-                logger.info(f"🔄 Found existing container: {container_name}")
-                
-                # If container exists but is stopped, start it
-                if existing_container.status == "exited":
-                    existing_container.start()
-                    logger.info(f"▶️ Started existing container: {container_name}")
-                elif existing_container.status == "running":
-                    logger.info(f"✅ Container already running: {container_name}")
-                
-                # Store container info and return
-                container_info = {
-                    "container_id": existing_container.id,
-                    "container_name": container_name,
-                    "session_id": session_id,
-                    "user_id": user_id,
-                    "volume_name": volume_name,
-                    "created_at": datetime.now(),
-                    "last_activity": datetime.now(),
-                    "status": existing_container.status
-                }
-                self.active_containers[session_id] = container_info
-                
-                return {
-                    "session_id": session_id,
-                    "container_id": existing_container.id,
-                    "container_name": container_name,
-                    "status": existing_container.status,
-                    "workspace_path": "/workspace"
-                }
-                
-            except docker.errors.NotFound:
-                # Container doesn't exist, create new one
-                logger.info(f"🆕 Creating new container: {container_name}")
+            logger.info(f"🆕 Creating container: {container_name}")
             
-            # Create volume for persistent storage
-            try:
-                volume = self.docker_client.volumes.create(name=volume_name)
-                logger.info(f"📦 Created volume: {volume_name}")
-            except docker.errors.APIError as e:
-                if "already exists" in str(e):
-                    volume = self.docker_client.volumes.get(volume_name)
-                    logger.info(f"📦 Using existing volume: {volume_name}")
-                else:
-                    raise
+            # Check if container already exists (reuse logic)
+            existing_container = await self._find_existing_container(container_name)
+            if existing_container:
+                logger.info(f"🔄 Container already exists: {container_name}")
+                return await self._handle_existing_container(
+                    existing_container, session_id, user_id, volume_name
+                )
             
-            # Container configuration
+            # Create or get volume for persistent storage
+            volume = await self._ensure_volume(volume_name)
+            
+            # Determine image and runtime settings
+            code_server_image = os.getenv("VIBECODING_IDE_IMAGE", "ghcr.io/coder/code-server:latest")
+            internal_port = int(os.getenv("IDE_CODE_SERVER_INTERNAL_PORT", "8080"))
+            base_network = os.getenv("IDE_BASE_NETWORK")  # Optional docker network to attach
+            enable_host_port = os.getenv("IDE_ENABLE_HOST_PORT", "false").lower() == "true"
+            host_port = None
+            if enable_host_port:
+                host_port = self._allocate_ephemeral_port()
+
+            # Pull the image with error handling
+            code_server_image = await self._pull_image_with_fallback(code_server_image)
+
+            # Container configuration with resource limits and security
             container_config = {
-                "image": DEV_CONTAINER_IMAGE,
+                "image": code_server_image,
                 "name": container_name,
+                # Run code-server bound to all interfaces, no auth (secured by backend proxy)
+                "command": f"code-server --bind-addr 0.0.0.0:{internal_port} --auth none /workspace",
                 "detach": True,
                 "tty": True,
                 "stdin_open": True,
@@ -112,677 +143,882 @@ class ContainerManager:
                 },
                 "environment": {
                     "PYTHONUNBUFFERED": "1",
-                    "DEBIAN_FRONTEND": "noninteractive"
+                    "DEBIAN_FRONTEND": "noninteractive",
+                    "TERM": "xterm-256color"
                 },
-                "network_mode": "bridge",
+                "mem_limit": "2g",  # 2GB RAM limit
+                "nano_cpus": int(1.5 * 1e9),  # 1.5 CPU cores
+                "pids_limit": 512,  # Prevent fork bombs
+                "security_opt": ["no-new-privileges:true"],  # Security hardening
                 "labels": {
-                    "vibecoding.session_id": session_id,
-                    "vibecoding.user_id": user_id or "anonymous",
-                    "vibecoding.created": datetime.now().isoformat()
+                    "app": "vibecode",
+                    "user_id": str(user_id),
+                    "session_id": session_id,
+                    "created_at": datetime.now().isoformat(),
+                    "volume_name": volume_name,
+                    "vibecode_internal_port": str(internal_port),
+                    "vibecode_host_port": str(host_port or "")
                 }
             }
+
+            # Publish host port if enabled
+            if enable_host_port and host_port:
+                container_config["ports"] = {f"{internal_port}/tcp": ("127.0.0.1", host_port)}
+
+            # Attach to base compose network at create time if provided
+            if base_network:
+                container_config["network"] = base_network
             
             # Create and start container
+            start_time = time.time()
             container = self.docker_client.containers.run(**container_config)
+            creation_time = time.time() - start_time
             
-            # Install common development tools
-            setup_commands = [
-                "apt-get update",
-                "apt-get install -y git curl wget nano vim nodejs npm",
-                "pip install --upgrade pip",
-                "pip install requests fastapi uvicorn flask django pandas numpy matplotlib jupyter"
-            ]
+            logger.info(f"✅ Container created in {creation_time:.2f}s: {container_name}")
             
-            for cmd in setup_commands:
-                try:
-                    result = container.exec_run(cmd)
-                    if result.exit_code != 0:
-                        logger.warning(f"Setup command failed: {cmd} - {result.output.decode()}")
-                except Exception as e:
-                    logger.warning(f"Failed to run setup command: {cmd} - {e}")
+            # Verify container started successfully
+            container.reload()
+            if container.status != "running":
+                raise Exception(f"Container failed to start: {container.status}")
             
             # Store container info
-            container_info = {
-                "container_id": container.id,
-                "container_name": container_name,
-                "session_id": session_id,
-                "user_id": user_id,
-                "volume_name": volume_name,
-                "created_at": datetime.now(),
-                "last_activity": datetime.now(),
-                "status": "running"
-            }
-            
+            container_info = ContainerInfo(
+                container_id=container.id,
+                container_name=container_name,
+                session_id=session_id,
+                user_id=user_id,
+                volume_name=volume_name,
+                status="running"
+            )
             self.active_containers[session_id] = container_info
             
-            # Update database with container info
-            try:
-                session_db = get_session_db()
-                await session_db.update_container_status(session_id, container.id, "running")
-            except Exception as e:
-                logger.warning(f"Failed to update container status in database: {e}")
+            return container_info
             
-            logger.info(f"✅ Created dev container: {container_name} for session: {session_id}")
-            
-            return {
-                "session_id": session_id,
-                "container_id": container.id,
-                "container_name": container_name,
-                "status": "running",
-                "workspace_path": "/workspace"
-            }
-            
+        except docker.errors.APIError as e:
+            logger.error(f"❌ Docker API error creating container: {e}")
+            raise HTTPException(status_code=500, detail=f"Docker error: {str(e)}")
         except Exception as e:
-            logger.error(f"Failed to create dev container: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to create container: {str(e)}")
+            logger.error(f"❌ Failed to create container: {e}")
+            raise HTTPException(status_code=500, detail=f"Container creation failed: {str(e)}")
     
     async def get_container(self, session_id: str) -> Optional[docker.models.containers.Container]:
-        """Get container by session ID."""
+        """Get container by session ID
+        
+        Args:
+            session_id: Session identifier
+            
+        Returns:
+            Docker container object or None if not found
+        """
         if not self.docker_client:
             return None
         
-        # First try to get from active_containers if we have it
+        # Check if we have it tracked
         if session_id in self.active_containers:
             try:
                 container_info = self.active_containers[session_id]
-                container = self.docker_client.containers.get(container_info["container_id"])
+                container = self.docker_client.containers.get(container_info.container_id)
                 
                 # Update last activity
-                container_info["last_activity"] = datetime.now()
+                container_info.last_activity = datetime.now()
                 
                 return container
             except docker.errors.NotFound:
                 # Container was removed externally
+                logger.warning(f"⚠️ Tracked container not found: {session_id}")
                 del self.active_containers[session_id]
             except Exception as e:
-                logger.error(f"Error getting tracked container: {e}")
+                logger.error(f"❌ Error getting tracked container: {e}")
         
-        # If not in active_containers or failed, try to find by container name
+        # Try to find by label
         try:
-            container_name = f"vibecoding_{session_id}"
-            container = self.docker_client.containers.get(container_name)
+            containers = self.docker_client.containers.list(
+                all=True,
+                filters={"label": f"session_id={session_id}"}
+            )
             
-            # Container exists but not tracked, add it to active_containers
-            volume_name = f"{VOLUME_PREFIX}{session_id}"
-            container_info = {
-                "container_id": container.id,
-                "container_name": container_name,
-                "session_id": session_id,
-                "user_id": "unknown",  # We don't know the user_id from existing containers
-                "volume_name": volume_name,
-                "created_at": datetime.now(),
-                "last_activity": datetime.now(),
-                "status": container.status
-            }
-            self.active_containers[session_id] = container_info
-            logger.info(f"🔄 Re-tracked existing container: {container_name}")
-            
-            return container
-        except docker.errors.NotFound:
-            logger.info(f"🚫 Container not found for session: {session_id}")
-            return None
-        except Exception as e:
-            logger.error(f"Error finding container by name: {e}")
-            return None
-    
-    async def execute_command(self, session_id: str, command: str) -> Dict[str, Any]:
-        """Execute command in container."""
-        container = await self.get_container(session_id)
-        if not container:
-            raise HTTPException(status_code=404, detail="Container not found")
-        
-        try:
-            import time
-            start_time = time.time()
-            
-            result = container.exec_run(command, workdir="/workspace")
-            
-            execution_time_ms = int((time.time() - start_time) * 1000)
-            output = result.output.decode("utf-8", errors="replace")
-            
-            # Log to database
-            try:
-                session_db = get_session_db()
-                await session_db.add_terminal_command(
-                    session_id, command, output, result.exit_code, 
-                    "/workspace", execution_time_ms
+            if containers:
+                container = containers[0]
+                logger.info(f"🔄 Found untracked container for session: {session_id}")
+                
+                # Add to tracking
+                volume_name = container.labels.get("volume_name", "")
+                user_id = container.labels.get("user_id", "unknown")
+                
+                container_info = ContainerInfo(
+                    container_id=container.id,
+                    container_name=container.name,
+                    session_id=session_id,
+                    user_id=user_id,
+                    volume_name=volume_name,
+                    status=container.status
                 )
+                self.active_containers[session_id] = container_info
+                
+                return container
+        except Exception as e:
+            logger.error(f"❌ Error finding container by label: {e}")
+        
+        return None
+
+    async def get_runner_container(self, session_id: str) -> Optional[docker.models.containers.Container]:
+        """Get runner container (python/node tools) by session ID"""
+        if not self.docker_client:
+            return None
+
+        # Check tracked runner container
+        if session_id in self.active_runner_containers:
+            try:
+                info = self.active_runner_containers[session_id]
+                container = self.docker_client.containers.get(info.container_id)
+                info.last_activity = datetime.now()
+                return container
+            except docker.errors.NotFound:
+                logger.warning(f"⚠️ Tracked runner container not found: {session_id}")
+                del self.active_runner_containers[session_id]
             except Exception as e:
-                logger.warning(f"Failed to log command to database: {e}")
-            
-            return {
-                "command": command,
-                "exit_code": result.exit_code,
-                "output": output,
-                "success": result.exit_code == 0,
-                "execution_time_ms": execution_time_ms
+                logger.error(f"❌ Error getting tracked runner container: {e}")
+
+        # Find by labels
+        try:
+            containers = self.docker_client.containers.list(
+                all=True,
+                filters={"label": [f"session_id={session_id}", "runner=true"]}
+            )
+            if containers:
+                container = containers[0]
+                logger.info(f"🔄 Found untracked runner container for session: {session_id}")
+                user_id = container.labels.get("user_id", "unknown")
+                volume_name = container.labels.get("volume_name", "")
+                info = ContainerInfo(
+                    container_id=container.id,
+                    container_name=container.name,
+                    session_id=session_id,
+                    user_id=user_id,
+                    volume_name=volume_name,
+                    status=container.status
+                )
+                self.active_runner_containers[session_id] = info
+                return container
+        except Exception as e:
+            logger.error(f"❌ Error finding runner container by label: {e}")
+
+        return None
+
+    async def create_runner_container(self, session_id: str, user_id: str) -> ContainerInfo:
+        """Create per-session runner container with Python/Node tools.
+
+        - Image: VIBECODING_RUNNER_IMAGE (default python:3.11-slim)
+        - Mounts the same /workspace volume as the IDE container
+        - Command sleeps indefinitely to keep container up for exec/terminal
+        """
+        if not self.docker_client:
+            raise HTTPException(status_code=503, detail="Docker service unavailable")
+
+        # Determine shared volume and network from IDE container
+        ide_info = self.active_containers.get(session_id)
+        volume_name = ide_info.volume_name if ide_info else f"vibecode-{user_id}-{session_id}-ws"
+        base_network = os.getenv("IDE_BASE_NETWORK")
+
+        # Pull runner image
+        runner_image = os.getenv("VIBECODING_RUNNER_IMAGE", "python:3.11-slim")
+        try:
+            logger.info(f"🔄 Pulling runner image: {runner_image}")
+            self.docker_client.images.pull(runner_image)
+        except Exception as e:
+            logger.error(f"❌ Failed to pull runner image {runner_image}: {e}")
+            raise HTTPException(status_code=500, detail=f"Runner image pull failed: {e}")
+
+        # Ensure volume exists
+        await self._ensure_volume(volume_name)
+
+        # Reuse if exists
+        runner_name = f"vibecode-runner-{user_id}-{session_id}"
+        existing = await self._find_existing_container(runner_name)
+        if existing:
+            logger.info(f"🔄 Runner container already exists: {runner_name}")
+            # Ensure running
+            if existing.status == "exited":
+                existing.start()
+            info = ContainerInfo(
+                container_id=existing.id,
+                container_name=existing.name,
+                session_id=session_id,
+                user_id=user_id,
+                volume_name=volume_name,
+                status=existing.status
+            )
+            self.active_runner_containers[session_id] = info
+            return info
+
+        # Create runner container
+        try:
+            config = {
+                "image": runner_image,
+                "name": runner_name,
+                "command": "sleep infinity",
+                "detach": True,
+                "tty": True,
+                "stdin_open": True,
+                "working_dir": "/workspace",
+                "volumes": { volume_name: {"bind": "/workspace", "mode": "rw"} },
+                "environment": {
+                    "PYTHONUNBUFFERED": "1",
+                    "DEBIAN_FRONTEND": "noninteractive",
+                    "TERM": "xterm-256color"
+                },
+                "labels": {
+                    "app": "vibecode",
+                    "runner": "true",
+                    "user_id": str(user_id),
+                    "session_id": session_id,
+                    "volume_name": volume_name,
+                    "created_at": datetime.now().isoformat()
+                }
             }
+            if base_network:
+                config["network"] = base_network
+
+            container = self.docker_client.containers.run(**config)
+            container.reload()
+            info = ContainerInfo(
+                container_id=container.id,
+                container_name=container.name,
+                session_id=session_id,
+                user_id=user_id,
+                volume_name=volume_name,
+                status=container.status
+            )
+            self.active_runner_containers[session_id] = info
+            logger.info(f"✅ Runner container created: {runner_name}")
+            return info
         except Exception as e:
-            logger.error(f"Command execution failed: {e}")
-            return {
-                "command": command,
-                "exit_code": -1,
-                "output": f"Error: {str(e)}",
-                "success": False
-            }
-    
-    async def list_files(self, session_id: str, path: str = "/workspace") -> List[Dict[str, Any]]:
-        """List files in container directory."""
-        container = await self.get_container(session_id)
+            logger.error(f"❌ Failed to create runner container: {e}")
+            raise HTTPException(status_code=500, detail=f"Runner container creation failed: {e}")
+
+    async def ensure_runner_ready(self, session_id: str, user_id: str) -> bool:
+        """Ensure runner container exists and passes readiness probes."""
+        info = self.active_runner_containers.get(session_id)
+        if not info:
+            info = await self.create_runner_container(session_id, user_id)
+
+        container = await self.get_runner_container(session_id)
         if not container:
-            raise HTTPException(status_code=404, detail="Container not found")
-        
+            return False
+
+        # Probes: workspace writable, python present, echo works
         try:
-            result = container.exec_run(f"ls -la {path}")
-            if result.exit_code != 0:
-                return []
-            
-            files = []
-            lines = result.output.decode("utf-8").strip().split("\n")
-            
-            for line in lines[1:]:  # Skip total line
-                if line.strip():
-                    parts = line.split()
-                    if len(parts) >= 9:
-                        permissions = parts[0]
-                        size = parts[4] if parts[4].isdigit() else "0"
-                        name = " ".join(parts[8:])
-                        
-                        if name not in [".", ".."]:
-                            files.append({
-                                "name": name,
-                                "type": "directory" if permissions.startswith("d") else "file",
-                                "size": int(size),
-                                "permissions": permissions,
-                                "path": f"{path.rstrip('/')}/{name}"
-                            })
-            
-            return files
+            # Workspace write probe
+            probe_cmd = "sh -lc 'touch /workspace/.probe && rm -f /workspace/.probe'"
+            res = container.exec_run(probe_cmd)
+            if res.exit_code != 0:
+                logger.error(f"❌ Runner probe failed (workspace): {res.output}")
+                return False
+
+            # Python present probe
+            py_cmd = "sh -lc 'command -v python >/dev/null 2>&1 || command -v python3 >/dev/null 2>&1'"
+            res = container.exec_run(py_cmd)
+            if res.exit_code != 0:
+                logger.warning("⚠️ Python interpreter not found in runner")
+                # Still considered ready for non-python commands
+
+            # Echo test
+            echo_cmd = "sh -lc 'echo test'"
+            res = container.exec_run(echo_cmd)
+            if res.exit_code != 0:
+                logger.error(f"❌ Runner probe failed (echo): {res.output}")
+                return False
+
+            return True
         except Exception as e:
-            logger.error(f"File listing failed: {e}")
-            return []
-    
-    async def read_file(self, session_id: str, file_path: str) -> str:
-        """Read file content from container."""
-        container = await self.get_container(session_id)
-        if not container:
-            raise HTTPException(status_code=404, detail="Container not found")
-        
-        try:
-            result = container.exec_run(f"cat {file_path}")
-            if result.exit_code != 0:
-                raise HTTPException(status_code=404, detail="File not found")
-            
-            return result.output.decode("utf-8", errors="replace")
-        except Exception as e:
-            logger.error(f"File read failed: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to read file: {str(e)}")
-    
-    async def write_file(self, session_id: str, file_path: str, content: str) -> bool:
-        """Write content to file in container."""
-        container = await self.get_container(session_id)
-        if not container:
-            raise HTTPException(status_code=404, detail="Container not found")
-        
-        try:
-            import os
-            # Create directory if it doesn't exist
-            dir_path = os.path.dirname(file_path)
-            if dir_path:
-                container.exec_run(f"mkdir -p {dir_path}")
-            
-            # Write content using tee command to handle special characters
-            import shlex
-            escaped_content = shlex.quote(content)
-            result = container.exec_run(f"echo {escaped_content} | tee {file_path}")
-            
-            success = result.exit_code == 0
-            
-            if success:
-                # Update file metadata in database
+            logger.error(f"❌ Runner readiness probes failed: {e}")
+            return False
+
+    def _allocate_ephemeral_port(self) -> int:
+        """Find an available host TCP port for publishing the code-server service.
+
+        Respects optional IDE_PORT_RANGE_START/END; falls back to OS-allocated socket.
+        """
+        start = int(os.getenv("IDE_PORT_RANGE_START", "10050"))
+        end = int(os.getenv("IDE_PORT_RANGE_END", "10150"))
+        for port in range(start, end + 1):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 try:
-                    file_name = os.path.basename(file_path)
-                    file_ext = os.path.splitext(file_name)[1].lower()
-                    
-                    # Detect file type and language
-                    language_map = {
-                        '.py': 'python',
-                        '.js': 'javascript',
-                        '.ts': 'typescript',
-                        '.html': 'html',
-                        '.css': 'css',
-                        '.json': 'json',
-                        '.md': 'markdown',
-                        '.txt': 'text',
-                        '.sh': 'bash',
-                        '.yml': 'yaml',
-                        '.yaml': 'yaml'
-                    }
-                    
-                    language = language_map.get(file_ext, 'text')
-                    file_type = 'text' if file_ext in language_map else 'binary'
-                    content_preview = content[:500] if len(content) > 500 else content
-                    
-                    session_db = get_session_db()
-                    await session_db.update_session_file(
-                        session_id, file_path, file_name, file_type,
-                        len(content), content_preview, language
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to update file metadata: {e}")
-            
-            return success
+                    s.bind(("127.0.0.1", port))
+                    return port
+                except OSError:
+                    continue
+        # Fallback: let OS pick a free port
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
+
+    async def _pull_image_with_fallback(self, image: str) -> str:
+        """Pull Docker image with fallback logic and proper error handling"""
+        try:
+            logger.info(f"🔄 Pulling image: {image}")
+            self.docker_client.images.pull(image)
+            logger.info(f"✅ Successfully pulled image: {image}")
+            return image
         except Exception as e:
-            logger.error(f"File write failed: {e}")
-            return False
+            error_msg = str(e)
+            logger.error(f"❌ Failed to pull image {image}: {error_msg}")
+            
+            # Check if it's a GHCR image and try fallback
+            if image.startswith("ghcr.io/coder/code-server"):
+                fallback_image = "lscr.io/linuxserver/code-server:latest"
+                logger.info(f"🔄 Trying fallback image: {fallback_image}")
+                try:
+                    self.docker_client.images.pull(fallback_image)
+                    logger.info(f"✅ Successfully pulled fallback image: {fallback_image}")
+                    return fallback_image
+                except Exception as fallback_error:
+                    logger.error(f"❌ Fallback image also failed: {fallback_error}")
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Docker pull failed for both {image} and {fallback_image}. "
+                               f"Please check VIBECODING_IDE_IMAGE environment variable. "
+                               f"Original error: {error_msg}"
+                    )
+            else:
+                # For non-GHCR images, provide specific error message
+                if "pull access denied" in error_msg.lower():
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"IDE image not found or access denied: {image}. "
+                               f"Please set VIBECODING_IDE_IMAGE to a valid image like "
+                               f"'ghcr.io/coder/code-server:4.104.3' or 'lscr.io/linuxserver/code-server:latest'"
+                    )
+                else:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Docker pull failed for {image}: {error_msg}"
+                    )
     
-    async def stop_container(self, session_id: str) -> bool:
-        """Stop and remove container."""
-        if session_id not in self.active_containers:
+    async def start_container(self, session_id: str) -> bool:
+        """Start a stopped container
+        
+        Args:
+            session_id: Session identifier
+            
+        Returns:
+            True if started successfully, False otherwise
+        """
+        container = await self.get_container(session_id)
+        if not container:
+            logger.warning(f"⚠️ Container not found for session: {session_id}")
             return False
         
         try:
-            container_info = self.active_containers[session_id]
-            container = self.docker_client.containers.get(container_info["container_id"])
+            if container.status == "running":
+                logger.info(f"✅ Container already running: {session_id}")
+                return True
             
-            container.stop(timeout=10)
-            container.remove()
+            logger.info(f"▶️ Starting container: {session_id}")
+            container.start()
             
-            # Keep volume for data persistence, but remove from active containers
-            del self.active_containers[session_id]
+            # Update tracking
+            if session_id in self.active_containers:
+                self.active_containers[session_id].status = "running"
+                self.active_containers[session_id].last_activity = datetime.now()
             
-            logger.info(f"✅ Stopped container for session: {session_id}")
             return True
             
         except Exception as e:
-            logger.error(f"Failed to stop container: {e}")
+            logger.error(f"❌ Failed to start container: {e}")
             return False
     
-    async def cleanup_inactive_containers(self):
-        """Cleanup containers that have been inactive."""
+    async def stop_container(self, session_id: str) -> bool:
+        """Stop a running container (preserves volume)
+        
+        Args:
+            session_id: Session identifier
+            
+        Returns:
+            True if stopped successfully, False otherwise
+        """
+        container = await self.get_container(session_id)
+        if not container:
+            logger.warning(f"⚠️ Container not found for session: {session_id}")
+            return False
+        
+        try:
+            if container.status == "exited":
+                logger.info(f"✅ Container already stopped: {session_id}")
+                return True
+            
+            logger.info(f"⏸️ Stopping container: {session_id}")
+            container.stop(timeout=10)
+            
+            # Update tracking
+            if session_id in self.active_containers:
+                self.active_containers[session_id].status = "stopped"
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to stop container: {e}")
+            return False
+    
+    async def execute_command(
+        self, 
+        session_id: str, 
+        command: str, 
+        workdir: str = "/workspace"
+    ) -> ExecutionResult:
+        """Execute a command in the container
+        
+        Args:
+            session_id: Session identifier
+            command: Command to execute
+            workdir: Working directory (default: /workspace)
+            
+        Returns:
+            ExecutionResult with command output and timing
+            
+        Raises:
+            HTTPException: If container not found
+        """
+        # Prefer executing in runner container if available
+        container = await self.get_runner_container(session_id)
+        if not container:
+            container = await self.get_container(session_id)
+        if not container:
+            raise HTTPException(status_code=404, detail="Container not found")
+        
+        try:
+            start_time = time.time()
+            
+            # Execute with demux to separate stdout/stderr
+            result = container.exec_run(
+                command,
+                workdir=workdir,
+                demux=True
+            )
+            
+            execution_time_ms = int((time.time() - start_time) * 1000)
+            
+            # Decode output
+            stdout_bytes, stderr_bytes = result.output
+            stdout = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
+            stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
+            
+            return ExecutionResult(
+                command=command,
+                stdout=stdout,
+                stderr=stderr,
+                exit_code=result.exit_code,
+                execution_time_ms=execution_time_ms
+            )
+            
+        except Exception as e:
+            logger.error(f"❌ Command execution failed: {e}")
+            return ExecutionResult(
+                command=command,
+                stdout="",
+                stderr=f"Error: {str(e)}",
+                exit_code=-1,
+                execution_time_ms=0
+            )
+    
+    async def cleanup_inactive_containers(
+        self, 
+        timeout: timedelta = timedelta(hours=2)
+    ) -> int:
+        """Clean up containers that have been inactive
+        
+        Stops containers that haven't been accessed for the specified timeout period.
+        This helps free up system resources while preserving volumes for later reuse.
+        
+        Args:
+            timeout: Inactivity timeout (default: 2 hours)
+            
+        Returns:
+            Number of containers cleaned up
+        """
         if not self.docker_client:
-            return
+            return 0
         
         current_time = datetime.now()
+        cleaned_up = 0
         to_cleanup = []
         
-        for session_id, info in self.active_containers.items():
-            if current_time - info["last_activity"] > CONTAINER_TIMEOUT:
+        # Find inactive containers in tracked list
+        for session_id, info in list(self.active_containers.items()):
+            if info.status == "running" and current_time - info.last_activity > timeout:
                 to_cleanup.append(session_id)
+                logger.info(f"🧹 Found inactive container: {session_id} (last activity: {info.last_activity})")
         
+        # Also check for untracked vibecode containers
+        try:
+            all_containers = self.docker_client.containers.list(
+                all=True,
+                filters={"label": "app=vibecode"}
+            )
+            
+            for container in all_containers:
+                session_id = container.labels.get("session_id")
+                if session_id and session_id not in self.active_containers:
+                    # Check container age
+                    created_at_str = container.labels.get("created_at")
+                    if created_at_str:
+                        try:
+                            created_at = datetime.fromisoformat(created_at_str)
+                            if current_time - created_at > timeout and container.status == "running":
+                                to_cleanup.append(session_id)
+                                logger.info(f"🧹 Found untracked inactive container: {session_id}")
+                        except Exception as e:
+                            logger.warning(f"⚠️ Could not parse created_at for {session_id}: {e}")
+        except Exception as e:
+            logger.error(f"❌ Error listing containers for cleanup: {e}")
+        
+        # Clean up each inactive container
         for session_id in to_cleanup:
-            logger.info(f"🧹 Cleaning up inactive container: {session_id}")
-            await self.stop_container(session_id)
+            try:
+                logger.info(f"🧹 Stopping inactive container: {session_id}")
+                if await self.stop_container(session_id):
+                    cleaned_up += 1
+            except Exception as e:
+                logger.error(f"❌ Failed to cleanup container {session_id}: {e}")
+        
+        if cleaned_up > 0:
+            logger.info(f"✅ Cleaned up {cleaned_up} inactive containers")
+        
+        return cleaned_up
+    
+    async def start_cleanup_task(self, interval_minutes: int = 30):
+        """Start background task to cleanup inactive containers
+        
+        Args:
+            interval_minutes: How often to run cleanup (default: 30 minutes)
+        """
+        if self._cleanup_running:
+            logger.warning("⚠️ Cleanup task already running")
+            return
+        
+        self._cleanup_running = True
+        logger.info(f"🚀 Starting container cleanup task (interval: {interval_minutes}m)")
+        
+        async def cleanup_loop():
+            while self._cleanup_running:
+                try:
+                    await asyncio.sleep(interval_minutes * 60)
+                    logger.info("🧹 Running scheduled container cleanup...")
+                    cleaned = await self.cleanup_inactive_containers()
+                    if cleaned > 0:
+                        logger.info(f"✅ Cleanup completed: {cleaned} containers stopped")
+                except asyncio.CancelledError:
+                    logger.info("🛑 Cleanup task cancelled")
+                    break
+                except Exception as e:
+                    logger.error(f"❌ Error in cleanup task: {e}")
+        
+        self._cleanup_task = asyncio.create_task(cleanup_loop())
+    
+    async def stop_cleanup_task(self):
+        """Stop the background cleanup task"""
+        if self._cleanup_task and self._cleanup_running:
+            logger.info("🛑 Stopping container cleanup task")
+            self._cleanup_running = False
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
+    
+    # Private helper methods
+    
+    async def _find_existing_container(self, container_name: str):
+        """Find existing container by name"""
+        try:
+            return self.docker_client.containers.get(container_name)
+        except docker.errors.NotFound:
+            return None
+        except Exception as e:
+            logger.error(f"❌ Error finding container: {e}")
+            return None
+    
+    async def _handle_existing_container(
+        self, 
+        container, 
+        session_id: str, 
+        user_id: str, 
+        volume_name: str
+    ) -> ContainerInfo:
+        """Handle existing container (start if stopped)"""
+        if container.status == "exited":
+            logger.info(f"▶️ Starting existing container: {container.name}")
+            container.start()
+        
+        # Create container info
+        container_info = ContainerInfo(
+            container_id=container.id,
+            container_name=container.name,
+            session_id=session_id,
+            user_id=user_id,
+            volume_name=volume_name,
+            status=container.status
+        )
+        self.active_containers[session_id] = container_info
+        
+        return container_info
+    
+    async def _ensure_volume(self, volume_name: str):
+        """Create volume if it doesn't exist"""
+        try:
+            volume = self.docker_client.volumes.get(volume_name)
+            logger.info(f"📦 Using existing volume: {volume_name}")
+            return volume
+        except docker.errors.NotFound:
+            logger.info(f"📦 Creating new volume: {volume_name}")
+            return self.docker_client.volumes.create(name=volume_name)
+        except Exception as e:
+            logger.error(f"❌ Volume error: {e}")
+            raise
+
 
 # Global container manager instance
 container_manager = ContainerManager()
 
-# Request/Response models
+
+def get_container_manager() -> ContainerManager:
+    """Dependency to get container manager instance"""
+    return container_manager
+
+
+# Request/Response Models
+
 class CreateContainerRequest(BaseModel):
-    session_id: Optional[str] = None
-    user_id: Optional[str] = None
+    session_id: str
+    user_id: str
+    template: str = "base"
+
+
+class ContainerStatusResponse(BaseModel):
+    session_id: str
+    container_id: str
+    container_name: str
+    status: str
+    created_at: str
+
 
 class ExecuteCommandRequest(BaseModel):
     session_id: str
     command: str
+    workdir: str = "/workspace"
 
-class FileOperationRequest(BaseModel):
-    session_id: str
-    file_path: str
-    content: Optional[str] = None
-
-class ListFilesRequest(BaseModel):
-    session_id: str
-    path: str = "/workspace"
 
 # API Endpoints
-@router.post("/api/vibecoding/container/create")
-async def create_container(req: CreateContainerRequest):
-    """Create a new development container for vibecoding session."""
-    session_id = req.session_id or str(uuid.uuid4())
+
+@router.post("/api/vibecode/container/create")
+async def create_container_endpoint(
+    req: CreateContainerRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """Create a new development container for a VibeCode session
     
-    result = await container_manager.create_dev_container(session_id, req.user_id)
-    return result
-
-@router.post("/api/vibecoding/container/execute")
-async def execute_command(req: ExecuteCommandRequest):
-    """Execute command in development container."""
-    result = await container_manager.execute_command(req.session_id, req.command)
-    return result
-
-@router.post("/api/vibecoding/container/files/list")
-async def list_files(req: ListFilesRequest):
-    """List files in container directory."""
-    files = await container_manager.list_files(req.session_id, req.path)
-    return {"files": files, "path": req.path}
-
-@router.post("/api/vibecoding/container/files/read")
-async def read_file(req: FileOperationRequest):
-    """Read file content from container."""
-    content = await container_manager.read_file(req.session_id, req.file_path)
-    return {"content": content, "file_path": req.file_path}
-
-@router.post("/api/vibecoding/container/files/write")
-async def write_file(req: FileOperationRequest):
-    """Write content to file in container."""
-    if req.content is None:
-        raise HTTPException(status_code=400, detail="Content is required")
+    Creates a Docker container with:
+    - Resource limits (2GB RAM, 1.5 CPU)
+    - Security options (no-new-privileges)
+    - Persistent volume for /workspace
+    - Proper labeling for discovery
+    - Automatic legacy Colab file migration on first open
+    """
+    # Import migration functions
+    from vibecoding.migration import (
+        check_migration_needed,
+        migrate_legacy_colab_files,
+        mark_migration_complete
+    )
     
-    success = await container_manager.write_file(req.session_id, req.file_path, req.content)
-    return {"success": success, "file_path": req.file_path}
+    # Verify user owns this session
+    if str(current_user["id"]) != req.user_id:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    
+    container_info = await container_manager.create_container(
+        session_id=req.session_id,
+        user_id=req.user_id,
+        template=req.template
+    )
+    
+    # Check if migration is needed (for existing volumes being attached to new containers)
+    migration_result = None
+    try:
+        needs_migration = await check_migration_needed(
+            container_manager,
+            req.session_id
+        )
+        
+        if needs_migration:
+            logger.info(f"🔄 Running legacy Colab migration for session {req.session_id}")
+            migration_result = await migrate_legacy_colab_files(
+                container_manager,
+                req.session_id
+            )
+            
+            # Mark migration as complete
+            await mark_migration_complete(
+                container_manager,
+                req.session_id
+            )
+            
+            logger.info(f"✅ Migration completed: {migration_result.get('total_count', 0)} files migrated")
+    except Exception as e:
+        logger.warning(f"⚠️ Migration check/execution failed: {e}")
+        # Don't fail the create operation if migration fails
+    
+    response = {
+        "session_id": container_info.session_id,
+        "container_id": container_info.container_id,
+        "container_name": container_info.container_name,
+        "status": container_info.status,
+        "volume_name": container_info.volume_name,
+        "workspace_path": "/workspace"
+    }
+    
+    # Include migration info if it occurred
+    if migration_result:
+        response["migration"] = migration_result
+    
+    return response
 
-@router.post("/api/vibecoding/container/files/tree")
-async def get_file_tree(req: ListFilesRequest):
-    """Get complete file tree structure for better performance."""
-    container = await container_manager.get_container(req.session_id)
+
+@router.get("/api/vibecode/container/{session_id}/status")
+async def get_container_status(
+    session_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get container status for a session"""
+    try:
+        container = await container_manager.get_container(session_id)
+        
+        if not container:
+            # Return a default status instead of 404
+            return {
+                "session_id": session_id,
+                "container_id": None,
+                "container_name": None,
+                "status": "not_created",
+                "created_at": "",
+                "message": "Container not created yet"
+            }
+        
+        # Verify user owns this session
+        user_id_label = container.labels.get("user_id")
+        if user_id_label and str(current_user["id"]) != user_id_label:
+            raise HTTPException(status_code=403, detail="Unauthorized")
+        
+        container.reload()
+        
+        return {
+            "session_id": session_id,
+            "container_id": container.id,
+            "container_name": container.name,
+            "status": container.status,
+            "created_at": container.labels.get("created_at", "")
+        }
+    except Exception as e:
+        logger.error(f"Error getting container status for {session_id}: {e}")
+        # Return a safe default status
+        return {
+            "session_id": session_id,
+            "container_id": None,
+            "container_name": None,
+            "status": "error",
+            "created_at": "",
+            "message": f"Error checking container status: {str(e)}"
+        }
+
+
+@router.post("/api/vibecode/container/{session_id}/start")
+async def start_container_endpoint(
+    session_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Start a stopped container and run migration if needed"""
+    # Import migration functions
+    from vibecoding.migration import (
+        check_migration_needed,
+        migrate_legacy_colab_files,
+        mark_migration_complete
+    )
+    
+    # Verify ownership
+    container = await container_manager.get_container(session_id)
     if not container:
         raise HTTPException(status_code=404, detail="Container not found")
     
+    user_id_label = container.labels.get("user_id")
+    if user_id_label and str(current_user["id"]) != user_id_label:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    
+    success = await container_manager.start_container(session_id)
+    
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to start container")
+    
+    # Check if migration is needed (first time opening session)
+    migration_result = None
     try:
-        # Get full directory tree in one command for better performance
-        result = container.exec_run(
-            f"find {req.path} -type f -o -type d 2>/dev/null | head -1000"
+        needs_migration = await check_migration_needed(
+            container_manager,
+            session_id
         )
         
-        if result.exit_code != 0:
-            return {"files": [], "path": req.path}
-        
-        paths = result.output.decode("utf-8").strip().split("\n")
-        paths = [p for p in paths if p and p != req.path]
-        
-        # Build tree structure
-        tree_dict = {}
-        for path in paths:
-            if path:
-                relative_path = path.replace(req.path, "").strip("/")
-                if relative_path:
-                    parts = relative_path.split("/")
-                    current = tree_dict
-                    
-                    for i, part in enumerate(parts):
-                        if part not in current:
-                            # Check if it's the final part (file/directory)
-                            is_final = i == len(parts) - 1
-                            if is_final:
-                                # Check if it's a directory
-                                stat_result = container.exec_run(f"test -d '{path}' && echo dir || echo file")
-                                is_dir = "dir" in stat_result.output.decode().strip()
-                                
-                                current[part] = {
-                                    "type": "directory" if is_dir else "file",
-                                    "path": path,
-                                    "name": part,
-                                    "children": {} if is_dir else None
-                                }
-                            else:
-                                # Intermediate directory
-                                current[part] = current.get(part, {
-                                    "type": "directory",
-                                    "path": "/".join(path.split("/")[:-len(parts)+i+1]),
-                                    "name": part,
-                                    "children": {}
-                                })
-                                current = current[part]["children"]
-                        else:
-                            if "children" in current[part]:
-                                current = current[part]["children"]
-        
-        def tree_to_list(tree_dict):
-            result = []
-            for name, node in tree_dict.items():
-                node_data = {
-                    "name": name,
-                    "type": node["type"],
-                    "path": node["path"],
-                }
-                if node["type"] == "directory" and node.get("children"):
-                    node_data["children"] = tree_to_list(node["children"])
-                else:
-                    node_data["children"] = []
-                result.append(node_data)
+        if needs_migration:
+            logger.info(f"🔄 Running legacy Colab migration for session {session_id}")
+            migration_result = await migrate_legacy_colab_files(
+                container_manager,
+                session_id
+            )
             
-            # Sort: directories first, then files, both alphabetically
-            result.sort(key=lambda x: (x["type"] == "file", x["name"].lower()))
-            return result
-        
-        file_list = tree_to_list(tree_dict)
-        logger.info(f"Built file tree with {len(file_list)} root items for {req.session_id}")
-        
-        return {"files": file_list, "path": req.path}
-        
-    except Exception as e:
-        logger.error(f"File tree listing failed: {e}")
-        return {"files": [], "path": req.path}
-
-@router.delete("/api/vibecoding/container/{session_id}")
-async def stop_container(session_id: str):
-    """Stop and remove development container."""
-    success = await container_manager.stop_container(session_id)
-    return {"success": success, "session_id": session_id}
-
-@router.get("/api/vibecoding/container/{session_id}/status")
-async def get_container_status(session_id: str):
-    """Get container status."""
-    container = await container_manager.get_container(session_id)
-    if not container:
-        return {"status": "not_found", "session_id": session_id}
-    
-    try:
-        container.reload()
-        return {
-            "status": container.status,
-            "session_id": session_id,
-            "created": container.attrs["Created"],
-            "image": container.image.tags[0] if container.image.tags else "unknown"
-        }
-    except Exception as e:
-        logger.error(f"Error getting container status: {e}")
-        return {"status": "error", "session_id": session_id, "error": str(e)}
-
-# WebSocket endpoint for real-time terminal
-@router.websocket("/api/vibecoding/container/{session_id}/terminal")
-async def terminal_websocket(websocket: WebSocket, session_id: str):
-    """WebSocket endpoint for real-time terminal interaction."""
-    await websocket.accept()
-    
-    container = await container_manager.get_container(session_id)
-    if not container:
-        await websocket.send_json({"type": "error", "message": "Container not found"})
-        await websocket.close()
-        return
-    
-    try:
-        # Start interactive shell
-        exec_id = container.client.api.exec_create(
-            container.id,
-            "/bin/bash",
-            stdin=True,
-            tty=True,
-            workdir="/workspace"
-        )
-        
-        socket = container.client.api.exec_start(
-            exec_id["Id"],
-            detach=False,
-            tty=True,
-            stream=True,
-            socket=True
-        )
-        
-        # Handle WebSocket communication
-        raw = getattr(socket, "_sock", socket)   # prefer public; fall back if needed
-        try:
-            raw.settimeout(1.0)                  # short non-blocking-ish reads
-        except Exception:
-            pass
+            # Mark migration as complete
+            await mark_migration_complete(
+                container_manager,
+                session_id
+            )
             
-        async def read_from_container():
-            import socket as pysock
-            try:
-                while True:
-                    try:
-                        data = raw.recv(4096)    # use public recv with larger buffer
-                        if not data:
-                            break
-                        await websocket.send_text(data.decode("utf-8", errors="replace"))
-                    except pysock.timeout:
-                        # just try again; this is normal when there's no output
-                        await asyncio.sleep(0.05)
-            except Exception as e:
-                logger.error(f"Error reading from container: {e}")
-                await websocket.send_json({"type": "error", "message": str(e)})
-        
-        async def write_to_container():
-            try:
-                while True:
-                    message = await websocket.receive_text()
-                    raw.send(message.encode("utf-8"))
-            except WebSocketDisconnect:
-                logger.info("Terminal WebSocket disconnected")
-            except Exception as e:
-                logger.error(f"Error writing to container: {e}")
-        
-        # Run both coroutines concurrently
-        await asyncio.gather(
-            read_from_container(),
-            write_to_container()
-        )
+            logger.info(f"✅ Migration completed: {migration_result.get('total_count', 0)} files migrated")
+    except Exception as e:
+        logger.warning(f"⚠️ Migration check/execution failed: {e}")
+        # Don't fail the start operation if migration fails
     
-    except Exception as e:
-        logger.error(f"Terminal WebSocket error: {e}")
-        await websocket.send_json({"type": "error", "message": str(e)})
-    finally:
-        try:
-            socket.close()
-        except:
-            pass
+    response = {
+        "session_id": session_id,
+        "status": "running",
+        "message": "Container started successfully"
+    }
+    
+    # Include migration info if it occurred
+    if migration_result:
+        response["migration"] = migration_result
+    
+    return response
 
-@router.get("/api/vibecoding/sessions/{user_id}")
-async def get_user_sessions(user_id: int, active_only: bool = True):
-    """Get all sessions for a user."""
-    try:
-        session_db = get_session_db()
-        sessions = await session_db.list_user_sessions(user_id, active_only)
-        return {"sessions": sessions, "user_id": user_id}
-    except Exception as e:
-        logger.error(f"Failed to get user sessions: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
-class SessionCreateRequest(BaseModel):
-    project_name: str
-    description: str = ""
-
-@router.post("/api/vibecoding/sessions/create")
-async def create_session_endpoint(
-    request: SessionCreateRequest,
+@router.post("/api/vibecode/container/{session_id}/stop")
+async def stop_container_endpoint(
+    session_id: str,
     current_user: dict = Depends(get_current_user)
 ):
-    """Create a new vibecoding session with JWT authentication."""
-    try:
-        logger.info(f"Creating session for user: {current_user}")
-        
-        session_id = str(uuid.uuid4())
-        volume_name = f"{VOLUME_PREFIX}{session_id}"
-        
-        session_db = get_session_db()
-        result = await session_db.create_session(
-            session_id, current_user["id"], request.project_name, request.description, 
-            volume_name=volume_name
-        )
-        
-        return {
-            "session_id": session_id,
-            "project_name": request.project_name,
-            "volume_name": volume_name,
-            **result
-        }
-    except Exception as e:
-        logger.error(f"Failed to create session: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.post("/api/vibecoding/sessions")
-async def create_session_json(request: Request):
-    """Create a new vibecoding session (JSON endpoint for frontend)."""
-    try:
-        # Parse JSON request body
-        body = await request.body()
-        logger.info(f"[DEBUG] Raw request body: {body}")
-        
-        try:
-            data = json.loads(body)
-            logger.info(f"[DEBUG] Parsed JSON data: {data}")
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON decode error: {e}")
-            raise HTTPException(status_code=422, detail=f"Invalid JSON: {e}")
-        
-        # Validate required fields
-        user_id = data.get('user_id')
-        project_name = data.get('project_name')
-        description = data.get('description', '')
-        
-        logger.info(f"[DEBUG] Extracted fields - user_id: {user_id} (type: {type(user_id)}), project_name: {project_name} (type: {type(project_name)}), description: {description}")
-        
-        if user_id is None:
-            logger.error(f"[DEBUG] Validation failed: user_id is None")
-            raise HTTPException(status_code=422, detail="user_id is required")
-        if project_name is None:
-            logger.error(f"[DEBUG] Validation failed: project_name is None")
-            raise HTTPException(status_code=422, detail="project_name is required")
-            
-        session_id = str(uuid.uuid4())
-        volume_name = f"{VOLUME_PREFIX}{session_id}"
-        
-        session_db = get_session_db()
-        result = await session_db.create_session(
-            session_id, int(user_id), project_name, description,
-            volume_name=volume_name
-        )
-        
-        return {
-            "session_id": session_id,
-            "project_name": project_name,
-            "volume_name": volume_name,
-            **result
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to create session: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/api/vibecoding/sessions/{session_id}/history")
-async def get_terminal_history(session_id: str, limit: int = 50):
-    """Get terminal history for session."""
-    try:
-        session_db = get_session_db()
-        history = await session_db.get_terminal_history(session_id, limit)
-        return {"history": history, "session_id": session_id}
-    except Exception as e:
-        logger.error(f"Failed to get terminal history: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/api/vibecoding/sessions/{session_id}/files")
-async def get_session_files_endpoint(session_id: str):
-    """Get file metadata for session."""
-    try:
-        session_db = get_session_db()
-        files = await session_db.get_session_files(session_id)
-        return {"files": files, "session_id": session_id}
-    except Exception as e:
-        logger.error(f"Failed to get session files: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-# Cleanup task (should be called periodically)
-@router.post("/api/vibecoding/container/cleanup")
-async def cleanup_containers():
-    """Manually trigger container cleanup."""
-    await container_manager.cleanup_inactive_containers()
+    """Stop a running container (preserves volume)"""
+    # Verify ownership
+    container = await container_manager.get_container(session_id)
+    if not container:
+        raise HTTPException(status_code=404, detail="Container not found")
     
-    # Also cleanup database
-    try:
-        session_db = get_session_db()
-        cleaned = await session_db.cleanup_inactive_sessions()
-        return {"message": "Cleanup completed", "sessions_cleaned": cleaned}
-    except Exception as e:
-        logger.error(f"Database cleanup failed: {e}")
-        return {"message": "Container cleanup completed, database cleanup failed"}
+    user_id_label = container.labels.get("user_id")
+    if user_id_label and str(current_user["id"]) != user_id_label:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    
+    success = await container_manager.stop_container(session_id)
+    
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to stop container")
+    
+    return {
+        "session_id": session_id,
+        "status": "stopped",
+        "message": "Container stopped successfully"
+    }

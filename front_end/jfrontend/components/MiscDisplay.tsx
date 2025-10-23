@@ -128,7 +128,7 @@ export default function MiscDisplay({ screenAnalysis }: MiscDisplayProps) {
                   </div>
                   <span className="text-xs text-gray-500">{insight.timestamp.toLocaleTimeString()}</span>
                 </div>
-                <p className="text-xs text-gray-400 line-clamp-2">{insight.content}</p>
+                <p className="text-xs text-gray-400 line-clamp-2">{typeof insight.content === 'string' ? insight.content : String(insight.content || '')}</p>
                 {insight.result && insight.status === 'done' && (
                   <div className="mt-2 pt-2 border-t border-gray-700">
                     <p className="text-xs text-green-400 line-clamp-1">Result: {insight.result}</p>
@@ -195,7 +195,7 @@ export default function MiscDisplay({ screenAnalysis }: MiscDisplayProps) {
               <div className="p-4 overflow-y-auto max-h-96 space-y-4">
                 <div>
                   <h4 className="text-sm font-medium text-gray-300 mb-2">Thought Process:</h4>
-                  <p className="text-gray-300 whitespace-pre-wrap">{selectedItem.content}</p>
+                  <p className="text-gray-300 whitespace-pre-wrap">{typeof selectedItem.content === 'string' ? selectedItem.content : String(selectedItem.content || '')}</p>
                 </div>
                 {selectedItem.result && (
                   <div>

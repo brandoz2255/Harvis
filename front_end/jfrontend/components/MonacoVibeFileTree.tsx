@@ -1,6 +1,7 @@
 "use client"
 
 import React, { useState, useEffect, useRef, useCallback } from 'react'
+import { safeTrim, toStr, toWorkspaceRelativePath } from '@/lib/strings'
 import { 
   Folder, 
   FolderOpen, 
@@ -15,7 +16,13 @@ import {
   Search,
   ChevronRight,
   ChevronDown,
-  Loader2
+  Loader2,
+  FilePlus,
+  FolderPlus,
+  Edit2,
+  Trash2,
+  X,
+  Check
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -30,13 +37,21 @@ interface FileTreeNode {
 
 interface MonacoVibeFileTreeProps {
   sessionId: string
+  isContainerRunning?: boolean
   onFileSelect: (filePath: string, content: string) => void
   onFileContentChange?: (filePath: string, content: string) => void
   className?: string
 }
 
+interface ContextMenu {
+  x: number
+  y: number
+  node: FileTreeNode
+}
+
 export default function MonacoVibeFileTree({ 
   sessionId, 
+  isContainerRunning = false,
   onFileSelect, 
   onFileContentChange,
   className = "" 
@@ -48,8 +63,16 @@ export default function MonacoVibeFileTree({
   const [isLoading, setIsLoading] = useState(false)
   const [searchTerm, setSearchTerm] = useState('')
   const [filteredTree, setFilteredTree] = useState<FileTreeNode[]>([])
+  const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null)
+  const [renamingNode, setRenamingNode] = useState<string | null>(null)
+  const [renameValue, setRenameValue] = useState('')
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState<string | null>(null)
+  const [draggedNode, setDraggedNode] = useState<FileTreeNode | null>(null)
+  const [dropTarget, setDropTarget] = useState<string | null>(null)
   
   const wsRef = useRef<WebSocket | null>(null)
+  const contextMenuRef = useRef<HTMLDivElement>(null)
+  const lastCallRef = useRef<number>(0)
 
   // Get appropriate icon for file type
   const getFileIcon = useCallback((node: FileTreeNode, isExpanded = false) => {
@@ -103,23 +126,28 @@ export default function MonacoVibeFileTree({
   const setupFileWatcher = useCallback(() => {
     if (!sessionId) return
 
+    // Temporarily disable file system watcher until backend endpoint is implemented
+    console.log('📁 File system watcher disabled (fs-events endpoint not implemented)')
+    return () => {} // Return empty cleanup function
+
+    /* TODO: Re-enable when backend implements fs-events WebSocket endpoint
     try {
       const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-      const wsUrl = `${wsProtocol}//${window.location.host}/api/vibecoding/container/${sessionId}/fs-events`
-      
+      const wsUrl = `${wsProtocol}//${window.location.host}/api/vibecode/container/${sessionId}/fs-events`
+
       const ws = new WebSocket(wsUrl)
-      
+
       ws.onopen = () => {
         console.log('📁 File system watcher connected')
       }
-      
+
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data)
           if (data.type === 'file-changed' || data.type === 'file-created' || data.type === 'file-deleted') {
             console.log('📄 File system change detected:', data)
             loadFileTree() // Refresh tree on changes
-            
+
             // Update cache if file changed
             if (data.type === 'file-changed' && data.filePath && data.content) {
               setFileCache(prev => new Map(prev.set(data.filePath, data.content)))
@@ -130,17 +158,17 @@ export default function MonacoVibeFileTree({
           console.error('Error parsing file system event:', error)
         }
       }
-      
+
       ws.onerror = (error) => {
-        console.error('File system watcher error:', error)
+        console.warn('File system watcher connection failed (endpoint may not exist):', error)
       }
-      
+
       ws.onclose = () => {
         console.log('📁 File system watcher disconnected')
       }
-      
+
       wsRef.current = ws
-      
+
       return () => {
         ws.close()
         wsRef.current = null
@@ -148,24 +176,46 @@ export default function MonacoVibeFileTree({
     } catch (error) {
       console.warn('Could not establish file system watcher:', error)
     }
+    */
   }, [sessionId, onFileContentChange])
 
-  // Load file tree with improved error handling
+  // Load file tree with improved error handling and throttling
   const loadFileTree = useCallback(async () => {
     if (!sessionId) return
+
+    // Throttle API calls to prevent spam
+    const now = Date.now()
+    if (lastCallRef.current && now - lastCallRef.current < 2000) {
+      console.log('⏳ Throttling file tree load (too frequent)')
+      return
+    }
+    lastCallRef.current = now
+
+    // Don't load if already loading
+    if (isLoading) {
+      console.log('⏳ File tree already loading, skipping...')
+      return
+    }
 
     try {
       setIsLoading(true)
       const token = localStorage.getItem('token')
       
-      const response = await fetch('/api/vibecoding/files', {
+      // Check if user is authenticated
+      if (!token) {
+        console.warn('⚠️ No auth token - user needs to log in')
+        setFileTree([])
+        setIsLoading(false)
+        return
+      }
+      
+      const response = await fetch('/api/vibecode/files/tree', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(token && { 'Authorization': `Bearer ${token}` })
+          'Authorization': `Bearer ${token}`  // Always include auth header
         },
         body: JSON.stringify({
-          action: 'list',
           session_id: sessionId,
           path: '/workspace'
         })
@@ -173,44 +223,35 @@ export default function MonacoVibeFileTree({
 
       if (response.ok) {
         const data = await response.json()
-        
-        // Convert flat file list to tree structure
-        const buildTree = (files: any[]): FileTreeNode[] => {
-          const tree: FileTreeNode[] = []
-          const pathMap = new Map<string, FileTreeNode>()
-          
-          // Sort files: directories first, then by name
-          const sortedFiles = files.sort((a, b) => {
-            if (a.type !== b.type) {
-              return a.type === 'directory' ? -1 : 1
-            }
-            return a.name.localeCompare(b.name)
-          })
-          
-          sortedFiles.forEach(file => {
-            const node: FileTreeNode = {
-              name: file.name,
-              type: file.type,
-              path: file.path,
-              size: file.size,
-              children: file.type === 'directory' ? [] : undefined
-            }
-            
-            pathMap.set(file.path, node)
-            
-            // For now, add all files to root level
-            // TODO: Build proper hierarchy based on path
-            tree.push(node)
-          })
-          
-          return tree
+        // Backend returns a hierarchical tree with a root (path=/workspace)
+        const toNode = (n: any): FileTreeNode => ({
+          name: n.name,
+          type: n.type,
+          path: n.path,
+          size: n.size,
+          children: Array.isArray(n.children) ? n.children.map(toNode) : undefined
+        })
+        const root = toNode(data)
+        const children = root.children || []
+        setFileTree(children)
+        console.log('📁 Loaded file tree:', children.length, 'items')
+        if (children.length > 0) {
+          console.log('📁 Files:', children.map(f => `${f.name} (${f.type})`).join(', '))
         }
-        
-        const tree = buildTree(data.files || [])
-        setFileTree(tree)
-        console.log('📁 Loaded file tree:', tree.length, 'items')
       } else {
-        console.error('Failed to load file tree:', response.status)
+        // Better error handling
+        if (response.status === 401) {
+          console.error('❌ Auth failed - token expired, please re-login')
+          setFileTree([])
+          // Optionally redirect to login or show auth error
+        } else if (response.status === 404) {
+          console.error('❌ Container not found - start container first')
+          setFileTree([])
+        } else {
+          const errorText = await response.text()
+          console.error(`❌ File tree load failed (${response.status}):`, errorText)
+          setFileTree([])
+        }
       }
     } catch (error) {
       console.error('Error loading file tree:', error)
@@ -228,16 +269,15 @@ export default function MonacoVibeFileTree({
 
     try {
       const token = localStorage.getItem('token')
-      const response = await fetch('/api/vibecoding/files', {
+      const response = await fetch('/api/vibecode/files/read', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           ...(token && { 'Authorization': `Bearer ${token}` })
         },
         body: JSON.stringify({
-          action: 'read',
           session_id: sessionId,
-          file_path: filePath
+          path: toWorkspaceRelativePath(filePath)
         })
       })
 
@@ -267,16 +307,15 @@ export default function MonacoVibeFileTree({
         return false
       }
 
-      const response = await fetch('/api/vibecoding/files', {
+      const response = await fetch('/api/vibecode/files/save', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          action: 'write',
           session_id: sessionId,
-          file_path: filePath,
+          path: toWorkspaceRelativePath(filePath),
           content: content
         })
       })
@@ -295,6 +334,232 @@ export default function MonacoVibeFileTree({
       return false
     }
   }, [sessionId])
+
+  // Create new file
+  const createFile = useCallback(async (parentPath: string, fileName: string) => {
+    try {
+      const token = localStorage.getItem('token')
+      if (!token) {
+        console.error('No authentication token found')
+        return false
+      }
+
+      // Convert absolute path to relative path for the API
+      const filePath = toWorkspaceRelativePath(`${parentPath}/${fileName}`.replace('//', '/'))
+      
+      const response = await fetch('/api/vibecode/files/create', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          session_id: sessionId,
+          path: filePath,
+          type: 'file'
+        })
+      })
+
+      if (response.ok) {
+        console.log('📄 File created:', filePath)
+        // Optimistic update
+        await loadFileTree()
+        return true
+      } else {
+        console.error('Failed to create file:', response.status)
+        return false
+      }
+    } catch (error) {
+      console.error('Error creating file:', error)
+      return false
+    }
+  }, [sessionId, loadFileTree])
+
+  // Create new folder
+  const createFolder = useCallback(async (parentPath: string, folderName: string) => {
+    try {
+      const token = localStorage.getItem('token')
+      if (!token) {
+        console.error('No authentication token found')
+        return false
+      }
+
+      // Convert absolute path to relative path for the API
+      const folderPath = toWorkspaceRelativePath(`${parentPath}/${folderName}`.replace('//', '/'))
+      
+      const response = await fetch('/api/vibecode/files/create', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          session_id: sessionId,
+          path: folderPath,
+          type: 'folder'
+        })
+      })
+
+      if (response.ok) {
+        console.log('📁 Folder created:', folderPath)
+        // Optimistic update
+        await loadFileTree()
+        // Expand parent folder
+        setExpandedNodes(prev => new Set(prev.add(parentPath)))
+        return true
+      } else {
+        console.error('Failed to create folder:', response.status)
+        return false
+      }
+    } catch (error) {
+      console.error('Error creating folder:', error)
+      return false
+    }
+  }, [sessionId, loadFileTree])
+
+  // Rename file or folder
+  const renameItem = useCallback(async (oldPath: string, newName: string) => {
+    try {
+      const token = localStorage.getItem('token')
+      if (!token) {
+        console.error('No authentication token found')
+        return false
+      }
+
+      const pathParts = toWorkspaceRelativePath(oldPath).split('/')
+      pathParts[pathParts.length - 1] = newName
+      const newPath = pathParts.join('/')
+      
+      const response = await fetch('/api/vibecode/files/rename', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          session_id: sessionId,
+          old_path: toWorkspaceRelativePath(oldPath),
+          new_name: newName
+        })
+      })
+
+      if (response.ok) {
+        console.log('✏️ Renamed:', oldPath, '->', newPath)
+        // Optimistic update
+        await loadFileTree()
+        // Update selected file if it was renamed
+        if (selectedFile === oldPath) {
+          setSelectedFile(newPath)
+        }
+        return true
+      } else {
+        console.error('Failed to rename:', response.status)
+        return false
+      }
+    } catch (error) {
+      console.error('Error renaming:', error)
+      return false
+    }
+  }, [sessionId, loadFileTree, selectedFile])
+
+  // Delete file or folder
+  const deleteItem = useCallback(async (path: string) => {
+    try {
+      const token = localStorage.getItem('token')
+      if (!token) {
+        console.error('No authentication token found')
+        return false
+      }
+      
+      const response = await fetch('/api/vibecode/files/delete', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          session_id: sessionId,
+          path: path
+        })
+      })
+
+      if (response.ok) {
+        console.log('🗑️ Deleted:', path)
+        // Optimistic update
+        await loadFileTree()
+        // Clear selection if deleted file was selected
+        if (selectedFile === path) {
+          setSelectedFile(null)
+        }
+        return true
+      } else {
+        console.error('Failed to delete:', response.status)
+        return false
+      }
+    } catch (error) {
+      console.error('Error deleting:', error)
+      return false
+    }
+  }, [sessionId, loadFileTree, selectedFile])
+
+  // Move file or folder
+  const moveItem = useCallback(async (sourcePath: string, targetDir: string) => {
+    try {
+      const token = localStorage.getItem('token')
+      if (!token) {
+        console.error('No authentication token found')
+        return false
+      }
+
+      // Validate destination is within /workspace
+      if (!targetDir.startsWith('/workspace')) {
+        console.error('Invalid destination: must be within /workspace')
+        return false
+      }
+
+      // Prevent moving into itself or its children
+      if (targetDir.startsWith(sourcePath + '/') || targetDir === sourcePath) {
+        console.error('Cannot move item into itself')
+        return false
+      }
+
+      const fileName = sourcePath.split('/').pop()
+      const newPath = `${targetDir}/${fileName}`.replace('//', '/')
+      
+      const response = await fetch('/api/vibecode/files/move', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          session_id: sessionId,
+          source_path: sourcePath,
+          target_dir: targetDir
+        })
+      })
+
+      if (response.ok) {
+        console.log('📦 Moved:', sourcePath, '->', newPath)
+        // Optimistic update
+        await loadFileTree()
+        // Update selected file if it was moved
+        if (selectedFile === sourcePath) {
+          setSelectedFile(newPath)
+        }
+        // Expand target directory
+        setExpandedNodes(prev => new Set(prev.add(targetDir)))
+        return true
+      } else {
+        const errorData = await response.json().catch(() => ({}))
+        console.error('Failed to move:', response.status, errorData)
+        return false
+      }
+    } catch (error) {
+      console.error('Error moving:', error)
+      return false
+    }
+  }, [sessionId, loadFileTree, selectedFile])
 
   // Handle file click
   const handleFileClick = useCallback(async (node: FileTreeNode) => {
@@ -316,9 +581,155 @@ export default function MonacoVibeFileTree({
     }
   }, [loadFileContent, onFileSelect])
 
+  // Handle right-click context menu
+  const handleContextMenu = useCallback((e: React.MouseEvent, node: FileTreeNode) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setContextMenu({
+      x: e.clientX,
+      y: e.clientY,
+      node
+    })
+  }, [])
+
+  // Close context menu
+  const closeContextMenu = useCallback(() => {
+    setContextMenu(null)
+  }, [])
+
+  // Handle context menu actions
+  const handleNewFile = useCallback(async () => {
+    const node = contextMenu?.node
+    if (!node) return
+    
+    const parentPath = node.type === 'directory' ? node.path : node.path.split('/').slice(0, -1).join('/')
+    const fileName = prompt('Enter file name:')
+    
+    if (fileName && safeTrim(fileName)) {
+      await createFile(parentPath, safeTrim(fileName))
+    }
+    closeContextMenu()
+  }, [contextMenu, createFile, closeContextMenu])
+
+  const handleNewFolder = useCallback(async () => {
+    const node = contextMenu?.node
+    if (!node) return
+    
+    const parentPath = node.type === 'directory' ? node.path : node.path.split('/').slice(0, -1).join('/')
+    const folderName = prompt('Enter folder name:')
+    
+    if (folderName && safeTrim(folderName)) {
+      await createFolder(parentPath, safeTrim(folderName))
+    }
+    closeContextMenu()
+  }, [contextMenu, createFolder, closeContextMenu])
+
+  const handleRename = useCallback(() => {
+    const node = contextMenu?.node
+    if (!node) return
+    
+    setRenamingNode(node.path)
+    setRenameValue(node.name)
+    closeContextMenu()
+  }, [contextMenu, closeContextMenu])
+
+  const handleDelete = useCallback(() => {
+    const node = contextMenu?.node
+    if (!node) return
+    
+    setShowDeleteConfirm(node.path)
+    closeContextMenu()
+  }, [contextMenu, closeContextMenu])
+
+  const confirmDelete = useCallback(async (path: string) => {
+    await deleteItem(path)
+    setShowDeleteConfirm(null)
+  }, [deleteItem])
+
+  const cancelDelete = useCallback(() => {
+    setShowDeleteConfirm(null)
+  }, [])
+
+  const confirmRename = useCallback(async (oldPath: string) => {
+    const trimmedValue = safeTrim(renameValue)
+    if (trimmedValue && trimmedValue !== oldPath.split('/').pop()) {
+      await renameItem(oldPath, trimmedValue)
+    }
+    setRenamingNode(null)
+    setRenameValue('')
+  }, [renameValue, renameItem])
+
+  const cancelRename = useCallback(() => {
+    setRenamingNode(null)
+    setRenameValue('')
+  }, [])
+
+  // Drag and drop handlers
+  const handleDragStart = useCallback((e: React.DragEvent, node: FileTreeNode) => {
+    e.stopPropagation()
+    setDraggedNode(node)
+    e.dataTransfer.effectAllowed = 'move'
+    e.dataTransfer.setData('text/plain', node.path)
+    
+    // Add visual feedback
+    if (e.currentTarget instanceof HTMLElement) {
+      e.currentTarget.style.opacity = '0.5'
+    }
+  }, [])
+
+  const handleDragEnd = useCallback((e: React.DragEvent) => {
+    e.stopPropagation()
+    setDraggedNode(null)
+    setDropTarget(null)
+    
+    // Remove visual feedback
+    if (e.currentTarget instanceof HTMLElement) {
+      e.currentTarget.style.opacity = '1'
+    }
+  }, [])
+
+  const handleDragOver = useCallback((e: React.DragEvent, node: FileTreeNode) => {
+    e.preventDefault()
+    e.stopPropagation()
+    
+    // Only allow dropping on directories
+    if (node.type === 'directory' && draggedNode && node.path !== draggedNode.path) {
+      e.dataTransfer.dropEffect = 'move'
+      setDropTarget(node.path)
+    } else {
+      e.dataTransfer.dropEffect = 'none'
+    }
+  }, [draggedNode])
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.stopPropagation()
+    setDropTarget(null)
+  }, [])
+
+  const handleDrop = useCallback(async (e: React.DragEvent, targetNode: FileTreeNode) => {
+    e.preventDefault()
+    e.stopPropagation()
+    
+    setDropTarget(null)
+    
+    // Only allow dropping on directories
+    if (targetNode.type !== 'directory' || !draggedNode) {
+      return
+    }
+
+    // Don't drop on itself
+    if (targetNode.path === draggedNode.path) {
+      return
+    }
+
+    // Perform the move
+    await moveItem(draggedNode.path, targetNode.path)
+    setDraggedNode(null)
+  }, [draggedNode, moveItem])
+
   // Filter files based on search term
   const filterTree = useCallback((nodes: FileTreeNode[], term: string): FileTreeNode[] => {
-    if (!term.trim()) return nodes
+    if (!safeTrim(term)) return nodes
     
     return nodes.filter(node => {
       const matchesName = node.name.toLowerCase().includes(term.toLowerCase())
@@ -339,16 +750,28 @@ export default function MonacoVibeFileTree({
   const renderFileNode = useCallback((node: FileTreeNode, depth = 0) => {
     const isExpanded = expandedNodes.has(node.path)
     const isSelected = selectedFile === node.path
+    const isRenaming = renamingNode === node.path
+    const isDeleting = showDeleteConfirm === node.path
+    const isDropTarget = dropTarget === node.path
     const Icon = getFileIcon(node, isExpanded)
     
     return (
       <div key={node.path}>
         <div 
-          className={`flex items-center py-1 px-2 hover:bg-gray-700 cursor-pointer rounded ${
+          className={`flex items-center py-1 px-2 hover:bg-gray-700 cursor-pointer rounded relative transition-colors ${
             isSelected ? 'bg-gray-600' : ''
+          } ${
+            isDropTarget ? 'bg-blue-600/30 border-2 border-blue-500' : ''
           }`}
           style={{ paddingLeft: `${depth * 16 + 8}px` }}
-          onClick={() => handleFileClick(node)}
+          onClick={() => !isRenaming && handleFileClick(node)}
+          onContextMenu={(e) => handleContextMenu(e, node)}
+          draggable={!isRenaming}
+          onDragStart={(e) => handleDragStart(e, node)}
+          onDragEnd={handleDragEnd}
+          onDragOver={(e) => handleDragOver(e, node)}
+          onDragLeave={handleDragLeave}
+          onDrop={(e) => handleDrop(e, node)}
         >
           {node.type === 'directory' && (
             <span className="mr-1 text-gray-400">
@@ -358,13 +781,77 @@ export default function MonacoVibeFileTree({
           <Icon size={16} className={`mr-2 ${
             node.type === 'directory' ? 'text-blue-400' : 'text-gray-300'
           }`} />
-          <span className="text-sm text-gray-200 truncate">{node.name}</span>
-          {node.size !== undefined && (
-            <span className="ml-auto text-xs text-gray-500">
-              {node.size < 1024 ? `${node.size}B` : `${(node.size / 1024).toFixed(1)}KB`}
-            </span>
+          
+          {isRenaming ? (
+            <div className="flex items-center flex-1 gap-1" onClick={(e) => e.stopPropagation()}>
+              <Input
+                value={renameValue}
+                onChange={(e) => setRenameValue(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    confirmRename(node.path)
+                  } else if (e.key === 'Escape') {
+                    cancelRename()
+                  }
+                }}
+                className="h-6 text-xs bg-gray-700 border-gray-600 text-gray-200 px-2"
+                autoFocus
+              />
+              <Button
+                size="sm"
+                variant="ghost"
+                className="p-1 h-6 w-6 hover:bg-gray-600"
+                onClick={() => confirmRename(node.path)}
+              >
+                <Check size={12} className="text-green-400" />
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="p-1 h-6 w-6 hover:bg-gray-600"
+                onClick={cancelRename}
+              >
+                <X size={12} className="text-red-400" />
+              </Button>
+            </div>
+          ) : (
+            <>
+              <span className="text-sm text-gray-200 truncate flex-1">{node.name}</span>
+              {node.size !== undefined && (
+                <span className="ml-auto text-xs text-gray-500">
+                  {node.size < 1024 ? `${node.size}B` : `${(node.size / 1024).toFixed(1)}KB`}
+                </span>
+              )}
+            </>
           )}
         </div>
+        
+        {isDeleting && (
+          <div 
+            className="mx-2 my-1 p-2 bg-red-900/20 border border-red-500/50 rounded text-xs"
+            style={{ marginLeft: `${depth * 16 + 8}px` }}
+          >
+            <p className="text-red-300 mb-2">Delete {node.name}?</p>
+            <div className="flex gap-2">
+              <Button
+                size="sm"
+                variant="destructive"
+                className="h-6 text-xs px-2"
+                onClick={() => confirmDelete(node.path)}
+              >
+                Delete
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-6 text-xs px-2"
+                onClick={cancelDelete}
+              >
+                Cancel
+              </Button>
+            </div>
+          </div>
+        )}
         
         {node.type === 'directory' && isExpanded && node.children && (
           <div>
@@ -373,16 +860,64 @@ export default function MonacoVibeFileTree({
         )}
       </div>
     )
-  }, [expandedNodes, selectedFile, getFileIcon, handleFileClick])
+  }, [
+    expandedNodes, 
+    selectedFile, 
+    renamingNode, 
+    showDeleteConfirm, 
+    dropTarget,
+    renameValue,
+    getFileIcon, 
+    handleFileClick, 
+    handleContextMenu,
+    confirmRename,
+    cancelRename,
+    confirmDelete,
+    cancelDelete,
+    handleDragStart,
+    handleDragEnd,
+    handleDragOver,
+    handleDragLeave,
+    handleDrop
+  ])
 
   // Initialize component
   useEffect(() => {
-    if (sessionId) {
+    if (sessionId && isContainerRunning) {
       loadFileTree()
       const cleanup = setupFileWatcher()
       return cleanup
     }
-  }, [sessionId, loadFileTree, setupFileWatcher])
+  }, [sessionId, isContainerRunning, setupFileWatcher])
+
+  // Auto-refresh file tree every 10 seconds (less frequent to reduce flickering)
+  useEffect(() => {
+    if (!sessionId || !isContainerRunning) return
+
+    const interval = setInterval(() => {
+      // Only refresh if not currently loading and no file is selected
+      if (!isLoading && !selectedFile) {
+        console.log('🔄 Auto-refreshing file tree...')
+        loadFileTree()
+      }
+    }, 10000) // Refresh every 10 seconds
+
+    return () => clearInterval(interval)
+  }, [sessionId, isContainerRunning, loadFileTree, isLoading, selectedFile])
+
+  // Close context menu on click outside
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (contextMenuRef.current && !contextMenuRef.current.contains(e.target as Node)) {
+        closeContextMenu()
+      }
+    }
+
+    if (contextMenu) {
+      document.addEventListener('mousedown', handleClickOutside)
+      return () => document.removeEventListener('mousedown', handleClickOutside)
+    }
+  }, [contextMenu, closeContextMenu])
 
   return (
     <div className={`bg-gray-800 border-r border-gray-700 flex flex-col h-full ${className}`}>
@@ -445,6 +980,48 @@ export default function MonacoVibeFileTree({
           </div>
         )}
       </div>
+
+      {/* Context Menu */}
+      {contextMenu && (
+        <div
+          ref={contextMenuRef}
+          className="fixed bg-gray-800 border border-gray-600 rounded shadow-lg py-1 z-50 min-w-[180px]"
+          style={{
+            left: `${contextMenu.x}px`,
+            top: `${contextMenu.y}px`
+          }}
+        >
+          <button
+            className="w-full px-4 py-2 text-left text-sm text-gray-200 hover:bg-gray-700 flex items-center gap-2"
+            onClick={handleNewFile}
+          >
+            <FilePlus size={14} />
+            New File
+          </button>
+          <button
+            className="w-full px-4 py-2 text-left text-sm text-gray-200 hover:bg-gray-700 flex items-center gap-2"
+            onClick={handleNewFolder}
+          >
+            <FolderPlus size={14} />
+            New Folder
+          </button>
+          <div className="border-t border-gray-600 my-1" />
+          <button
+            className="w-full px-4 py-2 text-left text-sm text-gray-200 hover:bg-gray-700 flex items-center gap-2"
+            onClick={handleRename}
+          >
+            <Edit2 size={14} />
+            Rename
+          </button>
+          <button
+            className="w-full px-4 py-2 text-left text-sm text-red-400 hover:bg-gray-700 flex items-center gap-2"
+            onClick={handleDelete}
+          >
+            <Trash2 size={14} />
+            Delete
+          </button>
+        </div>
+      )}
     </div>
   )
 }

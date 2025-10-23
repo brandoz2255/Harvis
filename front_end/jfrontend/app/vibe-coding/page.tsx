@@ -4,6 +4,7 @@ import React, { useState, useRef, useEffect } from "react"
 import { motion, AnimatePresence } from "framer-motion"
 import {
   ArrowLeft,
+  ArrowRight,
   Play,
   Save,
   FileText,
@@ -39,6 +40,9 @@ import VibeSessionManager from "@/components/VibeSessionManager"
 import MonacoVibeFileTree from "@/components/MonacoVibeFileTree"
 import OptimizedVibeTerminal from "@/components/OptimizedVibeTerminal"
 import VibeContainerCodeEditor from "@/components/VibeContainerCodeEditor"
+import IDEMigrationPrompt from "@/components/IDEMigrationPrompt"
+import ResetMigrationPrompt from "@/components/ResetMigrationPrompt"
+import { safeTrim, toStr } from '@/lib/strings'
 
 interface ChatMessage {
   role: "user" | "assistant"
@@ -51,7 +55,7 @@ interface ChatMessage {
 interface Session {
   id: string
   session_id: string
-  project_name: string
+  name: string
   description?: string
   container_status: 'running' | 'stopped' | 'starting' | 'stopping'
   created_at: string
@@ -97,6 +101,7 @@ export default function VibeCodingPage() {
   // UI state
   const [activeTab, setActiveTab] = useState<'files' | 'chat'>('files')
   const [terminalHeight, setTerminalHeight] = useState(200) // Terminal height in pixels
+  const [showMigrationPrompt, setShowMigrationPrompt] = useState(false)
   
   // Refs
   const chatEndRef = useRef<HTMLDivElement>(null)
@@ -120,6 +125,20 @@ export default function VibeCodingPage() {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" })
   }, [chatMessages])
 
+  // Show migration prompt unless user has explicitly chosen not to see it
+  useEffect(() => {
+    const hasSeenPrompt = localStorage.getItem('ide-migration-seen')
+    console.log('🔍 Migration prompt check:', { hasSeenPrompt, willShow: !hasSeenPrompt })
+    
+    // Show prompt unless user has explicitly chosen "Don't show again"
+    if (!hasSeenPrompt) {
+      console.log('✅ Showing migration prompt')
+      setShowMigrationPrompt(true)
+    } else {
+      console.log('❌ User chose not to see migration prompt again')
+    }
+  }, [])
+
   // Session Management
   const handleSessionSelect = async (session: Session) => {
     setCurrentSession(session)
@@ -130,7 +149,7 @@ export default function VibeCodingPage() {
     // Load welcome message for this session
     setChatMessages([{
       role: "assistant",
-      content: `Welcome to ${session.project_name}! 🚀 Your development container is ${session.container_status}. Ready to code together?`,
+      content: `Welcome to ${session.name}! 🚀 Your development container is ${session.container_status}. Ready to code together?`,
       timestamp: new Date(),
       type: "text",
     }])
@@ -139,31 +158,60 @@ export default function VibeCodingPage() {
     await checkContainerStatus(session.session_id)
   }
 
+  const handleStayLegacy = (dontShowAgain: boolean) => {
+    console.log('🔄 User chose to stay on legacy page', { dontShowAgain })
+    setShowMigrationPrompt(false)
+    if (dontShowAgain) {
+      localStorage.setItem('ide-migration-seen', 'true')
+    }
+  }
+
+  const handleUpgrade = (dontShowAgain: boolean) => {
+    console.log('🚀 User chose to upgrade to new IDE', { dontShowAgain })
+    setShowMigrationPrompt(false)
+    if (dontShowAgain) {
+      localStorage.setItem('ide-migration-seen', 'true')
+    }
+    router.push('/ide')
+  }
+
+  const handleShowMigrationAgain = () => {
+    console.log('🔄 User requested to see migration prompt again')
+    localStorage.removeItem('ide-migration-seen')
+    setShowMigrationPrompt(true)
+  }
+
   const handleSessionCreate = async (projectName: string, description?: string): Promise<Session> => {
     try {
       const token = localStorage.getItem('token')
       if (!token) throw new Error('No authentication token')
 
-      const response = await fetch('/api/vibecoding/sessions', {
+      const response = await fetch('/api/vibecode/sessions/create', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          project_name: projectName,
+          name: projectName,
+          template: 'base',
           description: description || ''
         })
       })
 
-      if (!response.ok) throw new Error('Failed to create session')
+      if (!response.ok) {
+        const errorText = await response.text()
+        console.error('Session creation failed:', response.status, errorText)
+        throw new Error(`Failed to create session: ${response.status} ${errorText}`)
+      }
 
       const data = await response.json()
+      console.log('Session creation response:', data)
       
       const session: Session = {
         id: data.id,
         session_id: data.session_id,
-        project_name: projectName,
+        name: projectName,
         description: description,
         container_status: 'stopped',
         created_at: new Date().toISOString(),
@@ -186,16 +234,12 @@ export default function VibeCodingPage() {
       if (!token) return
 
       // Stop container first
-      await fetch('/api/vibecoding/container', {
+      await fetch(`/api/vibecode/container/${sessionId}/stop`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          session_id: sessionId,
-          action: 'stop'
-        })
+        }
       })
 
       if (currentSession?.session_id === sessionId) {
@@ -215,16 +259,11 @@ export default function VibeCodingPage() {
       const token = localStorage.getItem('token')
       if (!token) return
 
-      const response = await fetch('/api/vibecoding/container', {
-        method: 'POST',
+      const response = await fetch(`/api/vibecode/container/${sessionId}/status`, {
+        method: 'GET',
         headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          session_id: sessionId,
-          action: 'status'
-        })
+          'Authorization': `Bearer ${token}`
+        }
       })
 
       if (response.ok) {
@@ -252,16 +291,12 @@ export default function VibeCodingPage() {
 
       setCurrentSession(prev => prev ? { ...prev, container_status: 'starting' } : null)
 
-      const response = await fetch('/api/vibecoding/container', {
+      const response = await fetch(`/api/vibecode/container/${currentSession.session_id}/start`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          session_id: currentSession.session_id,
-          action: 'create'
-        })
+        }
       })
 
       if (response.ok) {
@@ -293,16 +328,12 @@ export default function VibeCodingPage() {
 
       setCurrentSession(prev => prev ? { ...prev, container_status: 'stopping' } : null)
 
-      const response = await fetch('/api/vibecoding/container', {
+      const response = await fetch(`/api/vibecode/container/${currentSession.session_id}/stop`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          session_id: currentSession.session_id,
-          action: 'stop'
-        })
+        }
       })
 
       if (response.ok) {
@@ -432,7 +463,7 @@ export default function VibeCodingPage() {
   // AI Chat
   const sendVibeCommand = async (command?: string, inputType: "text" | "voice" = "text") => {
     const message = command || chatInput
-    if (!message.trim() || isAIProcessing) return
+    if (!safeTrim(message) || isAIProcessing) return
 
     const userMessage: ChatMessage = {
       role: "user",
@@ -463,7 +494,7 @@ export default function VibeCodingPage() {
           history: chatMessages.slice(-10),
           model: selectedModel,
           context: {
-            session: currentSession?.project_name || 'Vibe Coding Session',
+            session: currentSession?.name || 'Vibe Coding Session',
             container_running: isContainerRunning,
             selected_file: selectedFile?.name || null
           }
@@ -594,8 +625,23 @@ export default function VibeCodingPage() {
                   className="bg-gray-800 border-gray-600 text-gray-300 hover:bg-gray-700"
                 >
                   <Container className="w-4 h-4 mr-2" />
-                  {currentSession ? currentSession.project_name : 'Select Session'}
+                  {currentSession ? currentSession.name : 'Select Session'}
                 </Button>
+                
+                {/* Small "Show Migration Prompt Again" button */}
+                <Button
+                  onClick={handleShowMigrationAgain}
+                  variant="ghost"
+                  size="sm"
+                  className="text-xs text-gray-400 hover:text-gray-300 hover:bg-gray-800/50 px-2 py-1"
+                  title="Show IDE migration prompt again"
+                >
+                  <ArrowRight className="w-3 h-3 mr-1" />
+                  New IDE
+                </Button>
+                
+                {/* Reset button for testing */}
+                <ResetMigrationPrompt />
                 
                 {currentSession && (
                   <Badge 
@@ -846,7 +892,7 @@ export default function VibeCodingPage() {
                           />
                           <Button
                             onClick={() => sendVibeCommand()}
-                            disabled={isAIProcessing || !chatInput.trim() || isProcessingVoice}
+                            disabled={isAIProcessing || !safeTrim(chatInput) || isProcessingVoice}
                             size="sm"
                             className="bg-purple-600 hover:bg-purple-700 text-white"
                           >
@@ -974,7 +1020,7 @@ export default function VibeCodingPage() {
                           />
                           <Button
                             onClick={() => sendVibeCommand()}
-                            disabled={isAIProcessing || !chatInput.trim() || isProcessingVoice}
+                            disabled={isAIProcessing || !safeTrim(chatInput) || isProcessingVoice}
                             size="sm"
                             className="bg-purple-600 hover:bg-purple-700 text-white px-3"
                           >
@@ -1059,6 +1105,17 @@ export default function VibeCodingPage() {
 
         {/* Settings Modal */}
         <SettingsModal isOpen={showSettings} onClose={() => setShowSettings(false)} context="global" />
+
+        {/* Migration Prompt */}
+        {showMigrationPrompt && (
+          <>
+            {console.log('🎯 Rendering migration prompt')}
+            <IDEMigrationPrompt
+              onStayLegacy={handleStayLegacy}
+              onUpgrade={handleUpgrade}
+            />
+          </>
+        )}
       </div>
     </div>
   )
