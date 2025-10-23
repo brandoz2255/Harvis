@@ -609,7 +609,7 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
         }
 
         // Handle reasoning content if present - with delay to prevent race conditions
-        if (hasReasoningContent) {
+        if (hasReasoningContent && data.reasoning) {
           console.log(`🔮 [INSIGHTS_DEBUG] Processing reasoning content:`, {
             reasoningLength: data.reasoning.length,
             model: optimalModel,
