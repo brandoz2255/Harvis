@@ -35,11 +35,17 @@ export const useAIInsights = () => {
 
   const logUserInteraction = useCallback((
   userPrompt: string,
-  selectedModel?: string
+  selectedModel?: string,
+  hasReasoning?: boolean
 ) => {
   const thoughtProcess = generateThoughtProcess(userPrompt, selectedModel)
 
-  const type: 'thought' | 'reasoning' = isReasoningModel(selectedModel) ? 'reasoning' : 'thought'
+  // Content-based detection: if hasReasoning is explicitly provided, use it
+  // Otherwise fall back to name-based detection
+  const type: 'thought' | 'reasoning' =
+    hasReasoning !== undefined
+      ? (hasReasoning ? 'reasoning' : 'thought')
+      : (isReasoningModel(selectedModel) ? 'reasoning' : 'thought')
 
   const insightId = logThoughtProcess(
     thoughtProcess,
