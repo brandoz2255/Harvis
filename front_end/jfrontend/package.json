@@ -7,7 +7,10 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage"
   },
   "dependencies": {
     "@babel/runtime": "^7.26.10",
@@ -19,6 +22,11 @@
     "@tailwindcss/typography": "^0.5.16",
     "@types/archiver": "^6.0.3",
     "@types/lodash": "^4.17.20",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/addon-search": "^0.15.0",
+    "@xterm/addon-unicode11": "^0.8.0",
+    "@xterm/addon-web-links": "^0.11.0",
+    "@xterm/xterm": "^5.5.0",
     "archiver": "^7.0.1",
     "bcrypt": "^6.0.0",
     "brace-expansion": "^2.0.2",
@@ -39,6 +47,7 @@
     "react": "^18",
     "react-dom": "^18",
     "react-markdown": "^10.1.0",
+    "react-mosaic-component": "^6.1.1",
     "remark-gfm": "^4.0.1",
     "socket.io-client": "^4.8.1",
     "tailwind-merge": "^2.2.0",
@@ -46,6 +55,10 @@
     "textarea": "^0.3.0",
     "uuid": "^11.1.0",
     "vscode-languageserver-protocol": "^3.17.5",
+    "xterm-addon-fit": "^0.8.0",
+    "xterm-addon-search": "^0.13.0",
+    "xterm-addon-unicode11": "^0.6.0",
+    "xterm-addon-web-links": "^0.9.0",
     "zustand": "^5.0.6"
   },
   "devDependencies": {

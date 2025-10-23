@@ -68,6 +68,7 @@ start_backend() {
   docker run --rm -it \
     --name backend \
     --gpus all \
+    --user root \
     -p 8000:8000 \
     --env-file "$ENV_FILE" \
     --network ollama-n8n-network \
@@ -96,6 +97,7 @@ start_backend_detached() {
   docker run -d \
     --name backend \
     --gpus all \
+    --user root \
     -p 8000:8000 \
     --env-file "$ENV_FILE" \
     --network ollama-n8n-network \

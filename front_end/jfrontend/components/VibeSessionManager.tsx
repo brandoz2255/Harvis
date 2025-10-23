@@ -22,12 +22,13 @@ import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
+import { safeTrim, toStr } from '@/lib/strings'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
 
 interface Session {
   id: string
   session_id: string
-  project_name: string
+  name: string
   description?: string
   container_status: 'running' | 'stopped' | 'starting' | 'stopping'
   created_at: string
@@ -63,6 +64,8 @@ export default function VibeSessionManager({
   const [editProjectName, setEditProjectName] = useState("")
   const [editDescription, setEditDescription] = useState("")
   const [showCreateDialog, setShowCreateDialog] = useState(false)
+  const [selectedTemplate, setSelectedTemplate] = useState("base")
+  const [deleteConfirmSessionId, setDeleteConfirmSessionId] = useState<string | null>(null)
 
   const loadSessions = async () => {
     try {
@@ -70,7 +73,7 @@ export default function VibeSessionManager({
       const token = localStorage.getItem('token')
       if (!token) return
 
-      const response = await fetch('/api/vibecoding/sessions', {
+      const response = await fetch('/api/vibecode/sessions', {
         headers: {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json'
@@ -97,7 +100,7 @@ export default function VibeSessionManager({
   }, [userId])
 
   const handleCreateSession = async () => {
-    if (!newProjectName.trim() || isCreating) return
+    if (!safeTrim(newProjectName) || isCreating) return
 
     try {
       setIsCreating(true)
@@ -114,6 +117,8 @@ export default function VibeSessionManager({
       onSessionSelect(session)
     } catch (error) {
       console.error('Failed to create session:', error)
+      // Show error to user
+      alert(`Failed to create session: ${error instanceof Error ? error.message : 'Unknown error'}`)
     } finally {
       setIsCreating(false)
     }
@@ -125,6 +130,7 @@ export default function VibeSessionManager({
     try {
       await onSessionDelete(sessionId)
       await loadSessions()
+      setDeleteConfirmSessionId(null)
       
       // If we deleted the current session, clear selection
       if (currentSessionId === sessionId) {
@@ -132,7 +138,16 @@ export default function VibeSessionManager({
       }
     } catch (error) {
       console.error('Failed to delete session:', error)
+      alert(`Failed to delete session: ${error instanceof Error ? error.message : 'Unknown error'}`)
     }
+  }
+
+  const confirmDeleteSession = (sessionId: string) => {
+    setDeleteConfirmSessionId(sessionId)
+  }
+
+  const cancelDeleteSession = () => {
+    setDeleteConfirmSessionId(null)
   }
 
   const startEditSession = (session: Session) => {
@@ -142,29 +157,10 @@ export default function VibeSessionManager({
   }
 
   const saveEditSession = async (sessionId: string) => {
-    try {
-      const token = localStorage.getItem('token')
-      if (!token) return
-
-      const response = await fetch(`/api/vibecoding/sessions/${sessionId}`, {
-        method: 'PUT',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          project_name: editProjectName,
-          description: editDescription
-        })
-      })
-
-      if (response.ok) {
-        await loadSessions()
-        setEditingSessionId(null)
-      }
-    } catch (error) {
-      console.error('Failed to update session:', error)
-    }
+    // TODO: Implement session update endpoint
+    // For now, just close the edit mode
+    setEditingSessionId(null)
+    console.log('Session edit functionality not yet implemented')
   }
 
   const cancelEditSession = () => {
@@ -262,10 +258,25 @@ export default function VibeSessionManager({
                     onKeyPress={(e) => e.key === 'Enter' && handleCreateSession()}
                   />
                 </div>
+                <div>
+                  <label className="text-sm font-medium text-gray-300 mb-2 block">
+                    Template
+                  </label>
+                  <select
+                    value={selectedTemplate}
+                    onChange={(e) => setSelectedTemplate(e.target.value)}
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-600 text-white rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500"
+                  >
+                    <option value="base">Base (Python 3.10)</option>
+                    <option value="node">Node.js</option>
+                    <option value="python-data">Python Data Science</option>
+                    <option value="web">Web Development</option>
+                  </select>
+                </div>
                 <div className="flex space-x-2 pt-4">
                   <Button
                     onClick={handleCreateSession}
-                    disabled={!newProjectName.trim() || isCreating}
+                    disabled={!safeTrim(newProjectName) || isCreating}
                     className="bg-purple-600 hover:bg-purple-700 text-white flex-1"
                   >
                     {isCreating ? (
@@ -355,7 +366,7 @@ export default function VibeSessionManager({
                   <div>
                     <div className="flex items-start justify-between mb-2">
                       <h4 className="font-medium text-white truncate flex-1">
-                        {session.project_name}
+                        {session.name}
                       </h4>
                       <div className="flex items-center space-x-1 ml-2">
                         <Button
@@ -373,7 +384,7 @@ export default function VibeSessionManager({
                           <Button
                             onClick={(e) => {
                               e.stopPropagation()
-                              handleDeleteSession(session.session_id)
+                              confirmDeleteSession(session.session_id)
                             }}
                             size="sm"
                             variant="ghost"
@@ -439,6 +450,42 @@ export default function VibeSessionManager({
           Refresh Sessions
         </Button>
       </div>
+
+      {/* Delete Confirmation Dialog */}
+      <Dialog open={deleteConfirmSessionId !== null} onOpenChange={(open) => !open && cancelDeleteSession()}>
+        <DialogContent className="bg-gray-900 border-red-500/30 text-white">
+          <DialogHeader>
+            <DialogTitle className="text-red-400 flex items-center">
+              <Trash2 className="w-5 h-5 mr-2" />
+              Delete Session
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 pt-4">
+            <p className="text-gray-300">
+              Are you sure you want to delete this session? This will stop the container and move it to trash (soft delete).
+            </p>
+            <p className="text-sm text-gray-400">
+              Your files will be preserved in the volume. To permanently delete, use the force option.
+            </p>
+            <div className="flex space-x-2 pt-4">
+              <Button
+                onClick={() => deleteConfirmSessionId && handleDeleteSession(deleteConfirmSessionId)}
+                className="bg-red-600 hover:bg-red-700 text-white flex-1"
+              >
+                <Trash2 className="w-4 h-4 mr-2" />
+                Delete Session
+              </Button>
+              <Button
+                onClick={cancelDeleteSession}
+                variant="outline"
+                className="border-gray-600 text-gray-300"
+              >
+                Cancel
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </Card>
   )
 }

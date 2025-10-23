@@ -13,7 +13,7 @@ export const useAIInsights = () => {
     
     const insightId = addInsight({
       type,
-      status: 'thinking...',
+      status: 'thinking',
       title,
       content,
       model

@@ -21,6 +21,7 @@ import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import Editor from "@monaco-editor/react"
+import { toWorkspaceRelativePath } from '@/lib/strings'
 import { configureMonacoLanguages, setupLSPFeatures } from '@/lib/monaco-config'
 
 interface ContainerFile {
@@ -35,6 +36,7 @@ interface VibeContainerCodeEditorProps {
   sessionId: string | null
   selectedFile: ContainerFile | null
   onExecute?: (filePath: string) => void
+  onCursorPositionChange?: (position: { line: number; column: number }) => void
   className?: string
 }
 
@@ -42,6 +44,7 @@ export default function VibeContainerCodeEditor({
   sessionId,
   selectedFile,
   onExecute,
+  onCursorPositionChange,
   className = ""
 }: VibeContainerCodeEditorProps) {
   const [content, setContent] = useState('')
@@ -51,13 +54,92 @@ export default function VibeContainerCodeEditor({
   const [lastSaved, setLastSaved] = useState<Date | null>(null)
   const [isModified, setIsModified] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
+  const [isLoadingFile, setIsLoadingFile] = useState(false)
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'error' | null>(null)
   const [editorTheme, setEditorTheme] = useState<'vibe-dark' | 'vibe-light' | 'github-dark' | 'github-light' | 'vs-dark' | 'light' | 'monokai' | 'dracula'>('vibe-dark')
-  const [fontSize, setFontSize] = useState(14)
   const [wordWrap, setWordWrap] = useState<'on' | 'off'>('off')
+  
+  // Get font size from CSS variable (set by user preferences)
+  const [fontSize, setFontSize] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const cssVar = getComputedStyle(document.documentElement).getPropertyValue('--vibe-font-size')
+      return cssVar ? parseInt(cssVar) : 14
+    }
+    return 14
+  })
   
   const editorRef = useRef<any>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  // Use ref to track last call time to prevent debounce issues
+  const lastCallRef = useRef<number>(0)
+
+  // Define loadFileContent before using it in useEffect
+  const loadFileContent = useCallback(async () => {
+    if (!selectedFile || !sessionId || selectedFile.type !== 'file') return
+
+    // Debounce file loading to prevent flickering
+    const now = Date.now()
+    if (lastCallRef.current && now - lastCallRef.current < 500) {
+      console.log('⏳ Debouncing file load (too frequent)')
+      return
+    }
+    lastCallRef.current = now
+
+    // Don't load if already loading
+    if (isLoading || isLoadingFile) {
+      console.log('⏳ File already loading, skipping...')
+      return
+    }
+
+    try {
+      setIsLoading(true)
+      setIsLoadingFile(true)
+      const token = localStorage.getItem('token')
+      if (!token) {
+        console.error('❌ No authentication token found')
+        setContent('// Authentication required - please log in')
+        return
+      }
+
+      const response = await fetch('/api/vibecode/files/read', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          session_id: sessionId,
+          path: selectedFile.path
+        })
+      })
+
+      if (response.ok) {
+        const data = await response.json()
+        console.log(`📄 Loaded file ${selectedFile.path}: ${data.content?.length || 0} bytes`)
+        setContent(data.content || '')
+        setIsModified(false)
+        setLastSaved(new Date())
+      } else {
+        const errorText = await response.text()
+        console.error(`❌ Failed to load file content (${response.status}):`, errorText)
+
+        if (response.status === 401) {
+          console.error('❌ Authentication failed - token may be expired')
+          setContent('// Authentication failed - please refresh the page')
+          // Optionally redirect to login or refresh token
+        } else {
+          setContent('// Failed to load file content')
+        }
+      }
+    } catch (error) {
+      console.error('Error loading file:', error)
+      setContent('// Error loading file')
+    } finally {
+      setIsLoading(false)
+      setIsLoadingFile(false)
+    }
+  }, [selectedFile?.path, sessionId, isLoading, isLoadingFile])
 
   // Load file content when selected file changes
   useEffect(() => {
@@ -67,7 +149,27 @@ export default function VibeContainerCodeEditor({
       setContent('')
       setIsModified(false)
     }
-  }, [selectedFile, sessionId, loadFileContent])
+  }, [selectedFile?.path, sessionId, loadFileContent])
+
+  // Watch for font size changes from CSS variable (user preferences)
+  useEffect(() => {
+    const observer = new MutationObserver(() => {
+      const cssVar = getComputedStyle(document.documentElement).getPropertyValue('--vibe-font-size')
+      if (cssVar) {
+        const newSize = parseInt(cssVar)
+        if (newSize !== fontSize) {
+          setFontSize(newSize)
+        }
+      }
+    })
+    
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ['style']
+    })
+    
+    return () => observer.disconnect()
+  }, [fontSize])
 
   // Update Monaco editor options when settings change
   useEffect(() => {
@@ -80,54 +182,27 @@ export default function VibeContainerCodeEditor({
     }
   }, [fontSize, wordWrap])
 
-  const loadFileContent = useCallback(async () => {
-    if (!selectedFile || !sessionId || selectedFile.type !== 'file') return
-
-    try {
-      setIsLoading(true)
-      const token = localStorage.getItem('token')
-      if (!token) return
-
-      const response = await fetch('/api/vibecoding/files', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          session_id: sessionId,
-          action: 'read',
-          file_path: selectedFile.path
-        })
-      })
-
-      if (response.ok) {
-        const data = await response.json()
-        setContent(data.content || '')
-        setIsModified(false)
-        setLastSaved(new Date())
-      } else {
-        console.error('Failed to load file content')
-        setContent('// Failed to load file content')
-      }
-    } catch (error) {
-      console.error('Error loading file:', error)
-      setContent('// Error loading file')
-    } finally {
-      setIsLoading(false)
-    }
-  }, [selectedFile, sessionId])
-
-  const saveFile = async () => {
+  const saveFile = useCallback(async () => {
     if (!selectedFile || !sessionId || !isModified) return
+
+    // Throttle auto-save to prevent spam
+    const now = Date.now()
+    if (saveFile.lastCall && now - saveFile.lastCall < 2000) {
+      console.log('⏳ Throttling auto-save (too frequent)')
+      return
+    }
+    saveFile.lastCall = now
 
     try {
       setIsSaving(true)
       setSaveStatus('saving')
       const token = localStorage.getItem('token')
-      if (!token) return
+      if (!token) {
+        console.error('❌ No authentication token found')
+        return
+      }
 
-      const response = await fetch('/api/vibecoding/files', {
+      const response = await fetch('/api/vibecode/files/save', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
@@ -135,8 +210,7 @@ export default function VibeContainerCodeEditor({
         },
         body: JSON.stringify({
           session_id: sessionId,
-          action: 'write',
-          file_path: selectedFile.path,
+          path: toWorkspaceRelativePath(selectedFile.path),
           content
         })
       })
@@ -145,10 +219,19 @@ export default function VibeContainerCodeEditor({
         setIsModified(false)
         setLastSaved(new Date())
         setSaveStatus('saved')
-        
+
         // Clear save status after 2 seconds
         setTimeout(() => setSaveStatus(null), 2000)
       } else {
+        const errorText = await response.text()
+        console.error(`❌ Save failed (${response.status}):`, errorText)
+        
+        if (response.status === 401) {
+          console.error('❌ Authentication failed - token may be expired')
+        } else if (response.status === 422) {
+          console.error('❌ Validation error - check request format')
+        }
+        
         setSaveStatus('error')
         setTimeout(() => setSaveStatus(null), 3000)
       }
@@ -159,7 +242,18 @@ export default function VibeContainerCodeEditor({
     } finally {
       setIsSaving(false)
     }
-  }
+  }, [selectedFile?.path, sessionId, isModified, content])
+
+  // Debounced auto-save (500ms delay) - Task 11.2 requirement
+  useEffect(() => {
+    if (!isModified || !selectedFile || !sessionId || isSaving) return
+
+    const timeoutId = setTimeout(() => {
+      saveFile()
+    }, 500)
+
+    return () => clearTimeout(timeoutId)
+  }, [isModified, selectedFile?.path, sessionId, isSaving, saveFile])
 
   const executeFile = async () => {
     if (!selectedFile || !sessionId) return
@@ -172,30 +266,12 @@ export default function VibeContainerCodeEditor({
         await saveFile()
       }
 
+      // Use the onExecute prop to handle execution
       if (onExecute) {
-        onExecute(selectedFile.path)
-      }
-
-      // Alternative: execute via API
-      const token = localStorage.getItem('token')
-      if (token) {
-        const response = await fetch('/api/vibecoding/files', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            session_id: sessionId,
-            action: 'execute',
-            command: getExecuteCommand(selectedFile.name, selectedFile.path)
-          })
-        })
-
-        if (response.ok) {
-          const data = await response.json()
-          console.log('Execution result:', data)
-        }
+        console.log('🎯 Calling onExecute with path:', selectedFile.path)
+        await onExecute(selectedFile.path)
+      } else {
+        console.log('⚠️ onExecute prop not provided')
       }
     } catch (error) {
       console.error('Error executing file:', error)
@@ -431,6 +507,25 @@ export default function VibeContainerCodeEditor({
       contextmenu: true,
       mouseWheelZoom: true
     })
+    
+    // Track cursor position changes
+    if (onCursorPositionChange) {
+      editor.onDidChangeCursorPosition((e: any) => {
+        onCursorPositionChange({
+          line: e.position.lineNumber,
+          column: e.position.column
+        })
+      })
+      
+      // Set initial position
+      const position = editor.getPosition()
+      if (position) {
+        onCursorPositionChange({
+          line: position.lineNumber,
+          column: position.column
+        })
+      }
+    }
 
     // Add keyboard shortcuts
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
