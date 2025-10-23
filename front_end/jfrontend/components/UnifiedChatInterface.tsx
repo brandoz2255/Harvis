@@ -442,6 +442,7 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
     setIsLoading(true)
     
     // Log user interaction for AI insights
+    // Note: We'll update the insight type after we get the response and know if it has reasoning
     console.log(`🧠 [INSIGHTS_DEBUG] Creating user insight for: ${messageContent.substring(0, 30)}...`)
     const userInsightId = logUserInteraction(messageContent, optimalModel)
 
@@ -595,26 +596,33 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
 
       // Handle AI insights with improved timing and error handling
       try {
+        const hasReasoningContent = !!(data.reasoning && data.reasoning.trim().length > 0)
+
         // Complete the user interaction insight
         if (assistantResponse) {
-          console.log(`🧠 [INSIGHTS_DEBUG] Completing user insight: ${userInsightId}`)
-          completeInsight(userInsightId, `Response generated using ${optimalModel}`, "done")
+          const resultMessage = hasReasoningContent
+            ? `Reasoning model - thinking process captured using ${optimalModel}`
+            : `Response generated using ${optimalModel}`
+
+          console.log(`🧠 [INSIGHTS_DEBUG] Completing user insight: ${userInsightId} (hasReasoning: ${hasReasoningContent})`)
+          completeInsight(userInsightId, resultMessage, "done")
         }
 
         // Handle reasoning content if present - with delay to prevent race conditions
-        if (data.reasoning) {
+        if (hasReasoningContent) {
           console.log(`🔮 [INSIGHTS_DEBUG] Processing reasoning content:`, {
             reasoningLength: data.reasoning.length,
-            model: optimalModel
+            model: optimalModel,
+            detectedAsThinkingModel: true
           })
-          
+
           // Add small delay to prevent insight timing conflicts
           setTimeout(() => {
             try {
               // Log the reasoning process in AI insights
               const reasoningInsightId = logReasoningProcess(data.reasoning || '', optimalModel)
               console.log(`🔮 [INSIGHTS_DEBUG] Created reasoning insight: ${reasoningInsightId}`)
-              
+
               // Complete reasoning insight after a brief delay
               setTimeout(() => {
                 completeInsight(reasoningInsightId, "Reasoning process completed", "done")
@@ -624,7 +632,7 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
             }
           }, 50)
         } else {
-          console.log(`❌ [INSIGHTS_DEBUG] No reasoning content in response`)
+          console.log(`ℹ️ [INSIGHTS_DEBUG] No reasoning content in response - regular model response`)
         }
       } catch (insightError) {
         console.error(`❌ [INSIGHTS_DEBUG] Error handling AI insights:`, insightError)
@@ -903,10 +911,12 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
         }
 
         // Handle reasoning content if present (same as regular chat)
-        if (data.reasoning) {
+        const hasReasoningContent = !!(data.reasoning && data.reasoning.trim().length > 0)
+        if (hasReasoningContent) {
+          console.log(`🔮 [VOICE_DEBUG] Voice input detected reasoning content from ${modelToUse}`)
           // Log the reasoning process in AI insights
           const reasoningInsightId = logReasoningProcess(data.reasoning, modelToUse)
-          completeInsight(reasoningInsightId, "Reasoning process completed", "done")
+          completeInsight(reasoningInsightId, "Reasoning process completed (voice input)", "done")
         }
 
         if (data.audio_path) {
