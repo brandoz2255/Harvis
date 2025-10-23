@@ -467,3 +467,78 @@ async def delete_session(
         "message": "Session deleted" if not force else "Session permanently deleted",
         "success": success
     }
+
+@router.get("/status/{session_id}")
+async def get_session_status(
+    session_id: str,
+    user: Dict = Depends(get_current_user),
+    session_manager: SessionManager = Depends(get_session_manager)
+):
+    """Get session status with runtime capabilities"""
+    user_id = user.get("id")
+    
+    # Get session info
+    session = await session_manager.get_session(session_id, user_id)
+    
+    # Import container manager
+    from .containers import container_manager
+    
+    # Get container status
+    container = await container_manager.get_container(session_id)
+    
+    if not container:
+        return {
+            "status": "not_created",
+            "message": "Container not created yet",
+            "capabilities": {}
+        }
+    
+    # Verify user owns this session
+    user_id_label = container.labels.get("user_id")
+    if user_id_label and str(user_id) != user_id_label:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    
+    container.reload()
+    
+    # Probe runtime capabilities if container is running
+    capabilities = {}
+    if container.status == "running":
+        try:
+            import docker
+            client = docker.from_env()
+            
+            def _probe(cmd: str) -> bool:
+                """Probe if command exists in container"""
+                try:
+                    exec_id = client.api.exec_create(
+                        container=container.id, 
+                        cmd=["/bin/sh", "-lc", cmd]
+                    )["Id"]
+                    result = client.api.exec_start(exec_id, stream=False)
+                    insp = client.api.exec_inspect(exec_id)
+                    return insp.get("ExitCode", 1) == 0
+                except:
+                    return False
+            
+            # Probe each runtime
+            capabilities = {
+                "python": _probe("command -v python || command -v python3"),
+                "bash": _probe("command -v bash"),
+                "node": _probe("command -v node"),
+                "tsnode": _probe("node -e \"require('ts-node')\" >/dev/null 2>&1"),
+                "ruby": _probe("command -v ruby"),
+                "go": _probe("command -v go"),
+                "java": _probe("command -v javac && command -v java"),
+                "gcc": _probe("command -v gcc || command -v g++"),
+            }
+        except Exception as e:
+            logger.warning(f"Failed to probe capabilities for {session_id}: {e}")
+            capabilities = {}
+    
+    return {
+        "status": container.status,
+        "message": f"Container {container.status}",
+        "capabilities": capabilities,
+        "container_id": container.id,
+        "session_id": session_id
+    }

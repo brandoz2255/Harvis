@@ -40,6 +40,8 @@ interface MonacoVibeFileTreeProps {
   isContainerRunning?: boolean
   onFileSelect: (filePath: string, content: string) => void
   onFileContentChange?: (filePath: string, content: string) => void
+  currentDir?: string
+  newFileButton?: React.ReactNode
   className?: string
 }
 
@@ -54,6 +56,8 @@ export default function MonacoVibeFileTree({
   isContainerRunning = false,
   onFileSelect, 
   onFileContentChange,
+  currentDir = '/workspace',
+  newFileButton,
   className = "" 
 }: MonacoVibeFileTreeProps) {
   const [fileTree, setFileTree] = useState<FileTreeNode[]>([])
@@ -939,13 +943,15 @@ export default function MonacoVibeFileTree({
                 <RefreshCw size={14} className="text-gray-400" />
               )}
             </Button>
-            <Button 
-              size="sm"
-              variant="ghost"
-              className="p-1 h-auto hover:bg-gray-700"
-            >
-              <Plus size={14} className="text-gray-400" />
-            </Button>
+            {newFileButton || (
+              <Button 
+                size="sm"
+                variant="ghost"
+                className="p-1 h-auto hover:bg-gray-700"
+              >
+                <Plus size={14} className="text-gray-400" />
+              </Button>
+            )}
           </div>
         </div>
         
