@@ -1,0 +1,16 @@
+# Browser Service Dependencies
+# Selenium-based web automation
+
+# Core FastAPI
+fastapi
+uvicorn[standard]
+pydantic
+
+# Browser automation
+selenium
+webdriver-manager
+
+# Utilities
+python-dotenv
+requests
+Pillow

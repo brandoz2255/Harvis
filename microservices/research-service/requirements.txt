@@ -1,0 +1,32 @@
+# Research Service Dependencies
+# Web search, research agents, fact-checking
+
+# Core FastAPI and web dependencies
+fastapi
+uvicorn[standard]
+pydantic
+requests
+httpx
+
+# LangChain and search
+langchain
+langchain-community
+langchain-openai
+langchain-postgres
+ddgs
+beautifulsoup4
+newspaper3k
+tavily-python
+
+# Advanced research dependencies
+requests-cache>=1.0.0
+trafilatura>=1.6.0
+rank-bm25>=0.2.2
+youtube-transcript-api>=0.6.0
+pypdf>=3.0.0
+python-magic>=0.4.27
+
+# Utilities
+python-dotenv
+lxml_html_clean
+defusedxml>=0.7.0

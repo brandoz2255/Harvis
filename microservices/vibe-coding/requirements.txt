@@ -1,0 +1,7 @@
+# Vibe Coding Service Dependencies
+fastapi
+uvicorn[standard]
+pydantic
+python-dotenv
+requests
+docker>=7.0.0

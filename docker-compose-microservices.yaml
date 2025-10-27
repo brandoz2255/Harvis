@@ -1,0 +1,242 @@
+# Microservices Architecture for Harvis AI
+# Split backend into specialized services for reduced image sizes
+
+services:
+  # ============================================================================
+  # NGINX Proxy - Entry point for all requests
+  # ============================================================================
+  nginx:
+    image: nginx:alpine
+    container_name: nginx-proxy
+    restart: unless-stopped
+    ports:
+      - "9000:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      - ollama-n8n-network
+    depends_on:
+      - core-api
+
+  # ============================================================================
+  # Database - PostgreSQL with pgvector
+  # ============================================================================
+  pgsql:
+    image: pgvector/pgvector:pg15
+    container_name: pgsql-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: pguser
+      POSTGRES_PASSWORD: pgpassword
+      POSTGRES_DB: database
+      POSTGRES_INITDB_ARGS: "-E UTF8 --locale=C"
+    volumes:
+      - pgsql_data:/var/lib/postgresql/data
+      - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh
+    networks:
+      - ollama-n8n-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pguser -d database"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============================================================================
+  # Core API Service - Authentication Gateway and Router (~500MB)
+  # ============================================================================
+  core-api:
+    build:
+      context: ./microservices/core-api
+      dockerfile: Dockerfile
+    container_name: core-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      JWT_SECRET: ${JWT_SECRET:-your-secret-key-here}
+      DATABASE_URL: postgresql://pguser:pgpassword@pgsql:5432/database
+      RESEARCH_SERVICE_URL: http://research-service:8001
+      VOICE_SERVICE_URL: http://voice-service:8002
+      BROWSER_SERVICE_URL: http://browser-service:8003
+      MCP_SERVICE_URL: http://mcp-service:8004
+      N8N_SERVICE_URL: http://n8n-integration:8005
+      VIBE_SERVICE_URL: http://vibe-coding:8006
+    networks:
+      - ollama-n8n-network
+    depends_on:
+      pgsql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ============================================================================
+  # Research Service - Web Search and Research Agents (~1.5GB)
+  # ============================================================================
+  research-service:
+    build:
+      context: ./microservices/research-service
+      dockerfile: Dockerfile
+    container_name: research-service
+    restart: unless-stopped
+    environment:
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
+    networks:
+      - ollama-n8n-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ============================================================================
+  # Voice Service - Whisper STT + Chatterbox TTS (~4GB - largest)
+  # ============================================================================
+  voice-service:
+    build:
+      context: ./microservices/voice-service
+      dockerfile: Dockerfile
+    container_name: voice-service
+    restart: unless-stopped
+    environment:
+      WHISPER_MODEL: ${WHISPER_MODEL:-base}
+      OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
+    volumes:
+      - voice_cache:/home/appuser/.cache
+    networks:
+      - ollama-n8n-network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ============================================================================
+  # Browser Service - Selenium Web Automation (~800MB)
+  # ============================================================================
+  browser-service:
+    build:
+      context: ./microservices/browser-service
+      dockerfile: Dockerfile
+    container_name: browser-service
+    restart: unless-stopped
+    environment:
+      CHROME_BIN: /usr/bin/chromium
+      CHROMEDRIVER_PATH: /usr/bin/chromedriver
+    networks:
+      - ollama-n8n-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ============================================================================
+  # MCP Service - Model Context Protocol Tools (~600MB)
+  # ============================================================================
+  mcp-service:
+    build:
+      context: ./microservices/mcp-service
+      dockerfile: Dockerfile
+    container_name: mcp-service
+    restart: unless-stopped
+    networks:
+      - ollama-n8n-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ============================================================================
+  # N8N Integration Service - Workflow Automation (~1GB)
+  # ============================================================================
+  n8n-integration:
+    build:
+      context: ./microservices/n8n-integration
+      dockerfile: Dockerfile
+    container_name: n8n-integration
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://pguser:pgpassword@pgsql:5432/database
+      N8N_API_URL: ${N8N_API_URL:-http://n8n:5678}
+      N8N_API_KEY: ${N8N_PERSONAL_API_KEY:-}
+    networks:
+      - ollama-n8n-network
+    depends_on:
+      pgsql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8005/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ============================================================================
+  # Vibe Coding Service - AI Development Environment (~800MB)
+  # ============================================================================
+  vibe-coding:
+    build:
+      context: ./microservices/vibe-coding
+      dockerfile: Dockerfile
+    container_name: vibe-coding
+    restart: unless-stopped
+    environment:
+      OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
+      DOCKER_HOST: unix:///var/run/docker.sock
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - ollama-n8n-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8006/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ============================================================================
+  # N8N - Workflow Automation Platform
+  # ============================================================================
+  n8n:
+    image: n8nio/n8n
+    container_name: n8n
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    volumes:
+      - n8n_data:/home/node/.n8n2
+    environment:
+      N8N_BASIC_AUTH_ACTIVE: "true"
+      N8N_BASIC_AUTH_USER: "admin"
+      N8N_BASIC_AUTH_PASSWORD: "adminpass"
+      N8N_PERSONAL_API_KEY: "${N8N_PERSONAL_API_KEY}"
+      DB_TYPE: "postgres"
+      DB_POSTGRES_HOST: "pgsql"
+      DB_POSTGRES_PORT: "5432"
+      DB_POSTGRES_DATABASE: "database"
+      DB_POSTGRES_USER: "pguser"
+      DB_POSTGRES_PASSWORD: "pgpassword"
+    networks:
+      - ollama-n8n-network
+    depends_on:
+      pgsql:
+        condition: service_healthy
+
+networks:
+  ollama-n8n-network:
+    external: true
+
+volumes:
+  pgsql_data:
+  n8n_data:
+  voice_cache:
