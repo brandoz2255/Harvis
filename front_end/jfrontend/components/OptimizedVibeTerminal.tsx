@@ -108,9 +108,13 @@ export default function OptimizedVibeTerminal({
         })
       }
 
-      const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-      // Use new /ws/vibecoding/terminal endpoint
-      const wsUrl = `${wsProtocol}//${window.location.host}/ws/vibecoding/terminal?session_id=${sessionId}&token=${token}`
+      // Build WS URL robustly
+      const wsBase = window.location.origin.replace(/^http/, 'ws')
+      const params = new URLSearchParams({
+        session_id: sessionId,
+        token
+      })
+      const wsUrl = `${wsBase}/ws/vibecoding/terminal?${params.toString()}`
       
       console.log(`🔌 Connecting to WebSocket: ${wsUrl}`)
       console.log(`🔌 Token length: ${token ? token.length : 'null'}`)

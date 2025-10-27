@@ -320,8 +320,8 @@ class ContainerManager:
         volume_name = ide_info.volume_name if ide_info else f"vibecode-{user_id}-{session_id}-ws"
         base_network = os.getenv("IDE_BASE_NETWORK")
 
-        # Pull runner image
-        runner_image = os.getenv("VIBECODING_RUNNER_IMAGE", "python:3.11-slim")
+        # Pull runner image (node:18-bullseye-slim has Node.js + we'll add Python during creation)
+        runner_image = os.getenv("VIBECODING_RUNNER_IMAGE", "node:18-bullseye-slim")
         try:
             logger.info(f"🔄 Pulling runner image: {runner_image}")
             self.docker_client.images.pull(runner_image)
@@ -381,6 +381,25 @@ class ContainerManager:
 
             container = self.docker_client.containers.run(**config)
             container.reload()
+            
+            # Install Python in node:18-bullseye-slim runner
+            if runner_image == "node:18-bullseye-slim":
+                logger.info(f"🐍 Installing Python in runner container")
+                try:
+                    container.exec_run("apt-get update -q -y")
+                    container.exec_run("apt-get install -y -q python3 python3-pip")
+                    logger.info("✅ Python installed successfully")
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to install Python (non-critical): {e}")
+            
+            # Fix workspace permissions to be writable
+            logger.info(f"🔧 Fixing workspace permissions in new runner container")
+            try:
+                fix_perms_cmd = "sh -c 'chmod -R 777 /workspace 2>/dev/null || true'"
+                container.exec_run(fix_perms_cmd)
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to fix permissions (non-critical): {e}")
+            
             info = ContainerInfo(
                 container_id=container.id,
                 container_name=container.name,

@@ -26,6 +26,7 @@ import {
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog'
 
 interface FileTreeNode {
   name: string
@@ -69,6 +70,8 @@ export default function MonacoVibeFileTree({
   const [showDeleteConfirm, setShowDeleteConfirm] = useState<string | null>(null)
   const [draggedNode, setDraggedNode] = useState<FileTreeNode | null>(null)
   const [dropTarget, setDropTarget] = useState<string | null>(null)
+  const [showNewFileDialog, setShowNewFileDialog] = useState(false)
+  const [newFileName, setNewFileName] = useState('')
   
   const wsRef = useRef<WebSocket | null>(null)
   const contextMenuRef = useRef<HTMLDivElement>(null)
@@ -943,6 +946,7 @@ export default function MonacoVibeFileTree({
               size="sm"
               variant="ghost"
               className="p-1 h-auto hover:bg-gray-700"
+              onClick={() => setShowNewFileDialog(true)}
             >
               <Plus size={14} className="text-gray-400" />
             </Button>
@@ -1022,6 +1026,66 @@ export default function MonacoVibeFileTree({
           </button>
         </div>
       )}
+
+      {/* New File Dialog */}
+      <Dialog open={showNewFileDialog} onOpenChange={setShowNewFileDialog}>
+        <DialogContent className="bg-gray-900 border-gray-700 text-white sm:max-w-[425px]">
+          <DialogHeader>
+            <DialogTitle className="text-xl font-semibold text-white">Create New File</DialogTitle>
+            <DialogDescription className="text-gray-400">
+              Enter a filename with the appropriate extension (e.g., main.py, app.js, data.json)
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div>
+              <label className="text-sm font-medium text-gray-300 mb-2 block">
+                Filename
+              </label>
+              <Input
+                type="text"
+                placeholder="example.py"
+                value={newFileName}
+                onChange={(e) => setNewFileName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && newFileName.trim()) {
+                    handleCreateFile()
+                  }
+                }}
+                className="bg-gray-800 border-gray-600 text-white placeholder:text-gray-500 focus:border-purple-500"
+                autoFocus
+              />
+            </div>
+            <div className="flex justify-end gap-3 pt-4">
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setShowNewFileDialog(false)
+                  setNewFileName('')
+                }}
+                className="border-gray-600 text-gray-300 hover:bg-gray-800"
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={handleCreateFile}
+                disabled={!newFileName.trim()}
+                className="bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700 text-white"
+              >
+                <FilePlus className="w-4 h-4 mr-2" />
+                Create File
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   )
+  
+  function handleCreateFile() {
+    if (newFileName.trim()) {
+      createFile('/workspace', newFileName.trim())
+      setShowNewFileDialog(false)
+      setNewFileName('')
+    }
+  }
 }
