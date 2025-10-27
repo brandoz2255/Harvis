@@ -1,0 +1,24 @@
+# Voice Service Dependencies
+# Speech-to-Text (Whisper) and Text-to-Speech (Chatterbox)
+
+# Core FastAPI
+fastapi
+uvicorn[standard]
+python-multipart
+pydantic
+
+# PyTorch and Audio Processing (largest dependencies)
+torch==2.6.0
+torchaudio==2.6.0
+soundfile
+
+# Speech Recognition
+openai-whisper
+
+# Text-to-Speech
+chatterbox-tts
+accelerate
+
+# Utilities
+python-dotenv
+requests

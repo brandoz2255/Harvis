@@ -1,0 +1,8 @@
+# MCP Service Dependencies
+fastapi
+uvicorn[standard]
+pydantic
+python-dotenv
+requests
+defusedxml>=0.7.0
+python-magic>=0.4.27

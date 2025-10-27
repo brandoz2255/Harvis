@@ -1,0 +1,14 @@
+[project]
+name = "mcp-jarvis-osops"
+version = "0.1.0"
+description = "Minimal MCP-like server for OS operations (FastAPI + JSON-RPC)"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi",
+  "uvicorn",
+  "pydantic>=2",
+  "psutil",
+  "python-multipart",
+]
+# Optional extras users can install later:
+# pillow, pypdf, python-docx, lxml, pandas
