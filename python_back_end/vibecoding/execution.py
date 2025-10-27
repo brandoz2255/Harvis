@@ -28,18 +28,98 @@ router = APIRouter(tags=["vibecode-execution"])
 
 # Language detection mapping
 LANGUAGE_EXTENSIONS = {
+    # Python
     ".py": "python",
+    ".pyw": "python",
+    ".python": "python",
+    
+    # Node.js
     ".js": "node",
+    ".mjs": "node",
+    ".cjs": "node",
+    
+    # TypeScript
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    
+    # Shell
     ".sh": "bash",
     ".bash": "bash",
-    ".ts": "node",
-    ".mjs": "node",
+    ".zsh": "bash",
+    
+    # C/C++
+    ".c": "c",
+    ".cpp": "cpp",
+    ".cc": "cpp",
+    ".cxx": "cpp",
+    ".c++": "cpp",
+    ".hpp": "cpp",
+    
+    # Java
+    ".java": "java",
+    
+    # Go
+    ".go": "go",
+    
+    # Rust
+    ".rs": "rust",
+    
+    # Ruby
+    ".rb": "ruby",
+    ".rbx": "ruby",
+    
+    # PHP
+    ".php": "php",
+    
+    # Perl
+    ".pl": "perl",
+    ".pm": "perl",
+    
+    # Swift
+    ".swift": "swift",
+    
+    # Kotlin
+    ".kt": "kotlin",
+    ".kts": "kotlin",
+    
+    # Scala
+    ".scala": "scala",
+    ".sc": "scala",
+    
+    # R
+    ".r": "r",
+    
+    # Julia
+    ".jl": "julia",
+    
+    # Lua
+    ".lua": "lua",
+    
+    # Haskell
+    ".hs": "haskell",
+    ".lhs": "haskell",
 }
 
 LANGUAGE_COMMANDS = {
-    "python": "python",
+    "python": "python3",
     "node": "node",
+    "typescript": "npx ts-node",
     "bash": "bash",
+    "c": "gcc",
+    "cpp": "g++",
+    "java": "java",
+    "go": "go",
+    "rust": "rustc",
+    "ruby": "ruby",
+    "php": "php",
+    "perl": "perl",
+    "swift": "swift",
+    "kotlin": "kotlinc",
+    "scala": "scala",
+    "r": "R",
+    "julia": "julia",
+    "lua": "lua",
+    "haskell": "ghc",
 }
 
 
@@ -202,7 +282,7 @@ def _detect_language(file: str) -> str:
 
 
 def _build_file_command(file: str, lang: str, args: Optional[List[str]] = None) -> str:
-    """Build execution command for a file
+    """Build execution command for a file with multi-language support
     
     Args:
         file: File path (relative to /workspace)
@@ -212,52 +292,63 @@ def _build_file_command(file: str, lang: str, args: Optional[List[str]] = None) 
     Returns:
         Complete command string (sanitized for security)
     """
-    # Ensure file path is relative to /workspace
+    # Ensure file path is absolute
     if not file.startswith("/workspace/"):
         if file.startswith("/"):
             file = file[1:]
         file = f"/workspace/{file}"
     
-    # Build runtime fallback wrapper for common languages
     file_quoted = file
     arg_str = ""
     if args:
-        # Sanitize arguments to prevent injection
         safe_args = sanitize_arguments(args)
         arg_str = " " + " ".join(safe_args)
-
+    
+    cmd_name = LANGUAGE_COMMANDS.get(lang, lang)
+    
+    # Runtime commands (direct execution)
     if lang == "python":
-        # Prefer python, fallback to python3
-        return (
-            "sh -lc \""
-            "if command -v python >/dev/null 2>&1; then python '" + file_quoted + "'" + arg_str + "; "
-            "elif command -v python3 >/dev/null 2>&1; then python3 '" + file_quoted + "'" + arg_str + "; "
-            "else echo 'python runtime not found (install python or python3)'; exit 127; fi"
-            "\""
-        )
-
-    if lang == "node":
-        # Prefer node, fallback to nodejs
-        return (
-            "sh -lc \""
-            "if command -v node >/dev/null 2>&1; then node '" + file_quoted + "'" + arg_str + "; "
-            "elif command -v nodejs >/dev/null 2>&1; then nodejs '" + file_quoted + "'" + arg_str + "; "
-            "else echo 'node runtime not found (install node)'; exit 127; fi"
-            "\""
-        )
-
-    if lang == "bash":
-        # Prefer bash, fallback to sh
-        return (
-            "sh -lc \""
-            "if command -v bash >/dev/null 2>&1; then bash '" + file_quoted + "'" + arg_str + "; "
-            "elif command -v sh >/dev/null 2>&1; then sh '" + file_quoted + "'" + arg_str + "; "
-            "else echo 'shell not found (install bash)'; exit 127; fi"
-            "\""
-        )
-
-    # Fallback: execute file directly (already validated)
-    return file_quoted + arg_str
+        return f"python3 '{file_quoted}'{arg_str}"
+    
+    elif lang == "node":
+        return f"node '{file_quoted}'{arg_str}"
+    
+    elif lang == "bash":
+        return f"bash '{file_quoted}'{arg_str}"
+    
+    elif lang == "typescript":
+        return f"npx ts-node '{file_quoted}'{arg_str}"
+    
+    # Compiled languages (compile then run)
+    elif lang == "c":
+        # Compile to a.out, then run it
+        return f"gcc '{file_quoted}' -o /tmp/a.out && /tmp/a.out{arg_str}"
+    
+    elif lang == "cpp":
+        # Compile to a.out, then run it
+        return f"g++ '{file_quoted}' -o /tmp/a.out && /tmp/a.out{arg_str}"
+    
+    elif lang == "java":
+        # Compile and run Java
+        # Extract class name from file path
+        file_base = os.path.basename(file_quoted).replace('.java', '')
+        return f"cd /workspace && javac '{file_quoted}' && java {file_base}{arg_str}"
+    
+    elif lang == "rust":
+        # Compile and run Rust
+        file_base = os.path.basename(file_quoted).replace('.rs', '')
+        return f"rustc '{file_quoted}' -o /tmp/{file_base} && /tmp/{file_base}{arg_str}"
+    
+    elif lang == "go":
+        # Go run compiles and runs
+        return f"go run '{file_quoted}'{arg_str}"
+    
+    # Interpreted languages (direct run)
+    elif lang in ["ruby", "perl", "php", "lua", "r", "julia", "haskell", "scala", "kotlin", "swift"]:
+        return f"{cmd_name} '{file_quoted}'{arg_str}"
+    
+    # Fallback
+    return f"{cmd_name} '{file_quoted}'{arg_str}"
 
 
 # Pydantic models for API

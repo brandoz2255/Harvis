@@ -156,9 +156,13 @@ export default function VibeTerminal({
         return
       }
 
-      // Construct WebSocket URL
-      const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-      const wsUrl = `${wsProtocol}//${window.location.host}/ws/vibecoding/terminal?session_id=${sessionId}&token=${token}`
+      // Construct WebSocket URL robustly
+      const wsBase = window.location.origin.replace(/^http/, 'ws')
+      const params = new URLSearchParams({
+        session_id: sessionId,
+        token
+      })
+      const wsUrl = `${wsBase}/ws/vibecoding/terminal?${params.toString()}`
       
       console.log(`🔌 Connecting terminal WebSocket for session ${sessionId}`)
       const ws = new WebSocket(wsUrl)

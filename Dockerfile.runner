@@ -1,0 +1,46 @@
+# Multi-runtime runner container for VibeCode IDE
+# Supports: Python, Node.js, C/C++, Java, Go, Rust, and more
+
+FROM node:18-bullseye-slim
+
+# Install all required runtimes and compilers
+RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
+    build-essential \
+    gcc \
+    g++ \
+    openjdk-17-jdk \
+    golang-go \
+    rustc \
+    cargo \
+    ruby \
+    php \
+    perl \
+    lua5.3 \
+    r-base \
+    julia \
+    ghc \
+    # TypeScript support
+    npm \
+    typescript \
+    # Utilities
+    curl \
+    git \
+    vim \
+    # Cleanup
+    && rm -rf /var/lib/apt/lists/*
+
+# Create symlinks for common names
+RUN ln -sf /usr/bin/python3 /usr/local/bin/python
+
+# Set working directory
+WORKDIR /workspace
+
+# Set environment
+ENV NODE_ENV=development
+ENV PYTHONUNBUFFERED=1
+
+# Keep container running
+CMD ["sleep", "infinity"]
+
