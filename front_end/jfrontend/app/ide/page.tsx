@@ -4,13 +4,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from "react"
 import { useRouter } from "next/navigation"
 import { useUser } from "@/lib/auth/UserProvider"
 import { useUserPreferences } from "@/lib/useUserPreferences"
-import { X } from "lucide-react"
-import { ToastProvider } from "./components/Toast"
 import VibeSessionManager from "@/components/VibeSessionManager"
-import SessionCreator from "./components/SessionCreator"
-import ExplorerNewFile from "./components/ExplorerNewFile"
-import RunButton from "./components/RunButton"
-import FileActions from "./components/FileActions"
 import LeftSidebar from "@/components/LeftSidebar"
 import ResizablePanel from "@/components/ResizablePanel"
 import VibeContainerCodeEditor from "@/components/VibeContainerCodeEditor"
@@ -22,7 +16,6 @@ import StatusBar from "@/components/StatusBar"
 import CommandPalette, { useIDECommands } from "@/components/CommandPalette"
 import { Loader2, ChevronLeft, ChevronRight, FileText, Save, CheckCircle, AlertCircle, Terminal } from "lucide-react"
 import { toWorkspaceRelativePath } from '@/lib/strings'
-import { toRel } from './lib/paths'
 
 interface Session {
   id: string
@@ -46,7 +39,6 @@ export default function IDEPage() {
   const [currentSession, setCurrentSession] = useState<Session | null>(null)
   const [openSessions, setOpenSessions] = useState<Session[]>([])
   const [showSessionManager, setShowSessionManager] = useState(false)
-  const [sessionCapabilities, setSessionCapabilities] = useState<Record<string, boolean>>({})
   
   // Cursor position state for status bar
   const [cursorPosition, setCursorPosition] = useState<{ line: number; column: number }>({ line: 1, column: 1 })
@@ -66,11 +58,6 @@ export default function IDEPage() {
   
   // Command palette state
   const [showCommandPalette, setShowCommandPalette] = useState(false)
-  
-  // Session creation loading and error states
-  const [isCreatingSession, setIsCreatingSession] = useState(false)
-  const [sessionCreationError, setSessionCreationError] = useState<string | null>(null)
-  const [sessionCreationSuccess, setSessionCreationSuccess] = useState<string | null>(null)
   
   // Terminal tabs state
   const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>([])
@@ -107,14 +94,10 @@ export default function IDEPage() {
   const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const terminalContainerRef = useRef<HTMLDivElement | null>(null)
 
-  // Memoize active tab to prevent recreation on every render
-  const activeTab = useMemo(() => {
-    if (!activeTabId) return null
-    return editorTabs.find(t => t.id === activeTabId) || null
-  }, [activeTabId, editorTabs])
-
   // Memoize selectedFile to prevent recreation on every render
   const selectedFile = useMemo(() => {
+    if (!activeTabId) return null
+    const activeTab = editorTabs.find(t => t.id === activeTabId)
     if (!activeTab) return null
 
     return {
@@ -124,7 +107,7 @@ export default function IDEPage() {
       size: 0,
       permissions: ''
     }
-  }, [activeTab])
+  }, [activeTabId, editorTabs])
 
   // Authentication guard
   useEffect(() => {
@@ -205,20 +188,6 @@ export default function IDEPage() {
         }
         return prev.map(s => s.session_id === session.session_id ? updatedSession : s)
       })
-      
-      // Fetch session capabilities
-      try {
-        const statusResponse = await fetch(`/api/vibecoding/status/${session.session_id}`, {
-          headers: { 'Authorization': `Bearer ${token}` }
-        })
-        if (statusResponse.ok) {
-          const statusData = await statusResponse.json()
-          setSessionCapabilities(statusData.capabilities || {})
-        }
-      } catch (error) {
-        console.warn('Failed to fetch capabilities:', error)
-        setSessionCapabilities({})
-      }
       
       setShowSessionManager(false)
       
@@ -301,52 +270,22 @@ export default function IDEPage() {
 
   // Handle session creation
   const handleSessionCreate = async (projectName: string, description?: string): Promise<Session> => {
-    setIsCreatingSession(true)
-    setSessionCreationError(null)
-    setSessionCreationSuccess(null)
+    const token = localStorage.getItem('token')
+    if (!token) throw new Error('Not authenticated')
+
+    const response = await fetch('/api/vibecode/sessions/create', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ name: projectName, description })
+    })
+
+    if (!response.ok) throw new Error('Failed to create session')
     
-    try {
-      const token = localStorage.getItem('token')
-      if (!token) throw new Error('Not authenticated')
-
-      const response = await fetch('/api/vibecode/sessions/create', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ name: projectName, description })
-      })
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}))
-        throw new Error(errorData.detail || `Failed to create session (${response.status})`)
-      }
-      
-      const data = await response.json()
-      
-      // Show success message
-      setSessionCreationSuccess(`Session "${projectName}" created successfully! Loading...`)
-      
-      // Clear success message after 3 seconds
-      setTimeout(() => {
-        setSessionCreationSuccess(null)
-      }, 3000)
-      
-      return data.session
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Failed to create session'
-      setSessionCreationError(errorMessage)
-      
-      // Clear error message after 5 seconds
-      setTimeout(() => {
-        setSessionCreationError(null)
-      }, 5000)
-      
-      throw error
-    } finally {
-      setIsCreatingSession(false)
-    }
+    const data = await response.json()
+    return data.session
   }
 
   // Handle session deletion
@@ -1052,8 +991,7 @@ export default function IDEPage() {
   }
 
   return (
-    <ToastProvider>
-      <div className="h-screen bg-gray-900 text-white flex flex-col overflow-hidden">
+    <div className="h-screen bg-gray-900 text-white flex flex-col overflow-hidden">
       {/* Header with Session Tabs */}
       <header className="h-12 bg-gray-800 border-b border-gray-700 flex items-center justify-between px-4 flex-shrink-0">
         <div className="flex items-center gap-4">
@@ -1063,30 +1001,8 @@ export default function IDEPage() {
             activeSessionId={currentSession?.session_id || null}
             onSessionSelect={handleSessionSelect}
             onSessionClose={handleSessionClose}
-            onNewSession={() => {}} // Disabled - using SessionCreator instead
+            onNewSession={handleNewSession}
             className="flex-1"
-          />
-          <SessionCreator
-            onReady={(sessionId) => {
-              // Load the session details
-              const token = localStorage.getItem('token')
-              fetch('/api/vibecoding/sessions', {
-                headers: { 'Authorization': `Bearer ${token}` }
-              })
-                .then(r => r.json())
-                .then((sessions: any[]) => {
-                  const session = sessions.find(s => s.session_id === sessionId || s.id === sessionId)
-                  if (session) {
-                    setCurrentSession(session as Session)
-                    setShowSessionManager(false)
-                    setOpenSessions(prev => {
-                      const exists = prev.some(s => s.session_id === sessionId)
-                      return exists ? prev : [...prev, session as Session]
-                    })
-                  }
-                })
-                .catch(console.error)
-            }}
           />
         </div>
         <div className="flex items-center gap-2">
@@ -1127,19 +1043,6 @@ export default function IDEPage() {
               availableModels={availableModels}
               onSendMessage={handleSendAIMessage}
               onModelChange={setSelectedModel}
-              newFileButton={
-                <ExplorerNewFile
-                  sessionId={currentSession?.session_id || null}
-                  currentDir=""
-                  refreshTree={async () => {
-                    // Trigger file tree refresh
-                    console.log('Refreshing file tree...')
-                  }}
-                  onOpenFile={(filePath) => {
-                    handleFileSelect(filePath, '')
-                  }}
-                />
-              }
               className="h-full"
             />
           </ResizablePanel>
@@ -1170,7 +1073,7 @@ export default function IDEPage() {
                 className="flex-1"
               />
               
-              {/* Save Button and Run Button */}
+              {/* Save Button and Status */}
               {activeTabId && (
                 <div className="flex items-center gap-2 px-3 border-l border-gray-700">
                   <button
@@ -1211,23 +1114,6 @@ export default function IDEPage() {
                       </>
                     )}
                   </button>
-                  
-                  {/* Run Button */}
-                  <RunButton
-                    filePath={activeTab?.filePath || ''}
-                    sessionId={currentSession?.session_id || null}
-                    capabilities={sessionCapabilities}
-                    onRun={(result) => {
-                      console.log('Code execution result:', result)
-                      // You can add logic here to show the result in the output area
-                    }}
-                  />
-                  
-                  {/* File Actions (Format/Validate for JSON, etc.) */}
-                  <FileActions
-                    filePath={activeTab?.filePath || ''}
-                    sessionId={currentSession?.session_id || null}
-                  />
                 </div>
               )}
             </div>
@@ -1389,45 +1275,6 @@ export default function IDEPage() {
         commands={commands}
       />
 
-      {/* Session Creation Loading Overlay */}
-      {isCreatingSession && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-gray-800 rounded-lg shadow-xl p-6 max-w-md w-full mx-4">
-            <div className="flex items-center justify-center mb-4">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
-            </div>
-            <h3 className="text-lg font-semibold text-white text-center mb-2">
-              Creating Session...
-            </h3>
-            <p className="text-gray-300 text-center text-sm">
-              Please wait while we set up your development environment
-            </p>
-          </div>
-        </div>
-      )}
-
-      {/* Session Creation Success/Error Messages */}
-      {(sessionCreationSuccess || sessionCreationError) && (
-        <div className="fixed top-4 right-4 z-50 max-w-md">
-          {sessionCreationSuccess && (
-            <div className="bg-green-900/20 border border-green-500/30 rounded-md p-4 mb-2">
-              <div className="flex items-center">
-                <div className="w-4 h-4 bg-green-400 rounded-full mr-3 animate-pulse" />
-                <span className="text-green-300 text-sm">{sessionCreationSuccess}</span>
-              </div>
-            </div>
-          )}
-          {sessionCreationError && (
-            <div className="bg-red-900/20 border border-red-500/30 rounded-md p-4">
-              <div className="flex items-center">
-                <X className="w-4 h-4 text-red-400 mr-3" />
-                <span className="text-red-300 text-sm">{sessionCreationError}</span>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
       {/* Session Manager Modal */}
       {showSessionManager && user && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
@@ -1438,15 +1285,11 @@ export default function IDEPage() {
               onSessionCreate={handleSessionCreate}
               onSessionDelete={handleSessionDelete}
               userId={Number(user.id)}
-              isCreatingSession={isCreatingSession}
-              sessionCreationError={sessionCreationError}
-              sessionCreationSuccess={sessionCreationSuccess}
               className="h-full"
             />
           </div>
         </div>
       )}
-      </div>
-    </ToastProvider>
+    </div>
   )
 }

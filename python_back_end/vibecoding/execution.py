@@ -89,60 +89,6 @@ async def execute_code(
         # File execution mode
         logger.info(f"📄 File execution mode: {file}")
         
-        # Check for non-executable file types
-        _, ext = os.path.splitext(file)
-        ext = ext.lower()
-        
-        if ext == ".json":
-            return ExecutionResult(
-                command=f"# Cannot execute {file}",
-                stdout="",
-                stderr="JSON is not executable. Use Format/Validate actions instead.",
-                exit_code=126,  # Command cannot execute
-                execution_time_ms=0
-            )
-        
-        # Check for Node.js requirements for JS/TS files
-        if ext in [".js", ".mjs", ".ts"]:
-            # Get capabilities from container
-            try:
-                runner_container = await container_manager.get_runner_container(session_id)
-                if not runner_container:
-                    runner_container = await container_manager.get_container(session_id)
-                
-                if runner_container:
-                    # Quick probe for Node.js
-                    import docker
-                    client = docker.from_env()
-                    try:
-                        exec_id = client.api.exec_create(
-                            container=runner_container.id, 
-                            cmd=["/bin/sh", "-lc", "command -v node"]
-                        )["Id"]
-                        client.api.exec_start(exec_id, stream=False)
-                        insp = client.api.exec_inspect(exec_id)
-                        has_node = insp.get("ExitCode", 1) == 0
-                    except:
-                        has_node = False
-                    
-                    if not has_node:
-                        return ExecutionResult(
-                            command=f"# Cannot execute {file}",
-                            stdout="",
-                            stderr="Node runtime not available in runner. Ask admin to enable Node.",
-                            exit_code=127,  # Command not found
-                            execution_time_ms=0
-                        )
-            except Exception as e:
-                logger.warning(f"Failed to check Node.js availability: {e}")
-                return ExecutionResult(
-                    command=f"# Cannot execute {file}",
-                    stdout="",
-                    stderr="Unable to verify Node.js runtime. Please try again.",
-                    exit_code=127,
-                    execution_time_ms=0
-                )
-        
         # Detect language if not provided
         if not lang:
             lang = _detect_language(file)
@@ -174,17 +120,14 @@ async def execute_code(
     started_at = int(start_time * 1000)
     
     try:
-        # Get runner container for execution (preferred), fallback to IDE container
-        container = await container_manager.get_runner_container(session_id)
-        if not container:
-            container = await container_manager.get_container(session_id)
-        
+        # Get container and execute
+        container = await container_manager.get_container(session_id)
         if not container:
             # Return error result
             return ExecutionResult(
                 command=command,
                 stdout="",
-                stderr="Error: Container not found. Please ensure the session is running.",
+                stderr="Error: Container not found",
                 exit_code=-1,
                 execution_time_ms=0
             )

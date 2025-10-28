@@ -44,9 +44,6 @@ interface VibeSessionManagerProps {
   onSessionCreate: (projectName: string, description?: string) => Promise<Session>
   onSessionDelete?: (sessionId: string) => Promise<void>
   userId: number
-  isCreatingSession?: boolean
-  sessionCreationError?: string | null
-  sessionCreationSuccess?: string | null
   className?: string
 }
 
@@ -56,9 +53,6 @@ export default function VibeSessionManager({
   onSessionCreate,
   onSessionDelete,
   userId,
-  isCreatingSession = false,
-  sessionCreationError,
-  sessionCreationSuccess,
   className = ""
 }: VibeSessionManagerProps) {
   const [sessions, setSessions] = useState<Session[]>([])
@@ -106,7 +100,7 @@ export default function VibeSessionManager({
   }, [userId])
 
   const handleCreateSession = async () => {
-    if (!safeTrim(newProjectName) || isCreating || isCreatingSession) return
+    if (!safeTrim(newProjectName) || isCreating) return
 
     try {
       setIsCreating(true)
@@ -123,7 +117,8 @@ export default function VibeSessionManager({
       onSessionSelect(session)
     } catch (error) {
       console.error('Failed to create session:', error)
-      // Error is now handled by parent component
+      // Show error to user
+      alert(`Failed to create session: ${error instanceof Error ? error.message : 'Unknown error'}`)
     } finally {
       setIsCreating(false)
     }
@@ -278,38 +273,18 @@ export default function VibeSessionManager({
                     <option value="web">Web Development</option>
                   </select>
                 </div>
-                
-                {/* Error/Success Messages */}
-                {sessionCreationError && (
-                  <div className="bg-red-900/20 border border-red-500/30 rounded-md p-3">
-                    <div className="flex items-center">
-                      <X className="w-4 h-4 text-red-400 mr-2" />
-                      <span className="text-red-300 text-sm">{sessionCreationError}</span>
-                    </div>
-                  </div>
-                )}
-                
-                {sessionCreationSuccess && (
-                  <div className="bg-green-900/20 border border-green-500/30 rounded-md p-3">
-                    <div className="flex items-center">
-                      <div className="w-4 h-4 bg-green-400 rounded-full mr-2 animate-pulse" />
-                      <span className="text-green-300 text-sm">{sessionCreationSuccess}</span>
-                    </div>
-                  </div>
-                )}
-                
                 <div className="flex space-x-2 pt-4">
                   <Button
                     onClick={handleCreateSession}
-                    disabled={!safeTrim(newProjectName) || isCreating || isCreatingSession}
+                    disabled={!safeTrim(newProjectName) || isCreating}
                     className="bg-purple-600 hover:bg-purple-700 text-white flex-1"
                   >
-                    {(isCreating || isCreatingSession) ? (
+                    {isCreating ? (
                       <Loader2 className="w-4 h-4 animate-spin mr-2" />
                     ) : (
                       <Plus className="w-4 h-4 mr-2" />
                     )}
-                    {isCreatingSession ? 'Creating...' : 'Create Session'}
+                    Create Session
                   </Button>
                   <Button
                     onClick={() => setShowCreateDialog(false)}

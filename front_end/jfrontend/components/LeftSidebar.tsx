@@ -33,7 +33,6 @@ interface LeftSidebarProps {
   }>
   onSendMessage: (message: string) => void
   onModelChange: (model: string) => void
-  newFileButton?: React.ReactNode
   className?: string
 }
 
@@ -49,7 +48,6 @@ export default function LeftSidebar({
   availableModels,
   onSendMessage,
   onModelChange,
-  newFileButton,
   className = ""
 }: LeftSidebarProps) {
   const [activeTab, setActiveTab] = useState<SidebarTab>('explorer')
@@ -72,8 +70,6 @@ export default function LeftSidebar({
                 sessionId={sessionId}
                 isContainerRunning={isContainerRunning}
                 onFileSelect={onFileSelect}
-                currentDir=""
-                newFileButton={newFileButton}
                 className="h-full"
               />
             ) : (

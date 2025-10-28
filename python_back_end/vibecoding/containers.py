@@ -320,8 +320,8 @@ class ContainerManager:
         volume_name = ide_info.volume_name if ide_info else f"vibecode-{user_id}-{session_id}-ws"
         base_network = os.getenv("IDE_BASE_NETWORK")
 
-        # Pull runner image with multiple runtimes
-        runner_image = os.getenv("VIBECODING_RUNNER_IMAGE", "node:18-bullseye-slim")
+        # Pull runner image
+        runner_image = os.getenv("VIBECODING_RUNNER_IMAGE", "python:3.11-slim")
         try:
             logger.info(f"🔄 Pulling runner image: {runner_image}")
             self.docker_client.images.pull(runner_image)
@@ -340,14 +340,6 @@ class ContainerManager:
             # Ensure running
             if existing.status == "exited":
                 existing.start()
-            
-            # Fix workspace permissions on existing container
-            try:
-                fix_perms_cmd = "sh -c 'chmod -R 777 /workspace 2>/dev/null || true'"
-                existing.exec_run(fix_perms_cmd)
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to fix permissions on existing runner: {e}")
-            
             info = ContainerInfo(
                 container_id=existing.id,
                 container_name=existing.name,
@@ -359,7 +351,7 @@ class ContainerManager:
             self.active_runner_containers[session_id] = info
             return info
 
-        # Create runner container with runtime installation
+        # Create runner container
         try:
             config = {
                 "image": runner_image,
@@ -389,16 +381,6 @@ class ContainerManager:
 
             container = self.docker_client.containers.run(**config)
             container.reload()
-            
-            # Fix workspace permissions to be writable
-            logger.info(f"🔧 Fixing workspace permissions in runner container")
-            try:
-                # Ensure /workspace is writable by all users
-                fix_perms_cmd = "sh -c 'chmod -R 777 /workspace 2>/dev/null || true'"
-                container.exec_run(fix_perms_cmd)
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to fix permissions (non-critical): {e}")
-            
             info = ContainerInfo(
                 container_id=container.id,
                 container_name=container.name,
@@ -439,13 +421,6 @@ class ContainerManager:
             if res.exit_code != 0:
                 logger.warning("⚠️ Python interpreter not found in runner")
                 # Still considered ready for non-python commands
-
-            # Node.js present probe
-            node_cmd = "sh -lc 'command -v node >/dev/null 2>&1'"
-            res = container.exec_run(node_cmd)
-            if res.exit_code != 0:
-                logger.warning("⚠️ Node.js interpreter not found in runner")
-                # Still considered ready for non-node commands
 
             # Echo test
             echo_cmd = "sh -lc 'echo test'"
