@@ -28,18 +28,50 @@ router = APIRouter(tags=["vibecode-execution"])
 
 # Language detection mapping
 LANGUAGE_EXTENSIONS = {
+    # Python
     ".py": "python",
+    ".pyw": "python",
+    
+    # Node.js
     ".js": "node",
+    ".mjs": "node",
+    ".cjs": "node",
+    
+    # TypeScript
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    
+    # Shell
     ".sh": "bash",
     ".bash": "bash",
-    ".ts": "node",
-    ".mjs": "node",
+    
+    # C/C++
+    ".c": "c",
+    ".cpp": "cpp",
+    ".cc": "cpp",
+    ".cxx": "cpp",
+    ".hpp": "cpp",
+    
+    # Java
+    ".java": "java",
+    
+    # Go
+    ".go": "go",
+    
+    # Rust
+    ".rs": "rust",
 }
 
 LANGUAGE_COMMANDS = {
-    "python": "python",
+    "python": "python3",
     "node": "node",
+    "typescript": "npx ts-node",
     "bash": "bash",
+    "c": "gcc",
+    "cpp": "g++",
+    "java": "java",
+    "go": "go",
+    "rust": "rustc",
 }
 
 
@@ -120,17 +152,24 @@ async def execute_code(
     started_at = int(start_time * 1000)
     
     try:
-        # Get container and execute
-        container = await container_manager.get_container(session_id)
+        # Ensure runner container exists before execution
+        user_id = "default"  # TODO: Get actual user_id from session
+        await container_manager.ensure_runner_ready(session_id, user_id)
+        
+        # Get runner container for execution (prefer runner, fallback to IDE container)
+        container = await container_manager.get_runner_container(session_id)
         if not container:
-            # Return error result
-            return ExecutionResult(
-                command=command,
-                stdout="",
-                stderr="Error: Container not found",
-                exit_code=-1,
-                execution_time_ms=0
-            )
+            # Fallback to IDE container if runner not available
+            container = await container_manager.get_container(session_id)
+            if not container:
+                # Return error result
+                return ExecutionResult(
+                    command=command,
+                    stdout="",
+                    stderr="Error: Container not found",
+                    exit_code=-1,
+                    execution_time_ms=0
+                )
         
         # Execute with demux to separate stdout/stderr
         result = container.exec_run(
@@ -202,7 +241,7 @@ def _detect_language(file: str) -> str:
 
 
 def _build_file_command(file: str, lang: str, args: Optional[List[str]] = None) -> str:
-    """Build execution command for a file
+    """Build execution command for a file with multi-language support
     
     Args:
         file: File path (relative to /workspace)
@@ -212,52 +251,56 @@ def _build_file_command(file: str, lang: str, args: Optional[List[str]] = None) 
     Returns:
         Complete command string (sanitized for security)
     """
-    # Ensure file path is relative to /workspace
+    # Ensure file path is absolute
     if not file.startswith("/workspace/"):
         if file.startswith("/"):
             file = file[1:]
         file = f"/workspace/{file}"
     
-    # Build runtime fallback wrapper for common languages
     file_quoted = file
     arg_str = ""
     if args:
-        # Sanitize arguments to prevent injection
         safe_args = sanitize_arguments(args)
         arg_str = " " + " ".join(safe_args)
-
+    
+    # Interpreted languages (direct execution)
     if lang == "python":
-        # Prefer python, fallback to python3
-        return (
-            "sh -lc \""
-            "if command -v python >/dev/null 2>&1; then python '" + file_quoted + "'" + arg_str + "; "
-            "elif command -v python3 >/dev/null 2>&1; then python3 '" + file_quoted + "'" + arg_str + "; "
-            "else echo 'python runtime not found (install python or python3)'; exit 127; fi"
-            "\""
-        )
-
-    if lang == "node":
-        # Prefer node, fallback to nodejs
-        return (
-            "sh -lc \""
-            "if command -v node >/dev/null 2>&1; then node '" + file_quoted + "'" + arg_str + "; "
-            "elif command -v nodejs >/dev/null 2>&1; then nodejs '" + file_quoted + "'" + arg_str + "; "
-            "else echo 'node runtime not found (install node)'; exit 127; fi"
-            "\""
-        )
-
-    if lang == "bash":
-        # Prefer bash, fallback to sh
-        return (
-            "sh -lc \""
-            "if command -v bash >/dev/null 2>&1; then bash '" + file_quoted + "'" + arg_str + "; "
-            "elif command -v sh >/dev/null 2>&1; then sh '" + file_quoted + "'" + arg_str + "; "
-            "else echo 'shell not found (install bash)'; exit 127; fi"
-            "\""
-        )
-
-    # Fallback: execute file directly (already validated)
-    return file_quoted + arg_str
+        return f"python3 '{file_quoted}'{arg_str}"
+    
+    elif lang == "node":
+        return f"node '{file_quoted}'{arg_str}"
+    
+    elif lang == "bash":
+        return f"bash '{file_quoted}'{arg_str}"
+    
+    elif lang == "typescript":
+        return f"npx ts-node '{file_quoted}'{arg_str}"
+    
+    # Compiled languages (compile then run)
+    elif lang == "c":
+        # Compile to a.out, then run it
+        return f"sh -c \"gcc '{file_quoted}' -o /tmp/a.out && /tmp/a.out{arg_str}\""
+    
+    elif lang == "cpp":
+        # Compile to a.out, then run it
+        return f"sh -c \"g++ '{file_quoted}' -o /tmp/a.out && /tmp/a.out{arg_str}\""
+    
+    elif lang == "java":
+        # Compile and run Java
+        file_base = os.path.basename(file_quoted).replace('.java', '')
+        return f"sh -c \"cd /workspace && javac '{file_quoted}' && java {file_base}{arg_str}\""
+    
+    elif lang == "rust":
+        # Compile and run Rust
+        file_base = os.path.basename(file_quoted).replace('.rs', '')
+        return f"sh -c \"rustc '{file_quoted}' -o /tmp/{file_base} && /tmp/{file_base}{arg_str}\""
+    
+    elif lang == "go":
+        # Go run compiles and runs
+        return f"go run '{file_quoted}'{arg_str}"
+    
+    # Fallback
+    return f"'{file_quoted}'{arg_str}"
 
 
 # Pydantic models for API

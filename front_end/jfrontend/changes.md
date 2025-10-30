@@ -1,3 +1,19 @@
+## 2025-10-30 — IDE Output interactive input with auto-run, Explorer + button dialog, multi-lang exec fixes
+
+- Problem: Output tab could not accept interactive input; Explorer "+" button lacked a dialog; JS/CPP execution failed under runner; users had to manually type commands to run files.
+- Solution:
+  - Added an Interactive toggle to Output tab that embeds the session terminal using `OptimizedVibeTerminal`, enabling stdin for programs that prompt.
+  - **Auto-run feature**: When toggling "Interactive On", automatically builds and executes the current file's command (e.g., `python3 file.py`, `node file.js`) via `initialCommand` prop passed to terminal, which sends the command on WebSocket connect.
+  - Implemented a VSCode‑style New File dialog in `MonacoVibeFileTree.tsx` (dark UI, validation, Enter submit), wired the "+" button to open it, and refresh/open file on success.
+  - Corrected C/C++/Java/Rust command construction to run via `sh -c` so `&&` works; ensured execution prefers runner container and auto-creates it.
+- Files:
+  - `front_end/jfrontend/app/ide/page.tsx`: Added `interactiveOutput`, `interactiveCommand` states; `buildRunCommand()` function detects file type and builds command; toggle button sets command before enabling; passes `initialCommand` to terminal.
+  - `front_end/jfrontend/components/OptimizedVibeTerminal.tsx`: Added `initialCommand` prop; on WebSocket open, sends command automatically if provided.
+  - `front_end/jfrontend/components/MonacoVibeFileTree.tsx`: Added dialog imports/state/handlers; wired "+" button to open dialog; create file then refresh and open.
+  - `python_back_end/vibecoding/execution.py`: Wrap compile+run commands with `sh -c` for C/C++/Java/Rust; ensure runner container usage.
+  - `python_back_end/vibecoding/containers.py`: Runner image defaults to Node‑based image; installs python and build tools; fixes workspace perms.
+- Status: Working. One-click "Interactive On" auto-runs current file and enables stdin; Explorer new file dialog matches UI; JS/CPP run correctly in runner.
+
 # Changes Log
 
 ## 2025-10-16 - Fixed Infinite File Loading Loop in IDE

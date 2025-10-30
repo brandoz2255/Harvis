@@ -55,6 +55,8 @@ export default function IDEPage() {
   const [showTerminal, setShowTerminal] = useState(true)
   const [activeOutputTab, setActiveOutputTab] = useState<'terminal' | 'output'>('terminal')
   const [codeOutput, setCodeOutput] = useState<string>('')
+  const [interactiveOutput, setInteractiveOutput] = useState<boolean>(false)
+  const [interactiveCommand, setInteractiveCommand] = useState<string>('')
   
   // Command palette state
   const [showCommandPalette, setShowCommandPalette] = useState(false)
@@ -337,6 +339,33 @@ export default function IDEPage() {
     return languageMap[ext || ''] || 'plaintext'
   }
 
+  // Build run command for current file
+  const buildRunCommand = (filePath: string): string => {
+    const ext = filePath.split('.').pop()?.toLowerCase()
+    const relPath = toWorkspaceRelativePath(filePath)
+    
+    switch (ext) {
+      case 'py':
+        return `python3 ${relPath}`
+      case 'js':
+      case 'mjs':
+        return `node ${relPath}`
+      case 'ts':
+        return `npx ts-node ${relPath}`
+      case 'sh':
+      case 'bash':
+        return `bash ${relPath}`
+      case 'rb':
+        return `ruby ${relPath}`
+      case 'php':
+        return `php ${relPath}`
+      case 'go':
+        return `go run ${relPath}`
+      default:
+        return `cat ${relPath}`
+    }
+  }
+
   // Handle file selection from file tree
   const handleFileSelect = (filePath: string, content: string) => {
     // Check if tab already exists
@@ -373,28 +402,7 @@ export default function IDEPage() {
       const token = localStorage.getItem('token')
       if (!token) throw new Error('Not authenticated')
 
-      // Get file extension to determine execution command
-      const fileName = filePath.split('/').pop() || ''
-      const extension = fileName.split('.').pop()?.toLowerCase() || ''
-      
-      let command = ''
-      switch (extension) {
-        case 'py':
-          command = `python ${toWorkspaceRelativePath(filePath)}`
-          break
-        case 'js':
-          command = `node ${toWorkspaceRelativePath(filePath)}`
-          break
-        case 'ts':
-          command = `npx ts-node ${toWorkspaceRelativePath(filePath)}`
-          break
-        case 'sh':
-          command = `bash ${toWorkspaceRelativePath(filePath)}`
-          break
-        default:
-          command = `cat ${toWorkspaceRelativePath(filePath)}`
-      }
-
+      // Use file execution mode (let backend handle language detection and compilation)
       const response = await fetch('/api/vibecode/exec', {
         method: 'POST',
         headers: {
@@ -403,7 +411,7 @@ export default function IDEPage() {
         },
         body: JSON.stringify({
           session_id: currentSession.session_id,
-          cmd: command
+          file: toWorkspaceRelativePath(filePath) // Use file parameter instead of cmd
         })
       })
 
@@ -1227,17 +1235,50 @@ export default function IDEPage() {
                   <div className="flex-1 bg-gray-900 p-4 overflow-auto">
                     <div className="flex items-center justify-between mb-4">
                       <h3 className="text-sm font-medium text-gray-300">Code Output</h3>
-                      <button
-                        onClick={() => setCodeOutput('')}
-                        className="text-xs text-gray-400 hover:text-white px-2 py-1 rounded hover:bg-gray-700"
-                      >
-                        Clear
-                      </button>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => {
+                            const willBeOn = !interactiveOutput
+                            if (willBeOn && activeTabId) {
+                              // Build command for current file
+                              const activeTab = editorTabs.find(t => t.id === activeTabId)
+                              if (activeTab) {
+                                const cmd = buildRunCommand(activeTab.path)
+                                setInteractiveCommand(cmd)
+                              }
+                            }
+                            setInteractiveOutput(willBeOn)
+                          }}
+                          className={`text-xs px-2 py-1 rounded transition-colors ${interactiveOutput ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white hover:bg-gray-700'}`}
+                          title="Toggle interactive input - runs current file automatically"
+                        >
+                          {interactiveOutput ? 'Interactive On' : 'Interactive Off'}
+                        </button>
+                        <button
+                          onClick={() => setCodeOutput('')}
+                          className="text-xs text-gray-400 hover:text-white px-2 py-1 rounded hover:bg-gray-700"
+                        >
+                          Clear
+                        </button>
+                      </div>
                     </div>
-                    <div className="bg-black rounded p-3 font-mono text-sm text-green-400 min-h-[200px] whitespace-pre-wrap">
-                      {codeOutput || 'No output yet. Run some code to see results here.'}
-                      {console.log('🔍 Current codeOutput:', codeOutput)}
-                    </div>
+                    {interactiveOutput && currentSession ? (
+                      <div className="h-[260px] border border-gray-700 rounded overflow-hidden">
+                        <OptimizedVibeTerminal
+                          sessionId={currentSession.session_id}
+                          instanceId={`interactive-${Date.now()}`}
+                          isContainerRunning={currentSession.container_status === 'running'}
+                          autoConnect={true}
+                          initialCommand={interactiveCommand}
+                          className="h-full"
+                        />
+                      </div>
+                    ) : (
+                      <div className="bg-black rounded p-3 font-mono text-sm text-green-400 min-h-[200px] whitespace-pre-wrap">
+                        {codeOutput || 'No output yet. Run some code to see results here.'}
+                        {console.log('🔍 Current codeOutput:', codeOutput)}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
