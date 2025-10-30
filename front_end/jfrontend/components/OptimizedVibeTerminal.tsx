@@ -14,6 +14,7 @@ interface OptimizedVibeTerminalProps {
   onContainerStop?: () => Promise<void>
   onReady?: () => void
   autoConnect?: boolean
+  initialCommand?: string
   className?: string
 }
 
@@ -32,6 +33,7 @@ export default function OptimizedVibeTerminal({
   onContainerStop,
   onReady,
   autoConnect = true,
+  initialCommand,
   className = "" 
 }: OptimizedVibeTerminalProps) {
   const [lines, setLines] = useState<TerminalLine[]>([
@@ -135,6 +137,14 @@ export default function OptimizedVibeTerminal({
         addLine('', 'system')
         
         onReady?.()
+        
+        // Send initial command if provided
+        if (initialCommand) {
+          setTimeout(() => {
+            ws.send(initialCommand + '\n')
+            addLine(`$ ${initialCommand}`, 'input')
+          }, 200)
+        }
         
         // Focus input after connection
         setTimeout(() => {
