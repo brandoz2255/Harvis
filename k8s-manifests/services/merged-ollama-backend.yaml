@@ -24,7 +24,7 @@ spec:
       initContainers:
         # Init container to pre-download TTS and Whisper models
         - name: download-models
-          image: "localhost:5000/jarvis-backend:v1.3"
+          image: "localhost:5000/jarvis-backend:v1.3v3"
           imagePullPolicy: Always
           command: ["/app/entrypoint.sh", "download-models"]
           env:

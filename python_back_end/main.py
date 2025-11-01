@@ -1208,6 +1208,10 @@ async def chat(req: ChatRequest, request: Request, current_user: UserResponse = 
 
             response_text = resp.json().get("message", {}).get("content", "").strip()
 
+            # ── Unload Ollama model to free VRAM after inference ──
+            logger.info(f"🧹 Unloading Ollama model {req.model} to free VRAM after inference")
+            unload_ollama_model(req.model)
+
         # ── 4. Process reasoning content if present
         reasoning_content = ""
         final_answer = response_text
