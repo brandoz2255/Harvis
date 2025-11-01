@@ -28,6 +28,9 @@ spec:
             - name: http
               containerPort: 80
               protocol: TCP
+            - name: https
+              containerPort: 443
+              protocol: TCP
           resources:
             requests:
               cpu: 50m
@@ -40,10 +43,16 @@ spec:
               mountPath: /etc/nginx/nginx.conf
               subPath: nginx.conf
               readOnly: true
+            - name: ssl-certs
+              mountPath: /etc/nginx/ssl
+              readOnly: true
       volumes:
         - name: nginx-config
           configMap:
             name: harvis-ai-nginx-config
+        - name: ssl-certs
+          secret:
+            secretName: harvis-ssl-cert
 ---
 apiVersion: v1
 kind: Service
@@ -62,6 +71,10 @@ spec:
       targetPort: http
       protocol: TCP
       name: http
+    - port: 443
+      targetPort: https
+      protocol: TCP
+      name: https
   selector:
     app.kubernetes.io/name: harvis-ai
     app.kubernetes.io/component: nginx
