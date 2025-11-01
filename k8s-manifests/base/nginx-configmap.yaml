@@ -21,9 +21,25 @@ data:
             server harvis-ai-frontend:3000;
         }
 
+        # Redirect HTTP to HTTPS
         server {
             listen 80;
             server_name _;
+            return 301 https://$host$request_uri;
+        }
+
+        server {
+            listen 443 ssl;
+            server_name _;
+
+            # SSL certificate paths (mounted from Kubernetes secret)
+            ssl_certificate /etc/nginx/ssl/tls.crt;
+            ssl_certificate_key /etc/nginx/ssl/tls.key;
+
+            # SSL configuration
+            ssl_protocols TLSv1.2 TLSv1.3;
+            ssl_ciphers HIGH:!aNULL:!MD5;
+            ssl_prefer_server_ciphers on;
 
             # Frontend routes
             location / {
