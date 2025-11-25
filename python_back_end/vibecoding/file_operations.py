@@ -297,18 +297,25 @@ async def read_file(container, path: str) -> str:
     
     Args:
         container: Docker container object
-        path: Path to file
+        path: Path to file (can be relative or absolute with /workspace prefix)
         
     Returns:
         File content as string
     """
     try:
-        # Sanitize the path
+        # Sanitize the path (returns absolute path like /workspace/file.py)
         safe_path = sanitize_path(path)
+        
+        # Convert to relative path for exec_run since we use workdir=/workspace
+        # This prevents looking for /workspace/workspace/file.py
+        relative_path = safe_path.replace(WORKSPACE_BASE + '/', '', 1)
+        if relative_path == safe_path:
+            # Path didn't start with /workspace/, strip any leading /
+            relative_path = safe_path.lstrip('/')
         
         # Check if file exists and is a regular file
         result = container.exec_run(
-            cmd=["test", "-f", safe_path],
+            cmd=["test", "-f", relative_path],
             workdir=WORKSPACE_BASE
         )
         
@@ -317,7 +324,7 @@ async def read_file(container, path: str) -> str:
         
         # Read the file content
         result = container.exec_run(
-            cmd=["cat", safe_path],
+            cmd=["cat", relative_path],
             workdir=WORKSPACE_BASE
         )
         
@@ -346,7 +353,7 @@ async def save_file(container, path: str, content: str, skip_unchanged: bool = T
     
     Args:
         container: Docker container object
-        path: Path to file
+        path: Path to file (can be relative or absolute with /workspace prefix)
         content: Content to write
         skip_unchanged: Skip save if content hasn't changed (default: True)
         
@@ -354,15 +361,20 @@ async def save_file(container, path: str, content: str, skip_unchanged: bool = T
         True if successful
     """
     try:
-        # Sanitize the path
+        # Sanitize the path (returns absolute path like /workspace/file.py)
         safe_path = sanitize_path(path)
+        
+        # Convert to relative path for exec_run since we use workdir=/workspace
+        relative_path = safe_path.replace(WORKSPACE_BASE + '/', '', 1)
+        if relative_path == safe_path:
+            relative_path = safe_path.lstrip('/')
         
         # Optimization: Check if content has changed before saving
         if skip_unchanged:
             try:
                 # Try to read existing content
                 result = container.exec_run(
-                    cmd=["cat", safe_path],
+                    cmd=["cat", relative_path],
                     workdir=WORKSPACE_BASE
                 )
                 
@@ -371,15 +383,15 @@ async def save_file(container, path: str, content: str, skip_unchanged: bool = T
                     
                     # If content is identical, skip the save
                     if existing_content == content:
-                        logger.debug(f"Skipping save for {safe_path} (content unchanged)")
+                        logger.debug(f"Skipping save for {relative_path} (content unchanged)")
                         return True
             except Exception:
                 # File doesn't exist or can't be read - proceed with save
                 pass
         
         # Create parent directories if needed
-        parent_dir = os.path.dirname(safe_path)
-        if parent_dir != WORKSPACE_BASE:
+        parent_dir = os.path.dirname(relative_path)
+        if parent_dir and parent_dir != '.':
             result = container.exec_run(
                 cmd=["mkdir", "-p", parent_dir],
                 workdir=WORKSPACE_BASE
@@ -389,7 +401,7 @@ async def save_file(container, path: str, content: str, skip_unchanged: bool = T
         
         # Write content to file using sh -c with here-doc to handle special characters
         # This is safer than echo as it handles newlines and special chars properly
-        cmd = f"cat > {safe_path} << 'VIBECODE_EOF'\n{content}\nVIBECODE_EOF"
+        cmd = f"cat > {relative_path} << 'VIBECODE_EOF'\n{content}\nVIBECODE_EOF"
         
         result = container.exec_run(
             cmd=["sh", "-c", cmd],

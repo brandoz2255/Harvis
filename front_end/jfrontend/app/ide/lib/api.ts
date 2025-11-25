@@ -41,4 +41,11 @@ export const FilesAPI = {
       "Authorization": `Bearer ${localStorage.getItem('token')}`
     }
   }).then(async r => { if(!r.ok) throw new Error(await r.text()); return r.json(); }),
+  save: (sessionId:string, path:string, content:string) => fetch("/api/vibecode/files/save", {
+    method:"POST", headers:{ 
+      "Content-Type":"application/json",
+      "Authorization": `Bearer ${localStorage.getItem('token')}`
+    },
+    body: JSON.stringify({ session_id: sessionId, path: toRel(path), content })
+  }).then(async r => { if(!r.ok) throw new Error(await r.text()); return r.json(); }),
 };

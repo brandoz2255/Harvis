@@ -1,208 +1,354 @@
-Understanding IDE Components: The Building Blocks Behind VS Code, Cursor, and Kiro
+wesome — here’s a build plan you can follow today and a copy‑paste master prompt for Claude that tells it to actually code the Copilot features (inline suggestions + propose/compare/accept/merge) inside your /ide page, using your Harvis AI stack and conventions.
 
-Based on my research, I can break down exactly what makes up modern IDEs and how to guide your AI to build these components into your page.
-Core IDE Architecture Components
-1. Editor Engine (The Heart)
+🔨 What we’re building (concise)
 
-Monaco Editor is the foundation that powers VS Code, Cursor, and many web IDEs:
+AI → Propose changes for the current file/selection
 
-    Code Editor Core: Syntax highlighting, auto-completion, error detection
+Backend generates a draft (or unified diff) with an LLM.
 
-    Language Support: TypeScript interfaces, multiple programming languages
+Frontend opens a Monaco DiffEditor: Left = your file, Right = AI draft.
 
-    IntelliSense: Code completion and parameter hints
+Buttons: Accept, Reject, Merge (per hunk) → write to /workspace.
 
-    Text Manipulation: Find/replace, multi-cursor editing, code folding
+Inline ghost suggestions in Monaco
 
-2. File System Components
+On idle pause or Ctrl/Cmd+Space, call backend for a suggestion.
 
-    File Explorer Tree: Hierarchical folder/file navigation
+Render faded ghost text; Tab accepts, Esc dismisses.
 
-    File Operations: Create, delete, rename, move files
+Assistant (right pane) reuses home chat’s file-attachment model
 
-    File Tabs: Multi-file editing with tab management
+Can trigger “Propose changes” or “Insert snippet (draft first)”.
 
-    File Watching: Real-time file change detection
+Uses your Ollama compat (chat → fallback generate), streams via SSE.
 
-3. Terminal Integration
+Everything must use relative /api/... calls, JWT (cookie or header), and remain backwards-compatible with your working sessions, explorer, terminal, multi‑language exec, and “Interactive On”.
 
-    Web Terminal: Browser-based shell (using libraries like xterm.js)
+🧭 Plan of action (step‑by‑step)
+Phase 1 — Backend (FastAPI)
 
-    Process Management: Running commands and scripts
+A. Contracts (new under /api/ide/*)
 
-    Output Streaming: Real-time command output display
+POST /api/ide/diff/propose
+Body: { session_id, filepath, base_content?, selection?, instructions, mode?: "draft"|"unified_diff" }
+Returns: { draft_content|null, diff|null, stats: {lines_added,lines_removed,hunks}, base_etag }
 
-    Multiple Terminal Support: Tabbed terminal sessions
+POST /api/ide/diff/apply
+Body: { session_id, filepath, base_etag, draft_content }
+Returns: { saved:true, updated_at, new_etag } or 409 { conflict:true, current_etag, current_content }
 
-4. Debugging Infrastructure
+(Optional for inline) POST /api/ide/copilot/suggest
+Body: { session_id, filepath, language, content, cursor_offset }
+Returns: { suggestion, range:{start,end} }
 
-    Debug Adapter Protocol: Breakpoint management, variable inspection
+B. Core helpers
 
-    Call Stack Viewer: Function call hierarchy during debugging
+ETag utility: hash file contents (e.g., SHA256) to do optimistic concurrency on apply.
 
-    Variable Explorer: Runtime variable inspection
+Path guard: reject .. / absolute paths; only operate under /workspace.
 
-    Debug Console: Interactive debugging commands
+Ollama compat: try /api/chat; if 404, fallback to /api/generate; always stream SSE to FE.
 
-5. UI Framework & Layout
+Neighbor context (optional): include a few small related files.
 
-    Panel System: Resizable panels (sidebar, main editor, bottom panel)
+C. Skeleton (drop‑in)
 
-    Workbench: Overall layout management
+# api/ide_diff.py
+from fastapi import APIRouter, HTTPException, Depends
+from pydantic import BaseModel
+from typing import Optional, Dict, Any
+import hashlib, os, time
 
-    Status Bar: Information display at bottom
+router = APIRouter(prefix="/api/ide")
 
-    Menu Systems: Command palette, context menus
+WORKSPACE = "/workspace"
 
-How Cursor & Kiro Implement These
-Cursor Architecture
+def sanitize_path(path: str) -> str:
+    if path.startswith("/") or ".." in path:
+        raise HTTPException(400, "Invalid path")
+    return os.path.join(WORKSPACE, path)
 
-    Modified VSCode Fork: Built on Electron/VSCode architecture, not just an extension
+def etag_of(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
-    AI Integration: Multi-layered context system with real-time inference engine
+class Selection(BaseModel):
+    start: int
+    end: int
+    text: Optional[str] = None
 
-    Predictive Engine: Character, token, block, and architectural-level predictions
+class ProposeIn(BaseModel):
+    session_id: str
+    filepath: str
+    base_content: Optional[str] = None
+    selection: Optional[Selection] = None
+    instructions: str
+    mode: Optional[str] = "draft"
 
-    Vector Database: Indexes entire codebase for AI context
+class ProposeOut(BaseModel):
+    draft_content: Optional[str] = None
+    diff: Optional[str] = None
+    stats: Dict[str, int] = {"lines_added":0,"lines_removed":0,"hunks":0}
+    base_etag: str
 
-Kiro Implementation
+class ApplyIn(BaseModel):
+    session_id: str
+    filepath: str
+    base_etag: str
+    draft_content: str
 
-    Spec-Driven Development: Three-phase process (Requirements → Design → Tasks)
+@router.post("/diff/propose", response_model=ProposeOut)
+async def propose(body: ProposeIn, user=Depends(get_current_user)):
+    target = sanitize_path(body.filepath)
+    if body.base_content is None:
+        try:
+            with open(target, "r", encoding="utf-8") as f:
+                base = f.read()
+        except FileNotFoundError:
+            base = ""
+    else:
+        base = body.base_content
+    base_etag = etag_of(base)
 
-    Agent Hooks: Automated actions triggered by code changes
+    # Build prompt/context for LLM
+    context = {
+        "filepath": body.filepath,
+        "base": base,
+        "selection": body.selection.dict() if body.selection else None,
+        "instructions": body.instructions,
+        "mode": body.mode or "draft",
+    }
+    # Call Ollama via compat (prefer /api/chat; fallback /api/generate)
+    draft_content, diff, stats = await llm_propose_change(context)
 
-    MCP Integration: Model Context Protocol for connecting external tools
+    return ProposeOut(
+        draft_content=draft_content,
+        diff=diff,
+        stats=stats or {"lines_added":0,"lines_removed":0,"hunks":0},
+        base_etag=base_etag,
+    )
 
-    Steering Files: Project context and coding standards
+@router.post("/diff/apply")
+async def apply(body: ApplyIn, user=Depends(get_current_user)):
+    target = sanitize_path(body.filepath)
+    current = ""
+    if os.path.exists(target):
+        with open(target, "r", encoding="utf-8") as f:
+            current = f.read()
+    if etag_of(current) != body.base_etag:
+        return {"conflict": True, "current_etag": etag_of(current), "current_content": current}
 
-Technical Implementation Stack
-Web-Based IDE Components
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    with open(target, "w", encoding="utf-8") as f:
+        f.write(body.draft_content)
+    return {"saved": True, "updated_at": int(time.time()), "new_etag": etag_of(body.draft_content)}
 
-javascript
-// Core libraries for web IDE implementation
-{
-  "editor": "@monaco-editor/react",           // Code editor
-  "terminal": "xterm",                        // Web terminal
-  "file-tree": "react-tree-view",            // File explorer
-  "layout": "react-mosaic-component",        // Resizable panels
-  "websockets": "socket.io-client",          // Real-time communication
-  "file-operations": "browserfs"             // File system abstraction
+Wire get_current_user to your existing JWT dependency (cookie or header). Implement llm_propose_change(context) using your Ollama compat function (you already sketched this earlier for /api/chat → /api/generate fallback).
+
+D. Optional inline suggestions endpoint
+
+class SuggestIn(BaseModel):
+    session_id: str
+    filepath: str
+    language: str
+    content: str
+    cursor_offset: int
+
+class SuggestOut(BaseModel):
+    suggestion: str
+    range: Dict[str,int]  # {start, end}
+
+@router.post("/copilot/suggest", response_model=SuggestOut)
+async def suggest(body: SuggestIn, user=Depends(get_current_user)):
+    # Build a compact prompt from content around cursor + file header/context
+    suggestion, start, end = await llm_suggest_inline(body)
+    return {"suggestion": suggestion, "range": {"start": start, "end": end}}
+
+
+vPhase 2 — Frontend (Next.js + Monaco)
+
+A. “AI → Propose changes…” action
+
+// call from command palette / context menu
+async function proposeChanges({ sessionId, filepath, selection, instructions }: {
+  sessionId: string; filepath: string;
+  selection?: { start:number; end:number; text?:string };
+  instructions: string;
+}) {
+  const res = await fetch("/api/ide/diff/propose", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ session_id: sessionId, filepath, selection, instructions, mode: "draft" }),
+  });
+  const data = await res.json();
+  openDiffViewer({
+    filepath,
+    baseEtag: data.base_etag,
+    leftText: getCurrentEditorText(), // your current buffer
+    rightText: data.draft_content ?? applyUnifiedDiff(getCurrentEditorText(), data.diff),
+    stats: data.stats
+  });
+}
+B. Diff viewer (Monaco DiffEditor)
+|
+import * as monaco from "monaco-editor";
+
+let diffEditor: monaco.editor.IStandaloneDiffEditor | null = null;
+
+function openDiffViewer({ filepath, baseEtag, leftText, rightText, stats }:{
+  filepath:string; baseEtag:string; leftText:string; rightText:string; stats:any
+}) {
+  // render toolbar + stats (+X -Y, hunks)
+  diffEditor = monaco.editor.createDiffEditor(document.getElementById("diff-pane")!, {
+    readOnly: false,
+    renderSideBySide: true,
+    automaticLayout: true,
+    originalEditable: false,
+  });
+  const originalModel = monaco.editor.createModel(leftText, undefined, monaco.Uri.parse(`file:///${filepath}`));
+  const modifiedModel = monaco.editor.createModel(rightText, undefined, monaco.Uri.parse(`file:///${filepath}.draft`));
+  diffEditor.setModel({ original: originalModel, modified: modifiedModel });
+
+  // Wire toolbar
+  (document.getElementById("acceptAllBtn")!).onclick = async () => {
+    const merged = diffEditor!.getModel()!.modified.getValue();
+    const res = await fetch("/api/ide/diff/apply", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ session_id: currentSessionId, filepath, base_etag: baseEtag, draft_content: merged }),
+    });
+    const data = await res.json();
+    if (data.conflict) {
+      // show conflict dialog; offer re-propose with latest content
+      showConflictDialog(data);
+      return;
+    }
+    // refresh main editor buffer with merged result
+    replaceActiveEditorBuffer(filepath, merged);
+    closeDiffViewer();
+  };
+
+  (document.getElementById("rejectBtn")!).onclick = () => closeDiffViewer();
+
+  (document.getElementById("mergeBtn")!).onclick = () => {
+    // per-hunk accept is built into DiffEditor via inline commands; user resolves then clicks Accept All
+  };
 }
 
-Backend Infrastructure
+C. Inline ghost suggestions (Monaco)
 
-python
-# Docker container management
-docker_sdk = "docker"                        # Container operations
-file_watcher = "watchdog"                    # File change detection
-process_manager = "subprocess"               # Command execution
-websocket_server = "fastapi-websocket"      # Real-time communication
-
-Prompt Engineering for AI Implementation
-
-Here's how to instruct your AI to build these IDE components:
-Component-Specific Prompts
-
-For File Explorer:
-
-text
-"Create a React component that renders a hierarchical file tree using react-tree-view. 
-Include context menus for file operations (create, delete, rename). 
-Use Monaco Editor's file system API to sync with the editor tabs. 
-Style it to match VSCode's explorer panel with icons and folder expansion."
-
-For Terminal Integration:
-
-text
-"Implement a web terminal using xterm.js that connects to a Docker container via WebSocket. 
-Include multiple terminal tab support, process management, and output streaming. 
-Integrate with the existing Docker SDK backend to execute commands in user containers."
-
-For Monaco Editor Integration:
-
-text
-"Set up Monaco Editor with TypeScript language support, custom themes matching our dark UI, 
-and file tab management. Configure it to work with our file explorer component and 
-include features like auto-save, syntax highlighting for multiple languages, 
-and integration with our AI assistant for code completion."
-
-For Layout System:
-
-text
-"Create a VSCode-like layout using CSS Grid and react-mosaic-component. 
-Include a resizable sidebar for file explorer, main editor area with tabs, 
-bottom panel for terminal/output, and status bar. 
-Make panels collapsible and remember user layout preferences."
-
-Complete Implementation Strategy
-Phase 1: Core Editor
-
-typescript
-// 1. Monaco Editor setup
-import { Editor } from '@monaco-editor/react';
-
-// 2. File system integration
-import { FileSystemAPI } from './filesystem';
-
-// 3. Theme configuration
-monaco.editor.defineTheme('harvis-dark', {
-  base: 'vs-dark',
-  inherit: true,
-  rules: [/* custom syntax highlighting */],
-  colors: {/* match your existing dark theme */}
+// If your monaco version supports inline completions:
+monaco.languages.registerInlineCompletionsProvider("typescript", {
+  async provideInlineCompletions(model, position, context, token) {
+    const content = model.getValue();
+    const offset = model.getOffsetAt(position);
+    const res = await fetch("/api/ide/copilot/suggest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({
+        session_id: currentSessionId,
+        filepath: currentFilePath,
+        language: "typescript",
+        content,
+        cursor_offset: offset
+      }),
+    });
+    const data = await res.json();
+    const start = model.getPositionAt(data.range.start);
+    const end   = model.getPositionAt(data.range.end);
+    return {
+      items: [{
+        insertText: data.suggestion,
+        range: new monaco.Range(start.lineNumber, start.column, end.lineNumber, end.column),
+      }]
+    };
+  },
+  freeInlineCompletions() {}
 });
 
-Phase 2: File Management
+// Fallback (older monaco): render “ghost” via a decoration and accept on Tab (custom)
 
-typescript
-// File explorer component with operations
-const FileExplorer = () => {
-  const [fileTree, setFileTree] = useState();
-  const [selectedFile, setSelectedFile] = useState();
-  
-  // File operations: create, delete, rename
-  // Integration with Monaco Editor tabs
-  // WebSocket sync with container filesystem
-};
+Make sure your global keybindings use Tab to accept and Esc to dismiss your ghost.
 
-Phase 3: Terminal & Debug Integration
+D. Assistant (right pane)
+Reuse your home chat component; ensure calls are /api/ide/chat/send/stream with credentials:"include". Add quick actions on a message: Propose changes → calls proposeChanges(...) with prefilled instructions; Insert snippet → stage in a draft buffer first.
 
-typescript
-// Terminal component using xterm.js
-const Terminal = () => {
-  const terminalRef = useRef();
-  
-  useEffect(() => {
-    const terminal = new Terminal();
-    const websocket = new WebSocket('ws://localhost:8080/terminal');
-    // Attach terminal to DOM and WebSocket
-  }, []);
-};
+Phase 3 — Validation
 
-Key Architectural Decisions
-What Makes Cursor/Kiro Different
+npm run type-check and npm run dev (frontend).
 
-    AI-First Design: Every component designed with AI integration in mind
+Exercise flows: Propose → Diff → Accept/Reject/Merge; inline ghost suggestion accept with Tab; Assistant triggers propose.
 
-    Context Awareness: Deep codebase understanding through vector indexing
+Confirm no regressions in sessions, explorer, terminal, multi‑language execution, “Interactive On”.
 
-    Predictive Features: Multi-level prediction engines for code completion
+Confirm all calls are /api/... and auth works via cookie or header; SSE streaming stable.
 
-    Spec-Driven Development: Structured approach to feature implementation
+🧩 MASTER PROMPT FOR CLAUDE (copy‑paste)
 
-Implementation Recommendations
+System / Context
+You are coding in the Harvis AI monorepo.
+Stack: Next.js 14 (App Router) + Tailwind + Monaco + xterm.js (frontend), FastAPI (backend), PostgreSQL, Docker sessions (workspace at /workspace), Nginx proxy at http://localhost:9000, Ollama as local LLM (with /api/chat → fallback to /api/generate).
+Rules: All browser calls use relative paths /api/...; backend handles JWT via Authorization: Bearer or access_token cookie. Do not break existing sessions, explorer, terminal, multi‑language execution, or “Interactive On”. Do not add heavy new Dockerfiles.
 
-    Start with Monaco: Use @monaco-editor/react as your foundation
+Goal
+Implement a Copilot-style experience in /ide:
 
-    Container Backend: Docker SDK for isolated development environments
+AI → Propose changes for the active file/selection and open a Monaco DiffEditor with Accept / Reject / Merge.
 
-    Real-time Communication: WebSockets for terminal/file operations
+Inline ghost suggestions in Monaco (accept with Tab, dismiss with Esc).
 
-    Component Architecture: Modular React components for each IDE feature
+Assistant (right pane) reusing the home chat file-attachment model that can trigger proposals or insert snippets.
 
-    State Management: Zustand or Redux for complex IDE state
+Deliverables
 
-The key is understanding that modern IDEs like Cursor and Kiro aren't just editors—they're complete development platforms with AI deeply integrated into every component. Your AI should focus on building each component with this integrated approach in mind, ensuring seamless communication between the editor, file system, terminal, and AI assistant features.
+Backend (FastAPI):
 
+POST /api/ide/diff/propose and POST /api/ide/diff/apply with path sanitization (only under /workspace) and ETag (SHA256) optimistic concurrency.
 
+(Optional) POST /api/ide/copilot/suggest for ghost suggestions.
 
+LLM compat: use Ollama; try /api/chat, fallback to /api/generate, stream via SSE (text/event-stream).
+
+Mirror home chat as /api/ide/chat/send (+ /stream) keeping the same messages+attachments schema.
+
+Frontend (Next.js):
+
+Command palette + editor context menu: AI → Propose changes… (with optional selection).
+
+Monaco DiffEditor: Left=current file (read-only), Right=draft; toolbar Accept / Reject / Merge (per hunk).
+
+Wire apply to write accepted content and refresh the main editor; handle 409 conflict gracefully with “Rebase Draft”.
+
+InlineCompletionProvider (or decoration fallback) to render ghost suggestions, Tab accept, Esc dismiss.
+
+Assistant tab reusing home chat UI; quick actions Propose changes and Insert snippet (draft-first).
+
+Constraints
+
+All fetches are relative and include credentials:"include".
+
+Keep terminal/websocket and /api/vibecode/* endpoints intact.
+
+Path guard: reject .. and absolute paths; only touch /workspace.
+
+Update front_end/jfrontend/changes.md with timestamp, problem, root cause, solution, files, status.
+
+Acceptance Criteria
+
+From the editor, I can request AI → Propose changes, see a side-by-side diff, and Accept / Reject / Merge. Accepted changes persist to /workspace.
+
+Inline ghost suggestions appear on idle/shortcut and accept with Tab.
+
+The Assistant reuses the home chat file-attachment model and can trigger proposals/snippets.
+
+No regressions in sessions, explorer, terminal, execution, or “Interactive On”.
+
+All /api/... calls succeed with JWT (cookie or header); SSE streams; Ollama compat works.
+
+Now implement the above: create/modify backend endpoints, FE components, and wiring as needed, keeping code idiomatic for this repo and updating changes.md.
+
+make sure it can do an npm run build successfully and also make sure theres no messed up imported modules that might effect the backend 
+
+DO NOT MESS WITH DOCKER TOO MUCH

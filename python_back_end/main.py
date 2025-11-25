@@ -26,6 +26,7 @@ from vison_models.llm_connector import query_qwen, query_llm, load_qwen_model, u
 
 # Import vibecoding routers
 from vibecoding import sessions_router, models_router, execution_router, files_router, commands_router, containers_router, user_prefs_router, file_api_router, terminal_router, ai_assistant_router, proxy_router
+from vibecoding.ide_ai import router as ide_ai_router
 from vibecoding.containers import container_manager
 from vibecoding.core import initialize_vibe_agent
 
@@ -458,6 +459,7 @@ app.include_router(file_api_router)
 app.include_router(terminal_router)
 app.include_router(ai_assistant_router)
 app.include_router(proxy_router)
+app.include_router(ide_ai_router)
 
 # ─── Device & models -----------------------------------------------------------
 device = 0 if torch.cuda.is_available() else -1
@@ -987,8 +989,6 @@ async def get_authentication_stats():
     return get_auth_stats()
 
 # Import new modules
-
-
 
 
 @app.post("/api/chat", tags=["chat"])
