@@ -1,3 +1,469 @@
+## 2025-11-24 - Inline Prompt Hardening & IDE Layout Fix
+
+**Problem**:
+1. Copilot suggestions occasionally returned apologies/plaintext because the prompt contract was too loose and lacked language-aware stops.
+2. Frontend provider spammed `/copilot/suggest` regardless of cursor context and could not cancel inflight requests, causing lag and stale ghosts.
+3. IDE tab strip pushed the editor off-screen when many tabs overflowed because flex children lacked `min-w-0`.
+
+**Root Cause**:
+- Backend prompt/message builder returned large prose blocks without strict “code-only” instructions, and `clean_copilot_suggestion` could not reliably strip fences/apologies.
+- Frontend inline provider fired on every idle tick, lacked heuristics for punctuation/keywords, and never aborted previous fetches.
+- Flex containers (root, header, tab bar) had implicit `min-width:auto`, so overflowing tabs forced the editor column to shrink to zero.
+
+**Solution**:
+1. **Backend prompt contract (masterprompt3 compliant)**:
+   - Added `SYSTEM_INLINE`, `build_copilot_messages()` JSON payload, and dynamic `stops_for()` / `inline_generation_options()` that include language + suffix-aware stop sequences.
+   - Upgraded `clean_copilot_suggestion()` with regex filters (code-ish detection, apology stripping, indentation normalization) plus `truncate_safely()`.
+   - Added optional `prefix`/`suffix` request hints and neighbor summaries so the model always sees recent context slices.
+2. **Frontend heuristics & cancellation**:
+   - `VibeContainerCodeEditor` now uses trigger heuristics (keywords, punctuation, structured tokens) before hitting the backend, and aborts inflight requests via `AbortController`.
+   - Added support for prefix/suffix budgets + neighbor file snippets (open tabs) in the suggest payload, plus `copilotEnabled` gating and idle-trigger filtering.
+3. **Layout hardening**:
+   - Added `min-w-0` throughout the `/ide` flex chain, introduced `.vibe-ide-root` helper, and updated `EditorTabBar`/tab rows to use horizontal scrolling instead of shrinking the editor.
+
+**Files Modified**:
+- `python_back_end/vibecoding/ide_ai.py`
+- `front_end/jfrontend/components/VibeContainerCodeEditor.tsx`
+- `front_end/jfrontend/app/ide/page.tsx`
+- `front_end/jfrontend/components/EditorTabBar.tsx`
+- `front_end/jfrontend/app/globals.css`
+
+**Status**: ✅ Inline ghosts are now code-only, cancellable, and layout no longer shifts when tabs overflow.
+
+## 2025-01-08 - Fix Monaco Ghost Text Rendering: Remove Decoration Overlay, Use InlineCompletionProvider Only
+
+**Problem**:
+Ghost text was computed and logged correctly, but not visible in the IDE. Implementation was mixing Monaco's InlineCompletionProvider API with custom decorations, which conflicts with Monaco's built-in ghost text rendering.
+
+**Root Cause**:
+1. Custom decoration overlay (`showGhostDecoration`, `ghostDecorationRef`) was conflicting with Monaco's native ghost rendering
+2. Decorations are for range highlighting, not inline text insertion - Monaco's InlineCompletionProvider handles ghost text automatically
+3. Using both `insertText` and `text` properties (Monaco's InlineCompletion API expects `text` for inline completions)
+4. Custom CSS (`.ai-ghost-text`, `.ai-ghost-anchor`) was overriding Monaco's built-in ghost text styles
+
+**Solution**:
+1. **Removed custom decoration overlay** from `MonacoCopilot.tsx`:
+   - Removed `ghostDecorationRef` declaration
+   - Removed `showGhostDecoration` and `clearGhostDecoration` functions
+   - Removed all calls to `showGhostDecoration()` and `clearGhostDecoration()`
+   - Decorations are for visual marking, not inline text - Monaco's provider handles rendering automatically
+
+2. **Use `text` property only** (not `insertText`):
+   - Changed completion item to use `text: suggestion` (Monaco's InlineCompletion API expects `text`)
+   - Keep zero-length range: `new monaco.Range(line, col, line, col)`
+   - Removed `insertText` property from items
+
+3. **Removed custom CSS styles** from `globals.css`:
+   - Removed `.ai-ghost-text` and `.ai-ghost-anchor` styles (no longer needed)
+   - Kept only Monaco's built-in ghost text CSS variables for theme compatibility
+   - Monaco themes handle ghost text styling automatically when using InlineCompletionProvider
+
+4. **Updated logging**:
+   - Changed all log statements to reference `text` property only (removed `insertText` references)
+   - Updated `handleItemDidShow` callback to log `text` property only
+
+5. **Simplified trigger logic**:
+   - Removed direct `getSuggestion()` call from idle trigger
+   - Now only triggers Monaco's `editor.action.inlineSuggest.trigger()` which calls `provideInlineCompletions`
+   - Monaco handles all rendering automatically
+
+**Files Modified**:
+- `front_end/jfrontend/app/ide/components/MonacoCopilot.tsx`
+- `front_end/jfrontend/app/globals.css`
+
+**Status**: ✅ Fixed - Ghost text now uses Monaco's native InlineCompletionProvider rendering. No custom decorations or CSS conflicts. Monaco automatically displays faded grey ghost text when provider returns items with `text` property and zero-length range.
+
+---
+
+## 2025-01-XX - Masterprompt3: True Ghost Suggestions & Removed Propose from Assistant
+
+**Problem**:
+1. Ghost suggestions not displaying automatically when editing
+2. Ollama returning empty responses causing 503 errors
+3. Inline completions coupled with assistant/propose flow
+4. "Propose changes" button in AI Assistant tab conflicted with ghost suggestions
+5. Auto-propose logic in Assistant tab interfered with inline completions
+
+**Root Cause** (per masterprompt3.md):
+1. Inline completion provider was calling assistant/propose endpoints instead of dedicated suggest endpoint
+2. Ollama client didn't handle empty `message.content` responses gracefully
+3. No retry mechanism with minimal "code-only" prompts when Ollama returns empty
+4. Assistant tab had "Propose changes" UI that should be removed
+5. Ghost suggestions were being triggered from Assistant chat responses, not from typing
+
+**Solution**:
+1. **Created `vibecoding/llm/ollama_compat.py`**:
+   - `stream_sse()`: Robust SSE streaming with automatic `/api/chat` → `/api/generate` fallback
+   - `collect_text()`: Non-streaming text collection with empty response handling
+   - Automatic retry with minimal "code-only" prompt if Ollama returns empty
+   - **Returns empty string instead of raising error** (per masterprompt3: "Never returns 503 for empty outputs; return suggestion: '' instead")
+   - Handles both newer `/api/chat` and legacy `/api/generate` endpoints
+
+2. **Updated `/api/ide/copilot/suggest` endpoint**:
+   - Now uses `ollama_compat.collect_text()` instead of `query_ollama_generate()`
+   - Completely decoupled from assistant/propose flow
+   - **Returns `{ suggestion: "", range }` on errors** (never 503)
+   - Changed default model from `COPILOT_MODEL` to `IDE_COPILOT_MODEL` (default: `qwen2.5-coder:7b`)
+   - Increased `num_predict` from 200 to 256 tokens
+
+3. **Removed "Propose changes" from AI Assistant**:
+   - Removed `onProposeDiff` prop from `AIAssistant.tsx`
+   - Removed `handleProposeChanges` callback
+   - Removed "Propose Changes" button from assistant messages
+   - Removed "Auto-propose" checkbox from header
+   - Removed auto-propose detection logic (code block detection, auto-triggering)
+   - Removed `onProposeDiff` from `RightPanel.tsx` and `page.tsx` call
+   - Assistant is now **chat only** (as per masterprompt3: "Keep Assistant chat only")
+
+4. **Updated `query_ollama_chat()` and `stream_chat_sse()`**:
+   - Both now use `ollama_compat` layer for consistency
+   - Unified error handling across all Ollama calls
+
+5. **Frontend MonacoCopilot**:
+   - Already properly configured with zero-length range at cursor
+   - Already decoupled (no proposeDiff calls)
+   - Uses dedicated `/api/ide/copilot/suggest` endpoint only
+   - Automatic triggering on content change with 600ms debounce
+   - No dependency on Assistant tab
+
+**How It Works Now** (per masterprompt3):
+- User types → Monaco auto-triggers inline suggestions after 600ms idle
+- Frontend calls `/api/ide/copilot/suggest` with file context
+- Backend uses `ollama_compat.collect_text()` which:
+  - Tries `/api/chat` first (newer Ollama)
+  - Falls back to `/api/generate` if needed (older Ollama)
+  - Retries with minimal prompt if response is empty
+  - Returns empty string `""` on failure (never 503)
+- Ghost text renders automatically, Tab accepts, Esc dismisses
+- **Completely independent from Assistant tab**
+- Diff/propose flow still available elsewhere (not from Assistant)
+
+**Files Modified**:
+- `python_back_end/vibecoding/llm/__init__.py`: Created module
+- `python_back_end/vibecoding/llm/ollama_compat.py`: New robust Ollama compatibility layer (returns "" on empty)
+- `python_back_end/vibecoding/ide_ai.py`: Updated to use `ollama_compat`, returns empty suggestion on errors, changed to `IDE_COPILOT_MODEL`
+- `front_end/jfrontend/app/ide/components/AIAssistant.tsx`: Removed all propose/auto-propose logic, removed prop
+- `front_end/jfrontend/app/ide/components/RightPanel.tsx`: Removed `onProposeDiff` prop
+- `front_end/jfrontend/app/ide/page.tsx`: Removed `onProposeDiff` from RightPanel call
+- `front_end/jfrontend/app/ide/components/MonacoCopilot.tsx`: Already properly configured (verified)
+
+**Status**: ✅ Complete - Ghost suggestions fully decoupled from Assistant, Propose changes removed from Assistant tab, robust Ollama client returns "" on empty, masterprompt3 requirements implemented
+
+# Inline Suggestions Visibility Fix
+## Date: 2025-11-18
+
+### Problem
+Ghost completions were generated on the backend but the editor never rendered the faded preview. Users had to keep toggling the Suggestions button and still saw no gray text, making Tab acceptance impossible.
+
+### Root Cause
+- Monaco’s inline completion CSS colors were being overridden by the global Tailwind palette, making ghost text fully blend into the background.
+- The Alt+] cycling command attempted to call `dispose()` on a string command id, throwing `TypeError: d.current.dispose is not a function` whenever suggestions were toggled.
+
+### Solution
+1. Added explicit CSS + CSS variables in `app/globals.css` to style `.ghost-text-decoration` and related Monaco classes so the ghost text renders with a high-contrast, faded gray color.
+2. Updated `MonacoCopilot.tsx` to treat the Alt+] command registration correctly (store the command id, skip `.dispose()`, and avoid duplicate registrations), eliminating the runtime error when suggestions auto-refresh.
+3. Added a custom decoration fallback in `MonacoCopilot.tsx` so every suggestion also renders through our own faded text overlay (using `editor.createDecorationsCollection`), guaranteeing the user always sees the AI output even if Monaco’s native ghost renderer misbehaves.
+
+### Files Modified
+- `front_end/jfrontend/app/globals.css`
+- `front_end/jfrontend/app/ide/components/MonacoCopilot.tsx`
+
+### Result / Status
+✅ Ghost suggestions now appear automatically as faded gray inline text (both native ghost text and a custom overlay), and the MonacoCopilot lifecycle no longer crashes when the feature toggles.
+
+---
+
+## 2025-01-17 22:30 - Ghost Suggestions Auto-Trigger & Dispose Error Fix
+
+**Problem**: 
+1. TypeError when toggling suggestions off: `d.current.dispose is not a function` caused blank error screen
+2. Inline ghost suggestions not triggering automatically - only appeared when clicking button
+3. Need true Copilot/Cursor-style behavior: automatic suggestions as you type (not button-based)
+
+**Root Cause**:
+1. Cleanup function tried to dispose `contentChangeDisposable` but it was never set (removed in previous refactor)
+2. Manual content change listener was redundantly triggering inline suggestions
+3. Monaco's native automatic triggering was being overridden by explicit trigger calls
+
+**Solution**:
+1. **Removed manual content change listener** - Monaco handles this natively via `InlineCompletionsProvider`
+2. **Enhanced cleanup error handling** - wrapped all dispose() calls in try/catch to prevent crashes
+3. **Simplified provider logic** - only respond to Automatic triggers, let Monaco handle timing
+4. **Added enabled check** - provider returns empty array when suggestions are disabled
+5. **Better cancellation** - check `token.isCancellationRequested` before and after async API calls
+
+**How It Works Now**:
+- User types → Monaco auto-detects idle pause (~600ms) → calls `provideInlineCompletions` (Automatic trigger)
+- Provider fetches from `/api/ide/copilot/suggest` with file context
+- Ghost text renders as faded inline suggestion
+- Tab accepts | Esc dismisses | Alt+] manually triggers
+- Fully automatic like real Copilot/Cursor
+
+**Files Modified**:
+- `app/ide/components/MonacoCopilot.tsx` - removed content change listener, enhanced cleanup, simplified triggers
+- `components/VibeContainerCodeEditor.tsx` - removed duplicate config, force-enable inlineSuggest on mount
+
+**Status**: ✅ Complete - Build passes, automatic ghost suggestions working, no dispose errors
+
+---
+
+## 2025-01-XX — Masterprompt3 IDE Copilot Implementation
+
+- Problem: IDE needed full Copilot/Cursor-style coding experience with inline ghost suggestions, provider management, compare slider UI, and proper endpoint contracts matching masterprompt3.md specification
+- Root Cause: Missing providers endpoint, no Alt/Opt+] cycling for suggestions, no slider compare mode, endpoints not fully aligned with masterprompt3 contracts
+- Solution:
+  - **GET /api/ide/providers Endpoint**:
+    - Added `ProviderInfo` and `ProvidersResponse` models
+    - Queries Ollama `/api/tags` for available models
+    - Filters and categorizes models by capabilities (chat, completion, code)
+    - Optionally includes cloud models (OpenAI, Anthropic) if API keys exist
+    - Returns normalized list with id, label, type, capabilities
+    - Graceful fallback to default models on error
+  - **Alt/Opt+] Keybinding for Cycling**:
+    - Added `cycleCommandRef` to `MonacoCopilot.tsx`
+    - Registered `Alt/Opt+]` keybinding to trigger `editor.action.inlineSuggest.trigger`
+    - Properly disposes command on cleanup
+    - Allows users to cycle through inline suggestions manually
+  - **Compare Slider UI**:
+    - Added `viewMode` state ('diff' | 'slider') to `DiffMerge.tsx`
+    - Implemented slider mode with two stacked Monaco editors
+    - Added draggable slider handle with `clip-path` CSS for visual comparison
+    - Synchronized scrolling between original and modified editors
+    - Added toggle buttons in diff header: "Diff | Slider"
+    - Slider position controlled by mouse drag (0-100%)
+  - **Provider API Integration**:
+    - Added `IDEProvidersAPI.getProviders()` to `ide-api.ts`
+    - Updated `AIAssistant.tsx` to load providers on mount
+    - Chat model dropdown now populated from providers (filtered by 'chat' capability)
+    - Suggestion model dropdown populated from providers (filtered by 'completion' or 'code' capability)
+    - Auto-selects code-capable provider as default if available
+    - Shows provider type (Cloud) in labels
+  - **Endpoint Contract Verification**:
+    - Verified `/api/ide/copilot/suggest` matches masterprompt3: accepts `{session_id, filepath, language, content, cursor_offset}`, returns `{suggestion, range:{start,end}}`
+    - Verified `/api/ide/diff/propose` matches masterprompt3: accepts `{session_id, filepath, base_content?, selection?, instructions, mode}`, returns `{draft_content|null, diff|null, stats, base_etag}`
+    - Verified `/api/ide/diff/apply` matches masterprompt3: accepts `{session_id, filepath, base_etag, draft_content}`, returns `{saved, updated_at, new_etag}` or 409 conflict
+    - Verified `/api/ide/chat/send` exists and streams via SSE
+- Files Modified:
+  - `python_back_end/vibecoding/ide_ai.py`: Added `GET /api/ide/providers`, verified endpoint contracts
+  - `front_end/jfrontend/app/ide/lib/ide-api.ts`: Added `IDEProvidersAPI`, `ProviderInfo`, `ProvidersResponse` types
+  - `front_end/jfrontend/app/ide/components/MonacoCopilot.tsx`: Added Alt/Opt+] cycling keybinding
+  - `front_end/jfrontend/app/ide/components/DiffMerge.tsx`: Added slider compare mode with toggle
+  - `front_end/jfrontend/app/ide/components/AIAssistant.tsx`: Integrated providers API for dynamic model selection
+- Status: ✅ Complete - All masterprompt3.md requirements implemented, build passes, no regressions
+
+## 2025-11-13 — Automatic Copilot Features & Model Selection (Updated)
+
+- Problem: Copilot features required too much manual interaction. No automatic inline completions, no TODO comment detection, no quick keyboard shortcuts, no model selection, no auto-propose toggle. Model selector was floating randomly and not integrated with the UI
+- Root Cause: Copilot implementation was basic - manual triggers only, single hardcoded model, no intelligent detection of user intent. Model selector was positioned absolutely without context
+- Solution:
+  - **Automatic Inline Completions**:
+    - Updated debounce timing from 500ms to 600ms (industry standard)
+    - Verified AbortController cancellation works on new input
+    - Completions appear automatically while typing, accept with Tab, dismiss with Esc
+  - **TODO/FIXME/AI Comment Detection**:
+    - Added useEffect in `page.tsx` to monitor editor content changes
+    - Detects patterns: `// TODO:`, `# TODO:`, `/* TODO: */`, `// FIXME:`, `// AI:`
+    - Auto-triggers diff proposal 1000ms after typing stops
+    - Respects `auto_propose_enabled` localStorage setting (default: true)
+    - Console logs: "🔍 Detected TODO comment: {instruction}"
+  - **Quick Propose Keyboard Shortcut**:
+    - Registered `Ctrl+Shift+I` (or `Cmd+Shift+I` on Mac) in Monaco editor
+    - Shows prompt dialog for instructions
+    - Immediately triggers `handleProposeDiff()` with instruction
+    - Also added command palette entry: "AI → Quick Propose (Ctrl+Shift+I)"
+  - **Fast Model Configuration**:
+    - Added `COMPLETION_MODEL` (default: `deepseek-coder:6.7b`) for inline completions
+    - Added `CHAT_MODEL` (default: `gpt-oss`) for chat/proposals
+    - Added `COMPLETION_PARAMS` with optimized settings for fast completions:
+      ```python
+      {
+        "temperature": 0.2,  # Low for deterministic suggestions
+        "top_p": 0.15,       # Focused sampling
+        "top_k": 5,          # Limited candidate pool
+        "stop": ["\n\n", "```", "###"],
+        "num_predict": 200
+      }
+      ```
+    - Updated `query_ollama_generate()` to accept optional parameters
+    - Updated `/api/ide/copilot/suggest` to use `COMPLETION_MODEL` and `COMPLETION_PARAMS`
+  - **Model Selector UI** (Integrated into AI Assistant Panel):
+    - Added `copilotModel` state in `page.tsx` with localStorage persistence
+    - Moved Copilot controls into AI Assistant panel header (removed floating overlay)
+    - Added two-section header in `AIAssistant.tsx`:
+      - **Chat Settings**: Chat model selector (gpt-oss/mistral) + Auto-propose checkbox
+      - **Copilot Settings**: Copilot model dropdown (DeepSeek Coder 6.7B, Code Llama 7B, GPT-OSS, Mistral) + ON/OFF button
+    - Styled with border separator between sections for clear visual distinction
+    - Updated `MonacoCopilot` component to accept `model` prop
+    - Updated `ide-api.ts` to pass model parameter to backend
+    - Props flow: `page.tsx` → `RightPanel.tsx` → `AIAssistant.tsx`
+  - **Auto-Propose Toggle**:
+    - Added `autoProposeEnabled` state in `AIAssistant.tsx` with localStorage persistence
+    - Default: true (opt-out model)
+    - Added checkbox in AI Assistant header: "Auto-propose"
+    - Tooltip: "Automatically propose code changes when AI provides code"
+  - **Documentation**:
+    - Created comprehensive `docs/copilot-setup.md` with:
+      - Model setup instructions (pull deepseek-coder, codellama)
+      - Model comparison table
+      - Feature configuration guide
+      - Troubleshooting section
+      - Best practices
+- Files:
+  - Backend:
+    - `python_back_end/vibecoding/ide_ai.py`: Added `COMPLETION_MODEL`, `CHAT_MODEL`, `COMPLETION_PARAMS`, updated `query_ollama_generate()` signature, updated `CopilotSuggestRequest` model, updated `/api/ide/copilot/suggest` endpoint
+  - Frontend:
+    - `front_end/jfrontend/app/ide/components/MonacoCopilot.tsx`: Updated debounceMs default to 600, added `model` prop, passed model to API
+    - `front_end/jfrontend/app/ide/page.tsx`: Added TODO detection useEffect, keyboard shortcut registration useEffect, `copilotModel` state with localStorage, removed floating model selector, passed copilot props to RightPanel
+    - `front_end/jfrontend/app/ide/components/RightPanel.tsx`: Added copilot props and forwarded to AIAssistant
+    - `front_end/jfrontend/app/ide/components/AIAssistant.tsx`: Redesigned header with two sections (Chat Settings + Copilot Settings), added `copilotModel`/`copilotEnabled` props, added `autoProposeEnabled` state with localStorage
+    - `front_end/jfrontend/components/CommandPalette.tsx`: Added `onQuickPropose` parameter, added "AI → Quick Propose (Ctrl+Shift+I)" command
+    - `front_end/jfrontend/app/ide/lib/ide-api.ts`: Added `model` parameter to `IDECopilotAPI.suggest()`
+  - Documentation:
+    - `docs/copilot-setup.md`: Created comprehensive setup and configuration guide
+- Status: Resolved. Automatic Copilot features implemented. Model selection works. TODO detection active. Quick propose shortcut registered. Build passes (npm run build ✓). Backend imports verified (docker exec backend python3 -c "from vibecoding.ide_ai import router" ✓).
+
+## 2025-11-04 — Copilot Features: ETag Support & Conflict Detection
+
+- Problem: Missing ETag-based optimistic concurrency for diff proposals, no conflict detection when files change between propose and apply, endpoint path mismatch with masterprompt2.md spec
+- Root Cause:
+  - `/api/ide/diff/propose` endpoint didn't exist (only `/api/ide/chat/propose-diff`)
+  - No ETag generation or validation in propose/apply flow
+  - No 409 conflict response when file changed since proposal
+  - Frontend didn't handle conflicts or provide rebase option
+- Solution:
+  - **New Endpoint**: Added `/api/ide/diff/propose` with mode parameter ('draft' | 'unified_diff'), ETag generation, and proper response model. Kept `/api/ide/chat/propose-diff` for backward compatibility
+  - **ETag Utility**: Added `compute_etag()` helper using SHA256 hash for content versioning
+  - **Conflict Detection**: Enhanced `/api/ide/diff/apply` to:
+    - Accept optional `base_etag` in request
+    - Read current file and compute ETag before save
+    - Return 409 with `{conflict: true, current_etag, current_content}` if mismatch
+    - Return `new_etag` after successful save
+  - **Frontend Updates**:
+    - Updated `ide-api.ts` to use new `/api/ide/diff/propose` endpoint
+    - Added `DiffConflict` interface for 409 error handling
+    - Updated `DiffMerge` component to accept `baseEtag` prop and handle conflicts
+    - Added conflict dialog with "Rebase Draft" option
+    - Added `handleRebaseDiff` in `page.tsx` to re-propose with current content
+- Files:
+  - Backend:
+    - `python_back_end/vibecoding/ide_ai.py`: Added `compute_etag()`, new `/api/ide/diff/propose` endpoint, enhanced `/api/ide/diff/apply` with conflict detection, updated models to include ETag fields
+  - Frontend:
+    - `front_end/jfrontend/app/ide/lib/ide-api.ts`: Updated to use new endpoint, added conflict handling, updated types
+    - `front_end/jfrontend/app/ide/components/DiffMerge.tsx`: Added ETag support, conflict dialog, rebase handler
+    - `front_end/jfrontend/app/ide/page.tsx`: Updated to pass `baseEtag`, added `handleRebaseDiff` for conflict resolution
+- Status: Resolved. ETag-based optimistic concurrency implemented. Conflict detection works. Rebase option available. Build passes. Backend imports verified.
+
+## 2025-11-04 — Fix IDE AI Features: Editor Instance & File Path Handling
+
+- Problem: Multiple IDE AI features not working: Insert at cursor failed silently, Propose changes returned "File not found or is not a regular file", Copilot inline suggestions inactive
+- Root Causes:
+  1. **Monaco Editor Not Exposed**: `VibeContainerCodeEditor` held internal editor ref but never passed it to parent `/ide` page. Result: `editorRef.current` was always null, breaking insert-at-cursor and Copilot registration
+  2. **File Path Double-Prefix Bug**: Backend `file_operations.py` sanitized paths to absolute (`/workspace/file.py`), then used them directly in `docker.exec_run(..., workdir="/workspace")`. Docker searched for `/workspace/workspace/file.py` → 404 "File not found"
+- Solution:
+  - **Editor Instance**: Added `onEditorMount` callback to `VibeContainerCodeEditor` that passes Monaco instance to parent. Wired in `page.tsx` as `onEditorMount={(ed)=>{ editorRef.current = ed }}`. Now `handleInsertAtCursor` and `MonacoCopilot` receive live editor
+  - **File Path Fix**: Modified `read_file()` and `save_file()` in `file_operations.py` to convert absolute paths to relative before Docker commands:
+    ```python
+    relative_path = safe_path.replace(WORKSPACE_BASE + '/', '', 1)
+    if relative_path == safe_path:
+        relative_path = safe_path.lstrip('/')
+    # Use relative_path in exec_run with workdir=/workspace
+    ```
+- Files:
+  - Frontend:
+    - `front_end/jfrontend/components/VibeContainerCodeEditor.tsx`: Added `onEditorMount` prop
+    - `front_end/jfrontend/app/ide/page.tsx`: Wired `onEditorMount` to update `editorRef`
+  - Backend:
+    - `python_back_end/vibecoding/file_operations.py`: Fixed `read_file()` and `save_file()` to strip `/workspace` prefix before Docker exec
+  - Docs:
+    - `IDE_AI_DIAGNOSTIC_FIX.md`: Comprehensive diagnostic with root cause analysis, testing guide, architecture notes
+- Status: Resolved. Insert at cursor works. Propose changes reads files correctly. Copilot can register providers. Diff accept/save flow functional.
+
+## 2025-11-04 — Add Ollama Compatibility Layer (Supports /api/chat and /api/generate)
+
+- Problem: IDE AI Assistant fails with 404 errors on older Ollama versions that don't have `/api/chat` endpoint. Different Ollama versions (pre-v0.1.0 vs v0.1.0+) have incompatible APIs, breaking IDE chat streaming.
+- Root Cause: 
+  - Newer Ollama (v0.1.0+) uses `/api/chat` with messages array: `{ model, messages: [{role, content}], stream }`
+  - Older Ollama (pre-v0.1.0) only has `/api/generate` with prompt string: `{ model, prompt, stream }`
+  - Backend was hardcoded to use `/api/chat`, causing 404 on older versions
+  - Response formats differ: `/api/chat` returns `message.content`, `/api/generate` returns `response`
+- Solution:
+  - **Runtime Detection**: Added `detect_ollama_chat_support()` that tests `/api/chat` availability at startup and caches result
+  - **Unified Streaming**: Created `stream_chat_sse(model, messages)` that:
+    - Auto-detects which endpoint to use based on cached detection
+    - For `/api/chat`: Uses messages array directly, parses `message.content` from stream
+    - For `/api/generate`: Converts messages→prompt format (`System: ...\n\nUser: ...\n\nAssistant:`), parses `response` field
+    - Yields SSE-formatted chunks: `data: {"token": "..."}\n\n` (same format for both)
+  - **Updated Endpoints**: 
+    - `POST /api/ide/chat/send`: Uses `stream_chat_sse()` for automatic compatibility
+    - Copilot and diff endpoints: Use `query_ollama_chat()` which now includes same compatibility logic for non-streaming calls
+  - **No Frontend Changes**: Frontend still reads SSE with `credentials: "include"`, protocol unchanged
+- Files:
+  - Backend:
+    - `python_back_end/vibecoding/ide_ai.py`: Added `detect_ollama_chat_support()`, `stream_chat_sse()`, updated `query_ollama_chat()` to use compatibility layer, simplified `/chat/send` to use unified streaming
+  - Docs:
+    - `OLLAMA_COMPATIBILITY_SMOKE_TESTS.md`: Comprehensive smoke tests with curl commands for /api/tags, /api/chat, /api/generate, model pulling, backend testing, troubleshooting guide
+- Status: Resolved. IDE AI works with both old and new Ollama versions. Backend auto-detects at runtime (single check, cached). SSE streaming works consistently. No 404 errors. Backward and forward compatible.
+
+## 2025-11-04 — Fix Ollama Endpoint 404 Errors in IDE AI
+
+- Problem: IDE AI Assistant chat was returning "404 Not Found" errors when trying to stream responses from Ollama. Copilot suggestions and diff proposals were also failing.
+- Root Cause: Backend `ide_ai.py` was using `/api/generate` endpoint for all Ollama queries, but chat/streaming requires `/api/chat` endpoint. The two endpoints have different request/response formats.
+- Solution:
+  - Created two separate functions: `query_ollama_generate()` for code completions (uses `/api/generate` with `prompt`) and `query_ollama_chat()` for chat interactions (uses `/api/chat` with `messages` array)
+  - Updated chat streaming endpoint to use `/api/chat` with proper message format and parse `message.content` from responses instead of `response`
+  - Updated copilot suggestion endpoint to use `/api/generate` (kept as-is since it works with prompts)
+  - Updated propose-diff endpoint to use `/api/chat` with messages array
+- Files:
+  - `python_back_end/vibecoding/ide_ai.py`: Replaced single `query_ollama()` function with `query_ollama_generate()` and `query_ollama_chat()`, updated all endpoint handlers to use correct function
+- Status: Resolved. AI Assistant chat now streams correctly, Copilot provides suggestions, and diff proposals work. Backend restarted to apply changes.
+
+## 2025-11-04 — Fix Authorization Missing for IDE AI Features
+
+- Problem: IDE AI Assistant was returning "Authorization missing" (401) errors when trying to use Copilot, AI Assistant chat, or Diff/Merge features. Browser was not sending cookies to backend, and Nginx wasn't properly forwarding Authorization headers for SSE streams.
+- Root Cause: 
+  - Backend auth dependency (`get_current_user_optimized`) only checked Authorization header, not cookies
+  - Frontend API calls didn't include `credentials: "include"` to send cookies
+  - Nginx config lacked specific SSE support for `/api/ide/*` endpoints
+  - No 401 error handling in frontend with re-authentication prompt
+- Solution:
+  - **Backend**: Updated `auth_optimized.py` to accept JWT from either `Authorization: Bearer` header OR `access_token` cookie (dual-source auth). Updated login endpoint to set cookie with proper `path=/` and `samesite=lax` settings.
+  - **Frontend**: Added `credentials: "include"` to all fetch calls in `ide-api.ts` (Copilot, Chat, Diff APIs). Added 401 error handling in `AIAssistant.tsx` with toast notification and re-authentication prompt that redirects to `/login`.
+  - **Nginx**: Added dedicated `/api/ide/` location block with SSE support (`proxy_buffering off`, `proxy_cache off`, extended timeouts) and proper header forwarding (`Authorization`, `Cookie`).
+- Files:
+  - Backend:
+    - `python_back_end/auth_optimized.py`: Modified `get_current_user_optimized` to check cookies as fallback when Authorization header missing
+    - `python_back_end/main.py`: Updated login cookie settings (added `path="/"`)
+  - Frontend:
+    - `front_end/jfrontend/app/ide/lib/ide-api.ts`: Added `credentials: "include"` to all fetch calls (suggest, send SSE, proposeDiff, apply)
+    - `front_end/jfrontend/app/ide/components/AIAssistant.tsx`: Added 401 error detection, toast notification, and re-authentication flow
+  - Nginx:
+    - `nginx.conf`: Added `/api/ide/` location block with SSE support, header forwarding, extended timeouts
+- Status: Resolved. All IDE AI endpoints now accept authentication via header or cookie. SSE streaming works correctly. Users get clear error messages and re-authentication prompts on 401. Backend and Nginx restarted to apply changes.
+
+## 2025-10-30 — IDE AI Capabilities: Copilot, AI Assistant, Compare & Merge
+
+- Problem: IDE lacked AI assistance features like inline code suggestions, conversational AI help, and ability to review/merge AI-proposed code changes.
+- Solution:
+  - **Copilot**: Integrated Monaco's InlineCompletionsProvider API with Ollama backend for context-aware code suggestions triggered on idle or Ctrl/Cmd+Space. Shows faded ghost text at cursor, accept with Tab, dismiss with Esc.
+  - **AI Assistant Panel**: Added right-side panel with streaming chat interface (separate from home chat), file attachment support, markdown rendering, and actions to insert code at cursor or propose changes to files.
+  - **Compare & Merge**: Implemented Monaco DiffEditor split-pane view for side-by-side comparison of original and AI-proposed changes, with Accept/Reject/Manual merge buttons.
+  - **Backend API**: Created `/api/ide/*` endpoints for copilot suggestions, chat streaming (SSE), diff proposals, and diff application with path validation and rate limiting.
+  - **Database**: Added `ide_chat_sessions` and `ide_chat_messages` tables to separate IDE assistant chat from home page chat, linked to vibecode sessions.
+- Files:
+  - Backend:
+    - `python_back_end/vibecoding/ide_ai.py`: New router with copilot/suggest, chat/send (streaming), chat/propose-diff, diff/apply endpoints. Uses Ollama with fallback to cloud LLMs.
+    - `python_back_end/migrations/add_ide_chat_tables.sql`: New database tables for IDE chat persistence.
+    - `python_back_end/main.py`: Mounted ide_ai_router.
+  - Frontend:
+    - `front_end/jfrontend/app/ide/lib/ide-api.ts`: API client with IDECopilotAPI, IDEChatAPI, IDEDiffAPI. Includes SSE streaming helper for chat.
+    - `front_end/jfrontend/app/ide/components/MonacoCopilot.tsx`: Registers Monaco inline completions provider, debounced suggestions, keyboard controls.
+    - `front_end/jfrontend/app/ide/components/AIAssistant.tsx`: Chat UI with streaming responses, file attachments, markdown rendering, action buttons (Insert at Cursor, Propose Changes).
+    - `front_end/jfrontend/app/ide/components/DiffMerge.tsx`: Monaco DiffEditor wrapper with split-pane layout, change stats display, Accept/Reject/Merge actions.
+    - `front_end/jfrontend/app/ide/components/RightPanel.tsx`: Tabbed panel for AI Assistant and Code Execution output.
+    - `front_end/jfrontend/app/ide/components/Toast.tsx`: Minimal toast provider for user feedback.
+    - `front_end/jfrontend/app/ide/page.tsx`: Integrated all AI components, added right panel with resizing, split editor view for diff, MonacoCopilot wiring, ToastProvider wrapping, handlers for insert/propose/apply/close.
+- Status: Implemented end-to-end. Copilot provides inline suggestions, AI Assistant enables contextual chat with code actions, Diff/Merge allows review of AI changes before applying. All API calls authenticated with JWT, paths sanitized, rate limiting on copilot suggestions.
+
 ## 2025-10-30 — IDE Output interactive input with auto-run, Explorer + button dialog, multi-lang exec fixes
 
 - Problem: Output tab could not accept interactive input; Explorer "+" button lacked a dialog; JS/CPP execution failed under runner; users had to manually type commands to run files.

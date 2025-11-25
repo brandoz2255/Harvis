@@ -16,6 +16,10 @@ import StatusBar from "@/components/StatusBar"
 import CommandPalette, { useIDECommands } from "@/components/CommandPalette"
 import { Loader2, ChevronLeft, ChevronRight, FileText, Save, CheckCircle, AlertCircle, Terminal } from "lucide-react"
 import { toWorkspaceRelativePath } from '@/lib/strings'
+import { RightPanel } from './components/RightPanel'
+import { DiffMerge } from './components/DiffMerge'
+import { IDEChatAPI, type DiffProposal } from './lib/ide-api'
+import { ToastProvider } from './components/Toast'
 
 interface Session {
   id: string
@@ -92,6 +96,23 @@ export default function IDEPage() {
   }>>([])
   const [isExecuting, setIsExecuting] = useState(false)
   
+  // AI Copilot state
+  const [copilotEnabled, setCopilotEnabled] = useState(true)
+  const [copilotModel, setCopilotModel] = useState<string>(() => {
+    // Initialize from localStorage
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('copilot_model') || 'gpt-oss'
+    }
+    return 'gpt-oss'
+  })
+  const editorRef = useRef<any>(null)
+  
+  // Right panel and diff view state
+  const [showRightPanel, setShowRightPanel] = useState(true)
+  const [rightPanelWidth, setRightPanelWidth] = useState(350)
+  const [showDiffView, setShowDiffView] = useState(false)
+  const [diffViewData, setDiffViewData] = useState<DiffProposal & { filepath: string } | null>(null)
+  
   // Refs for debouncing and terminal focus
   const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const terminalContainerRef = useRef<HTMLDivElement | null>(null)
@@ -110,6 +131,17 @@ export default function IDEPage() {
       permissions: ''
     }
   }, [activeTabId, editorTabs])
+
+  const neighborFileSnippets = useMemo(() => {
+    if (!selectedFile) return []
+    return editorTabs
+      .filter(tab => tab.path !== selectedFile.path)
+      .slice(0, 3)
+      .map(tab => ({
+        path: tab.path,
+        content: (tab.content || '').slice(0, 4000)
+      }))
+  }, [editorTabs, selectedFile])
 
   // Authentication guard
   useEffect(() => {
@@ -665,6 +697,245 @@ export default function IDEPage() {
     console.log('New file creation not yet implemented')
   }, [])
 
+  // AI Assistant handlers
+  const handleInsertAtCursor = useCallback((text: string) => {
+    // TODO: Insert text at cursor position in Monaco editor
+    if (editorRef.current) {
+      const editor = editorRef.current
+      const selection = editor.getSelection()
+      editor.executeEdits('', [{
+        range: selection,
+        text: text,
+        forceMoveMarkers: true
+      }])
+    }
+  }, [])
+
+  const handleProposeDiff = useCallback(async (filepath: string, instructions: string) => {
+    console.log('🚀 handleProposeDiff called', { filepath, instructions, hasSession: !!currentSession })
+    
+    if (!currentSession) {
+      console.error('❌ No current session')
+      return
+    }
+
+    try {
+      // Normalize filepath (remove /workspace/ prefix if present)
+      const normalizedPath = filepath.replace(/^\/workspace\//, '').replace(/^workspace\//, '')
+      console.log('📁 Normalized path:', normalizedPath)
+      
+      // Get current file content
+      const activeTab = editorTabs.find(t => t.path === filepath || t.path === normalizedPath || t.path.replace(/^\/workspace\//, '') === normalizedPath)
+      if (!activeTab) {
+        console.error('❌ Active tab not found for path:', filepath)
+        console.error('Available tabs:', editorTabs.map(t => t.path))
+        return
+      }
+      console.log('✅ Found active tab:', activeTab.path)
+
+      // Capture editor selection (if any)
+      let selection: { start_line: number; end_line: number; text: string } | undefined
+      if (editorRef.current) {
+        const editorSelection = editorRef.current.getSelection()
+        if (editorSelection && !editorSelection.isEmpty()) {
+          const model = editorRef.current.getModel()
+          const selectedText = model?.getValueInRange(editorSelection)
+          if (selectedText) {
+            selection = {
+              start_line: editorSelection.startLineNumber,
+              end_line: editorSelection.endLineNumber,
+              text: selectedText
+            }
+            console.log('📝 Selection captured:', selection)
+          }
+        }
+      }
+
+      console.log('🌐 Calling IDEChatAPI.proposeDiff...', {
+        sessionId: currentSession.session_id,
+        filepath: normalizedPath,
+        contentLength: activeTab.content?.length || 0,
+        hasSelection: !!selection
+      })
+
+      const response = await IDEChatAPI.proposeDiff(
+        currentSession.session_id,
+        normalizedPath,
+        instructions,
+        activeTab.content || '',
+        selection
+      )
+
+      console.log('✅ Propose diff response received:', {
+        hasDraft: !!response.draft_content,
+        hasDiff: !!response.diff,
+        stats: response.stats
+      })
+
+      // Show diff view
+      setDiffViewData({
+        ...response,
+        filepath: normalizedPath
+      })
+      setShowDiffView(true)
+      console.log('✅ Diff view shown')
+    } catch (error: any) {
+      console.error('❌ Failed to propose diff:', error)
+      console.error('Error details:', {
+        message: error.message,
+        stack: error.stack,
+        response: error.response
+      })
+      alert(`Failed to propose diff: ${error.message}`)
+    }
+  }, [currentSession, editorTabs])
+
+  const handleProposeChangesFromCommand = useCallback(() => {
+    if (!selectedFile || !currentSession) return
+
+    const instructions = prompt('Enter instructions for AI to modify the code:\n\n(e.g., "Add error handling", "Refactor to use async/await", "Add type hints")')
+    if (!instructions || !instructions.trim()) return
+
+    handleProposeDiff(selectedFile.path, instructions.trim())
+  }, [selectedFile, currentSession, handleProposeDiff])
+
+  const handleApplyDiff = useCallback(async (content: string) => {
+    if (!currentSession || !diffViewData) return
+
+    try {
+      // Save to container filesystem
+      const { FilesAPI } = await import('./lib/api')
+      await FilesAPI.save(currentSession.session_id, diffViewData.filepath, content)
+      
+      // Update the active tab content
+      if (activeTabId) {
+        setEditorTabs(prev => prev.map(tab =>
+          tab.id === activeTabId
+            ? { ...tab, content, isDirty: false } // Mark as saved
+            : tab
+        ))
+      }
+
+      // Dispatch custom event to notify editor to reload
+      window.dispatchEvent(new CustomEvent('file-updated', {
+        detail: { path: diffViewData.filepath, content }
+      }))
+    } catch (error) {
+      console.error('Failed to save file after accepting diff:', error)
+      // Still update the tab but mark as dirty so user can save manually
+      if (activeTabId) {
+        setEditorTabs(prev => prev.map(tab =>
+          tab.id === activeTabId
+            ? { ...tab, content, isDirty: true }
+            : tab
+        ))
+      }
+    }
+  }, [activeTabId, diffViewData, currentSession])
+
+  const handleCloseDiff = useCallback(() => {
+    setShowDiffView(false)
+    setDiffViewData(null)
+  }, [])
+
+  const handleRebaseDiff = useCallback(async () => {
+    if (!currentSession || !diffViewData) return
+
+    try {
+      // Get current file content
+      const activeTab = editorTabs.find(t => t.path === diffViewData.filepath)
+      if (!activeTab) return
+
+      // Re-propose with current content and same instructions
+      // We need to store the original instructions - for now, use a generic message
+      // In a real implementation, you'd store the instructions in diffViewData
+      const instructions = "Apply the same changes to the current version of the file"
+      
+      // Normalize filepath for rebase
+      const normalizedRebasePath = diffViewData.filepath.replace(/^\/workspace\//, '').replace(/^workspace\//, '')
+      
+      const response = await IDEChatAPI.proposeDiff(
+        currentSession.session_id,
+        normalizedRebasePath,
+        instructions,
+        activeTab.content || '',
+        undefined, // No selection on rebase
+        'draft'
+      )
+
+      // Update diff view with new proposal
+      setDiffViewData({
+        ...response,
+        filepath: diffViewData.filepath
+      })
+    } catch (error) {
+      console.error('Failed to rebase diff:', error)
+    }
+  }, [currentSession, diffViewData, editorTabs])
+
+  const handleRightPanelResize = useCallback((width: number) => {
+    setRightPanelWidth(width)
+  }, [])
+
+  // TODO/FIXME/AI comment detection for auto-diff proposals
+  useEffect(() => {
+    if (!editorRef.current || !currentSession || !selectedFile) return
+    
+    const editor = editorRef.current
+    let debounceTimer: NodeJS.Timeout | null = null
+    let lastDetectedComment: string | null = null
+    
+    const detectTODOComments = () => {
+      try {
+        const model = editor.getModel()
+        if (!model) return
+        
+        const content = model.getValue()
+        
+        // Regex to match TODO/FIXME/AI comments with instructions
+        // Supports: // TODO: instruction, # TODO: instruction, /* TODO: instruction */
+        const todoPattern = /(?:\/\/|#|\/\*)\s*(TODO|FIXME|AI):\s*(.+?)(?:\*\/|$)/i
+        const match = content.match(todoPattern)
+        
+        if (match && match[2]) {
+          const instruction = match[2].trim()
+          
+          // Avoid re-triggering for the same comment
+          if (instruction === lastDetectedComment) return
+          lastDetectedComment = instruction
+          
+          // Check if auto-propose is enabled (default: true)
+          const autoPropose = localStorage.getItem('auto_propose_enabled')
+          if (autoPropose === 'false') return
+          
+          // Auto-trigger diff proposal
+          console.log('🔍 Detected TODO comment:', instruction)
+          handleProposeDiff(selectedFile.path, instruction)
+        }
+      } catch (error) {
+        console.error('TODO detection error:', error)
+      }
+    }
+    
+    // Set up content change listener with debounce
+    const disposable = editor.onDidChangeModelContent(() => {
+      if (debounceTimer) {
+        clearTimeout(debounceTimer)
+      }
+      debounceTimer = setTimeout(detectTODOComments, 1000)
+    })
+    
+    return () => {
+      disposable.dispose()
+      if (debounceTimer) {
+        clearTimeout(debounceTimer)
+      }
+    }
+  }, [editorRef.current, currentSession, selectedFile, handleProposeDiff])
+
+  // Note: Removed Ctrl+Shift+I shortcut - not user friendly
+  // Users can right-click → "AI → Propose changes..." instead
+
   // Fetch available AI models
   useEffect(() => {
     const fetchModels = async () => {
@@ -883,6 +1154,11 @@ export default function IDEPage() {
     }
   }, [])
 
+  // Save copilot model selection to localStorage
+  useEffect(() => {
+    localStorage.setItem('copilot_model', copilotModel)
+  }, [copilotModel])
+
   // Create command palette commands
   const commands = useIDECommands({
     onSaveFile: handleManualSave,
@@ -890,6 +1166,8 @@ export default function IDEPage() {
     onNewTerminal: createTerminal,
     onStartContainer: handleStartContainer,
     onStopContainer: handleStopContainer,
+    onProposeChanges: selectedFile ? handleProposeChangesFromCommand : undefined,
+    onQuickPropose: selectedFile ? handleProposeChangesFromCommand : undefined,
     onToggleTheme: handleThemeToggle,
     onToggleLeftPanel: toggleLeftPanel,
     onToggleTerminal: toggleTerminal,
@@ -999,38 +1277,39 @@ export default function IDEPage() {
   }
 
   return (
-    <div className="h-screen bg-gray-900 text-white flex flex-col overflow-hidden">
-      {/* Header with Session Tabs */}
-      <header className="h-12 bg-gray-800 border-b border-gray-700 flex items-center justify-between px-4 flex-shrink-0">
-        <div className="flex items-center gap-4">
-          <h1 className="text-lg font-semibold">VibeCode IDE</h1>
-          <SessionTabs
-            sessions={openSessions}
-            activeSessionId={currentSession?.session_id || null}
-            onSessionSelect={handleSessionSelect}
-            onSessionClose={handleSessionClose}
-            onNewSession={handleNewSession}
-            className="flex-1"
-          />
-        </div>
-        <div className="flex items-center gap-2">
-          {currentSession && (
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-gray-400">Container:</span>
-              <span className={`text-xs px-2 py-1 rounded ${
-                currentSession.container_status === 'running' 
-                  ? 'bg-green-500/20 text-green-400' 
-                  : 'bg-red-500/20 text-red-400'
-              }`}>
-                {currentSession.container_status}
-              </span>
-            </div>
-          )}
-        </div>
-      </header>
+    <ToastProvider>
+      <div className="vibe-ide-root h-screen w-full bg-gray-900 text-white flex flex-col overflow-hidden">
+        {/* Header with Session Tabs */}
+        <header className="h-12 bg-gray-800 border-b border-gray-700 flex items-center justify-between px-4 flex-shrink-0 min-w-0">
+          <div className="flex items-center gap-4 min-w-0">
+            <h1 className="text-lg font-semibold">VibeCode IDE</h1>
+            <SessionTabs
+              sessions={openSessions}
+              activeSessionId={currentSession?.session_id || null}
+              onSessionSelect={handleSessionSelect}
+              onSessionClose={handleSessionClose}
+              onNewSession={handleNewSession}
+              className="flex-1 min-w-0"
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            {currentSession && (
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-gray-400">Container:</span>
+                <span className={`text-xs px-2 py-1 rounded ${
+                  currentSession.container_status === 'running' 
+                    ? 'bg-green-500/20 text-green-400' 
+                    : 'bg-red-500/20 text-red-400'
+                }`}>
+                  {currentSession.container_status}
+                </span>
+              </div>
+            )}
+          </div>
+        </header>
 
       {/* Main Grid Layout */}
-      <div className="flex-1 overflow-hidden flex">
+      <div className="flex-1 overflow-hidden flex min-w-0">
         {/* Left Sidebar - Cursor Style */}
         {showLeftPanel && (
           <ResizablePanel
@@ -1068,11 +1347,11 @@ export default function IDEPage() {
         )}
         
         {/* Center - Editor and Terminal */}
-        <div className="flex-1 flex flex-col overflow-hidden">
+        <div className="flex-1 flex flex-col overflow-hidden min-w-0">
             {/* Center - Editor */}
-            <div className="flex-1 bg-gray-900 overflow-hidden flex flex-col">
+            <div className="flex-1 bg-gray-900 overflow-hidden flex flex-col min-w-0">
             {/* Editor Tab Bar with Save Button */}
-            <div className="flex items-center bg-gray-800 border-b border-gray-700">
+            <div className="flex items-center bg-gray-800 border-b border-gray-700 min-w-0">
               <EditorTabBar
                 tabs={editorTabs}
                 activeTabId={activeTabId}
@@ -1126,21 +1405,50 @@ export default function IDEPage() {
               )}
             </div>
             
-            {/* Monaco Editor */}
-            <div className="flex-1 overflow-hidden">
-              {selectedFile && currentSession ? (
-                <VibeContainerCodeEditor
-                  sessionId={currentSession.session_id}
-                  selectedFile={selectedFile}
-                  onExecute={handleCodeExecution}
-                  onCursorPositionChange={setCursorPosition}
-                  className="h-full"
-                />
-              ) : (
-                <div className="h-full flex flex-col items-center justify-center text-gray-400">
-                  <FileText className="w-16 h-16 mb-4 opacity-50" />
-                  <p className="text-lg">No file open</p>
-                  <p className="text-sm mt-2">Select a file from the explorer to start editing</p>
+            {/* Monaco Editor (or split with Diff) */}
+            <div className="flex-1 overflow-hidden flex">
+              {/* Main Editor */}
+              <div className={showDiffView ? "flex-1 min-w-0 border-r border-gray-700" : "flex-1 min-w-0"}>
+                {selectedFile && currentSession ? (
+                  <>
+                    <VibeContainerCodeEditor
+                      sessionId={currentSession.session_id}
+                      selectedFile={selectedFile}
+                      onExecute={handleCodeExecution}
+                      onCursorPositionChange={setCursorPosition}
+                      neighborFiles={neighborFileSnippets}
+                      copilotEnabled={copilotEnabled}
+                      onEditorMount={(ed:any)=>{ 
+                        editorRef.current = ed
+                        // Force re-render of MonacoCopilot when editor mounts
+                        console.log('✅ Editor mounted, MonacoCopilot should register now')
+                      }}
+                      className="h-full"
+                    />
+                  </>
+                ) : (
+                  <div className="h-full flex flex-col items-center justify-center text-gray-400">
+                    <FileText className="w-16 h-16 mb-4 opacity-50" />
+                    <p className="text-lg">No file open</p>
+                    <p className="text-sm mt-2">Select a file from the explorer to start editing</p>
+                  </div>
+                )}
+              </div>
+
+              {/* Diff View */}
+              {showDiffView && diffViewData && currentSession && (
+                <div className="flex-1 min-w-0">
+                  <DiffMerge
+                    sessionId={currentSession.session_id}
+                    filepath={diffViewData.filepath}
+                    originalContent={editorTabs.find(t => t.path === diffViewData.filepath)?.content || ''}
+                    draftContent={diffViewData.draft_content || ''}
+                    stats={diffViewData.stats}
+                    baseEtag={diffViewData.base_etag}
+                    onClose={handleCloseDiff}
+                    onApply={handleApplyDiff}
+                    onRebase={handleRebaseDiff}
+                  />
                 </div>
               )}
             </div>
@@ -1156,9 +1464,9 @@ export default function IDEPage() {
               direction="vertical"
               handlePosition="top"
             >
-              <div className="h-full bg-gray-800 border-t border-gray-700 overflow-hidden flex flex-col">
+              <div className="h-full bg-gray-800 border-t border-gray-700 overflow-hidden flex flex-col min-w-0">
                 {/* Output and Terminal Tabs */}
-                <div className="flex border-b border-gray-700">
+                <div className="flex border-b border-gray-700 min-w-0 overflow-x-auto">
                   <button
                     className={`px-4 py-2 text-sm font-medium transition-colors ${
                       activeOutputTab === 'terminal' 
@@ -1194,7 +1502,7 @@ export default function IDEPage() {
                 />
                 
                 {/* Terminal Content */}
-                <div ref={terminalContainerRef} className="flex-1 overflow-hidden relative">
+                <div ref={terminalContainerRef} className="flex-1 overflow-hidden relative min-w-0">
                   {terminalTabs.length === 0 ? (
                     <div className="h-full flex flex-col items-center justify-center text-gray-400">
                       <Terminal className="w-12 h-12 mb-3 opacity-50" />
@@ -1285,6 +1593,29 @@ export default function IDEPage() {
             </ResizablePanel>
           )}
         </div>
+
+        {/* Right Panel - AI Assistant & Code Execution */}
+        {showRightPanel && (
+          <ResizablePanel
+            width={rightPanelWidth}
+            onResize={handleRightPanelResize}
+            minWidth={300}
+            maxWidth={600}
+            direction="horizontal"
+            handlePosition="left"
+          >
+            <RightPanel
+              sessionId={currentSession?.session_id || null}
+              currentFilePath={selectedFile?.path}
+              codeOutput={codeOutput}
+              onInsertAtCursor={handleInsertAtCursor}
+              copilotModel={copilotModel}
+              onCopilotModelChange={setCopilotModel}
+              copilotEnabled={copilotEnabled}
+              onCopilotToggle={() => setCopilotEnabled(!copilotEnabled)}
+            />
+          </ResizablePanel>
+        )}
       </div>
       {/* End of main flex container */}
 
@@ -1332,5 +1663,6 @@ export default function IDEPage() {
         </div>
       )}
     </div>
+    </ToastProvider>
   )
 }

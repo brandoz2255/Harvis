@@ -44,11 +44,11 @@ export default function EditorTabBar({
   }, [activeTabId])
 
   return (
-    <div className={`flex items-center bg-gray-800 border-b border-gray-700 ${className}`}>
+    <div className={`flex items-center bg-gray-800 border-b border-gray-700 min-w-0 ${className}`}>
       {/* Tabs container with horizontal scroll */}
       <div
         ref={scrollContainerRef}
-        className="flex-1 flex overflow-x-auto scrollbar-thin scrollbar-thumb-gray-600 scrollbar-track-gray-800"
+        className="flex-1 flex overflow-x-auto overscroll-contain scrollbar-thin scrollbar-thumb-gray-600 scrollbar-track-gray-800 min-w-0"
         style={{ scrollbarWidth: 'thin' }}
       >
         {tabs.map((tab) => (

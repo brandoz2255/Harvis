@@ -16,7 +16,8 @@ import {
   PanelRightOpen,
   Minimize2,
   Maximize2,
-  X
+  X,
+  Sparkles
 } from "lucide-react"
 import { safeTrim, toStr } from '@/lib/strings'
 
@@ -320,6 +321,8 @@ export function useIDECommands({
   onToggleLeftPanel,
   onToggleRightPanel,
   onToggleTerminal,
+  onProposeChanges,
+  onQuickPropose,
   canSave = false,
   canStartContainer = false,
   canStopContainer = false,
@@ -334,6 +337,8 @@ export function useIDECommands({
   onToggleLeftPanel?: () => void
   onToggleRightPanel?: () => void
   onToggleTerminal?: () => void
+  onProposeChanges?: () => void
+  onQuickPropose?: () => void
   canSave?: boolean
   canStartContainer?: boolean
   canStopContainer?: boolean
@@ -362,6 +367,29 @@ export function useIDECommands({
         icon: <FileText className="w-5 h-5" />,
         action: onNewFile,
         keywords: ['create', 'new', 'file', 'add']
+      })
+    }
+
+    // AI commands
+    if (onProposeChanges) {
+      commands.push({
+        id: 'propose-changes',
+        label: 'AI → Propose Changes',
+        description: 'Ask AI to propose code changes for the current file',
+        icon: <Sparkles className="w-5 h-5" />,
+        action: onProposeChanges,
+        keywords: ['ai', 'propose', 'changes', 'modify', 'refactor', 'suggest', 'copilot']
+      })
+    }
+
+    if (onQuickPropose) {
+      commands.push({
+        id: 'quick-propose',
+        label: 'AI → Quick Propose (Ctrl+Shift+I)',
+        description: 'Quickly propose changes with a prompt dialog',
+        icon: <Sparkles className="w-5 h-5" />,
+        action: onQuickPropose,
+        keywords: ['ai', 'quick', 'propose', 'prompt', 'fast', 'shortcut', 'copilot']
       })
     }
     
