@@ -189,7 +189,7 @@ export default function ChatInterface() {
                       ),
                     }}
                   >
-                    {message.content}
+                    {typeof message.content === 'string' ? message.content : String(message.content || '')}
                   </ReactMarkdown>
                 </div>
                 <span className="text-xs opacity-70 mt-1 block">{message.timestamp.toLocaleTimeString()}</span>

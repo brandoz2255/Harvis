@@ -4,13 +4,17 @@ import React, { useState, useRef, useEffect, useCallback } from 'react'
 import { Terminal, Power, RefreshCw, Maximize2, Minimize2, Copy, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { safeTrim, toStr } from '@/lib/strings'
 
 interface OptimizedVibeTerminalProps {
   sessionId: string
+  instanceId?: string
   isContainerRunning?: boolean
   onContainerStart?: () => Promise<void>
   onContainerStop?: () => Promise<void>
   onReady?: () => void
+  autoConnect?: boolean
+  initialCommand?: string
   className?: string
 }
 
@@ -22,11 +26,14 @@ interface TerminalLine {
 }
 
 export default function OptimizedVibeTerminal({ 
-  sessionId, 
+  sessionId,
+  instanceId,
   isContainerRunning = false,
   onContainerStart,
   onContainerStop,
   onReady,
+  autoConnect = true,
+  initialCommand,
   className = "" 
 }: OptimizedVibeTerminalProps) {
   const [lines, setLines] = useState<TerminalLine[]>([
@@ -83,9 +90,33 @@ export default function OptimizedVibeTerminal({
     addLine('🔌 Establishing optimized terminal connection...', 'system')
 
     try {
+      // Get token from localStorage
+      const token = localStorage.getItem('token')
+      if (!token) {
+        addLine('❌ Authentication token not found', 'error')
+        setIsConnecting(false)
+        return
+      }
+
+      // Wait for page to be fully loaded
+      if (document.readyState !== 'complete') {
+        addLine('⏳ Waiting for page to load...', 'system')
+        await new Promise(resolve => {
+          if (document.readyState === 'complete') {
+            resolve(void 0)
+          } else {
+            window.addEventListener('load', resolve, { once: true })
+          }
+        })
+      }
+
       const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-      const wsUrl = `${wsProtocol}//${window.location.host}/api/vibecoding/container/${sessionId}/terminal`
+      // Use new /ws/vibecoding/terminal endpoint
+      const wsUrl = `${wsProtocol}//${window.location.host}/ws/vibecoding/terminal?session_id=${sessionId}&token=${token}`
       
+      console.log(`🔌 Connecting to WebSocket: ${wsUrl}`)
+      console.log(`🔌 Token length: ${token ? token.length : 'null'}`)
+      console.log(`🔌 Session ID: ${sessionId}`)
       const ws = new WebSocket(wsUrl)
       websocketRef.current = ws
 
@@ -107,29 +138,54 @@ export default function OptimizedVibeTerminal({
         
         onReady?.()
         
+        // Send initial command if provided
+        if (initialCommand) {
+          setTimeout(() => {
+            ws.send(initialCommand + '\n')
+            addLine(`$ ${initialCommand}`, 'input')
+          }, 200)
+        }
+        
         // Focus input after connection
         setTimeout(() => {
           inputRef.current?.focus()
         }, 100)
       }
 
-      ws.onmessage = (event) => {
+      ws.onmessage = async (event) => {
         try {
-          // Try to parse as JSON first (for structured messages)
-          const data = JSON.parse(event.data)
-          if (data.type === 'error') {
-            addLine(`❌ Error: ${data.message}`, 'error')
-          } else if (data.type === 'system') {
-            addLine(data.message, 'system')
+          let data: any
+          
+          // Handle different data types
+          if (event.data instanceof Blob) {
+            // Convert blob to text
+            const text = await event.data.text()
+            data = text
+          } else if (typeof event.data === 'string') {
+            data = event.data
           } else {
-            addLine(data.content || event.data, 'output')
+            data = String(event.data)
           }
-        } catch {
-          // Raw terminal output - handle ANSI escape codes if needed
-          const content = event.data
-          if (content.trim()) {
-            addLine(content, 'output')
+          
+          // Try to parse as JSON first (for structured messages)
+          try {
+            const jsonData = JSON.parse(data)
+            if (jsonData.type === 'error') {
+              addLine(`❌ Error: ${jsonData.message}`, 'error')
+            } else if (jsonData.type === 'system') {
+              addLine(jsonData.message, 'system')
+            } else {
+              addLine(jsonData.content || data, 'output')
+            }
+          } catch {
+            // Raw terminal output - handle ANSI escape codes if needed
+            if (safeTrim(data)) {
+              addLine(data, 'output')
+            }
           }
+        } catch (error) {
+          console.error('Error processing WebSocket message:', error)
+          addLine('❌ Error processing terminal output', 'error')
         }
       }
 
@@ -185,14 +241,14 @@ export default function OptimizedVibeTerminal({
   }, [])
 
   const executeCommandDirect = useCallback(async (command: string) => {
-    if (!command.trim() || !sessionId) return
+    if (!safeTrim(command) || !sessionId) return
 
     setIsExecutingCommand(true)
     addLine(`$ ${command}`, 'input')
     
     // Add to command history
-    if (command.trim() !== commandHistoryRef.current[0]) {
-      commandHistoryRef.current.unshift(command.trim())
+    if (safeTrim(command) !== commandHistoryRef.current[0]) {
+      commandHistoryRef.current.unshift(safeTrim(command))
       if (commandHistoryRef.current.length > 100) {
         commandHistoryRef.current = commandHistoryRef.current.slice(0, 100)
       }
@@ -206,14 +262,13 @@ export default function OptimizedVibeTerminal({
       } else {
         // Fallback to HTTP API
         const token = localStorage.getItem('token')
-        const response = await fetch('/api/vibecoding/files', {
+        const response = await fetch('/api/vibecode/exec', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             ...(token && { 'Authorization': `Bearer ${token}` })
           },
           body: JSON.stringify({
-            action: 'execute',
             session_id: sessionId,
             command: command
           })
@@ -294,14 +349,14 @@ export default function OptimizedVibeTerminal({
 
   // Auto-connect when sessionId changes and container is running
   useEffect(() => {
-    if (sessionId && isContainerRunning && !websocketRef.current) {
+    if (autoConnect && sessionId && isContainerRunning && !websocketRef.current) {
       connectWebSocket()
     }
     
     return () => {
       disconnectWebSocket()
     }
-  }, [sessionId, isContainerRunning, connectWebSocket, disconnectWebSocket])
+  }, [sessionId, instanceId, isContainerRunning, autoConnect, connectWebSocket, disconnectWebSocket])
 
   const handleContainerStart = async () => {
     if (onContainerStart) {

@@ -657,7 +657,7 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
       console.error(`❌ [CHAT_DEBUG] Chat attempt failed:`, error)
       
       // Handle specific timeout errors
-      if (error.name === 'AbortError') {
+      if (error instanceof Error && error.name === 'AbortError') {
         const timeoutType = needsWebSearch ? "Research" : "Chat"
         const timeoutDuration = needsWebSearch ? "5 minutes" : "1 minute"
         console.warn(`⏰ ${timeoutType} request timed out after ${timeoutDuration}`)
@@ -1254,7 +1254,7 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
                       ),
                     }}
                   >
-                    {message.content}
+                    {typeof message.content === 'string' ? message.content : String(message.content || '')}
                   </ReactMarkdown>
                 </div>
 

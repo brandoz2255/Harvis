@@ -156,21 +156,30 @@ async def get_db_pool(request: Request) -> Optional[asyncpg.Pool]:
     return pool
 
 async def get_current_user_optimized(
+    request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(security),
-    request: Request = None,
     pool = Depends(get_db_pool)
 ) -> Dict:
     """
     Optimized JWT token verification with caching and connection pooling
+    Accepts JWT from Authorization header or access_token cookie
     """
-    if not credentials:
+    token = None
+    
+    # Try Authorization header first
+    if credentials:
+        token = credentials.credentials
+    
+    # Fallback to cookie if header not present
+    if not token and request:
+        token = request.cookies.get("access_token")
+    
+    if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authorization header missing",
+            detail="Authorization missing: provide JWT in Authorization header or access_token cookie",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
-    token = credentials.credentials
     
     # Fast token decoding with cache
     payload = decode_token_fast(token)
