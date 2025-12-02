@@ -182,14 +182,13 @@ export default function VibeContainerFileExplorer({
       const token = localStorage.getItem('token')
       if (!token) return
 
-      const response = await fetch('/api/vibecoding/files', {
+      const response = await fetch('/api/vibecode/files/tree', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          action: 'list',
           session_id: sessionId,
           path: path
         })
@@ -197,18 +196,23 @@ export default function VibeContainerFileExplorer({
 
       if (response.ok) {
         const data = await response.json()
-        const fileNodes: FileNode[] = data.files.map((file: ContainerFile) => ({
-          ...file,
+        // Backend returns the tree rooted at `path`; use its children
+        const toNode = (n: any): FileNode => ({
+          name: n.name,
+          type: n.type,
+          size: n.size,
+          permissions: n.permissions,
+          path: n.path,
           depth: path.split('/').length - 1,
-          isExpanded: expandedPaths.has(file.path),
-          children: file.type === 'directory' ? [] : undefined
-        }))
-        
+          isExpanded: expandedPaths.has(n.path),
+          children: Array.isArray(n.children) ? n.children.map(toNode) : undefined
+        })
+        const root = toNode(data)
+        const children = (root.children || []) as FileNode[]
         if (path === '/workspace') {
-          setFiles(fileNodes)
+          setFiles(children)
         } else {
-          // Update the specific directory in the tree
-          setFiles(prev => updateDirectoryInTree(prev, path, fileNodes))
+          setFiles(prev => updateDirectoryInTree(prev, path, children))
         }
       }
     } catch (error) {
@@ -258,7 +262,7 @@ export default function VibeContainerFileExplorer({
 
       const filePath = `${currentPath}/${newFileName}`.replace('//', '/')
       
-      const response = await fetch('/api/vibecoding/files', {
+      const response = await fetch('/api/vibecode/files/create', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
@@ -266,9 +270,8 @@ export default function VibeContainerFileExplorer({
         },
         body: JSON.stringify({
           session_id: sessionId,
-          action: 'write',
-          file_path: filePath,
-          content: newFileType === 'file' ? '// New file\n' : ''
+          path: filePath,
+          type: newFileType === 'file' ? 'file' : 'folder'
         })
       })
 

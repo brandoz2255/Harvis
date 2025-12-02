@@ -85,3 +85,24 @@
   background-size: 400% 400%;
   animation: gradient 3s ease infinite;
 }
+
+/* Monaco native ghost text visibility */
+.monaco-editor .ghost-text-decoration,
+.monaco-editor .ghost-text-decoration-preview,
+.monaco-editor .suggest-preview-text .ghost-text,
+.monaco-editor .inline-completion-text-to-replace {
+  color: rgba(148, 163, 184, 0.7) !important;
+  font-style: italic !important;
+}
+
+/* Custom AI ghost overlay (used by VibeContainerCodeEditor) */
+.monaco-editor .ai-ghost-overlay-text {
+  color: rgba(148, 163, 184, 0.9) !important;
+  font-style: italic !important;
+  pointer-events: none !important;
+}
+
+.vibe-ide-root,
+.vibe-ide-root * {
+  min-width: 0;
+}

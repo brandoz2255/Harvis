@@ -126,7 +126,7 @@ export default function ResearchAssistant() {
       }
     } catch (error) {
       console.error("Summary generation failed:", error)
-      if (error.name === 'AbortError') {
+      if (error instanceof Error && error.name === 'AbortError') {
         console.warn("Research request timed out after 5 minutes")
       }
     } finally {

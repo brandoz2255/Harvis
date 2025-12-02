@@ -1,738 +1,427 @@
-"""Vibe Coding Execution API Routes with Docker SDK"""
+"""Vibecoding Code Execution
 
-from fastapi import APIRouter, Depends, HTTPException
-from typing import Dict, Any, Optional, List
+This module handles code execution in VibeCode IDE sessions, providing structured
+output with timing information for commands and file execution.
+"""
+
+import time
 import logging
 import os
-import tempfile
-import uuid
-import json
-from datetime import datetime
+from typing import Optional, List, Dict, Any
 from pydantic import BaseModel
-import asyncio
-import docker
-from docker.models.containers import Container
-from docker.errors import DockerException, ContainerError
+from fastapi import APIRouter, HTTPException, Depends
 
-# Import auth dependencies
+from .containers import container_manager, ExecutionResult
 from auth_utils import get_current_user
+
+# Import validated model
+from .validators import ExecuteCodeRequest as ValidatedExecuteCodeRequest
+
+# Import command security
+from .command_security import execute_safe_command, build_safe_command, sanitize_arguments
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/vibe", tags=["vibe-execution"])
+# Create router
+router = APIRouter(tags=["vibecode-execution"])
 
-# Initialize Docker client
-try:
-    docker_client = docker.from_env()
-    DOCKER_AVAILABLE = True
-    logger.info("Docker client initialized successfully")
-except DockerException as e:
-    docker_client = None
-    DOCKER_AVAILABLE = False
-    logger.warning(f"Docker not available: {e}")
 
-# Pydantic models
-class CodeExecutionRequest(BaseModel):
-    session_id: str
-    code: str
-    language: str = "python"
-    filename: Optional[str] = None
-    environment: Optional[str] = "python:3.11-slim"  # Docker image
-    timeout: Optional[int] = 30  # seconds
-    working_directory: Optional[str] = "/workspace"
-    dependencies: Optional[List[str]] = None  # pip packages, etc.
-
-class CodeExecutionResponse(BaseModel):
-    execution_id: str
-    session_id: str
-    status: str  # running, completed, failed, timeout
-    output: str
-    error: Optional[str] = None
-    exit_code: Optional[int] = None
-    execution_time: Optional[float] = None
-    container_id: Optional[str] = None
-    created_at: datetime
-
-class ExecutionStatusResponse(BaseModel):
-    execution_id: str
-    status: str
-    is_running: bool
-    container_info: Optional[Dict[str, Any]] = None
-
-# In-memory storage for executions
-executions_storage: Dict[str, Dict[str, Any]] = {}
-
-# Language to Docker image mapping
-LANGUAGE_IMAGES = {
-    "python": "python:3.11-slim",
-    "javascript": "node:18-alpine", 
-    "typescript": "node:18-alpine",
-    "java": "openjdk:11-alpine",
-    "go": "golang:1.21-alpine",
-    "rust": "rust:1.75-slim",
-    "cpp": "gcc:latest",
-    "c": "gcc:latest",
-    "ruby": "ruby:3.2-alpine",
-    "php": "php:8.2-alpine",
-    "bash": "ubuntu:22.04",
-    "shell": "ubuntu:22.04",
-}
-
-# Language file extensions
+# Language detection mapping
 LANGUAGE_EXTENSIONS = {
-    "python": ".py",
-    "javascript": ".js",
-    "typescript": ".ts", 
-    "java": ".java",
-    "go": ".go",
-    "rust": ".rs",
-    "cpp": ".cpp",
-    "c": ".c",
-    "ruby": ".rb",
-    "php": ".php",
-    "bash": ".sh",
-    "shell": ".sh",
+    # Python
+    ".py": "python",
+    ".pyw": "python",
+    
+    # Node.js
+    ".js": "node",
+    ".mjs": "node",
+    ".cjs": "node",
+    
+    # TypeScript
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    
+    # Shell
+    ".sh": "bash",
+    ".bash": "bash",
+    
+    # C/C++
+    ".c": "c",
+    ".cpp": "cpp",
+    ".cc": "cpp",
+    ".cxx": "cpp",
+    ".hpp": "cpp",
+    
+    # Java
+    ".java": "java",
+    
+    # Go
+    ".go": "go",
+    
+    # Rust
+    ".rs": "rust",
 }
 
-# Language execution commands
 LANGUAGE_COMMANDS = {
-    "python": ["python", "{filename}"],
-    "javascript": ["node", "{filename}"],
-    "typescript": ["npx", "ts-node", "{filename}"],
-    "java": ["sh", "-c", "javac {filename} && java {classname}"],
-    "go": ["go", "run", "{filename}"],
-    "rust": ["sh", "-c", "rustc {filename} -o /tmp/program && /tmp/program"],
-    "cpp": ["sh", "-c", "g++ {filename} -o /tmp/program && /tmp/program"],
-    "c": ["sh", "-c", "gcc {filename} -o /tmp/program && /tmp/program"], 
-    "ruby": ["ruby", "{filename}"],
-    "php": ["php", "{filename}"],
-    "bash": ["bash", "{filename}"],
-    "shell": ["sh", "{filename}"],
+    "python": "python3",
+    "node": "node",
+    "typescript": "npx ts-node",
+    "bash": "bash",
+    "c": "gcc",
+    "cpp": "g++",
+    "java": "java",
+    "go": "go",
+    "rust": "rustc",
 }
 
-def get_docker_image(language: str, custom_environment: Optional[str] = None) -> str:
-    """Get the appropriate Docker image for a language"""
-    if custom_environment:
-        return custom_environment
-    return LANGUAGE_IMAGES.get(language.lower(), "ubuntu:22.04")
 
-def get_filename(language: str, custom_filename: Optional[str] = None) -> str:
-    """Get the appropriate filename for a language"""
-    if custom_filename:
-        return custom_filename
-    
-    extension = LANGUAGE_EXTENSIONS.get(language.lower(), ".txt")
-    return f"main{extension}"
-
-def get_execution_command(language: str, filename: str) -> List[str]:
-    """Get the execution command for a language"""
-    command_template = LANGUAGE_COMMANDS.get(language.lower(), ["cat", "{filename}"])
-    
-    # Special handling for Java classname
-    classname = filename.replace(".java", "") if filename.endswith(".java") else "Main"
-    
-    # Format command with filename and classname
-    return [cmd.format(filename=filename, classname=classname) for cmd in command_template]
-
-async def execute_code_in_container(
-    code: str,
-    language: str,
-    filename: str,
-    docker_image: str,
-    working_dir: str = "/workspace",
-    timeout: int = 30,
-    dependencies: Optional[List[str]] = None
-) -> Dict[str, Any]:
-    """Execute code in a Docker container"""
-    
-    if not DOCKER_AVAILABLE:
-        return {
-            "status": "failed",
-            "output": "",
-            "error": "Docker not available on this system",
-            "exit_code": -1,
-            "execution_time": 0.0
-        }
-    
-    container = None
-    start_time = datetime.now()
-    
-    try:
-        # Create temporary directory for code
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Write code to file
-            code_file_path = os.path.join(temp_dir, filename)
-            with open(code_file_path, 'w', encoding='utf-8') as f:
-                f.write(code)
-            
-            # Create setup script for dependencies
-            setup_script = ""
-            if dependencies and language.lower() == "python":
-                pip_packages = " ".join(dependencies)
-                setup_script = f"pip install {pip_packages} && "
-            elif dependencies and language.lower() in ["javascript", "typescript"]:
-                npm_packages = " ".join(dependencies)
-                setup_script = f"npm install {npm_packages} && "
-            
-            # Get execution command
-            exec_command = get_execution_command(language, filename)
-            full_command = f"{setup_script}" + " ".join(exec_command)
-            
-            # Container configuration
-            container_config = {
-                "image": docker_image,
-                "command": ["sh", "-c", full_command],
-                "volumes": {temp_dir: {"bind": working_dir, "mode": "rw"}},
-                "working_dir": working_dir,
-                "network_mode": "none",  # No network access for security
-                "mem_limit": "512m",     # 512MB memory limit
-                "cpu_count": 1,          # 1 CPU core
-                "detach": True,
-                "remove": False,         # Don't auto-remove for debugging
-                "stdout": True,
-                "stderr": True
-            }
-            
-            # Pull image if not exists
-            try:
-                docker_client.images.get(docker_image)
-            except docker.errors.ImageNotFound:
-                logger.info(f"Pulling Docker image: {docker_image}")
-                docker_client.images.pull(docker_image)
-            
-            # Create and start container
-            container = docker_client.containers.run(**container_config)
-            container_id = container.id
-            
-            logger.info(f"Started container {container_id[:12]} for {language} execution")
-            
-            # Wait for completion with timeout
-            try:
-                result = container.wait(timeout=timeout)
-                exit_code = result["StatusCode"]
-            except Exception as e:
-                logger.warning(f"Container execution timeout or error: {e}")
-                container.kill()
-                exit_code = -1
-            
-            # Get output and logs
-            try:
-                output = container.logs(stdout=True, stderr=False).decode('utf-8', errors='ignore')
-                error = container.logs(stdout=False, stderr=True).decode('utf-8', errors='ignore')
-            except Exception as e:
-                logger.error(f"Error getting container logs: {e}")
-                output = ""
-                error = f"Error retrieving logs: {str(e)}"
-            
-            # Calculate execution time
-            execution_time = (datetime.now() - start_time).total_seconds()
-            
-            # Clean up container
-            try:
-                container.remove(force=True)
-            except Exception as e:
-                logger.warning(f"Error removing container: {e}")
-            
-            status = "completed" if exit_code == 0 else "failed"
-            
-            return {
-                "status": status,
-                "output": output.strip(),
-                "error": error.strip() if error.strip() else None,
-                "exit_code": exit_code,
-                "execution_time": execution_time,
-                "container_id": container_id
-            }
-            
-    except DockerException as e:
-        logger.error(f"Docker error during code execution: {e}")
-        return {
-            "status": "failed", 
-            "output": "",
-            "error": f"Docker error: {str(e)}",
-            "exit_code": -1,
-            "execution_time": (datetime.now() - start_time).total_seconds()
-        }
-    except Exception as e:
-        logger.error(f"Unexpected error during code execution: {e}")
-        return {
-            "status": "failed",
-            "output": "",
-            "error": f"Execution error: {str(e)}",
-            "exit_code": -1,
-            "execution_time": (datetime.now() - start_time).total_seconds()
-        }
-    finally:
-        # Ensure cleanup
-        if container:
-            try:
-                container.remove(force=True)
-            except Exception:
-                pass
-
-async def execute_code_fallback(
-    code: str,
-    language: str,
-    filename: str,
-    timeout: int = 30
-) -> Dict[str, Any]:
-    """Fallback execution without Docker - runs code directly on host"""
-    import subprocess
-    import sys
-    
-    start_time = datetime.now()
-    
-    try:
-        # Create temporary directory for code
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Write code to file
-            code_file_path = os.path.join(temp_dir, filename)
-            with open(code_file_path, 'w', encoding='utf-8') as f:
-                f.write(code)
-            
-            # Check for non-executable file types
-            non_executable_languages = ["json", "yaml", "yml", "xml", "html", "css", "md", "txt"]
-            if language.lower() in non_executable_languages:
-                return {
-                    "status": "completed",
-                    "output": f"File content displayed (not executable):\n\n{code}",
-                    "error": None,
-                    "exit_code": 0,
-                    "execution_time": (datetime.now() - start_time).total_seconds()
-                }
-            
-            # Determine execution command based on language
-            lang = language.lower()
-            
-            if lang == "python":
-                cmd = [sys.executable, code_file_path]
-            elif lang in ["javascript", "js"]:
-                cmd = ["node", code_file_path]
-            elif lang in ["typescript", "ts"]:
-                # Try ts-node first, fallback to tsc + node
-                try:
-                    subprocess.run(["ts-node", "--version"], capture_output=True, check=True)
-                    cmd = ["ts-node", code_file_path]
-                except (subprocess.CalledProcessError, FileNotFoundError):
-                    # Fallback: compile with tsc then run with node
-                    js_file = code_file_path.replace('.ts', '.js')
-                    compile_result = subprocess.run(
-                        ["tsc", code_file_path, "--outFile", js_file],
-                        capture_output=True, text=True
-                    )
-                    if compile_result.returncode != 0:
-                        return {
-                            "status": "failed",
-                            "output": "",
-                            "error": f"TypeScript compilation failed: {compile_result.stderr}",
-                            "exit_code": compile_result.returncode,
-                            "execution_time": (datetime.now() - start_time).total_seconds()
-                        }
-                    cmd = ["node", js_file]
-            elif lang == "java":
-                # Compile and run Java
-                class_name = filename.replace('.java', '')
-                compile_result = subprocess.run(
-                    ["javac", code_file_path],
-                    cwd=temp_dir,
-                    capture_output=True,
-                    text=True
-                )
-                if compile_result.returncode != 0:
-                    return {
-                        "status": "failed",
-                        "output": "",
-                        "error": f"Java compilation failed: {compile_result.stderr}",
-                        "exit_code": compile_result.returncode,
-                        "execution_time": (datetime.now() - start_time).total_seconds()
-                    }
-                cmd = ["java", class_name]
-            elif lang in ["cpp", "c++"]:
-                # Compile and run C++
-                exe_file = os.path.join(temp_dir, "program")
-                compile_result = subprocess.run(
-                    ["g++", code_file_path, "-o", exe_file],
-                    capture_output=True,
-                    text=True
-                )
-                if compile_result.returncode != 0:
-                    return {
-                        "status": "failed",
-                        "output": "",
-                        "error": f"C++ compilation failed: {compile_result.stderr}",
-                        "exit_code": compile_result.returncode,
-                        "execution_time": (datetime.now() - start_time).total_seconds()
-                    }
-                cmd = [exe_file]
-            elif lang == "c":
-                # Compile and run C
-                exe_file = os.path.join(temp_dir, "program")
-                compile_result = subprocess.run(
-                    ["gcc", code_file_path, "-o", exe_file],
-                    capture_output=True,
-                    text=True
-                )
-                if compile_result.returncode != 0:
-                    return {
-                        "status": "failed",
-                        "output": "",
-                        "error": f"C compilation failed: {compile_result.stderr}",
-                        "exit_code": compile_result.returncode,
-                        "execution_time": (datetime.now() - start_time).total_seconds()
-                    }
-                cmd = [exe_file]
-            elif lang == "go":
-                cmd = ["go", "run", code_file_path]
-            elif lang == "rust":
-                # Compile and run Rust
-                exe_file = os.path.join(temp_dir, "program")
-                compile_result = subprocess.run(
-                    ["rustc", code_file_path, "-o", exe_file],
-                    capture_output=True,
-                    text=True
-                )
-                if compile_result.returncode != 0:
-                    return {
-                        "status": "failed",
-                        "output": "",
-                        "error": f"Rust compilation failed: {compile_result.stderr}",
-                        "exit_code": compile_result.returncode,
-                        "execution_time": (datetime.now() - start_time).total_seconds()
-                    }
-                cmd = [exe_file]
-            elif lang == "ruby":
-                cmd = ["ruby", code_file_path]
-            elif lang == "php":
-                cmd = ["php", code_file_path]
-            elif lang in ["bash", "shell", "sh"]:
-                cmd = ["bash", code_file_path]
-            elif lang == "perl":
-                cmd = ["perl", code_file_path]
-            elif lang == "lua":
-                cmd = ["lua", code_file_path]
-            elif lang in ["r", "rscript"]:
-                cmd = ["Rscript", code_file_path]
-            elif lang == "scala":
-                cmd = ["scala", code_file_path]
-            elif lang == "kotlin":
-                # Compile and run Kotlin
-                jar_file = os.path.join(temp_dir, "program.jar")
-                compile_result = subprocess.run(
-                    ["kotlinc", code_file_path, "-include-runtime", "-d", jar_file],
-                    capture_output=True,
-                    text=True
-                )
-                if compile_result.returncode != 0:
-                    return {
-                        "status": "failed",
-                        "output": "",
-                        "error": f"Kotlin compilation failed: {compile_result.stderr}",
-                        "exit_code": compile_result.returncode,
-                        "execution_time": (datetime.now() - start_time).total_seconds()
-                    }
-                cmd = ["java", "-jar", jar_file]
-            elif lang in ["powershell", "ps1"]:
-                cmd = ["powershell", "-File", code_file_path]
-            elif lang == "dart":
-                cmd = ["dart", code_file_path]
-            elif lang == "swift":
-                cmd = ["swift", code_file_path]
-            else:
-                return {
-                    "status": "failed",
-                    "output": "",
-                    "error": f"Language {language} not supported in fallback mode. Supported languages: python, javascript, typescript, java, cpp, c, go, rust, ruby, php, bash, shell, perl, lua, r, scala, kotlin, powershell, dart, swift",
-                    "exit_code": -1,
-                    "execution_time": 0.0
-                }
-            
-            # Execute the code
-            try:
-                result = subprocess.run(
-                    cmd,
-                    cwd=temp_dir,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                    check=False  # Don't raise exception on non-zero exit
-                )
-                
-                output = result.stdout
-                error = result.stderr
-                exit_code = result.returncode
-                
-                execution_time = (datetime.now() - start_time).total_seconds()
-                status = "completed" if exit_code == 0 else "failed"
-                
-                return {
-                    "status": status,
-                    "output": output.strip(),
-                    "error": error.strip() if error.strip() else None,
-                    "exit_code": exit_code,
-                    "execution_time": execution_time
-                }
-                
-            except subprocess.TimeoutExpired:
-                return {
-                    "status": "timeout",
-                    "output": "",
-                    "error": f"Code execution timed out after {timeout} seconds",
-                    "exit_code": -1,
-                    "execution_time": timeout
-                }
-            except FileNotFoundError as e:
-                return {
-                    "status": "failed",
-                    "output": "",
-                    "error": f"Interpreter not found: {str(e)}. Make sure {language} is installed.",
-                    "exit_code": -1,
-                    "execution_time": (datetime.now() - start_time).total_seconds()
-                }
-                
-    except Exception as e:
-        logger.error(f"Fallback execution error: {e}")
-        return {
-            "status": "failed",
-            "output": "",
-            "error": f"Execution error: {str(e)}",
-            "exit_code": -1,
-            "execution_time": (datetime.now() - start_time).total_seconds()
-        }
-
-@router.post("/execute", response_model=CodeExecutionResponse)
 async def execute_code(
-    request: CodeExecutionRequest,
-    user: Dict = Depends(get_current_user)
-):
-    """Execute code in a secure Docker container"""
-    try:
-        execution_id = str(uuid.uuid4())
-        created_at = datetime.now()
+    session_id: str,
+    cmd: Optional[str] = None,
+    file: Optional[str] = None,
+    lang: Optional[str] = None,
+    args: Optional[List[str]] = None
+) -> ExecutionResult:
+    """Execute code or command in a VibeCode session container
+    
+    This function supports two modes:
+    1. Direct command execution (cmd parameter)
+    2. File execution with language detection (file + lang parameters)
+    
+    Args:
+        session_id: Unique session identifier
+        cmd: Direct command to execute (e.g., "echo hello")
+        file: Path to file to execute (relative to /workspace)
+        lang: Language for file execution (python, node, bash)
+        args: Additional arguments to pass to the command
         
-        # Validate inputs
-        if not request.code.strip():
-            raise HTTPException(status_code=400, detail="Code cannot be empty")
+    Returns:
+        ExecutionResult with stdout, stderr, exit_code, and timing info
         
-        if request.language.lower() not in LANGUAGE_IMAGES:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Unsupported language: {request.language}. Supported: {list(LANGUAGE_IMAGES.keys())}"
-            )
+    Raises:
+        ValueError: If neither cmd nor file is provided
         
-        # Get execution parameters
-        docker_image = get_docker_image(request.language, request.environment)
-        filename = get_filename(request.language, request.filename)
+    Example:
+        # Direct command
+        result = await execute_code(session_id="abc123", cmd="echo 'hello world'")
         
-        logger.info(f"Executing {request.language} code in container for user {user.get('id')}")
-        logger.info(f"Using image: {docker_image}, filename: {filename}")
-        
-        # Store execution info
-        execution_info = {
-            "execution_id": execution_id,
-            "session_id": request.session_id,
-            "user_id": str(user.get("id")),
-            "status": "running",
-            "language": request.language,
-            "filename": filename,
-            "docker_image": docker_image,
-            "created_at": created_at,
-            "code": request.code[:1000]  # Store first 1000 chars for debugging
-        }
-        executions_storage[execution_id] = execution_info
-        
-        # Execute code - use fallback if Docker is not available
-        if DOCKER_AVAILABLE:
-            result = await execute_code_in_container(
-                code=request.code,
-                language=request.language,
-                filename=filename,
-                docker_image=docker_image,
-                working_dir=request.working_directory or "/workspace",
-                timeout=request.timeout or 30,
-                dependencies=request.dependencies
-            )
-        else:
-            logger.info(f"Using fallback execution for {request.language} (Docker not available)")
-            result = await execute_code_fallback(
-                code=request.code,
-                language=request.language,
-                filename=filename,
-                timeout=request.timeout or 30
-            )
-        
-        # Update execution info with results
-        execution_info.update({
-            "status": result["status"],
-            "output": result["output"],
-            "error": result["error"],
-            "exit_code": result["exit_code"],
-            "execution_time": result["execution_time"],
-            "container_id": result.get("container_id"),
-            "completed_at": datetime.now()
-        })
-        
-        logger.info(f"Code execution {execution_id} completed with status: {result['status']}")
-        
-        return CodeExecutionResponse(
-            execution_id=execution_id,
-            session_id=request.session_id,
-            status=result["status"],
-            output=result["output"],
-            error=result["error"],
-            exit_code=result["exit_code"],
-            execution_time=result["execution_time"],
-            container_id=result.get("container_id"),
-            created_at=created_at
+        # File execution
+        result = await execute_code(
+            session_id="abc123",
+            file="test.py",
+            lang="python"
         )
+    """
+    logger.info(f"🚀 Executing code in session: {session_id}")
+    
+    # Build the command to execute
+    command = None
+    
+    if file:
+        # File execution mode
+        logger.info(f"📄 File execution mode: {file}")
         
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error executing code: {e}")
-        raise HTTPException(status_code=500, detail=f"Code execution failed: {str(e)}")
-
-@router.get("/execute/{execution_id}/status", response_model=ExecutionStatusResponse)
-async def get_execution_status(
-    execution_id: str,
-    user: Dict = Depends(get_current_user)
-):
-    """Get the status of a code execution"""
-    try:
-        execution = executions_storage.get(execution_id)
+        # Detect language if not provided
+        if not lang:
+            lang = _detect_language(file)
+            logger.info(f"🔍 Detected language: {lang}")
         
-        if not execution:
-            raise HTTPException(status_code=404, detail="Execution not found")
+        # Build command based on language
+        command = _build_file_command(file, lang, args)
         
-        # Check if user owns this execution
-        if execution.get("user_id") != str(user.get("id")):
-            raise HTTPException(status_code=403, detail="Access denied")
+    elif cmd:
+        # Direct command mode
+        logger.info(f"💻 Direct command mode: {cmd}")
         
-        is_running = execution.get("status") == "running"
-        container_info = None
-        
-        # If we have a container ID and Docker is available, get container info
-        if DOCKER_AVAILABLE and execution.get("container_id"):
-            try:
-                container = docker_client.containers.get(execution["container_id"])
-                container_info = {
-                    "id": container.id,
-                    "status": container.status,
-                    "image": container.image.tags[0] if container.image.tags else "unknown"
-                }
-            except docker.errors.NotFound:
-                # Container no longer exists
-                if is_running:
-                    execution["status"] = "failed"
-                    execution["error"] = "Container no longer exists"
-                    is_running = False
-            except Exception as e:
-                logger.warning(f"Error getting container info: {e}")
-        
-        return ExecutionStatusResponse(
-            execution_id=execution_id,
-            status=execution.get("status", "unknown"),
-            is_running=is_running,
-            container_info=container_info
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting execution status: {e}")
-        raise HTTPException(status_code=500, detail="Failed to get execution status")
-
-@router.get("/execute/history")
-async def get_execution_history(
-    user: Dict = Depends(get_current_user),
-    session_id: Optional[str] = None,
-    limit: int = 50
-):
-    """Get execution history for the user"""
-    try:
-        user_executions = []
-        
-        for exec_id, execution in executions_storage.items():
-            if execution.get("user_id") == str(user.get("id")):
-                if session_id and execution.get("session_id") != session_id:
-                    continue
-                    
-                # Remove code content for history (privacy/size)
-                exec_copy = execution.copy()
-                exec_copy.pop("code", None)
-                user_executions.append(exec_copy)
-        
-        # Sort by creation time, most recent first
-        user_executions.sort(
-            key=lambda x: x.get("created_at", datetime.min), 
-            reverse=True
-        )
-        
-        # Limit results
-        user_executions = user_executions[:limit]
-        
-        return {
-            "executions": user_executions,
-            "total": len(user_executions),
-            "docker_available": DOCKER_AVAILABLE
-        }
-        
-    except Exception as e:
-        logger.error(f"Error getting execution history: {e}")
-        raise HTTPException(status_code=500, detail="Failed to get execution history")
-
-@router.get("/docker/status")
-async def get_docker_status(
-    user: Dict = Depends(get_current_user)
-):
-    """Get Docker service status"""
-    try:
-        if not DOCKER_AVAILABLE:
-            return {
-                "available": False,
-                "error": "Docker client not initialized"
-            }
-        
-        # Test Docker connection
+        # Validate command for security
         try:
-            info = docker_client.info()
-            version = docker_client.version()
-            
-            return {
-                "available": True,
-                "version": version.get("Version", "unknown"),
-                "api_version": version.get("ApiVersion", "unknown"),
-                "containers": info.get("Containers", 0),
-                "images": info.get("Images", 0),
-                "server_version": info.get("ServerVersion", "unknown")
-            }
-        except Exception as e:
-            return {
-                "available": False,
-                "error": str(e)
-            }
-            
+            # Allow pipes for advanced users, but block other dangerous patterns
+            command = execute_safe_command(cmd, strict=False, allow_pipes=True)
+            logger.info(f"✅ Command validated and sanitized")
+        except ValueError as e:
+            logger.warning(f"🚫 Command rejected: {e}")
+            raise ValueError(f"Unsafe command: {e}")
+        
+    else:
+        raise ValueError("Either 'cmd' or 'file' parameter is required")
+    
+    logger.info(f"⚙️ Executing command: {command}")
+    
+    # Execute command in container with timing
+    start_time = time.time()
+    started_at = int(start_time * 1000)
+    
+    try:
+        # Ensure runner container exists before execution
+        user_id = "default"  # TODO: Get actual user_id from session
+        await container_manager.ensure_runner_ready(session_id, user_id)
+        
+        # Get runner container for execution (prefer runner, fallback to IDE container)
+        container = await container_manager.get_runner_container(session_id)
+        if not container:
+            # Fallback to IDE container if runner not available
+            container = await container_manager.get_container(session_id)
+            if not container:
+                # Return error result
+                return ExecutionResult(
+                    command=command,
+                    stdout="",
+                    stderr="Error: Container not found",
+                    exit_code=-1,
+                    execution_time_ms=0
+                )
+        
+        # Execute with demux to separate stdout/stderr
+        result = container.exec_run(
+            command,
+            workdir="/workspace",
+            demux=True
+        )
+        
+        end_time = time.time()
+        finished_at = int(end_time * 1000)
+        execution_time_ms = int((end_time - start_time) * 1000)
+        
+        # Decode output
+        stdout_bytes, stderr_bytes = result.output
+        stdout = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
+        stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
+        
+        logger.info(f"✅ Execution completed in {execution_time_ms}ms with exit code {result.exit_code}")
+        
+        # Create execution result with proper timing
+        exec_result = ExecutionResult(
+            command=command,
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=result.exit_code,
+            execution_time_ms=execution_time_ms
+        )
+        
+        # Override timing fields to match actual execution
+        exec_result.started_at = started_at
+        exec_result.finished_at = finished_at
+        
+        return exec_result
+        
     except Exception as e:
-        logger.error(f"Error checking Docker status: {e}")
-        return {
-            "available": False,
-            "error": str(e)
-        }
+        end_time = time.time()
+        finished_at = int(end_time * 1000)
+        execution_time_ms = int((end_time - start_time) * 1000)
+        
+        logger.error(f"❌ Execution failed: {e}")
+        
+        # Return error result
+        exec_result = ExecutionResult(
+            command=command,
+            stdout="",
+            stderr=f"Error: {str(e)}",
+            exit_code=-1,
+            execution_time_ms=execution_time_ms
+        )
+        exec_result.started_at = started_at
+        exec_result.finished_at = finished_at
+        
+        return exec_result
 
-@router.get("/languages")
-async def get_supported_languages(
-    user: Dict = Depends(get_current_user)
+
+def _detect_language(file: str) -> str:
+    """Detect programming language from file extension
+    
+    Args:
+        file: Filename or path
+        
+    Returns:
+        Language identifier (python, node, bash) or empty string
+    """
+    _, ext = os.path.splitext(file)
+    ext = ext.lower()
+    
+    return LANGUAGE_EXTENSIONS.get(ext, "")
+
+
+def _build_file_command(file: str, lang: str, args: Optional[List[str]] = None) -> str:
+    """Build execution command for a file with multi-language support
+    
+    Args:
+        file: File path (relative to /workspace)
+        lang: Language identifier
+        args: Additional arguments
+        
+    Returns:
+        Complete command string (sanitized for security)
+    """
+    # Ensure file path is absolute
+    if not file.startswith("/workspace/"):
+        if file.startswith("/"):
+            file = file[1:]
+        file = f"/workspace/{file}"
+    
+    file_quoted = file
+    arg_str = ""
+    if args:
+        safe_args = sanitize_arguments(args)
+        arg_str = " " + " ".join(safe_args)
+    
+    # Interpreted languages (direct execution)
+    if lang == "python":
+        return f"python3 '{file_quoted}'{arg_str}"
+    
+    elif lang == "node":
+        return f"node '{file_quoted}'{arg_str}"
+    
+    elif lang == "bash":
+        return f"bash '{file_quoted}'{arg_str}"
+    
+    elif lang == "typescript":
+        return f"npx ts-node '{file_quoted}'{arg_str}"
+    
+    # Compiled languages (compile then run)
+    elif lang == "c":
+        # Compile to a.out, then run it
+        return f"sh -c \"gcc '{file_quoted}' -o /tmp/a.out && /tmp/a.out{arg_str}\""
+    
+    elif lang == "cpp":
+        # Compile to a.out, then run it
+        return f"sh -c \"g++ '{file_quoted}' -o /tmp/a.out && /tmp/a.out{arg_str}\""
+    
+    elif lang == "java":
+        # Compile and run Java
+        file_base = os.path.basename(file_quoted).replace('.java', '')
+        return f"sh -c \"cd /workspace && javac '{file_quoted}' && java {file_base}{arg_str}\""
+    
+    elif lang == "rust":
+        # Compile and run Rust
+        file_base = os.path.basename(file_quoted).replace('.rs', '')
+        return f"sh -c \"rustc '{file_quoted}' -o /tmp/{file_base} && /tmp/{file_base}{arg_str}\""
+    
+    elif lang == "go":
+        # Go run compiles and runs
+        return f"go run '{file_quoted}'{arg_str}"
+    
+    # Fallback
+    return f"'{file_quoted}'{arg_str}"
+
+
+# Pydantic models for API
+
+# Use validated model from validators module
+ExecuteCodeRequest = ValidatedExecuteCodeRequest
+
+
+class ExecutionResultResponse(BaseModel):
+    """Response model for execution results"""
+    command: str
+    stdout: str
+    stderr: str
+    exit_code: int
+    started_at: int
+    finished_at: int
+    execution_time_ms: int
+
+
+# API Endpoints
+
+@router.post("/api/vibecode/exec")
+async def execute_code_endpoint(
+    req: ExecuteCodeRequest,
+    current_user: dict = Depends(get_current_user)
 ):
-    """Get list of supported programming languages"""
-    return {
-        "languages": [
-            {
-                "name": lang,
-                "display_name": lang.title(),
-                "docker_image": image,
-                "extension": LANGUAGE_EXTENSIONS.get(lang, ".txt"),
-                "available": DOCKER_AVAILABLE
-            }
-            for lang, image in LANGUAGE_IMAGES.items()
-        ],
-        "docker_available": DOCKER_AVAILABLE
-    }
+    """Execute code or command in a VibeCode session container
+    
+    This endpoint supports two execution modes:
+    1. Direct command execution using the 'cmd' parameter
+    2. File execution using 'file' and optionally 'lang' parameters
+    
+    The endpoint will:
+    - Execute the command/file in the session's container
+    - Capture stdout and stderr separately
+    - Record execution timing (started_at, finished_at, execution_time_ms)
+    - Return structured results with exit code
+    
+    Examples:
+        Direct command:
+        {
+            "session_id": "abc123",
+            "cmd": "echo 'hello world'"
+        }
+        
+        File execution:
+        {
+            "session_id": "abc123",
+            "file": "test.py",
+            "lang": "python"
+        }
+        
+        File with auto-detection:
+        {
+            "session_id": "abc123",
+            "file": "script.js"
+        }
+    """
+    logger.info(f"🚀 Execution request from user {current_user['id']} for session {req.session_id}")
+    
+    # Verify container exists and user has access
+    # Prefer runner container
+    container = await container_manager.get_runner_container(req.session_id)
+    if not container:
+        container = await container_manager.get_container(req.session_id)
+    if not container:
+        raise HTTPException(status_code=404, detail="Container not found")
+    
+    # Verify user owns this session
+    user_id_label = container.labels.get("user_id")
+    if user_id_label and str(current_user["id"]) != user_id_label:
+        raise HTTPException(status_code=403, detail="Unauthorized: You don't own this session")
+    
+    # Verify container is running
+    container.reload()
+    if container.status != "running":
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Container is not running (status: {container.status})"
+        )
+    
+    # Execute the code
+    try:
+        result = await execute_code(
+            session_id=req.session_id,
+            cmd=req.cmd,
+            file=req.file,
+            lang=req.lang,
+            args=req.args
+        )
+        
+        # Convert to response model
+        return ExecutionResultResponse(
+            command=result.command,
+            stdout=result.stdout,
+            stderr=result.stderr,
+            exit_code=result.exit_code,
+            started_at=result.started_at,
+            finished_at=result.finished_at,
+            execution_time_ms=result.execution_time_ms
+        )
+        
+    except ValueError as e:
+        # Return structured error without 500
+        return ExecutionResultResponse(
+            command=req.cmd or (req.file or ''),
+            stdout="",
+            stderr=str(e),
+            exit_code=127,
+            started_at=int(time.time()*1000),
+            finished_at=int(time.time()*1000),
+            execution_time_ms=0
+        )
+    except Exception as e:
+        logger.error(f"❌ Execution error: {e}")
+        return ExecutionResultResponse(
+            command=req.cmd or (req.file or ''),
+            stdout="",
+            stderr=f"Execution failed: {str(e)}",
+            exit_code=127,
+            started_at=int(time.time()*1000),
+            finished_at=int(time.time()*1000),
+            execution_time_ms=0
+        )

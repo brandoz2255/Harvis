@@ -21,9 +21,9 @@ class VibeCodingSessionDB:
         self.db_pool = db_pool
     
     async def create_session(
-        self, 
-        session_id: str, 
-        user_id: int, 
+        self,
+        session_id: str,
+        user_id: int,
         project_name: str = "Untitled Project",
         description: str = "",
         container_id: str = None,
@@ -33,12 +33,12 @@ class VibeCodingSessionDB:
         async with self.db_pool.acquire() as conn:
             try:
                 row = await conn.fetchrow("""
-                    INSERT INTO vibecoding_sessions 
+                    INSERT INTO vibecoding_sessions
                     (session_id, user_id, project_name, description, container_id, volume_name)
                     VALUES ($1, $2, $3, $4, $5, $6)
                     RETURNING id, session_id, created_at
                 """, session_id, user_id, project_name, description, container_id, volume_name)
-                
+
                 logger.info(f"✅ Created session: {session_id} for user: {user_id}")
                 return {
                     "id": str(row["id"]),
@@ -47,6 +47,37 @@ class VibeCodingSessionDB:
                 }
             except Exception as e:
                 logger.error(f"Failed to create session: {e}")
+                raise
+
+    async def create_session_with_workspace(
+        self,
+        session_id: str,
+        user_id: int,
+        project_name: str = "Untitled Project",
+        description: str = "",
+        container_id: str = None,
+        volume_name: str = None,
+        container_name: str = None,
+        workspace_host_path: str = None
+    ) -> Dict[str, Any]:
+        """Create a new vibecoding session with workspace details."""
+        async with self.db_pool.acquire() as conn:
+            try:
+                row = await conn.fetchrow("""
+                    INSERT INTO vibecoding_sessions
+                    (session_id, user_id, name, project_name, description, container_id, volume_name, container_name, workspace_host_path, status)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'stopped')
+                    RETURNING id, session_id, created_at
+                """, session_id, user_id, project_name, project_name, description, container_id, volume_name, container_name, workspace_host_path)
+
+                logger.info(f"✅ Created session with workspace: {session_id} for user: {user_id}")
+                return {
+                    "id": str(row["id"]),
+                    "session_id": row["session_id"],
+                    "created_at": row["created_at"].isoformat()
+                }
+            except Exception as e:
+                logger.error(f"Failed to create session with workspace: {e}")
                 raise
     
     async def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
@@ -300,6 +331,45 @@ class VibeCodingSessionDB:
             except Exception as e:
                 logger.error(f"Failed to cleanup sessions: {e}")
                 return 0
+
+    async def get_user_preferences(self, user_id: int) -> Optional[Dict[str, Any]]:
+        """Get user preferences."""
+        async with self.db_pool.acquire() as conn:
+            try:
+                row = await conn.fetchrow("""
+                    SELECT preferences FROM user_preferences WHERE user_id = $1
+                """, user_id)
+
+                if row and row["preferences"]:
+                    return json.loads(row["preferences"])
+                return None
+            except Exception as e:
+                logger.error(f"Failed to get user preferences: {e}")
+                return None
+
+    async def update_user_preferences(self, user_id: int, preferences: Dict[str, Any]) -> bool:
+        """Update user preferences."""
+        async with self.db_pool.acquire() as conn:
+            try:
+                # Try to update existing preferences
+                result = await conn.execute("""
+                    UPDATE user_preferences
+                    SET preferences = $2, updated_at = CURRENT_TIMESTAMP
+                    WHERE user_id = $1
+                """, user_id, json.dumps(preferences))
+
+                # If no row was updated, insert new preferences
+                if "UPDATE 0" in str(result):
+                    await conn.execute("""
+                        INSERT INTO user_preferences (user_id, preferences)
+                        VALUES ($1, $2)
+                    """, user_id, json.dumps(preferences))
+
+                logger.info(f"✅ Updated preferences for user: {user_id}")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to update user preferences: {e}")
+                return False
 
 # Global session database instance (will be initialized with db_pool)
 session_db = None

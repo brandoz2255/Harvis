@@ -1,13 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { AuthService } from '@/lib/auth/AuthService'
 import pool from '@/lib/db'
 import archiver from 'archiver'
 import { Readable } from 'stream'
 
+export const dynamic = 'force-dynamic'
+
 export async function GET(request: NextRequest) {
   try {
-    const user = await AuthService.getCurrentUser(request)
-    if (!user) {
+    // Check for authorization header since auth is handled by backend
+    const authHeader = request.headers.get('authorization')
+    if (!authHeader) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 

@@ -23,11 +23,14 @@ export async function POST(request: NextRequest) {
 
     console.log(`Mic-chat proxying to backend with auth header: ${authHeader?.substring(0, 20)}...`)
 
+    const headers: Record<string, string> = {}
+    if (authHeader) {
+      headers["Authorization"] = authHeader
+    }
+
     const response = await fetch(url, {
       method: "POST",
-      headers: {
-        "Authorization": authHeader, // Forward the auth header to backend
-      },
+      headers,
       body: backendFormData,
     })
 
