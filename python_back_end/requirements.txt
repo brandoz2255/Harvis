@@ -15,6 +15,7 @@ python-jose[cryptography]==3.3.0
 bcrypt==4.0.1
 requests
 pydantic
+cryptography
 
 # Audio processing - install torch first to avoid conflicts
 torch==2.6.0

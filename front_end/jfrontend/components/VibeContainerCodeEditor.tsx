@@ -15,6 +15,8 @@ import {
   Maximize2,
   Minimize2,
   Settings,
+  Sun,
+  Moon,
   Palette
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -74,7 +76,7 @@ export default function VibeContainerCodeEditor({
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'error' | null>(null)
   const [editorTheme, setEditorTheme] = useState<'vibe-dark' | 'vibe-light' | 'github-dark' | 'github-light' | 'vs-dark' | 'light' | 'monokai' | 'dracula'>('vibe-dark')
   const [wordWrap, setWordWrap] = useState<'on' | 'off'>('off')
-  
+
   // Get font size from CSS variable (set by user preferences)
   const [fontSize, setFontSize] = useState(() => {
     if (typeof window !== 'undefined') {
@@ -83,7 +85,7 @@ export default function VibeContainerCodeEditor({
     }
     return 14
   })
-  
+
   const editorRef = useRef<any>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
@@ -264,12 +266,12 @@ export default function VibeContainerCodeEditor({
         }
       }
     })
-    
+
     observer.observe(document.documentElement, {
       attributes: true,
       attributeFilter: ['style']
     })
-    
+
     return () => observer.disconnect()
   }, [fontSize])
 
@@ -327,13 +329,13 @@ export default function VibeContainerCodeEditor({
       } else {
         const errorText = await response.text()
         console.error(`❌ Save failed (${response.status}):`, errorText)
-        
+
         if (response.status === 401) {
           console.error('❌ Authentication failed - token may be expired')
         } else if (response.status === 422) {
           console.error('❌ Validation error - check request format')
         }
-        
+
         setSaveStatus('error')
         setTimeout(() => setSaveStatus(null), 3000)
       }
@@ -362,7 +364,7 @@ export default function VibeContainerCodeEditor({
 
     setIsExecuting(true)
     console.log('🚀 Executing file:', selectedFile.path)
-    
+
     try {
       const command = getExecuteCommand(selectedFile.name, toWorkspaceRelativePath(selectedFile.path))
       console.log('📝 Execute command:', command)
@@ -377,7 +379,7 @@ export default function VibeContainerCodeEditor({
 
   const getExecuteCommand = (fileName: string, filePath: string) => {
     const extension = fileName.split('.').pop()?.toLowerCase()
-    
+
     switch (extension) {
       case 'py':
         return `python ${filePath}`
@@ -550,7 +552,7 @@ export default function VibeContainerCodeEditor({
 
   const getLanguageFromFileName = (fileName: string) => {
     const extension = fileName.split('.').pop()?.toLowerCase()
-    
+
     const languageMap: { [key: string]: string } = {
       'py': 'python',
       'js': 'javascript',
@@ -577,7 +579,7 @@ export default function VibeContainerCodeEditor({
       'vue': 'vue',
       'svelte': 'svelte'
     }
-    
+
     return languageMap[extension || ''] || 'plaintext'
   }
 
@@ -588,26 +590,26 @@ export default function VibeContainerCodeEditor({
     if (typeof window !== 'undefined') {
       import(
         'monaco-editor/esm/vs/editor/contrib/inlineCompletions/browser/inlineCompletions.contribution'
-      ).catch(() => {})
+      ).catch(() => { })
     }
 
     // Notify parent about the editor instance
     try {
       onEditorMount && onEditorMount(editor)
-    } catch {}
-    
+    } catch { }
+
     // Define custom themes
     defineCustomThemes(monaco)
-    
+
     // Configure language features
     configureMonacoLanguages(monaco)
-    
+
     // Setup LSP features for current language
     if (selectedFile) {
       const language = getLanguageFromFileName(selectedFile.name)
       setupLSPFeatures(monaco, language)
     }
-    
+
     // Configure editor
     editor.updateOptions({
       fontSize: fontSize,
@@ -626,7 +628,7 @@ export default function VibeContainerCodeEditor({
       inlineSuggest: { enabled: true },
       tabCompletion: 'off'
     })
-    
+
     // Track cursor position changes
     if (onCursorPositionChange) {
       editor.onDidChangeCursorPosition((e: any) => {
@@ -635,7 +637,7 @@ export default function VibeContainerCodeEditor({
           column: e.position.column
         })
       })
-      
+
       // Set initial position
       const position = editor.getPosition()
       if (position) {
@@ -681,7 +683,7 @@ export default function VibeContainerCodeEditor({
     ]
 
     const registerInlineProvider = () => {
-      const emptyResult = { items: [], dispose() {} }
+      const emptyResult = { items: [], dispose() { } }
       const provideInlineCompletions = async (
         model: any,
         position: any,
@@ -758,7 +760,7 @@ export default function VibeContainerCodeEditor({
                 range: new monaco.Range(pos.lineNumber, pos.column, pos.lineNumber, pos.column)
               }
             ],
-            dispose() {}
+            dispose() { }
           }
         } catch (error: any) {
           if (error?.name !== 'AbortError') {
@@ -777,7 +779,7 @@ export default function VibeContainerCodeEditor({
           providerDisposables.push(
             monaco.languages.registerInlineCompletionsProvider(lang, {
               provideInlineCompletions,
-              freeInlineCompletions: () => {}
+              freeInlineCompletions: () => { }
             })
           )
         } catch (e) {
@@ -802,10 +804,10 @@ export default function VibeContainerCodeEditor({
                 range: new monaco.Range(pos.lineNumber, pos.column, pos.lineNumber, pos.column)
               }
             ],
-            dispose() {}
+            dispose() { }
           }
         },
-        freeInlineCompletions: () => {}
+        freeInlineCompletions: () => { }
       })
       providerDisposables.push(testDisposable)
       console.log('🧪 Inline test provider enabled (set window.__ENABLE_INLINE_TEST_PROVIDER = true)')

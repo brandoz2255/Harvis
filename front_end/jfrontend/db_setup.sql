@@ -153,3 +153,13 @@ CREATE TRIGGER update_vibe_files_updated_at
     BEFORE UPDATE ON vibe_files 
     FOR EACH ROW 
     EXECUTE FUNCTION update_updated_at_column();
+
+-- GitHub OAuth Tokens (encrypted)
+CREATE TABLE IF NOT EXISTS github_tokens (
+    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    access_token TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Index for faster lookups
+CREATE INDEX IF NOT EXISTS idx_github_tokens_user_id ON github_tokens(user_id);

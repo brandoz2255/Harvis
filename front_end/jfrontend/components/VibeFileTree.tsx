@@ -101,9 +101,8 @@ function ContextMenu({ x, y, node, onClose, onAction }: ContextMenuProps) {
       {menuItems.map((item) => (
         <button
           key={item.id}
-          className={`w-full px-3 py-2 text-left text-sm hover:bg-gray-700 flex items-center space-x-2 ${
-            item.danger ? 'text-red-400 hover:text-red-300' : 'text-gray-300 hover:text-white'
-          }`}
+          className={`w-full px-3 py-2 text-left text-sm hover:bg-gray-700 flex items-center space-x-2 ${item.danger ? 'text-red-400 hover:text-red-300' : 'text-gray-300 hover:text-white'
+            }`}
           onClick={() => {
             onAction(item.id, node)
             onClose()
@@ -117,12 +116,12 @@ function ContextMenu({ x, y, node, onClose, onAction }: ContextMenuProps) {
   )
 }
 
-function FileTreeItem({ 
-  node, 
-  level = 0, 
-  selectedFileId, 
-  onFileSelect, 
-  onToggleExpanded, 
+function FileTreeItem({
+  node,
+  level = 0,
+  selectedFileId,
+  onFileSelect,
+  onToggleExpanded,
   onContextMenu,
   draggedNode,
   onDragStart,
@@ -215,15 +214,26 @@ function FileTreeItem({
   const IconComponent = getFileIcon(node)
 
   return (
-    <div>
+    <div className="relative">
+      {/* Horizontal Line for current item (if not root) */}
+      {level > 0 && (
+        <div
+          className="absolute h-px bg-gray-600"
+          style={{
+            left: `${(level - 1) * 16 + 15}px`,
+            width: '12px',
+            top: '14px' // Centered vertically relative to the row height (approx 28px)
+          }}
+        />
+      )}
+
       <div
-        className={`flex items-center space-x-2 py-1 px-2 rounded cursor-pointer transition-all duration-200 ${
-          isSelected
-            ? 'bg-purple-600/30 border border-purple-500/50 text-white'
-            : dragOver
+        className={`flex items-center space-x-2 py-1 px-2 rounded cursor-pointer transition-all duration-200 relative z-10 ${isSelected
+          ? 'bg-purple-600/30 border border-purple-500/50 text-white'
+          : dragOver
             ? 'bg-blue-600/30 border border-blue-500/50 text-white'
             : 'hover:bg-gray-700/50 text-gray-300 hover:text-white'
-        }`}
+          }`}
         style={{ paddingLeft: `${level * 16 + 8}px` }}
         draggable
         onDragStart={handleDragStart}
@@ -238,7 +248,7 @@ function FileTreeItem({
       >
         {/* Expand/Collapse Icon */}
         {canExpand && (
-          <button onClick={(e) => { e.stopPropagation(); handleToggle() }} className="p-0.5">
+          <button onClick={(e) => { e.stopPropagation(); handleToggle() }} className="p-0.5 z-20">
             {node.isExpanded ? (
               <ChevronDown className="w-4 h-4 text-gray-400" />
             ) : (
@@ -248,9 +258,8 @@ function FileTreeItem({
         )}
 
         {/* File/Folder Icon */}
-        <IconComponent className={`w-4 h-4 flex-shrink-0 ${
-          node.type === 'folder' ? 'text-blue-400' : 'text-purple-400'
-        }`} />
+        <IconComponent className={`w-4 h-4 flex-shrink-0 ${node.type === 'folder' ? 'text-blue-400' : 'text-purple-400'
+          }`} />
 
         {/* Name */}
         <div className="flex-1 flex items-center space-x-2 min-w-0">
@@ -288,6 +297,18 @@ function FileTreeItem({
         {node.isModified && (
           <div className="w-2 h-2 bg-orange-400 rounded-full flex-shrink-0" />
         )}
+
+        {/* Connector Line (Folder to Children) */}
+        {canExpand && node.isExpanded && hasChildren && (
+          <div
+            className="absolute w-px bg-gray-600"
+            style={{
+              left: `${level * 16 + 15}px`,
+              top: '14px',
+              height: '14px'
+            }}
+          />
+        )}
       </div>
 
       {/* Children */}
@@ -298,7 +319,18 @@ function FileTreeItem({
             animate={{ opacity: 1, height: 'auto' }}
             exit={{ opacity: 0, height: 0 }}
             transition={{ duration: 0.2 }}
+            className="relative"
           >
+            {/* Vertical Line for children */}
+            <div
+              className="absolute w-px bg-gray-600"
+              style={{
+                left: `${level * 16 + 15}px`,
+                top: '0',
+                bottom: '0'
+              }}
+            />
+
             {node.children?.map((child) => (
               <FileTreeItem
                 key={child.id}
