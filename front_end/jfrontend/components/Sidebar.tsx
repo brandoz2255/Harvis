@@ -42,11 +42,12 @@ export default function Sidebar() {
 
   const toggleMobile = () => setIsMobileOpen(!isMobileOpen);
   const toggleCollapse = () => {
-    setIsCollapsed(!isCollapsed);
+    const newCollapsed = !isCollapsed;
+    setIsCollapsed(newCollapsed);
     // Update main content margin directly
     const mainContent = document.getElementById('main-content');
     if (mainContent) {
-      if (!isCollapsed) {
+      if (newCollapsed) {
         mainContent.classList.remove('lg:ml-64');
         mainContent.classList.add('lg:ml-16');
       } else {
@@ -54,6 +55,8 @@ export default function Sidebar() {
         mainContent.classList.add('lg:ml-64');
       }
     }
+    // Dispatch custom event for IDE and other pages to listen to
+    window.dispatchEvent(new CustomEvent('sidebar-collapse', { detail: { collapsed: newCollapsed } }));
   };
 
   // Set initial main content margin

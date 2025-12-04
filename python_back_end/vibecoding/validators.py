@@ -241,7 +241,7 @@ class FilePathRequest(BaseModel):
     
     @validator('path')
     def validate_path(cls, v):
-        return validate_file_path(v)
+        return validate_file_path(v, allow_absolute=True)
 
 
 class FileCreateRequest(BaseModel):
@@ -256,7 +256,7 @@ class FileCreateRequest(BaseModel):
     
     @validator('path')
     def validate_path(cls, v):
-        return validate_file_path(v)
+        return validate_file_path(v, allow_absolute=True)
     
     @validator('type')
     def validate_type(cls, v):
@@ -277,7 +277,7 @@ class FileSaveRequest(BaseModel):
     
     @validator('path')
     def validate_path(cls, v):
-        return validate_file_path(v)
+        return validate_file_path(v, allow_absolute=True)
     
     @validator('content')
     def validate_content(cls, v):
@@ -304,11 +304,11 @@ class FileRenameRequest(BaseModel):
     
     @validator('old_path')
     def validate_old_path(cls, v):
-        return validate_file_path(v)
+        return validate_file_path(v, allow_absolute=True)
     
     @validator('new_path')
     def validate_new_path(cls, v):
-        return validate_file_path(v)
+        return validate_file_path(v, allow_absolute=True)
 
 
 class FileMoveRequest(BaseModel):
@@ -323,11 +323,11 @@ class FileMoveRequest(BaseModel):
     
     @validator('source_path')
     def validate_source(cls, v):
-        return validate_file_path(v)
+        return validate_file_path(v, allow_absolute=True)
     
     @validator('target_dir')
     def validate_target(cls, v):
-        return validate_file_path(v)
+        return validate_file_path(v, allow_absolute=True)
 
 
 class ExecuteCodeRequest(BaseModel):

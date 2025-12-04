@@ -25,7 +25,7 @@ from typing import List, Optional, Dict, Any, Union
 from vison_models.llm_connector import query_qwen, query_llm, load_qwen_model, unload_qwen_model, unload_ollama_model
 
 # Import vibecoding routers
-from vibecoding import sessions_router, models_router, execution_router, files_router, commands_router, containers_router, user_prefs_router, file_api_router, terminal_router, ai_assistant_router, proxy_router
+from vibecoding import sessions_router, models_router, execution_router, files_router, commands_router, containers_router, user_prefs_router, file_api_router, terminal_router, ai_assistant_router, proxy_router, auth_github_router, auth_github_legacy_router, repo_import_router
 from vibecoding.ide_ai import router as ide_ai_router
 from vibecoding.containers import container_manager
 from vibecoding.core import initialize_vibe_agent
@@ -289,47 +289,6 @@ async def lifespan(app: FastAPI):
         chat_history_manager = ChatHistoryManager(app.state.pg_pool)
         logger.info("✅ ChatHistoryManager initialized in lifespan")
         
-        # VALIDATE MODEL CACHES AT STARTUP
-        logger.info("🔍 Validating model caches at startup...")
-
-        # Check HuggingFace cache
-        hf_cache = os.getenv('TRANSFORMERS_CACHE', os.getenv('HF_HOME', '~/.cache/huggingface'))
-        hf_cache_expanded = os.path.expanduser(hf_cache)
-        logger.info(f"📁 HuggingFace cache path: {hf_cache_expanded}")
-
-        if os.path.exists(hf_cache_expanded):
-            try:
-                hf_contents = os.listdir(hf_cache_expanded)
-                model_dirs = [d for d in hf_contents if d.startswith('models--')]
-                logger.info(f"✅ HF cache exists with {len(hf_contents)} items ({len(model_dirs)} model dirs)")
-                if model_dirs:
-                    for model_dir in model_dirs[:3]:  # Log first 3 models
-                        logger.info(f"   - {model_dir}")
-            except Exception as e:
-                logger.warning(f"⚠️ Could not read HF cache: {e}")
-        else:
-            logger.warning(f"⚠️ HF cache directory does not exist: {hf_cache_expanded}")
-            logger.warning("   Models will be downloaded on first use!")
-
-        # Check Whisper cache
-        whisper_cache = os.getenv('WHISPER_CACHE', os.path.expanduser('~/.cache/whisper'))
-        logger.info(f"📁 Whisper cache path: {whisper_cache}")
-
-        if os.path.exists(whisper_cache):
-            try:
-                whisper_contents = os.listdir(whisper_cache)
-                pt_files = [f for f in whisper_contents if f.endswith('.pt')]
-                logger.info(f"✅ Whisper cache exists with {len(pt_files)} model files")
-                if pt_files:
-                    for pt_file in pt_files:
-                        file_size = os.path.getsize(os.path.join(whisper_cache, pt_file))
-                        logger.info(f"   - {pt_file} ({file_size / 1024 / 1024:.1f} MB)")
-            except Exception as e:
-                logger.warning(f"⚠️ Could not read Whisper cache: {e}")
-        else:
-            logger.warning(f"⚠️ Whisper cache directory does not exist: {whisper_cache}")
-            logger.warning("   Models will be downloaded on first use!")
-
         # Initialize Whisper cache for offline operation
         try:
             from init_whisper_cache import init_whisper_cache
@@ -501,6 +460,9 @@ app.include_router(terminal_router)
 app.include_router(ai_assistant_router)
 app.include_router(proxy_router)
 app.include_router(ide_ai_router)
+app.include_router(auth_github_router)
+app.include_router(auth_github_legacy_router)  # Legacy path: /api/auth/vibecode/github/callback
+app.include_router(repo_import_router)
 
 # ─── Device & models -----------------------------------------------------------
 device = 0 if torch.cuda.is_available() else -1
@@ -514,174 +476,70 @@ LOCAL_OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
 API_KEY = os.getenv("OLLAMA_API_KEY", "key")
 DEFAULT_MODEL = "llama3.2:3b"
 
-def make_ollama_request(endpoint, payload, timeout=90, user_settings=None):
+def make_ollama_request(endpoint, payload, timeout=90):
     """Make a POST request to Ollama with automatic fallback from cloud to local.
-
-    Args:
-        endpoint: Ollama API endpoint (e.g., '/api/chat')
-        payload: Request payload dict
-        timeout: Request timeout in seconds
-        user_settings: Optional dict with user's Ollama settings (cloud_url, local_url, api_key, preferred_endpoint)
-                      If None, uses global env vars
-
-    Returns:
-        The response object from the successful request.
-    """
-    # Use user settings if provided, otherwise use global defaults
-    if user_settings:
-        cloud_url = user_settings.get("cloud_url") or CLOUD_OLLAMA_URL
-        local_url = user_settings.get("local_url") or LOCAL_OLLAMA_URL
-        api_key = user_settings.get("api_key") or API_KEY
-        preferred_endpoint = user_settings.get("preferred_endpoint", "auto")
-    else:
-        cloud_url = CLOUD_OLLAMA_URL
-        local_url = LOCAL_OLLAMA_URL
-        api_key = API_KEY
-        preferred_endpoint = "auto"
-
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key and api_key != "key" else {}
-
-    # Determine request order based on preferred_endpoint
-    if preferred_endpoint == "local":
-        # Try local only
-        try:
-            logger.info("🏠 Using local Ollama (user preference): %s", local_url)
-            response = requests.post(f"{local_url}{endpoint}", json=payload, timeout=timeout)
-            if response.status_code == 200:
-                logger.info("✅ Local Ollama request successful")
-                return response
-            else:
-                logger.error("❌ Local Ollama returned status %s", response.status_code)
-                response.raise_for_status()
-        except Exception as e:
-            logger.error("❌ Local Ollama request failed: %s", e)
-            raise
-
-    elif preferred_endpoint == "cloud":
-        # Try cloud only
-        try:
-            logger.info("🌐 Using cloud Ollama (user preference): %s", cloud_url)
-            response = requests.post(f"{cloud_url}{endpoint}", json=payload, headers=headers, timeout=timeout)
-            if response.status_code == 200:
-                logger.info("✅ Cloud Ollama request successful")
-                return response
-            else:
-                logger.error("❌ Cloud Ollama returned status %s", response.status_code)
-                response.raise_for_status()
-        except Exception as e:
-            logger.error("❌ Cloud Ollama request failed: %s", e)
-            raise
-
-    else:  # auto - try cloud first, fallback to local
-        # Try cloud first
-        try:
-            logger.info("🌐 Trying cloud Ollama: %s", cloud_url)
-            response = requests.post(f"{cloud_url}{endpoint}", json=payload, headers=headers, timeout=timeout)
-            if response.status_code == 200:
-                logger.info("✅ Cloud Ollama request successful")
-                return response
-            else:
-                logger.warning("⚠️ Cloud Ollama returned status %s", response.status_code)
-        except Exception as e:
-            logger.warning("⚠️ Cloud Ollama request failed: %s", e)
-
-        # Fallback to local
-        try:
-            logger.info("🏠 Falling back to local Ollama: %s", local_url)
-            response = requests.post(f"{local_url}{endpoint}", json=payload, timeout=timeout)
-            if response.status_code == 200:
-                logger.info("✅ Local Ollama request successful")
-                return response
-            else:
-                logger.error("❌ Local Ollama returned status %s", response.status_code)
-                response.raise_for_status()
-        except Exception as e:
-            logger.error("❌ Local Ollama request failed: %s", e)
-            raise
-
+    Returns the response object from the successful request."""
+    headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY != "key" else {}
+    
+    # Try cloud first
+    try:
+        logger.info("🌐 Trying cloud Ollama: %s", CLOUD_OLLAMA_URL)
+        response = requests.post(f"{CLOUD_OLLAMA_URL}{endpoint}", json=payload, headers=headers, timeout=timeout)
+        if response.status_code == 200:
+            logger.info("✅ Cloud Ollama request successful")
+            return response
+        else:
+            logger.warning("⚠️ Cloud Ollama returned status %s", response.status_code)
+    except Exception as e:
+        logger.warning("⚠️ Cloud Ollama request failed: %s", e)
+    
+    # Fallback to local
+    try:
+        logger.info("🏠 Falling back to local Ollama: %s", LOCAL_OLLAMA_URL)
+        response = requests.post(f"{LOCAL_OLLAMA_URL}{endpoint}", json=payload, timeout=timeout)
+        if response.status_code == 200:
+            logger.info("✅ Local Ollama request successful")
+            return response
+        else:
+            logger.error("❌ Local Ollama returned status %s", response.status_code)
+            response.raise_for_status()
+    except Exception as e:
+        logger.error("❌ Local Ollama request failed: %s", e)
+        raise
+    
     return response
 
-def make_ollama_get_request(endpoint, timeout=10, user_settings=None):
+def make_ollama_get_request(endpoint, timeout=10):
     """Make a GET request to Ollama with automatic fallback from cloud to local.
-
-    Args:
-        endpoint: Ollama API endpoint (e.g., '/api/tags')
-        timeout: Request timeout in seconds
-        user_settings: Optional dict with user's Ollama settings
-
-    Returns:
-        The response object from the successful request.
-    """
-    # Use user settings if provided, otherwise use global defaults
-    if user_settings:
-        cloud_url = user_settings.get("cloud_url") or CLOUD_OLLAMA_URL
-        local_url = user_settings.get("local_url") or LOCAL_OLLAMA_URL
-        api_key = user_settings.get("api_key") or API_KEY
-        preferred_endpoint = user_settings.get("preferred_endpoint", "auto")
-    else:
-        cloud_url = CLOUD_OLLAMA_URL
-        local_url = LOCAL_OLLAMA_URL
-        api_key = API_KEY
-        preferred_endpoint = "auto"
-
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key and api_key != "key" else {}
-
-    # Determine request order based on preferred_endpoint
-    if preferred_endpoint == "local":
-        try:
-            logger.info("🏠 Using local Ollama GET (user preference): %s", local_url)
-            response = requests.get(f"{local_url}{endpoint}", timeout=timeout)
-            if response.status_code == 200:
-                logger.info("✅ Local Ollama GET request successful")
-                return response
-            else:
-                logger.error("❌ Local Ollama GET returned status %s", response.status_code)
-                response.raise_for_status()
-        except Exception as e:
-            logger.error("❌ Local Ollama GET request failed: %s", e)
-            raise
-
-    elif preferred_endpoint == "cloud":
-        try:
-            logger.info("🌐 Using cloud Ollama GET (user preference): %s", cloud_url)
-            response = requests.get(f"{cloud_url}{endpoint}", headers=headers, timeout=timeout)
-            if response.status_code == 200:
-                logger.info("✅ Cloud Ollama GET request successful")
-                return response
-            else:
-                logger.error("❌ Cloud Ollama GET returned status %s", response.status_code)
-                response.raise_for_status()
-        except Exception as e:
-            logger.error("❌ Cloud Ollama GET request failed: %s", e)
-            raise
-
-    else:  # auto - try cloud first, fallback to local
-        # Try cloud first
-        try:
-            logger.info("🌐 Trying cloud Ollama GET: %s", cloud_url)
-            response = requests.get(f"{cloud_url}{endpoint}", headers=headers, timeout=timeout)
-            if response.status_code == 200:
-                logger.info("✅ Cloud Ollama GET request successful")
-                return response
-            else:
-                logger.warning("⚠️ Cloud Ollama GET returned status %s", response.status_code)
-        except Exception as e:
-            logger.warning("⚠️ Cloud Ollama GET request failed: %s", e)
-
-        # Fallback to local
-        try:
-            logger.info("🏠 Falling back to local Ollama GET: %s", local_url)
-            response = requests.get(f"{local_url}{endpoint}", timeout=timeout)
-            if response.status_code == 200:
-                logger.info("✅ Local Ollama GET request successful")
-                return response
-            else:
-                logger.error("❌ Local Ollama GET returned status %s", response.status_code)
-                response.raise_for_status()
-        except Exception as e:
-            logger.error("❌ Local Ollama GET request failed: %s", e)
-            raise
-
+    Returns the response object from the successful request."""
+    headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY != "key" else {}
+    
+    # Try cloud first
+    try:
+        logger.info("🌐 Trying cloud Ollama GET: %s", CLOUD_OLLAMA_URL)
+        response = requests.get(f"{CLOUD_OLLAMA_URL}{endpoint}", headers=headers, timeout=timeout)
+        if response.status_code == 200:
+            logger.info("✅ Cloud Ollama GET request successful")
+            return response
+        else:
+            logger.warning("⚠️ Cloud Ollama GET returned status %s", response.status_code)
+    except Exception as e:
+        logger.warning("⚠️ Cloud Ollama GET request failed: %s", e)
+    
+    # Fallback to local
+    try:
+        logger.info("🏠 Falling back to local Ollama GET: %s", LOCAL_OLLAMA_URL)
+        response = requests.get(f"{LOCAL_OLLAMA_URL}{endpoint}", timeout=timeout)
+        if response.status_code == 200:
+            logger.info("✅ Local Ollama GET request successful")
+            return response
+        else:
+            logger.error("❌ Local Ollama GET returned status %s", response.status_code)
+            response.raise_for_status()
+    except Exception as e:
+        logger.error("❌ Local Ollama GET request failed: %s", e)
+        raise
+    
     return response
 
 def get_ollama_url():
@@ -835,12 +693,12 @@ async def root() -> FileResponse:
 @app.post("/api/chat-history/sessions", response_model=ChatSession, tags=["chat-history"])
 async def create_chat_session(
     request: CreateSessionRequest,
-    current_user: UserResponse = Depends(get_current_user)
+    current_user: Dict = Depends(get_current_user_optimized)
 ):
     """Create a new chat session"""
     try:
         session = await chat_history_manager.create_session(
-            user_id=current_user.id,
+            user_id=current_user['id'],
             title=request.title,
             model_used=request.model_used
         )
@@ -853,12 +711,12 @@ async def create_chat_session(
 async def get_user_chat_sessions(
     limit: int = 50,
     offset: int = 0,
-    current_user: UserResponse = Depends(get_current_user)
+    current_user: Dict = Depends(get_current_user_optimized)
 ):
     """Get all chat sessions for the current user"""
     try:
         sessions_response = await chat_history_manager.get_user_sessions(
-            user_id=current_user.id,
+            user_id=current_user['id'],
             limit=limit,
             offset=offset
         )
@@ -878,10 +736,10 @@ async def get_session_messages(
     try:
         # Convert string session_id to UUID
         session_uuid = UUID(session_id)
-        logger.info(f"Getting messages for session {session_uuid}, user {current_user.id}")
+        logger.info(f"Getting messages for session {session_uuid}, user {current_user['id']}")
         response = await chat_history_manager.get_session_messages(
             session_id=session_uuid,
-            user_id=current_user.id,
+            user_id=current_user["id"],
             limit=limit,
             offset=offset
         )
@@ -913,7 +771,7 @@ async def update_session_title(
         session_uuid = UUID(session_id)
         success = await chat_history_manager.update_session_title(
             session_id=session_uuid,
-            user_id=current_user.id,
+            user_id=current_user["id"],
             title=request.title
         )
         if not success:
@@ -936,7 +794,7 @@ async def delete_chat_session(
         session_uuid = UUID(session_id)
         success = await chat_history_manager.delete_session(
             session_id=session_uuid,
-            user_id=current_user.id
+            user_id=current_user["id"]
         )
         if not success:
             raise HTTPException(status_code=404, detail="Session not found")
@@ -958,7 +816,7 @@ async def clear_session_messages(
         session_uuid = UUID(session_id)
         deleted_count = await chat_history_manager.clear_session_messages(
             session_id=session_uuid,
-            user_id=current_user.id
+            user_id=current_user["id"]
         )
         return {"success": True, "message": f"Deleted {deleted_count} messages"}
     except Exception as e:
@@ -975,7 +833,7 @@ async def search_messages(
     """Search messages by content"""
     try:
         messages = await chat_history_manager.search_messages(
-            user_id=current_user.id,
+            user_id=current_user["id"],
             query=query,
             session_id=session_id,
             limit=limit
@@ -991,7 +849,7 @@ async def get_user_chat_stats(
 ):
     """Get user chat statistics"""
     try:
-        stats = await chat_history_manager.get_user_stats(current_user.id)
+        stats = await chat_history_manager.get_user_stats(current_user["id"])
         return stats
     except Exception as e:
         logger.error(f"Error getting user stats: {e}")
@@ -1005,13 +863,13 @@ async def add_message_to_session(
     """Add a message to a chat session"""
     try:
         # Verify the user owns the session
-        session = await chat_history_manager.get_session(message_request.session_id, current_user.id)
+        session = await chat_history_manager.get_session(message_request.session_id, current_user["id"])
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
         
         # Add the message using the new manager API
         added_message = await chat_history_manager.add_message(
-            user_id=current_user.id,
+            user_id=current_user["id"],
             session_id=message_request.session_id,
             role=message_request.role,
             content=message_request.content,
@@ -1124,9 +982,9 @@ async def _login_with_connection(request: AuthRequest, conn):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/api/auth/me", response_model=UserResponse, tags=["auth"])
-async def get_current_user_info(current_user: UserResponse = Depends(get_current_user)):
-    """Get current user info"""
-    return current_user
+async def get_current_user_info(current_user: Dict = Depends(get_current_user_optimized)):
+    """Optimized user info endpoint with caching"""
+    return UserResponse(**current_user)
 
 @app.get("/api/auth/stats", tags=["auth"])
 async def get_authentication_stats():
@@ -1137,13 +995,13 @@ async def get_authentication_stats():
 
 
 @app.post("/api/chat", tags=["chat"])
-async def chat(req: ChatRequest, request: Request, current_user: UserResponse = Depends(get_current_user)):
+async def chat(req: ChatRequest, request: Request, current_user: Dict = Depends(get_current_user_optimized)):
     """
     Main conversational endpoint with persistent chat history.
     Produces: JSON {history, audio_path, session_id}
     """
     try:
-        logger.info(f"Chat endpoint reached - User: {current_user.username}, Message: {req.message[:50]}...")
+        logger.info(f"Chat endpoint reached - User: {current_user['username']}, Message: {req.message[:50]}...")
         # ── 1. Handle chat session and history ──────────────────────────────────────────
         session_id = req.session_id
         
@@ -1157,7 +1015,7 @@ async def chat(req: ChatRequest, request: Request, current_user: UserResponse = 
                 # Get recent messages from database for context
                 recent_messages = await chat_history_manager.get_recent_messages(
                     session_id=session_uuid, 
-                    user_id=current_user.id, 
+                    user_id=current_user['id'], 
                     limit=10
                 )
             except (ValueError, Exception) as e:
@@ -1236,10 +1094,6 @@ async def chat(req: ChatRequest, request: Request, current_user: UserResponse = 
 
             response_text = resp.json().get("message", {}).get("content", "").strip()
 
-            # ── Unload Ollama model to free VRAM after inference ──
-            logger.info(f"🧹 Unloading Ollama model {req.model} to free VRAM after inference")
-            unload_ollama_model(req.model)
-
         # ── 4. Process reasoning content if present
         reasoning_content = ""
         final_answer = response_text
@@ -1252,10 +1106,10 @@ async def chat(req: ChatRequest, request: Request, current_user: UserResponse = 
         if session_id:
             try:
                 # Create session if it doesn't exist
-                session = await chat_history_manager.get_session(session_id, current_user.id)
+                session = await chat_history_manager.get_session(session_id, current_user["id"])
                 if not session:
                     session = await chat_history_manager.create_session(
-                        user_id=current_user.id,
+                        user_id=current_user["id"],
                         title="New Chat",
                         model_used=req.model
                     )
@@ -1263,7 +1117,7 @@ async def chat(req: ChatRequest, request: Request, current_user: UserResponse = 
                 
                 # Save user message
                 await chat_history_manager.add_message(
-                    user_id=current_user.id,
+                    user_id=current_user["id"],
                     session_id=session_id,
                     role="user",
                     content=req.message,
@@ -1273,7 +1127,7 @@ async def chat(req: ChatRequest, request: Request, current_user: UserResponse = 
 
                 # Save assistant message
                 await chat_history_manager.add_message(
-                    user_id=current_user.id,
+                    user_id=current_user["id"],
                     session_id=session_id,
                     role="assistant",
                     content=final_answer,
@@ -1291,7 +1145,7 @@ async def chat(req: ChatRequest, request: Request, current_user: UserResponse = 
             # Create new session for this conversation if none provided
             try:
                 session = await chat_history_manager.create_session(
-                    user_id=current_user.id,
+                    user_id=current_user["id"],
                     title="New Chat",
                     model_used=req.model
                 )
@@ -1299,7 +1153,7 @@ async def chat(req: ChatRequest, request: Request, current_user: UserResponse = 
                 
                 # Save messages to new session
                 await chat_history_manager.add_message(
-                    user_id=current_user.id,
+                    user_id=current_user["id"],
                     session_id=session_id,
                     role="user",
                     content=req.message,
@@ -1308,7 +1162,7 @@ async def chat(req: ChatRequest, request: Request, current_user: UserResponse = 
                 )
                 
                 await chat_history_manager.add_message(
-                    user_id=current_user.id,
+                    user_id=current_user["id"],
                     session_id=session_id,
                     role="assistant",
                     content=final_answer,
@@ -1738,20 +1592,10 @@ async def analyze_screen_with_tts(req: ScreenAnalysisWithTTSRequest):
 # Whisper model will be loaded on demand
 
 @app.post("/api/mic-chat", tags=["voice"])
-async def mic_chat(
-    file: UploadFile = File(...),
-    model: str = Form(DEFAULT_MODEL),
-    session_id: Optional[str] = Form(None),
-    research_mode: str = Form("false"),  # Add research mode parameter
-    current_user: UserResponse = Depends(get_current_user)
-):
+async def mic_chat(file: UploadFile = File(...), model: str = Form(DEFAULT_MODEL), session_id: Optional[str] = Form(None), current_user: Dict = Depends(get_current_user_optimized)):
     try:
-        # Parse research_mode (comes as string from form)
-        is_research_mode = research_mode.lower() == "true"
-
-        # DEBUG: Log the received parameters
+        # DEBUG: Log the received model parameter
         logger.info(f"🎤 MIC-CHAT: Received model parameter: '{model}' (type: {type(model)})")
-        logger.info(f"🎤 MIC-CHAT: Research mode: {is_research_mode}")
         logger.info(f"🎤 MIC-CHAT: DEFAULT_MODEL is: '{DEFAULT_MODEL}'")
         
         # Save uploaded file to temp
@@ -1831,26 +1675,10 @@ async def mic_chat(
         except:
             pass
 
-        # Route to research endpoint if research mode is enabled
-        if is_research_mode:
-            logger.info(f"🔍 MIC-CHAT: Routing to research endpoint with model: '{model}'")
-            # Create research request with voice input
-            research_req = ResearchChatRequest(
-                message=message,
-                model=model,
-                history=[],  # Empty history for voice - backend will load from session
-                session_id=session_id,
-                # Add TTS parameters with defaults
-                exaggeration=0.5,
-                temperature=0.8,
-                cfg_weight=0.5
-            )
-            return await research_chat(research_req)
-        else:
-            # Regular chat endpoint
-            logger.info(f"🎤 MIC-CHAT: Creating ChatRequest with model: '{model}' and session_id: '{session_id}'")
-            chat_req = ChatRequest(message=message, model=model, session_id=session_id)
-            return await chat(chat_req, request=None, current_user=current_user)
+        # Now use existing chat logic with the selected model
+        logger.info(f"🎤 MIC-CHAT: Creating ChatRequest with model: '{model}' and session_id: '{session_id}'")
+        chat_req = ChatRequest(message=message, model=model, session_id=session_id)
+        return await chat(chat_req, request=None, current_user=current_user)
 
     except Exception as e:
         logger.exception("Mic chat failed")
@@ -1968,71 +1796,64 @@ async def research_chat(req: Union[ResearchChatRequest, AdvancedResearchRequest]
         # Update history with assistant reply (use final answer only for chat history)
         new_history = req.history + [{"role": "assistant", "content": final_research_answer}]
 
-        # ── TTS Generation Disabled for Research Mode ──────────────────────────────────────
-        # DISABLED: TTS generation causes OOM crashes for long research responses
-        # Research responses are text-only to conserve memory and prevent pod crashes
-        logger.info("🔍 Research mode - skipping TTS to conserve memory (prevents OOM)")
+        # ── Generate TTS for research response ──────────────────────────────────────────
+        logger.info("🔊 Research complete - preparing TTS generation")
 
-        # # ── Generate TTS for research response ──────────────────────────────────────────
-        # logger.info("🔊 Research complete - preparing TTS generation")
-        #
-        # # Handle audio prompt path
-        # audio_prompt_path = req.audio_prompt or HARVIS_VOICE_PATH
-        # if not os.path.isfile(audio_prompt_path):
-        #     logger.warning(
-        #         "Audio prompt %s not found, falling back to default voice.",
-        #         audio_prompt_path,
-        #     )
-        #     audio_prompt_path = None
-        #
-        # # Debug logging for the audio prompt path
-        # if audio_prompt_path:
-        #     if not os.path.exists(audio_prompt_path):
-        #         logger.warning(f"JARVIS voice prompt missing at: {audio_prompt_path}")
-        #     else:
-        #         logger.info(f"Cloning voice using prompt: {audio_prompt_path}")
-        #
-        # # Create a more conversational version of the research response for TTS
-        # # Use final_research_answer (without reasoning) for TTS
-        # # Remove markdown formatting and make it more speech-friendly
-        # tts_text = final_research_answer.replace("**", "").replace("*", "").replace("#", "")
-        # # Replace numbered lists with more natural speech
-        # import re
-        # tts_text = re.sub(r'^\d+\.\s*', '', tts_text, flags=re.MULTILINE)
-        # # Replace markdown links with just the title
-        # tts_text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', tts_text)
-        # # Limit length for TTS (keep it conversational)
-        # if len(tts_text) > 800:
-        #     tts_text = tts_text[:800] + "... and more details are available in the sources."
-        #
-        # sr, wav = safe_generate_speech_optimized(
-        #     text=tts_text,
-        #     audio_prompt=audio_prompt_path,
-        #     exaggeration=req.exaggeration,
-        #     temperature=req.temperature,
-        #     cfg_weight=req.cfg_weight,
-        # )
-        #
-        # # ── Persist WAV to /tmp so it can be served ──────────────────────────────────────
-        # filename = f"research_{uuid.uuid4()}.wav"
-        # filepath = os.path.join(tempfile.gettempdir(), filename)
-        # sf.write(filepath, wav, sr)
-        # logger.info("Research TTS audio written to %s", filepath)
+        # Handle audio prompt path
+        audio_prompt_path = req.audio_prompt or HARVIS_VOICE_PATH
+        if not os.path.isfile(audio_prompt_path):
+            logger.warning(
+                "Audio prompt %s not found, falling back to default voice.",
+                audio_prompt_path,
+            )
+            audio_prompt_path = None
 
-        # Return text-only response (no audio_path to prevent OOM)
+        # Debug logging for the audio prompt path
+        if audio_prompt_path:
+            if not os.path.exists(audio_prompt_path):
+                logger.warning(f"JARVIS voice prompt missing at: {audio_prompt_path}")
+            else:
+                logger.info(f"Cloning voice using prompt: {audio_prompt_path}")
+
+        # Create a more conversational version of the research response for TTS
+        # Use final_research_answer (without reasoning) for TTS
+        # Remove markdown formatting and make it more speech-friendly
+        tts_text = final_research_answer.replace("**", "").replace("*", "").replace("#", "")
+        # Replace numbered lists with more natural speech
+        import re
+        tts_text = re.sub(r'^\d+\.\s*', '', tts_text, flags=re.MULTILINE)
+        # Replace markdown links with just the title
+        tts_text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', tts_text)
+        # Limit length for TTS (keep it conversational)
+        if len(tts_text) > 800:
+            tts_text = tts_text[:800] + "... and more details are available in the sources."
+
+        sr, wav = safe_generate_speech_optimized(
+            text=tts_text,
+            audio_prompt=audio_prompt_path,
+            exaggeration=req.exaggeration,
+            temperature=req.temperature,
+            cfg_weight=req.cfg_weight,
+        )
+
+        # ── Persist WAV to /tmp so it can be served ──────────────────────────────────────
+        filename = f"research_{uuid.uuid4()}.wav"
+        filepath = os.path.join(tempfile.gettempdir(), filename)
+        sf.write(filepath, wav, sr)
+        logger.info("Research TTS audio written to %s", filepath)
+
         research_response_data = {
-            "history": new_history,
+            "history": new_history, 
             "response": final_research_answer,  # Use final answer for response
-            # No audio_path - research responses are text-only to prevent OOM
+            "audio_path": f"/api/audio/{filename}"
         }
-
+        
         # Add reasoning content if present
         if research_reasoning:
             research_response_data["reasoning"] = research_reasoning
             research_response_data["final_answer"] = final_research_answer
             logger.info(f"🧠 Returning research reasoning content ({len(research_reasoning)} chars)")
-
-        logger.info("✅ Research response prepared (text-only, no TTS)")
+        
         return research_response_data
 
     except Exception as e:
@@ -2293,57 +2114,93 @@ async def reload_models():
     return {"message": "Models reloaded successfully"}
 
 # ─── User Ollama Settings ──────────────────────────────────────────────────────
-# Ollama settings are now managed via Next.js API routes and stored in database
-# Python backend queries database directly when needed for Ollama requests
+class OllamaSettings(BaseModel):
+    cloud_url: str
+    local_url: str
+    api_key: str
+    preferred_endpoint: str  # "cloud", "local", or "auto"
 
-async def get_user_ollama_settings_from_db(user_id: int) -> dict:
-    """
-    Get user's Ollama settings from database.
-    Returns dict with cloud_url, local_url, api_key, preferred_endpoint
-    Falls back to global env vars if no user settings found.
-    """
-    try:
-        async with db_pool.acquire() as conn:
-            result = await conn.fetchrow(
-                """
-                SELECT cloud_url, local_url, api_key_encrypted, preferred_endpoint
-                FROM user_ollama_settings
-                WHERE user_id = $1
-                """,
-                user_id
-            )
+# Global settings dict (in production, this would be stored in database per user)
+user_ollama_settings = {}
 
-            if result:
-                # Decrypt API key if present
-                from cryptography.fernet import Fernet
-                import base64
-
-                api_key = ""
-                if result['api_key_encrypted']:
-                    try:
-                        # Use same encryption key as Next.js (from env)
-                        # For now, we'll pass encrypted key and decrypt on Next.js side
-                        # In production, implement proper key derivation
-                        api_key = result['api_key_encrypted']  # Will need proper decryption
-                    except Exception as e:
-                        logger.warning(f"Could not decrypt API key for user {user_id}: {e}")
-
-                return {
-                    "cloud_url": result['cloud_url'] or CLOUD_OLLAMA_URL,
-                    "local_url": result['local_url'] or LOCAL_OLLAMA_URL,
-                    "api_key": api_key,
-                    "preferred_endpoint": result['preferred_endpoint'] or "auto"
-                }
-    except Exception as e:
-        logger.warning(f"Could not fetch user Ollama settings from database: {e}")
-
-    # Fall back to global env vars
-    return {
+@app.get("/api/user/ollama-settings", tags=["settings"])
+async def get_ollama_settings(current_user: dict = Depends(get_current_user_optimized)):
+    """Get current user's Ollama settings"""
+    user_id = current_user.get("id")
+    default_settings = {
         "cloud_url": CLOUD_OLLAMA_URL,
         "local_url": LOCAL_OLLAMA_URL,
-        "api_key": API_KEY,
+        "api_key": "****" if API_KEY != "key" else "",
         "preferred_endpoint": "auto"
     }
+    
+    user_settings = user_ollama_settings.get(str(user_id), default_settings)
+    logger.info(f"Retrieved Ollama settings for user {user_id}: {user_settings}")
+    return user_settings
+
+@app.post("/api/user/ollama-settings", tags=["settings"])
+async def update_ollama_settings(
+    settings: OllamaSettings,
+    current_user: dict = Depends(get_current_user_optimized)
+):
+    """Update current user's Ollama settings"""
+    user_id = current_user.get("id")
+    
+    # Store settings for user (in production, save to database)
+    user_ollama_settings[str(user_id)] = {
+        "cloud_url": settings.cloud_url,
+        "local_url": settings.local_url,
+        "api_key": settings.api_key,
+        "preferred_endpoint": settings.preferred_endpoint
+    }
+    
+    logger.info(f"Updated Ollama settings for user {user_id}: {settings.dict()}")
+    return {"message": "Ollama settings updated successfully", "settings": settings.dict()}
+
+@app.post("/api/user/ollama-test-connection", tags=["settings"])
+async def test_ollama_connection(
+    settings: OllamaSettings,
+    current_user: dict = Depends(get_current_user_optimized)
+):
+    """Test connection to Ollama with provided settings"""
+    user_id = current_user.get("id")
+    results = {"cloud": None, "local": None}
+    
+    # Test cloud connection
+    if settings.cloud_url and settings.cloud_url.strip():
+        try:
+            headers = {"Authorization": f"Bearer {settings.api_key}"} if settings.api_key and settings.api_key != "key" else {}
+            response = requests.get(f"{settings.cloud_url}/api/tags", headers=headers, timeout=10)
+            if response.status_code == 200:
+                models = response.json().get("models", [])
+                results["cloud"] = {
+                    "status": "success",
+                    "model_count": len(models),
+                    "models": [m.get("name", "unknown") for m in models[:5]]  # First 5 models
+                }
+            else:
+                results["cloud"] = {"status": "error", "message": f"HTTP {response.status_code}"}
+        except Exception as e:
+            results["cloud"] = {"status": "error", "message": str(e)}
+    
+    # Test local connection
+    if settings.local_url and settings.local_url.strip():
+        try:
+            response = requests.get(f"{settings.local_url}/api/tags", timeout=10)
+            if response.status_code == 200:
+                models = response.json().get("models", [])
+                results["local"] = {
+                    "status": "success", 
+                    "model_count": len(models),
+                    "models": [m.get("name", "unknown") for m in models[:5]]  # First 5 models
+                }
+            else:
+                results["local"] = {"status": "error", "message": f"HTTP {response.status_code}"}
+        except Exception as e:
+            results["local"] = {"status": "error", "message": str(e)}
+    
+    logger.info(f"Connection test results for user {user_id}: {results}")
+    return results
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
@@ -2413,7 +2270,7 @@ async def create_n8n_automation(
         logger.info(f"n8n automation request from user {current_user.username}: {request.prompt[:100]}...")
         
         result = await n8n_automation_service.process_automation_request(
-            request, user_id=current_user.id
+            request, user_id=current_user["id"]
         )
         
         if result.get("success"):
@@ -2454,7 +2311,7 @@ async def create_simple_workflow(
         logger.info(f"Creating simple n8n workflow '{request.name}' for user {current_user.username}")
         
         result = await n8n_automation_service.create_simple_workflow(
-            request, user_id=current_user.id
+            request, user_id=current_user["id"]
         )
         
         if result.get("success"):
@@ -2484,7 +2341,7 @@ async def list_user_n8n_workflows(
         raise HTTPException(status_code=503, detail="n8n automation service not available")
     
     try:
-        workflows = await n8n_automation_service.list_user_workflows(current_user.id)
+        workflows = await n8n_automation_service.list_user_workflows(current_user["id"])
         return {
             "success": True,
             "workflows": workflows,
@@ -2536,7 +2393,7 @@ async def execute_n8n_workflow(
         
         # Verify user owns workflow
         if n8n_storage:
-            workflow_record = await n8n_storage.get_workflow(workflow_id, current_user.id)
+            workflow_record = await n8n_storage.get_workflow(workflow_id, current_user["id"])
             if not workflow_record:
                 raise HTTPException(status_code=404, detail="Workflow not found")
         
@@ -2571,7 +2428,7 @@ async def get_workflow_executions(
     try:
         # Verify user owns workflow
         if n8n_storage:
-            workflow_record = await n8n_storage.get_workflow(workflow_id, current_user.id)
+            workflow_record = await n8n_storage.get_workflow(workflow_id, current_user["id"])
             if not workflow_record:
                 raise HTTPException(status_code=404, detail="Workflow not found")
         
@@ -2600,7 +2457,7 @@ async def get_automation_history(
         raise HTTPException(status_code=503, detail="n8n automation service not available")
     
     try:
-        history = await n8n_automation_service.get_automation_history(current_user.id)
+        history = await n8n_automation_service.get_automation_history(current_user["id"])
         return {
             "success": True,
             "history": history,
@@ -2783,7 +2640,7 @@ async def create_n8n_automation_with_ai(
         
         # Process request with AI agent and vector context
         result = await n8n_ai_agent.process_automation_request_with_context(
-            request, user_id=current_user.id
+            request, user_id=current_user["id"]
         )
         
         if result.get("success"):

@@ -38,6 +38,8 @@ import AIAssistantPanel from "@/components/AIAssistantPanel"
 import ResizablePanel from "@/components/ResizablePanel"
 import RightTabsPanel from "@/components/RightTabsPanel"
 import { useUserPreferences, getPreferencesWithDefaults } from "@/lib/useUserPreferences"
+import { GitHubStatus } from "@/components/GitHubStatus"
+import { ImportRepoButton } from "@/components/ImportRepoButton"
 
 // Import VibeTerminal dynamically to avoid SSR issues with xterm.js
 const VibeTerminal = dynamic(() => import("@/components/VibeTerminal"), {
@@ -95,6 +97,8 @@ export default function VibeCodePage() {
   const [currentSession, setCurrentSession] = useState<Session | null>(null)
   const [isContainerRunning, setIsContainerRunning] = useState(false)
   const [selectedFile, setSelectedFile] = useState<ContainerFile | null>(null)
+  const [openFiles, setOpenFiles] = useState<ContainerFile[]>([])
+  const [activeFile, setActiveFile] = useState<ContainerFile | null>(null)
   const [isLoadingSession, setIsLoadingSession] = useState(true)
   const [selectedModel, setSelectedModel] = useState<string>('mistral')
   const [selectedAgent, setSelectedAgent] = useState<'assistant' | 'vibe'>('vibe')
@@ -145,10 +149,10 @@ export default function VibeCodePage() {
       setLeftPanelWidth(preferences.left_panel_width)
       setRightPanelWidth(preferences.right_panel_width)
       setTerminalHeight(preferences.terminal_height)
-      
+
       // Apply default model
       setSelectedModel(preferences.default_model)
-      
+
       // Apply theme
       setCurrentTheme(preferences.theme)
       if (preferences.theme === 'light') {
@@ -156,7 +160,7 @@ export default function VibeCodePage() {
       } else {
         document.documentElement.classList.add('dark')
       }
-      
+
       // Apply font size to editor and terminal (via CSS variable)
       document.documentElement.style.setProperty('--vibe-font-size', `${preferences.font_size}px`)
     }
@@ -188,13 +192,13 @@ export default function VibeCodePage() {
   const handleThemeToggle = useCallback(() => {
     const newTheme = currentTheme === 'dark' ? 'light' : 'dark'
     setCurrentTheme(newTheme)
-    
+
     if (newTheme === 'light') {
       document.documentElement.classList.remove('dark')
     } else {
       document.documentElement.classList.add('dark')
     }
-    
+
     updatePreferences({ theme: newTheme })
   }, [currentTheme, updatePreferences])
 
@@ -444,13 +448,38 @@ export default function VibeCodePage() {
 
   // File Management
   const handleFileSelect = (filePath: string, content: string) => {
-    setSelectedFile({
+    // Check if file is already open
+    const existingFile = openFiles.find(f => f.path === filePath)
+
+    if (existingFile) {
+      setActiveFile(existingFile)
+      return
+    }
+
+    // Create new file object
+    const newFile: ContainerFile = {
       name: filePath.split('/').pop() || '',
       type: 'file',
       size: content.length,
       permissions: '',
       path: filePath
-    })
+    }
+
+    setOpenFiles(prev => [...prev, newFile])
+    setActiveFile(newFile)
+    setSelectedFile(newFile) // Keep this for backward compatibility if needed
+  }
+
+  const handleCloseFile = (e: React.MouseEvent, filePath: string) => {
+    e.stopPropagation()
+
+    const newOpenFiles = openFiles.filter(f => f.path !== filePath)
+    setOpenFiles(newOpenFiles)
+
+    if (activeFile?.path === filePath) {
+      // If closing active file, switch to the last one or null
+      setActiveFile(newOpenFiles.length > 0 ? newOpenFiles[newOpenFiles.length - 1] : null)
+    }
   }
 
   const handleFileContentChange = (filePath: string, content: string) => {
@@ -694,15 +723,14 @@ export default function VibeCodePage() {
                   <>
                     <Badge
                       variant="outline"
-                      className={`${
-                        currentSession.container_status === 'running'
-                          ? 'border-green-500 text-green-400'
-                          : currentSession.container_status === 'starting'
+                      className={`${currentSession.container_status === 'running'
+                        ? 'border-green-500 text-green-400'
+                        : currentSession.container_status === 'starting'
                           ? 'border-yellow-500 text-yellow-400'
                           : currentSession.container_status === 'stopping'
-                          ? 'border-orange-500 text-orange-400'
-                          : 'border-red-500 text-red-400'
-                      }`}
+                            ? 'border-orange-500 text-orange-400'
+                            : 'border-red-500 text-red-400'
+                        }`}
                     >
                       <Monitor className="w-3 h-3 mr-1" />
                       {currentSession.container_status}
@@ -757,19 +785,18 @@ export default function VibeCodePage() {
               </div>
 
               {/* Theme Toggle */}
-              <Button
-                onClick={handleThemeToggle}
-                variant="outline"
-                size="sm"
-                className="bg-gray-800 border-gray-600 text-gray-300"
-                title={`Switch to ${currentTheme === 'dark' ? 'light' : 'dark'} mode`}
-              >
-                {currentTheme === 'dark' ? (
-                  <Sun className="w-4 h-4" />
-                ) : (
-                  <Moon className="w-4 h-4" />
-                )}
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={handleThemeToggle}
+                  className="h-8 px-2 hover:bg-gray-700"
+                  title={`Switch to ${currentTheme === 'dark' ? 'light' : 'dark'} theme`}
+                >
+                  {currentTheme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
+                </Button>
+                <GitHubStatus />
+              </div>
 
               <Button
                 onClick={() => setShowSettings(true)}
@@ -846,24 +873,57 @@ export default function VibeCodePage() {
               >
                 <MonacoVibeFileTree
                   sessionId={currentSession.session_id}
+                  isContainerRunning={isContainerRunning}
                   onFileSelect={handleFileSelect}
                   onFileContentChange={handleFileContentChange}
-                  className="h-full"
+                  currentDir="/workspace"
+                  newFileButton={
+                    <ImportRepoButton
+                      sessionId={currentSession.session_id}
+                      onSuccess={async () => {
+                        // Refresh file tree after successful import
+                        // The MonacoVibeFileTree will handle the refresh automatically
+                      }}
+                    />
+                  }
                 />
               </ResizablePanel>
+
 
               {/* Center Panel: Code Editor + Terminal */}
               <div className="flex-1 min-w-0 flex flex-col gap-4">
                 {/* Code Editor (takes remaining space) */}
-                <div className="flex-1 min-h-0">
+                <div className="flex-1 min-h-0 flex flex-col">
+                  {/* Tab Bar */}
+                  <div className="flex items-center bg-gray-900 border-b border-gray-700 overflow-x-auto">
+                    {openFiles.map(file => (
+                      <div
+                        key={file.path}
+                        onClick={() => setActiveFile(file)}
+                        className={`
+                          flex items-center gap-2 px-3 py-2 text-sm cursor-pointer border-r border-gray-700 min-w-[120px] max-w-[200px]
+                          ${activeFile?.path === file.path ? 'bg-gray-800 text-white' : 'bg-gray-900 text-gray-400 hover:bg-gray-800'}
+                        `}
+                      >
+                        <span className="truncate flex-1">{file.name}</span>
+                        <button
+                          onClick={(e) => handleCloseFile(e, file.path)}
+                          className="p-0.5 hover:bg-gray-700 rounded-sm opacity-0 group-hover:opacity-100 transition-opacity"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+
                   <VibeContainerCodeEditor
                     sessionId={currentSession.session_id}
-                    selectedFile={selectedFile}
+                    selectedFile={activeFile}
                     onExecute={handleFileExecute}
-                    className="h-full"
+                    className="flex-1"
                   />
                 </div>
-                
+
                 {/* Terminal (Resizable 100-600px height) */}
                 <ResizablePanel
                   height={terminalHeight}

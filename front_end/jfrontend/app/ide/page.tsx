@@ -20,6 +20,7 @@ import { RightPanel } from './components/RightPanel'
 import { DiffMerge } from './components/DiffMerge'
 import { IDEChatAPI, type DiffProposal } from './lib/ide-api'
 import { ToastProvider } from './components/Toast'
+import { GitHubStatus } from '@/components/GitHubStatus'
 
 interface Session {
   id: string
@@ -61,6 +62,9 @@ export default function IDEPage() {
   const [codeOutput, setCodeOutput] = useState<string>('')
   const [interactiveOutput, setInteractiveOutput] = useState<boolean>(false)
   const [interactiveCommand, setInteractiveCommand] = useState<string>('')
+  
+  // Main app sidebar state (for layout adjustment)
+  const [mainSidebarCollapsed, setMainSidebarCollapsed] = useState(false)
   
   // Command palette state
   const [showCommandPalette, setShowCommandPalette] = useState(false)
@@ -1154,6 +1158,22 @@ export default function IDEPage() {
     }
   }, [])
 
+  // Listen for main app sidebar collapse/expand events
+  useEffect(() => {
+    const handleSidebarCollapse = (e: CustomEvent<{ collapsed: boolean }>) => {
+      setMainSidebarCollapsed(e.detail.collapsed)
+    }
+    
+    // Check initial state by looking at main-content class
+    const mainContent = document.getElementById('main-content')
+    if (mainContent) {
+      setMainSidebarCollapsed(mainContent.classList.contains('lg:ml-16'))
+    }
+    
+    window.addEventListener('sidebar-collapse', handleSidebarCollapse as EventListener)
+    return () => window.removeEventListener('sidebar-collapse', handleSidebarCollapse as EventListener)
+  }, [])
+
   // Save copilot model selection to localStorage
   useEffect(() => {
     localStorage.setItem('copilot_model', copilotModel)
@@ -1278,7 +1298,11 @@ export default function IDEPage() {
 
   return (
     <ToastProvider>
-      <div className="vibe-ide-root h-screen w-full bg-gray-900 text-white flex flex-col overflow-hidden">
+      <div className={`vibe-ide-root h-screen bg-gray-900 text-white flex flex-col overflow-hidden transition-all duration-300 ${
+        mainSidebarCollapsed
+          ? 'w-[calc(95vw-4rem)] ml-[1rem] max-w-[calc(95vw-4rem)] scale-95'
+          : 'w-[calc(95vw-16rem)] ml-[14rem] max-w-[calc(95vw-16rem)] scale-95'
+      }`}>
         {/* Header with Session Tabs */}
         <header className="h-12 bg-gray-800 border-b border-gray-700 flex items-center justify-between px-4 flex-shrink-0 min-w-0">
           <div className="flex items-center gap-4 min-w-0">
@@ -1293,6 +1317,7 @@ export default function IDEPage() {
             />
           </div>
           <div className="flex items-center gap-2">
+            <GitHubStatus />
             {currentSession && (
               <div className="flex items-center gap-2">
                 <span className="text-xs text-gray-400">Container:</span>
@@ -1322,6 +1347,7 @@ export default function IDEPage() {
           >
             <LeftSidebar
               sessionId={currentSession?.session_id || null}
+              sessionName={currentSession?.name}
               isContainerRunning={currentSession?.container_status === 'running'}
               onFileSelect={handleFileSelect}
               chatMessages={chatMessages}
