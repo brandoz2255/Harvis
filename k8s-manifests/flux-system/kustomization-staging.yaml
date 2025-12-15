@@ -1,0 +1,45 @@
+---
+# Kustomization - Tells Flux to reconcile staging environment
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: harvis-ai-staging
+  namespace: flux-system
+spec:
+  interval: 5m  # Reconcile every 5 minutes
+
+  sourceRef:
+    kind: GitRepository
+    name: harvis-ai-repo
+
+  path: ./k8s-manifests/overlays/staging
+
+  prune: true  # Remove resources that are no longer in Git
+  wait: true   # Wait for resources to be ready
+  timeout: 10m
+
+  # Health checks for critical resources
+  healthChecks:
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: staging-harvis-ai-backend
+      namespace: ai-agents-staging
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: staging-harvis-ai-frontend
+      namespace: ai-agents-staging
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: staging-harvis-ai-ollama
+      namespace: ai-agents-staging
+
+  # Retry configuration
+  retryInterval: 1m
+
+  # Force re-creation if needed
+  force: false
+
+  # Post-build variable substitution (if needed)
+  # postBuild:
+  #   substitute:
+  #     ENVIRONMENT: "staging"

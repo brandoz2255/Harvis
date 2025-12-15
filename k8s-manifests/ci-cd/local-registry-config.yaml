@@ -1,0 +1,159 @@
+---
+# ConfigMap for registry configuration and garbage collection
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: registry-config
+  namespace: kube-system
+  labels:
+    app: docker-registry
+data:
+  config.yml: |
+    version: 0.1
+    log:
+      level: info
+      fields:
+        service: registry
+        environment: kubernetes
+
+    storage:
+      cache:
+        blobdescriptor: inmemory
+      filesystem:
+        rootdirectory: /var/lib/registry
+      delete:
+        enabled: true
+
+    http:
+      addr: :5000
+      headers:
+        X-Content-Type-Options: [nosniff]
+      debug:
+        addr: :5001
+        prometheus:
+          enabled: true
+          path: /metrics
+
+    health:
+      storagedriver:
+        enabled: true
+        interval: 10s
+        threshold: 3
+
+    # Garbage collection configuration
+    # Run manually: docker exec registry bin/registry garbage-collect /etc/docker/registry/config.yml
+    # Or via cron job (see below)
+
+---
+# CronJob for registry garbage collection (cleanup unused blobs)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: registry-garbage-collection
+  namespace: kube-system
+  labels:
+    app: docker-registry
+spec:
+  # Run every Sunday at 2 AM
+  schedule: "0 2 * * 0"
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: garbage-collect
+              image: registry:2
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  echo "Starting registry garbage collection..."
+                  bin/registry garbage-collect /etc/docker/registry/config.yml
+                  echo "Garbage collection completed"
+              volumeMounts:
+                - name: registry-storage
+                  mountPath: /var/lib/registry
+                - name: registry-config
+                  mountPath: /etc/docker/registry
+
+          volumes:
+            # Mount the same storage as the registry
+            # Adjust this based on your registry deployment
+            - name: registry-storage
+              hostPath:
+                path: /var/lib/registry
+                type: DirectoryOrCreate
+
+            - name: registry-config
+              configMap:
+                name: registry-config
+
+---
+# Note: This assumes your registry is running as a Docker container on the host
+# If you want to migrate to a K8s-native registry, use the deployment below:
+
+# ---
+# apiVersion: apps/v1
+# kind: Deployment
+# metadata:
+#   name: docker-registry
+#   namespace: kube-system
+# spec:
+#   replicas: 1
+#   selector:
+#     matchLabels:
+#       app: docker-registry
+#   template:
+#     metadata:
+#       labels:
+#         app: docker-registry
+#     spec:
+#       containers:
+#         - name: registry
+#           image: registry:2
+#           ports:
+#             - containerPort: 5000
+#               name: registry
+#             - containerPort: 5001
+#               name: metrics
+#           volumeMounts:
+#             - name: registry-storage
+#               mountPath: /var/lib/registry
+#             - name: registry-config
+#               mountPath: /etc/docker/registry
+#           resources:
+#             requests:
+#               memory: 256Mi
+#               cpu: 100m
+#             limits:
+#               memory: 1Gi
+#               cpu: 500m
+#       volumes:
+#         - name: registry-storage
+#           persistentVolumeClaim:
+#             claimName: registry-pvc
+#         - name: registry-config
+#           configMap:
+#             name: registry-config
+#
+# ---
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   name: docker-registry
+#   namespace: kube-system
+# spec:
+#   type: NodePort
+#   ports:
+#     - name: registry
+#       port: 5000
+#       targetPort: 5000
+#       nodePort: 30500
+#     - name: metrics
+#       port: 5001
+#       targetPort: 5001
+#   selector:
+#     app: docker-registry

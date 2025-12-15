@@ -1,0 +1,48 @@
+---
+# GitRepository - Points Flux to your GitHub repository
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: harvis-ai-repo
+  namespace: flux-system
+spec:
+  interval: 1m  # Check for changes every minute
+
+  # IMPORTANT: Update this URL to your actual GitHub repository
+  url: https://github.com/YOUR_USERNAME/YOUR_REPO.git
+
+  ref:
+    branch: main
+
+  # For private repositories, create a secret with SSH key or personal access token
+  # secretRef:
+  #   name: github-credentials
+
+  # Ignore paths to avoid reconciliation loops
+  ignore: |
+    # Exclude CI/CD workflows
+    .github/
+    # Exclude documentation
+    *.md
+    # Exclude local development files
+    docker-compose*.yml
+    .env*
+
+  # Timeout for git operations
+  timeout: 60s
+
+---
+# Optional: Secret for private GitHub repository access
+# Create this if your repository is private
+#
+# For HTTPS with Personal Access Token:
+# kubectl create secret generic github-credentials \
+#   --from-literal=username=YOUR_GITHUB_USERNAME \
+#   --from-literal=password=YOUR_GITHUB_PAT \
+#   -n flux-system
+#
+# For SSH:
+# kubectl create secret generic github-credentials \
+#   --from-file=identity=~/.ssh/id_rsa \
+#   --from-literal=known_hosts="$(ssh-keyscan github.com)" \
+#   -n flux-system

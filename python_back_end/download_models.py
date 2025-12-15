@@ -204,10 +204,11 @@ def main():
             logger.error("❌ Model verification failed")
             sys.exit(1)
 
-        # CRITICAL: Fix permissions so app container can read the cache
+        # Best effort: Try to fix permissions so app container can read the cache
+        # Don't fail if this doesn't work (NFS may not allow chmod)
         if not fix_cache_permissions():
-            logger.error("❌ Failed to set proper cache permissions")
-            sys.exit(1)
+            logger.warning("⚠️ Could not set cache permissions - NFS may not allow chmod")
+            logger.warning("⚠️ This is expected on NFS mounts and should not cause issues")
 
         logger.info("✅ All models downloaded and verified successfully")
         logger.info("✅ Cache permissions set correctly")

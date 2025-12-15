@@ -1,0 +1,125 @@
+name: Trigger GitLab CI Build
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - prod
+
+permissions:
+  contents: read
+
+jobs:
+  trigger-gitlab-build:
+    name: Trigger GitLab CI Pipeline
+    runs-on: ubuntu-latest
+    # Only trigger if SAST scans passed (or workflow_dispatch)
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get commit info
+        id: commit
+        run: |
+          echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "commit_msg=$(git log -1 --pretty=%B | head -n 1)" >> $GITHUB_OUTPUT
+          echo "author=$(git log -1 --pretty=%an)" >> $GITHUB_OUTPUT
+
+      - name: Determine environment
+        id: env
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "target=${{ inputs.environment }}" >> $GITHUB_OUTPUT
+          else
+            echo "target=staging" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Trigger GitLab CI via Webhook
+        env:
+          GITLAB_WEBHOOK_URL: ${{ secrets.GITLAB_WEBHOOK_URL }}
+          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+        run: |
+          echo "🚀 Triggering GitLab CI pipeline..."
+          echo "Environment: ${{ steps.env.outputs.target }}"
+          echo "Commit: ${{ steps.commit.outputs.sha_short }}"
+          echo "Author: ${{ steps.commit.outputs.author }}"
+
+          # Trigger GitLab CI pipeline via webhook
+          # Option A: Using GitLab trigger token
+          if [[ -n "$GITLAB_TOKEN" ]] && [[ -n "$GITLAB_WEBHOOK_URL" ]]; then
+            curl -X POST \
+              -F "token=$GITLAB_TOKEN" \
+              -F "ref=main" \
+              -F "variables[GITHUB_SHA]=${{ github.sha }}" \
+              -F "variables[GITHUB_SHA_SHORT]=${{ steps.commit.outputs.sha_short }}" \
+              -F "variables[GITHUB_REF]=${{ github.ref }}" \
+              -F "variables[GITHUB_ACTOR]=${{ github.actor }}" \
+              -F "variables[ENVIRONMENT]=${{ steps.env.outputs.target }}" \
+              -F "variables[COMMIT_MESSAGE]=${{ steps.commit.outputs.commit_msg }}" \
+              "$GITLAB_WEBHOOK_URL"
+
+            echo "✅ GitLab CI pipeline triggered successfully"
+          else
+            echo "⚠️  GitLab webhook URL or token not configured"
+            echo "Please set GITLAB_WEBHOOK_URL and GITLAB_TOKEN secrets"
+            echo "Skipping GitLab trigger..."
+          fi
+
+      - name: Notify on success
+        if: success()
+        run: |
+          echo "🎉 Build trigger sent to GitLab CI"
+          echo "Monitor your GitLab pipeline for build status"
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "❌ Failed to trigger GitLab CI pipeline"
+          echo "Check GitLab webhook configuration and secrets"
+          exit 1
+
+  # Create deployment tracking issue (optional)
+  create-deployment-tracking:
+    name: Create Deployment Tracking
+    runs-on: ubuntu-latest
+    needs: trigger-gitlab-build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Create deployment event
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const deployment = await github.rest.repos.createDeployment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: context.sha,
+              environment: 'staging',
+              description: 'Automated deployment to staging via GitLab CI',
+              auto_merge: false,
+              required_contexts: []
+            });
+
+            console.log('Deployment created:', deployment.data.id);
+
+            // Create deployment status
+            await github.rest.repos.createDeploymentStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              deployment_id: deployment.data.id,
+              state: 'in_progress',
+              description: 'Building images in GitLab CI'
+            });

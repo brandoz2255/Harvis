@@ -1,0 +1,121 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Production environment overlay
+namespace: ai-agents
+
+# Reference base manifests
+resources:
+  - ../../base/configmaps.yaml
+  - ../../base/nginx-configmap.yaml
+  - ../../base/secrets.yaml
+  - ../../storage/pvcs.yaml
+  - ../../storage/local-path-storage.yaml
+  - ../../services/postgresql.yaml
+  - ../../services/ollama-dedicated.yaml
+  - ../../services/backend-dedicated.yaml
+  - ../../services/frontend.yaml
+  - ../../services/n8n.yaml
+  - ../../services/nginx.yaml
+
+# Image overrides for production (auto-updated by Flux)
+images:
+  - name: localhost:5000/jarvis-backend
+    newTag: latest  # Flux will update this to versioned tags (v1.0.0, etc.)
+  - name: localhost:5000/jarvis-frontend
+    newTag: latest  # Flux will update this to versioned tags
+
+# Common labels for production
+commonLabels:
+  app.kubernetes.io/name: harvis-ai
+  app.kubernetes.io/managed-by: kustomize
+  environment: production
+
+# Production annotations
+commonAnnotations:
+  environment: production
+  managed-by: flux
+
+# Patches for production environment
+patches:
+  # Production replicas (can be scaled up)
+  - target:
+      kind: Deployment
+      name: harvis-ai-backend
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1  # Can be increased for load balancing
+
+  - target:
+      kind: Deployment
+      name: harvis-ai-frontend
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1  # Can be increased for load balancing
+
+  # Add production-specific environment variables
+  - target:
+      kind: Deployment
+      name: harvis-ai-backend
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: ENVIRONMENT
+          value: "production"
+
+  - target:
+      kind: Deployment
+      name: harvis-ai-backend
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: LOG_LEVEL
+          value: "INFO"
+
+  # Production resource limits (full GPU allocation)
+  - target:
+      kind: Deployment
+      name: harvis-ai-backend
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: "12Gi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: "16Gi"
+
+  # Add production liveness/readiness probe timeouts
+  - target:
+      kind: Deployment
+      name: harvis-ai-backend
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/livenessProbe/initialDelaySeconds
+        value: 90
+      - op: replace
+        path: /spec/template/spec/containers/0/livenessProbe/timeoutSeconds
+        value: 15
+
+  - target:
+      kind: Deployment
+      name: harvis-ai-backend
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/readinessProbe/initialDelaySeconds
+        value: 60
+      - op: replace
+        path: /spec/template/spec/containers/0/readinessProbe/timeoutSeconds
+        value: 10
+
+  # Production Ollama configuration
+  - target:
+      kind: Deployment
+      name: harvis-ai-ollama
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/nvidia.com~1gpu
+        value: 1  # Full GPU for production workloads

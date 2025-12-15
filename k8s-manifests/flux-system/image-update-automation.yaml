@@ -1,0 +1,80 @@
+---
+# ImageUpdateAutomation - Auto-updates staging manifests with new images
+apiVersion: image.toolkit.fluxcd.io/v1beta2
+kind: ImageUpdateAutomation
+metadata:
+  name: harvis-staging-auto-update
+  namespace: flux-system
+spec:
+  interval: 1m  # Check for updates every minute
+
+  sourceRef:
+    kind: GitRepository
+    name: harvis-ai-repo
+    namespace: flux-system
+
+  git:
+    checkout:
+      ref:
+        branch: main
+    commit:
+      author:
+        name: fluxcdbot
+        email: flux@harvis.ai
+      messageTemplate: |
+        🤖 [staging] Auto-update images
+
+        Updated by Flux image automation:
+        - Backend: {{ range .Updated.Images }}{{ if contains "backend" .}}{{ . }}{{ end }}{{ end }}
+        - Frontend: {{ range .Updated.Images }}{{ if contains "frontend" .}}{{ . }}{{ end }}{{ end }}
+
+        Automation: {{ .AutomationObject }}
+
+    push:
+      branch: main
+
+  update:
+    path: ./k8s-manifests/overlays/staging
+    strategy: Setters  # Use kustomize setters to update image tags
+
+---
+# ImageUpdateAutomation - Auto-updates production manifests (more conservative)
+apiVersion: image.toolkit.fluxcd.io/v1beta2
+kind: ImageUpdateAutomation
+metadata:
+  name: harvis-prod-auto-update
+  namespace: flux-system
+spec:
+  interval: 5m  # Less frequent updates for production
+
+  sourceRef:
+    kind: GitRepository
+    name: harvis-ai-repo
+    namespace: flux-system
+
+  git:
+    checkout:
+      ref:
+        branch: main
+    commit:
+      author:
+        name: fluxcdbot
+        email: flux@harvis.ai
+      messageTemplate: |
+        🚀 [production] Auto-update images
+
+        Production deployment update:
+        - Backend: {{ range .Updated.Images }}{{ if contains "backend" .}}{{ . }}{{ end }}{{ end }}
+        - Frontend: {{ range .Updated.Images }}{{ if contains "frontend" .}}{{ . }}{{ end }}{{ end }}
+
+        Version: {{ .AutomationObject }}
+
+    push:
+      branch: main
+
+  update:
+    path: ./k8s-manifests/overlays/prod
+    strategy: Setters
+
+  # Only update production on version tags
+  suspend: false  # Set to true to require manual approval for prod updates

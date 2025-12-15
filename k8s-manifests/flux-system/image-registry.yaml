@@ -1,0 +1,91 @@
+---
+# ImageRepository - Scans local registry for new backend images
+apiVersion: image.toolkit.fluxcd.io/v1beta2
+kind: ImageRepository
+metadata:
+  name: harvis-backend
+  namespace: flux-system
+spec:
+  image: localhost:5000/jarvis-backend
+  interval: 1m  # Scan every minute for new images
+  insecure: true  # Required for HTTP registry (not HTTPS)
+
+---
+# ImageRepository - Scans local registry for new frontend images
+apiVersion: image.toolkit.fluxcd.io/v1beta2
+kind: ImageRepository
+metadata:
+  name: harvis-frontend
+  namespace: flux-system
+spec:
+  image: localhost:5000/jarvis-frontend
+  interval: 1m  # Scan every minute for new images
+  insecure: true  # Required for HTTP registry (not HTTPS)
+
+---
+# ImagePolicy - Policy for selecting backend image tags (staging)
+apiVersion: image.toolkit.fluxcd.io/v1beta2
+kind: ImagePolicy
+metadata:
+  name: harvis-backend-staging
+  namespace: flux-system
+spec:
+  imageRepositoryRef:
+    name: harvis-backend
+  policy:
+    semver:
+      range: ">=0.0.0-0"  # Accept all tags
+  filterTags:
+    pattern: '^staging-.*$'  # Only staging tags
+    extract: '$0'
+
+---
+# ImagePolicy - Policy for selecting frontend image tags (staging)
+apiVersion: image.toolkit.fluxcd.io/v1beta2
+kind: ImagePolicy
+metadata:
+  name: harvis-frontend-staging
+  namespace: flux-system
+spec:
+  imageRepositoryRef:
+    name: harvis-frontend
+  policy:
+    semver:
+      range: ">=0.0.0-0"
+  filterTags:
+    pattern: '^staging-.*$'  # Only staging tags
+    extract: '$0'
+
+---
+# ImagePolicy - Policy for selecting backend image tags (production)
+apiVersion: image.toolkit.fluxcd.io/v1beta2
+kind: ImagePolicy
+metadata:
+  name: harvis-backend-prod
+  namespace: flux-system
+spec:
+  imageRepositoryRef:
+    name: harvis-backend
+  policy:
+    semver:
+      range: ">=1.0.0"  # Production versions (v1.0.0, v1.0.1, etc.)
+  filterTags:
+    pattern: '^v.*$'  # Only version tags (v1.0.0, v2.0.0)
+    extract: '$0'
+
+---
+# ImagePolicy - Policy for selecting frontend image tags (production)
+apiVersion: image.toolkit.fluxcd.io/v1beta2
+kind: ImagePolicy
+metadata:
+  name: harvis-frontend-prod
+  namespace: flux-system
+spec:
+  imageRepositoryRef:
+    name: harvis-frontend
+  policy:
+    semver:
+      range: ">=1.0.0"  # Production versions
+  filterTags:
+    pattern: '^v.*$'  # Only version tags
+    extract: '$0'

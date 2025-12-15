@@ -11,10 +11,12 @@ resources:
 
   # Storage
   - storage/pvcs.yaml
+  - storage/nfs-storage.yaml
 
   # Services
   - services/postgresql.yaml
-  - services/merged-ollama-backend.yaml
+  - services/ollama-dedicated.yaml
+  - services/backend-dedicated.yaml
   - services/frontend.yaml
   - services/n8n.yaml
   - services/nginx.yaml

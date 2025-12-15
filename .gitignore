@@ -31,6 +31,34 @@ flux-config/**/secrets/
 flux-config/**/*-secret.yaml
 flux-config/**/external-secret*.yaml
 
+# ==========================================
+# CI/CD Secrets and Credentials
+# ==========================================
+
+# GitLab Runner secrets (templates are .yaml.template, actual secrets are ignored)
+k8s-manifests/ci-cd/gitlab-runner-secrets.yaml
+!k8s-manifests/ci-cd/gitlab-runner-secrets.yaml.template
+k8s-manifests/ci-cd/*-secret.yaml
+k8s-manifests/ci-cd/*-secrets.yaml
+!k8s-manifests/ci-cd/*-secret.yaml.template
+!k8s-manifests/ci-cd/*-secrets.yaml.template
+
+# FluxCD Git credentials and SSH keys
+k8s-manifests/flux-system/flux-system-secret.yaml
+k8s-manifests/flux-system/git-credentials.yaml
+k8s-manifests/flux-system/*-secret.yaml
+k8s-manifests/flux-system/*-credentials.yaml
+!k8s-manifests/flux-system/*-secret.yaml.template
+!k8s-manifests/flux-system/*-credentials.yaml.template
+flux-system-key*
+id_rsa*
+id_ed25519*
+
+# GitHub/GitLab tokens and webhooks
+.github-token
+.gitlab-token
+webhook-secret.txt
+
 # Kubeconfig and kubectl contexts
 kubeconfig
 kubeconfig.*

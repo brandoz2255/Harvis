@@ -1,0 +1,298 @@
+# GitLab CI/CD Pipeline for Harvis AI
+# Builds Docker images and pushes to local registry (localhost:5000)
+
+variables:
+  # Registry configuration
+  REGISTRY_URL: "localhost:5000"
+
+  # Image names
+  BACKEND_IMAGE: "${REGISTRY_URL}/jarvis-backend"
+  FRONTEND_IMAGE: "${REGISTRY_URL}/jarvis-frontend"
+
+  # Build configuration
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: ""
+
+  # Default environment (overridden by GitHub Actions webhook)
+  ENVIRONMENT: "staging"
+
+  # Git info (set by GitHub Actions or use GitLab defaults)
+  GIT_SHA: "${CI_COMMIT_SHA}"
+  GIT_SHA_SHORT: "${CI_COMMIT_SHORT_SHA}"
+  GIT_REF: "${CI_COMMIT_REF_NAME}"
+
+stages:
+  - build
+  - push
+  - tag
+  - deploy
+
+# ============================================
+# Backend Build Jobs
+# ============================================
+
+build-backend:
+  stage: build
+  tags:
+    - node1        # Run on node1 (node-gpu-1) with GPU
+    - backend
+    - docker
+  variables:
+    IMAGE_TAG: "${BACKEND_IMAGE}:${GIT_SHA_SHORT}"
+  script:
+    - echo "🔨 Building backend Docker image..."
+    - echo "Image: ${IMAGE_TAG}"
+    - echo "Environment: ${ENVIRONMENT}"
+
+    # Build backend image
+    - cd python_back_end
+    - |
+      docker build \
+        --build-arg BUILDKIT_INLINE_CACHE=1 \
+        --cache-from ${BACKEND_IMAGE}:latest \
+        --tag ${IMAGE_TAG} \
+        --tag ${BACKEND_IMAGE}:${ENVIRONMENT}-latest \
+        --tag ${BACKEND_IMAGE}:build-${CI_PIPELINE_ID} \
+        -f Dockerfile \
+        .
+
+    # Verify image built
+    - docker images | grep jarvis-backend
+
+    - echo "✅ Backend image built successfully"
+  only:
+    - main
+    - develop
+    - tags
+
+push-backend:
+  stage: push
+  tags:
+    - node1
+    - backend
+    - docker
+  dependencies:
+    - build-backend
+  variables:
+    IMAGE_TAG: "${BACKEND_IMAGE}:${GIT_SHA_SHORT}"
+  script:
+    - echo "📤 Pushing backend image to registry..."
+
+    # Push all tags
+    - docker push ${IMAGE_TAG}
+    - docker push ${BACKEND_IMAGE}:${ENVIRONMENT}-latest
+    - docker push ${BACKEND_IMAGE}:build-${CI_PIPELINE_ID}
+
+    # Tag and push as 'latest' if main branch
+    - |
+      if [[ "${GIT_REF}" == "main" || "${CI_COMMIT_REF_NAME}" == "main" ]]; then
+        docker tag ${IMAGE_TAG} ${BACKEND_IMAGE}:latest
+        docker push ${BACKEND_IMAGE}:latest
+        echo "✅ Tagged and pushed as 'latest'"
+      fi
+
+    - echo "✅ Backend images pushed to ${REGISTRY_URL}"
+    - echo "Available tags:"
+    - echo "  - ${GIT_SHA_SHORT}"
+    - echo "  - ${ENVIRONMENT}-latest"
+    - echo "  - build-${CI_PIPELINE_ID}"
+  only:
+    - main
+    - develop
+    - tags
+
+# ============================================
+# Frontend Build Jobs
+# ============================================
+
+build-frontend:
+  stage: build
+  tags:
+    - node2        # Run on node2 (node-gpu-2)
+    - frontend
+    - docker
+  variables:
+    IMAGE_TAG: "${FRONTEND_IMAGE}:${GIT_SHA_SHORT}"
+  script:
+    - echo "🔨 Building frontend Docker image..."
+    - echo "Image: ${IMAGE_TAG}"
+    - echo "Environment: ${ENVIRONMENT}"
+
+    # Build frontend image
+    - cd front_end/jfrontend
+    - |
+      docker build \
+        --build-arg BUILDKIT_INLINE_CACHE=1 \
+        --cache-from ${FRONTEND_IMAGE}:latest \
+        --tag ${IMAGE_TAG} \
+        --tag ${FRONTEND_IMAGE}:${ENVIRONMENT}-latest \
+        --tag ${FRONTEND_IMAGE}:build-${CI_PIPELINE_ID} \
+        -f Dockerfile \
+        .
+
+    # Verify image built
+    - docker images | grep jarvis-frontend
+
+    - echo "✅ Frontend image built successfully"
+  only:
+    - main
+    - develop
+    - tags
+
+push-frontend:
+  stage: push
+  tags:
+    - node2
+    - frontend
+    - docker
+  dependencies:
+    - build-frontend
+  variables:
+    IMAGE_TAG: "${FRONTEND_IMAGE}:${GIT_SHA_SHORT}"
+  script:
+    - echo "📤 Pushing frontend image to registry..."
+
+    # Push all tags
+    - docker push ${IMAGE_TAG}
+    - docker push ${FRONTEND_IMAGE}:${ENVIRONMENT}-latest
+    - docker push ${FRONTEND_IMAGE}:build-${CI_PIPELINE_ID}
+
+    # Tag and push as 'latest' if main branch
+    - |
+      if [[ "${GIT_REF}" == "main" || "${CI_COMMIT_REF_NAME}" == "main" ]]; then
+        docker tag ${IMAGE_TAG} ${FRONTEND_IMAGE}:latest
+        docker push ${FRONTEND_IMAGE}:latest
+        echo "✅ Tagged and pushed as 'latest'"
+      fi
+
+    - echo "✅ Frontend images pushed to ${REGISTRY_URL}"
+    - echo "Available tags:"
+    - echo "  - ${GIT_SHA_SHORT}"
+    - echo "  - ${ENVIRONMENT}-latest"
+    - echo "  - build-${CI_PIPELINE_ID}"
+  only:
+    - main
+    - develop
+    - tags
+
+# ============================================
+# Version Tagging (for releases)
+# ============================================
+
+tag-release:
+  stage: tag
+  tags:
+    - node1
+    - docker
+  dependencies:
+    - push-backend
+    - push-frontend
+  script:
+    - echo "🏷️  Tagging release version ${CI_COMMIT_TAG}"
+
+    # Pull latest images
+    - docker pull ${BACKEND_IMAGE}:${GIT_SHA_SHORT}
+    - docker pull ${FRONTEND_IMAGE}:${GIT_SHA_SHORT}
+
+    # Tag with version
+    - docker tag ${BACKEND_IMAGE}:${GIT_SHA_SHORT} ${BACKEND_IMAGE}:${CI_COMMIT_TAG}
+    - docker tag ${FRONTEND_IMAGE}:${GIT_SHA_SHORT} ${FRONTEND_IMAGE}:${CI_COMMIT_TAG}
+
+    # Push version tags
+    - docker push ${BACKEND_IMAGE}:${CI_COMMIT_TAG}
+    - docker push ${FRONTEND_IMAGE}:${CI_COMMIT_TAG}
+
+    - echo "✅ Release ${CI_COMMIT_TAG} tagged and pushed"
+  only:
+    - tags
+  except:
+    - branches
+
+# ============================================
+# Optional: Trigger Flux Image Update
+# ============================================
+
+trigger-flux-update:
+  stage: deploy
+  tags:
+    - node1
+  dependencies:
+    - push-backend
+    - push-frontend
+  script:
+    - echo "🔄 Notifying Flux of new images..."
+    - echo "Environment: ${ENVIRONMENT}"
+
+    # Flux will automatically detect new images via ImageRepository polling
+    # This job is mainly for logging/notification purposes
+
+    - |
+      echo "New images available:"
+      echo "  Backend: ${BACKEND_IMAGE}:${GIT_SHA_SHORT}"
+      echo "  Frontend: ${FRONTEND_IMAGE}:${GIT_SHA_SHORT}"
+      echo "  Environment tag: ${ENVIRONMENT}-latest"
+
+    # Optional: Force Flux reconciliation (requires kubectl access)
+    # - kubectl annotate gitrepository flux-system -n flux-system reconcile.fluxcd.io/requestedAt="$(date +%s)"
+
+    - echo "✅ Flux will automatically update deployments"
+  only:
+    - main
+  when: on_success
+
+# ============================================
+# Cleanup Old Images (optional)
+# ============================================
+
+cleanup-old-images:
+  stage: deploy
+  tags:
+    - node1
+    - docker
+  script:
+    - echo "🧹 Cleaning up old Docker images..."
+
+    # Remove dangling images
+    - docker image prune -f
+
+    # Remove build cache older than 7 days
+    - docker builder prune --all --force --filter "until=168h"
+
+    - echo "✅ Cleanup completed"
+  only:
+    - main
+  when: on_success
+  allow_failure: true
+
+# ============================================
+# Pipeline Notification
+# ============================================
+
+pipeline-success:
+  stage: deploy
+  tags:
+    - node1
+  script:
+    - |
+      echo "========================================="
+      echo "🎉 CI/CD Pipeline Completed Successfully"
+      echo "========================================="
+      echo "Pipeline ID: ${CI_PIPELINE_ID}"
+      echo "Commit: ${GIT_SHA_SHORT} (${COMMIT_MESSAGE})"
+      echo "Branch: ${GIT_REF}"
+      echo "Environment: ${ENVIRONMENT}"
+      echo "Triggered by: ${GITHUB_ACTOR:-GitLab}"
+      echo ""
+      echo "Images pushed:"
+      echo "  - ${BACKEND_IMAGE}:${GIT_SHA_SHORT}"
+      echo "  - ${FRONTEND_IMAGE}:${GIT_SHA_SHORT}"
+      echo ""
+      echo "Next steps:"
+      echo "  1. Flux will detect new images"
+      echo "  2. Deployments will auto-update in ~5 min"
+      echo "  3. Monitor with: kubectl get pods -n ai-agents"
+      echo "========================================="
+  when: on_success
+  only:
+    - main
+    - develop

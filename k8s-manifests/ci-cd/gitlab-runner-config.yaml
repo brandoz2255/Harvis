@@ -1,0 +1,22 @@
+---
+# GitLab Runner Configuration ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gitlab-runner-config
+  namespace: gitlab-runner
+  labels:
+    app.kubernetes.io/name: gitlab-runner
+    app.kubernetes.io/component: ci-cd
+data:
+  config.toml: |
+    concurrent = 4
+    check_interval = 3
+    log_level = "info"
+    listen_address = ":9252"
+
+    [session_server]
+      session_timeout = 1800
+
+    # This section will be populated when runners are registered
+    # You can manually add runner configurations here after registration

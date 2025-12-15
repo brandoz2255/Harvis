@@ -1,0 +1,94 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Staging environment overlay
+namespace: ai-agents-staging
+
+# Reference base manifests
+resources:
+  - ../../base/configmaps.yaml
+  - ../../base/nginx-configmap.yaml
+  - ../../base/secrets.yaml
+  - ../../storage/pvcs.yaml
+  - ../../storage/local-path-storage.yaml
+  - ../../services/postgresql.yaml
+  - ../../services/ollama-dedicated.yaml
+  - ../../services/backend-dedicated.yaml
+  - ../../services/frontend.yaml
+  - ../../services/n8n.yaml
+  - ../../services/nginx.yaml
+  # Create staging namespace
+  - namespace.yaml
+
+# Image overrides for staging (auto-updated by Flux)
+images:
+  - name: localhost:5000/jarvis-backend
+    newTag: staging-latest  # Flux will update this
+  - name: localhost:5000/jarvis-frontend
+    newTag: staging-latest  # Flux will update this
+
+# Common labels for staging
+commonLabels:
+  app.kubernetes.io/name: harvis-ai
+  app.kubernetes.io/managed-by: kustomize
+  environment: staging
+
+# Namespace-specific labels
+commonAnnotations:
+  environment: staging
+  managed-by: flux
+
+# Resource name prefix
+namePrefix: staging-
+
+# Patches for staging environment
+patches:
+  # Reduce replicas for staging
+  - target:
+      kind: Deployment
+      name: harvis-ai-backend
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+
+  - target:
+      kind: Deployment
+      name: harvis-ai-frontend
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+
+  # Add staging-specific environment variables
+  - target:
+      kind: Deployment
+      name: harvis-ai-backend
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: ENVIRONMENT
+          value: "staging"
+
+  - target:
+      kind: Deployment
+      name: harvis-ai-backend
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: LOG_LEVEL
+          value: "DEBUG"
+
+  # Reduce resource limits for staging
+  - target:
+      kind: Deployment
+      name: harvis-ai-backend
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: "8Gi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: "10Gi"

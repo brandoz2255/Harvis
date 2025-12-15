@@ -1,0 +1,55 @@
+---
+# Kustomization - Tells Flux to reconcile production environment
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: harvis-ai-production
+  namespace: flux-system
+spec:
+  interval: 10m  # Less frequent reconciliation for production
+
+  sourceRef:
+    kind: GitRepository
+    name: harvis-ai-repo
+
+  path: ./k8s-manifests/overlays/prod
+
+  prune: true  # Remove resources that are no longer in Git
+  wait: true   # Wait for resources to be ready
+  timeout: 15m  # Longer timeout for production deployments
+
+  # Health checks for critical resources
+  healthChecks:
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: harvis-ai-backend
+      namespace: ai-agents
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: harvis-ai-frontend
+      namespace: ai-agents
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: harvis-ai-ollama
+      namespace: ai-agents
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: harvis-ai-nginx
+      namespace: ai-agents
+
+  # Retry configuration
+  retryInterval: 2m
+
+  # Don't force recreate in production
+  force: false
+
+  # Validation before applying
+  validation: client
+
+  # Post-build variable substitution
+  # postBuild:
+  #   substitute:
+  #     ENVIRONMENT: "production"
+
+  # Optional: Require manual approval for production updates
+  # suspend: true  # Set to false after manual review

@@ -14,7 +14,7 @@ data:
 
     http {
         upstream backend {
-            server harvis-ai-merged-backend:8000;
+            server harvis-ai-backend:8000;
         }
 
         upstream frontend {

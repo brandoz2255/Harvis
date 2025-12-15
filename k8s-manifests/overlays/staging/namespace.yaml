@@ -1,0 +1,10 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ai-agents-staging
+  labels:
+    name: ai-agents-staging
+    environment: staging
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/managed-by: kustomize

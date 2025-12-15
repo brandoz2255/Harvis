@@ -6,6 +6,10 @@ metadata:
   labels:
     app.kubernetes.io/name: harvis-ai
     app.kubernetes.io/component: frontend
+  annotations:
+    # Flux image automation annotations
+    fluxcd.io/automated: "true"
+    fluxcd.io/tag.frontend: semver:~1.0
 spec:
   replicas: 1
   selector:
@@ -20,7 +24,7 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: "localhost:5000/jarvis-frontend:v1.3v6"
+          image: "localhost:5000/jarvis-frontend:v1.3v6" # {"$imagepolicy": "flux-system:harvis-frontend-prod"}
           imagePullPolicy: Always
           ports:
             - name: http
