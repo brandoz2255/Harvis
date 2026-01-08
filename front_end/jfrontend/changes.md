@@ -1,3 +1,82 @@
+## 2025-12-04 - Add NotebookLM-style Notebooks Feature
+
+**Timestamp**: 2025-12-04 18:00 UTC
+
+**Feature**: NotebookLM-style Notebooks with RAG Chat
+
+**Description**:
+Implemented a full NotebookLM-style feature allowing users to create notebooks, upload sources (PDFs, text, URLs), and chat with their documents using RAG (Retrieval-Augmented Generation).
+
+**Key Features**:
+1. **Notebooks CRUD**: Create, read, update, delete notebooks per user
+2. **Multi-format Source Upload**: Support for PDF, text, markdown, URLs, and pasted content
+3. **Automatic Ingestion Pipeline**: Background processing for text extraction, chunking, and embedding generation
+4. **RAG-based Chat**: Ask questions about uploaded sources with grounded answers and citations
+5. **Notes Management**: Save user notes and AI-generated insights
+6. **pgvector Integration**: Vector similarity search for semantic retrieval
+
+**Architecture**:
+- Backend: FastAPI router with async database operations
+- Database: PostgreSQL with pgvector extension for embeddings
+- Embeddings: Ollama's nomic-embed-text model
+- LLM: Configurable (Mistral, Llama, DeepSeek, Qwen)
+- Frontend: Next.js App Router with Zustand state management
+
+**Database Schema** (added to db_setup.sql):
+- `notebooks`: Main notebook container
+- `notebook_sources`: Uploaded sources (PDF, text, URL, etc.)
+- `notebook_chunks`: Text chunks with vector embeddings
+- `notebook_notes`: User and AI-generated notes
+- `notebook_chat_messages`: Per-notebook chat history
+
+**API Endpoints** (all JWT-protected):
+```
+GET    /api/notebooks              - List notebooks
+POST   /api/notebooks              - Create notebook
+GET    /api/notebooks/{id}         - Get notebook
+PATCH  /api/notebooks/{id}         - Update notebook
+DELETE /api/notebooks/{id}         - Delete notebook
+
+POST   /api/notebooks/{id}/sources/upload  - Upload file source
+POST   /api/notebooks/{id}/sources/url     - Add URL source
+POST   /api/notebooks/{id}/sources/text    - Add text source
+GET    /api/notebooks/{id}/sources         - List sources
+DELETE /api/notebooks/{id}/sources/{sid}   - Delete source
+
+POST   /api/notebooks/{id}/chat            - RAG chat
+GET    /api/notebooks/{id}/chat/history    - Get chat history
+DELETE /api/notebooks/{id}/chat/history    - Clear chat
+
+POST   /api/notebooks/{id}/notes           - Create note
+GET    /api/notebooks/{id}/notes           - List notes
+PATCH  /api/notebooks/{id}/notes/{nid}     - Update note
+DELETE /api/notebooks/{id}/notes/{nid}     - Delete note
+```
+
+**Files Created**:
+- `python_back_end/notebooks/__init__.py` - Module exports
+- `python_back_end/notebooks/models.py` - Pydantic models
+- `python_back_end/notebooks/manager.py` - Database operations
+- `python_back_end/notebooks/ingestion.py` - Text extraction and chunking
+- `python_back_end/notebooks/rag_chat.py` - RAG chat service
+- `python_back_end/notebooks/router.py` - FastAPI endpoints
+- `front_end/jfrontend/stores/notebookStore.ts` - Zustand store
+- `front_end/jfrontend/app/notebooks/page.tsx` - Notebooks list page
+- `front_end/jfrontend/app/notebooks/[id]/page.tsx` - Notebook workspace
+
+**Files Modified**:
+- `front_end/jfrontend/db_setup.sql` - Added NotebookLM tables with pgvector
+- `python_back_end/main.py` - Imported and included notebooks router
+- `front_end/jfrontend/components/Sidebar.tsx` - Added Notebooks navigation link
+
+**Result/Status**: ✅ Complete
+- Full end-to-end NotebookLM functionality
+- RAG chat with citation support
+- Background source ingestion
+- Clean, responsive UI matching existing Harvis style
+
+---
+
 ## 2025-12-04 - Fix GitHub Authorization Header for Private Repos
 
 **Timestamp**: 2025-12-04 11:15 UTC
