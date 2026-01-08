@@ -30,6 +30,9 @@ from vibecoding.ide_ai import router as ide_ai_router
 from vibecoding.containers import container_manager
 from vibecoding.core import initialize_vibe_agent
 
+# Import NotebookLM router
+from notebooks import notebooks_router
+
 from pydantic import BaseModel
 import torch, soundfile as sf
 import whisper  # Import Whisper
@@ -463,6 +466,9 @@ app.include_router(ide_ai_router)
 app.include_router(auth_github_router)
 app.include_router(auth_github_legacy_router)  # Legacy path: /api/auth/vibecode/github/callback
 app.include_router(repo_import_router)
+
+# Include NotebookLM router
+app.include_router(notebooks_router)
 
 # ─── Device & models -----------------------------------------------------------
 device = 0 if torch.cuda.is_available() else -1

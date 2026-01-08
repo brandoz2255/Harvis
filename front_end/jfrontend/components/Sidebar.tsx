@@ -11,7 +11,8 @@ import {
   Home,
   Code2,
   ChevronLeft,
-  ChevronRight
+  ChevronRight,
+  BookOpen
 } from 'lucide-react';
 
 const navigationItems = [
@@ -20,6 +21,12 @@ const navigationItems = [
     href: '/',
     icon: Home,
     description: 'Main chat interface'
+  },
+  {
+    name: 'Notebooks',
+    href: '/notebooks',
+    icon: BookOpen,
+    description: 'RAG-powered research'
   },
   {
     name: 'Vibe Coding',
