@@ -6,8 +6,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is the Harvis AI Project, a sophisticated AI voice assistant that combines Next.js frontend with Python backend services. The project features voice-first interaction, browser automation, AI-powered coding assistance, and authentication with PostgreSQL.
 
-
 Remember the web app is ran through docker commands and the docker compose is just for the microservices that the web app runs on
+
+## Kubernetes DNS Issues
+
+**CRITICAL**: The Kubernetes cluster is in a network environment (csusb.edu) that blocks outbound UDP port 53 traffic from pods, preventing DNS resolution of external domains. This affects model pulling, registry access, and any external API calls.
+
+**Solution**: See `K8S_DNS_WORKAROUND.md` for detailed instructions on adding DNS entries to CoreDNS.
+
+**Quick Fix for Model Pulling:**
+```bash
+# Use the helper script
+./scripts/add-dns-entry.sh registry.ollama.ai
+
+# Or manually add entries - see K8S_DNS_WORKAROUND.md
+```
+
+**Current DNS Entries** (as of 2026-01-20):
+- `104.21.75.227 registry.ollama.ai`
+- `172.67.182.229 registry.ollama.ai`
 
 ## Docker Network URLs
 
