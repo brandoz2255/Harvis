@@ -13,8 +13,8 @@ data:
   CORS_ORIGINS: "*"
   MAX_WORKERS: "4"
   UVICORN_WORKERS: "1"
-  # Ollama configuration - localhost since Ollama and Backend share the same pod
-  OLLAMA_CLOUD_URL: "http://localhost:11434"
+  # Ollama configuration - using Kubernetes service DNS name
+  OLLAMA_CLOUD_URL: "http://harvis-ai-ollama:11434"
 ---
 apiVersion: v1
 kind: ConfigMap
