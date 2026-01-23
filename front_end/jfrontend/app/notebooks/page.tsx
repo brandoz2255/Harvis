@@ -148,7 +148,7 @@ export default function NotebooksPage() {
 
   if (authLoading) {
     return (
-      <div className="flex items-center justify-center min-h-[60vh]">
+      <div className="flex items-center justify-center h-full">
         <Loader2 className="w-8 h-8 animate-spin text-blue-400" />
       </div>
     )
@@ -156,7 +156,7 @@ export default function NotebooksPage() {
 
   if (!user) {
     return (
-      <div className="flex flex-col items-center justify-center min-h-[60vh] text-center px-4">
+      <div className="flex flex-col items-center justify-center h-full text-center px-4">
         <div className="w-20 h-20 rounded-full bg-gradient-to-br from-orange-400 via-pink-500 to-purple-600 flex items-center justify-center mb-6">
           <BookOpen className="w-10 h-10 text-white" />
         </div>
@@ -188,7 +188,7 @@ export default function NotebooksPage() {
   }
 
   return (
-    <div className="max-w-6xl mx-auto">
+    <div className="h-full w-full p-6 overflow-y-auto">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
         <div className="flex items-center gap-3">

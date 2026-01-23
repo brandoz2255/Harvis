@@ -240,6 +240,41 @@ class ChatHistoryResponse(BaseModel):
     has_more: bool
 
 
+# ─── Search Models ─────────────────────────────────────────────────────────────
+
+class SearchType(str, Enum):
+    TEXT = "text"
+    VECTOR = "vector"
+
+
+class SearchRequest(BaseModel):
+    query: str = Field(..., min_length=1, max_length=500)
+    type: SearchType = SearchType.TEXT
+    limit: int = Field(50, ge=1, le=200)
+    search_sources: bool = True
+    search_notes: bool = True
+    minimum_score: float = Field(0.2, ge=0.0, le=1.0)
+
+
+class SearchResult(BaseModel):
+    kind: str  # "source" | "note"
+    notebook_id: UUID
+    notebook_title: Optional[str] = None
+
+    source_id: Optional[UUID] = None
+    note_id: Optional[UUID] = None
+
+    title: Optional[str] = None
+    snippet: Optional[str] = None
+    score: Optional[float] = None
+
+
+class SearchResponse(BaseModel):
+    results: List[SearchResult]
+    total_count: int
+    search_type: SearchType
+
+
 # ─── Transformation Models ────────────────────────────────────────────────────
 
 class TransformationType(str, Enum):
@@ -315,6 +350,8 @@ class PodcastRequest(BaseModel):
     speakers: int = Field(2, ge=1, le=4)
     duration_minutes: int = Field(10, ge=1, le=60)
     custom_speakers: Optional[List[SpeakerProfile]] = None
+    source_ids: Optional[List[UUID]] = None  # Optional list of specific sources to include
+    note_ids: Optional[List[UUID]] = None  # Optional list of notes to include in podcast
 
 
 class PodcastTranscriptEntry(BaseModel):
