@@ -1,3 +1,116 @@
+## 2026-01-12 - Open Notebook UI Implementation
+
+**Timestamp**: 2026-01-12 UTC
+
+**Feature**: Open Notebook UI Implementation (following masterprompt5.md)
+
+**Description**:
+Implemented the Open Notebook UI design pattern to replace the existing notebook interface with a more polished, feature-rich experience inspired by https://github.com/lfnovo/open-notebook. The implementation is confined to the `/notebooks` page and does not modify Docker configurations or other critical files.
+
+**Problem**:
+The existing notebook interface had a functional but basic UI. The goal was to implement the exact Open Notebook UI pattern with:
+- Dedicated notebook sidebar with navigation
+- Tab-based views (Sources, Chat, Podcast, Settings)
+- Grid/List view toggle for sources
+- Improved chat interface with source citations
+- Better podcast generation UI
+
+**Solution**:
+Created a comprehensive set of reusable components following the Open Notebook design:
+
+### New Components Created:
+1. **`app/notebooks/layout.tsx`** - Custom layout with collapsible notebook sidebar
+   - Notebook list with search functionality
+   - Create notebook modal
+   - Context menu (right-click) support
+   - User menu with settings/logout
+
+2. **`components/notebook/TopNavigation.tsx`** - Tab navigation bar
+   - Four tabs: Sources, Chat, Podcast, Settings
+   - Editable notebook title
+   - Active tab indicator (blue underline)
+   - Share and options menu
+
+3. **`components/notebook/SourceCard.tsx`** - Source display component
+   - Grid and List view modes
+   - Status indicators (pending, processing, ready, error)
+   - Selection checkbox support
+   - Actions menu (transform, view, delete)
+   - Type-specific icons (PDF, URL, YouTube, audio, etc.)
+
+4. **`components/notebook/SourcesView.tsx`** - Sources management view
+   - Grid/List toggle
+   - Search, filter by type, sort options
+   - Bulk selection and actions
+   - Empty state with call-to-action
+   - Source count statistics
+
+5. **`components/notebook/ChatView.tsx`** - RAG chat interface
+   - Message bubbles with user/AI distinction
+   - Source citation badges with tooltips
+   - Reasoning display toggle (for DeepSeek R1, QwQ models)
+   - Model selector dropdown
+   - Suggested prompts for empty state
+   - Copy/export functionality
+
+6. **`components/notebook/PodcastView.tsx`** - Podcast generation
+   - Two-panel layout (config left, podcasts right)
+   - Style selection (conversational, interview, etc.)
+   - Source selector for podcast content
+   - Audio player with progress bar
+   - Transcript viewer
+
+7. **`components/notebook/AddSourceModal.tsx`** - Source upload modal
+   - Drag & drop file upload
+   - URL input for websites
+   - YouTube video import
+   - Text paste input
+   - Source limit progress bar
+
+### Updated Files:
+- **`app/notebooks/[id]/page.tsx`** - Completely rewritten to use new components
+- **`components/notebook/index.ts`** - Updated exports for all new components
+
+**Design System**:
+- Background colors: #0a0a0a (main), #111111 (cards), #1a1a1a (elevated)
+- Border colors: gray-800 for borders
+- Accent: Gradient from orange-500 via pink-500 to purple-600
+- Tab indicator: blue-500
+- Dark theme consistent with Open Notebook
+
+**Files Modified**:
+- `app/notebooks/layout.tsx` (new)
+- `app/notebooks/[id]/page.tsx` (rewritten)
+- `components/notebook/TopNavigation.tsx` (new)
+- `components/notebook/SourceCard.tsx` (new)
+- `components/notebook/SourcesView.tsx` (new)
+- `components/notebook/ChatView.tsx` (new)
+- `components/notebook/PodcastView.tsx` (new)
+- `components/notebook/AddSourceModal.tsx` (new)
+- `components/notebook/index.ts` (updated)
+
+**Status**: Complete
+**Type Errors**: None in new components
+
+### Update: Layout Integration Fix (2026-01-12)
+
+**Problem**: The Open Notebook UI initially had its own sidebar which conflicted with the main HARVIS sidebar. The notebook pages didn't fill the available space properly.
+
+**Solution**:
+- Removed duplicate sidebar from notebook layout
+- Updated `app/notebooks/layout.tsx` to use fixed positioning that respects the main HARVIS sidebar
+- Layout now listens to `sidebar-collapse` custom events from the main sidebar
+- Dynamically adjusts left offset: `16rem` (256px) when expanded, `4rem` (64px) when collapsed
+- Uses `z-index: 10` to layer properly (above content, below sidebar/modals)
+- Notebook pages now fill the full available viewport
+
+**Key Changes**:
+- `app/notebooks/layout.tsx`: Simplified to fixed positioning with dynamic sidebar awareness
+- `app/notebooks/page.tsx`: Updated to use `h-full` for proper height filling
+- `app/notebooks/[id]/page.tsx`: Added `w-full` for proper width filling
+
+---
+
 ## 2025-12-04 - Add NotebookLM-style Notebooks Feature
 
 **Timestamp**: 2025-12-04 18:00 UTC

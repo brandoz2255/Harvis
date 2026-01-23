@@ -12,6 +12,7 @@ from typing import List, Optional, Dict, Any
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks, Request
 from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse
 
 from .models import (
     Notebook, NotebookSource, NotebookNote, NotebookChatMessage,
@@ -977,17 +978,55 @@ async def _run_podcast_generation(db_pool, podcast_id: UUID, notebook_id: UUID, 
                 PodcastStatus.GENERATING.value, podcast_id
             )
             
-            # Get all source content from notebook
-            rows = await conn.fetch("""
-                SELECT content_text FROM notebook_sources 
-                WHERE notebook_id = $1 AND status = 'ready' AND content_text IS NOT NULL
-            """, notebook_id)
+            # Get source content - either selected sources or all ready sources
+            source_ids = getattr(request, 'source_ids', None)
+            note_ids = getattr(request, 'note_ids', None)
+            
+            source_content = []
+            note_content = []
+            
+            # Fetch source content
+            if source_ids and len(source_ids) > 0:
+                # Use selected sources
+                rows = await conn.fetch("""
+                    SELECT title, content_text FROM notebook_sources 
+                    WHERE notebook_id = $1 AND id = ANY($2) AND status = 'ready' AND content_text IS NOT NULL
+                """, notebook_id, source_ids)
+            else:
+                # Use all ready sources from notebook
+                rows = await conn.fetch("""
+                    SELECT title, content_text FROM notebook_sources 
+                    WHERE notebook_id = $1 AND status = 'ready' AND content_text IS NOT NULL
+                """, notebook_id)
+            
+            for row in rows:
+                if row["content_text"]:
+                    header = f"=== SOURCE: {row['title'] or 'Untitled'} ==="
+                    source_content.append(f"{header}\n{row['content_text']}")
+            
+            # Fetch note content
+            if note_ids and len(note_ids) > 0:
+                note_rows = await conn.fetch("""
+                    SELECT title, content FROM notebook_notes 
+                    WHERE notebook_id = $1 AND id = ANY($2) AND content IS NOT NULL
+                """, notebook_id, note_ids)
+                
+                for row in note_rows:
+                    if row["content"]:
+                        header = f"=== NOTE: {row['title'] or 'Untitled Note'} ==="
+                        note_content.append(f"{header}\n{row['content']}")
         
-        # Combine all source content
-        content = "\n\n".join([row["content_text"] for row in rows if row["content_text"]])
+        # Combine all content
+        all_content_parts = []
+        if source_content:
+            all_content_parts.append("SOURCES:\n" + "\n\n".join(source_content))
+        if note_content:
+            all_content_parts.append("NOTES:\n" + "\n\n".join(note_content))
+        
+        content = "\n\n".join(all_content_parts)
         
         if not content:
-            raise Exception("No content available in notebook sources")
+            raise Exception("No content available in selected sources or notes. Make sure sources have been processed.")
         
         # Generate podcast
         generator = PodcastGenerator()
@@ -1096,3 +1135,198 @@ async def get_podcast(
     except Exception as e:
         logger.error(f"Failed to get podcast: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{notebook_id}/podcasts/{podcast_id}/audio")
+async def get_podcast_audio(
+    notebook_id: UUID,
+    podcast_id: UUID,
+    request: Request = None,
+    current_user: Dict = Depends(get_current_user_from_request),
+    manager: NotebookManager = Depends(get_notebook_manager)
+):
+    """Stream/download the generated podcast audio file"""
+    try:
+        await manager.get_notebook(notebook_id, current_user["id"])
+
+        async with manager.db_pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT audio_path FROM notebook_podcasts
+                WHERE id = $1 AND notebook_id = $2
+            """, podcast_id, notebook_id)
+
+        if not row:
+            raise HTTPException(status_code=404, detail="Podcast not found")
+
+        audio_path = row["audio_path"]
+        if not audio_path:
+            raise HTTPException(status_code=404, detail="Podcast has no audio yet")
+
+        import os
+        if not os.path.exists(audio_path):
+            raise HTTPException(status_code=404, detail="Audio file not found on disk")
+
+        media_type = "audio/mpeg" if audio_path.endswith(".mp3") else "audio/wav"
+        filename = os.path.basename(audio_path)
+        return FileResponse(audio_path, media_type=media_type, filename=filename)
+
+    except NotebookNotFoundError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to serve podcast audio: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─── Global Search (Open Notebook-style) ───────────────────────────────────────
+
+@router.post("/search")
+async def search_knowledge_base(
+    search_request: "SearchRequest",
+    request: Request = None,
+    current_user: Dict = Depends(get_current_user_from_request),
+    manager: NotebookManager = Depends(get_notebook_manager)
+):
+    """
+    Search across all notebooks for this user.
+    - type=text: ILIKE search in sources + notes
+    - type=vector: pgvector search over notebook_chunks (sources only)
+    """
+    from .models import SearchRequest, SearchResponse, SearchResult, SearchType
+
+    q = (search_request.query or "").strip()
+    if not q:
+        return SearchResponse(results=[], total_count=0, search_type=search_request.type)
+
+    results: list[SearchResult] = []
+
+    async with manager.db_pool.acquire() as conn:
+        # Text search
+        if search_request.type == SearchType.TEXT:
+            if search_request.search_sources:
+                rows = await conn.fetch(
+                    """
+                    SELECT
+                      n.id as notebook_id,
+                      n.title as notebook_title,
+                      s.id as source_id,
+                      COALESCE(s.title, s.original_filename) as title,
+                      LEFT(COALESCE(s.content_text, ''), 300) as snippet
+                    FROM notebook_sources s
+                    JOIN notebooks n ON n.id = s.notebook_id
+                    WHERE n.user_id = $1
+                      AND (
+                        COALESCE(s.title,'') ILIKE '%' || $2 || '%'
+                        OR COALESCE(s.original_filename,'') ILIKE '%' || $2 || '%'
+                        OR COALESCE(s.content_text,'') ILIKE '%' || $2 || '%'
+                      )
+                    ORDER BY s.updated_at DESC
+                    LIMIT $3
+                    """,
+                    current_user["id"],
+                    q,
+                    search_request.limit,
+                )
+                for r in rows:
+                    results.append(
+                        SearchResult(
+                            kind="source",
+                            notebook_id=r["notebook_id"],
+                            notebook_title=r["notebook_title"],
+                            source_id=r["source_id"],
+                            title=r["title"],
+                            snippet=r["snippet"],
+                        )
+                    )
+
+            if search_request.search_notes and len(results) < search_request.limit:
+                remaining = search_request.limit - len(results)
+                rows = await conn.fetch(
+                    """
+                    SELECT
+                      n.id as notebook_id,
+                      n.title as notebook_title,
+                      nn.id as note_id,
+                      COALESCE(nn.title, 'Untitled Note') as title,
+                      LEFT(COALESCE(nn.content, ''), 300) as snippet
+                    FROM notebook_notes nn
+                    JOIN notebooks n ON n.id = nn.notebook_id
+                    WHERE n.user_id = $1
+                      AND (
+                        COALESCE(nn.title,'') ILIKE '%' || $2 || '%'
+                        OR COALESCE(nn.content,'') ILIKE '%' || $2 || '%'
+                      )
+                    ORDER BY nn.updated_at DESC
+                    LIMIT $3
+                    """,
+                    current_user["id"],
+                    q,
+                    remaining,
+                )
+                for r in rows:
+                    results.append(
+                        SearchResult(
+                            kind="note",
+                            notebook_id=r["notebook_id"],
+                            notebook_title=r["notebook_title"],
+                            note_id=r["note_id"],
+                            title=r["title"],
+                            snippet=r["snippet"],
+                        )
+                    )
+
+        # Vector search (sources only via chunks)
+        else:
+            if not search_request.search_sources:
+                return SearchResponse(results=[], total_count=0, search_type=search_request.type)
+
+            from .ingestion import IngestionService
+            service = IngestionService(manager)
+            embedding = await service.get_query_embedding(q)
+            if not embedding:
+                return SearchResponse(results=[], total_count=0, search_type=search_request.type)
+
+            # Normalize to 4096 to match table definition
+            embedding = service._normalize_embedding_dimension(embedding, 4096)  # noqa: SLF001
+            embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
+
+            rows = await conn.fetch(
+                """
+                SELECT
+                  n.id as notebook_id,
+                  n.title as notebook_title,
+                  s.id as source_id,
+                  COALESCE(s.title, s.original_filename) as title,
+                  LEFT(COALESCE(s.content_text, ''), 300) as snippet,
+                  1 - (c.embedding <=> $1::vector) as score
+                FROM notebook_chunks c
+                JOIN notebook_sources s ON s.id = c.source_id
+                JOIN notebooks n ON n.id = c.notebook_id
+                WHERE n.user_id = $2
+                  AND c.embedding IS NOT NULL
+                ORDER BY c.embedding <=> $1::vector
+                LIMIT $3
+                """,
+                embedding_str,
+                current_user["id"],
+                search_request.limit,
+            )
+
+            for r in rows:
+                score = float(r["score"]) if r["score"] is not None else None
+                if score is not None and score < search_request.minimum_score:
+                    continue
+                results.append(
+                    SearchResult(
+                        kind="source",
+                        notebook_id=r["notebook_id"],
+                        notebook_title=r["notebook_title"],
+                        source_id=r["source_id"],
+                        title=r["title"],
+                        snippet=r["snippet"],
+                        score=score,
+                    )
+                )
+
+    return SearchResponse(results=results, total_count=len(results), search_type=search_request.type)

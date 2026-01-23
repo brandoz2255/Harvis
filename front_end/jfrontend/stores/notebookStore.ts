@@ -562,7 +562,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
     }
   },
 
-  sendMessage: async (notebookId: string, message: string, model: string = 'gpt-oss:latest') => {
+  sendMessage: async (notebookId: string, message: string, model?: string) => {
     set({ isChatting: true, error: null })
 
     // Add user message optimistically
@@ -581,6 +581,12 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
     }))
 
     try {
+      // If no model specified, use notebook default (if set), else fallback.
+      const effectiveModel =
+        model ||
+        localStorage.getItem('notebook_default_model') ||
+        'gpt-oss:latest'
+
       const response = await fetch(`/api/notebooks/${notebookId}/chat`, {
         method: 'POST',
         headers: {
@@ -588,7 +594,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
           ...getAuthHeaders(),
         },
         credentials: 'include',
-        body: JSON.stringify({ message, model, top_k: 5 }),
+        body: JSON.stringify({ message, model: effectiveModel, top_k: 5 }),
       })
 
       if (response.ok) {
