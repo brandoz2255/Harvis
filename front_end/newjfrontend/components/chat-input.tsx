@@ -34,6 +34,7 @@ export function ChatInput({ onSend, isLoading, isResearchMode, selectedModel, cl
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const audioChunksRef = useRef<Blob[]>([])
   const streamRef = useRef<MediaStream | null>(null)
+  const transcribedTextRef = useRef<string>('')
 
   const handleSend = () => {
     if (message.trim() && !isLoading) {
@@ -213,9 +214,12 @@ export function ChatInput({ onSend, isLoading, isResearchMode, selectedModel, cl
                 throw new Error(data.error || 'Unknown streaming error')
               }
 
-              // You could update UI state here (e.g. setProgress(data.progress))
-              // if (data.status === 'transcribing') ...
-              // if (data.status === 'speaking') ...
+              // Capture transcribed text when status is 'chat'
+              // This is the user's actual spoken words - store for later use
+              if (data.status === 'chat' && data.text) {
+                transcribedTextRef.current = data.text
+                console.log('📝 Captured user transcription:', data.text)
+              }
 
               if (data.status === 'complete') {
                 handleVoiceResponse(data)
@@ -235,8 +239,15 @@ export function ChatInput({ onSend, isLoading, isResearchMode, selectedModel, cl
   }
 
   const handleVoiceResponse = (data: any) => {
-    // Extract user transcription from history
-    const userTranscription = data.history?.find((msg: any) => msg.role === 'user')?.content || 'Voice input'
+    // Use transcription captured from 'chat' status, fallback to history, then placeholder
+    const userTranscription = transcribedTextRef.current ||
+      data.history?.find((msg: any) => msg.role === 'user')?.content ||
+      'Voice input'
+
+    // Clear the ref for next recording
+    transcribedTextRef.current = ''
+
+    console.log('🎤 Voice response - User said:', userTranscription)
 
     // Add user message first
     const userMessage: MessageObject = {
