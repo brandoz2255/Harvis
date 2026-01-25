@@ -19,7 +19,9 @@ import type { Message, MessageObject } from "@/types/message"
 export default function ChatPage() {
   const router = useRouter()
   const { user, isLoading: isAuthLoading } = useUser()
-  const [selectedModel, setSelectedModel] = useState("")
+  const [selectedModel, setSelectedModel] = useState<string>("")
+  const [lowVram, setLowVram] = useState(false)
+  const [textOnly, setTextOnly] = useState(false)
   const [isResearchMode, setIsResearchMode] = useState(false)
   const [messages, setMessages] = useState<Message[]>([])
   const [isLoading, setIsLoading] = useState(false)
@@ -151,7 +153,9 @@ export default function ChatPage() {
           content: m.content
         })),
         model: selectedModel || 'mistral',
-        session_id: sessionId || null
+        session_id: sessionId || null,
+        low_vram: lowVram,
+        text_only: textOnly
       }
 
       // Add research mode parameters
@@ -165,8 +169,9 @@ export default function ChatPage() {
       // Retry logic with exponential backoff
       let lastError: Error | null = null
       let response: Response | null = null
-      const maxRetries = 6
-      const timeoutMs = 600000 // 10 minutes for local hardware
+      const maxRetries = 2
+      // Use extended timeout for Low VRAM mode (20 mins vs 5 mins)
+      const timeoutMs = lowVram ? 1200000 : 300000
 
       for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
@@ -222,8 +227,10 @@ export default function ChatPage() {
             throw lastError
           }
 
-          // Exponential backoff
-          const backoffDelay = Math.min(1000 * Math.pow(2, attempt), 5000)
+          // Exponential backoff with longer base delay
+          // Wait longer (5s base) to let system recover, especially in Low VRAM mode
+          const baseDelay = lowVram ? 10000 : 2000
+          const backoffDelay = Math.min(baseDelay * Math.pow(2, attempt), 30000)
           console.log(`🔄 Retrying in ${backoffDelay}ms...`)
           await new Promise(resolve => setTimeout(resolve, backoffDelay))
         }
@@ -352,6 +359,10 @@ export default function ChatPage() {
             <ModelSelector
               selectedModel={selectedModel}
               onModelChange={setSelectedModel}
+              lowVram={lowVram}
+              onLowVramChange={setLowVram}
+              textOnly={textOnly}
+              onTextOnlyChange={setTextOnly}
             />
           </div>
         </header>

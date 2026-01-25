@@ -15,12 +15,20 @@ interface ModelInfo {
 interface ModelSelectorProps {
     selectedModel?: string
     onModelChange: (model: string) => void
+    lowVram: boolean
+    onLowVramChange: (enabled: boolean) => void
+    textOnly: boolean
+    onTextOnlyChange: (enabled: boolean) => void
     className?: string
 }
 
 export default function ModelSelector({
     selectedModel,
     onModelChange,
+    lowVram,
+    onLowVramChange,
+    textOnly,
+    onTextOnlyChange,
     className = ''
 }: ModelSelectorProps) {
     const [models, setModels] = useState<ModelInfo[]>([])
@@ -122,6 +130,28 @@ export default function ModelSelector({
                     <span>Offline</span>
                 </div>
             )}
+            <div className="flex items-center gap-4 ml-4 border-l pl-4 border-border">
+                <label className="flex items-center gap-2 cursor-pointer text-sm" title="Unloads LLM before loading TTS to prevent crashes on low memory devices">
+                    <input
+                        type="checkbox"
+                        checked={lowVram}
+                        onChange={(e) => onLowVramChange(e.target.checked)}
+                        className="rounded border-input"
+                    />
+                    <span className="hidden sm:inline">Low VRAM</span>
+                    <span className="sm:hidden">L-VRAM</span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer text-sm" title="Disables TTS for faster responses and no audio">
+                    <input
+                        type="checkbox"
+                        checked={textOnly}
+                        onChange={(e) => onTextOnlyChange(e.target.checked)}
+                        className="rounded border-input"
+                    />
+                    <span className="hidden sm:inline">Text Only</span>
+                    <span className="sm:hidden">Text</span>
+                </label>
+            </div>
         </div>
     )
 }
