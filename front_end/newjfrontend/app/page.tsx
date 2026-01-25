@@ -165,7 +165,7 @@ export default function ChatPage() {
       // Retry logic with exponential backoff
       let lastError: Error | null = null
       let response: Response | null = null
-      const maxRetries = 2
+      const maxRetries = 6
       const timeoutMs = 600000 // 10 minutes for local hardware
 
       for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -203,10 +203,13 @@ export default function ChatPage() {
           break
 
         } catch (error) {
-          lastError = error as Error
-          console.error(`❌ [Attempt ${attempt + 1}/${maxRetries + 1}] Request failed:`, error)
-
-          // Check if it's a timeout
+          // Log warning for intermediate failures, error only for final failure
+          if (attempt < maxRetries) {
+            console.warn(`⚠️ [Attempt ${attempt + 1}/${maxRetries + 1}] Request failed (retrying):`, error)
+          } else {
+            console.error(`❌ [Attempt ${attempt + 1}/${maxRetries + 1}] Request failed (final):`, error)
+            lastError = error as Error
+          }
           if (error instanceof Error && error.name === 'AbortError') {
             lastError = new Error(
               `Request timed out after ${timeoutMs / 1000} seconds. ` +
