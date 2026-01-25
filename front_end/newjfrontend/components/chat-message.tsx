@@ -22,6 +22,39 @@ import { ReasoningPanel } from "@/components/reasoning-panel"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 
+// Utility to separate thinking/reasoning from final answer
+// Supports both <think>...</think> and <thinking>...</thinking> formats
+function separateThinkingFromContent(content: string): { reasoning: string; finalAnswer: string } {
+  let reasoning = ''
+  let remainingContent = content
+
+  // Match both <think>...</think> and <thinking>...</thinking> tags (case insensitive)
+  const patterns = [
+    /<think>([\s\S]*?)<\/think>/gi,
+    /<thinking>([\s\S]*?)<\/thinking>/gi,
+  ]
+
+  for (const regex of patterns) {
+    let matches
+    // Extract all thinking blocks
+    while ((matches = regex.exec(remainingContent)) !== null) {
+      reasoning += matches[1].trim() + '\n\n'
+    }
+    // Remove tags from content
+    remainingContent = remainingContent.replace(regex, '')
+  }
+
+  // Clean up
+  const finalAnswer = remainingContent
+    .replace(/^\s*\n+/, '') // Remove leading newlines
+    .trim()
+
+  return {
+    reasoning: reasoning.trim(),
+    finalAnswer
+  }
+}
+
 interface ChatMessageProps {
   role: "user" | "assistant"
   content: string
@@ -130,14 +163,23 @@ export function ChatMessage({
   searchResults,
   searchQuery,
   audioUrl,
-  reasoning,
+  reasoning: propReasoning,
 }: ChatMessageProps) {
   const [copied, setCopied] = useState(false)
   const [showVoice, setShowVoice] = useState(false)
   const [feedback, setFeedback] = useState<"up" | "down" | null>(null)
 
+  // Process content to separate reasoning from final answer
+  // This handles cases where <think> tags are still in the content
+  const { reasoning: extractedReasoning, finalAnswer } = separateThinkingFromContent(content || '')
+
+  // Use extracted reasoning if available, otherwise use prop
+  const reasoning = extractedReasoning || propReasoning || ''
+  // Use cleaned content (without think tags) for display
+  const displayContent = finalAnswer || content || ''
+
   const handleCopy = async () => {
-    await navigator.clipboard.writeText(content)
+    await navigator.clipboard.writeText(displayContent)
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
   }
@@ -284,11 +326,11 @@ export function ChatMessage({
                   },
                 }}
               >
-                {content}
+                {displayContent}
               </ReactMarkdown>
             </div>
           ) : (
-            <p className="text-sm leading-relaxed whitespace-pre-wrap">{content}</p>
+            <p className="text-sm leading-relaxed whitespace-pre-wrap">{displayContent}</p>
           )}
         </div>
 
