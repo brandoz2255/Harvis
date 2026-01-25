@@ -170,145 +170,50 @@ export default function ChatPage() {
         requestBody.cfg_weight = 0.5
       }
 
-      // Handle streaming response for research mode
-      if (isResearchMode) {
-        const response = await fetch(endpoint, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`
-          },
-          body: JSON.stringify(requestBody),
-          credentials: 'include'
-        })
+      // Use fetchWithRetry for all modes (it handles both JSON and SSE)
+      const data = await fetchWithRetry(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify(requestBody),
+        credentials: 'include'
+      }, {
+        lowVram,
+        timeout: lowVram ? 3600000 : 300000,
+        maxRetries: 0
+      })
 
-        if (!response.ok) {
-          const errorText = await response.text()
-          throw new Error(`Backend error: ${response.status} - ${errorText}`)
-        }
-
-        if (!response.body) {
-          throw new Error('ReadableStream not supported in this browser.')
-        }
-
-        const reader = response.body.getReader()
-        const decoder = new TextDecoder()
-        let buffer = ''
-        let finalData: any = null
-
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-
-          buffer += decoder.decode(value, { stream: true })
-          const lines = buffer.split('\n\n')
-          buffer = lines.pop() || ''
-
-          for (const line of lines) {
-            const trimmedLine = line.trim()
-            if (trimmedLine.startsWith('data: ')) {
-              const jsonStr = trimmedLine.slice(6)
-              try {
-                const data = JSON.parse(jsonStr)
-                console.log('Stream status:', data.status, data.message || '')
-
-                if (data.status === 'error') {
-                  throw new Error(data.error || 'Unknown streaming error')
-                }
-
-                if (data.status === 'complete') {
-                  finalData = data
-                }
-              } catch (e) {
-                if (e instanceof Error && e.message.includes('streaming error')) {
-                  throw e
-                }
-                console.warn('Error parsing SSE data:', e)
-              }
-            }
-          }
-        }
-
-        // Update user message to sent
-        setMessages((prev) =>
-          prev.map((msg) =>
-            msg.tempId === tempId ? { ...msg, status: "sent" } : msg
-          )
+      // Update user message to sent
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.tempId === tempId ? { ...msg, status: "sent" } : msg
         )
+      )
 
-        if (!finalData) {
-          throw new Error('No final data received from stream')
-        }
+      // Create assistant message with all response data
+      const assistantContent = data.final_answer ||
+        data.response ||
+        (data.history && data.history.length > 0
+          ? data.history[data.history.length - 1]?.content
+          : '')
 
-        // Create assistant message with all response data
-        const assistantContent = finalData.final_answer ||
-          finalData.response ||
-          (finalData.history && finalData.history.length > 0
-            ? finalData.history[finalData.history.length - 1]?.content
-            : '')
+      const assistantMessage: Message = {
+        id: (Date.now() + 1).toString(),
+        role: "assistant",
+        content: assistantContent,
+        timestamp: new Date(),
+        model: selectedModel,
+        status: "sent",
+        audioUrl: data.audio_path,
+        reasoning: data.reasoning,
+        searchResults: data.search_results,
+        searchQuery: data.searchQuery,
+      }
 
-        const assistantMessage: Message = {
-          id: (Date.now() + 1).toString(),
-          role: "assistant",
-          content: assistantContent,
-          timestamp: new Date(),
-          model: selectedModel,
-          status: "sent",
-          audioUrl: finalData.audio_path,
-          reasoning: finalData.reasoning,
-          searchResults: finalData.search_results,
-          searchQuery: finalData.searchQuery,
-        }
-
-        if (!isDuplicateMessage(assistantMessage, messages)) {
-          setMessages((prev) => [...prev, assistantMessage])
-        }
-      } else {
-        // Non-streaming mode for regular chat
-        const data = await fetchWithRetry(endpoint, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`
-          },
-          body: JSON.stringify(requestBody),
-          credentials: 'include'
-        }, {
-          lowVram,
-          timeout: lowVram ? 3600000 : 300000,
-          maxRetries: 0
-        })
-
-        // Update user message to sent
-        setMessages((prev) =>
-          prev.map((msg) =>
-            msg.tempId === tempId ? { ...msg, status: "sent" } : msg
-          )
-        )
-
-        // Create assistant message with all response data
-        const assistantContent = data.final_answer ||
-          data.response ||
-          (data.history && data.history.length > 0
-            ? data.history[data.history.length - 1]?.content
-            : '')
-
-        const assistantMessage: Message = {
-          id: (Date.now() + 1).toString(),
-          role: "assistant",
-          content: assistantContent,
-          timestamp: new Date(),
-          model: selectedModel,
-          status: "sent",
-          audioUrl: data.audio_path,
-          reasoning: data.reasoning,
-          searchResults: data.search_results,
-          searchQuery: data.searchQuery,
-        }
-
-        if (!isDuplicateMessage(assistantMessage, messages)) {
-          setMessages((prev) => [...prev, assistantMessage])
-        }
+      if (!isDuplicateMessage(assistantMessage, messages)) {
+        setMessages((prev) => [...prev, assistantMessage])
       }
     } catch (error) {
       console.error("Chat error:", error)
