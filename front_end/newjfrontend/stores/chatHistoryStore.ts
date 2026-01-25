@@ -158,6 +158,8 @@ export const useChatHistoryStore = create<ChatHistoryState>((set, get) => ({
       const response = await fetch(`${API_BASE_URL}/api/chat-history/sessions`, {
         headers: {
           'Content-Type': 'application/json',
+          'Connection': 'keep-alive',
+          'Keep-Alive': 'timeout=300',
           ...getAuthHeaders(),
         },
         signal: AbortSignal.timeout(10000), // 10 second timeout
@@ -251,6 +253,8 @@ export const useChatHistoryStore = create<ChatHistoryState>((set, get) => ({
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'Connection': 'keep-alive',
+          'Keep-Alive': 'timeout=300',
           ...getAuthHeaders(),
         },
         body: JSON.stringify({
@@ -298,6 +302,8 @@ export const useChatHistoryStore = create<ChatHistoryState>((set, get) => ({
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'Connection': 'keep-alive',
+          'Keep-Alive': 'timeout=300',
           ...getAuthHeaders(),
         },
         body: JSON.stringify({
@@ -394,6 +400,8 @@ export const useChatHistoryStore = create<ChatHistoryState>((set, get) => ({
         method: 'DELETE',
         headers: {
           'Content-Type': 'application/json',
+          'Connection': 'keep-alive',
+          'Keep-Alive': 'timeout=300',
           ...getAuthHeaders(),
         },
       })
@@ -418,6 +426,8 @@ export const useChatHistoryStore = create<ChatHistoryState>((set, get) => ({
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
+          'Connection': 'keep-alive',
+          'Keep-Alive': 'timeout=300',
           ...getAuthHeaders(),
         },
         body: JSON.stringify({ title }),
@@ -496,6 +506,8 @@ export const useChatHistoryStore = create<ChatHistoryState>((set, get) => ({
       const response = await fetch(`${API_BASE_URL}/api/chat-history/sessions/${sessionId}`, {
         headers: {
           'Content-Type': 'application/json',
+          'Connection': 'keep-alive',
+          'Keep-Alive': 'timeout=300',
           ...(authHeaders.Authorization ? { 'Authorization': authHeaders.Authorization } : {}),
         },
         signal: AbortSignal.timeout(10000), // 10 second timeout

@@ -138,6 +138,7 @@ export function ChatInput({ onSend, isLoading, isResearchMode, selectedModel, cl
   const sendAudioToBackend = async (audioBlob: Blob) => {
     // Create AbortController for long timeout (10 minutes for local hardware)
     const controller = new AbortController()
+    // Even with streaming, we want a timeout safeguard
     const timeoutId = setTimeout(() => controller.abort(), 600000)
 
     try {
@@ -147,7 +148,7 @@ export function ChatInput({ onSend, isLoading, isResearchMode, selectedModel, cl
       if (!token) {
         console.error('No auth token found')
         alert('Authentication required. Please log in.')
-        clearTimeout(timeoutId) // Clear timeout if we return early
+        clearTimeout(timeoutId)
         return
       }
 
@@ -160,17 +161,15 @@ export function ChatInput({ onSend, isLoading, isResearchMode, selectedModel, cl
         formData.append('model', selectedModel)
       }
 
-      // Add research mode if active
       if (isResearchMode) {
         formData.append('research_mode', 'true')
       }
 
-      // Call backend via nginx proxy with long timeout for local hardware
-      // Voice requests can take a while: model loading + transcription + LLM + TTS
       const response = await fetch('/api/mic-chat', {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${token}`
+          'Authorization': `Bearer ${token}`,
+          // No Connection header needed usually, but ok to keep
         },
         body: formData,
         credentials: 'include',
@@ -184,10 +183,49 @@ export function ChatInput({ onSend, isLoading, isResearchMode, selectedModel, cl
         throw new Error(`Backend error: ${response.status} - ${errorText}`)
       }
 
-      const data = await response.json()
+      if (!response.body) {
+        throw new Error('ReadableStream not supported in this browser.')
+      }
 
-      // Handle response
-      handleVoiceResponse(data)
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n\n')
+        // Keep the incomplete last line in the buffer
+        buffer = lines.pop() || ''
+
+        for (const line of lines) {
+          const trimmedLine = line.trim()
+          if (trimmedLine.startsWith('data: ')) {
+            const jsonStr = trimmedLine.slice(6)
+            try {
+              const data = JSON.parse(jsonStr)
+              console.log('Voice stream status:', data.status, data)
+
+              // Handle explicit error in stream
+              if (data.status === 'error') {
+                throw new Error(data.error || 'Unknown streaming error')
+              }
+
+              // You could update UI state here (e.g. setProgress(data.progress))
+              // if (data.status === 'transcribing') ...
+              // if (data.status === 'speaking') ...
+
+              if (data.status === 'complete') {
+                handleVoiceResponse(data)
+              }
+            } catch (e) {
+              console.warn('Error parsing SSE data:', e)
+            }
+          }
+        }
+      }
 
     } catch (error) {
       clearTimeout(timeoutId)
@@ -245,7 +283,7 @@ export function ChatInput({ onSend, isLoading, isResearchMode, selectedModel, cl
   }, [message])
 
   return (
-    <div className={cn("p-4", className)}>
+    <div className={cn("p-4 bg-background", className)}>
       <div className="mx-auto max-w-3xl">
         <div className="relative rounded-2xl border border-border bg-card shadow-lg">
           {/* Input Area */}

@@ -29,6 +29,11 @@ async function fetchWithRetry(
 
       const response = await fetch(url, {
         ...options,
+        headers: {
+          ...options.headers,
+          'Connection': 'keep-alive',
+          'Keep-Alive': 'timeout=300'
+        },
         signal: controller.signal,
       })
 
@@ -153,6 +158,8 @@ export const apiClient = {
     const response = await fetch(`${API_BASE_URL}/api/ollama-models`, {
       headers: {
         'Content-Type': 'application/json',
+        'Connection': 'keep-alive',
+        'Keep-Alive': 'timeout=300',
         ...getAuthHeaders(),
       },
     })
@@ -178,6 +185,8 @@ export const apiClient = {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        'Connection': 'keep-alive',
+        'Keep-Alive': 'timeout=300',
       },
       body: JSON.stringify({
         query,
@@ -199,6 +208,8 @@ export const apiClient = {
     const response = await fetch(`${API_BASE_URL}/api/chat-history/sessions`, {
       headers: {
         'Content-Type': 'application/json',
+        'Connection': 'keep-alive',
+        'Keep-Alive': 'timeout=300',
         ...getAuthHeaders(),
       },
     })
@@ -215,6 +226,8 @@ export const apiClient = {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        'Connection': 'keep-alive',
+        'Keep-Alive': 'timeout=300',
         ...getAuthHeaders(),
       },
       body: JSON.stringify({
@@ -234,6 +247,8 @@ export const apiClient = {
     const response = await fetch(`${API_BASE_URL}/api/chat-history/sessions/${sessionId}`, {
       headers: {
         'Content-Type': 'application/json',
+        'Connection': 'keep-alive',
+        'Keep-Alive': 'timeout=300',
         ...getAuthHeaders(),
       },
     })
@@ -250,6 +265,8 @@ export const apiClient = {
       method: 'DELETE',
       headers: {
         'Content-Type': 'application/json',
+        'Connection': 'keep-alive',
+        'Keep-Alive': 'timeout=300',
         ...getAuthHeaders(),
       },
     })
@@ -266,6 +283,8 @@ export const apiClient = {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
+        'Connection': 'keep-alive',
+        'Keep-Alive': 'timeout=300',
         ...getAuthHeaders(),
       },
       body: JSON.stringify({ title }),
@@ -291,6 +310,8 @@ export const apiClient = {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        'Connection': 'keep-alive',
+        'Keep-Alive': 'timeout=300',
         ...getAuthHeaders(),
       },
       body: JSON.stringify(payload),

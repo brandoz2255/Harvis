@@ -16,6 +16,8 @@ import { apiClient } from "@/lib/api"
 import { useUser } from "@/lib/auth/UserProvider"
 import type { Message, MessageObject } from "@/types/message"
 
+import { useApiWithRetry } from "@/hooks/useApiWithRetry"
+
 export default function ChatPage() {
   const router = useRouter()
   const { user, isLoading: isAuthLoading } = useUser()
@@ -101,6 +103,8 @@ export default function ChatPage() {
     )
   }
 
+  const { fetchWithRetry } = useApiWithRetry()
+
   const handleSendMessage = async (input: string | MessageObject) => {
     // Handle voice message objects
     if (typeof input !== 'string') {
@@ -166,111 +170,145 @@ export default function ChatPage() {
         requestBody.cfg_weight = 0.5
       }
 
-      // Retry logic with exponential backoff
-      let lastError: Error | null = null
-      let response: Response | null = null
-      const maxRetries = 2
-      // Use extended timeout for Low VRAM mode (20 mins vs 5 mins)
-      const timeoutMs = lowVram ? 1200000 : 300000
+      // Handle streaming response for research mode
+      if (isResearchMode) {
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify(requestBody),
+          credentials: 'include'
+        })
 
-      for (let attempt = 0; attempt <= maxRetries; attempt++) {
-        try {
-          const controller = new AbortController()
-          const timeoutId = setTimeout(() => {
-            console.error(`⏱️ Request timeout after ${timeoutMs}ms (attempt ${attempt + 1}/${maxRetries + 1})`)
-            controller.abort()
-          }, timeoutMs)
-
-          const startTime = Date.now()
-          console.log(`📤 [Attempt ${attempt + 1}/${maxRetries + 1}] Sending to ${endpoint}`)
-
-          response = await fetch(endpoint, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${token}`
-            },
-            body: JSON.stringify(requestBody),
-            credentials: 'include',
-            signal: controller.signal
-          })
-
-          clearTimeout(timeoutId)
-          const elapsed = Date.now() - startTime
-          console.log(`📥 Response received in ${elapsed}ms with status ${response.status}`)
-
-          if (!response.ok) {
-            const errorText = await response.text()
-            throw new Error(`Server error (${response.status}): ${errorText}`)
-          }
-
-          // Success - break retry loop
-          break
-
-        } catch (error) {
-          // Log warning for intermediate failures, error only for final failure
-          if (attempt < maxRetries) {
-            console.warn(`⚠️ [Attempt ${attempt + 1}/${maxRetries + 1}] Request failed (retrying):`, error)
-          } else {
-            console.error(`❌ [Attempt ${attempt + 1}/${maxRetries + 1}] Request failed (final):`, error)
-            lastError = error as Error
-          }
-          if (error instanceof Error && error.name === 'AbortError') {
-            lastError = new Error(
-              `Request timed out after ${timeoutMs / 1000} seconds. ` +
-              `The backend may be processing your request. Please wait and try again.`
-            )
-          }
-
-          // Don't retry if we're out of attempts
-          if (attempt >= maxRetries) {
-            throw lastError
-          }
-
-          // Exponential backoff with longer base delay
-          // Wait longer (5s base) to let system recover, especially in Low VRAM mode
-          const baseDelay = lowVram ? 10000 : 2000
-          const backoffDelay = Math.min(baseDelay * Math.pow(2, attempt), 30000)
-          console.log(`🔄 Retrying in ${backoffDelay}ms...`)
-          await new Promise(resolve => setTimeout(resolve, backoffDelay))
+        if (!response.ok) {
+          const errorText = await response.text()
+          throw new Error(`Backend error: ${response.status} - ${errorText}`)
         }
-      }
 
-      if (!response || !response.ok) {
-        throw lastError || new Error('Failed to get response from server')
-      }
+        if (!response.body) {
+          throw new Error('ReadableStream not supported in this browser.')
+        }
 
-      const data = await response.json()
+        const reader = response.body.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ''
+        let finalData: any = null
 
-      // Update user message to sent
-      setMessages((prev) =>
-        prev.map((msg) =>
-          msg.tempId === tempId ? { ...msg, status: "sent" } : msg
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split('\n\n')
+          buffer = lines.pop() || ''
+
+          for (const line of lines) {
+            const trimmedLine = line.trim()
+            if (trimmedLine.startsWith('data: ')) {
+              const jsonStr = trimmedLine.slice(6)
+              try {
+                const data = JSON.parse(jsonStr)
+                console.log('Stream status:', data.status, data.message || '')
+
+                if (data.status === 'error') {
+                  throw new Error(data.error || 'Unknown streaming error')
+                }
+
+                if (data.status === 'complete') {
+                  finalData = data
+                }
+              } catch (e) {
+                if (e instanceof Error && e.message.includes('streaming error')) {
+                  throw e
+                }
+                console.warn('Error parsing SSE data:', e)
+              }
+            }
+          }
+        }
+
+        // Update user message to sent
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.tempId === tempId ? { ...msg, status: "sent" } : msg
+          )
         )
-      )
 
-      // Create assistant message with all response data
-      const assistantContent = data.final_answer ||
-        data.response ||
-        (data.history && data.history.length > 0
-          ? data.history[data.history.length - 1]?.content
-          : '')
+        if (!finalData) {
+          throw new Error('No final data received from stream')
+        }
 
-      const assistantMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        role: "assistant",
-        content: assistantContent,
-        timestamp: new Date(),
-        model: selectedModel,
-        status: "sent",
-        audioUrl: data.audio_path,
-        reasoning: data.reasoning,
-        searchResults: data.search_results,
-        searchQuery: data.searchQuery,
-      }
+        // Create assistant message with all response data
+        const assistantContent = finalData.final_answer ||
+          finalData.response ||
+          (finalData.history && finalData.history.length > 0
+            ? finalData.history[finalData.history.length - 1]?.content
+            : '')
 
-      if (!isDuplicateMessage(assistantMessage, messages)) {
-        setMessages((prev) => [...prev, assistantMessage])
+        const assistantMessage: Message = {
+          id: (Date.now() + 1).toString(),
+          role: "assistant",
+          content: assistantContent,
+          timestamp: new Date(),
+          model: selectedModel,
+          status: "sent",
+          audioUrl: finalData.audio_path,
+          reasoning: finalData.reasoning,
+          searchResults: finalData.search_results,
+          searchQuery: finalData.searchQuery,
+        }
+
+        if (!isDuplicateMessage(assistantMessage, messages)) {
+          setMessages((prev) => [...prev, assistantMessage])
+        }
+      } else {
+        // Non-streaming mode for regular chat
+        const data = await fetchWithRetry(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify(requestBody),
+          credentials: 'include'
+        }, {
+          lowVram,
+          timeout: lowVram ? 3600000 : 300000,
+          maxRetries: 0
+        })
+
+        // Update user message to sent
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.tempId === tempId ? { ...msg, status: "sent" } : msg
+          )
+        )
+
+        // Create assistant message with all response data
+        const assistantContent = data.final_answer ||
+          data.response ||
+          (data.history && data.history.length > 0
+            ? data.history[data.history.length - 1]?.content
+            : '')
+
+        const assistantMessage: Message = {
+          id: (Date.now() + 1).toString(),
+          role: "assistant",
+          content: assistantContent,
+          timestamp: new Date(),
+          model: selectedModel,
+          status: "sent",
+          audioUrl: data.audio_path,
+          reasoning: data.reasoning,
+          searchResults: data.search_results,
+          searchQuery: data.searchQuery,
+        }
+
+        if (!isDuplicateMessage(assistantMessage, messages)) {
+          setMessages((prev) => [...prev, assistantMessage])
+        }
       }
     } catch (error) {
       console.error("Chat error:", error)
@@ -329,9 +367,9 @@ export default function ChatPage() {
       )}
 
       {/* Main Content */}
-      <div className="flex flex-1 flex-col">
-        {/* Header */}
-        <header className="flex items-center gap-4 border-b border-border px-4 py-3">
+      <div className="flex flex-1 flex-col overflow-hidden">
+        {/* Header - Sticky at top */}
+        <header className="sticky top-0 z-10 shrink-0 flex items-center gap-4 border-b border-border bg-background px-4 py-3">
           <Button
             variant="ghost"
             size="icon"
@@ -367,8 +405,8 @@ export default function ChatPage() {
           </div>
         </header>
 
-        {/* Chat Area */}
-        <ScrollArea ref={scrollRef} className="flex-1">
+        {/* Chat Area - Scrollable middle section */}
+        <div className="flex-1 overflow-y-auto" ref={scrollRef}>
           <div className="mx-auto max-w-4xl px-4 py-6">
             {messages.length === 0 ? (
               <div className="flex h-[60vh] flex-col items-center justify-center text-center">
@@ -431,15 +469,17 @@ export default function ChatPage() {
               </div>
             )}
           </div>
-        </ScrollArea>
+        </div>
 
-        {/* Input Area */}
-        <ChatInput
-          onSend={handleSendMessage}
-          isLoading={isLoading}
-          isResearchMode={isResearchMode}
-          selectedModel={selectedModel}
-        />
+        {/* Input Area - Sticky at bottom */}
+        <div className="sticky bottom-0 z-10 shrink-0 border-t border-border bg-background">
+          <ChatInput
+            onSend={handleSendMessage}
+            isLoading={isLoading}
+            isResearchMode={isResearchMode}
+            selectedModel={selectedModel}
+          />
+        </div>
       </div>
     </div>
   )
