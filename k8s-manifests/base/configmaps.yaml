@@ -69,6 +69,9 @@ data:
     # Create application tables if they don't exist
     echo "Creating application tables..."
     psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL
+        -- Enable pgcrypto for gen_random_uuid() if not using PG13+
+        CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
         CREATE TABLE IF NOT EXISTS users (
             id SERIAL PRIMARY KEY,
             username VARCHAR(255) UNIQUE NOT NULL,
@@ -79,18 +82,27 @@ data:
         );
 
         CREATE TABLE IF NOT EXISTS chat_sessions (
-            id SERIAL PRIMARY KEY,
-            user_id INTEGER REFERENCES users(id),
-            title VARCHAR(255),
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+            title VARCHAR(255) NOT NULL DEFAULT 'New Chat',
             created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            last_message_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            message_count INTEGER DEFAULT 0,
+            model_used VARCHAR(100),
+            is_active BOOLEAN DEFAULT true
         );
 
         CREATE TABLE IF NOT EXISTS chat_messages (
             id SERIAL PRIMARY KEY,
-            session_id INTEGER REFERENCES chat_sessions(id),
-            role VARCHAR(50) NOT NULL,
+            session_id UUID NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            role VARCHAR(20) NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
             content TEXT NOT NULL,
+            reasoning TEXT NULL,
+            model_used VARCHAR(100),
+            input_type VARCHAR(20) DEFAULT 'text' CHECK (input_type IN ('text', 'voice', 'screen')),
+            metadata JSONB DEFAULT '{}',
             created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
 
@@ -98,7 +110,37 @@ data:
         CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
         CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
         CREATE INDEX IF NOT EXISTS idx_chat_sessions_user_id ON chat_sessions(user_id);
+        CREATE INDEX IF NOT EXISTS idx_chat_sessions_user_updated ON chat_sessions(user_id, updated_at DESC);
         CREATE INDEX IF NOT EXISTS idx_chat_messages_session_id ON chat_messages(session_id);
+        CREATE INDEX IF NOT EXISTS idx_chat_messages_session_created ON chat_messages(session_id, created_at ASC);
+
+        -- Trigger function to update session's updated_at and last_message_at
+        CREATE OR REPLACE FUNCTION update_session_on_message_insert()
+        RETURNS TRIGGER AS \$\$
+        BEGIN
+            UPDATE chat_sessions 
+            SET 
+                updated_at = NEW.created_at,
+                last_message_at = NEW.created_at,
+                message_count = message_count + 1,
+                model_used = COALESCE(NEW.model_used, model_used)
+            WHERE id = NEW.session_id;
+            
+            RETURN NEW;
+        END;
+        \$\$ LANGUAGE plpgsql;
+
+        -- Create trigger if not exists
+        DO \$\$
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trigger_update_session_on_message_insert') THEN
+                CREATE TRIGGER trigger_update_session_on_message_insert
+                    AFTER INSERT ON chat_messages
+                    FOR EACH ROW
+                    EXECUTE FUNCTION update_session_on_message_insert();
+            END IF;
+        END
+        \$\$;
     EOSQL
 
     echo "✅ Database initialization completed successfully"

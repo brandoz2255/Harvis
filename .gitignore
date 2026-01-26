@@ -71,6 +71,9 @@ kubeconfig.*
 # Personal/Sensitive Files
 # ==========================================
 
+# Generated Certificates
+certs/
+
 # API Keys and tokens
 **/*api-key*
 **/*token*

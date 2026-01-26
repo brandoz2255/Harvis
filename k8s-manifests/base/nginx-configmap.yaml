@@ -43,8 +43,19 @@ data:
             "http://127.0.0.1:5678" "$http_origin"; # n8n server
         }
 
-        server {
+    server {
             listen 80;
+            return 301 https://$host$request_uri;
+        }
+
+        server {
+            listen 443 ssl;
+            server_name harvis.dulc3.tech;
+
+            ssl_certificate /etc/nginx/ssl/tls.crt;
+            ssl_certificate_key /etc/nginx/ssl/tls.key;
+            ssl_protocols TLSv1.2 TLSv1.3;
+            ssl_ciphers HIGH:!aNULL:!MD5;
 
             # CORS headers are handled per-location to prevent duplication with backend headers
 

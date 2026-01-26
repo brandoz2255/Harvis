@@ -65,3 +65,13 @@ Manual Parsing of Raw Output	Works with default outputs	May break with model upd
 
 By combining Ollama's structured outputs (where available) or robust client-side parsing, you can easily mirror the backend/frontend split described in your previous workflow: displaying only the final answer in the main chat, and the reasoning (or thought process) exclusively in the AI Insightsghts panel
 .
+
+
+when u come back do 
+
+ > Now that we have online RAG lets also use the local RAG i have i     │
+│   have a vectordb inside that database that harvis uses there is a     │
+│   embedding model inside the ollama server to use a vector database    │
+│   make a settings page there is already a settings button      i would like to be in control of updatng a vector database based on what i want to search in the UI like i search in the chat update vector store with Next.js docs and examples from stack overflow and github soliutions and it starts the backend modules to parse the docs and copy them onto the RAG directory where the embedding model would embed them onto vectordatabase so that the LLMs can use  the vector so my LLMs can be smarter also document each step 
+
+this we need to update the UI for this  and backend with this

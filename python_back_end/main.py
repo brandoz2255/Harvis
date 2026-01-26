@@ -150,10 +150,10 @@ from model_manager import (
 )
 
 # TTS Helper Function with graceful error handling
-def safe_generate_speech_optimized(text, audio_prompt=None, exaggeration=0.5, temperature=0.8, cfg_weight=0.5):
+def safe_generate_speech_optimized(text, audio_prompt=None, exaggeration=0.5, temperature=0.8, cfg_weight=0.5, auto_unload=True):
     """Generate speech with graceful error handling - never crashes the app"""
     try:
-        result = generate_speech_optimized(text, audio_prompt, exaggeration, temperature, cfg_weight)
+        result = generate_speech_optimized(text, audio_prompt, exaggeration, temperature, cfg_weight, auto_unload=auto_unload)
         if result is None or result == (None, None):
             logger.warning("⚠️ TTS unavailable - skipping audio generation")
             return None, None
@@ -1061,6 +1061,7 @@ async def chat(req: ChatRequest, request: Request, current_user: UserResponse = 
     """
     try:
         logger.info(f"Chat endpoint reached - User: {current_user.username}, Message: {req.message[:50]}...")
+        logger.info(f"⚙️ Mode flags - low_vram: {req.low_vram}, text_only: {req.text_only}")
         
         # ── 0. Process Attachments FIRST so content is available for research ──────────
         # Add current user message to history
@@ -1389,6 +1390,7 @@ async def chat(req: ChatRequest, request: Request, current_user: UserResponse = 
                     exaggeration=req.exaggeration,
                     temperature=req.temperature,
                     cfg_weight=req.cfg_weight,
+                    auto_unload=req.low_vram,
                 )
 
                 # ── 6. Persist WAV to /tmp so nginx (or FastAPI fallback) can serve it ------------
@@ -1433,6 +1435,7 @@ async def vision_chat(req: VisionChatRequest, request: Request, current_user: Us
     """
     try:
         logger.info(f"🖼️ Vision chat - User: {current_user.username}, Model: {req.model}, Images: {len(req.images)}")
+        logger.info(f"⚙️ Vision mode flags - low_vram: {req.low_vram}, text_only: {req.text_only}")
 
         # Extract base64 data from images and ensure proper format
         processed_images = []
@@ -1643,7 +1646,7 @@ async def vision_chat(req: VisionChatRequest, request: Request, current_user: Us
                     exaggeration=0.5,
                     temperature=0.8,
                     cfg_weight=0.5,
-                    unload_after=req.low_vram
+                    auto_unload=req.low_vram
                 )
 
                 if wav is not None:

@@ -247,33 +247,41 @@ def load_tts_model(force_cpu=False):
 
                     except Exception as cuda_test_e:
                         logger.error(f"❌ Basic CUDA test failed: {cuda_test_e}")
-                        raise RuntimeError(f"CUDA is broken: {cuda_test_e}")
+                        logger.warning("⚠️ CUDA is broken - will load TTS on CPU directly")
+                        # Reset CUDA to clear the error state
+                        try:
+                            torch.cuda.reset_peak_memory_stats()
+                            torch.cuda.empty_cache()
+                        except:
+                            pass
+                        # Skip CUDA entirely, go straight to CPU
+                        tts_device = "cpu"
 
-                # CRITICAL: Force GPU memory cleanup before TTS loading
-                logger.info("🔧 Performing aggressive GPU memory cleanup before TTS...")
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    torch.cuda.synchronize()
-                    # Force garbage collection
-                    import gc
-                    gc.collect()
-                    torch.cuda.empty_cache()
-                    # Wait for cleanup to complete
-                    import time
-                    time.sleep(1.0)
-                    log_gpu_memory("before TTS load after cleanup")
+                # CRITICAL: Force GPU memory cleanup before TTS loading (only if using CUDA)
+                if tts_device == "cuda" and torch.cuda.is_available():
+                    logger.info("🔧 Performing aggressive GPU memory cleanup before TTS...")
+                    try:
+                        torch.cuda.empty_cache()
+                        torch.cuda.synchronize()
+                        # Force garbage collection
+                        import gc
+                        gc.collect()
+                        torch.cuda.empty_cache()
+                        # Wait for cleanup to complete
+                        import time
+                        time.sleep(1.0)
+                        log_gpu_memory("before TTS load after cleanup")
+                    except Exception as cleanup_e:
+                        logger.warning(f"⚠️ GPU cleanup failed (continuing anyway): {cleanup_e}")
 
                 # Load TTS model without signal-based timeout (thread-safe)
                 try:
-                    logger.info("🚀 Attempting ChatterboxTTS.from_pretrained(device='cuda')...")
+                    logger.info(f"🚀 Attempting ChatterboxTTS.from_pretrained(device='{tts_device}')...")
 
-                    # Additional safety: Test ChatterboxTTS import first
-                    try:
-                        from chatterbox.tts import ChatterboxTTS
-                        logger.info("✅ ChatterboxTTS import successful")
-                    except Exception as import_e:
-                        logger.error(f"❌ ChatterboxTTS import failed: {import_e}")
-                        raise ImportError(f"ChatterboxTTS unavailable: {import_e}")
+                    # ChatterboxTTS is imported at module level - verify it's available
+                    if ChatterboxTTS is None:
+                        raise ImportError("ChatterboxTTS module not available")
+                    logger.info("✅ ChatterboxTTS module available")
 
                     # Attempt TTS model loading with additional error context
                     # Enable transformers logging to see what's happening
@@ -284,7 +292,7 @@ def load_tts_model(force_cpu=False):
                     logger.info("📥 This may use cached models or download if cache is missing...")
 
                     tts_model = ChatterboxTTS.from_pretrained(device=tts_device)
-                    logger.info("✅ TTS model loaded successfully on CUDA")
+                    logger.info(f"✅ TTS model loaded successfully on {tts_device.upper()}")
 
                     # Reset logging verbosity
                     transformers.logging.set_verbosity_warning()
