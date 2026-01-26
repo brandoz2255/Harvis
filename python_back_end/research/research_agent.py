@@ -196,50 +196,35 @@ class ResearchAgent:
         system_prompt = self._get_research_system_prompt(research_depth)
         
         research_prompt = f"""
-USER QUESTION: "{topic}"
+QUESTION: {topic}
 
-SOURCES (numbered for citation):
 {context}
 
-INSTRUCTIONS:
-Answer the question with ACTIONABLE, SPECIFIC recommendations.
+════════════════════════════════════════════════════════════════════════════════
+ANSWER FORMAT (follow exactly)
+════════════════════════════════════════════════════════════════════════════════
 
-CITATION STYLE (REQUIRED):
-- Use inline citations: "Use multi-stage builds for smaller images [1]"
-- NEVER write "Source 1 says..." or "According to Source 2..."
-- Every [n] MUST match a source number from SOURCES above
-- If you cite [3], there must be a Source 3 in your list
+Write a direct, informative answer. NO meta-commentary, NO "[Good]", NO template text.
 
-ACTION DENSITY (REQUIRED):
-- Minimum 5 concrete actions (verb + tool/technique + why)
-- Maximum 2 sentences of intro before bullets
-- Each bullet = one actionable recommendation
+PARAGRAPH FORMAT:
+Write 2-3 paragraphs answering the question directly. Cite sources inline like this [1].
+Do NOT write "Source 1 says" - just make the claim and cite: "Python dominates ML [1]."
 
-EVIDENCE RULES:
-- No statistics/percentages unless you quote the exact source text
-- If no exact quote available, rephrase without the number
-- Mark uncertain claims: "reportedly" or "according to [source]"
+BULLET POINTS (5 minimum):
+After paragraphs, give actionable recommendations:
 
-FORMAT:
-[1-2 sentence direct answer with citations]
+• **Use X for Y** - explanation of why [1]
+• **Implement Z with A** - concrete benefit [2]
+• **Configure B properly** - practical step [1][3]
 
-• **Action 1**: Do X using Y because Z [1]
-• **Action 2**: Implement A with B for C [2]
-• **Action 3**: Configure D to achieve E [1][3]
-• **Action 4**: Use F instead of G when H [2]
-• **Action 5**: Enable J for K benefits [3]
+RULES:
+1. Only cite [1], [2], etc. - numbers must match sources above
+2. Never write "Source X says/states/mentions" - banned phrase
+3. No made-up statistics unless directly quoted from source
+4. No template text like "[Your answer]" or "domain.com"
+5. Just answer the question naturally with citations
 
----
-**Sources**
-[1] [Title](url) - domain.com
-[2] [Title](url) - domain.com
-[3] [Title](url) - domain.com
-
-BANNED PHRASES:
-- "Source X says..." / "Source X states..." / "Source X emphasizes..."
-- "Based on my research..." / "According to the sources..."
-- "It is important to note..." / "In conclusion..."
-- Any placeholder like "[Your answer]" or "First key point..."
+DO NOT include a Sources section - that's handled separately.
 """
         
         analysis = self.query_llm(research_prompt, model, system_prompt)
@@ -272,7 +257,8 @@ BANNED PHRASES:
             "sources_found": len(raw_sources),
             "sources_used": len(quality_sources),
             "timestamp": self._get_timestamp(),
-            "quality_validation": validation_result  # Include validation info for debugging
+            "quality_validation": validation_result,  # Include validation info for debugging
+            "videos": videos  # YouTube videos for Perplexity-style display
         }
 
         if include_sources:
@@ -391,66 +377,232 @@ Be thorough and objective in your analysis.
         match = re.search(r'https?://(?:www\.)?([^/]+)', url)
         return match.group(1) if match else url
 
+    def _canonicalize_url(self, url: str) -> str:
+        """
+        Canonicalize URL for reliable matching.
+        Handles: trailing slashes, utm params, http/https, www prefix
+        """
+        from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
+
+        if not url:
+            return ""
+
+        try:
+            parsed = urlparse(url.lower().strip())
+
+            # Normalize scheme to https
+            scheme = 'https'
+
+            # Remove www. prefix from host
+            host = parsed.netloc
+            if host.startswith('www.'):
+                host = host[4:]
+
+            # Remove tracking params (utm_, fbclid, etc.)
+            tracking_params = {'utm_source', 'utm_medium', 'utm_campaign', 'utm_term',
+                             'utm_content', 'fbclid', 'gclid', 'ref', 'source'}
+            if parsed.query:
+                params = parse_qs(parsed.query)
+                clean_params = {k: v for k, v in params.items() if k.lower() not in tracking_params}
+                query = urlencode(clean_params, doseq=True) if clean_params else ''
+            else:
+                query = ''
+
+            # Remove trailing slash from path
+            path = parsed.path.rstrip('/')
+            if not path:
+                path = ''
+
+            return urlunparse((scheme, host, path, '', query, ''))
+        except Exception:
+            return url.lower().strip()
+
+    def _normalize_whitespace(self, text: str) -> str:
+        """
+        Normalize whitespace while PRESERVING paragraph breaks.
+        - Replace \\r\\n -> \\n
+        - Collapse 3+ newlines to 2
+        - Collapse long runs of spaces, but keep \\n\\n
+        """
+        import re
+
+        if not text:
+            return ""
+
+        # Normalize line endings
+        text = text.replace('\r\n', '\n').replace('\r', '\n')
+
+        # Collapse 3+ newlines to 2 (preserve paragraph breaks)
+        text = re.sub(r'\n{3,}', '\n\n', text)
+
+        # Collapse multiple spaces (but not newlines) to single space
+        text = re.sub(r'[^\S\n]+', ' ', text)
+
+        # Clean up space around newlines
+        text = re.sub(r' *\n *', '\n', text)
+
+        return text.strip()
+
+    def _chunk_text(self, text: str, chunk_size: int = 800, max_chunks: int = 5) -> List[str]:
+        """
+        Split text into labeled chunks for citation granularity.
+        Tries to split on paragraph boundaries.
+        """
+        if not text or len(text) <= chunk_size:
+            return [text] if text else []
+
+        chunks = []
+        paragraphs = text.split('\n\n')
+        current_chunk = ""
+
+        for para in paragraphs:
+            if len(current_chunk) + len(para) + 2 <= chunk_size:
+                current_chunk += ('\n\n' if current_chunk else '') + para
+            else:
+                if current_chunk:
+                    chunks.append(current_chunk)
+                current_chunk = para
+
+                # If single paragraph exceeds chunk_size, split it
+                while len(current_chunk) > chunk_size:
+                    # Find a sentence boundary to split on
+                    split_point = current_chunk[:chunk_size].rfind('. ')
+                    if split_point == -1:
+                        split_point = chunk_size
+                    chunks.append(current_chunk[:split_point + 1].strip())
+                    current_chunk = current_chunk[split_point + 1:].strip()
+
+            if len(chunks) >= max_chunks:
+                break
+
+        if current_chunk and len(chunks) < max_chunks:
+            chunks.append(current_chunk)
+
+        return chunks[:max_chunks]
+
     def _prepare_research_context(self, search_data: Dict[str, Any]) -> str:
-        """Prepare search results for LLM context with clean formatting"""
+        """
+        Prepare search results for LLM context with clear extractive formatting.
+        Each source has clearly marked citable content with chunk labels.
+        """
         context_parts = []
 
-        # Add search results with domain extraction for cleaner citations
+        # Anti-hallucination policy hint
+        context_parts.append("""
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║ CITATION POLICY: Only make claims directly supported by the Citable Content  ║
+║ or Extended Content blocks below. If support is missing, say "not found in   ║
+║ sources" rather than inventing information.                                   ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
+""")
+
+        # Build URL to source number mapping with canonicalized URLs
+        url_to_source_num = {}
+        for i, r in enumerate(search_data.get("search_results", []), 1):
+            url = r.get('url', '')
+            canonical = self._canonicalize_url(url)
+            url_to_source_num[canonical] = i
+            # Also map original URL for safety
+            url_to_source_num[url] = i
+
+        # Add search results with domain extraction and clear snippet marking
         for i, result in enumerate(search_data.get("search_results", []), 1):
             url = result.get('url', 'Unknown')
             domain = self._extract_domain(url)
             title = result.get('title', 'Unknown')
             snippet = result.get('snippet', 'No snippet available')
 
+            # Clean snippet whitespace
+            snippet = self._normalize_whitespace(snippet)
+
             context_parts.append(f"""
-Source {i}: [{title}]({url}) - {domain}
-Snippet: {snippet}
+═══ Source [{i}] ═════════════════════════════════════════════════════════════
+Title: {title}
+URL: {url}
+Domain: {domain}
+─── Search Snippet (citable as [{i}]) ───
+{snippet}
 """)
 
-        # Add extracted content if available (match to source numbers)
-        url_to_source_num = {r.get('url'): i for i, r in enumerate(search_data.get("search_results", []), 1)}
-
+        # Add extracted content with chunk labeling for citation granularity
         for content in search_data.get("extracted_content", []):
             if content.get("success") and content.get("text"):
                 url = content.get('url', '')
-                source_num = url_to_source_num.get(url)
+                canonical = self._canonicalize_url(url)
+
+                # Try canonical first, then original
+                source_num = url_to_source_num.get(canonical) or url_to_source_num.get(url)
+
                 if source_num:
-                    # Truncate very long content
-                    text = content["text"][:2000] if len(content["text"]) > 2000 else content["text"]
-                    context_parts.append(f"""
-Extended Content for Source {source_num}:
-{text}
+                    # Normalize whitespace while preserving paragraph breaks
+                    text = self._normalize_whitespace(content["text"])
+
+                    # Chunk the text for citation granularity
+                    chunks = self._chunk_text(text, chunk_size=800, max_chunks=4)
+
+                    if chunks:
+                        context_parts.append(f"""
+─── Extended Content for Source [{source_num}] ───""")
+
+                        for j, chunk in enumerate(chunks, 1):
+                            chunk_label = f"[{source_num}.{chr(64+j)}]"  # [1.A], [1.B], etc.
+                            context_parts.append(f"""
+Chunk {chunk_label}:
+{chunk}
 """)
 
         return "\n".join(context_parts)
     
     def _get_research_system_prompt(self, depth: str) -> str:
         """Get system prompt based on research depth"""
-        base_prompt = """You are a research assistant that analyzes web search results to provide specific, accurate information about the requested topic. 
+        base_prompt = """You are a research assistant. Answer questions using ONLY the provided search results.
 
-CRITICAL RULES:
-- You must ONLY use information from the provided search results
-- Do NOT provide general knowledge or generic information about search engines
-- Focus specifically on the topic being researched
-- Cite specific sources when making claims
-- If the search results don't contain relevant information, say so explicitly"""
-        
+STYLE:
+- Write naturally like a knowledgeable expert, not like a robot
+- Cite sources with [1], [2] inline - never write "Source 1 says"
+- Be specific and actionable, not generic
+- If sources don't cover something, say "sources don't address this"
+
+FORBIDDEN:
+- "Source X says/states/mentions" - BANNED
+- Template text like "[Good]" or "[Your answer]"
+- Made-up statistics or protocols
+- Generic advice not from the sources"""
+
         depth_prompts = {
-            "quick": f"{base_prompt} Provide concise, focused insights from the search results.",
-            "standard": f"{base_prompt} Provide thorough analysis with balanced coverage of the search results.",
-            "deep": f"{base_prompt} Provide in-depth, comprehensive analysis with detailed insights from the search results."
+            "quick": f"{base_prompt}\n\nGive a brief, focused answer.",
+            "standard": f"{base_prompt}\n\nGive a thorough answer with practical recommendations.",
+            "deep": f"{base_prompt}\n\nGive a comprehensive analysis with detailed insights."
         }
-        
+
         return depth_prompts.get(depth, depth_prompts["standard"])
     
-    def _format_sources(self, search_results: List[Dict[str, Any]]) -> List[Dict[str, str]]:
-        """Format sources for output"""
+    def _format_sources(self, search_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Format sources with full Perplexity-style schema:
+        id, title, url, domain, snippet (extractive quote from source)
+        """
         sources = []
-        for result in search_results:
+        for i, result in enumerate(search_results, 1):
+            url = result.get("url", "")
+            domain = self._extract_domain(url)
+            snippet = result.get("snippet", "")
+
+            # Clean and truncate snippet for citation display
+            if snippet:
+                # Take first 200 chars as extractive quote
+                snippet = snippet[:200].strip()
+                if len(result.get("snippet", "")) > 200:
+                    snippet += "..."
+
             sources.append({
+                "id": i,  # Numbered ID for citation mapping
                 "title": result.get("title", "Unknown"),
-                "url": result.get("url", "Unknown"),
-                "source": result.get("source", "Web Search")
+                "url": url,
+                "domain": domain,
+                "snippet": snippet,  # Extractive quote for grounding
+                "source": result.get("source", "Web Search"),
+                "relevance_score": result.get("relevance_score", 0)
             })
         return sources
     
@@ -810,39 +962,24 @@ Queries:"""
         issues_text = "\n".join(f"- {issue}" for issue in validation["issues"])
 
         return f"""
-The following research response has quality issues that need fixing:
+Fix this response to address the issues listed below.
 
-ORIGINAL RESPONSE:
-{original_response[:2000]}...
+ORIGINAL:
+{original_response[:1500]}
 
-ISSUES FOUND:
+ISSUES:
 {issues_text}
 
-USER QUESTION: "{topic}"
+QUESTION: {topic}
 
-SOURCES (numbered for citation):
-{context}
+FIX THESE PROBLEMS:
+1. Replace "Source X says..." with direct claims + citation: "Python leads AI development [1]"
+2. Remove any template text like "[Good]" or "[Your answer]"
+3. Only cite [1], [2], etc. - matching the source numbers provided
+4. Add 5+ actionable bullet points if missing
+5. Do NOT generate a Sources section - that's handled automatically
 
-REWRITE INSTRUCTIONS:
-1. Fix all invalid citation numbers - only use [1] through [{len(context.split('Source '))-1}]
-2. NEVER use "Source X says/states/emphasizes" - instead write: "claim [X]"
-3. Every statistic/percentage MUST have a citation immediately after
-4. Include at least 5 concrete, actionable bullet points
-5. Keep the same factual content, just fix the formatting issues
-
-FORMAT:
-[1-2 sentence direct answer with citations]
-
-• **Action 1**: Do X using Y because Z [1]
-• **Action 2**: Implement A with B for C [2]
-[continue with 5+ actions]
-
----
-**Sources**
-[1] [Title](url) - domain.com
-[continue for all valid sources]
-
-Rewrite the response now, fixing ALL the issues:
+Write the corrected answer now (just the content, no meta-commentary):
 """
 
     def _rewrite_with_validation(self, response: str, source_count: int, topic: str,
@@ -901,16 +1038,22 @@ Keep all factual content accurate but fix formatting, citations, and style issue
     def _finalize_research_output(self, response: str) -> str:
         """
         Post-processing QA gate to clean up LLM output:
-        - Remove template placeholders
-        - Remove duplicate Sources sections
+        - Remove template placeholders and meta-commentary
+        - Remove duplicate/LLM-generated Sources sections (we add real ones from API)
         - Clean up formatting issues
         """
         import re
-        
-        # Patterns that indicate template leakage (case insensitive)
+
+        # Remove meta-commentary and template leakage
         placeholder_patterns = [
+            # Template placeholders
             r'\[Your direct answer.*?\]',
             r'\[Your answer here\]',
+            r'\[Good\]',
+            r'\[Bad\]',
+            r'\[Direct answer citing sources:?\]',
+            r'\[Direct answer\]',
+            # Generic template text
             r'First key point with details\.\.\.?',
             r'Second key point with details\.\.\.?',
             r'Third key point or actionable insight\.\.\.?',
@@ -918,30 +1061,50 @@ Keep all factual content accurate but fix formatting, citations, and style issue
             r'Key insight one with supporting detail\.\.\.?',
             r'Key insight two explaining another aspect\.\.\.?',
             r'Practical recommendation or action item\.\.\.?',
+            # URL placeholders
             r'\[Title\]\(url\)',
-            r'\[Article Title\]\(https://actual-url\.com\)',
-            r'\[Another Article\]\(https://another-url\.com\)',
+            r'\[Title\]\(URL\)',
+            r'\[Article Title\]\(https?://[^)]+\)',
+            r'\[Another Article\]\(https?://[^)]+\)',
+            r'- domain\.com\s*$',
+            # Meta instructions that leaked
+            r'DO NOT include a Sources section.*',
+            r'Sources list handled separately.*',
+            r'Paraphrase release notes by citing.*',
+            r'citing Source \d+ (?:to|for).*',
         ]
-        
+
         cleaned = response
         for pattern in placeholder_patterns:
-            cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
-        
-        # Remove duplicate "Sources" sections (keep only the last one)
-        sources_matches = list(re.finditer(r'\*\*Sources\*\*', cleaned, re.IGNORECASE))
-        if len(sources_matches) > 1:
-            # Keep everything up to the first Sources section, then from the last Sources section
-            first_pos = sources_matches[0].start()
-            last_pos = sources_matches[-1].start()
-            cleaned = cleaned[:first_pos] + cleaned[last_pos:]
-        
+            cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE | re.MULTILINE)
+
+        # Remove LLM-generated Sources sections entirely (we provide real sources from API)
+        # Match: **Sources** or Sources: followed by [1] list items
+        sources_section_pattern = r'\n*-{2,}\s*\n*\*?\*?Sources\*?\*?:?\s*\n(?:\[\d+\].*\n?)*'
+        cleaned = re.sub(sources_section_pattern, '', cleaned, flags=re.IGNORECASE)
+
+        # Also remove standalone Sources headers
+        cleaned = re.sub(r'\n*\*?\*?Sources\*?\*?:?\s*\n(?:\[\d+\].*?\n)*', '', cleaned, flags=re.IGNORECASE)
+
+        # Remove trailing source-like lines at the end
+        cleaned = re.sub(r'\n\[\d+\]\s*-\s*[a-z]+\.com\s*$', '', cleaned, flags=re.IGNORECASE | re.MULTILINE)
+
+        # Clean up "Source X says" patterns that slipped through
+        cleaned = re.sub(r'Source\s+\d+\s+(says|states|mentions|notes|emphasizes)\s+', '', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r'According to Source\s+\d+,?\s*', '', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r'Based on Source\s+\d+,?\s*', '', cleaned, flags=re.IGNORECASE)
+
         # Clean up multiple consecutive newlines
-        cleaned = re.sub(r'\n{4,}', '\n\n\n', cleaned)
-        
+        cleaned = re.sub(r'\n{4,}', '\n\n', cleaned)
+
         # Clean up empty bullet points
         cleaned = re.sub(r'•\s*\n', '', cleaned)
         cleaned = re.sub(r'•\s*$', '', cleaned, flags=re.MULTILINE)
-        
+        cleaned = re.sub(r'-\s*\n', '', cleaned)
+
+        # Clean up stray dashes/separators at end
+        cleaned = re.sub(r'\n-{2,}\s*$', '', cleaned)
+
         return cleaned.strip()
     
     def _score_source(self, source: dict) -> int:

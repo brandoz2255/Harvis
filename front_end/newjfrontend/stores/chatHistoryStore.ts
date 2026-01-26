@@ -1,9 +1,7 @@
 import { create } from 'zustand'
 
-// Use the backend URL from environment, which goes through nginx proxy
-const API_BASE_URL = typeof window !== 'undefined'
-  ? (process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:9000')
-  : ''
+// Use relative paths to go through the nginx proxy
+const API_BASE_URL = ''
 
 export interface ChatSession {
   id: string

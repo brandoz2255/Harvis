@@ -22,9 +22,11 @@ spec:
         app.kubernetes.io/name: harvis-ai
         app.kubernetes.io/component: frontend
     spec:
+      nodeSelector:
+        kubernetes.io/hostname: dulc3-os
       containers:
         - name: frontend
-          image: "localhost:5000/jarvis-frontend:v1.3v6" # {"$imagepolicy": "flux-system:harvis-frontend-prod"}
+          image: "dulc3/jarvis-frontend:v2" # {"$imagepolicy": "flux-system:harvis-frontend-prod"}
           imagePullPolicy: Always
           ports:
             - name: http

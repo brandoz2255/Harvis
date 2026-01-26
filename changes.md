@@ -1298,3 +1298,77 @@ Implemented 6 Quality Gates with automatic validation and rewrite loop:
 6. ✅ Sources capped at 3-8 (top-ranked)
 
 ---
+
+## Date: 2025-01-25 (continued)
+
+### 11. YouTube Video Search Integration (Perplexity-style)
+
+#### Problem:
+Research results lacked visual media context. Users wanted to see relevant YouTube videos alongside text-based search results, similar to Perplexity's interface.
+
+#### Solution Applied:
+Added YouTube video search functionality that displays relevant videos in a horizontal carousel above search results.
+
+#### Backend Changes:
+
+**`python_back_end/research/web_search.py`:**
+- Added `search_youtube_videos()` method using DuckDuckGo video search
+- Added `_extract_youtube_video_id()` helper for thumbnail generation
+- Added `search_with_videos()` for combined web + video search
+- Added `search_and_extract_with_videos()` for full content extraction + videos
+- Video results include: title, url, thumbnail, channel, duration, views, description
+
+**`python_back_end/research/research_agent.py`:**
+- Updated search params to include `max_videos` per depth level (quick: 2, standard: 4, deep: 6)
+- Updated `research_topic()` to use `search_and_extract_with_videos()` 
+- Added `_deduplicate_videos()` helper
+- Result now includes `videos` array
+
+**`python_back_end/main.py`:**
+- Updated `/api/research-chat` endpoint to extract and pass videos
+- Response payload now includes `videos` array (max 6)
+
+#### Frontend Changes:
+
+**`front_end/newjfrontend/components/video-carousel.tsx`:** (New file)
+- `VideoCarousel` component with horizontal scroll and navigation arrows
+- `VideoCard` component with thumbnail, play overlay, duration badge
+- `VideoList` component for compact inline display
+- Responsive design with hover effects and smooth scrolling
+
+**`front_end/newjfrontend/components/chat-message.tsx`:**
+- Added `VideoCarousel` import and integration
+- Added `videos` prop to `ChatMessageProps` interface
+- Videos render above search results in assistant messages
+
+**`front_end/newjfrontend/types/message.ts`:**
+- Added `VideoResult` interface
+- Added `videos` to `Message` interface
+
+**`front_end/newjfrontend/app/page.tsx`:**
+- Extract `videos` from API response
+- Pass `videos` prop to `ChatMessage` component
+
+#### Video Data Structure:
+```typescript
+interface VideoResult {
+  title: string
+  url: string
+  thumbnail: string  // YouTube thumbnail URL
+  channel?: string
+  duration?: string
+  views?: string
+  description?: string
+  published?: string
+}
+```
+
+#### Result/Status:
+- ✅ YouTube videos appear in research chat responses
+- ✅ Horizontal carousel with scroll navigation
+- ✅ Clickable cards open videos in new tab
+- ✅ Thumbnails auto-generated from video IDs
+- ✅ Responsive design for mobile/desktop
+- ✅ Videos filtered to YouTube-only results
+
+---

@@ -1,6 +1,5 @@
-// API client utilities for backend communication
-
-const API_BASE_URL = process.env.NEXT_PUBLIC_BACKEND_URL || ''
+// Use relative paths to go through the nginx proxy
+const API_BASE_URL = ''
 
 export const getAuthHeaders = (): Record<string, string> => {
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null

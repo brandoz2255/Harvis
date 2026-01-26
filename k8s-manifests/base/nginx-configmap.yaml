@@ -8,76 +8,376 @@ metadata:
     app.kubernetes.io/component: nginx
 data:
   nginx.conf: |
-    events {
-        worker_connections 1024;
-    }
+    events {}
 
     http {
-        upstream backend {
-            server harvis-ai-backend:8000;
+        # Global proxy timeout settings - increased for TTS/Whisper processing
+        proxy_connect_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_read_timeout 3600s;
+        send_timeout 3600s;
+        client_body_timeout 3600s;
+
+        # Allow larger body size for image uploads (vision features)
+        client_max_body_size 50m;
+
+        # Keep-alive settings to prevent connection drops
+        keepalive_timeout 3600s;
+        keepalive_requests 1000;
+
+        # Map allowed origins dynamically
+        map $http_origin $cors_origin {
+            default "";
+            "http://harvis.dulc3.tech" "$http_origin";
+            "https://harvis.dulc3.tech" "$http_origin";
+            "http://localhost:9000" "$http_origin";  # Main nginx access point
+            "http://127.0.0.1:9000" "$http_origin";  # Main nginx access point
+            "http://localhost:8000" "$http_origin";
+            "http://localhost:3000" "$http_origin";
+            "http://localhost:3001" "$http_origin";
+            "http://127.0.0.1:8080" "$http_origin";
+            "http://127.0.0.1:3000" "$http_origin";
+            "http://127.0.0.1:3001" "$http_origin";
+            "http://localhost:5173" "$http_origin"; # Vite or dev server support
+            "http://localhost:5678" "$http_origin"; # n8n server
+            "http://127.0.0.1:5678" "$http_origin"; # n8n server
         }
 
-        upstream frontend {
-            server harvis-ai-frontend:3000;
-        }
-
-        # Redirect HTTP to HTTPS
         server {
             listen 80;
-            server_name _;
-            return 301 https://$host$request_uri;
-        }
 
-        server {
-            listen 443 ssl;
-            server_name _;
+            # CORS headers are handled per-location to prevent duplication with backend headers
 
-            # SSL certificate paths (mounted from Kubernetes secret)
-            ssl_certificate /etc/nginx/ssl/tls.crt;
-            ssl_certificate_key /etc/nginx/ssl/tls.key;
-
-            # SSL configuration
-            ssl_protocols TLSv1.2 TLSv1.3;
-            ssl_ciphers HIGH:!aNULL:!MD5;
-            ssl_prefer_server_ciphers on;
-
-            # Frontend routes
-            location / {
-                proxy_pass http://frontend;
-                proxy_set_header Host $host;
-                proxy_set_header X-Real-IP $remote_addr;
-                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-                proxy_set_header X-Forwarded-Proto $scheme;
-            }
-
-            # API routes - proxy to backend (preserve /api/ path)
-            location /api/ {
-                proxy_pass http://backend/api/;
-                proxy_set_header Host $host;
-                proxy_set_header X-Real-IP $remote_addr;
-                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-                proxy_set_header X-Forwarded-Proto $scheme;
-
-                # Timeouts for long-running requests
-                proxy_connect_timeout 300s;
-                proxy_send_timeout 300s;
-                proxy_read_timeout 300s;
-
-                # Handle CORS
-                add_header Access-Control-Allow-Origin *;
-                add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS";
-                add_header Access-Control-Allow-Headers "Authorization, Content-Type";
-
+            # ==== Handle authentication routes (direct to backend) ====
+            location /api/me {
                 if ($request_method = 'OPTIONS') {
+                    add_header 'Access-Control-Allow-Origin' $cors_origin always;
+                    add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS, PUT, DELETE' always;
+                    add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization' always;
+                    add_header 'Access-Control-Allow-Credentials' 'true' always;
                     return 204;
                 }
+                
+                # Hide backend CORS headers and add our own to prevent duplication
+                proxy_hide_header 'Access-Control-Allow-Origin';
+                proxy_hide_header 'Access-Control-Allow-Methods';
+                proxy_hide_header 'Access-Control-Allow-Headers';
+                proxy_hide_header 'Access-Control-Allow-Credentials';
+                proxy_hide_header 'Access-Control-Expose-Headers';
+                
+                add_header 'Access-Control-Allow-Origin' $cors_origin always;
+                add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS, PUT, DELETE' always;
+                add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization' always;
+                add_header 'Access-Control-Allow-Credentials' 'true' always;
+                add_header 'Access-Control-Expose-Headers' 'Content-Length,Content-Range' always;
+
+                proxy_pass http://harvis-ai-merged-backend:8000;
+                proxy_http_version 1.1;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_set_header Authorization $http_authorization;
+                proxy_set_header Cookie $http_cookie;
             }
 
-            # Health check
-            location /health {
-                access_log off;
-                return 200 "healthy\n";
-                add_header Content-Type text/plain;
+            location /api/auth/ {
+                if ($request_method = 'OPTIONS') {
+                    add_header 'Access-Control-Allow-Origin' $cors_origin always;
+                    add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS, PUT, DELETE' always;
+                    add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization' always;
+                    add_header 'Access-Control-Allow-Credentials' 'true' always;
+                    return 204;
+                }
+                
+                # Hide backend CORS headers and add our own to prevent duplication
+                proxy_hide_header 'Access-Control-Allow-Origin';
+                proxy_hide_header 'Access-Control-Allow-Methods';
+                proxy_hide_header 'Access-Control-Allow-Headers';
+                proxy_hide_header 'Access-Control-Allow-Credentials';
+                proxy_hide_header 'Access-Control-Expose-Headers';
+                
+                add_header 'Access-Control-Allow-Origin' $cors_origin always;
+                add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS, PUT, DELETE' always;
+                add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization' always;
+                add_header 'Access-Control-Allow-Credentials' 'true' always;
+                add_header 'Access-Control-Expose-Headers' 'Content-Length,Content-Range' always;
+
+                proxy_pass http://harvis-ai-merged-backend:8000;
+                proxy_http_version 1.1;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_set_header Authorization $http_authorization;
+                proxy_set_header Cookie $http_cookie;
+            }
+
+            location /api/chat-history/ {
+                if ($request_method = 'OPTIONS') {
+                    add_header 'Access-Control-Allow-Origin' $cors_origin always;
+                    add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS, PUT, DELETE' always;
+                    add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization' always;
+                    add_header 'Access-Control-Allow-Credentials' 'true' always;
+                    return 204;
+                }
+                
+                # Hide backend CORS headers and add our own to prevent duplication
+                proxy_hide_header 'Access-Control-Allow-Origin';
+                proxy_hide_header 'Access-Control-Allow-Methods';
+                proxy_hide_header 'Access-Control-Allow-Headers';
+                proxy_hide_header 'Access-Control-Allow-Credentials';
+                proxy_hide_header 'Access-Expose-Headers';
+                
+                add_header 'Access-Control-Allow-Origin' $cors_origin always;
+                add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS, PUT, DELETE' always;
+                add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization' always;
+                add_header 'Access-Control-Allow-Credentials' 'true' always;
+                add_header 'Access-Control-Expose-Headers' 'Content-Length,Content-Range' always;
+
+                proxy_pass http://harvis-ai-merged-backend:8000;
+                proxy_http_version 1.1;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_set_header Authorization $http_authorization;
+                proxy_set_header Cookie $http_cookie;
+            }
+
+            # ==== Handle frontend API routes ====
+            location /api/n8n-stats {
+                proxy_pass http://harvis-ai-frontend:3000;
+                proxy_http_version 1.1;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+            }
+
+            location /api/n8n-workflows {
+                proxy_pass http://harvis-ai-frontend:3000;
+                proxy_http_version 1.1;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+            }
+
+            location /api/ollama-models {
+                if ($request_method = 'OPTIONS') {
+                    add_header 'Access-Control-Allow-Origin' $cors_origin always;
+                    add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS, PUT, DELETE' always;
+                    add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization' always;
+                    add_header 'Access-Control-Allow-Credentials' 'true' always;
+                    add_header 'Access-Control-Expose-Headers' 'Content-Length,Content-Range' always;
+                    return 204;
+                }
+
+                proxy_pass http://harvis-ai-merged-backend:8000;
+                proxy_http_version 1.1;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_set_header Authorization $http_authorization;
+            }
+
+            # Vibecoding WebSocket terminal (direct to backend)
+            location ~ ^/api/vibecoding/container/([^/]+)/terminal$ {
+                proxy_pass http://harvis-ai-merged-backend:8000;
+                proxy_http_version 1.1;
+                proxy_set_header Upgrade $http_upgrade;
+                proxy_set_header Connection "upgrade";
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_read_timeout 86400;
+            }
+
+            # Vibecoding API routes (must go through frontend for JWT processing)
+            location /api/vibecoding/ {
+                proxy_pass http://harvis-ai-frontend:3000;
+                proxy_http_version 1.1;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+            }
+
+            # ==== Handle frontend ====
+            location / {
+                proxy_pass http://harvis-ai-frontend:3000;
+                proxy_http_version 1.1;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+            }
+
+            # ==== Handle research endpoints with extended timeouts ====
+            location ~ ^/api/(research|research-chat|fact-check|comparative-research|web-search|research/) {
+                if ($request_method = 'OPTIONS') {
+                    add_header 'Access-Control-Allow-Origin' $cors_origin always;
+                    add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS, PUT, DELETE' always;
+                    add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization' always;
+                    add_header 'Access-Control-Allow-Credentials' 'true' always;
+                    add_header 'Access-Control-Expose-Headers' 'Content-Length,Content-Range' always;
+                    return 204;
+                }
+
+                proxy_pass http://harvis-ai-merged-backend:8000;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_set_header Authorization $http_authorization;
+                proxy_set_header Cookie $http_cookie;
+                
+                # Extended timeouts for research processing
+                proxy_connect_timeout 600s;
+                proxy_send_timeout 600s;
+                proxy_read_timeout 600s;
+            }
+
+            # ==== Handle chat endpoint with extended timeout for TTS ====
+            location /api/chat {
+                if ($request_method = 'OPTIONS') {
+                    add_header 'Access-Control-Allow-Origin' $cors_origin always;
+                    add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS, PUT, DELETE' always;
+                    add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization' always;
+                    add_header 'Access-Control-Allow-Credentials' 'true' always;
+                    add_header 'Access-Control-Expose-Headers' 'Content-Length,Content-Range' always;
+                    return 204;
+                }
+
+                # Hide CORS headers from backend to prevent duplication
+                proxy_hide_header 'Access-Control-Allow-Origin';
+                proxy_hide_header 'Access-Control-Allow-Methods';
+                proxy_hide_header 'Access-Control-Allow-Headers';
+                proxy_hide_header 'Access-Control-Allow-Credentials';
+                proxy_hide_header 'Access-Control-Expose-Headers';
+
+                add_header 'Access-Control-Allow-Origin' $cors_origin always;
+                add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS, PUT, DELETE' always;
+                add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization' always;
+                add_header 'Access-Control-Allow-Credentials' 'true' always;
+                add_header 'Access-Control-Expose-Headers' 'Content-Length,Content-Range' always;
+
+                proxy_pass http://harvis-ai-merged-backend:8000;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_set_header Authorization $http_authorization;
+                proxy_set_header Cookie $http_cookie;
+
+                # Extended timeouts for TTS model loading (sequential processing can take time)
+                proxy_connect_timeout 3600s;
+                proxy_send_timeout 3600s;
+                proxy_read_timeout 3600s;
+            }
+
+            # ==== Handle mic-chat endpoint with extended timeout for Whisper + LLM + TTS ====
+            location /api/mic-chat {
+                if ($request_method = 'OPTIONS') {
+                    add_header 'Access-Control-Allow-Origin' $cors_origin always;
+                    add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS, PUT, DELETE' always;
+                    add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization' always;
+                    add_header 'Access-Control-Allow-Credentials' 'true' always;
+                    add_header 'Access-Control-Expose-Headers' 'Content-Length,Content-Range' always;
+                    return 204;
+                }
+
+                # Hide CORS headers from backend to prevent duplication
+                proxy_hide_header 'Access-Control-Allow-Origin';
+                proxy_hide_header 'Access-Control-Allow-Methods';
+                proxy_hide_header 'Access-Control-Allow-Headers';
+                proxy_hide_header 'Access-Control-Allow-Credentials';
+                proxy_hide_header 'Access-Control-Expose-Headers';
+
+                add_header 'Access-Control-Allow-Origin' $cors_origin always;
+                add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS, PUT, DELETE' always;
+                add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization' always;
+                add_header 'Access-Control-Allow-Credentials' 'true' always;
+                add_header 'Access-Control-Expose-Headers' 'Content-Length,Content-Range' always;
+
+                proxy_pass http://harvis-ai-merged-backend:8000;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_set_header Authorization $http_authorization;
+                proxy_set_header Cookie $http_cookie;
+
+                # Extended timeouts for full voice pipeline
+                proxy_connect_timeout 3600s;
+                proxy_send_timeout 3600s;
+                proxy_read_timeout 3600s;
+            }
+
+            # ==== Handle FastAPI backend ====
+            location /api/ {
+                if ($request_method = 'OPTIONS') {
+                    add_header 'Access-Control-Allow-Origin' $cors_origin always;
+                    add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS, PUT, DELETE' always;
+                    add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization' always;
+                    add_header 'Access-Control-Allow-Credentials' 'true' always;
+                    add_header 'Access-Control-Expose-Headers' 'Content-Length,Content-Range' always;
+                    return 204;
+                }
+
+                # Hide CORS headers from backend to prevent duplication
+                proxy_hide_header 'Access-Control-Allow-Origin';
+                proxy_hide_header 'Access-Control-Allow-Methods';
+                proxy_hide_header 'Access-Control-Allow-Headers';
+                proxy_hide_header 'Access-Control-Allow-Credentials';
+                proxy_hide_header 'Access-Control-Expose-Headers';
+
+                # Add CORS headers for actual requests (after hiding backend's)
+                add_header 'Access-Control-Allow-Origin' $cors_origin always;
+                add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS, PUT, DELETE' always;
+                add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization' always;
+                add_header 'Access-Control-Allow-Credentials' 'true' always;
+                add_header 'Access-Control-Expose-Headers' 'Content-Length,Content-Range' always;
+
+                proxy_pass http://harvis-ai-merged-backend:8000;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_set_header Authorization $http_authorization;
+                proxy_set_header Cookie $http_cookie;
+            }
+
+            # ==== Serve audio files from temp directory ====
+            location /audio/ {
+                alias /tmp/;
+                add_header Content-Type application/octet-stream;
+                autoindex on;
+            }
+
+            # ==== Handle n8n requests ====
+            location /n8n/ {
+                if ($request_method = 'OPTIONS') {
+                    add_header 'Access-Control-Allow-Origin' $cors_origin always;
+                    add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS, PUT, DELETE' always;
+                    add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization,X-N8N-API-KEY' always;
+                    add_header 'Access-Control-Allow-Credentials' 'true' always;
+                    add_header 'Access-Control-Expose-Headers' 'Content-Length,Content-Range' always;
+                    return 204;
+                }
+
+                proxy_pass http://harvis-ai-n8n:5678/;
+                proxy_http_version 1.1;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_set_header Authorization $http_authorization;
+                proxy_set_header X-N8N-API-KEY $http_x_n8n_api_key;
+                proxy_set_header Cookie $http_cookie;
             }
         }
     }

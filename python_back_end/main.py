@@ -29,6 +29,7 @@ from vison_models.llm_connector import query_qwen, query_llm, load_qwen_model, u
 # Import vibecoding routers
 from vibecoding import sessions_router, models_router, execution_router, files_router, commands_router, containers_router
 from vibecoding.core import initialize_vibe_agent
+from file_processing import extract_text_from_file
 
 from pydantic import BaseModel
 import torch, soundfile as sf
@@ -446,6 +447,8 @@ async def lifespan(app: FastAPI):
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        "http://harvis.dulc3.tech",
+        "https://harvis.dulc3.tech",
         "http://localhost:9000",   # Main nginx proxy access point
         "http://127.0.0.1:9000",   # Main nginx proxy access point
         "http://localhost:3000",
@@ -564,6 +567,7 @@ class ChatRequest(BaseModel):
     model: str = DEFAULT_MODEL
     session_id: Optional[str] = None  # Chat session ID for history persistence
     audio_prompt: Optional[str] = None  # overrides HARVIS_VOICE_PATH if provided
+    attachments: Optional[List[Dict[str, Any]]] = None  # List of file attachments
     exaggeration: float = 0.5
     temperature: float = 0.8
     cfg_weight: float = 0.5
@@ -1058,28 +1062,61 @@ async def chat(req: ChatRequest, request: Request, current_user: UserResponse = 
     try:
         logger.info(f"Chat endpoint reached - User: {current_user.username}, Message: {req.message[:50]}...")
         
-        # ── 0. Auto-Research Detection (Perplexity-style) ──────────────────────────────
-        # Check if this query should automatically trigger web research
+        # ── 0. Process Attachments FIRST so content is available for research ──────────
+        # Add current user message to history
+        current_message_content = req.message
+        
+        # Process attachments if present
+        if req.attachments:
+            logger.info(f"Processing {len(req.attachments)} attachments")
+            attachment_text = []
+            for attachment in req.attachments:
+                # Skip images as they are handled by vision-chat endpoint or vision models
+                if attachment.get('type') == 'image':
+                    continue
+                    
+                file_name = attachment.get('name', 'Unknown File')
+                file_type = attachment.get('mimeType', '') or attachment.get('type', '')
+                file_data = attachment.get('data', '')
+                
+                if file_data:
+                    logger.info(f"Extracting text from attachment: {file_name} ({file_type})")
+                    extracted = extract_text_from_file(file_data, file_name if not file_type else file_type)
+                    if extracted:
+                        attachment_text.append(f"\n--- Content of {file_name} ---\n{extracted}\n--- End of {file_name} ---\n")
+            
+            if attachment_text:
+                current_message_content += "\n" + "\n".join(attachment_text)
+                logger.info(f"Added {len(attachment_text)} file contents to message")
+
+        # ── 1. Auto-Research Detection (Perplexity-style) ──────────────────────────────
+        # Check if this query (with file content) should automatically trigger web research
+        # We pass the original message for detection to avoid false positives from file content?
+        # Actually, if the file content prompts research, we should do it. But usually the user query drives it.
+        # Let's keep checking req.message for now, but pass current_message_content to agent.
         if should_auto_research(req.message):
             logger.info("🔍 Auto-research triggered, redirecting to research pipeline")
             try:
                 # Use the research agent for this query
                 from agent_research import research_agent
-                research_result = await run_in_threadpool(research_agent, req.message, req.model, use_advanced=False)
+                # Use current_message_content which includes file text
+                research_result = await run_in_threadpool(research_agent, current_message_content, req.model, use_advanced=False)
                 
                 if "error" not in research_result:
                     analysis = research_result.get("analysis", "")
                     sources = research_result.get("sources", [])
-                    
+                    videos = research_result.get("videos", [])  # YouTube videos
+
                     # Build response with research data
                     response_data = {
                         "response": analysis,
                         "history": req.history + [
-                            {"role": "user", "content": req.message},
+                            {"role": "user", "content": current_message_content},
                             {"role": "assistant", "content": analysis}
                         ],
                         "auto_researched": True,
                         "sources": sources[:5],
+                        "videos": videos[:6],  # Include YouTube videos
                         "session_id": req.session_id
                     }
                     
@@ -1090,7 +1127,7 @@ async def chat(req: ChatRequest, request: Request, current_user: UserResponse = 
                                 user_id=current_user.id,
                                 session_id=req.session_id,
                                 role="user",
-                                content=req.message,
+                                content=current_message_content,
                                 model_used=req.model,
                                 input_type="text"
                             )
@@ -1139,8 +1176,9 @@ async def chat(req: ChatRequest, request: Request, current_user: UserResponse = 
             history = req.history
             logger.info("No session provided, using request history")
         
-        # Add current user message to history
-        history = history + [{"role": "user", "content": req.message}]
+        # ── 2. Add current user message to history (standard flow) ──────────────────────
+        # We already computed current_message_content above
+        history = history + [{"role": "user", "content": current_message_content}]
         response_text: str
 
         # ── 2. Browser automation branch -------------------------------------------------
@@ -1196,7 +1234,7 @@ async def chat(req: ChatRequest, request: Request, current_user: UserResponse = 
                 messages.append({"role": msg["role"], "content": msg["content"]})
             
             # Add current user message
-            messages.append({"role": "user", "content": req.message})
+            messages.append({"role": "user", "content": current_message_content})
             
             payload = {
                 "model": req.model,
@@ -1261,7 +1299,7 @@ async def chat(req: ChatRequest, request: Request, current_user: UserResponse = 
                     user_id=current_user.id,
                     session_id=session_id,
                     role="user",
-                    content=req.message,
+                    content=current_message_content,
                     model_used=req.model,
                     input_type="text"
                 )
@@ -1297,7 +1335,7 @@ async def chat(req: ChatRequest, request: Request, current_user: UserResponse = 
                     user_id=current_user.id,
                     session_id=session_id,
                     role="user",
-                    content=req.message,
+                    content=current_message_content,
                     model_used=req.model,
                     input_type="text"
                 )
@@ -2241,30 +2279,35 @@ async def research_chat(req: Union[ResearchChatRequest, AdvancedResearchRequest]
             response_content = ""
             sources = []
             sources_found = 0
-            
+            videos = []  # YouTube videos for Perplexity-style display
+
             try:
                 if use_advanced:
                     # Advanced research
                     yield f"data: {json.dumps({'status': 'researching', 'detail': 'Running advanced research pipeline'})}\n\n"
                     response_data = await async_research_agent(
-                        query=req.message, 
+                        query=req.message,
                         model=req.model,
                         enable_streaming=False  # We handle streaming at this level
                     )
                     response_content = response_data if isinstance(response_data, str) else str(response_data)
                     sources_found = "embedded"
+                    # Try to get videos from advanced research if available
+                    if isinstance(response_data, dict):
+                        videos = response_data.get("videos", [])
                 else:
                     # Standard research
                     yield f"data: {json.dumps({'status': 'researching', 'detail': 'Analyzing search results'})}\n\n"
                     response_data = await run_in_threadpool(research_agent, req.message, req.model, use_advanced=False)
-                    
+
                     if "error" in response_data:
                         response_content = f"Research Error: {response_data['error']}"
                     else:
                         analysis = response_data.get("analysis", "No analysis available")
                         sources = response_data.get("sources", [])
                         sources_found = response_data.get("sources_found", 0)
-                        
+                        videos = response_data.get("videos", [])  # Get YouTube videos
+
                         response_content = f"{analysis}\n\n"
                         if sources:
                             response_content += f"**Sources ({sources_found} found):**\n"
@@ -2298,9 +2341,10 @@ async def research_chat(req: Union[ResearchChatRequest, AdvancedResearchRequest]
                 "response": final_research_answer,
                 "final_answer": final_research_answer,
                 "sources": sources[:5] if sources else [],
-                "sources_found": sources_found
+                "sources_found": sources_found,
+                "videos": videos[:6] if videos else []  # Include YouTube videos (max 6)
             }
-            
+
             if research_reasoning:
                 result_payload["reasoning"] = research_reasoning
                 

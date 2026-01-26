@@ -28,6 +28,7 @@ data:
   # Frontend configuration
   NODE_ENV: "production"
   NEXT_TELEMETRY_DISABLED: "1"
+  NEXT_PUBLIC_BACKEND_URL: ""
 ---
 apiVersion: v1
 kind: ConfigMap

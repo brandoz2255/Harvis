@@ -1,6 +1,6 @@
 # The Harvis AI Project
 
-![Harvis AI Interface](assets/images/swappy-20250713-001120.png)
+![Harvis AI Interface](assets/images/harvis_dashboard_2026.png)
 
 The Harvis AI Project is a sophisticated, voice-activated AI assistant designed to be a proactive and interactive partner on your computer. It combines the power of large language models, voice synthesis, and system automation to provide a seamless interface for controlling your digital environment, retrieving information, and assisting with various tasks.
 
@@ -320,6 +320,15 @@ docker-compose logs -f [service] # View service logs
 - **Git strategy:** Feature branches from `main` with conventional commits
 
 ## Recent Improvements & Changes
+
+
+### Latest Updates (2026-01-26)
+
+#### Core Improvements
+- ✅ **Research Agent**: Significantly improved output quality for deep research tasks, utilizing the new "Cards" UI.
+- ✅ **UI Redesign**: Complete visual overhaul with a new "Cards" layout for better information density and aesthetics.
+- ✅ **Streaming Responses**: Implemented true Server-Sent Events (SSE) streaming for chat and voice, resolving Nginx 499 timeouts.
+- ✅ **User Experience**: Fixed independent scrolling issues for the sidebar and main chat area.
 
 ### Latest Updates (2025-01-17)
 

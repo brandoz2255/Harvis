@@ -19,6 +19,7 @@ import { Button } from "@/components/ui/button"
 import { VoicePlayer } from "@/components/voice-player"
 import { AudioWaveform } from "@/components/ui/audio-waveform"
 import { ReasoningPanel } from "@/components/reasoning-panel"
+import { VideoCarousel, type VideoResult } from "@/components/video-carousel"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { Highlight, themes } from "prism-react-renderer"
@@ -71,6 +72,7 @@ interface ChatMessageProps {
     snippet: string
   }>
   searchQuery?: string
+  videos?: VideoResult[]  // YouTube videos from research
   audioUrl?: string
   reasoning?: string
   imageUrl?: string
@@ -156,6 +158,7 @@ export function ChatMessage({
   codeBlocks,
   searchResults,
   searchQuery,
+  videos,
   audioUrl,
   reasoning: propReasoning,
   imageUrl,
@@ -347,35 +350,66 @@ export function ChatMessage({
           </div>
         ))}
 
-        {/* Search Results */}
+        {/* Video Carousel - Perplexity-style */}
+        {videos && videos.length > 0 && (
+          <VideoCarousel videos={videos} className="mt-3" />
+        )}
+
+        {/* Search Results - Perplexity-style source cards */}
         {searchResults && searchResults.length > 0 && (
           <div className="w-full space-y-2">
-            {searchQuery && (
-              <p className="text-xs text-muted-foreground">
-                Search results for: {searchQuery}
-              </p>
-            )}
-            {searchResults.map((result, index) => (
-              <a
-                key={`search-${index}`}
-                href={result.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="block rounded-lg border border-border bg-card p-3 transition-colors hover:bg-accent"
-              >
-                <div className="flex items-start justify-between gap-2">
-                  <div className="flex-1">
-                    <h4 className="text-sm font-medium text-foreground line-clamp-1">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                Sources
+              </span>
+              <span className="text-xs text-muted-foreground">
+                ({searchResults.length})
+              </span>
+            </div>
+            <div className="grid gap-2 sm:grid-cols-2">
+              {searchResults.map((result, index) => {
+                // Extract domain from URL for display
+                const domain = (() => {
+                  try {
+                    const url = new URL(result.url)
+                    return url.hostname.replace('www.', '')
+                  } catch {
+                    return result.url
+                  }
+                })()
+
+                return (
+                  <a
+                    key={`search-${index}`}
+                    href={result.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="group/card flex flex-col rounded-lg border border-border bg-card/50 p-3 transition-all hover:bg-accent hover:border-primary/30"
+                  >
+                    {/* Source number + domain */}
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="flex h-5 w-5 items-center justify-center rounded bg-primary/20 text-[10px] font-bold text-primary">
+                        {index + 1}
+                      </span>
+                      <span className="text-xs text-muted-foreground truncate">
+                        {domain}
+                      </span>
+                      <ExternalLink className="h-3 w-3 shrink-0 text-muted-foreground opacity-0 group-hover/card:opacity-100 transition-opacity ml-auto" />
+                    </div>
+                    {/* Title */}
+                    <h4 className="text-sm font-medium text-foreground line-clamp-2 leading-snug">
                       {result.title}
                     </h4>
-                    <p className="mt-1 text-xs text-muted-foreground line-clamp-2">
-                      {result.snippet}
-                    </p>
-                  </div>
-                  <ExternalLink className="h-4 w-4 shrink-0 text-muted-foreground" />
-                </div>
-              </a>
-            ))}
+                    {/* Snippet */}
+                    {result.snippet && (
+                      <p className="mt-1 text-xs text-muted-foreground line-clamp-2">
+                        {result.snippet}
+                      </p>
+                    )}
+                  </a>
+                )
+              })}
+            </div>
           </div>
         )}
 

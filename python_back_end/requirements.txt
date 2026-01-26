@@ -59,3 +59,4 @@ rank-bm25>=0.2.2
 youtube-transcript-api>=0.6.0
 pypdf>=3.0.0
 python-magic>=0.4.27
+python-docx

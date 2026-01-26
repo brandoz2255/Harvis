@@ -107,41 +107,64 @@ export default function ChatPage() {
   const { fetchWithRetry } = useApiWithRetry()
 
   const handleSendMessage = async (input: string | MessageObject) => {
-    // Handle voice/image message objects
-    if (typeof input !== 'string') {
-      const msgObj = input as MessageObject
+    let messageContent = ""
+    let messageAttachments: Attachment[] = []
 
-      // Add user message to display
+    // 1. Unify input handling and optimistic updates
+    if (typeof input === 'string') {
+      messageContent = input
+      if (!messageContent.trim()) return
+    } else {
+      const msgObj = input as MessageObject
+      messageContent = msgObj.content
+      messageAttachments = msgObj.attachments || []
+
+      // Add user message to display immediately for objects (files/images)
       if (!isDuplicateMessage(msgObj as Message, messages)) {
         setMessages((prev) => [...prev, msgObj as Message])
       }
+    }
 
-      // If it has attachments with images, send to vision endpoint
-      if (msgObj.attachments && msgObj.attachments.length > 0) {
-        const imageAttachment = msgObj.attachments.find(a => a.type === 'image')
-        if (imageAttachment && isVisionModel(selectedModel || '')) {
-          await handleVisionMessage(msgObj.content, imageAttachment.data, msgObj.attachments)
-        }
+    if (isLoading) return
+
+    // 2. Handle Vision (Images) - Specific branch
+    // If it has images AND a vision model is selected, use vision endpoint 
+    const hasImages = messageAttachments.some(a => a.type === 'image')
+    if (hasImages && isVisionModel(selectedModel || '')) {
+      // Vision logic (already adds its own messages to state?)
+      // The current handleVisionMessage adds assistant response but NOT user message?
+      // Wait, standard handleSendMessage "string" path adds user message. 
+      // The "object" path above adds it.
+      // So we are good on user message.
+      const imageAttachment = messageAttachments.find(a => a.type === 'image')
+      if (imageAttachment) {
+        await handleVisionMessage(messageContent, imageAttachment.data, messageAttachments)
       }
       return
     }
 
-    // Handle text input
-    if (!input.trim() || isLoading) return
+    // 3. Normal Chat (Text + Files)
 
     const tempId = uuidv4()
 
-    // Create optimistic user message
-    const userMessage: Message = {
-      tempId,
-      role: "user",
-      content: input,
-      timestamp: new Date(),
-      model: selectedModel,
-      status: "pending",
+    // If it was a string input, we haven't added it to state yet.
+    if (typeof input === 'string') {
+      const userMessage: Message = {
+        tempId,
+        role: "user",
+        content: messageContent,
+        timestamp: new Date(),
+        model: selectedModel,
+        status: "pending",
+      }
+      setMessages((prev) => [...prev, userMessage])
+    } else {
+      // If it was an object, we already added it, but let's treat it as pending
+      // (The optimistic add above doesn't set status usually? MessageObject doesn't have status)
+      // Actually MessageObject (from types) doesn't have status. Message does.
+      // We might want to update the status of the last message if needed, but let's leave it simple.
     }
 
-    setMessages((prev) => [...prev, userMessage])
     setIsLoading(true)
 
     // Create session if none exists
@@ -163,7 +186,7 @@ export default function ChatPage() {
 
       // Build request payload
       const requestBody: any = {
-        message: input,
+        message: messageContent,
         history: messages.map(m => ({
           role: m.role,
           content: m.content
@@ -171,7 +194,8 @@ export default function ChatPage() {
         model: selectedModel || 'mistral',
         session_id: sessionId || null,
         low_vram: lowVram,
-        text_only: textOnly
+        text_only: textOnly,
+        attachments: messageAttachments.length > 0 ? messageAttachments : undefined
       }
 
       // Add research mode parameters
@@ -197,12 +221,14 @@ export default function ChatPage() {
         maxRetries: 0
       })
 
-      // Update user message to sent
-      setMessages((prev) =>
-        prev.map((msg) =>
-          msg.tempId === tempId ? { ...msg, status: "sent" } : msg
+      // Update user message to sent (if we had a tempId)
+      if (typeof input === 'string') {
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.tempId === tempId ? { ...msg, status: "sent" } : msg
+          )
         )
-      )
+      }
 
       // Create assistant message with all response data
       const assistantContent = data.final_answer ||
@@ -222,6 +248,7 @@ export default function ChatPage() {
         reasoning: data.reasoning,
         searchResults: data.search_results || data.sources,  // Handle both formats
         searchQuery: data.searchQuery,
+        videos: data.videos,  // YouTube videos from research
         autoResearched: data.auto_researched,  // Perplexity-style auto-research indicator
       }
 
@@ -231,11 +258,16 @@ export default function ChatPage() {
     } catch (error) {
       console.error("Chat error:", error)
       // Mark message as failed
-      setMessages((prev) =>
-        prev.map((msg) =>
-          msg.tempId === tempId ? { ...msg, status: "failed" } : msg
+      if (typeof input === 'string') {
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.tempId === tempId ? { ...msg, status: "failed" } : msg
+          )
         )
-      )
+      } else {
+        // Add error annotation to the last message? Or just alert?
+        // For now, let's just log it. The UI doesn't track status for input objects well yet.
+      }
     } finally {
       setIsLoading(false)
     }
@@ -465,6 +497,7 @@ export default function ChatPage() {
                   codeBlocks={message.codeBlocks}
                   searchResults={message.searchResults}
                   searchQuery={message.searchQuery}
+                  videos={message.videos}
                   audioUrl={message.audioUrl}
                   reasoning={message.reasoning}
                   imageUrl={message.imageUrl}

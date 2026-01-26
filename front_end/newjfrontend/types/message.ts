@@ -5,6 +5,17 @@ export interface SearchResult {
   source?: string
 }
 
+export interface VideoResult {
+  title: string
+  url: string
+  thumbnail: string
+  channel?: string
+  duration?: string
+  views?: string
+  description?: string
+  published?: string
+}
+
 export interface ImageAttachment {
   id: string
   type: 'image'
@@ -47,6 +58,7 @@ export interface Message {
   reasoning?: string
   searchResults?: SearchResult[]
   searchQuery?: string
+  videos?: VideoResult[]  // YouTube videos from research
   inputType?: 'text' | 'voice' | 'screen' | 'image' | 'file'
   codeBlocks?: Array<{
     language: string
