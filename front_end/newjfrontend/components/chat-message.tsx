@@ -21,6 +21,7 @@ import { AudioWaveform } from "@/components/ui/audio-waveform"
 import { ReasoningPanel } from "@/components/reasoning-panel"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
+import { Highlight, themes } from "prism-react-renderer"
 
 // Utility to separate thinking/reasoning from final answer
 // Supports both <think>...</think> and <thinking>...</thinking> formats
@@ -74,85 +75,76 @@ interface ChatMessageProps {
   reasoning?: string
 }
 
-// Simple syntax highlighter for code
-function highlightCode(code: string, language: string): React.ReactNode[] {
-  const lines = code.split('\n')
+// Language mapping for prism-react-renderer
+const languageMap: Record<string, string> = {
+  js: 'javascript',
+  ts: 'typescript',
+  jsx: 'jsx',
+  tsx: 'tsx',
+  py: 'python',
+  rb: 'ruby',
+  yml: 'yaml',
+  sh: 'bash',
+  shell: 'bash',
+  zsh: 'bash',
+  dockerfile: 'docker',
+  md: 'markdown',
+}
 
-  const patterns: Record<string, { pattern: RegExp; className: string }[]> = {
-    default: [
-      // Strings (double and single quotes)
-      { pattern: /(["'`])(?:(?!\1)[^\\]|\\.)*\1/g, className: 'text-green-400' },
-      // Comments
-      { pattern: /(\/\/.*$|\/\*[\s\S]*?\*\/|#.*$)/gm, className: 'text-muted-foreground italic' },
-      // Numbers
-      { pattern: /\b(\d+\.?\d*)\b/g, className: 'text-orange-400' },
-      // Keywords
-      { pattern: /\b(const|let|var|function|return|if|else|for|while|class|import|export|from|default|async|await|try|catch|throw|new|this|super|extends|implements|interface|type|public|private|protected|static|readonly|enum|namespace|module|declare|as|is|in|of|typeof|instanceof|void|null|undefined|true|false)\b/g, className: 'text-purple-400' },
-      // Function calls
-      { pattern: /\b([a-zA-Z_$][\w$]*)\s*(?=\()/g, className: 'text-cyan-400' },
-      // JSX tags
-      { pattern: /(<\/?[A-Z][a-zA-Z0-9]*|<\/?[a-z][a-zA-Z0-9]*)/g, className: 'text-rose-400' },
-      // Operators
-      { pattern: /(=>|===|!==|==|!=|<=|>=|&&|\|\||[+\-*/%=<>!&|^~?:])/g, className: 'text-yellow-400' },
-      // Properties/attributes
-      { pattern: /\b([a-zA-Z_$][\w$]*)\s*(?=:)/g, className: 'text-blue-400' },
-      // Types (PascalCase)
-      { pattern: /\b([A-Z][a-zA-Z0-9]*)\b/g, className: 'text-teal-400' },
-    ]
+// Code block component with prism-react-renderer
+function CodeBlock({ code, language }: { code: string; language: string }) {
+  const [copied, setCopied] = useState(false)
+  const normalizedLang = languageMap[language.toLowerCase()] || language.toLowerCase()
+
+  const handleCopy = async () => {
+    await navigator.clipboard.writeText(code)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
   }
 
-  const rules = patterns[language] || patterns.default
-
-  return lines.map((line, lineIndex) => {
-    if (!line.trim()) {
-      return <span key={lineIndex}>{'\n'}</span>
-    }
-
-    // Find all matches with their positions
-    const matches: Array<{ start: number; end: number; text: string; className: string }> = []
-
-    for (const rule of rules) {
-      const regex = new RegExp(rule.pattern.source, rule.pattern.flags)
-      let match
-      while ((match = regex.exec(line)) !== null) {
-        matches.push({
-          start: match.index,
-          end: match.index + match[0].length,
-          text: match[0],
-          className: rule.className
-        })
-      }
-    }
-
-    // Sort by position and filter overlapping (keep first match)
-    matches.sort((a, b) => a.start - b.start)
-    const filteredMatches: typeof matches = []
-    let lastEnd = 0
-    for (const m of matches) {
-      if (m.start >= lastEnd) {
-        filteredMatches.push(m)
-        lastEnd = m.end
-      }
-    }
-
-    // Build the highlighted line
-    const parts: React.ReactNode[] = []
-    let currentIndex = 0
-
-    for (const m of filteredMatches) {
-      if (m.start > currentIndex) {
-        parts.push(<span key={`${lineIndex}-${currentIndex}`}>{line.slice(currentIndex, m.start)}</span>)
-      }
-      parts.push(<span key={`${lineIndex}-${m.start}`} className={m.className}>{m.text}</span>)
-      currentIndex = m.end
-    }
-
-    if (currentIndex < line.length) {
-      parts.push(<span key={`${lineIndex}-end`}>{line.slice(currentIndex)}</span>)
-    }
-
-    return <span key={lineIndex}>{parts}{lineIndex < lines.length - 1 ? '\n' : ''}</span>
-  })
+  return (
+    <div className="my-3 overflow-hidden rounded-xl border border-violet-500/20 bg-gradient-to-br from-slate-900 via-slate-900 to-violet-950/30">
+      <div className="flex items-center justify-between border-b border-violet-500/20 bg-slate-800/50 px-4 py-2">
+        <div className="flex items-center gap-2">
+          <div className="flex gap-1.5">
+            <div className="h-3 w-3 rounded-full bg-red-500/80" />
+            <div className="h-3 w-3 rounded-full bg-yellow-500/80" />
+            <div className="h-3 w-3 rounded-full bg-green-500/80" />
+          </div>
+          <span className="text-xs font-medium text-violet-300/80">{language}</span>
+        </div>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={handleCopy}
+          className="h-6 text-xs text-violet-300/70 hover:text-violet-200 hover:bg-violet-500/20"
+        >
+          {copied ? <Check className="mr-1 h-3 w-3 text-green-400" /> : <Copy className="mr-1 h-3 w-3" />}
+          {copied ? 'Copied!' : 'Copy'}
+        </Button>
+      </div>
+      <Highlight theme={themes.nightOwl} code={code} language={normalizedLang}>
+        {({ className, style, tokens, getLineProps, getTokenProps }) => (
+          <pre className="overflow-x-auto p-4" style={{ ...style, background: '#0d1117', margin: 0 }}>
+            <code className="text-sm font-mono leading-relaxed">
+              {tokens.map((line, i) => (
+                <div key={i} {...getLineProps({ line })} className="table-row">
+                  <span className="table-cell pr-4 text-right text-xs text-slate-600 select-none">
+                    {i + 1}
+                  </span>
+                  <span className="table-cell">
+                    {line.map((token, key) => (
+                      <span key={key} {...getTokenProps({ token })} />
+                    ))}
+                  </span>
+                </div>
+              ))}
+            </code>
+          </pre>
+        )}
+      </Highlight>
+    </div>
+  )
 }
 
 export function ChatMessage({
@@ -184,9 +176,6 @@ export function ChatMessage({
     setTimeout(() => setCopied(false), 2000)
   }
 
-  const handleCopyCode = async (code: string) => {
-    await navigator.clipboard.writeText(code)
-  }
 
   return (
     <div
@@ -220,34 +209,23 @@ export function ChatMessage({
               <ReactMarkdown
                 remarkPlugins={[remarkGfm]}
                 components={{
-                  // Style code blocks
+                  // Style code blocks with syntax highlighting using prism-react-renderer
                   code({ node, inline, className, children, ...props }: any) {
                     const match = /language-(\w+)/.exec(className || '')
+                    const codeString = String(children).replace(/\n$/, '')
+
                     if (!inline && match) {
-                      return (
-                        <div className="my-2 overflow-hidden rounded-lg border border-border bg-background">
-                          <div className="flex items-center justify-between border-b border-border bg-card px-3 py-1">
-                            <span className="text-xs text-muted-foreground">{match[1]}</span>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => navigator.clipboard.writeText(String(children))}
-                              className="h-6 text-xs"
-                            >
-                              <Copy className="mr-1 h-3 w-3" />
-                              Copy
-                            </Button>
-                          </div>
-                          <pre className="overflow-x-auto p-3 bg-[oklch(0.06_0.005_260)]">
-                            <code className="text-xs font-mono" {...props}>
-                              {children}
-                            </code>
-                          </pre>
-                        </div>
-                      )
+                      const language = match[1]
+                      return <CodeBlock code={codeString} language={language} />
                     }
+
+                    // Check if it's a multi-line code block without language specified
+                    if (!inline && codeString.includes('\n')) {
+                      return <CodeBlock code={codeString} language="text" />
+                    }
+
                     return (
-                      <code className="rounded bg-muted px-1.5 py-0.5 text-sm font-mono" {...props}>
+                      <code className="rounded-md bg-violet-500/20 px-1.5 py-0.5 text-sm font-mono text-violet-300" {...props}>
                         {children}
                       </code>
                     )
@@ -336,34 +314,11 @@ export function ChatMessage({
 
         {/* Code Blocks */}
         {codeBlocks?.map((block, index) => (
-          <div
-            key={`code-${index}`}
-            className="w-full overflow-hidden rounded-xl border border-border bg-background"
-          >
-            <div className="flex items-center justify-between border-b border-border bg-card px-4 py-2">
-              <div className="flex items-center gap-2">
-                <div className="flex h-3 w-3 rounded-full bg-destructive/50" />
-                <div className="flex h-3 w-3 rounded-full bg-yellow-500/50" />
-                <div className="flex h-3 w-3 rounded-full bg-green-500/50" />
-                <span className="ml-2 text-xs text-muted-foreground">
-                  {block.title || block.language}
-                </span>
-              </div>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => handleCopyCode(block.code)}
-                className="h-7 text-xs text-muted-foreground hover:text-foreground"
-              >
-                <Copy className="mr-1 h-3 w-3" />
-                Copy
-              </Button>
-            </div>
-            <pre className="overflow-x-auto p-4 bg-[oklch(0.06_0.005_260)]">
-              <code className="text-xs font-mono text-foreground leading-relaxed">
-                {highlightCode(block.code, block.language)}
-              </code>
-            </pre>
+          <div key={`code-${index}`} className="w-full">
+            {block.title && (
+              <div className="text-xs text-muted-foreground mb-1">{block.title}</div>
+            )}
+            <CodeBlock code={block.code} language={block.language} />
           </div>
         ))}
 

@@ -83,23 +83,26 @@ def query_qwen(image_path: str, prompt: str) -> str:
         logger.error(f"Qwen2VL query failed: {e}")
         return f"[Qwen error] {e}"
 
-OLLAMA_URL = os.getenv("OLLAMA_CLOUD_URL", "https://harvis.example.com/ollama")
+
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-def unload_ollama_model(model_name: str) -> bool:
+def unload_ollama_model(model_name: str, url: str = None) -> bool:
     """Unload specific Ollama model to free VRAM"""
     try:
+        if not url:
+             url = os.getenv("OLLAMA_URL", "http://ollama:11434")
+
         api_key = os.getenv("OLLAMA_API_KEY", "key")
         headers = {"Authorization": f"Bearer {api_key}"} if api_key != "key" else {}
 
-        logger.info(f"🗑️ Unloading Ollama model: {model_name}")
+        logger.info(f"🗑️ Unloading Ollama model: {model_name} from {url}")
 
         # Use generate with empty prompt and keep_alive=0 to force unload
         res = requests.post(
-            f"{OLLAMA_URL}/api/generate",
+            f"{url}/api/generate",
             json={
                 "model": model_name,
                 "prompt": "",
@@ -119,7 +122,7 @@ def unload_ollama_model(model_name: str) -> bool:
             # Try alternative method: POST to /api/keep-alive
             try:
                 res2 = requests.post(
-                    f"{OLLAMA_URL}/api/keep-alive",
+                    f"{url}/api/keep-alive",
                     json={"model": model_name, "keep_alive": 0},
                     headers=headers,
                     timeout=30

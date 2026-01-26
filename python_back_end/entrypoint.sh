@@ -23,7 +23,7 @@ app)
 
 *)
   echo "❌ Unknown mode: $MODE"
-  echo "Usuage: $0 {download-models|app}"
+  echo "Usage: $0 {download-models|app}"
   exit 1
   ;;
 esac

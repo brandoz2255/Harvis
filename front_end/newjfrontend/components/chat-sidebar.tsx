@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { cn } from "@/lib/utils"
 import {
   Search,
@@ -13,6 +13,9 @@ import {
   Settings,
   Sparkles,
   User,
+  Cpu,
+  Trash2,
+  Loader2,
 } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
@@ -57,6 +60,61 @@ export function ChatSidebar({
     recents: true,
     codeBlocks: true,
   })
+  const [isClearing, setIsClearing] = useState(false)
+  const [memoryStats, setMemoryStats] = useState<{
+    usage_percent?: number
+    free_gb?: number
+    allocated_gb?: number
+  } | null>(null)
+  const [clearMessage, setClearMessage] = useState<string | null>(null)
+
+  const fetchMemoryStats = async () => {
+    try {
+      const res = await fetch('/api/models/memory-pressure')
+      if (res.ok) {
+        const data = await res.json()
+        setMemoryStats(data)
+      }
+    } catch (error) {
+      console.error('Failed to fetch memory stats:', error)
+    }
+  }
+
+  const handleClearRAM = async () => {
+    setIsClearing(true)
+    setClearMessage(null)
+    try {
+      // Unload all models
+      const res = await fetch('/api/models/unload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model_type: 'all' }),
+      })
+
+      if (res.ok) {
+        const data = await res.json()
+        setClearMessage(`Cleared: ${data.unloaded_models?.join(', ') || 'All models'}`)
+        // Refresh memory stats
+        await fetchMemoryStats()
+      } else {
+        setClearMessage('Failed to clear RAM')
+      }
+    } catch (error) {
+      console.error('Failed to clear RAM:', error)
+      setClearMessage('Error clearing RAM')
+    } finally {
+      setIsClearing(false)
+      // Clear message after 3 seconds
+      setTimeout(() => setClearMessage(null), 3000)
+    }
+  }
+
+  // Fetch memory stats on mount and periodically
+  useEffect(() => {
+    fetchMemoryStats()
+    const interval = setInterval(fetchMemoryStats, 30000) // Every 30 seconds
+    return () => clearInterval(interval)
+  }, [])
 
   const toggleSection = (section: keyof typeof expandedSections) => {
     setExpandedSections((prev) => ({ ...prev, [section]: !prev[section] }))
@@ -211,6 +269,39 @@ export function ChatSidebar({
 
       {/* Footer */}
       <div className="border-t border-border p-3 space-y-1">
+        {/* RAM Clear Button */}
+        <button
+          type="button"
+          onClick={handleClearRAM}
+          disabled={isClearing}
+          className={cn(
+            "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors",
+            isClearing
+              ? "text-muted-foreground cursor-not-allowed"
+              : "text-muted-foreground hover:bg-red-500/10 hover:text-red-400"
+          )}
+        >
+          {isClearing ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <Trash2 className="h-4 w-4" />
+          )}
+          <div className="flex flex-col items-start flex-1">
+            <span className="flex items-center gap-2">
+              Clear AI RAM
+              <Cpu className="h-3 w-3" />
+            </span>
+            {memoryStats && (
+              <span className="text-xs text-muted-foreground">
+                {memoryStats.usage_percent?.toFixed(0)}% used ({memoryStats.free_gb?.toFixed(1)}GB free)
+              </span>
+            )}
+            {clearMessage && (
+              <span className="text-xs text-green-400">{clearMessage}</span>
+            )}
+          </div>
+        </button>
+
         <button
           type="button"
           className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"

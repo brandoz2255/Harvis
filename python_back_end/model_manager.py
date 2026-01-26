@@ -213,12 +213,9 @@ def load_tts_model(force_cpu=False):
                     logger.warning(f"⚠️ Could not list cache contents: {e}")
             else:
                 logger.warning(f"⚠️ HF cache directory does not exist: {hf_cache_expanded}")
-            # Add timeout for CUDA loading to prevent hanging
-            import signal
-            
-            def timeout_handler(signum, frame):
-                raise TimeoutError("TTS model loading timed out")
-            
+            # Note: Removed signal-based timeouts for thread-safety
+            # Request-level timeouts are handled by Nginx (3600s)
+
             if tts_device == "cuda":
                 # COMPREHENSIVE CUDA DIAGNOSTICS
                 logger.info("🔧 Starting comprehensive CUDA diagnostics for TTS...")
@@ -266,9 +263,7 @@ def load_tts_model(force_cpu=False):
                     time.sleep(1.0)
                     log_gpu_memory("before TTS load after cleanup")
 
-                # Set 180 second timeout for CUDA loading (TTS takes ~90-120s to load from cache)
-                signal.signal(signal.SIGALRM, timeout_handler)
-                signal.alarm(180)
+                # Load TTS model without signal-based timeout (thread-safe)
                 try:
                     logger.info("🚀 Attempting ChatterboxTTS.from_pretrained(device='cuda')...")
 
@@ -289,25 +284,61 @@ def load_tts_model(force_cpu=False):
                     logger.info("📥 This may use cached models or download if cache is missing...")
 
                     tts_model = ChatterboxTTS.from_pretrained(device=tts_device)
-                    signal.alarm(0)  # Cancel timeout
                     logger.info("✅ TTS model loaded successfully on CUDA")
 
                     # Reset logging verbosity
                     transformers.logging.set_verbosity_warning()
 
-                except TimeoutError:
-                    signal.alarm(0)  # Cancel timeout
-                    logger.warning("⏰ TTS CUDA loading timed out, falling back to CPU...")
-                    tts_device = "cpu"
-                    try:
-                        tts_model = ChatterboxTTS.from_pretrained(device="cpu")
-                        logger.info("✅ TTS model loaded successfully on CPU (timeout fallback)")
-                    except Exception as cpu_fallback_e:
-                        logger.error(f"❌ CPU fallback also failed: {cpu_fallback_e}")
-                        raise RuntimeError("TTS loading failed on both CUDA (timeout) and CPU") from cpu_fallback_e
-
                 except Exception as cuda_load_e:
-                    signal.alarm(0)  # Cancel timeout
+                    
+                    # ─── INTELLIGENT OOM RECOVERY ─────────────────────────────────────────────
+                    # Check if this is an OOM error
+                    error_str = str(cuda_load_e).lower()
+                    if "out of memory" in error_str or "cuda error" in error_str:
+                        logger.warning(f"🚨 CUDA OOM detected during TTS load: {cuda_load_e}")
+                        logger.info("🧠 Attempting INTELLIGENT OOM RECOVERY: Unloading Ollama models...")
+                        
+                        try:
+                            import requests
+                            # 1. Get running Ollama models
+                            ollama_url = os.getenv("OLLAMA_URL", "http://ollama:11434")
+                            try:
+                                ps_resp = requests.get(f"{ollama_url}/api/ps", timeout=2)
+                                if ps_resp.status_code == 200:
+                                    running_models = ps_resp.json().get('models', [])
+                                    for model_info in running_models:
+                                        model_name = model_info.get('name')
+                                        logger.info(f"🔫 Force-unloading Ollama model: {model_name}")
+                                        # Force unload
+                                        requests.post(
+                                            f"{ollama_url}/api/generate",
+                                            json={"model": model_name, "keep_alive": 0},
+                                            timeout=2
+                                        )
+                            except Exception as ollama_e:
+                                logger.error(f"❌ Failed to query/unload Ollama: {ollama_e}")
+
+                            # 2. Aggressive PyTorch cleanup
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                                torch.cuda.synchronize()
+                                import gc
+                                gc.collect()
+                                torch.cuda.empty_cache()
+                                time.sleep(1) # Wait for VRAM to release
+
+                            logger.info("🔄 Retrying TTS load after OOM recovery...")
+                            
+                            # 3. Retry loading on CUDA
+                            tts_model = ChatterboxTTS.from_pretrained(device="cuda")
+                            logger.info("✅ TTS model loaded successfully on CUDA (after OOM recovery)")
+                            return tts_model
+
+                        except Exception as retry_e:
+                            logger.error(f"❌ OOM Recovery failed: {retry_e}")
+                            # Proceed to CPU fallback below
+                    # ──────────────────────────────────────────────────────────────────────────
+
                     logger.error(f"❌ TTS CUDA loading failed: {cuda_load_e}")
                     logger.error(f"❌ Exception type: {type(cuda_load_e).__name__}")
                     logger.error(f"❌ Exception args: {cuda_load_e.args}")
@@ -371,28 +402,22 @@ def load_whisper_model():
                 logger.warning(f"⚠️ Whisper cache directory does not exist: {whisper_cache}")
             
             # SURGICAL FIX 1: Force CUDA init early to prevent hanging
-            import signal
-            def cuda_timeout_handler(signum, frame):
-                raise TimeoutError("CUDA operation timed out")
-            
+            # Note: Using threading instead of signal for thread-safety
             if torch.cuda.is_available():
                 logger.info("🔧 Pre-warming CUDA to prevent init hangs...")
-                signal.signal(signal.SIGALRM, cuda_timeout_handler)
-                signal.alarm(15)  # 15 second timeout for CUDA init
                 try:
                     torch.cuda.empty_cache()
                     torch.cuda.synchronize()
                     _ = torch.cuda.current_device()
                     logger.info("✅ CUDA pre-warm successful")
-                    signal.alarm(0)
                 except Exception as cuda_e:
-                    signal.alarm(0)
                     logger.error(f"❌ CUDA pre-warm failed: {cuda_e}")
-                    raise RuntimeError(f"CUDA initialization failed: {cuda_e}")
+                    # Don't raise - continue with CPU fallback
+                    logger.warning("⚠️ Continuing with CPU fallback for Whisper")
             
             # SURGICAL FIX 2: Check if model already exists in cache (avoids download entirely)
-            import os
-            cache_dir = os.path.expanduser("~/.cache/whisper")
+            # Use the same whisper_cache from env var (set by Docker Compose init script)
+            cache_dir = whisper_cache
             logger.info(f"📁 Checking Whisper cache directory: {cache_dir}")
             
             if os.path.exists(cache_dir):
@@ -403,7 +428,8 @@ def load_whisper_model():
                 if model_files:
                     logger.info(f"✅ Found existing Whisper models: {model_files}")
                     # SURGICAL FIX 3: Validate cached models and load with timeout
-                    for model_name in ['tiny', 'base', 'small']:  # Start with smallest for faster testing
+                    # Prioritize 'base' since that's what the init script downloads
+                    for model_name in ['base', 'tiny', 'small']:
                         expected_file = f"{model_name}.pt"
                         if expected_file in model_files:
                             model_path = os.path.join(cache_dir, expected_file)
@@ -418,17 +444,13 @@ def load_whisper_model():
                             
                             logger.info(f"🎯 Loading cached Whisper '{model_name}' model ({file_size} bytes)...")
 
-                            # Load with timeout protection and explicit cache dir
-                            signal.signal(signal.SIGALRM, cuda_timeout_handler)
-                            signal.alarm(45)  # 45 second timeout for model loading
+                            # Load from cache (no signal timeout for thread-safety)
                             try:
-                                logger.info(f"📥 Loading from cache: {whisper_cache}")
-                                whisper_model = whisper.load_model(model_name, device="cuda", download_root=whisper_cache)
+                                logger.info(f"📥 Loading from cache: {cache_dir}")
+                                whisper_model = whisper.load_model(model_name, device="cuda", download_root=cache_dir)
                                 logger.info(f"✅ Successfully loaded cached Whisper '{model_name}' model on GPU")
-                                signal.alarm(0)
                                 return whisper_model
                             except Exception as load_e:
-                                signal.alarm(0)
                                 logger.warning(f"⚠️ Failed to load cached {model_name}: {load_e}")
                                 continue
             else:
@@ -500,16 +522,12 @@ def load_whisper_model():
                 if success:
                     logger.info(f"✅ Downloaded {model_name} model, now loading with GPU...")
                     
-                    # Load with timeout and force GPU
-                    signal.signal(signal.SIGALRM, cuda_timeout_handler)
-                    signal.alarm(60)  # 60 second timeout for fresh model loading
+                    # Load freshly downloaded model (no signal timeout for thread-safety)
                     try:
                         whisper_model = whisper.load_model(model_name, device="cuda")
                         logger.info(f"✅ Successfully loaded Whisper '{model_name}' model on GPU")
-                        signal.alarm(0)
                         break
                     except Exception as load_e:
-                        signal.alarm(0)
                         logger.error(f"❌ Failed to load downloaded {model_name}: {load_e}")
                         # Remove corrupted download
                         try:

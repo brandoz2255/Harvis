@@ -1,6 +1,122 @@
-# version: "3.9"
+version: "3.9"
 
 services:
+  # Ollama LLM Service
+  ollama:
+    image: ollama/ollama:latest
+    runtime: nvidia
+    container_name: harvis-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+        limits:
+          memory: 30G
+    networks:
+      - ollama-n8n-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Model Downloader (Init Container equivalent)
+  model-downloader:
+    build:
+      context: ./python_back_end
+      dockerfile: Dockerfile
+    container_name: harvis-model-downloader
+    user: root
+    command: ["download-models"]
+    environment:
+      HF_HOME: "/models-cache/huggingface"
+      TRANSFORMERS_CACHE: "/models-cache/huggingface"
+      WHISPER_CACHE: "/models-cache/whisper"
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ml-models-cache:/models-cache
+    networks:
+      - ollama-n8n-network
+
+  # Python FastAPI Backend
+  backend:
+    runtime: nvidia
+    build:
+      context: ./python_back_end
+      dockerfile: Dockerfile
+    container_name: harvis-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: "postgresql://pguser:pgpassword@pgsql:5432/database"
+      JWT_SECRET: "***REMOVED***"
+      OLLAMA_URL: "http://ollama:11434"
+      BACKEND_URL: "http://backend:8000"
+      HF_HOME: "/models-cache/huggingface"
+      TRANSFORMERS_CACHE: "/models-cache/huggingface"
+      WHISPER_CACHE: "/models-cache/whisper"
+      UVICORN_WORKERS: "1"
+      ENVIRONMENT: "production"
+      LOG_LEVEL: "INFO"
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ml-models-cache:/models-cache
+      - embedding-data:/app/embedding
+      - /tmp:/tmp
+    depends_on:
+      ollama:
+        condition: service_started
+      pgsql:
+        condition: service_healthy
+      model-downloader:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+        limits:
+          memory: 15G
+    networks:
+      - ollama-n8n-network
+
+  # Next.js Frontend (New UI)
+  frontend:
+    build:
+      context: ./front_end/newjfrontend
+      dockerfile: Dockerfile
+    container_name: harvis-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: "production"
+      NEXT_TELEMETRY_DISABLED: "1"
+      JWT_SECRET: "***REMOVED***"
+      BACKEND_URL: "http://backend:8000"
+      OLLAMA_URL: "http://ollama:11434"
+    depends_on:
+      - backend
+      - pgsql
+    deploy:
+      resources:
+        limits:
+          memory: 1512M
+    networks:
+      - ollama-n8n-network
+
+  # Nginx Reverse Proxy
   nginx:
     image: nginx:alpine
     container_name: nginx-proxy
@@ -9,9 +125,18 @@ services:
       - "9000:80"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - /tmp:/tmp:ro
+    depends_on:
+      - frontend
+      - backend
+    deploy:
+      resources:
+        limits:
+          memory: 64M
     networks:
       - ollama-n8n-network
 
+  # PostgreSQL Database with pgvector
   pgsql:
     image: pgvector/pgvector:pg15
     container_name: pgsql-db
@@ -23,41 +148,57 @@ services:
       POSTGRES_INITDB_ARGS: "-E UTF8 --locale=C"
     volumes:
       - pgsql_data:/var/lib/postgresql/data
-      - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh
+      - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
+    ports:
+      - "5432:5432"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
     networks:
       - ollama-n8n-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pguser -d database"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
+  # N8N Workflow Automation
   n8n:
-    image: n8nio/n8n
+    image: n8nio/n8n:latest
     container_name: n8n
     restart: unless-stopped
     ports:
       - "5678:5678"
     volumes:
-      - n8n_data:/home/node/.n8n2
+      - n8n_data:/home/node/.n8n
     environment:
       N8N_BASIC_AUTH_ACTIVE: "true"
       N8N_BASIC_AUTH_USER: "admin"
-      N8N_BASIC_AUTH_PASSWORD: "adminpass"
+      N8N_BASIC_AUTH_PASSWORD: "${N8N_PASSWORD:-adminpass}"
       N8N_PERSONAL_API_KEY: "${N8N_PERSONAL_API_KEY}"
-      DB_TYPE: "postgres"
-      DB_POSTGRES_HOST: "pgsql-db"
-      DB_POSTGRES_PORT: "5432"
-      DB_POSTGRES_DATABASE: "database"
-      DB_POSTGRES_USER: "pguser"
-      DB_POSTGRES_PASSWORD: "pgpassword"
-    networks:
-      - ollama-n8n-network
+      DB_TYPE: "postgresdb"
+      DB_POSTGRESDB_HOST: "pgsql"
+      DB_POSTGRESDB_PORT: "5432"
+      DB_POSTGRESDB_DATABASE: "n8n"
+      DB_POSTGRESDB_USER: "pguser"
+      DB_POSTGRESDB_PASSWORD: "pgpassword"
     depends_on:
       - pgsql
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    networks:
+      - ollama-n8n-network
 
 networks:
   ollama-n8n-network:
     external: true
 
 volumes:
-  ollama:
+  ollama-models:
   n8n_data:
   pgsql_data:
-
-
+  ml-models-cache:
+  embedding-data:
