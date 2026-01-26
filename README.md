@@ -1,6 +1,7 @@
 # The Harvis AI Project
 
-![Harvis AI Interface](assets/images/harvis_dashboard_2026.png)
+<img width="1653" height="1392" alt="image" src="https://github.com/user-attachments/assets/36dd9d2d-9313-41bb-9491-313838ed5e97" />
+
 
 The Harvis AI Project is a sophisticated, voice-activated AI assistant designed to be a proactive and interactive partner on your computer. It combines the power of large language models, voice synthesis, and system automation to provide a seamless interface for controlling your digital environment, retrieving information, and assisting with various tasks.
 
