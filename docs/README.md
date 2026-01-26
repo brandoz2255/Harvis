@@ -12,6 +12,7 @@ This documentation provides comprehensive information about the AI Voice Assista
 5. [LLM Integration](llm-integration.md)
 6. [System Architecture](system-architecture.md)
 7. [Main and Chatterbox TTS Integration](main-chatterbox-integration.md)
+8. [Vision and MCP Integration](vision-mcp-integration.md) 🆕
 
 ### Deployment & Operations
 8. [FluxCD GitOps Setup](flux/README.md) 🆕

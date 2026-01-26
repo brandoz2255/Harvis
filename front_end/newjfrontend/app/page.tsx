@@ -240,7 +240,7 @@ export default function ChatPage() {
     }
   }
 
-  // Handle vision messages (images/screenshots)
+  // Handle vision messages (images/screenshots) - Uses Ollama VL models
   const handleVisionMessage = async (prompt: string, imageData: string, attachments: Attachment[]) => {
     setIsLoading(true)
 
@@ -250,19 +250,28 @@ export default function ChatPage() {
         throw new Error('Authentication required')
       }
 
-      // Use the analyze-and-respond endpoint for vision
-      const response = await fetch('/api/analyze-and-respond', {
+      // Collect all images from attachments
+      const images = attachments
+        .filter(a => a.type === 'image')
+        .map(a => a.data)
+
+      // Use the new Ollama vision-chat endpoint
+      const response = await fetch('/api/vision-chat', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`
         },
         body: JSON.stringify({
-          image: imageData,
-          prompt: prompt || 'What do you see in this image?',
+          message: prompt || 'What do you see in this image?',
+          images: images,
+          history: messages.map(m => ({
+            role: m.role,
+            content: m.content
+          })),
           model: selectedModel,
-          text_only: textOnly,
-          low_vram: lowVram
+          low_vram: lowVram,
+          text_only: textOnly
         }),
         credentials: 'include'
       })
@@ -278,7 +287,7 @@ export default function ChatPage() {
       const assistantMessage: Message = {
         id: (Date.now() + 1).toString(),
         role: "assistant",
-        content: data.llm_response || data.analysis || data.commentary || 'I analyzed the image.',
+        content: data.response || 'I analyzed the image.',
         timestamp: new Date(),
         model: selectedModel,
         status: "sent",
@@ -295,7 +304,7 @@ export default function ChatPage() {
       const errorMessage: Message = {
         id: (Date.now() + 1).toString(),
         role: "assistant",
-        content: `Vision analysis failed: ${error instanceof Error ? error.message : 'Unknown error'}. Make sure you have a vision model selected (llava, moondream, qwen2-vl, etc.)`,
+        content: `Vision analysis failed: ${error instanceof Error ? error.message : 'Unknown error'}. Make sure you have a VL model selected and pulled (llava, moondream, bakllava, etc.) on your Ollama server.`,
         timestamp: new Date(),
         model: selectedModel,
         status: "failed",

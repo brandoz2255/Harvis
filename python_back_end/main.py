@@ -606,6 +606,16 @@ class ScreenAnalysisWithTTSRequest(BaseModel):
     temperature: float = 0.8
     cfg_weight: float = 0.5
 
+class VisionChatRequest(BaseModel):
+    """Request model for Ollama vision chat (llava, moondream, etc.)"""
+    message: str
+    images: List[str]  # List of base64 images (data-URI or raw)
+    history: List[Dict[str, Any]] = []
+    model: str = "llava"  # Default to llava, user can select any VL model
+    session_id: Optional[str] = None
+    low_vram: bool = False
+    text_only: bool = False
+
 # VibeCodingRequest moved to vibecoding.commands
 
 class VoiceTranscribeRequest(BaseModel):
@@ -1266,6 +1276,173 @@ async def chat(req: ChatRequest, request: Request, current_user: UserResponse = 
     except Exception as e:
         logger.exception("Chat endpoint crashed")
         raise HTTPException(500, str(e)) from e
+
+
+@app.post("/api/vision-chat", tags=["vision"])
+async def vision_chat(req: VisionChatRequest, request: Request, current_user: UserResponse = Depends(get_current_user)):
+    """
+    Vision chat endpoint using Ollama VL models (llava, moondream, bakllava, etc.).
+    Sends images directly to Ollama's vision-capable models.
+    """
+    try:
+        logger.info(f"🖼️ Vision chat - User: {current_user.username}, Model: {req.model}, Images: {len(req.images)}")
+
+        # Extract base64 data from images and ensure proper format
+        processed_images = []
+        for idx, img in enumerate(req.images):
+            try:
+                logger.info(f"🖼️ Processing image {idx+1}/{len(req.images)} - Input length: {len(img)}")
+
+                # Remove data URI prefix if present
+                if ',' in img:
+                    # Get the base64 part after the comma
+                    header, data = img.split(',', 1)
+                    logger.info(f"🖼️ Image {idx+1}: Found data URI header: {header[:50]}...")
+                    img_data = data
+                else:
+                    logger.info(f"🖼️ Image {idx+1}: No data URI header found")
+                    img_data = img
+
+                # Clean up the base64 string (remove whitespace/newlines)
+                img_data = img_data.strip().replace('\n', '').replace('\r', '').replace(' ', '')
+
+                # Validate and decode the base64 to ensure it's valid
+                try:
+                    decoded = base64.b64decode(img_data)
+                    logger.info(f"🖼️ Image {idx+1}: Valid base64, decoded size: {len(decoded)} bytes")
+
+                    # Check if it's a valid image by looking at magic bytes
+                    if len(decoded) > 8:
+                        if decoded[:8] == b'\x89PNG\r\n\x1a\n':
+                            logger.info(f"🖼️ Image {idx+1}: PNG format detected")
+                        elif decoded[:2] == b'\xff\xd8':
+                            logger.info(f"🖼️ Image {idx+1}: JPEG format detected")
+                        elif decoded[:4] == b'GIF8':
+                            logger.info(f"🖼️ Image {idx+1}: GIF format detected")
+                        elif decoded[:4] == b'RIFF':
+                            logger.info(f"🖼️ Image {idx+1}: WEBP format detected")
+                        else:
+                            logger.warning(f"🖼️ Image {idx+1}: Unknown format, first bytes: {decoded[:10].hex()}")
+                    else:
+                         logger.warning(f"🖼️ Image {idx+1}: Data too short to check magic bytes")
+
+                    # Re-encode to ensure clean base64
+                    clean_b64 = base64.b64encode(decoded).decode('utf-8')
+                    processed_images.append(clean_b64)
+
+                except Exception as decode_err:
+                    logger.error(f"🖼️ Image {idx+1}: Failed to decode base64: {decode_err}")
+                    # Try to use original anyway
+                    processed_images.append(img_data)
+
+            except Exception as img_err:
+                logger.error(f"🖼️ Error processing image {idx+1}: {img_err}")
+                continue
+
+        if not processed_images:
+            raise HTTPException(400, "No valid images provided")
+
+        # Build messages array for Ollama vision
+        # Ollama vision format: messages with "images" field containing base64 strings
+        messages = []
+
+        # Add system prompt
+        system_prompt = (
+            'You are "Harvis", an AI assistant with vision capabilities. '
+            'Analyze the provided image(s) and respond helpfully to the user\'s question. '
+            'Be concise but thorough in your visual analysis.'
+        )
+        messages.append({"role": "system", "content": system_prompt})
+
+        # Add conversation history (without images)
+        for msg in req.history:
+            messages.append({"role": msg["role"], "content": msg["content"]})
+
+        # Add current user message with images
+        user_message = {
+            "role": "user",
+            "content": req.message,
+            "images": processed_images
+        }
+        messages.append(user_message)
+
+        # Build Ollama payload
+        payload = {
+            "model": req.model,
+            "messages": messages,
+            "stream": False,
+        }
+
+        logger.info(f"🖼️ VISION: Sending to Ollama model '{req.model}' with {len(processed_images)} image(s)")
+
+        # Send to Ollama
+        resp = await run_in_threadpool(make_ollama_request, "/api/chat", payload, timeout=3600)
+
+        if resp.status_code != 200:
+            logger.error(f"Ollama vision error {resp.status_code}: {resp.text}")
+            raise HTTPException(resp.status_code, f"Ollama vision error: {resp.text}")
+
+        response_text = resp.json().get("message", {}).get("content", "").strip()
+        logger.info(f"🖼️ VISION: Got response ({len(response_text)} chars)")
+
+        # Unload model if low VRAM mode
+        if req.low_vram:
+            logger.info(f"🧹 [Low VRAM Mode] Unloading vision model {req.model}")
+            unload_ollama_model(req.model, LOCAL_OLLAMA_URL)
+
+        # Separate reasoning if present
+        reasoning_content = None
+        final_answer = response_text
+
+        # Check for <think> tags
+        import re
+        think_pattern = r'<think>([\s\S]*?)</think>'
+        think_matches = re.findall(think_pattern, response_text, re.IGNORECASE)
+        if think_matches:
+            reasoning_content = '\n\n'.join(think_matches).strip()
+            final_answer = re.sub(think_pattern, '', response_text, flags=re.IGNORECASE).strip()
+
+        # Build response
+        response_data = {
+            "response": final_answer,
+            "model": req.model,
+            "images_processed": len(processed_images)
+        }
+
+        if reasoning_content:
+            response_data["reasoning"] = reasoning_content
+
+        # Generate TTS if not text-only mode
+        audio_path = None
+        if not req.text_only:
+            try:
+                sr, wav = safe_generate_speech_optimized(
+                    final_answer,
+                    audio_prompt_path=HARVIS_VOICE_PATH,
+                    exaggeration=0.5,
+                    temperature=0.8,
+                    cfg_weight=0.5,
+                    unload_after=req.low_vram
+                )
+
+                if wav is not None:
+                    filename = f"vision_{uuid.uuid4()}.wav"
+                    filepath = os.path.join(tempfile.gettempdir(), filename)
+                    scipy.io.wavfile.write(filepath, sr, wav)
+                    audio_path = f"/api/audio/{filename}"
+                    response_data["audio_path"] = audio_path
+                    logger.info(f"🔊 VISION: Generated TTS audio: {audio_path}")
+            except Exception as tts_error:
+                logger.error(f"TTS generation failed for vision response: {tts_error}")
+
+        return response_data
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Vision chat endpoint crashed")
+        raise HTTPException(500, str(e)) from e
+
 
 @app.get("/api/audio/{filename}", tags=["audio"])
 async def serve_audio(filename: str):

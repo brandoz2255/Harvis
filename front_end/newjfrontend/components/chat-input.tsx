@@ -274,14 +274,15 @@ export function ChatInput({ onSend, isLoading, isResearchMode, selectedModel, cl
     if (!ctx) return null
 
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.8)
+    // Use PNG format for better compatibility with Ollama VL models
+    const dataUrl = canvas.toDataURL('image/png')
 
     // Update the latest screen capture as an attachment
     const screenAttachment: ImageAttachment = {
       id: 'screen-capture',
       type: 'image',
       data: dataUrl,
-      mimeType: 'image/jpeg',
+      mimeType: 'image/png',
       name: 'Screen Capture',
       width: canvas.width,
       height: canvas.height
