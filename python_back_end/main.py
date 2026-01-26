@@ -33,6 +33,9 @@ from vibecoding.core import initialize_vibe_agent
 # Import NotebookLM router
 from notebooks import notebooks_router
 
+# Import TTS router
+from api.tts_routes import router as tts_router
+
 from pydantic import BaseModel
 import torch, soundfile as sf
 import whisper  # Import Whisper
@@ -469,6 +472,9 @@ app.include_router(repo_import_router)
 
 # Include NotebookLM router
 app.include_router(notebooks_router)
+
+# Include TTS router
+app.include_router(tts_router)
 
 # ─── Device & models -----------------------------------------------------------
 device = 0 if torch.cuda.is_available() else -1

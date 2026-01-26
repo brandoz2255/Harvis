@@ -1,9 +1,20 @@
 import { create } from 'zustand'
+import OpenNotebookAPI, {
+  Notebook as OpenNotebook,
+  Source,
+  Note,
+  ChatSession,
+  ChatMessage as OpenChatMessage,
+  ChatSessionWithMessages,
+} from '@/lib/openNotebookApi'
 
-// Types
+// ============================================================================
+// Types - Mapped from Open Notebook API types
+// ============================================================================
+
 export interface Notebook {
   id: string
-  user_id: number
+  user_id: number  // Not used by Open Notebook but kept for compatibility
   title: string
   description?: string
   is_active: boolean
@@ -77,9 +88,13 @@ interface NotebookState {
   isLoadingNotes: boolean
 
   // Chat
+  currentSession: ChatSession | null
   messages: ChatMessage[]
   isLoadingMessages: boolean
   isChatting: boolean
+
+  // Service status
+  isOpenNotebookAvailable: boolean
 
   // Error
   error: string | null
@@ -113,12 +128,96 @@ interface NotebookState {
   // UI State
   setError: (error: string | null) => void
   clearCurrentNotebook: () => void
+  checkServiceHealth: () => Promise<void>
 }
 
-const getAuthHeaders = (): Record<string, string> => {
-  const token = localStorage.getItem('token')
-  return token ? { 'Authorization': `Bearer ${token}` } : {}
+// ============================================================================
+// Mappers - Convert between Open Notebook API types and our internal types
+// ============================================================================
+
+function mapOpenNotebookToNotebook(on: OpenNotebook): Notebook {
+  return {
+    id: on.id,
+    user_id: 0, // Open Notebook doesn't have user_id
+    title: on.name,
+    description: on.description,
+    is_active: !on.archived,
+    created_at: on.created,
+    updated_at: on.updated,
+    source_count: on.source_count,
+    note_count: on.note_count,
+  }
 }
+
+function mapSourceToNotebookSource(source: Source, notebookId: string): NotebookSource {
+  // Map source_type to our type
+  const typeMap: Record<string, NotebookSource['type']> = {
+    file: 'doc',
+    url: 'url',
+    text: 'text',
+    youtube: 'youtube',
+    pdf: 'pdf',
+    audio: 'audio',
+    video: 'transcript',
+  }
+
+  // Map processing_status to our status
+  const statusMap: Record<string, NotebookSource['status']> = {
+    pending: 'pending',
+    processing: 'processing',
+    completed: 'ready',
+    failed: 'error',
+  }
+
+  return {
+    id: source.id,
+    notebook_id: notebookId,
+    type: typeMap[source.source_type] || 'doc',
+    title: source.title,
+    storage_path: source.file_path,
+    original_filename: source.title,
+    metadata: {},
+    status: statusMap[source.processing_status] || 'pending',
+    error_message: source.error_message,
+    created_at: source.created,
+    updated_at: source.updated,
+    chunk_count: source.asset_count || 0,
+  }
+}
+
+function mapNoteToNotebookNote(note: Note): NotebookNote {
+  return {
+    id: note.id,
+    notebook_id: note.notebook_id || '',
+    user_id: 0,
+    type: (note.note_type as NotebookNote['type']) || 'user_note',
+    title: note.title,
+    content: note.content,
+    source_meta: { source_ids: note.source_ids },
+    is_pinned: note.pinned,
+    created_at: note.created,
+    updated_at: note.updated,
+  }
+}
+
+function mapOpenChatMessageToChatMessage(
+  msg: OpenChatMessage,
+  notebookId: string
+): ChatMessage {
+  return {
+    id: msg.id,
+    notebook_id: notebookId,
+    user_id: 0,
+    role: msg.type === 'human' ? 'user' : 'assistant',
+    content: msg.content,
+    citations: [],
+    created_at: msg.timestamp || new Date().toISOString(),
+  }
+}
+
+// ============================================================================
+// Store
+// ============================================================================
 
 export const useNotebookStore = create<NotebookState>((set, get) => ({
   // Initial state
@@ -129,44 +228,60 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
   isLoadingSources: false,
   notes: [],
   isLoadingNotes: false,
+  currentSession: null,
   messages: [],
   isLoadingMessages: false,
   isChatting: false,
+  isOpenNotebookAvailable: false,
   error: null,
+
+  // ─── Service Health ──────────────────────────────────────────────────────────
+
+  checkServiceHealth: async () => {
+    const isAvailable = await OpenNotebookAPI.checkHealth()
+    set({ isOpenNotebookAvailable: isAvailable })
+  },
 
   // ─── Notebook Actions ─────────────────────────────────────────────────────────
 
   fetchNotebooks: async () => {
-    const token = localStorage.getItem('token')
-    if (!token) {
-      set({ error: 'Please login to view notebooks' })
-      return
-    }
-
     set({ isLoadingNotebooks: true, error: null })
 
     try {
-      const response = await fetch('/api/notebooks', {
-        headers: {
-          'Content-Type': 'application/json',
-          ...getAuthHeaders(),
-        },
-      })
+      const openNotebooks = await OpenNotebookAPI.notebooks.list(false)
+      const notebooks = openNotebooks.map(mapOpenNotebookToNotebook)
+      
+      // Also fetch archived notebooks
+      const archivedNotebooks = await OpenNotebookAPI.notebooks.list(true)
+      const allNotebooks = [
+        ...notebooks,
+        ...archivedNotebooks.map(mapOpenNotebookToNotebook),
+      ]
 
-      if (response.ok) {
-        const data = await response.json()
-        set({
-          notebooks: data.notebooks || [],
-          isLoadingNotebooks: false
-        })
-      } else {
-        const error = await response.text()
-        set({ error: 'Failed to load notebooks', isLoadingNotebooks: false })
-        console.error('Failed to fetch notebooks:', error)
-      }
+      set({
+        notebooks: allNotebooks,
+        isLoadingNotebooks: false,
+        isOpenNotebookAvailable: true,
+      })
     } catch (error) {
-      set({ error: 'Failed to load notebooks', isLoadingNotebooks: false })
       console.error('Error fetching notebooks:', error)
+      let errorMessage = 'Failed to load notebooks'
+      
+      if (error instanceof Error) {
+        if (error.message.includes('fetch')) {
+          errorMessage = 'Cannot connect to Open Notebook service. Make sure it is running.'
+        } else if (error.message.includes('401')) {
+          errorMessage = 'Session expired. Please login again.'
+        } else if (error.message.includes('5')) {
+          errorMessage = 'Server error. Please try again later.'
+        }
+      }
+      
+      set({ 
+        error: errorMessage, 
+        isLoadingNotebooks: false,
+        isOpenNotebookAvailable: false,
+      })
     }
   },
 
@@ -174,30 +289,21 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
     set({ error: null })
 
     try {
-      const response = await fetch('/api/notebooks', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...getAuthHeaders(),
-        },
-        body: JSON.stringify({ title, description }),
+      const openNotebook = await OpenNotebookAPI.notebooks.create({
+        name: title,
+        description,
       })
-
-      if (response.ok) {
-        const notebook = await response.json()
-        set(state => ({
-          notebooks: [notebook, ...state.notebooks],
-        }))
-        return notebook
-      } else {
-        const error = await response.text()
-        set({ error: 'Failed to create notebook' })
-        console.error('Failed to create notebook:', error)
-        return null
-      }
+      
+      const notebook = mapOpenNotebookToNotebook(openNotebook)
+      
+      set(state => ({
+        notebooks: [notebook, ...state.notebooks],
+      }))
+      
+      return notebook
     } catch (error) {
-      set({ error: 'Failed to create notebook' })
       console.error('Error creating notebook:', error)
+      set({ error: 'Failed to create notebook' })
       return null
     }
   },
@@ -206,56 +312,43 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
     set({ isLoadingNotebooks: true, error: null })
 
     try {
-      const response = await fetch(`/api/notebooks/${notebookId}`, {
-        headers: {
-          'Content-Type': 'application/json',
-          ...getAuthHeaders(),
-        },
+      const openNotebook = await OpenNotebookAPI.notebooks.get(notebookId)
+      const notebook = mapOpenNotebookToNotebook(openNotebook)
+      
+      set({
+        currentNotebook: notebook,
+        isLoadingNotebooks: false,
+        sources: [],
+        notes: [],
+        messages: [],
+        currentSession: null,
       })
 
-      if (response.ok) {
-        const notebook = await response.json()
-        set({
-          currentNotebook: notebook,
-          isLoadingNotebooks: false,
-          sources: [],
-          notes: [],
-          messages: [],
-        })
-
-        // Fetch related data
-        await Promise.all([
-          get().fetchSources(notebookId),
-          get().fetchNotes(notebookId),
-          get().fetchChatHistory(notebookId),
-        ])
-      } else {
-        set({ error: 'Notebook not found', isLoadingNotebooks: false })
-      }
+      // Fetch related data in parallel
+      await Promise.all([
+        get().fetchSources(notebookId),
+        get().fetchNotes(notebookId),
+        get().fetchChatHistory(notebookId),
+      ])
     } catch (error) {
-      set({ error: 'Failed to load notebook', isLoadingNotebooks: false })
       console.error('Error selecting notebook:', error)
+      set({ error: 'Notebook not found', isLoadingNotebooks: false })
     }
   },
 
   updateNotebook: async (notebookId: string, title?: string, description?: string) => {
     try {
-      const response = await fetch(`/api/notebooks/${notebookId}`, {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          ...getAuthHeaders(),
-        },
-        body: JSON.stringify({ title, description }),
+      const openNotebook = await OpenNotebookAPI.notebooks.update(notebookId, {
+        name: title,
+        description,
       })
-
-      if (response.ok) {
-        const updated = await response.json()
-        set(state => ({
-          notebooks: state.notebooks.map(n => n.id === notebookId ? updated : n),
-          currentNotebook: state.currentNotebook?.id === notebookId ? updated : state.currentNotebook,
-        }))
-      }
+      
+      const updated = mapOpenNotebookToNotebook(openNotebook)
+      
+      set(state => ({
+        notebooks: state.notebooks.map(n => n.id === notebookId ? updated : n),
+        currentNotebook: state.currentNotebook?.id === notebookId ? updated : state.currentNotebook,
+      }))
     } catch (error) {
       console.error('Error updating notebook:', error)
     }
@@ -263,17 +356,12 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
 
   deleteNotebook: async (notebookId: string) => {
     try {
-      const response = await fetch(`/api/notebooks/${notebookId}`, {
-        method: 'DELETE',
-        headers: getAuthHeaders(),
-      })
-
-      if (response.ok) {
-        set(state => ({
-          notebooks: state.notebooks.filter(n => n.id !== notebookId),
-          currentNotebook: state.currentNotebook?.id === notebookId ? null : state.currentNotebook,
-        }))
-      }
+      await OpenNotebookAPI.notebooks.delete(notebookId)
+      
+      set(state => ({
+        notebooks: state.notebooks.filter(n => n.id !== notebookId),
+        currentNotebook: state.currentNotebook?.id === notebookId ? null : state.currentNotebook,
+      }))
     } catch (error) {
       console.error('Error deleting notebook:', error)
     }
@@ -285,132 +373,96 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
     set({ isLoadingSources: true })
 
     try {
-      const response = await fetch(`/api/notebooks/${notebookId}/sources`, {
-        headers: {
-          'Content-Type': 'application/json',
-          ...getAuthHeaders(),
-        },
-      })
-
-      if (response.ok) {
-        const sources = await response.json()
-        set({ sources, isLoadingSources: false })
-      } else {
-        set({ isLoadingSources: false })
-      }
+      const sources = await OpenNotebookAPI.sources.list(notebookId)
+      const mappedSources = sources.map(s => mapSourceToNotebookSource(s, notebookId))
+      
+      set({ sources: mappedSources, isLoadingSources: false })
     } catch (error) {
-      set({ isLoadingSources: false })
       console.error('Error fetching sources:', error)
+      set({ isLoadingSources: false })
     }
   },
 
   uploadSource: async (notebookId: string, file: File, title?: string) => {
-    const formData = new FormData()
-    formData.append('file', file)
-    if (title) formData.append('title', title)
-
     try {
-      const response = await fetch(`/api/notebooks/${notebookId}/sources/upload`, {
-        method: 'POST',
-        headers: getAuthHeaders(),
-        credentials: 'include',
-        body: formData,
+      const source = await OpenNotebookAPI.sources.uploadFile({
+        file,
+        title,
+        notebook_id: notebookId,
+        embed: true,
+        async_processing: true,
       })
-
-      if (response.ok) {
-        const data = await response.json()
-        set(state => ({
-          sources: [data.source, ...state.sources],
-        }))
-        return data.source
-      } else {
-        const errorData = await response.json().catch(() => ({}))
-        set({ error: errorData.detail || 'Failed to upload file' })
-        console.error('Failed to upload source:', errorData)
-        return null
-      }
+      
+      const mappedSource = mapSourceToNotebookSource(source, notebookId)
+      
+      set(state => ({
+        sources: [mappedSource, ...state.sources],
+      }))
+      
+      return mappedSource
     } catch (error) {
-      set({ error: 'Failed to upload file' })
       console.error('Error uploading source:', error)
+      set({ error: 'Failed to upload file' })
       return null
     }
   },
 
   addUrlSource: async (notebookId: string, url: string, title?: string) => {
     try {
-      const response = await fetch(`/api/notebooks/${notebookId}/sources/url`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...getAuthHeaders(),
-        },
-        credentials: 'include',
-        body: JSON.stringify({ url, title }),
+      const source = await OpenNotebookAPI.sources.createFromUrl({
+        url,
+        title,
+        notebook_id: notebookId,
+        embed: true,
+        async_processing: true,
       })
-
-      if (response.ok) {
-        const data = await response.json()
-        set(state => ({
-          sources: [data.source, ...state.sources],
-        }))
-        return data.source
-      } else {
-        const errorData = await response.json().catch(() => ({}))
-        set({ error: errorData.detail || 'Failed to add URL' })
-        console.error('URL source error:', errorData)
-        return null
-      }
+      
+      const mappedSource = mapSourceToNotebookSource(source, notebookId)
+      
+      set(state => ({
+        sources: [mappedSource, ...state.sources],
+      }))
+      
+      return mappedSource
     } catch (error) {
-      set({ error: 'Failed to add URL' })
       console.error('Error adding URL source:', error)
+      set({ error: 'Failed to add URL' })
       return null
     }
   },
 
   addTextSource: async (notebookId: string, title: string, content: string) => {
-    const formData = new FormData()
-    formData.append('title', title)
-    formData.append('content', content)
-
     try {
-      const response = await fetch(`/api/notebooks/${notebookId}/sources/text`, {
-        method: 'POST',
-        headers: getAuthHeaders(),
-        credentials: 'include',
-        body: formData,
+      const source = await OpenNotebookAPI.sources.createFromText({
+        content,
+        title,
+        notebook_id: notebookId,
+        embed: true,
       })
-
-      if (response.ok) {
-        const data = await response.json()
-        set(state => ({
-          sources: [data.source, ...state.sources],
-        }))
-        return data.source
-      } else {
-        const errorData = await response.json().catch(() => ({}))
-        set({ error: errorData.detail || 'Failed to add text' })
-        console.error('Text source error:', errorData)
-        return null
-      }
+      
+      const mappedSource = mapSourceToNotebookSource(source, notebookId)
+      
+      set(state => ({
+        sources: [mappedSource, ...state.sources],
+      }))
+      
+      return mappedSource
     } catch (error) {
-      set({ error: 'Failed to add text' })
       console.error('Error adding text source:', error)
+      set({ error: 'Failed to add text' })
       return null
     }
   },
 
   deleteSource: async (notebookId: string, sourceId: string) => {
     try {
-      const response = await fetch(`/api/notebooks/${notebookId}/sources/${sourceId}`, {
-        method: 'DELETE',
-        headers: getAuthHeaders(),
-      })
-
-      if (response.ok) {
-        set(state => ({
-          sources: state.sources.filter(s => s.id !== sourceId),
-        }))
-      }
+      // First remove from notebook, then delete the source
+      await OpenNotebookAPI.notebooks.removeSource(notebookId, sourceId)
+      await OpenNotebookAPI.sources.delete(sourceId)
+      
+      set(state => ({
+        sources: state.sources.filter(s => s.id !== sourceId),
+      }))
     } catch (error) {
       console.error('Error deleting source:', error)
     }
@@ -418,23 +470,22 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
 
   refreshSourceStatus: async (notebookId: string, sourceId: string) => {
     try {
-      const response = await fetch(`/api/notebooks/${notebookId}/sources/${sourceId}/status`, {
-        headers: {
-          'Content-Type': 'application/json',
-          ...getAuthHeaders(),
-        },
-      })
-
-      if (response.ok) {
-        const status = await response.json()
-        set(state => ({
-          sources: state.sources.map(s =>
-            s.id === sourceId
-              ? { ...s, status: status.status, chunk_count: status.chunk_count || s.chunk_count, error_message: status.error_message }
-              : s
-          ),
-        }))
+      const status = await OpenNotebookAPI.sources.getStatus(sourceId)
+      
+      const statusMap: Record<string, NotebookSource['status']> = {
+        pending: 'pending',
+        processing: 'processing',
+        completed: 'ready',
+        failed: 'error',
       }
+      
+      set(state => ({
+        sources: state.sources.map(s =>
+          s.id === sourceId
+            ? { ...s, status: statusMap[status.status] || s.status, error_message: status.error }
+            : s
+        ),
+      }))
     } catch (error) {
       console.error('Error refreshing source status:', error)
     }
@@ -446,75 +497,52 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
     set({ isLoadingNotes: true })
 
     try {
-      const response = await fetch(`/api/notebooks/${notebookId}/notes`, {
-        headers: {
-          'Content-Type': 'application/json',
-          ...getAuthHeaders(),
-        },
-      })
-
-      if (response.ok) {
-        const data = await response.json()
-        set({ notes: data.notes || [], isLoadingNotes: false })
-      } else {
-        set({ isLoadingNotes: false })
-      }
+      const notes = await OpenNotebookAPI.notes.list(notebookId)
+      const mappedNotes = notes.map(mapNoteToNotebookNote)
+      
+      set({ notes: mappedNotes, isLoadingNotes: false })
     } catch (error) {
-      set({ isLoadingNotes: false })
       console.error('Error fetching notes:', error)
+      set({ isLoadingNotes: false })
     }
   },
 
   createNote: async (notebookId: string, content: string, type: string = 'user_note', title?: string) => {
     try {
-      const response = await fetch(`/api/notebooks/${notebookId}/notes`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...getAuthHeaders(),
-        },
-        body: JSON.stringify({ content, type, title }),
+      const note = await OpenNotebookAPI.notes.create({
+        title: title || 'Untitled Note',
+        content,
+        notebook_id: notebookId,
+        note_type: type,
       })
-
-      if (response.ok) {
-        const note = await response.json()
-        set(state => ({
-          notes: [note, ...state.notes],
-        }))
-        return note
-      } else {
-        set({ error: 'Failed to create note' })
-        return null
-      }
+      
+      const mappedNote = mapNoteToNotebookNote(note)
+      
+      set(state => ({
+        notes: [mappedNote, ...state.notes],
+      }))
+      
+      return mappedNote
     } catch (error) {
-      set({ error: 'Failed to create note' })
       console.error('Error creating note:', error)
+      set({ error: 'Failed to create note' })
       return null
     }
   },
 
   updateNote: async (notebookId: string, noteId: string, content?: string, title?: string, isPinned?: boolean) => {
     try {
-      const body: any = {}
-      if (content !== undefined) body.content = content
-      if (title !== undefined) body.title = title
-      if (isPinned !== undefined) body.is_pinned = isPinned
-
-      const response = await fetch(`/api/notebooks/${notebookId}/notes/${noteId}`, {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          ...getAuthHeaders(),
-        },
-        body: JSON.stringify(body),
+      const note = await OpenNotebookAPI.notes.update(noteId, {
+        content,
+        title,
+        pinned: isPinned,
       })
-
-      if (response.ok) {
-        const updated = await response.json()
-        set(state => ({
-          notes: state.notes.map(n => n.id === noteId ? updated : n),
-        }))
-      }
+      
+      const mappedNote = mapNoteToNotebookNote(note)
+      
+      set(state => ({
+        notes: state.notes.map(n => n.id === noteId ? mappedNote : n),
+      }))
     } catch (error) {
       console.error('Error updating note:', error)
     }
@@ -522,16 +550,11 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
 
   deleteNote: async (notebookId: string, noteId: string) => {
     try {
-      const response = await fetch(`/api/notebooks/${notebookId}/notes/${noteId}`, {
-        method: 'DELETE',
-        headers: getAuthHeaders(),
-      })
-
-      if (response.ok) {
-        set(state => ({
-          notes: state.notes.filter(n => n.id !== noteId),
-        }))
-      }
+      await OpenNotebookAPI.notes.delete(noteId)
+      
+      set(state => ({
+        notes: state.notes.filter(n => n.id !== noteId),
+      }))
     } catch (error) {
       console.error('Error deleting note:', error)
     }
@@ -543,26 +566,41 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
     set({ isLoadingMessages: true })
 
     try {
-      const response = await fetch(`/api/notebooks/${notebookId}/chat/history`, {
-        headers: {
-          'Content-Type': 'application/json',
-          ...getAuthHeaders(),
-        },
-      })
-
-      if (response.ok) {
-        const data = await response.json()
-        set({ messages: data.messages || [], isLoadingMessages: false })
+      // Get or create a chat session for this notebook
+      const sessions = await OpenNotebookAPI.chat.getSessions(notebookId)
+      
+      let session: ChatSession
+      if (sessions.length > 0) {
+        // Use the most recent session
+        session = sessions[0]
       } else {
-        set({ isLoadingMessages: false })
+        // Create a new session
+        session = await OpenNotebookAPI.chat.createSession({
+          notebook_id: notebookId,
+          title: 'Chat',
+        })
       }
+      
+      // Fetch messages for this session
+      const sessionWithMessages = await OpenNotebookAPI.chat.getSession(session.id)
+      const messages = sessionWithMessages.messages.map(msg =>
+        mapOpenChatMessageToChatMessage(msg, notebookId)
+      )
+      
+      set({
+        currentSession: session,
+        messages,
+        isLoadingMessages: false,
+      })
     } catch (error) {
-      set({ isLoadingMessages: false })
       console.error('Error fetching chat history:', error)
+      set({ isLoadingMessages: false })
     }
   },
 
   sendMessage: async (notebookId: string, message: string, model?: string) => {
+    const { currentSession, sources, notes } = get()
+    
     set({ isChatting: true, error: null })
 
     // Add user message optimistically
@@ -581,73 +619,71 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
     }))
 
     try {
-      // If no model specified, use notebook default (if set), else fallback.
-      const effectiveModel =
-        model ||
-        localStorage.getItem('notebook_default_model') ||
-        'gpt-oss:latest'
+      // Ensure we have a session
+      let sessionId = currentSession?.id
+      if (!sessionId) {
+        const session = await OpenNotebookAPI.chat.createSession({
+          notebook_id: notebookId,
+          title: 'Chat',
+        })
+        sessionId = session.id
+        set({ currentSession: session })
+      }
 
-      const response = await fetch(`/api/notebooks/${notebookId}/chat`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...getAuthHeaders(),
-        },
-        credentials: 'include',
-        body: JSON.stringify({ message, model: effectiveModel, top_k: 5 }),
+      // Build context from current sources and notes
+      const context = {
+        sources: sources.map(s => s.id),
+        notes: notes.map(n => n.id),
+        use_rag: true,
+        include_all_sources: true,
+        include_all_notes: true,
+      }
+
+      // Send message
+      const response = await OpenNotebookAPI.chat.sendMessage({
+        session_id: sessionId,
+        message,
+        context,
+        model_override: model,
       })
 
-      if (response.ok) {
-        const data = await response.json()
+      // Update messages with response
+      const newMessages = response.messages.map(msg =>
+        mapOpenChatMessageToChatMessage(msg, notebookId)
+      )
 
-        // Replace temp message with actual and add assistant response
-        set(state => ({
-          messages: [
-            ...state.messages.filter(m => m.id !== tempUserMsg.id),
-            { ...tempUserMsg, id: `user-${Date.now()}` },
-            {
-              id: data.message_id,
-              notebook_id: notebookId,
-              user_id: 0,
-              role: 'assistant',
-              content: data.answer,
-              reasoning: data.reasoning,
-              citations: data.citations || [],
-              model_used: data.model_used,
-              created_at: new Date().toISOString(),
-            },
-          ],
-          isChatting: false,
-        }))
-      } else {
-        const error = await response.text()
-        set(state => ({
-          messages: state.messages.filter(m => m.id !== tempUserMsg.id),
-          error: 'Failed to send message',
-          isChatting: false,
-        }))
-        console.error('Failed to send message:', error)
-      }
+      set({
+        messages: newMessages,
+        isChatting: false,
+      })
     } catch (error) {
+      console.error('Error sending message:', error)
       set(state => ({
         messages: state.messages.filter(m => m.id !== tempUserMsg.id),
         error: 'Failed to send message',
         isChatting: false,
       }))
-      console.error('Error sending message:', error)
     }
   },
 
   clearChatHistory: async (notebookId: string) => {
+    const { currentSession } = get()
+    
     try {
-      const response = await fetch(`/api/notebooks/${notebookId}/chat/history`, {
-        method: 'DELETE',
-        headers: getAuthHeaders(),
-      })
-
-      if (response.ok) {
-        set({ messages: [] })
+      if (currentSession) {
+        await OpenNotebookAPI.chat.deleteSession(currentSession.id)
       }
+      
+      // Create a new session
+      const session = await OpenNotebookAPI.chat.createSession({
+        notebook_id: notebookId,
+        title: 'Chat',
+      })
+      
+      set({
+        currentSession: session,
+        messages: [],
+      })
     } catch (error) {
       console.error('Error clearing chat history:', error)
     }
@@ -662,5 +698,6 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
     sources: [],
     notes: [],
     messages: [],
+    currentSession: null,
   }),
 }))

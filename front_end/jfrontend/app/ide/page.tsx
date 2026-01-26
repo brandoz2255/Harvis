@@ -109,6 +109,10 @@ export default function IDEPage() {
     }
     return 'gpt-oss'
   })
+  
+  // Ollama connection state
+  const [ollamaConnected, setOllamaConnected] = useState(false)
+  const [ollamaError, setOllamaError] = useState<string | null>(null)
   const editorRef = useRef<any>(null)
   
   // Right panel and diff view state
@@ -953,16 +957,34 @@ export default function IDEPage() {
 
         if (response.ok) {
           const data = await response.json()
-          setAvailableModels(data.models || [])
+          const models = data.models || []
+          setAvailableModels(models)
+          
+          // Update Ollama connection status
+          if (models.length > 0) {
+            setOllamaConnected(true)
+            setOllamaError(null)
+          } else {
+            setOllamaConnected(false)
+            setOllamaError('No models available - run: ollama pull mistral')
+          }
+        } else {
+          setOllamaConnected(false)
+          setOllamaError('Cannot connect to model server')
         }
       } catch (error) {
         console.error('Failed to fetch AI models:', error)
+        setOllamaConnected(false)
+        setOllamaError(error instanceof Error ? error.message : 'Network error')
       }
     }
 
     if (currentSession) {
       fetchModels()
     }
+    
+    // Also fetch models on mount to show status immediately
+    fetchModels()
   }, [currentSession])
 
   // Handle AI message sending
@@ -1317,6 +1339,17 @@ export default function IDEPage() {
             />
           </div>
           <div className="flex items-center gap-2">
+            {/* Ollama Status */}
+            <div className="flex items-center gap-1" title={ollamaError || (ollamaConnected ? 'Ollama connected' : 'Ollama offline')}>
+              <span className={`text-xs px-2 py-1 rounded flex items-center gap-1 ${
+                ollamaConnected
+                  ? 'bg-green-500/20 text-green-400'
+                  : 'bg-yellow-500/20 text-yellow-400'
+              }`}>
+                {ollamaConnected ? '🦙' : '⚠️'}
+                {ollamaConnected ? `${availableModels.length} models` : 'Ollama Offline'}
+              </span>
+            </div>
             <GitHubStatus />
             {currentSession && (
               <div className="flex items-center gap-2">
@@ -1332,6 +1365,22 @@ export default function IDEPage() {
             )}
           </div>
         </header>
+
+      {/* Ollama Offline Warning Banner */}
+      {!ollamaConnected && (
+        <div className="bg-yellow-900/30 border-b border-yellow-600/30 px-4 py-2 flex items-center justify-between text-sm">
+          <div className="flex items-center gap-2 text-yellow-400">
+            <span>⚠️</span>
+            <span>
+              <strong>AI features limited:</strong> Ollama is not connected.
+              {ollamaError && <span className="text-yellow-500/80 ml-1">({ollamaError})</span>}
+            </span>
+          </div>
+          <span className="text-yellow-500/80 text-xs">
+            Start Ollama to enable AI assistant and code completion
+          </span>
+        </div>
+      )}
 
       {/* Main Grid Layout */}
       <div className="flex-1 overflow-hidden flex min-w-0">

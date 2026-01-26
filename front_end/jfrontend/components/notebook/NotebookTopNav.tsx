@@ -2,12 +2,13 @@
 
 import Link from "next/link"
 import { usePathname, useRouter } from "next/navigation"
-import { BookOpen, Search, Mic, Bot, Settings } from "lucide-react"
+import { BookOpen, Search, Mic, Bot, Settings, Headphones } from "lucide-react"
 import { useState } from "react"
 
 const navItems = [
   { label: "Notebooks", href: "/notebooks", icon: BookOpen },
   { label: "Search", href: "/notebooks/search", icon: Search },
+  { label: "Voices", href: "/notebooks/voices", icon: Headphones },
   { label: "Podcasts", href: "/notebooks/podcasts", icon: Mic },
   { label: "Models", href: "/notebooks/models", icon: Bot },
   { label: "Settings", href: "/notebooks/settings", icon: Settings },
@@ -53,6 +54,7 @@ export default function NotebookTopNav() {
               (item.href === "/notebooks" &&
                 pathname?.startsWith("/notebooks/") &&
                 !pathname?.startsWith("/notebooks/search") &&
+                !pathname?.startsWith("/notebooks/voices") &&
                 !pathname?.startsWith("/notebooks/podcasts") &&
                 !pathname?.startsWith("/notebooks/models") &&
                 !pathname?.startsWith("/notebooks/settings"))

@@ -1,314 +1,1189 @@
-Great progress. You’ve already built the context pipeline and a dedicated /api/ide/copilot/suggest—that’s the right architecture. Now let’s (1) harden the prompt engineering so models return code‑only, useful, and more frequent ghost completions, and (2) fix the tab bar layout bug that pushes the IDE off‑screen.
+# 🎙️ HARVIS VIBEVOICE INTEGRATION - COMPLETE MASTER PROMPT
 
-Below you’ll get:
+*Voice Cloning & Podcast Generation Implementation Guide*
 
-Drop‑in prompt builder improvements (system + user messages, stop‑sequences, options)
+---
 
-Cleaner post‑processing for “no apologies, code‑only” + indentation/length control
+## 📋 TABLE OF CONTENTS
 
-Trigger heuristics so you don’t call the model when signal is poor (and call more aggressively when signal is strong)
+1. [Quick Start](#quick-start)
+2. [Architecture Overview](#architecture-overview)
+3. [Phase 1: Backend Setup](#phase-1-backend-setup)
+4. [Phase 2: Frontend UI](#phase-2-frontend-ui)
+5. [Phase 3: Integration](#phase-3-integration)
+6. [Phase 4: Testing](#phase-4-testing)
+7. [Phase 5: Deployment](#phase-5-deployment)
+8. [Troubleshooting](#troubleshooting)
+9. [API Reference](#api-reference)
 
-FE context packaging (neighbor files, language)
+---
 
-UI fixes for the “tabs curve left / background shows” bug (Tailwind + CSS)
+## 🚀 QUICK START
 
-A master prompt for Claude to implement it end‑to‑end in your repo
+### **Goal**
+Add VibeVoice voice cloning to HARVIS, enabling users to:
+- Clone ANY voice from 10-60 second samples (Walter White, Peter Griffin, etc.)
+- Generate multi-speaker podcasts (up to 4 speakers)
+- Create long-form audio (up to 90 minutes)
+- All running locally on 7-8GB VRAM GPU
 
-1) Prompt engineering: make suggestions accurate, code‑only, and frequent
-A. System & user prompt contract (tight + language‑aware)
+### **Key Model Info**
+```yaml
+Model: microsoft/VibeVoice-1.5B
+License: MIT (fully open)
+Access Token: NOT REQUIRED ✅
+VRAM: 6-8GB (with 4-bit quantization)
+Quality: Excellent
+Voice Cloning: Zero-shot (no training needed)
+Languages: English + Chinese (+ experimental multilingual)
+```
 
-In ide_ai.py, replace your current system/user builders with this stricter contract (keeps your context window):
-# ---- Prompt contract (tight) ----------------------------------------------
+### **Implementation Time**
+- Backend: 2-3 days
+- Frontend: 2-3 days
+- Integration & Testing: 1-2 days
+- **Total: ~7 days**
 
-SYSTEM_INLINE = (
-    "You are a code completion engine for an IDE.\n"
-    "TASK: Predict only the next code the user is likely to type.\n"
-    "HARD RULES:\n"
-    "  - OUTPUT CODE ONLY. No prose. No markdown fences. No apologies.\n"
-    "  - Do not repeat existing text in the suffix.\n"
-    "  - Respect the language and indentation exactly.\n"
-    "  - Prefer short, incremental continuations for inline suggestions.\n"
-    "  - If there is not enough signal to continue safely, return nothing.\n"
-)
+---
 
-def build_copilot_messages(language: str, safe_path: str,
-                           context_window: dict,
-                           neighbor_summary: str | None) -> list[dict]:
-    # Tight, structured user message:
-    user_payload = {
-        "file": safe_path,
-        "language": language,
-        "indentation": context_window["indentation"],
-        "before_lines": context_window["before_line_count"],
-        "after_lines": context_window["after_line_count"],
-        # only small but salient slices
-        "prefix": context_window["before"][-2000:],        # budget
-        "suffix": context_window["after"][:400],           # guard repetition
-        "surrounding": context_window["surrounding_snippet"],
-        "neighbors": neighbor_summary or "",
-        "instruction": (
-            "Return ONLY the characters to insert at the cursor.\n"
-            "No backticks or markdown. No commentary. No apologies.\n"
-            "If unsure, return empty string."
-        ),
+## 🏗️ ARCHITECTURE OVERVIEW
+
+```
+┌─────────────────────────────────────────────┐
+│           Frontend (Next.js)                │
+│  ┌─────────────┐    ┌──────────────────┐  │
+│  │Voice Library│    │Podcast Generator │  │
+│  │   UI        │    │       UI         │  │
+│  └──────┬──────┘    └────────┬─────────┘  │
+└─────────┼──────────────────────┼────────────┘
+          │                      │
+          │    API Requests      │
+          ▼                      ▼
+┌─────────────────────────────────────────────┐
+│         HARVIS Backend (FastAPI)            │
+│         /api/tts/* proxy routes             │
+└─────────────────┬───────────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────────────┐
+│      TTS Service (Docker Container)         │
+│  ┌────────────────────────────────────┐    │
+│  │    VibeVoice Engine                │    │
+│  │  - Voice Cloning                   │    │
+│  │  - Multi-Speaker Generation        │    │
+│  │  - 4-bit Quantization              │    │
+│  └────────────────────────────────────┘    │
+│                                             │
+│  Volumes:                                   │
+│  - /app/models  (Model weights)            │
+│  - /app/voices  (Voice library)            │
+│  - /app/output  (Generated audio)          │
+└─────────────────────────────────────────────┘
+```
+
+---
+
+## 📦 PHASE 1: BACKEND SETUP
+
+### **Step 1.1: File Structure**
+
+Create this directory structure:
+
+```
+python_back_end/
+└── tts_system/
+    ├── __init__.py
+    ├── server.py                    # FastAPI service
+    ├── engines/
+    │   ├── __init__.py
+    │   └── vibevoice_engine.py     # VibeVoice implementation
+    └── models/
+        ├── __init__.py
+        └── voice_model.py          # Data models
+```
+
+### **Step 1.2: Install Dependencies**
+
+All backend files have been created in `/mnt/user-data/outputs/python_back_end/tts_system/`
+
+Copy them to your project:
+```bash
+cp -r /mnt/user-data/outputs/python_back_end/tts_system/* python_back_end/tts_system/
+```
+
+### **Step 1.3: Docker Setup**
+
+Files created in `/mnt/user-data/outputs/docker/`:
+
+1. **Dockerfile** - `docker/tts-service/Dockerfile`
+2. **Requirements** - `docker/tts-service/requirements-tts.txt`
+3. **Docker Compose Addition** - `docker-compose-tts-addition.yaml`
+4. **Nginx Config Addition** - `nginx-tts-addition.conf`
+
+**Integration Steps:**
+
+```bash
+# 1. Copy Docker files
+mkdir -p docker/tts-service
+cp /mnt/user-data/outputs/docker/tts-service/* docker/tts-service/
+
+# 2. Add TTS service to docker-compose.yaml
+# Append contents of docker-compose-tts-addition.yaml to your docker-compose.yaml
+
+# 3. Update nginx.conf
+# Append contents of nginx-tts-addition.conf to your nginx.conf
+
+# 4. Build and start
+docker-compose up -d --build tts-service
+```
+
+### **Step 1.4: Verify Backend**
+
+```bash
+# Check service is running
+docker logs harvis-tts
+
+# Should see:
+# ✅ TTS Service Ready!
+
+# Test health endpoint
+curl http://localhost:8001/health
+
+# Should return:
+# {"status": "healthy", "engine_info": {...}}
+```
+
+---
+
+## 🎨 PHASE 2: FRONTEND UI
+
+### **Step 2.1: Voice Library Component**
+
+Create: `front_end/jfrontend/components/notebook/VoiceLibrary.tsx`
+
+```typescript
+'use client'
+
+import { useState, useEffect } from 'react'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
+import { Mic, Upload, Trash2, Play, Pause, Sparkles } from 'lucide-react'
+import { useToast } from '@/components/ui/use-toast'
+
+interface Voice {
+  voice_id: string
+  voice_name: string
+  description?: string
+  reference_duration: number
+  created_at: string
+  quality_score?: number
+}
+
+export function VoiceLibrary() {
+  const [voices, setVoices] = useState<Voice[]>([])
+  const [loading, setLoading] = useState(true)
+  const { toast } = useToast()
+  
+  useEffect(() => {
+    fetchVoices()
+  }, [])
+  
+  const fetchVoices = async () => {
+    try {
+      const res = await fetch('/api/tts/voices')
+      const data = await res.json()
+      setVoices(data.voices)
+    } catch (error) {
+      console.error('Failed to fetch voices:', error)
+    } finally {
+      setLoading(false)
     }
-
-    return [
-        {"role": "system", "content": SYSTEM_INLINE},
-        {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
-    ]
-B. Language‑ & suffix‑aware stop sequences
-
-Stopping early prevents rambling/apologies and keeps results snappy:
-
-# ---- Stop sequences --------------------------------------------------------
-
-def stops_for(language: str, suffix: str) -> list[str]:
-    base = ["```", "\n\n\n"]  # break long rambles or fenced output quickly
-
-    # Stop near the suffix to avoid repeating the future
-    suffix_hint = suffix[:24].strip()
-    if suffix_hint:
-        base.append(suffix_hint)
-
-    lang_stops = {
-        "python": ["\n\n", "# ", '"""', "'''"],
-        "javascript": ["\n\n", "/*", "//"],
-        "typescript": ["\n\n", "/*", "//"],
-        "go": ["\n\n", "/*", "//"],
-        "java": ["\n\n", "/*", "//"],
-        "c": ["\n\n", "/*", "//"],
-        "cpp": ["\n\n", "/*", "//"],
-        "csharp": ["\n\n", "/*", "//"],
-        "rust": ["\n\n", "/*", "//"],
-        "php": ["\n\n", "/*", "//", "?>"],
-        "ruby": ["\n\n", "# "],
-        "shell": ["\n\n", "# "],
-        "sql": ["\n\n", "-- "],
-        "html": ["\n\n", "<!--"],
-        "css": ["\n\n"],
-        "json": ["\n\n", "}"],
-        "yaml": ["\n\n", "- "],
-        "markdown": ["\n\n"],
-        "plaintext": ["\n\n"],
+  }
+  
+  const handleCloneVoice = async (voiceName: string, audioFile: File, description?: string) => {
+    try {
+      const formData = new FormData()
+      formData.append('audio_sample', audioFile)
+      
+      const res = await fetch(
+        `/api/tts/voices/clone?voice_name=${encodeURIComponent(voiceName)}${
+          description ? `&description=${encodeURIComponent(description)}` : ''
+        }`,
+        {
+          method: 'POST',
+          body: formData
+        }
+      )
+      
+      if (!res.ok) throw new Error('Voice cloning failed')
+      
+      const result = await res.json()
+      
+      toast({
+        title: '✅ Voice Cloned!',
+        description: `"${voiceName}" is ready to use in podcasts.`
+      })
+      
+      fetchVoices()
+      
+    } catch (error) {
+      toast({
+        title: '❌ Cloning Failed',
+        description: error.message,
+        variant: 'destructive'
+      })
     }
-    return list(dict.fromkeys(base + lang_stops.get(language.lower(), ["\n\n"])))
-
-Pass these into your existing collect_text_from_ollama call (extend it to accept options and include them in both /api/chat and /api/generate payloads).
-
-2) Post‑processing: always return code‑only, well‑formed, not repetitive
-
-Improve clean_copilot_suggestion:
-
-CODEISH_PAT = re.compile(r"[;{}\[\]()=]|^\s*(def|class|return|if|for|while|try|catch|import|from|const|let|var)\b", re.I)
-
-APOLOGY_PAT = re.compile(r"\b(sorry|apolog|as an ai|i can’t|i cannot|i'm unable)\b", re.I)
-FENCE_PAT = re.compile(r"^```[\w-]*\s*|\s*```$", re.M)
-BACKTICK_PAT = re.compile(r"`{1,3}")
-
-def clean_copilot_suggestion(text: str, language: str = "") -> str:
-    if not text:
-        return ""
-
-    # strip fences / backticks
-    text = FENCE_PAT.sub("", text)
-    text = BACKTICK_PAT.sub("", text)
-
-    # drop apologies / prose
-    if APOLOGY_PAT.search(text):
-        return ""
-
-    # keep only first 'code-ish' paragraph
-    parts = [p.strip("\n") for p in text.split("\n\n") if p.strip()]
-    for p in parts:
-        if CODEISH_PAT.search(p) or language.lower() in ("python","javascript","typescript"):
-            text = p
-            break
-
-    # trim to a reasonable inline length
-    max_chars = int(os.getenv("IDE_INLINE_MAX_CHARS", "240"))
-    text = text[:max_chars].rstrip()
-
-    # normalize indentation for multi-line blocks (respect current indentation)
-    text = text.replace("\r\n", "\n")
-
-    return text
-
-
-Optional: truncate to a sane boundary (no half tokens / open quotes):
-
-def truncate_safely(text: str) -> str:
-    # stop at end of line or before an obvious break
-    for marker in ["\n\n", "\n# ", "\n// ", "\n/*"]:
-        i = text.find(marker)
-        if i != -1:
-            return text[:i]
-    return text
-
-
-Call clean_copilot_suggestion(...) → truncate_safely(...) before returning.
-
-3) Trigger heuristics: call more when signal is strong, less when weak
-
-Front‑end (already logging heuristics). Tighten it:
-
-Call when any is true:
-
-line ends with . -> . in JS/TS, . or : in Python, {/( just typed
-
-prefix contains function signature/incomplete call foo(, def , class , if , for
-
-just typed a dot, ::, ->, or after an equals =
-
-Skip when:
-
-file is empty or whitespace only
-
-you’re in comments/strings (you can cheaply detect by scanning the prefix line)
-
-the last suggestion was just accepted < 1s ago (cooldown)
-
-Debounce idle: 450–700 ms (you’re at 650ms; that’s fine).
-
-Abort previous inflight /suggest with AbortController on each new keystroke to avoid piling up responses.
-
-4) FE context packaging (neighbor files + language)
-
-From the editor:
-
-Send language = model.getLanguageId() (you are).
-
-Buffer slices:
-
-prefix last 2000 chars
-
-suffix first 400 chars
-
-Neighbor files: send the top 2–3 relevant (open tabs / same directory / same module) as {path, snippet} (first ~200 lines or a 2–3 paragraph summary); you already have a placeholder—wire it in now.
-
-5) UI fix: tabs overflow pushes the IDE off‑screen
-
-This is a flex/min-width/overflow issue. Fix the containers so the editor region never “curves left”.
-
-A. Ensure every flex child in the chain has min-width: 0
-
-// e.g., in /ide page layout
-<main className="h-full w-full flex flex-col overflow-hidden">
-  <div className="flex h-10 items-center border-b min-w-0 overflow-x-auto">
-    {/* tabs row */}
-  </div>
-  <div className="flex-1 min-w-0 flex overflow-hidden">
-    {/* left explorer */}
-    <aside className="w-64 shrink-0 border-r overflow-auto">…</aside>
-
-    {/* editor + right pane */}
-    <section className="flex-1 min-w-0 flex overflow-hidden">
-      <div className="flex-1 min-w-0 relative">
-        <div id="editor" className="absolute inset-0" />
+  }
+  
+  const handleDeleteVoice = async (voiceId: string) => {
+    try {
+      await fetch(`/api/tts/voices/${voiceId}`, { method: 'DELETE' })
+      
+      toast({
+        title: 'Voice Deleted',
+        description: `Voice removed from library.`
+      })
+      
+      fetchVoices()
+    } catch (error) {
+      toast({
+        title: 'Deletion Failed',
+        description: error.message,
+        variant: 'destructive'
+      })
+    }
+  }
+  
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex justify-between items-center">
+        <div>
+          <h2 className="text-2xl font-bold">Voice Library</h2>
+          <p className="text-sm text-gray-400 mt-1">
+            Clone voices from 10-60 second audio samples
+          </p>
+        </div>
+        
+        <VoiceCloneDialog onClone={handleCloneVoice} />
       </div>
-      <div className="w-96 shrink-0 border-l overflow-auto">{/* right tabs */}</div>
-    </section>
-  </div>
-</main>
+      
+      {/* Voice Grid */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {loading ? (
+          <div className="col-span-full text-center py-12">
+            <div className="animate-spin w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full mx-auto mb-4"></div>
+            <p className="text-gray-400">Loading voices...</p>
+          </div>
+        ) : voices.length === 0 ? (
+          <Card className="col-span-full bg-gray-900/50 border-gray-800">
+            <CardContent className="pt-12 pb-12 text-center">
+              <Mic className="w-16 h-16 mx-auto mb-4 text-gray-600" />
+              <h3 className="text-lg font-semibold mb-2">No Voices Yet</h3>
+              <p className="text-gray-400 mb-6">
+                Clone your first voice to start generating podcasts
+              </p>
+              <VoiceCloneDialog onClone={handleCloneVoice} />
+            </CardContent>
+          </Card>
+        ) : (
+          voices.map((voice) => (
+            <VoiceCard
+              key={voice.voice_id}
+              voice={voice}
+              onDelete={handleDeleteVoice}
+            />
+          ))
+        )}
+      </div>
+    </div>
+  )
+}
 
+function VoiceCloneDialog({ onClone }) {
+  const [open, setOpen] = useState(false)
+  const [voiceName, setVoiceName] = useState('')
+  const [description, setDescription] = useState('')
+  const [audioFile, setAudioFile] = useState<File | null>(null)
+  const [isCloning, setIsCloning] = useState(false)
+  
+  const handleSubmit = async () => {
+    if (!voiceName || !audioFile) return
+    
+    setIsCloning(true)
+    await onClone(voiceName, audioFile, description)
+    setIsCloning(false)
+    
+    // Reset
+    setVoiceName('')
+    setDescription('')
+    setAudioFile(null)
+    setOpen(false)
+  }
+  
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button className="bg-blue-600 hover:bg-blue-700">
+          <Sparkles className="w-4 h-4 mr-2" />
+          Clone Voice
+        </Button>
+      </DialogTrigger>
+      
+      <DialogContent className="sm:max-w-[500px] bg-gray-900 border-gray-800">
+        <DialogHeader>
+          <DialogTitle>Clone a Voice</DialogTitle>
+          <DialogDescription className="text-gray-400">
+            Upload 10-60 seconds of clear speech. Works with any voice!
+          </DialogDescription>
+        </DialogHeader>
+        
+        <div className="space-y-4 pt-4">
+          {/* Voice Name */}
+          <div>
+            <Label htmlFor="voice-name" className="text-sm font-medium">
+              Voice Name *
+            </Label>
+            <Input
+              id="voice-name"
+              placeholder="e.g., Walter White, My Voice, etc."
+              value={voiceName}
+              onChange={(e) => setVoiceName(e.target.value)}
+              className="mt-1.5 bg-gray-800 border-gray-700"
+            />
+          </div>
+          
+          {/* Description */}
+          <div>
+            <Label htmlFor="description" className="text-sm font-medium">
+              Description (optional)
+            </Label>
+            <Input
+              id="description"
+              placeholder="e.g., Character from Breaking Bad"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              className="mt-1.5 bg-gray-800 border-gray-700"
+            />
+          </div>
+          
+          {/* Audio Upload */}
+          <div>
+            <Label className="text-sm font-medium mb-2 block">
+              Audio Sample * (10-60 seconds)
+            </Label>
+            <Button
+              variant="outline"
+              className="w-full justify-start bg-gray-800 border-gray-700 hover:bg-gray-750"
+              onClick={() => document.getElementById('audio-upload')?.click()}
+            >
+              <Upload className="w-4 h-4 mr-2" />
+              {audioFile ? audioFile.name : 'Choose audio file...'}
+            </Button>
+            
+            <input
+              id="audio-upload"
+              type="file"
+              accept="audio/*"
+              className="hidden"
+              onChange={(e) => setAudioFile(e.target.files?.[0] || null)}
+            />
+            
+            {audioFile && (
+              <p className="text-xs text-gray-400 mt-2">
+                ✓ {(audioFile.size / 1024 / 1024).toFixed(2)} MB
+              </p>
+            )}
+          </div>
+          
+          {/* Submit */}
+          <Button
+            onClick={handleSubmit}
+            disabled={!voiceName || !audioFile || isCloning}
+            className="w-full bg-blue-600 hover:bg-blue-700"
+          >
+            {isCloning ? (
+              <>
+                <div className="animate-spin w-4 h-4 border-2 border-white border-t-transparent rounded-full mr-2"></div>
+                Cloning Voice...
+              </>
+            ) : (
+              <>
+                <Sparkles className="w-4 h-4 mr-2" />
+                Clone Voice
+              </>
+            )}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
 
-B. Tab strip styles
+function VoiceCard({ voice, onDelete }) {
+  const [playing, setPlaying] = useState(false)
+  const [showDelete, setShowDelete] = useState(false)
+  
+  return (
+    <Card className="bg-gray-900/50 border-gray-800 hover:border-gray-700 transition-colors">
+      <CardHeader className="pb-3">
+        <div className="flex justify-between items-start">
+          <div className="flex-1 min-w-0">
+            <CardTitle className="text-base truncate">
+              {voice.voice_name}
+            </CardTitle>
+            {voice.description && (
+              <CardDescription className="text-xs mt-1">
+                {voice.description}
+              </CardDescription>
+            )}
+          </div>
+          
+          <Button
+            variant="ghost"
+            size="sm"
+            className="text-gray-400 hover:text-red-400 -mr-2"
+            onClick={() => setShowDelete(true)}
+          >
+            <Trash2 className="w-4 h-4" />
+          </Button>
+        </div>
+      </CardHeader>
+      
+      <CardContent className="space-y-2">
+        <div className="flex justify-between text-xs text-gray-400">
+          <span>{voice.reference_duration.toFixed(1)}s sample</span>
+          {voice.quality_score && (
+            <span>Quality: {(voice.quality_score * 100).toFixed(0)}%</span>
+          )}
+        </div>
+        
+        <Button
+          variant="outline"
+          size="sm"
+          className="w-full"
+          onClick={() => setPlaying(!playing)}
+        >
+          {playing ? (
+            <>
+              <Pause className="w-3 h-3 mr-2" />
+              Pause Sample
+            </>
+          ) : (
+            <>
+              <Play className="w-3 h-3 mr-2" />
+              Play Sample
+            </>
+          )}
+        </Button>
+      </CardContent>
+      
+      {/* Delete Confirmation */}
+      {showDelete && (
+        <div className="absolute inset-0 bg-black/80 flex items-center justify-center rounded-lg">
+          <div className="text-center p-4">
+            <p className="text-sm mb-3">Delete this voice?</p>
+            <div className="flex gap-2 justify-center">
+              <Button
+                size="sm"
+                variant="destructive"
+                onClick={() => {
+                  onDelete(voice.voice_id)
+                  setShowDelete(false)
+                }}
+              >
+                Delete
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setShowDelete(false)}
+              >
+                Cancel
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+    </Card>
+  )
+}
+```
 
-<div className="flex h-10 items-center gap-1 overflow-x-auto overscroll-contain min-w-0 flex-shrink-0">
-  {/* each tab */}
-  <button className="shrink-0 px-3 h-8 rounded hover:bg-neutral-800 whitespace-nowrap">code.py</button>
-</div>
+### **Step 2.2: Podcast Generator Component**
 
+Create: `front_end/jfrontend/components/notebook/PodcastGenerator.tsx`
 
-Critical pieces: min-w-0 on every flex item that should shrink, overflow-hidden/overflow-x-auto on containers, and avoid flex-shrink-0 on the central editor area (give it flex-1 min-w-0).
+```typescript
+'use client'
 
-C. One CSS affordance (global.css)
+import { useState, useEffect } from 'react'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Textarea } from '@/components/ui/textarea'
+import { Label } from '@/components/ui/label'
+import { Sparkles, Volume2, Download } from 'lucide-react'
+import { useToast } from '@/components/ui/use-toast'
 
-/* Ensure flex containers don't expand children beyond viewport */
-.vibe-ide-root, .vibe-ide-root * { min-width: 0; }
+interface Voice {
+  voice_id: string
+  voice_name: string
+}
 
-(You can also add max-w-none to any element that previously used max-w-screen utilities.)
+export function PodcastGenerator({ notebookId }: { notebookId: string }) {
+  const [voices, setVoices] = useState<Voice[]>([])
+  const [script, setScript] = useState('')
+  const [speakerCount, setSpeakerCount] = useState(2)
+  const [voiceMapping, setVoiceMapping] = useState<Record<string, string>>({})
+  const [generating, setGenerating] = useState(false)
+  const [audioUrl, setAudioUrl] = useState<string | null>(null)
+  const { toast } = useToast()
+  
+  useEffect(() => {
+    fetchVoices()
+  }, [])
+  
+  const fetchVoices = async () => {
+    try {
+      const res = await fetch('/api/tts/voices')
+      const data = await res.json()
+      setVoices(data.voices)
+    } catch (error) {
+      console.error('Failed to fetch voices:', error)
+    }
+  }
+  
+  const parseScript = (scriptText: string) => {
+    // Parse format: [1] Text or Speaker 1: Text
+    const lines = scriptText.split('\n').filter(line => line.trim())
+    const parsed = []
+    
+    for (const line of lines) {
+      const match = line.match(/^\[(\d+)\](.+)$/) || line.match(/^Speaker (\d+):(.+)$/)
+      if (match) {
+        parsed.push({
+          speaker: match[1],
+          text: match[2].trim()
+        })
+      }
+    }
+    
+    return parsed
+  }
+  
+  const handleGenerate = async () => {
+    if (!script.trim()) {
+      toast({
+        title: 'No Script',
+        description: 'Please enter a podcast script.',
+        variant: 'destructive'
+      })
+      return
+    }
+    
+    // Check voice mapping
+    for (let i = 1; i <= speakerCount; i++) {
+      if (!voiceMapping[i.toString()]) {
+        toast({
+          title: 'Missing Voice',
+          description: `Please assign a voice to Speaker ${i}.`,
+          variant: 'destructive'
+        })
+        return
+      }
+    }
+    
+    setGenerating(true)
+    
+    try {
+      const parsedScript = parseScript(script)
+      
+      const res = await fetch('/api/tts/generate/podcast', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          script: parsedScript,
+          voice_mapping: voiceMapping,
+          settings: {
+            cfg_scale: 1.3,
+            inference_steps: 10
+          }
+        })
+      })
+      
+      if (!res.ok) throw new Error('Generation failed')
+      
+      const result = await res.json()
+      
+      setAudioUrl(result.audio_url)
+      
+      toast({
+        title: '✅ Podcast Generated!',
+        description: `Duration: ${result.duration.toFixed(1)}s`
+      })
+      
+    } catch (error) {
+      toast({
+        title: '❌ Generation Failed',
+        description: error.message,
+        variant: 'destructive'
+      })
+    } finally {
+      setGenerating(false)
+    }
+  }
+  
+  return (
+    <div className="space-y-6">
+      <Card className="bg-gray-900/50 border-gray-800">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Volume2 className="w-5 h-5" />
+            Generate Podcast
+          </CardTitle>
+        </CardHeader>
+        
+        <CardContent className="space-y-4">
+          {/* Number of Speakers */}
+          <div>
+            <Label className="text-sm font-medium mb-2 block">
+              Number of Speakers
+            </Label>
+            <Select
+              value={speakerCount.toString()}
+              onValueChange={(v) => setSpeakerCount(parseInt(v))}
+            >
+              <SelectTrigger className="bg-gray-800 border-gray-700">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="1">1 Speaker (Monologue)</SelectItem>
+                <SelectItem value="2">2 Speakers (Dialogue)</SelectItem>
+                <SelectItem value="3">3 Speakers (Panel)</SelectItem>
+                <SelectItem value="4">4 Speakers (Group)</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          
+          {/* Voice Assignment */}
+          {Array.from({ length: speakerCount }).map((_, i) => {
+            const speakerId = (i + 1).toString()
+            return (
+              <div key={speakerId}>
+                <Label className="text-sm font-medium mb-2 block">
+                  Speaker {speakerId} Voice
+                </Label>
+                <Select
+                  value={voiceMapping[speakerId]}
+                  onValueChange={(v) => 
+                    setVoiceMapping({ ...voiceMapping, [speakerId]: v })
+                  }
+                >
+                  <SelectTrigger className="bg-gray-800 border-gray-700">
+                    <SelectValue placeholder="Select voice..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {voices.map((voice) => (
+                      <SelectItem key={voice.voice_id} value={voice.voice_id}>
+                        {voice.voice_name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )
+          })}
+          
+          {voices.length === 0 && (
+            <p className="text-sm text-yellow-500">
+              ⚠️ No voices available. Clone voices first in Voice Library.
+            </p>
+          )}
+          
+          {/* Script Input */}
+          <div>
+            <Label className="text-sm font-medium mb-2 block">
+              Podcast Script
+            </Label>
+            <p className="text-xs text-gray-400 mb-2">
+              Format: [1] Text or Speaker 1: Text
+            </p>
+            <Textarea
+              placeholder={`[1] Welcome to the show!\n[2] Thanks for having me!\n[1] Let's dive in...`}
+              value={script}
+              onChange={(e) => setScript(e.target.value)}
+              className="min-h-[200px] bg-gray-800 border-gray-700 font-mono text-sm"
+            />
+          </div>
+          
+          {/* Generate Button */}
+          <Button
+            onClick={handleGenerate}
+            disabled={generating || voices.length === 0}
+            className="w-full bg-blue-600 hover:bg-blue-700"
+            size="lg"
+          >
+            {generating ? (
+              <>
+                <div className="animate-spin w-4 h-4 border-2 border-white border-t-transparent rounded-full mr-2"></div>
+                Generating Podcast...
+              </>
+            ) : (
+              <>
+                <Sparkles className="w-5 h-5 mr-2" />
+                Generate Podcast
+              </>
+            )}
+          </Button>
+          
+          {/* Audio Player */}
+          {audioUrl && (
+            <div className="pt-4 border-t border-gray-800">
+              <Label className="text-sm font-medium mb-2 block">
+                Generated Podcast
+              </Label>
+              <audio controls className="w-full" src={audioUrl}>
+                Your browser does not support audio.
+              </audio>
+              <Button
+                variant="outline"
+                size="sm"
+                className="mt-2"
+                onClick={() => window.open(audioUrl, '_blank')}
+              >
+                <Download className="w-4 h-4 mr-2" />
+                Download
+              </Button>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+```
 
-6) Master Prompt for Claude (copy‑paste)
+### **Step 2.3: Add to Notebook Page**
 
-Context
-Harvis AI monorepo. Frontend: Next.js 14 + Monaco. Backend: FastAPI. Sessions mounted at /workspace. LLM: Ollama. The inline endpoint is /api/ide/copilot/suggest. We have a context pipeline (build_copilot_context, summarize_neighbor_files, build_copilot_messages, clean_copilot_suggestion) and want better, more frequent code‑only completions. There’s also a UI bug where tabs overflow pushes the IDE off‑screen on the left.
+Update: `front_end/jfrontend/app/notebook/[id]/page.tsx`
 
-Goals
+```typescript
+import { VoiceLibrary } from '@/components/notebook/VoiceLibrary'
+import { PodcastGenerator } from '@/components/notebook/PodcastGenerator'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 
-Improve prompt engineering and post‑processing so ghost suggestions are accurate, code‑only, and frequent (no “I’m sorry” responses).
+export default function NotebookPage({ params }: { params: { id: string } }) {
+  return (
+    <div className="container mx-auto p-6">
+      <Tabs defaultValue="sources">
+        <TabsList>
+          <TabsTrigger value="sources">Sources</TabsTrigger>
+          <TabsTrigger value="chat">Chat</TabsTrigger>
+          <TabsTrigger value="podcast">🎙️ Podcast</TabsTrigger>
+          <TabsTrigger value="voices">🎤 Voices</TabsTrigger>
+        </TabsList>
+        
+        <TabsContent value="sources">
+          {/* Existing sources UI */}
+        </TabsContent>
+        
+        <TabsContent value="chat">
+          {/* Existing chat UI */}
+        </TabsContent>
+        
+        <TabsContent value="podcast">
+          <PodcastGenerator notebookId={params.id} />
+        </TabsContent>
+        
+        <TabsContent value="voices">
+          <VoiceLibrary />
+        </TabsContent>
+      </Tabs>
+    </div>
+  )
+}
+```
 
-Add language‑ & suffix‑aware stop sequences and tuned generation options for Ollama.
+---
 
-Tighten FE triggers & neighbor‑file packaging.
+## 🔗 PHASE 3: INTEGRATION
 
-Fix the tab strip overflow so the IDE never “curves left”.
+### **Step 3.1: Create Backend API Proxy**
 
-Tasks
-Backend (FastAPI / ide_ai.py)
+Create: `python_back_end/api/tts_routes.py`
 
-Replace the system/user prompt with the strict contract in this spec (OUTPUT CODE ONLY; no fences; no apologies; respect indentation; if unsure return empty).
+```python
+from fastapi import APIRouter, UploadFile, File, HTTPException
+from typing import Dict
+import httpx
+import os
 
-Implement stops_for(language, suffix) and inline_options(language, suffix), pass options into both /api/chat and /api/generate payloads.
+router = APIRouter(prefix="/api/tts", tags=["tts"])
 
-Improve clean_copilot_suggestion to strip fences/apologies, prefer code‑ish paragraphs, limit length, normalize indentation, and truncate safely.
+TTS_SERVICE_URL = os.getenv("TTS_SERVICE_URL", "http://tts-service:8001")
 
-Ensure the endpoint never 503s for ghost; on empty simply return suggestion: "".
+@router.post("/voices/clone")
+async def clone_voice(
+    voice_name: str,
+    audio_sample: UploadFile = File(...),
+    description: str = None
+):
+    """Proxy to TTS service - Clone voice"""
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        files = {"audio_sample": (audio_sample.filename, audio_sample.file)}
+        params = {"voice_name": voice_name}
+        if description:
+            params["description"] = description
+        
+        response = await client.post(
+            f"{TTS_SERVICE_URL}/voices/clone",
+            params=params,
+            files=files
+        )
+        
+        if response.status_code != 200:
+            raise HTTPException(response.status_code, response.text)
+        
+        return response.json()
 
-Accept optional neighbor_files and include them via summarize_neighbor_files.
+@router.get("/voices")
+async def list_voices():
+    """Proxy to TTS service - List voices"""
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{TTS_SERVICE_URL}/voices")
+        return response.json()
 
-Frontend (Next.js / Monaco)
+@router.delete("/voices/{voice_id}")
+async def delete_voice(voice_id: str):
+    """Proxy to TTS service - Delete voice"""
+    async with httpx.AsyncClient() as client:
+        response = await client.delete(f"{TTS_SERVICE_URL}/voices/{voice_id}")
+        return response.json()
 
-Add AbortController to cancel in‑flight suggest requests on new keystrokes.
+@router.post("/generate/podcast")
+async def generate_podcast(request: Dict):
+    """Proxy to TTS service - Generate podcast"""
+    async with httpx.AsyncClient(timeout=600.0) as client:
+        response = await client.post(
+            f"{TTS_SERVICE_URL}/generate/podcast",
+            json=request
+        )
+        
+        if response.status_code != 200:
+            raise HTTPException(response.status_code, response.text)
+        
+        return response.json()
+```
 
-Tighten trigger heuristics: call more often after . -> :: ( : =, or after keywords (def, class, if, for, etc.); skip if in comment/string.
+Add to main backend:
 
-Send language from model.getLanguageId(), and short prefix/suffix budgets (e.g., 2k/400).
+```python
+# python_back_end/api/main.py
+from .tts_routes import router as tts_router
 
-Pass top 2–3 neighbor files (open tabs / same dir) as {path, snippet}.
+app.include_router(tts_router)
+```
 
-Fix tab strip with min-w-0, overflow-x-auto, and ensure central editor area is flex-1 min-w-0 (no flex-shrink-0 on editor).
+---
 
-Ensure theme has a visible editorGhostText.foreground.
+## 🧪 PHASE 4: TESTING
 
-Acceptance
+### **Step 4.1: Test Voice Cloning**
 
-Inline suggestions appear more frequently and are code‑only; no apologetic prose.
+```bash
+# 1. Prepare test audio (10+ seconds of clear speech)
+# Download a sample: Walter White saying "I am the one who knocks"
 
-Suggestions stop before repeating the suffix and respect indentation.
+# 2. Test cloning via API
+curl -X POST "http://localhost:8001/voices/clone?voice_name=walter_white" \
+  -F "audio_sample=@walter_white.wav"
 
-Latency stays low; no request pile‑ups during typing.
+# Expected response:
+# {
+#   "success": true,
+#   "voice": {
+#     "voice_id": "walter_white",
+#     "voice_name": "walter_white",
+#     ...
+#   }
+# }
 
-IDE tabs no longer push the layout left; the editor remains centered with horizontal tab scrolling.
+# 3. Verify voice is listed
+curl http://localhost:8001/voices
 
-changes.md updated (timestamp, problem, root cause, solution, files changed, status).
+# 4. Test in UI
+# - Go to http://localhost:3000/notebook/123/voices
+# - Click "Clone Voice"
+# - Upload audio & name it
+# - Should appear in voice library
+```
 
-Constraints
+### **Step 4.2: Test Podcast Generation**
 
-Keep all browser calls relative (/api/...), JWT via cookie or header.
+```bash
+# Test via API
+curl -X POST "http://localhost:8001/generate/podcast" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "script": [
+      {"speaker": "1", "text": "Say my name."},
+      {"speaker": "2", "text": "Heisenberg?"},
+      {"speaker": "1", "text": "You are goddamn right."}
+    ],
+    "voice_mapping": {
+      "1": "walter_white",
+      "2": "peter_griffin"
+    }
+  }'
 
-Do not break sessions, explorer, terminal, execution, or Interactive mode.
+# Expected response:
+# {
+#   "success": true,
+#   "audio_url": "/audio/podcast_xxx.wav",
+#   "duration": 15.3,
+#   ...
+# }
 
-Reuse the existing Ollama client and SSE stream; just extend options.
+# Download and listen
+curl http://localhost:8001/audio/podcast_xxx.wav -o test_podcast.wav
+```
 
-Quick test commands
+### **Step 4.3: Test in UI**
 
-Backend:
-curl -s -X POST http://localhost:9000/api/ide/copilot/suggest \
-  -H 'Content-Type: application/json' \
-  --data '{
-    "session_id":"x",
-    "filepath":"code.py",
-    "language":"python",
-    "content":"def add(a, b):\n    ",
-    "cursor_offset":18
-  }' | jq
+1. **Voice Library Tab:**
+   - Clone 2-3 voices
+   - Play samples
+   - Delete a voice
+   - Verify it works
 
-Expected: { "suggestion": "return a + b", "range": { "start": 18, "end": 18 } }
+2. **Podcast Tab:**
+   - Select 2 speakers
+   - Assign voices
+   - Enter script
+   - Generate podcast
+   - Listen to result
+   - Download file
 
-Frontend:
+---
 
-Type def add(a, b):⏎␠␠ → pause → ghost should show return a + b.
+## 🚀 PHASE 5: DEPLOYMENT
 
-Confirm the tab strip scrolls instead of shrinking the editor off‑screen.
+### **Step 5.1: Production Build**
 
+```bash
+# 1. Build all services
+docker-compose build
+
+# 2. Start services
+docker-compose up -d
+
+# 3. Check logs
+docker-compose logs -f tts-service
+
+# 4. Verify services
+curl http://localhost:8001/health
+curl http://localhost:3000
+```
+
+### **Step 5.2: Model Download**
+
+First run will auto-download VibeVoice-1.5B (~10GB):
+
+```bash
+# Monitor download progress
+docker logs -f harvis-tts
+
+# You'll see:
+# Downloading microsoft/VibeVoice-1.5B...
+# ✅ Model loaded successfully
+```
+
+### **Step 5.3: GPU Verification**
+
+```bash
+# Check GPU is being used
+docker exec harvis-tts nvidia-smi
+
+# Should show:
+# +-----------------------------------------------------------------------------+
+# | Processes:                                                                  |
+# |  GPU   GI   CI        PID   Type   Process name                  GPU Memory |
+# |        ID   ID                                                   Usage      |
+# |=============================================================================|
+# |    0   N/A  N/A      1234      C   python                          7500MiB |
+# +-----------------------------------------------------------------------------+
+```
+
+---
+
+## 🔧 TROUBLESHOOTING
+
+### **Issue: Service won't start**
+
+```bash
+# Check GPU availability
+nvidia-smi
+
+# Check NVIDIA Docker runtime
+docker run --rm --gpus all nvidia/cuda:11.8.0-base-ubuntu22.04 nvidia-smi
+
+# Check logs
+docker logs harvis-tts --tail 100
+```
+
+### **Issue: Out of VRAM**
+
+```bash
+# Enable 4-bit quantization (should be default)
+# In docker-compose.yaml:
+environment:
+  - QUANTIZE_4BIT=true
+
+# Restart service
+docker-compose restart tts-service
+```
+
+### **Issue: Voice cloning fails**
+
+Check audio requirements:
+- Duration: 10-60 seconds
+- Format: WAV, MP3, M4A, etc.
+- Quality: Clear speech, minimal background noise
+- Mono or stereo (will be converted to mono)
+
+### **Issue: Generated audio quality is poor**
+
+Try adjusting parameters:
+```python
+# Increase inference steps (slower but better quality)
+settings = {
+    "cfg_scale": 1.5,      # Higher = stricter to reference (1.0-2.0)
+    "inference_steps": 20   # More steps = better quality (10-50)
+}
+```
+
+---
+
+## 📚 API REFERENCE
+
+### **Voice Cloning**
+
+```http
+POST /api/tts/voices/clone?voice_name=walter_white
+Content-Type: multipart/form-data
+
+audio_sample: <audio file>
+description: "Character from Breaking Bad" (optional)
+```
+
+### **List Voices**
+
+```http
+GET /api/tts/voices
+
+Response:
+{
+  "voices": [
+    {
+      "voice_id": "walter_white",
+      "voice_name": "walter_white",
+      "reference_duration": 15.3,
+      "quality_score": 0.95,
+      "created_at": "2025-01-23T..."
+    }
+  ],
+  "count": 1
+}
+```
+
+### **Generate Podcast**
+
+```http
+POST /api/tts/generate/podcast
+Content-Type: application/json
+
+{
+  "script": [
+    {"speaker": "1", "text": "Hello"},
+    {"speaker": "2", "text": "Hi"}
+  ],
+  "voice_mapping": {
+    "1": "voice_id_1",
+    "2": "voice_id_2"
+  },
+  "settings": {
+    "cfg_scale": 1.3,
+    "inference_steps": 10
+  }
+}
+
+Response:
+{
+  "success": true,
+  "job_id": "uuid",
+  "audio_url": "/audio/podcast_uuid.wav",
+  "duration": 30.5,
+  "generation_time": 45.2
+}
+```
+
+---
+
+## ✅ SUCCESS CRITERIA
+
+Your implementation is complete when:
+
+1. ✅ TTS service starts without errors
+2. ✅ VibeVoice model loads successfully
+3. ✅ Can clone voice from 10-second sample via UI
+4. ✅ Cloned voice appears in Voice Library
+5. ✅ Can generate single-speaker speech
+6. ✅ Can generate multi-speaker podcast (2-4 speakers)
+7. ✅ Generated audio quality is high
+8. ✅ Audio plays in browser
+9. ✅ Can download generated podcasts
+10. ✅ VRAM usage stays under 8GB
+
+---
+
+## 🎯 NEXT STEPS
+
+After core implementation:
+
+1. **Automatic Podcast Generation**
+   - Integrate with Open Notebook
+   - Auto-generate from notebook content
+   - AI script writing
+
+2. **Advanced Features**
+   - Voice mixing (background music, effects)
+   - Multi-language support
+   - Batch generation
+   - Voice presets library
+
+3. **Optimization**
+   - Caching for faster generation
+   - Background job queue
+   - Progress tracking
+   - Preview generation (first 2 minutes)
+
+---
+
+## 📞 SUPPORT
+
+If you encounter issues:
+
+1. Check logs: `docker logs harvis-tts`
+2. Verify GPU: `nvidia-smi`
+3. Test API directly: `curl http://localhost:8001/health`
+4. Check this master prompt for troubleshooting
+
+**Good luck! 🚀🎙️**
+
+---
+
+*End of Master Prompt*

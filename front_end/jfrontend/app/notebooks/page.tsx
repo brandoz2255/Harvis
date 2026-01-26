@@ -53,10 +53,12 @@ export default function NotebooksPage() {
     notebooks,
     isLoadingNotebooks,
     error,
+    isOpenNotebookAvailable,
     fetchNotebooks,
     createNotebook,
     deleteNotebook,
-    updateNotebook
+    updateNotebook,
+    checkServiceHealth
   } = useNotebookStore()
 
   const [showCreateModal, setShowCreateModal] = useState(false)
@@ -67,6 +69,10 @@ export default function NotebooksPage() {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState<string | null>(null)
   const [showArchivedSection, setShowArchivedSection] = useState(false)
   const [isRefreshing, setIsRefreshing] = useState(false)
+
+  useEffect(() => {
+    checkServiceHealth()
+  }, [checkServiceHealth])
 
   useEffect(() => {
     if (!authLoading && user) {
@@ -207,6 +213,15 @@ export default function NotebooksPage() {
           >
             <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} />
           </button>
+          {/* Service Status */}
+          <div className={`flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs ${
+            isOpenNotebookAvailable 
+              ? 'bg-green-500/10 text-green-400 border border-green-500/20' 
+              : 'bg-yellow-500/10 text-yellow-400 border border-yellow-500/20'
+          }`}>
+            <div className={`w-1.5 h-1.5 rounded-full ${isOpenNotebookAvailable ? 'bg-green-400' : 'bg-yellow-400 animate-pulse'}`} />
+            {isOpenNotebookAvailable ? 'Connected' : 'Connecting...'}
+          </div>
         </div>
         <div className="flex items-center gap-3">
           {/* Search */}
@@ -232,8 +247,28 @@ export default function NotebooksPage() {
 
       {/* Error */}
       {error && (
-        <div className="mb-6 p-4 bg-red-900/50 border border-red-700 rounded-lg text-red-200">
-          {error}
+        <div className="mb-6 p-4 bg-red-900/50 border border-red-700 rounded-lg flex items-center justify-between">
+          <span className="text-red-200">{error}</span>
+          <div className="flex gap-2">
+            {error.includes('login') && (
+              <button
+                onClick={() => router.push('/login')}
+                className="px-3 py-1.5 bg-red-700/50 hover:bg-red-700 text-red-200 rounded-lg text-sm transition-colors"
+              >
+                Login
+              </button>
+            )}
+            {(error.includes('connect') || error.includes('Server') || error.includes('try again')) && (
+              <button
+                onClick={handleRefresh}
+                disabled={isRefreshing}
+                className="px-3 py-1.5 bg-red-700/50 hover:bg-red-700 text-red-200 rounded-lg text-sm transition-colors flex items-center gap-1"
+              >
+                <RefreshCw className={`w-3 h-3 ${isRefreshing ? 'animate-spin' : ''}`} />
+                Retry
+              </button>
+            )}
+          </div>
         </div>
       )}
 

@@ -1,0 +1,66 @@
+{
+  "narrator_morgan": {
+    "name": "Morgan Freeman Style",
+    "description": "Warm, authoritative narrator voice perfect for documentaries and storytelling",
+    "category": "narrator",
+    "sample_text": "In the end, we only regret the chances we didn't take.",
+    "icon": "mic",
+    "requires_activation": true
+  },
+  "narrator_david": {
+    "name": "David Attenborough Style",
+    "description": "Gentle, contemplative voice for nature and science content",
+    "category": "narrator",
+    "sample_text": "The natural world is full of extraordinary animals.",
+    "icon": "globe",
+    "requires_activation": true
+  },
+  "host_professional_male": {
+    "name": "Professional Host (Male)",
+    "description": "Clear, engaging voice for podcasts and presentations",
+    "category": "host",
+    "sample_text": "Welcome back to the show! Today we have an exciting topic.",
+    "icon": "user",
+    "requires_activation": true
+  },
+  "host_professional_female": {
+    "name": "Professional Host (Female)",
+    "description": "Warm, articulate voice for interviews and discussions",
+    "category": "host",
+    "sample_text": "Thank you for joining us. Let's dive right in.",
+    "icon": "user",
+    "requires_activation": true
+  },
+  "character_walter": {
+    "name": "Walter White Style",
+    "description": "Intense, measured voice - perfect for dramatic content",
+    "category": "character",
+    "sample_text": "I am the one who knocks.",
+    "icon": "zap",
+    "requires_activation": true
+  },
+  "character_peter": {
+    "name": "Peter Griffin Style",
+    "description": "Comedic, animated voice for humorous content",
+    "category": "character",
+    "sample_text": "You know what really grinds my gears?",
+    "icon": "smile",
+    "requires_activation": true
+  },
+  "educator_calm": {
+    "name": "Calm Educator",
+    "description": "Patient, clear voice ideal for educational content",
+    "category": "educator",
+    "sample_text": "Let me explain this concept step by step.",
+    "icon": "book-open",
+    "requires_activation": true
+  },
+  "storyteller_dramatic": {
+    "name": "Dramatic Storyteller",
+    "description": "Expressive voice for fiction and audiobooks",
+    "category": "storyteller",
+    "sample_text": "It was a dark and stormy night...",
+    "icon": "book",
+    "requires_activation": true
+  }
+}

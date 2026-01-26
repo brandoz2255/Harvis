@@ -389,21 +389,22 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
       taskType = "lightweight"
     }
 
+    // If no models available, return empty string (will show warning)
+    if (ollamaModels.length === 0) {
+      console.warn("⚠️ No Ollama models available - cannot select model")
+      return ""
+    }
+    
     // Use the orchestrator to select optimal model from available models
     const optimalModel = orchestrator.selectOptimalModel(taskType, priority)
     
     // If the optimal model is available in our models list, use it
-    // Otherwise, fall back to first available Ollama model or built-in model
-    if (models.includes(optimalModel)) {
+    if (optimalModel && ollamaModels.includes(optimalModel)) {
       return optimalModel
     }
     
-    // Fallback: prefer Ollama models if available, otherwise use built-in
-    if (ollamaModels.length > 0) {
-      return ollamaModels[0]
-    }
-    
-    return orchestrator.getAllModels()[0]?.name || "mistral"
+    // Fallback: use first available Ollama model
+    return ollamaModels[0]
   }
 
 
@@ -412,9 +413,21 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
   const sendMessage = async (inputType: "text" | "voice" = "text") => {
     if ((!inputValue.trim() && inputType === "text") || isLoading) return
 
+    // Check if Ollama is connected and models are available
+    if (!ollamaConnected || ollamaModels.length === 0) {
+      console.error("❌ Cannot send message: Ollama not connected or no models available")
+      return
+    }
+
     const messageContent = inputType === "text" ? inputValue : "Voice message"
     const tempId = uuidv4();
     const optimalModel = getOptimalModel(messageContent)
+    
+    // Double-check we have a valid model
+    if (!optimalModel) {
+      console.error("❌ Cannot send message: No model selected")
+      return
+    }
 
     console.log(`🚀 [CHAT_DEBUG] Starting sendMessage:`, {
       tempId,
@@ -976,6 +989,16 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
               <span>{storeError}</span>
             </div>
             <div className="flex space-x-2">
+              {storeError.includes('Please login') && (
+                <Button
+                  onClick={() => window.location.href = '/login'}
+                  size="sm"
+                  variant="outline"
+                  className="text-red-400 border-red-500/50 hover:bg-red-500/10"
+                >
+                  Login
+                </Button>
+              )}
               {(storeError.includes('Could not load chat history') || storeError.includes('Request timed out')) && currentSession && (
                 <Button
                   onClick={() => refreshSessionMessages(currentSession.id)}
@@ -998,6 +1021,30 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
                 </Button>
               )}
             </div>
+          </div>
+        </div>
+      )}
+      
+      {/* Ollama Offline Warning */}
+      {!ollamaConnected && (
+        <div className="mb-4">
+          <div className="bg-yellow-900/20 border border-yellow-500/30 rounded-lg p-3 text-yellow-400 text-sm flex items-center justify-between">
+            <div className="flex items-center space-x-2">
+              <WifiOff className="w-4 h-4" />
+              <span>
+                <strong>Ollama not connected.</strong> Start Ollama to chat with AI models.
+                {ollamaError && <span className="text-yellow-500/80 ml-2">({ollamaError})</span>}
+              </span>
+            </div>
+            <Button
+              onClick={refreshOllamaModels}
+              size="sm"
+              variant="outline"
+              className="text-yellow-400 border-yellow-500/50 hover:bg-yellow-500/10"
+            >
+              <RefreshCw className="w-3 h-3 mr-1" />
+              Retry
+            </Button>
           </div>
         </div>
       )}
@@ -1082,25 +1129,18 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
             <select
               value={selectedModel}
               onChange={(e) => setSelectedModel(e.target.value)}
-              className="bg-gray-800 border border-gray-600 text-white text-sm rounded px-2 py-1 focus:border-blue-500 focus:outline-none min-w-[200px]"
+              className={`bg-gray-800 border text-white text-sm rounded px-2 py-1 focus:border-blue-500 focus:outline-none min-w-[200px] ${
+                !ollamaConnected ? 'border-red-500/50' : 'border-gray-600'
+              }`}
             >
-              {/* Auto-select option */}
-              <option value="auto">🤖 Auto-Select</option>
-              
-              {/* Built-in models */}
-              {orchestrator.getAllModels().length > 0 && (
-                <optgroup label="Built-in Models">
-                  {orchestrator.getAllModels().map((model) => (
-                    <option key={model.name} value={model.name}>
-                      {model.name.charAt(0).toUpperCase() + model.name.slice(1)}
-                    </option>
-                  ))}
-                </optgroup>
+              {/* Auto-select option - only if models available */}
+              {ollamaModels.length > 0 && (
+                <option value="auto">🤖 Auto-Select</option>
               )}
               
               {/* Ollama models */}
               {ollamaModels.length > 0 && (
-                <optgroup label={`Ollama Models (${ollamaModels.length})`}>
+                <optgroup label={`Available Models (${ollamaModels.length})`}>
                   {ollamaModels.map((modelName) => (
                     <option key={modelName} value={modelName}>
                       🦙 {modelName}
@@ -1109,11 +1149,12 @@ const UnifiedChatInterface = forwardRef<ChatHandle, {}>((_, ref) => {
                 </optgroup>
               )}
               
-              {/* Show message if no Ollama models */}
+              {/* Show helpful message if Ollama offline or no models */}
               {!ollamaConnected && (
-                <optgroup label="Ollama (Offline)">
-                  <option disabled>No Ollama models available</option>
-                </optgroup>
+                <option disabled value="">⚠️ Ollama not connected - start Ollama first</option>
+              )}
+              {ollamaConnected && ollamaModels.length === 0 && (
+                <option disabled value="">⚠️ No models installed - run: ollama pull mistral</option>
               )}
             </select>
           </div>

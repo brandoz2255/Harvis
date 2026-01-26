@@ -24,6 +24,23 @@
     --input: 0 0% 20%;
     --ring: 217 91% 60%;
     --radius: 0.5rem;
+
+    /* Open Notebook Sidebar Variables (Dark theme default) */
+    --sidebar: 210 6% 13%;
+    --sidebar-foreground: 0 0% 97%;
+    --sidebar-primary: 217 91% 60%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 210 6% 17%;
+    --sidebar-accent-foreground: 0 0% 97%;
+    --sidebar-border: 0 0% 100% / 10%;
+    --sidebar-ring: 217 91% 60%;
+
+    /* Chart colors for Open Notebook */
+    --chart-1: 217 91% 60%;
+    --chart-2: 160 60% 45%;
+    --chart-3: 30 80% 55%;
+    --chart-4: 280 65% 60%;
+    --chart-5: 340 75% 55%;
   }
 }
 
@@ -105,4 +122,58 @@
 .vibe-ide-root,
 .vibe-ide-root * {
   min-width: 0;
+}
+
+/* Open Notebook Sidebar Styling */
+.app-sidebar {
+  background-color: hsl(var(--sidebar));
+  color: hsl(var(--sidebar-foreground));
+  border-color: hsl(var(--sidebar-border));
+}
+
+/* Enhanced hover effects for cards - Open Notebook style */
+.card-hover {
+  @apply transition-all duration-200 cursor-pointer;
+}
+
+.card-hover:hover {
+  background-color: hsl(var(--muted)) !important;
+  border-color: hsl(var(--border));
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+/* Ensure clickable cards show pointer cursor */
+.clickable-card {
+  cursor: pointer !important;
+}
+
+.clickable-card * {
+  cursor: pointer !important;
+}
+
+/* Collapsible column styles */
+.collapsible-column {
+  @apply transition-all duration-150;
+}
+
+.collapsible-column.collapsed {
+  @apply w-12 flex-shrink-0;
+}
+
+.collapsible-column.expanded {
+  @apply flex-none;
+}
+
+/* Context toggle colors */
+.context-off {
+  @apply text-muted-foreground;
+}
+
+.context-insights {
+  color: rgb(217, 119, 6); /* amber-600 */
+}
+
+.context-full {
+  @apply text-primary;
 }
