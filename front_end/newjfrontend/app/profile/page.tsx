@@ -12,7 +12,6 @@ import {
   Key,
   Bell,
   Shield,
-  CreditCard,
   Sparkles,
   ArrowLeft,
   Moon,
@@ -45,7 +44,6 @@ export default function ProfilePage() {
   const [profile, setProfile] = useState({
     name: "",
     email: "",
-    plan: "Pro",
   })
 
   // Update profile state when user data is loaded
@@ -54,7 +52,6 @@ export default function ProfilePage() {
       setProfile({
         name: user.name || "",
         email: user.email || "",
-        plan: "Pro", // Plan is not yet in DB, keep default
       })
     }
   }, [user])
@@ -129,8 +126,7 @@ export default function ProfilePage() {
                   <p className="text-muted-foreground">{profile.email}</p>
                   <div className="flex items-center gap-2">
                     <span className="inline-flex items-center gap-1 rounded-full bg-primary/20 px-2.5 py-0.5 text-xs font-medium text-primary">
-                      <Sparkles className="h-3 w-3" />
-                      {profile.plan} Plan
+                      Local User
                     </span>
                   </div>
                 </div>
@@ -170,39 +166,6 @@ export default function ProfilePage() {
             </CardContent>
           </Card>
 
-          {/* Subscription Card */}
-          <Card className="border-border bg-card">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2 text-foreground">
-                <CreditCard className="h-5 w-5 text-primary" />
-                Subscription
-              </CardTitle>
-              <CardDescription>Manage your subscription and billing</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="flex items-center justify-between rounded-lg border border-primary/30 bg-primary/5 p-4">
-                <div className="space-y-1">
-                  <div className="flex items-center gap-2">
-                    <Sparkles className="h-5 w-5 text-primary" />
-                    <span className="font-semibold text-foreground">Pro Plan</span>
-                  </div>
-                  <p className="text-sm text-muted-foreground">Unlimited messages, priority support, voice responses</p>
-                </div>
-                <div className="text-right">
-                  <p className="text-2xl font-bold text-foreground">$20</p>
-                  <p className="text-xs text-muted-foreground">/month</p>
-                </div>
-              </div>
-              <div className="flex gap-3">
-                <Button variant="outline" className="flex-1 border-border bg-transparent">
-                  Change Plan
-                </Button>
-                <Button variant="outline" className="flex-1 border-border bg-transparent">
-                  Billing History
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
 
           {/* Preferences Card */}
           <Card className="border-border bg-card">
@@ -363,9 +326,8 @@ function ActionRow({
     >
       <div className="flex items-center gap-4">
         <div
-          className={`flex h-10 w-10 items-center justify-center rounded-lg ${
-            destructive ? "bg-destructive/10 text-destructive" : "bg-primary/10 text-primary"
-          }`}
+          className={`flex h-10 w-10 items-center justify-center rounded-lg ${destructive ? "bg-destructive/10 text-destructive" : "bg-primary/10 text-primary"
+            }`}
         >
           {icon}
         </div>
