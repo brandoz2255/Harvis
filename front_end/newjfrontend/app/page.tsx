@@ -255,7 +255,18 @@ export default function ChatPage() {
         .filter(a => a.type === 'image')
         .map(a => a.data)
 
-      // Use the new Ollama vision-chat endpoint
+      // Get or create session (same as regular chat)
+      let sessionId = currentSession?.id
+      if (!sessionId) {
+        console.log('🖼️ Vision: No current session, creating new one')
+        const newSession = await createNewChat()
+        sessionId = newSession?.id
+        console.log(`🖼️ Vision: Created new session: ${sessionId}`)
+      } else {
+        console.log(`🖼️ Vision: Using existing session: ${sessionId}`)
+      }
+
+      // Use the Ollama vision-chat endpoint with session_id
       const response = await fetch('/api/vision-chat', {
         method: 'POST',
         headers: {
@@ -270,6 +281,7 @@ export default function ChatPage() {
             content: m.content
           })),
           model: selectedModel,
+          session_id: sessionId,  // Pass session_id for unified history
           low_vram: lowVram,
           text_only: textOnly
         }),
@@ -282,6 +294,15 @@ export default function ChatPage() {
       }
 
       const data = await response.json()
+
+      // If backend created a new session, just update the session reference
+      // Don't call selectSession as that would clear messages and reload from DB
+      if (data.session_id && data.session_id !== sessionId) {
+        console.log(`🖼️ Vision: Backend created/used session ${data.session_id}`)
+        // Refresh sessions list to pick up the new session in sidebar
+        await fetchSessions()
+        // Note: Don't select the session here - we already have the messages in local state
+      }
 
       // Create assistant message with vision analysis
       const assistantMessage: Message = {

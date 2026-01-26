@@ -1101,6 +1101,10 @@ async def chat(req: ChatRequest, request: Request, current_user: UserResponse = 
             }
             
             logger.info(f"💬 CHAT: Sending {len(messages)} messages to Ollama (including {len(history)-1} context messages)")
+            # Debug: Log each message being sent (truncated for readability)
+            for idx, msg in enumerate(messages):
+                content_preview = msg['content'][:100] if len(msg['content']) > 100 else msg['content']
+                logger.info(f"💬 CHAT: Message {idx}: role={msg['role']}, content_preview='{content_preview}...'")
 
             logger.info("💬 CHAT: Using model '%s' for Ollama %s", req.model, OLLAMA_ENDPOINT)
 
@@ -1418,11 +1422,70 @@ async def vision_chat(req: VisionChatRequest, request: Request, current_user: Us
             reasoning_content = '\n\n'.join(think_matches).strip()
             final_answer = re.sub(think_pattern, '', response_text, flags=re.IGNORECASE).strip()
 
+        # ── Persist chat history to database ──────────────────────────────────────────
+        session_id = req.session_id
+        logger.info(f"🖼️ VISION: Session persistence starting - received session_id: {session_id}")
+        try:
+            from uuid import UUID
+            if session_id:
+                logger.info(f"🖼️ VISION: Using existing session_id: {session_id}")
+                # Get or create session
+                session = await chat_history_manager.get_session(session_id, current_user.id)
+                if not session:
+                    logger.info(f"🖼️ VISION: Session not found, creating new one")
+                    session = await chat_history_manager.create_session(
+                        user_id=current_user.id,
+                        title="Vision Chat",
+                        model_used=req.model
+                    )
+                    session_id = str(session.id)
+            else:
+                logger.info(f"🖼️ VISION: No session_id provided, creating new session")
+                # Create new session for this conversation
+                session = await chat_history_manager.create_session(
+                    user_id=current_user.id,
+                    title="Vision Chat",
+                    model_used=req.model
+                )
+                session_id = str(session.id)
+                logger.info(f"🖼️ VISION: Created new session: {session_id}")
+
+            # Save user message (with image indicator)
+            user_content = req.message or "What do you see in this image?"
+            if len(processed_images) > 0:
+                user_content = f"[Image attached] {user_content}"
+            
+            await chat_history_manager.add_message(
+                user_id=current_user.id,
+                session_id=session_id,
+                role="user",
+                content=user_content,
+                model_used=req.model,
+                input_type="screen"  # Use 'screen' as 'image' is not in allowed values
+            )
+
+            # Save assistant message
+            await chat_history_manager.add_message(
+                user_id=current_user.id,
+                session_id=session_id,
+                role="assistant",
+                content=final_answer,
+                reasoning=reasoning_content if reasoning_content else None,
+                model_used=req.model,
+                input_type="text"
+            )
+            
+            logger.info(f"💾 Vision chat: Saved messages to session {session_id}")
+        except Exception as e:
+            logger.error(f"Error saving vision chat history: {e}")
+            # Don't fail the request if history saving fails
+
         # Build response
         response_data = {
             "response": final_answer,
             "model": req.model,
-            "images_processed": len(processed_images)
+            "images_processed": len(processed_images),
+            "session_id": session_id  # Return session_id for frontend to use
         }
 
         if reasoning_content:
