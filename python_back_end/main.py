@@ -7,6 +7,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
 import uvicorn, os, sys, tempfile, uuid, base64, io, logging, re, requests, random, json
+from PIL import Image
 
 # Import optimized auth module
 from auth_optimized import get_current_user_optimized, auth_optimizer, get_auth_stats
@@ -1318,13 +1319,28 @@ async def vision_chat(req: VisionChatRequest, request: Request, current_user: Us
                         elif decoded[:2] == b'\xff\xd8':
                             logger.info(f"🖼️ Image {idx+1}: JPEG format detected")
                         elif decoded[:4] == b'GIF8':
-                            logger.info(f"🖼️ Image {idx+1}: GIF format detected")
+                            logger.info(f"🖼️ Image {idx+1}: GIF format detected - Converting to PNG")
                         elif decoded[:4] == b'RIFF':
-                            logger.info(f"🖼️ Image {idx+1}: WEBP format detected")
+                            logger.info(f"🖼️ Image {idx+1}: WEBP format detected - Converting to PNG")
                         else:
-                            logger.warning(f"🖼️ Image {idx+1}: Unknown format, first bytes: {decoded[:10].hex()}")
+                            logger.warning(f"🖼️ Image {idx+1}: Unknown format, first bytes: {decoded[:10].hex()} - Attempting conversion")
                     else:
                          logger.warning(f"🖼️ Image {idx+1}: Data too short to check magic bytes")
+
+                    # Convert image to PNG using PIL to ensure compatibility with Ollama
+                    try:
+                        image_io = io.BytesIO(decoded)
+                        with Image.open(image_io) as img:
+                            # Convert to RGB to ensure compatibility (removing alpha channel if present)
+                            if img.mode in ('RGBA', 'P'):
+                                img = img.convert('RGB')
+                            
+                            output_io = io.BytesIO()
+                            img.save(output_io, format='PNG')
+                            decoded = output_io.getvalue()
+                            logger.info(f"🖼️ Image {idx+1}: Converted to PNG, new size: {len(decoded)} bytes")
+                    except Exception as pil_err:
+                        logger.error(f"🖼️ Image {idx+1}: Pillow conversion failed: {pil_err} - Sending original")
 
                     # Re-encode to ensure clean base64
                     clean_b64 = base64.b64encode(decoded).decode('utf-8')
