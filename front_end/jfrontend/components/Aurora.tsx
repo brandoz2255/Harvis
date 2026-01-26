@@ -112,6 +112,8 @@ function Aurora(props: AuroraProps) {
   } = props;
 
   const ctnDom = useRef<HTMLDivElement>(null);
+  // Track if component is mounted to prevent rendering after cleanup
+  const isMountedRef = useRef(true);
 
   // Memoize color stops array to prevent recreation on every render
   const memoizedColorStops = useMemo(() => {
@@ -133,85 +135,143 @@ function Aurora(props: AuroraProps) {
     const ctn = ctnDom.current;
     if (!ctn) return;
 
-    const renderer = new Renderer({
-      alpha: true,
-      premultipliedAlpha: true,
-      antialias: true,
-    });
-    const gl = renderer.gl;
-    gl.clearColor(0, 0, 0, 0);
-    gl.enable(gl.BLEND);
-    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-    gl.canvas.style.backgroundColor = "transparent";
+    // Reset mounted flag
+    isMountedRef.current = true;
 
+    // Check if WebGL is available
+    const testCanvas = document.createElement('canvas');
+    const testGl = testCanvas.getContext('webgl2') || testCanvas.getContext('webgl');
+    if (!testGl) {
+      console.warn('WebGL not available, Aurora effect disabled');
+      return;
+    }
+
+    let renderer: Renderer;
+    let gl: WebGL2RenderingContext | WebGLRenderingContext;
     let program: Program | undefined;
+    let mesh: Mesh;
+    let animateId = 0;
 
-    function resize() {
-      if (!ctn) return;
-      const width = ctn.offsetWidth;
-      const height = ctn.offsetHeight;
-
-      // Only resize if dimensions actually changed to prevent unnecessary operations
-      const currentSize = program?.uniforms.uResolution.value;
-      if (currentSize && currentSize[0] === width && currentSize[1] === height) {
+    try {
+      renderer = new Renderer({
+        alpha: true,
+        premultipliedAlpha: true,
+        antialias: true,
+      });
+      gl = renderer.gl;
+      
+      if (!gl) {
+        console.warn('Failed to get WebGL context');
         return;
       }
 
-      renderer.setSize(width, height);
-      if (program) {
-        program.uniforms.uResolution.value = [width, height];
+      gl.clearColor(0, 0, 0, 0);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+      gl.canvas.style.backgroundColor = "transparent";
+
+      function resize() {
+        if (!ctn || !isMountedRef.current || !renderer || !gl) return;
+        const width = ctn.offsetWidth;
+        const height = ctn.offsetHeight;
+
+        // Only resize if dimensions actually changed to prevent unnecessary operations
+        const currentSize = program?.uniforms?.uResolution?.value;
+        if (currentSize && currentSize[0] === width && currentSize[1] === height) {
+          return;
+        }
+
+        try {
+          renderer.setSize(width, height);
+          if (program) {
+            program.uniforms.uResolution.value = [width, height];
+          }
+        } catch (e) {
+          // Ignore resize errors during cleanup
+        }
       }
-    }
 
-    // Use passive listener for better performance
-    window.addEventListener("resize", resize, { passive: true });
+      // Use passive listener for better performance
+      window.addEventListener("resize", resize, { passive: true });
 
-    const geometry = new Triangle(gl);
-    if ((geometry.attributes as any).uv) {
-      delete (geometry.attributes as any).uv;
-    }
+      const geometry = new Triangle(gl);
+      if ((geometry.attributes as any).uv) {
+        delete (geometry.attributes as any).uv;
+      }
 
-    program = new Program(gl, {
-      vertex: VERT,
-      fragment: FRAG,
-      uniforms: {
-        uTime: { value: 0 },
-        uAmplitude: { value: stableProps.amplitude },
-        uColorStops: { value: stableProps.colorStops },
-        uResolution: { value: [ctn.offsetWidth, ctn.offsetHeight] },
-        uBlend: { value: stableProps.blend },
-      },
-    });
+      program = new Program(gl, {
+        vertex: VERT,
+        fragment: FRAG,
+        uniforms: {
+          uTime: { value: 0 },
+          uAmplitude: { value: stableProps.amplitude },
+          uColorStops: { value: stableProps.colorStops },
+          uResolution: { value: [ctn.offsetWidth, ctn.offsetHeight] },
+          uBlend: { value: stableProps.blend },
+        },
+      });
 
-    const mesh = new Mesh(gl, { geometry, program });
-    ctn.appendChild(gl.canvas);
+      mesh = new Mesh(gl, { geometry, program });
+      ctn.appendChild(gl.canvas);
 
-    let animateId = 0;
-    const update = (t: number) => {
+      const update = (t: number) => {
+        // Check if still mounted before rendering
+        if (!isMountedRef.current || !program || !renderer || !gl) {
+          return;
+        }
+
+        animateId = requestAnimationFrame(update);
+        
+        try {
+          const time = props.time ?? t * 0.01;
+          program.uniforms.uTime.value = time * stableProps.speed * 0.1;
+          program.uniforms.uAmplitude.value = stableProps.amplitude;
+          program.uniforms.uBlend.value = stableProps.blend;
+          program.uniforms.uColorStops.value = stableProps.colorStops;
+          renderer.render({ scene: mesh });
+        } catch (e) {
+          // Silently handle render errors during cleanup
+          cancelAnimationFrame(animateId);
+        }
+      };
       animateId = requestAnimationFrame(update);
-      const time = props.time ?? t * 0.01;
-      if (program) {
-        program.uniforms.uTime.value = time * stableProps.speed * 0.1;
-        program.uniforms.uAmplitude.value = stableProps.amplitude;
-        program.uniforms.uBlend.value = stableProps.blend;
-        program.uniforms.uColorStops.value = stableProps.colorStops;
-        renderer.render({ scene: mesh });
-      }
-    };
-    animateId = requestAnimationFrame(update);
 
-    resize();
+      resize();
 
-    return () => {
-      cancelAnimationFrame(animateId);
-      window.removeEventListener("resize", resize);
-      if (ctn && gl.canvas.parentNode === ctn) {
-        ctn.removeChild(gl.canvas);
-      }
-      // Proper WebGL context cleanup to prevent memory leaks
-      gl.getExtension("WEBGL_lose_context")?.loseContext();
-    };
-  }, [stableProps]); // Only re-create WebGL context when stable props actually change
+      return () => {
+        // Mark as unmounted first to stop any pending renders
+        isMountedRef.current = false;
+        
+        // Cancel animation frame
+        cancelAnimationFrame(animateId);
+        
+        // Remove resize listener
+        window.removeEventListener("resize", resize);
+        
+        // Clean up DOM
+        try {
+          if (ctn && gl && gl.canvas && gl.canvas.parentNode === ctn) {
+            ctn.removeChild(gl.canvas);
+          }
+        } catch (e) {
+          // Ignore DOM cleanup errors
+        }
+        
+        // Properly dispose of WebGL context
+        try {
+          const loseContext = gl?.getExtension?.("WEBGL_lose_context");
+          if (loseContext) {
+            loseContext.loseContext();
+          }
+        } catch (e) {
+          // Ignore WebGL cleanup errors
+        }
+      };
+    } catch (e) {
+      console.warn('Aurora WebGL initialization failed:', e);
+      return;
+    }
+  }, [stableProps, props.time]); // Only re-create WebGL context when stable props actually change
 
   // Pass className to the container div
   return <div ref={ctnDom} className={`w-full h-full ${className || ''}`} />;

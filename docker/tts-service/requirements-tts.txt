@@ -1,0 +1,39 @@
+# TTS Service Requirements
+
+# FastAPI and server
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+
+# PyTorch with CUDA support
+torch>=2.1.0
+torchaudio>=2.1.0
+
+# Transformers for model loading
+transformers>=4.35.0
+accelerate>=0.24.0
+bitsandbytes>=0.41.0
+
+# Audio processing
+librosa>=0.10.0
+soundfile>=0.12.0
+scipy>=1.11.0
+numpy>=1.24.0
+# Note: torchcodec removed due to FFmpeg version compatibility issues
+# Using soundfile/librosa instead for audio loading
+
+# Speaker embedding (optional, for better voice cloning)
+speechbrain>=0.5.15
+
+# Hugging Face Hub
+huggingface-hub>=0.19.0
+
+# Pydantic for data validation
+pydantic>=2.0.0
+
+# Logging
+loguru>=0.7.0
+
+# Optional: Dia/VibeVoice model support
+# Uncomment if using nari-labs/Dia-1.6B
+# dia-tts>=0.1.0

@@ -21,72 +21,9 @@ interface HardwareInfo {
 }
 
 export class AIOrchestrator {
-  private models: ModelCapabilities[] = [
-    {
-      name: "gemini-1.5-flash",
-      tasks: ["general", "conversation", "creative", "multilingual", "code", "reasoning", "lightweight", "quick-response"],
-      speed: 9,
-      accuracy: 8,
-      memoryUsage: 1024,
-      gpuRequired: false,
-    },
-    {
-      name: "mistral",
-      tasks: ["general", "conversation", "reasoning"],
-      speed: 8,
-      accuracy: 7,
-      memoryUsage: 2048,
-      gpuRequired: false,
-    },
-    {
-      name: "llama3",
-      tasks: ["general", "conversation", "complex-reasoning"],
-      speed: 6,
-      accuracy: 9,
-      memoryUsage: 4096,
-      gpuRequired: true,
-    },
-    {
-      name: "codellama",
-      tasks: ["code", "programming", "debugging"],
-      speed: 7,
-      accuracy: 9,
-      memoryUsage: 3072,
-      gpuRequired: false,
-    },
-    {
-      name: "gemma",
-      tasks: ["general", "creative", "writing"],
-      speed: 9,
-      accuracy: 6,
-      memoryUsage: 1536,
-      gpuRequired: false,
-    },
-    {
-      name: "phi3",
-      tasks: ["lightweight", "mobile", "quick-response"],
-      speed: 10,
-      accuracy: 6,
-      memoryUsage: 512,
-      gpuRequired: false,
-    },
-    {
-      name: "qwen",
-      tasks: ["multilingual", "translation", "general"],
-      speed: 7,
-      accuracy: 8,
-      memoryUsage: 2560,
-      gpuRequired: false,
-    },
-    {
-      name: "deepseek-coder",
-      tasks: ["code", "programming", "technical"],
-      speed: 6,
-      accuracy: 10,
-      memoryUsage: 3584,
-      gpuRequired: true,
-    },
-  ]
+  // Models are populated dynamically from Ollama - no hardcoded placeholders
+  private models: ModelCapabilities[] = []
+  private ollamaModelNames: string[] = []
 
   private hardware: HardwareInfo | null = null
 
@@ -135,25 +72,37 @@ export class AIOrchestrator {
       
       const data = await response.json()
       console.log("🦙 API Response data:", data)
-      console.log("🦙 data type:", typeof data)
-      console.log("🦙 data is array:", Array.isArray(data))
       
       // Backend returns array of model names directly: ["model1", "model2"]
       if (Array.isArray(data) && data.length > 0) {
         console.log("🦙 Found models array:", data)
+        // Update internal models list with real Ollama models
+        this.ollamaModelNames = data
+        this.models = data.map((name: string) => ({
+          name,
+          tasks: ["general", "conversation", "code", "reasoning"],
+          speed: 7,
+          accuracy: 7,
+          memoryUsage: 2048,
+          gpuRequired: false,
+        }))
         return {
           models: data,
           connected: true
         }
       } else if (Array.isArray(data) && data.length === 0) {
         console.log("🦙 Empty models array - Ollama connected but no models")
+        this.ollamaModelNames = []
+        this.models = []
         return {
           models: [],
           connected: true,
-          error: 'No models found on Ollama server'
+          error: 'No models installed. Run: ollama pull mistral'
         }
       } else {
         console.log("🦙 Unexpected response format:", data)
+        this.ollamaModelNames = []
+        this.models = []
         return {
           models: [],
           connected: false,
@@ -162,17 +111,24 @@ export class AIOrchestrator {
       }
     } catch (error) {
       console.error("🦙 Could not fetch Ollama models:", error)
+      this.ollamaModelNames = []
+      this.models = []
       return {
         models: [],
         connected: false,
-        error: error instanceof Error ? error.message : 'Network error'
+        error: error instanceof Error ? error.message : 'Network error - is Ollama running?'
       }
     }
   }
 
   selectOptimalModel(task: string, priority: "speed" | "accuracy" | "balanced" = "balanced"): string {
+    // If no models available, return empty to signal no model selected
+    if (this.models.length === 0) {
+      return ""
+    }
+
     if (!this.hardware) {
-      return "mistral"
+      return this.models[0]?.name || ""
     }
 
     const suitableModels = this.models.filter((model) =>
@@ -188,7 +144,8 @@ export class AIOrchestrator {
   }
 
   private selectBestModel(models: ModelCapabilities[], priority: "speed" | "accuracy" | "balanced"): string {
-    if (!this.hardware) return models[0]?.name || "mistral"
+    if (models.length === 0) return ""
+    if (!this.hardware) return models[0]?.name || ""
 
     const compatibleModels = models.filter((model) => {
       if (model.gpuRequired && !this.hardware!.gpu) return false
@@ -197,7 +154,7 @@ export class AIOrchestrator {
     })
 
     if (compatibleModels.length === 0) {
-      return models.sort((a, b) => a.memoryUsage - b.memoryUsage)[0]?.name || "mistral"
+      return models.sort((a, b) => a.memoryUsage - b.memoryUsage)[0]?.name || ""
     }
 
     const scoredModels = compatibleModels.map((model) => {
@@ -217,7 +174,7 @@ export class AIOrchestrator {
     })
 
     scoredModels.sort((a, b) => b.score - a.score)
-    return scoredModels[0]?.model.name || "mistral"
+    return scoredModels[0]?.model.name || ""
   }
 
   getModelInfo(modelName: string): ModelCapabilities | null {
@@ -267,26 +224,15 @@ export function useAIOrchestrator() {
     console.log("🔄 refreshOllamaModels called")
     const result = await orchestrator.fetchOllamaModels()
     console.log("🔄 fetchOllamaModels result:", result)
-    console.log("🔄 result.models type:", typeof result.models)
-    console.log("🔄 result.models length:", result.models?.length)
-    console.log("🔄 result.connected:", result.connected)
     
     setOllamaModels(result.models)
     setOllamaConnected(result.connected)
     setOllamaError(result.error || null)
     setLastFetch(new Date())
-    console.log("🔄 State set - about to log current state")
     
-    // Log state after a brief delay to see if React updated it
-    setTimeout(() => {
-      console.log("🔄 State after update - models:", result.models, "connected:", result.connected)
-    }, 100)
-    
-    // Update combined models list
-    const builtInModels = orchestrator.getAllModels().map((m) => m.name)
-    const allModels = [...builtInModels, ...result.models]
-    setModels(Array.from(new Set(allModels)))
-    console.log("🔄 Combined models updated:", allModels)
+    // Only show real Ollama models - no placeholders
+    setModels(result.models)
+    console.log("🔄 Models updated:", result.models.length > 0 ? result.models : "No models available")
     
     return result
   }, [orchestrator])

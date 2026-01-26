@@ -1,284 +1,292 @@
 'use client'
 
-import { useState } from 'react'
-import { NotebookSource } from '@/stores/notebookStore'
+import * as React from 'react'
 import {
-  File,
   FileText,
   Globe,
+  File,
   Headphones,
   Youtube,
-  Image,
+  Image as ImageIcon,
+  Clock,
   Loader2,
   CheckCircle,
   AlertCircle,
-  Clock,
-  Trash2,
-  Wand2,
   MoreVertical,
-  Eye,
-  Download,
-  ExternalLink
+  Trash2,
+  RefreshCw,
+  Wand2,
+  ExternalLink,
 } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+} from '@/components/ui/dropdown-menu'
+import { ContextToggle } from './ContextToggle'
+import { cn } from '@/lib/utils'
+import { ContextMode } from '@/stores/openNotebookUiStore'
+import { NotebookSource } from '@/stores/notebookStore'
 
 // Source type icons mapping
-const sourceTypeIcons: Record<string, { icon: React.ReactNode; color: string }> = {
-  pdf: { icon: <File className="w-5 h-5" />, color: 'text-red-400' },
-  text: { icon: <FileText className="w-5 h-5" />, color: 'text-blue-400' },
-  url: { icon: <Globe className="w-5 h-5" />, color: 'text-green-400' },
-  markdown: { icon: <FileText className="w-5 h-5" />, color: 'text-purple-400' },
-  doc: { icon: <File className="w-5 h-5" />, color: 'text-blue-400' },
-  transcript: { icon: <FileText className="w-5 h-5" />, color: 'text-yellow-400' },
-  audio: { icon: <Headphones className="w-5 h-5" />, color: 'text-orange-400' },
-  youtube: { icon: <Youtube className="w-5 h-5" />, color: 'text-red-500' },
-  image: { icon: <Image className="w-5 h-5" />, color: 'text-pink-400' },
+const SOURCE_TYPE_ICONS: Record<string, React.ElementType> = {
+  pdf: File,
+  text: FileText,
+  url: Globe,
+  markdown: FileText,
+  doc: File,
+  transcript: FileText,
+  audio: Headphones,
+  youtube: Youtube,
+  image: ImageIcon,
 }
 
-// Status indicators
-const getStatusIndicator = (status: string) => {
-  switch (status) {
-    case 'pending':
-      return { icon: <Clock className="w-3.5 h-3.5" />, color: 'text-gray-400', label: 'Pending' }
-    case 'processing':
-      return { icon: <Loader2 className="w-3.5 h-3.5 animate-spin" />, color: 'text-blue-400', label: 'Processing' }
-    case 'ready':
-      return { icon: <CheckCircle className="w-3.5 h-3.5" />, color: 'text-green-400', label: 'Ready' }
-    case 'error':
-      return { icon: <AlertCircle className="w-3.5 h-3.5" />, color: 'text-red-400', label: 'Error' }
-    default:
-      return { icon: <Clock className="w-3.5 h-3.5" />, color: 'text-gray-400', label: status }
-  }
+// Status configuration
+const STATUS_CONFIG = {
+  pending: {
+    icon: Clock,
+    label: 'Pending',
+    color: 'text-muted-foreground',
+    bgColor: 'bg-muted',
+  },
+  processing: {
+    icon: Loader2,
+    label: 'Processing',
+    color: 'text-blue-500',
+    bgColor: 'bg-blue-500/10',
+    animate: true,
+  },
+  ready: {
+    icon: CheckCircle,
+    label: 'Ready',
+    color: 'text-green-500',
+    bgColor: 'bg-green-500/10',
+  },
+  error: {
+    icon: AlertCircle,
+    label: 'Failed',
+    color: 'text-red-500',
+    bgColor: 'bg-red-500/10',
+  },
 }
 
 interface SourceCardProps {
   source: NotebookSource
-  isSelected?: boolean
-  viewMode?: 'grid' | 'list'
-  onSelect?: () => void
+  contextMode?: ContextMode
+  onContextModeChange?: (mode: ContextMode) => void
   onDelete?: () => void
+  onRetry?: () => void
   onTransform?: () => void
   onView?: () => void
+  isSelected?: boolean
+  onClick?: () => void
+  showContextToggle?: boolean
+  className?: string
 }
 
-export default function SourceCard({
+export function SourceCard({
   source,
-  isSelected = false,
-  viewMode = 'grid',
-  onSelect,
+  contextMode = 'full',
+  onContextModeChange,
   onDelete,
+  onRetry,
   onTransform,
   onView,
+  isSelected,
+  onClick,
+  showContextToggle = true,
+  className,
 }: SourceCardProps) {
-  const [showMenu, setShowMenu] = useState(false)
+  const TypeIcon = SOURCE_TYPE_ICONS[source.type] || FileText
+  const statusConfig = STATUS_CONFIG[source.status]
+  const StatusIcon = statusConfig.icon
 
-  const typeInfo = sourceTypeIcons[source.type] || { icon: <FileText className="w-5 h-5" />, color: 'text-gray-400' }
-  const statusInfo = getStatusIndicator(source.status)
-
-  const title = source.title || source.original_filename || 'Untitled'
-
-  // Format date
-  const formatDate = (dateStr: string) => {
-    const date = new Date(dateStr)
-    return date.toLocaleDateString('en-US', {
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric',
-    })
+  const handleCardClick = () => {
+    if (onClick) {
+      onClick()
+    } else if (onView && source.status === 'ready') {
+      onView()
+    }
   }
 
-  if (viewMode === 'list') {
-    return (
-      <div
-        onClick={onSelect}
-        className={`group flex items-center gap-4 p-3 rounded-lg cursor-pointer transition-all ${
-          isSelected
-            ? 'bg-blue-600/20 border border-blue-500/50'
-            : 'bg-[#111111] border border-gray-800 hover:border-gray-700'
-        }`}
-      >
-        {/* Checkbox */}
-        <input
-          type="checkbox"
-          checked={isSelected}
-          onChange={onSelect}
-          className="w-4 h-4 rounded border-gray-600 bg-gray-800 text-blue-500 focus:ring-blue-500"
-          onClick={(e) => e.stopPropagation()}
-        />
+  // Check if source has insights (for context toggle)
+  const hasInsights = source.chunk_count > 0
 
-        {/* Icon */}
-        <div className={`p-2 rounded-lg bg-gray-800/50 ${typeInfo.color}`}>
-          {typeInfo.icon}
-        </div>
-
-        {/* Title and Info */}
-        <div className="flex-1 min-w-0">
-          <h3 className="text-sm font-medium text-white truncate">{title}</h3>
-          <div className="flex items-center gap-3 mt-1">
-            <span className={`flex items-center gap-1 text-xs ${statusInfo.color}`}>
-              {statusInfo.icon}
-              {statusInfo.label}
-            </span>
-            {source.status === 'ready' && source.chunk_count > 0 && (
-              <span className="text-xs text-gray-500">{source.chunk_count} chunks</span>
+  return (
+    <div
+      className={cn(
+        'group relative p-3 border rounded-lg transition-all cursor-pointer card-hover',
+        isSelected && 'ring-2 ring-primary bg-primary/5',
+        className
+      )}
+      onClick={handleCardClick}
+    >
+      {/* Header Row */}
+      <div className="flex items-start justify-between mb-2">
+        <div className="flex items-center gap-2 flex-1 min-w-0">
+          {/* Type Icon */}
+          <div
+            className={cn(
+              'flex items-center justify-center w-8 h-8 rounded-lg',
+              source.type === 'youtube' ? 'bg-red-500/10' : 'bg-muted'
             )}
-            <span className="text-xs text-gray-500">{formatDate(source.created_at)}</span>
+          >
+            <TypeIcon
+              className={cn(
+                'h-4 w-4',
+                source.type === 'youtube' ? 'text-red-500' : 'text-muted-foreground'
+              )}
+            />
           </div>
-          {source.error_message && (
-            <p className="text-xs text-red-400 mt-1 truncate">{source.error_message}</p>
-          )}
+
+          {/* Title */}
+          <div className="flex-1 min-w-0">
+            <h4 className="text-sm font-medium truncate">
+              {source.title || source.original_filename || 'Untitled'}
+            </h4>
+            <p className="text-xs text-muted-foreground truncate">
+              {source.type}
+              {source.chunk_count > 0 && ` • ${source.chunk_count} chunks`}
+            </p>
+          </div>
         </div>
 
         {/* Actions */}
-        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-          {source.status === 'ready' && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation()
-                onTransform?.()
-              }}
-              className="p-1.5 text-gray-400 hover:text-purple-400 hover:bg-gray-800 rounded transition-colors"
-              title="Transform with AI"
-            >
-              <Wand2 className="w-4 h-4" />
-            </button>
-          )}
-          <button
-            onClick={(e) => {
-              e.stopPropagation()
-              onDelete?.()
-            }}
-            className="p-1.5 text-gray-400 hover:text-red-400 hover:bg-gray-800 rounded transition-colors"
-            title="Delete source"
-          >
-            <Trash2 className="w-4 h-4" />
-          </button>
-        </div>
-      </div>
-    )
-  }
-
-  // Grid View
-  return (
-    <div
-      onClick={onSelect}
-      className={`group relative p-4 rounded-xl cursor-pointer transition-all ${
-        isSelected
-          ? 'bg-blue-600/20 border-2 border-blue-500'
-          : 'bg-[#111111] border border-gray-800 hover:border-gray-700'
-      }`}
-    >
-      {/* Selection Checkbox */}
-      <div className="absolute top-3 left-3">
-        <input
-          type="checkbox"
-          checked={isSelected}
-          onChange={onSelect}
-          className="w-4 h-4 rounded border-gray-600 bg-gray-800 text-blue-500 focus:ring-blue-500"
-          onClick={(e) => e.stopPropagation()}
-        />
-      </div>
-
-      {/* Menu Button */}
-      <div className="absolute top-3 right-3">
-        <button
-          onClick={(e) => {
-            e.stopPropagation()
-            setShowMenu(!showMenu)
-          }}
-          className="p-1 text-gray-500 hover:text-white hover:bg-gray-800 rounded opacity-0 group-hover:opacity-100 transition-all"
-        >
-          <MoreVertical className="w-4 h-4" />
-        </button>
-
-        {showMenu && (
-          <>
-            <div
-              className="fixed inset-0 z-10"
-              onClick={(e) => {
-                e.stopPropagation()
-                setShowMenu(false)
-              }}
+        <div className="flex items-center gap-1">
+          {showContextToggle && onContextModeChange && (
+            <ContextToggle
+              mode={contextMode}
+              hasInsights={hasInsights}
+              onChange={onContextModeChange}
+              className="opacity-0 group-hover:opacity-100"
             />
-            <div className="absolute right-0 top-full mt-1 bg-[#1a1a1a] border border-gray-800 rounded-lg shadow-xl py-1 z-20 min-w-[140px]">
-              {source.status === 'ready' && (
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    onTransform?.()
-                    setShowMenu(false)
-                  }}
-                  className="w-full px-3 py-2 text-left text-sm text-gray-300 hover:bg-gray-800 flex items-center gap-2"
-                >
-                  <Wand2 className="w-4 h-4 text-purple-400" />
-                  Transform
-                </button>
-              )}
-              <button
-                onClick={(e) => {
-                  e.stopPropagation()
-                  onView?.()
-                  setShowMenu(false)
-                }}
-                className="w-full px-3 py-2 text-left text-sm text-gray-300 hover:bg-gray-800 flex items-center gap-2"
-              >
-                <Eye className="w-4 h-4" />
-                View
-              </button>
-              <button
-                onClick={(e) => {
-                  e.stopPropagation()
-                  onDelete?.()
-                  setShowMenu(false)
-                }}
-                className="w-full px-3 py-2 text-left text-sm text-red-400 hover:bg-gray-800 flex items-center gap-2"
-              >
-                <Trash2 className="w-4 h-4" />
-                Delete
-              </button>
-            </div>
-          </>
-        )}
-      </div>
+          )}
 
-      {/* Icon */}
-      <div className="flex justify-center pt-6 pb-4">
-        <div className={`p-4 rounded-2xl bg-gray-800/50 ${typeInfo.color}`}>
-          {typeInfo.icon}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-8 w-8 p-0 opacity-0 group-hover:opacity-100"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <MoreVertical className="h-4 w-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              {onView && source.status === 'ready' && (
+                <DropdownMenuItem
+                  onSelect={(e) => {
+                    e.preventDefault()
+                    onView()
+                  }}
+                >
+                  <ExternalLink className="h-4 w-4 mr-2" />
+                  View Source
+                </DropdownMenuItem>
+              )}
+              {onTransform && source.status === 'ready' && (
+                <DropdownMenuItem
+                  onSelect={(e) => {
+                    e.preventDefault()
+                    onTransform()
+                  }}
+                >
+                  <Wand2 className="h-4 w-4 mr-2" />
+                  Transform with AI
+                </DropdownMenuItem>
+              )}
+              {onRetry && source.status === 'error' && (
+                <DropdownMenuItem
+                  onSelect={(e) => {
+                    e.preventDefault()
+                    onRetry()
+                  }}
+                >
+                  <RefreshCw className="h-4 w-4 mr-2" />
+                  Retry Processing
+                </DropdownMenuItem>
+              )}
+              {(onView || onTransform || onRetry) && onDelete && <DropdownMenuSeparator />}
+              {onDelete && (
+                <DropdownMenuItem
+                  className="text-destructive focus:text-destructive"
+                  onSelect={(e) => {
+                    e.preventDefault()
+                    onDelete()
+                  }}
+                >
+                  <Trash2 className="h-4 w-4 mr-2" />
+                  Delete
+                </DropdownMenuItem>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </div>
 
-      {/* Title */}
-      <h3 className="text-sm font-medium text-white text-center truncate px-2">
-        {title}
-      </h3>
+      {/* Status Row */}
+      <div className="flex items-center gap-2">
+        <Badge
+          variant="secondary"
+          className={cn('text-xs', statusConfig.bgColor, statusConfig.color)}
+        >
+          <StatusIcon
+            className={cn('h-3 w-3 mr-1', statusConfig.animate && 'animate-spin')}
+          />
+          {statusConfig.label}
+        </Badge>
 
-      {/* Status and Info */}
-      <div className="flex items-center justify-center gap-2 mt-2">
-        <span className={`flex items-center gap-1 text-xs ${statusInfo.color}`}>
-          {statusInfo.icon}
-          {statusInfo.label}
-        </span>
-        {source.status === 'ready' && source.chunk_count > 0 && (
-          <>
-            <span className="text-gray-600">|</span>
-            <span className="text-xs text-gray-500">{source.chunk_count} chunks</span>
-          </>
+        {source.status === 'error' && source.error_message && (
+          <span className="text-xs text-red-500 truncate flex-1">
+            {source.error_message}
+          </span>
         )}
-      </div>
-
-      {/* Error Message */}
-      {source.error_message && (
-        <p className="text-xs text-red-400 text-center mt-2 truncate px-2">
-          {source.error_message}
-        </p>
-      )}
-
-      {/* Type Badge */}
-      <div className="flex justify-center mt-3">
-        <span className="text-xs text-gray-500 bg-gray-800 px-2 py-0.5 rounded capitalize">
-          {source.type}
-        </span>
       </div>
     </div>
   )
 }
+
+// Compact version for lists
+export function SourceCardCompact({
+  source,
+  isSelected,
+  onClick,
+}: {
+  source: NotebookSource
+  isSelected?: boolean
+  onClick?: () => void
+}) {
+  const TypeIcon = SOURCE_TYPE_ICONS[source.type] || FileText
+  const statusConfig = STATUS_CONFIG[source.status]
+
+  return (
+    <div
+      className={cn(
+        'flex items-center gap-2 p-2 rounded-lg cursor-pointer transition-colors',
+        'hover:bg-muted',
+        isSelected && 'bg-primary/10 ring-1 ring-primary'
+      )}
+      onClick={onClick}
+    >
+      <TypeIcon className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+      <span className="text-sm truncate flex-1">
+        {source.title || source.original_filename || 'Untitled'}
+      </span>
+      <statusConfig.icon
+        className={cn(
+          'h-3 w-3 flex-shrink-0',
+          statusConfig.color,
+          statusConfig.animate && 'animate-spin'
+        )}
+      />
+    </div>
+  )
+}
+
+// Also export as default for backward compatibility
+export default SourceCard

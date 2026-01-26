@@ -15,8 +15,14 @@ import {
   GraduationCap,
   Coffee,
   Download,
-  RefreshCw
+  RefreshCw,
+  Volume2,
+  ChevronDown,
+  Headphones,
+  Sparkles,
+  UserCircle2
 } from 'lucide-react'
+import { useVoiceStore, Voice } from '@/stores/voiceStore'
 
 interface PodcastStyle {
   id: string
@@ -58,6 +64,15 @@ const PODCAST_STYLES: PodcastStyle[] = [
   }
 ]
 
+// Speaker labels for podcast
+const SPEAKER_LABELS = ['Host', 'Guest 1', 'Guest 2', 'Guest 3']
+const SPEAKER_COLORS = [
+  'from-violet-500 to-fuchsia-500',
+  'from-emerald-500 to-teal-500',
+  'from-amber-500 to-orange-500',
+  'from-sky-500 to-blue-500'
+]
+
 interface Podcast {
   id: string
   title: string
@@ -72,6 +87,7 @@ interface Podcast {
   duration_seconds?: number
   created_at: string
   completed_at?: string
+  voice_mapping?: Record<string, string>
 }
 
 interface PodcastGeneratorProps {
@@ -95,11 +111,19 @@ export default function PodcastGenerator({
   const [loadingPodcasts, setLoadingPodcasts] = useState(true)
   const [playingId, setPlayingId] = useState<string | null>(null)
   const [audioElement, setAudioElement] = useState<HTMLAudioElement | null>(null)
+  
+  // Voice selection state
+  const [voiceMapping, setVoiceMapping] = useState<Record<string, string>>({})
+  const [showVoiceSelection, setShowVoiceSelection] = useState(false)
+  
+  // Voice store
+  const { voices, fetchVoices, isLoading: loadingVoices } = useVoiceStore()
 
-  // Load existing podcasts
+  // Load existing podcasts and voices
   useEffect(() => {
     fetchPodcasts()
-  }, [notebookId])
+    fetchVoices()
+  }, [notebookId, fetchVoices])
 
   // Cleanup audio on unmount
   useEffect(() => {
@@ -107,6 +131,9 @@ export default function PodcastGenerator({
       audioElement?.pause()
     }
   }, [audioElement])
+
+  // Get only activated/available voices
+  const availableVoices = voices.filter(v => v.voice_type === 'user' || v.activated)
 
   const fetchPodcasts = async () => {
     try {
@@ -139,7 +166,8 @@ export default function PodcastGenerator({
           title: title.trim(),
           style,
           speakers,
-          duration_minutes: duration
+          duration_minutes: duration,
+          voice_mapping: voiceMapping
         })
       })
 
@@ -197,6 +225,18 @@ export default function PodcastGenerator({
     }
   }
 
+  const updateVoiceMapping = (speakerIndex: number, voiceId: string) => {
+    setVoiceMapping(prev => ({
+      ...prev,
+      [String(speakerIndex + 1)]: voiceId
+    }))
+  }
+
+  const getVoiceForSpeaker = (speakerIndex: number): Voice | undefined => {
+    const voiceId = voiceMapping[String(speakerIndex + 1)]
+    return voices.find(v => v.voice_id === voiceId)
+  }
+
   const getStatusBadge = (status: string) => {
     switch (status) {
       case 'pending':
@@ -217,61 +257,66 @@ export default function PodcastGenerator({
   }
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-gray-900 rounded-xl border border-gray-700 max-w-3xl w-full max-h-[85vh] overflow-hidden flex flex-col">
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+      <div className="bg-gray-900 rounded-2xl border border-white/10 max-w-3xl w-full max-h-[85vh] overflow-hidden flex flex-col shadow-2xl">
         {/* Header */}
-        <div className="p-4 border-b border-gray-700 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Mic className="w-5 h-5 text-orange-400" />
-            <h2 className="text-lg font-semibold">Generate Podcast</h2>
+        <div className="p-5 border-b border-white/10 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="p-2 rounded-xl bg-gradient-to-br from-orange-500 to-rose-500">
+              <Mic className="w-5 h-5 text-white" />
+            </div>
+            <div>
+              <h2 className="text-lg font-semibold text-white">Generate Podcast</h2>
+              <p className="text-sm text-white/50">Create audio from your notebook</p>
+            </div>
           </div>
           <button
             onClick={onClose}
-            className="p-2 hover:bg-gray-800 rounded-lg transition-colors"
+            className="p-2 hover:bg-white/10 rounded-lg transition-colors"
           >
-            <X className="w-5 h-5" />
+            <X className="w-5 h-5 text-white/60" />
           </button>
         </div>
 
         {/* Content */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-6">
+        <div className="flex-1 overflow-y-auto p-5 space-y-6">
           {/* New Podcast Form */}
-          <div className="bg-gray-800/50 rounded-lg p-4 space-y-4">
-            <h3 className="font-medium flex items-center gap-2">
-              <Mic className="w-4 h-4 text-orange-400" />
+          <div className="bg-white/5 rounded-xl p-5 space-y-5 border border-white/5">
+            <h3 className="font-medium text-white flex items-center gap-2">
+              <Sparkles className="w-4 h-4 text-orange-400" />
               Create New Podcast
             </h3>
 
             {/* Title */}
             <div>
-              <label className="block text-sm text-gray-400 mb-1">Title</label>
+              <label className="block text-sm text-white/60 mb-1.5">Title</label>
               <input
                 type="text"
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
                 placeholder="Episode title..."
-                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
+                className="w-full px-4 py-2.5 bg-white/5 border border-white/10 rounded-xl text-sm text-white placeholder-white/30 focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent transition-all"
               />
             </div>
 
             {/* Style Selection */}
             <div>
-              <label className="block text-sm text-gray-400 mb-2">Style</label>
+              <label className="block text-sm text-white/60 mb-2">Style</label>
               <div className="grid grid-cols-5 gap-2">
                 {PODCAST_STYLES.map((s) => (
                   <button
                     key={s.id}
                     onClick={() => setStyle(s.id)}
-                    className={`p-2 rounded-lg border text-center transition-all ${
+                    className={`p-3 rounded-xl border text-center transition-all ${
                       style === s.id
                         ? 'border-orange-500 bg-orange-500/10'
-                        : 'border-gray-700 hover:border-gray-600 bg-gray-800/50'
+                        : 'border-white/10 hover:border-white/20 bg-white/5'
                     }`}
                   >
-                    <div className={`mx-auto mb-1 ${style === s.id ? 'text-orange-400' : 'text-gray-400'}`}>
+                    <div className={`mx-auto mb-1.5 ${style === s.id ? 'text-orange-400' : 'text-white/40'}`}>
                       {s.icon}
                     </div>
-                    <span className="text-xs">{s.name}</span>
+                    <span className="text-xs text-white/80">{s.name}</span>
                   </button>
                 ))}
               </div>
@@ -280,28 +325,28 @@ export default function PodcastGenerator({
             {/* Speakers and Duration */}
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <label className="block text-sm text-gray-400 mb-1 flex items-center gap-1">
-                  <Users className="w-3 h-3" /> Speakers
+                <label className="block text-sm text-white/60 mb-1.5 flex items-center gap-1.5">
+                  <Users className="w-3.5 h-3.5" /> Number of Speakers
                 </label>
                 <select
                   value={speakers}
                   onChange={(e) => setSpeakers(Number(e.target.value))}
-                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
+                  className="w-full px-4 py-2.5 bg-white/5 border border-white/10 rounded-xl text-sm text-white focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent transition-all"
                 >
                   <option value={1}>1 (Monologue)</option>
                   <option value={2}>2 (Dialogue)</option>
-                  <option value={3}>3</option>
-                  <option value={4}>4</option>
+                  <option value={3}>3 Speakers</option>
+                  <option value={4}>4 Speakers</option>
                 </select>
               </div>
               <div>
-                <label className="block text-sm text-gray-400 mb-1 flex items-center gap-1">
-                  <Clock className="w-3 h-3" /> Duration (minutes)
+                <label className="block text-sm text-white/60 mb-1.5 flex items-center gap-1.5">
+                  <Clock className="w-3.5 h-3.5" /> Duration
                 </label>
                 <select
                   value={duration}
                   onChange={(e) => setDuration(Number(e.target.value))}
-                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
+                  className="w-full px-4 py-2.5 bg-white/5 border border-white/10 rounded-xl text-sm text-white focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent transition-all"
                 >
                   <option value={5}>~5 minutes</option>
                   <option value={10}>~10 minutes</option>
@@ -312,9 +357,92 @@ export default function PodcastGenerator({
               </div>
             </div>
 
+            {/* Voice Selection Section */}
+            <div>
+              <button
+                onClick={() => setShowVoiceSelection(!showVoiceSelection)}
+                className="flex items-center gap-2 text-sm text-white/70 hover:text-white transition-colors"
+              >
+                <Headphones className="w-4 h-4" />
+                Voice Selection
+                <ChevronDown className={`w-4 h-4 transition-transform ${showVoiceSelection ? 'rotate-180' : ''}`} />
+                {Object.keys(voiceMapping).length > 0 && (
+                  <span className="px-2 py-0.5 text-xs bg-orange-500/20 text-orange-400 rounded-full">
+                    {Object.keys(voiceMapping).length} assigned
+                  </span>
+                )}
+              </button>
+
+              {showVoiceSelection && (
+                <div className="mt-4 space-y-3">
+                  {loadingVoices ? (
+                    <div className="flex items-center justify-center py-4">
+                      <Loader2 className="w-5 h-5 animate-spin text-white/40" />
+                    </div>
+                  ) : availableVoices.length === 0 ? (
+                    <div className="p-4 rounded-xl bg-white/5 border border-dashed border-white/20 text-center">
+                      <Mic className="w-8 h-8 mx-auto text-white/20 mb-2" />
+                      <p className="text-sm text-white/50">No voices available</p>
+                      <p className="text-xs text-white/30 mt-1">
+                        Clone voices in the Voice Studio to use them here
+                      </p>
+                    </div>
+                  ) : (
+                    <>
+                      {Array.from({ length: speakers }).map((_, index) => {
+                        const selectedVoice = getVoiceForSpeaker(index)
+                        return (
+                          <div key={index} className="flex items-center gap-3">
+                            <div className={`flex items-center gap-2 w-28 px-3 py-2 rounded-lg bg-gradient-to-r ${SPEAKER_COLORS[index]} bg-opacity-20`}>
+                              <UserCircle2 className="w-4 h-4 text-white" />
+                              <span className="text-sm text-white font-medium">{SPEAKER_LABELS[index]}</span>
+                            </div>
+                            <select
+                              value={voiceMapping[String(index + 1)] || ''}
+                              onChange={(e) => updateVoiceMapping(index, e.target.value)}
+                              className="flex-1 px-4 py-2.5 bg-white/5 border border-white/10 rounded-xl text-sm text-white focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent transition-all"
+                            >
+                              <option value="">Default Voice</option>
+                              <optgroup label="Your Voices">
+                                {availableVoices
+                                  .filter(v => v.voice_type === 'user')
+                                  .map(voice => (
+                                    <option key={voice.voice_id} value={voice.voice_id}>
+                                      {voice.voice_name}
+                                    </option>
+                                  ))}
+                              </optgroup>
+                              <optgroup label="Voice Presets">
+                                {availableVoices
+                                  .filter(v => v.voice_type === 'builtin' && v.activated)
+                                  .map(voice => (
+                                    <option key={voice.voice_id} value={voice.voice_id}>
+                                      {voice.voice_name}
+                                    </option>
+                                  ))}
+                              </optgroup>
+                            </select>
+                            {selectedVoice && (
+                              <div className="flex items-center gap-1 text-xs text-white/40">
+                                <Volume2 className="w-3 h-3" />
+                                {selectedVoice.quality_score ? `${Math.round(selectedVoice.quality_score * 100)}%` : 'Ready'}
+                              </div>
+                            )}
+                          </div>
+                        )
+                      })}
+                      <p className="text-xs text-white/40 mt-2">
+                        💡 Tip: Leave as "Default Voice" to use the system's standard TTS voices
+                      </p>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+
             {/* Error */}
             {error && (
-              <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400 text-sm">
+              <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-xl text-red-400 text-sm">
                 {error}
               </div>
             )}
@@ -323,16 +451,16 @@ export default function PodcastGenerator({
             <button
               onClick={handleGenerate}
               disabled={isGenerating || !title.trim()}
-              className="w-full py-2 bg-orange-600 hover:bg-orange-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors flex items-center justify-center gap-2"
+              className="w-full py-3 bg-gradient-to-r from-orange-600 to-rose-600 hover:from-orange-500 hover:to-rose-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl transition-all flex items-center justify-center gap-2 font-medium shadow-lg shadow-orange-500/20"
             >
               {isGenerating ? (
                 <>
-                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <Loader2 className="w-5 h-5 animate-spin" />
                   Starting Generation...
                 </>
               ) : (
                 <>
-                  <Mic className="w-4 h-4" />
+                  <Mic className="w-5 h-5" />
                   Generate Podcast
                 </>
               )}
@@ -342,42 +470,45 @@ export default function PodcastGenerator({
           {/* Existing Podcasts */}
           <div className="space-y-3">
             <div className="flex items-center justify-between">
-              <h3 className="font-medium">Your Podcasts</h3>
+              <h3 className="font-medium text-white">Your Podcasts</h3>
               <button
                 onClick={fetchPodcasts}
-                className="p-1 hover:bg-gray-800 rounded transition-colors"
+                className="p-1.5 hover:bg-white/10 rounded-lg transition-colors"
               >
-                <RefreshCw className="w-4 h-4 text-gray-400" />
+                <RefreshCw className="w-4 h-4 text-white/40" />
               </button>
             </div>
 
             {loadingPodcasts ? (
               <div className="flex items-center justify-center py-8">
-                <Loader2 className="w-6 h-6 animate-spin text-gray-400" />
+                <Loader2 className="w-6 h-6 animate-spin text-white/40" />
               </div>
             ) : podcasts.length === 0 ? (
-              <div className="text-center py-8 text-gray-500">
-                <Mic className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                <p>No podcasts yet</p>
-                <p className="text-sm">Generate your first podcast above!</p>
+              <div className="text-center py-12 bg-white/5 rounded-xl border border-dashed border-white/10">
+                <Mic className="w-10 h-10 mx-auto mb-3 text-white/20" />
+                <p className="text-white/60">No podcasts yet</p>
+                <p className="text-sm text-white/40 mt-1">Generate your first podcast above!</p>
               </div>
             ) : (
               <div className="space-y-2">
                 {podcasts.map((podcast) => (
                   <div
                     key={podcast.id}
-                    className="p-3 bg-gray-800/50 border border-gray-700 rounded-lg"
+                    className="p-4 bg-white/5 border border-white/10 rounded-xl hover:bg-white/[0.07] transition-colors"
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 mb-1">
-                          <h4 className="font-medium truncate">{podcast.title}</h4>
+                          <h4 className="font-medium text-white truncate">{podcast.title}</h4>
                           {getStatusBadge(podcast.status)}
                         </div>
-                        <div className="flex items-center gap-3 text-xs text-gray-500">
+                        <div className="flex items-center gap-3 text-xs text-white/40">
                           <span className="capitalize">{podcast.style}</span>
                           <span>{podcast.speakers} speakers</span>
                           <span>~{podcast.duration_minutes} min</span>
+                          {podcast.voice_mapping && Object.keys(podcast.voice_mapping).length > 0 && (
+                            <span className="text-violet-400">Custom voices</span>
+                          )}
                         </div>
                         {podcast.error_message && (
                           <p className="text-xs text-red-400 mt-1">{podcast.error_message}</p>
@@ -388,20 +519,20 @@ export default function PodcastGenerator({
                         <div className="flex items-center gap-2">
                           <button
                             onClick={() => togglePlayback(podcast)}
-                            className="p-2 bg-orange-600 hover:bg-orange-700 rounded-full transition-colors"
+                            className="p-2.5 bg-gradient-to-r from-orange-600 to-rose-600 hover:from-orange-500 hover:to-rose-500 rounded-full transition-all shadow-lg"
                           >
                             {playingId === podcast.id ? (
-                              <Pause className="w-4 h-4" />
+                              <Pause className="w-4 h-4 text-white" />
                             ) : (
-                              <Play className="w-4 h-4" />
+                              <Play className="w-4 h-4 text-white" />
                             )}
                           </button>
                           <a
                             href={podcast.audio_path}
                             download
-                            className="p-2 bg-gray-700 hover:bg-gray-600 rounded-full transition-colors"
+                            className="p-2.5 bg-white/10 hover:bg-white/20 rounded-full transition-colors"
                           >
-                            <Download className="w-4 h-4" />
+                            <Download className="w-4 h-4 text-white/70" />
                           </a>
                         </div>
                       )}
@@ -410,18 +541,18 @@ export default function PodcastGenerator({
                     {/* Transcript Preview */}
                     {podcast.transcript && podcast.transcript.length > 0 && (
                       <details className="mt-3">
-                        <summary className="text-xs text-gray-500 cursor-pointer hover:text-gray-400">
+                        <summary className="text-xs text-white/40 cursor-pointer hover:text-white/60 transition-colors">
                           View Transcript ({podcast.transcript.length} segments)
                         </summary>
-                        <div className="mt-2 max-h-48 overflow-y-auto space-y-2 text-sm">
+                        <div className="mt-3 max-h-48 overflow-y-auto space-y-2 text-sm">
                           {podcast.transcript.slice(0, 10).map((entry, i) => (
-                            <div key={i} className="pl-3 border-l-2 border-gray-700">
+                            <div key={i} className="pl-3 border-l-2 border-white/10">
                               <span className="text-orange-400 font-medium">{entry.speaker}:</span>{' '}
-                              <span className="text-gray-400">{entry.dialogue}</span>
+                              <span className="text-white/60">{entry.dialogue}</span>
                             </div>
                           ))}
                           {podcast.transcript.length > 10 && (
-                            <p className="text-xs text-gray-500">
+                            <p className="text-xs text-white/40">
                               ...and {podcast.transcript.length - 10} more segments
                             </p>
                           )}
@@ -438,4 +569,3 @@ export default function PodcastGenerator({
     </div>
   )
 }
-

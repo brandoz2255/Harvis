@@ -17,7 +17,8 @@ import { Loader2, AlertCircle, ArrowLeft, FileText, MessageSquare, Mic, StickyNo
 export default function NotebookWorkspacePage() {
   const router = useRouter()
   const params = useParams()
-  const notebookId = params.id as string
+  // Decode the URL-encoded notebook ID from the route params
+  const notebookId = decodeURIComponent(params.id as string)
   const { user, isLoading: authLoading } = useUser()
 
   const {

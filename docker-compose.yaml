@@ -51,6 +51,92 @@ services:
     depends_on:
       - pgsql
 
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Open Notebook Services
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  surrealdb:
+    image: surrealdb/surrealdb:v2
+    container_name: surrealdb
+    restart: unless-stopped
+    command: start --log info --user root --pass root rocksdb:/mydata/mydatabase.db
+    environment:
+      - SURREAL_EXPERIMENTAL_GRAPHQL=true
+    volumes:
+      - surrealdb_data:/mydata
+    user: root
+    networks:
+      - ollama-n8n-network
+
+  open-notebook:
+    image: lfnovo/open_notebook:v1-latest
+    container_name: open-notebook
+    restart: unless-stopped
+    ports:
+      - "8502:8502"
+      - "5055:5055"
+    environment:
+      # SurrealDB Configuration
+      SURREAL_URL: ws://surrealdb:8000/rpc
+      SURREAL_USER: root
+      SURREAL_PASSWORD: root
+      SURREAL_NAMESPACE: open_notebook
+      SURREAL_DATABASE: open_notebook
+      # Ollama Configuration (shared with your backend)
+      OLLAMA_API_BASE: http://ollama:11434
+      # API Configuration
+      API_URL: http://localhost:8502
+      INTERNAL_API_URL: http://localhost:5055
+      API_CLIENT_TIMEOUT: "300"
+    volumes:
+      - open_notebook_data:/app/data
+    depends_on:
+      - surrealdb
+    networks:
+      - ollama-n8n-network
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # TTS Service - Voice Cloning & Podcast Generation
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  tts-service:
+    build:
+      context: .
+      dockerfile: docker/tts-service/Dockerfile
+    container_name: tts-service
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    environment:
+      # TTS Configuration
+      TTS_HOST: "0.0.0.0"
+      TTS_PORT: "8001"
+      QUANTIZE_4BIT: "true"
+      # Storage paths (inside container)
+      VOICES_DIR: /app/voices
+      OUTPUT_DIR: /app/output
+      MODEL_CACHE_DIR: /app/models
+    volumes:
+      - tts_voices:/app/voices
+      - tts_output:/app/output
+      - tts_models:/app/models
+      - ./python_back_end/tts_system:/app/tts_system:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks:
+      - ollama-n8n-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
 networks:
   ollama-n8n-network:
     external: true
@@ -59,5 +145,10 @@ volumes:
   ollama:
   n8n_data:
   pgsql_data:
+  surrealdb_data:
+  open_notebook_data:
+  tts_voices:
+  tts_output:
+  tts_models:
 
 
