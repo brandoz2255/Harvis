@@ -220,8 +220,9 @@ export default function ChatPage() {
         status: "sent",
         audioUrl: data.audio_path,
         reasoning: data.reasoning,
-        searchResults: data.search_results,
+        searchResults: data.search_results || data.sources,  // Handle both formats
         searchQuery: data.searchQuery,
+        autoResearched: data.auto_researched,  // Perplexity-style auto-research indicator
       }
 
       if (!isDuplicateMessage(assistantMessage, messages)) {
@@ -349,11 +350,11 @@ export default function ChatPage() {
   }
 
   return (
-    <div className="flex h-screen bg-background">
+    <div className="flex h-screen bg-background overflow-hidden">
       {/* Sidebar */}
       <div
         className={`${sidebarOpen ? "translate-x-0" : "-translate-x-full"
-          } fixed inset-y-0 left-0 z-30 transition-transform duration-300 lg:relative lg:translate-x-0`}
+          } fixed inset-y-0 left-0 z-30 h-full transition-transform duration-300 lg:relative lg:translate-x-0`}
       >
         <ChatSidebar
           chats={sessions.map((s) => ({

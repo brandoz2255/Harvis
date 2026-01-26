@@ -228,19 +228,27 @@ export function ChatInput({ onSend, isLoading, isResearchMode, selectedModel, cl
       // Create video and canvas elements for capturing frames
       const video = document.createElement('video')
       video.srcObject = stream
-      video.autoplay = true
       video.muted = true
+      // Important: Add playsinline for better compatibility
+      video.playsInline = true
       videoRef.current = video
 
       const canvas = document.createElement('canvas')
       canvasRef.current = canvas
 
-      // Wait for video to be ready
+      // Wait for video to be ready and actually playing
       await new Promise<void>((resolve) => {
         video.onloadedmetadata = () => {
           canvas.width = video.videoWidth
           canvas.height = video.videoHeight
-          resolve()
+          // Explicitly play the video
+          video.play().then(() => {
+            console.log(`🎥 Screenshare started: ${video.videoWidth}x${video.videoHeight}`)
+            resolve()
+          }).catch(e => {
+            console.error('Error playing video for screenshare:', e)
+            resolve() // Try to continue anyway
+          })
         }
       })
 
