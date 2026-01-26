@@ -394,6 +394,170 @@ class WebSearchAgent:
         
         return min(1.0, score)
 
+    def search_youtube_videos(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:
+        """
+        Search for YouTube videos related to the query using DuckDuckGo video search.
+
+        Args:
+            query: Search query
+            max_results: Maximum number of video results
+
+        Returns:
+            List of video results with title, url, thumbnail, channel, duration, views
+        """
+        try:
+            # Add "youtube" to query to bias results toward YouTube
+            video_query = f"{query} site:youtube.com"
+
+            logger.info(f"Searching for YouTube videos: '{video_query}'")
+
+            with DDGS() as ddgs:
+                time.sleep(0.3)  # Small delay to avoid rate limiting
+
+                # Use video search
+                video_results = list(ddgs.videos(
+                    video_query,
+                    max_results=max_results * 2,  # Get extra to filter
+                    region="us-en",
+                    safesearch="moderate"
+                ))
+
+            logger.info(f"DDGS video search returned {len(video_results)} raw results")
+
+            # Filter for YouTube videos and format results
+            formatted_videos = []
+            seen_urls = set()
+
+            for video in video_results:
+                url = video.get('content', video.get('href', ''))
+
+                # Only include YouTube videos
+                if 'youtube.com' not in url and 'youtu.be' not in url:
+                    continue
+
+                # Skip duplicates
+                if url in seen_urls:
+                    continue
+                seen_urls.add(url)
+
+                # Extract video ID for thumbnail
+                video_id = self._extract_youtube_video_id(url)
+                thumbnail = f"https://img.youtube.com/vi/{video_id}/mqdefault.jpg" if video_id else video.get('thumbnail', '')
+
+                formatted_video = {
+                    "title": video.get('title', ''),
+                    "url": url,
+                    "thumbnail": thumbnail,
+                    "channel": video.get('uploader', video.get('publisher', '')),
+                    "duration": video.get('duration', ''),
+                    "views": video.get('views', ''),
+                    "description": video.get('description', video.get('body', ''))[:200],
+                    "published": video.get('published', ''),
+                    "source": "YouTube"
+                }
+
+                formatted_videos.append(formatted_video)
+
+                if len(formatted_videos) >= max_results:
+                    break
+
+            logger.info(f"Found {len(formatted_videos)} YouTube videos for query: '{query}'")
+            return formatted_videos
+
+        except Exception as e:
+            logger.error(f"YouTube video search failed for query '{query}': {e}")
+            logger.exception("Full traceback:")
+            return []
+
+    def _extract_youtube_video_id(self, url: str) -> str:
+        """Extract YouTube video ID from various URL formats"""
+        import re
+
+        # Handle youtu.be short links
+        short_match = re.search(r'youtu\.be/([a-zA-Z0-9_-]{11})', url)
+        if short_match:
+            return short_match.group(1)
+
+        # Handle youtube.com/watch?v= links
+        watch_match = re.search(r'youtube\.com/watch\?v=([a-zA-Z0-9_-]{11})', url)
+        if watch_match:
+            return watch_match.group(1)
+
+        # Handle youtube.com/embed/ links
+        embed_match = re.search(r'youtube\.com/embed/([a-zA-Z0-9_-]{11})', url)
+        if embed_match:
+            return embed_match.group(1)
+
+        # Handle youtube.com/v/ links
+        v_match = re.search(r'youtube\.com/v/([a-zA-Z0-9_-]{11})', url)
+        if v_match:
+            return v_match.group(1)
+
+        return ''
+
+    def search_with_videos(self, query: str, max_web_results: int = 5, max_video_results: int = 4) -> Dict[str, Any]:
+        """
+        Combined search for both web results and YouTube videos.
+
+        Args:
+            query: Search query
+            max_web_results: Maximum number of web results
+            max_video_results: Maximum number of video results
+
+        Returns:
+            Dictionary with search_results, videos, and extracted_content
+        """
+        # Run web search and video search
+        web_results = self.search_web(query, max_web_results)
+        video_results = self.search_youtube_videos(query, max_video_results)
+
+        return {
+            "query": query,
+            "search_results": web_results,
+            "videos": video_results,
+            "extracted_content": []
+        }
+
+    def search_and_extract_with_videos(self, query: str, extract_content: bool = True,
+                                       max_web_results: int = 5, max_video_results: int = 4) -> Dict[str, Any]:
+        """
+        Search with video support and optional content extraction.
+
+        Args:
+            query: Search query
+            extract_content: Whether to extract full content from URLs
+            max_web_results: Maximum number of web results
+            max_video_results: Maximum number of video results
+
+        Returns:
+            Dictionary with search results, videos, and extracted content
+        """
+        # Get web results
+        search_results = self.search_web(query, max_web_results)
+
+        # Get video results
+        video_results = self.search_youtube_videos(query, max_video_results)
+
+        result = {
+            "query": query,
+            "search_results": search_results,
+            "videos": video_results,
+            "extracted_content": []
+        }
+
+        if extract_content and search_results:
+            # Extract URLs from search results (exclude YouTube)
+            urls = [r["url"] for r in search_results
+                    if r.get("url") and 'youtube.com' not in r["url"] and 'youtu.be' not in r["url"]]
+
+            # Extract content from URLs
+            if urls:
+                extracted_content = self.extract_content_from_urls(urls)
+                result["extracted_content"] = extracted_content
+
+        return result
+
+
 class TavilySearchAgent:
     """
     Alternative search agent using Tavily API for more comprehensive results

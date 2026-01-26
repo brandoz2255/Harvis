@@ -997,6 +997,56 @@ async def get_authentication_stats():
 # Import new modules
 
 
+# ── Auto-Research Detection for Perplexity-style behavior ──────────────────────
+def should_auto_research(message: str) -> bool:
+    """
+    Detect if a message should trigger automatic web research (Perplexity-style).
+    Returns True for freshness/recommendation queries, False for conceptual questions.
+    """
+    msg_lower = message.lower()
+    
+    # Keywords that indicate need for current/fresh information
+    freshness_keywords = [
+        'new', 'latest', 'current', '2026', '2025', 'today', 'this week', 'recently',
+        'best', 'top', 'recommend', 'compare', 'vs', 'which should',
+        'roadmap', 'release', 'what changed', 'update', 'version',
+        'trending', 'popular', 'modern', 'state of the art', 'sota'
+    ]
+    
+    # Keywords that indicate conceptual questions (don't need web search)
+    conceptual_keywords = [
+        'explain', 'what is', 'how does', 'define', 'tutorial', 
+        'teach me', 'understand', 'concept', 'basics', 'fundamentals'
+    ]
+    
+    # Explicit research requests always trigger
+    explicit_research = [
+        'search', 'look up', 'find sources', 'research', 'browse',
+        'check online', 'google', 'web search'
+    ]
+    
+    # Check for explicit research request first
+    for keyword in explicit_research:
+        if keyword in msg_lower:
+            logger.info(f"🔍 Auto-research triggered by explicit keyword: '{keyword}'")
+            return True
+    
+    # Check for conceptual questions (skip research)
+    for keyword in conceptual_keywords:
+        if keyword in msg_lower:
+            # But override if freshness is also present
+            has_freshness = any(fk in msg_lower for fk in freshness_keywords)
+            if not has_freshness:
+                logger.info(f"📚 Conceptual question detected, skipping auto-research")
+                return False
+    
+    # Check for freshness keywords
+    for keyword in freshness_keywords:
+        if keyword in msg_lower:
+            logger.info(f"🔍 Auto-research triggered by freshness keyword: '{keyword}'")
+            return True
+    
+    return False
 
 
 @app.post("/api/chat", tags=["chat"])
@@ -1007,6 +1057,60 @@ async def chat(req: ChatRequest, request: Request, current_user: UserResponse = 
     """
     try:
         logger.info(f"Chat endpoint reached - User: {current_user.username}, Message: {req.message[:50]}...")
+        
+        # ── 0. Auto-Research Detection (Perplexity-style) ──────────────────────────────
+        # Check if this query should automatically trigger web research
+        if should_auto_research(req.message):
+            logger.info("🔍 Auto-research triggered, redirecting to research pipeline")
+            try:
+                # Use the research agent for this query
+                from agent_research import research_agent
+                research_result = await run_in_threadpool(research_agent, req.message, req.model, use_advanced=False)
+                
+                if "error" not in research_result:
+                    analysis = research_result.get("analysis", "")
+                    sources = research_result.get("sources", [])
+                    
+                    # Build response with research data
+                    response_data = {
+                        "response": analysis,
+                        "history": req.history + [
+                            {"role": "user", "content": req.message},
+                            {"role": "assistant", "content": analysis}
+                        ],
+                        "auto_researched": True,
+                        "sources": sources[:5],
+                        "session_id": req.session_id
+                    }
+                    
+                    # Save to chat history if session exists
+                    if req.session_id:
+                        try:
+                            await chat_history_manager.add_message(
+                                user_id=current_user.id,
+                                session_id=req.session_id,
+                                role="user",
+                                content=req.message,
+                                model_used=req.model,
+                                input_type="text"
+                            )
+                            await chat_history_manager.add_message(
+                                user_id=current_user.id,
+                                session_id=req.session_id,
+                                role="assistant",
+                                content=analysis,
+                                model_used=req.model,
+                                input_type="text"
+                            )
+                            logger.info(f"💾 Saved auto-research messages to session {req.session_id}")
+                        except Exception as e:
+                            logger.error(f"Failed to save auto-research to history: {e}")
+                    
+                    return response_data
+            except Exception as e:
+                logger.error(f"Auto-research failed, falling back to regular chat: {e}")
+                # Fall through to regular chat if research fails
+        
         # ── 1. Handle chat session and history ──────────────────────────────────────────
         session_id = req.session_id
         

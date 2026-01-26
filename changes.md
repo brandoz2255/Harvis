@@ -1212,3 +1212,89 @@ Frontend → /api/n8n-workflows → Backend /api/n8n/workflows → n8n Client �
 - "Email Processing Bot" - n8n automation workflow - Executions: 5 (real n8n data)
 
 ---
+## Date: 2025-01-25
+
+### 10. Perplexity-Level Research Quality Gates
+
+#### Problem:
+Research chat responses had several quality issues preventing a Perplexity-like experience:
+1. **"Source X says..." pattern** - Output reads like fabricated citations instead of grounded research
+2. **Citation mapping broken** - References like [4] don't map to actual sources
+3. **Answers too generic** - Not actionable enough, missing concrete recommendations
+4. **Numbers look hallucinated** - Statistics without real source backing
+5. **Inconsistent source quality** - SEO junk mixed with authoritative sources
+
+#### Root Cause Analysis:
+- Prompts instructed model to avoid "Source X says" but no enforcement in post-processing
+- No validation that [n] citations actually exist in the source list
+- No mechanism to fix/rewrite responses that fail validation
+- No "action density" enforcement for practical usefulness
+
+#### Solution Applied:
+Implemented 6 Quality Gates with automatic validation and rewrite loop:
+
+1. **Citation Validator** (`_validate_citations`):
+   - Extracts all [n] citations from response
+   - Verifies each maps to an actual source (1 to source_count)
+   - Returns invalid citations for fixing
+
+2. **"Source X says" Detector/Remover** (`_detect_source_x_says`, `_remove_source_x_says`):
+   - Detects 13+ banned patterns (says, states, emphasizes, mentions, etc.)
+   - Auto-fixes by transforming: "Source 1 says Docker uses containers" → "Docker uses containers [1]"
+
+3. **Numeric Claims Validator** (`_validate_numeric_claims`):
+   - Finds statistics/percentages in response
+   - Checks for adjacent citation within 50 characters
+   - Flags unsupported numeric claims
+
+4. **Action Density Checker** (`_check_action_density`):
+   - Counts actionable bullet points with verbs
+   - Requires minimum 5 concrete actions
+   - Detects action verbs: use, implement, configure, enable, etc.
+
+5. **Source Quality Filter** (updated `_filter_and_rank_sources`):
+   - Caps sources at 3-8 (Perplexity-style)
+   - Scores sources by domain authority
+   - Filters SEO spam patterns
+   - Ensures minimum source count
+
+6. **Rewrite Loop** (`_rewrite_with_validation`):
+   - Validates response against all gates
+   - Auto-fixes "Source X says" patterns first
+   - If still invalid, generates rewrite prompt with specific issues
+   - Re-queries LLM to fix problems (max 2 attempts)
+   - Re-validates after each attempt
+
+#### Files Modified:
+- `python_back_end/research/research_agent.py`:
+  - Added `_validate_citations()` - Gate 1
+  - Added `_detect_source_x_says()` - Gate 2 detection
+  - Added `_remove_source_x_says()` - Gate 2 auto-fix
+  - Added `_validate_numeric_claims()` - Gate 3
+  - Added `_check_action_density()` - Gate 4
+  - Added `_validate_response_quality()` - Master validator
+  - Added `_generate_rewrite_prompt()` - Rewrite instruction generator
+  - Added `_rewrite_with_validation()` - Validation + rewrite loop
+  - Added `_extract_domain()` - Helper for cleaner source display
+  - Updated `_filter_and_rank_sources()` - 3-8 source cap
+  - Updated `_prepare_research_context()` - Cleaner source format with domains
+  - Updated `research_topic()` - Integrated validation loop
+
+#### Result/Status:
+- ✅ **Citation Validation**: All [n] references validated against actual sources
+- ✅ **No "Source X says"**: Auto-detection and auto-fix of banned patterns
+- ✅ **Numeric Evidence**: Statistics flagged if missing citations
+- ✅ **Action Density**: Minimum 5 actionable items enforced
+- ✅ **Source Quality**: 3-8 top-ranked sources, SEO spam filtered
+- ✅ **Rewrite Loop**: Automatic fixing with max 2 LLM rewrites
+- ✅ **Validation Logging**: Clear logs showing gate pass/fail status
+
+#### Quality Gates Checklist (Perplexity-level):
+1. ✅ No placeholders / no "Source X says"
+2. ✅ Answer first: first 6-10 lines are direct + actionable
+3. ✅ Citations valid: every [n] exists, every source has title/url/domain
+4. ✅ No numeric claims without snippet evidence (flagged)
+5. ✅ Source quality filter: SEO junk dropped
+6. ✅ Sources capped at 3-8 (top-ranked)
+
+---
