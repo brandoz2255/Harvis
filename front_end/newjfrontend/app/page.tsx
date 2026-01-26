@@ -14,7 +14,8 @@ import SearchToggle from "@/components/SearchToggle"
 import { useChatHistoryStore } from "@/stores/chatHistoryStore"
 import { apiClient } from "@/lib/api"
 import { useUser } from "@/lib/auth/UserProvider"
-import type { Message, MessageObject } from "@/types/message"
+import type { Message, MessageObject, Attachment } from "@/types/message"
+import { isVisionModel } from "@/types/message"
 
 import { useApiWithRetry } from "@/hooks/useApiWithRetry"
 
@@ -106,10 +107,21 @@ export default function ChatPage() {
   const { fetchWithRetry } = useApiWithRetry()
 
   const handleSendMessage = async (input: string | MessageObject) => {
-    // Handle voice message objects
+    // Handle voice/image message objects
     if (typeof input !== 'string') {
-      if (!isDuplicateMessage(input as Message, messages)) {
-        setMessages((prev) => [...prev, input as Message])
+      const msgObj = input as MessageObject
+
+      // Add user message to display
+      if (!isDuplicateMessage(msgObj as Message, messages)) {
+        setMessages((prev) => [...prev, msgObj as Message])
+      }
+
+      // If it has attachments with images, send to vision endpoint
+      if (msgObj.attachments && msgObj.attachments.length > 0) {
+        const imageAttachment = msgObj.attachments.find(a => a.type === 'image')
+        if (imageAttachment && isVisionModel(selectedModel || '')) {
+          await handleVisionMessage(msgObj.content, imageAttachment.data, msgObj.attachments)
+        }
       }
       return
     }
@@ -223,6 +235,72 @@ export default function ChatPage() {
           msg.tempId === tempId ? { ...msg, status: "failed" } : msg
         )
       )
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  // Handle vision messages (images/screenshots)
+  const handleVisionMessage = async (prompt: string, imageData: string, attachments: Attachment[]) => {
+    setIsLoading(true)
+
+    try {
+      const token = localStorage.getItem('token')
+      if (!token) {
+        throw new Error('Authentication required')
+      }
+
+      // Use the analyze-and-respond endpoint for vision
+      const response = await fetch('/api/analyze-and-respond', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          image: imageData,
+          prompt: prompt || 'What do you see in this image?',
+          model: selectedModel,
+          text_only: textOnly,
+          low_vram: lowVram
+        }),
+        credentials: 'include'
+      })
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        throw new Error(`Vision analysis failed: ${errorText}`)
+      }
+
+      const data = await response.json()
+
+      // Create assistant message with vision analysis
+      const assistantMessage: Message = {
+        id: (Date.now() + 1).toString(),
+        role: "assistant",
+        content: data.llm_response || data.analysis || data.commentary || 'I analyzed the image.',
+        timestamp: new Date(),
+        model: selectedModel,
+        status: "sent",
+        audioUrl: data.audio_path,
+        reasoning: data.reasoning,
+      }
+
+      setMessages((prev) => [...prev, assistantMessage])
+
+    } catch (error) {
+      console.error("Vision error:", error)
+
+      // Add error message
+      const errorMessage: Message = {
+        id: (Date.now() + 1).toString(),
+        role: "assistant",
+        content: `Vision analysis failed: ${error instanceof Error ? error.message : 'Unknown error'}. Make sure you have a vision model selected (llava, moondream, qwen2-vl, etc.)`,
+        timestamp: new Date(),
+        model: selectedModel,
+        status: "failed",
+      }
+      setMessages((prev) => [...prev, errorMessage])
     } finally {
       setIsLoading(false)
     }
@@ -358,6 +436,8 @@ export default function ChatPage() {
                   searchQuery={message.searchQuery}
                   audioUrl={message.audioUrl}
                   reasoning={message.reasoning}
+                  imageUrl={message.imageUrl}
+                  inputType={message.inputType}
                 />
               ))
             )}

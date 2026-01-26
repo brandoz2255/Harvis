@@ -73,6 +73,8 @@ interface ChatMessageProps {
   searchQuery?: string
   audioUrl?: string
   reasoning?: string
+  imageUrl?: string
+  inputType?: 'text' | 'voice' | 'screen' | 'image' | 'file'
 }
 
 // Language mapping for prism-react-renderer
@@ -156,6 +158,8 @@ export function ChatMessage({
   searchQuery,
   audioUrl,
   reasoning: propReasoning,
+  imageUrl,
+  inputType,
 }: ChatMessageProps) {
   const [copied, setCopied] = useState(false)
   const [showVoice, setShowVoice] = useState(false)
@@ -308,7 +312,28 @@ export function ChatMessage({
               </ReactMarkdown>
             </div>
           ) : (
-            <p className="text-sm leading-relaxed whitespace-pre-wrap">{displayContent}</p>
+            <div className="space-y-2">
+              {/* Display image if present in user message */}
+              {imageUrl && (
+                <div className="rounded-lg overflow-hidden max-w-xs">
+                  <img
+                    src={imageUrl}
+                    alt="Attached image"
+                    className="w-full h-auto"
+                  />
+                </div>
+              )}
+              <p className="text-sm leading-relaxed whitespace-pre-wrap">{displayContent}</p>
+              {/* Show input type badge */}
+              {inputType && inputType !== 'text' && (
+                <span className="inline-flex items-center gap-1 text-xs opacity-70 mt-1">
+                  {inputType === 'voice' && '🎤 Voice'}
+                  {inputType === 'screen' && '🖥️ Screen'}
+                  {inputType === 'image' && '🖼️ Image'}
+                  {inputType === 'file' && '📄 File'}
+                </span>
+              )}
+            </div>
           )}
         </div>
 
