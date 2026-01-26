@@ -19,7 +19,6 @@ import {
 } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
-import { ScrollArea } from "@/components/ui/scroll-area"
 
 interface Chat {
   id: string
@@ -169,8 +168,7 @@ export function ChatSidebar({
         </div>
       </div>
 
-      {/* Chat List */}
-      <ScrollArea className="flex-1 px-2">
+      <div className="flex-1 overflow-y-auto px-2">
         {/* Starred Section */}
         {starredChats.length > 0 && (
           <div className="mb-2">
@@ -265,7 +263,7 @@ export function ChatSidebar({
             </div>
           )}
         </div>
-      </ScrollArea>
+      </div>
 
       {/* Footer */}
       <div className="border-t border-border p-3 space-y-1">

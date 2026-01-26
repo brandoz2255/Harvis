@@ -55,6 +55,7 @@ export interface Message {
   }>
   attachments?: Attachment[]
   imageUrl?: string // For displaying image in message
+  autoResearched?: boolean // Perplexity-style auto-research indicator
 }
 
 export interface MessageObject {
