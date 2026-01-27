@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useEffect } from "react"
+import { useRouter } from "next/navigation"
 import { cn } from "@/lib/utils"
 import {
   Search,
@@ -53,6 +54,7 @@ export function ChatSidebar({
   onProfileClick,
   className,
 }: ChatSidebarProps) {
+  const router = useRouter()
   const [searchQuery, setSearchQuery] = useState("")
   const [expandedSections, setExpandedSections] = useState({
     starred: true,
@@ -302,6 +304,7 @@ export function ChatSidebar({
 
         <button
           type="button"
+          onClick={() => router.push("/settings")}
           className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
         >
           <Settings className="h-4 w-4" />

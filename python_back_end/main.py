@@ -196,6 +196,18 @@ from n8n.models import (
     WorkflowResponse
 )
 
+# ─── RAG Corpus Setup ─────────────────────────────────────────────────────────
+try:
+    from rag_corpus import rag_router, initialize_rag_corpus, LocalRAGRetriever, VectorDBAdapter, EmbeddingAdapter
+    RAG_CORPUS_AVAILABLE = True
+except ImportError as e:
+    logging.warning(f"RAG corpus module not available: {e}")
+    RAG_CORPUS_AVAILABLE = False
+    LocalRAGRetriever = None
+
+# Global RAG retriever (initialized in lifespan)
+local_rag_retriever = None
+
 # ─── Set up logging ─────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -371,6 +383,43 @@ async def lifespan(app: FastAPI):
                 logger.warning(f"⚠️ Failed to initialize n8n AI agent: {e}")
                 logger.warning("n8n automation will work without vector database enhancement")
         
+        # Initialize RAG corpus services
+        if RAG_CORPUS_AVAILABLE:
+            try:
+                await initialize_rag_corpus(db_pool)
+                logger.info("✅ RAG corpus services initialized")
+                
+                # Initialize the local RAG retriever for chat integration
+                global local_rag_retriever
+                try:
+                    ollama_url = os.getenv("OLLAMA_URL", "http://ollama:11434")
+                    embedding_model = os.getenv("RAG_EMBEDDING_MODEL", "nomic-embed-text")
+                    
+                    embedding_adapter = EmbeddingAdapter(
+                        model_name=embedding_model,
+                        ollama_url=ollama_url
+                    )
+                    
+                    vectordb_adapter = VectorDBAdapter(
+                        db_pool=db_pool,
+                        collection_name="local_rag_corpus",
+                        embedding_dimension=768
+                    )
+                    
+                    local_rag_retriever = LocalRAGRetriever(
+                        vectordb_adapter=vectordb_adapter,
+                        embedding_adapter=embedding_adapter,
+                        default_k=3,
+                        score_threshold=0.5
+                    )
+                    
+                    logger.info("✅ Local RAG retriever initialized for chat integration")
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to initialize RAG retriever: {e}")
+                    local_rag_retriever = None
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to initialize RAG corpus: {e}")
+        
         logger.info("Database pool and all services initialized successfully")
         
     except Exception as e:
@@ -476,6 +525,10 @@ app.include_router(execution_router)
 app.include_router(files_router)
 app.include_router(commands_router)
 app.include_router(containers_router)
+
+# Include RAG corpus router
+if RAG_CORPUS_AVAILABLE:
+    app.include_router(rag_router)
 
 # ─── Device & models -----------------------------------------------------------
 device = 0 if torch.cuda.is_available() else -1
@@ -1053,6 +1106,29 @@ def should_auto_research(message: str) -> bool:
     return False
 
 
+# ── Local RAG Context Helper ────────────────────────────────────────────────────
+async def get_local_rag_context(query: str, max_length: int = 2000) -> str:
+    """
+    Retrieve relevant context from the local RAG corpus.
+    Returns formatted context string or empty string if unavailable.
+    """
+    if local_rag_retriever is None:
+        return ""
+    
+    try:
+        context = await local_rag_retriever.get_context_string(
+            query=query,
+            k=3,
+            max_length=max_length
+        )
+        if context:
+            logger.info(f"📚 Retrieved {len(context)} chars of local RAG context")
+        return context
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to get local RAG context: {e}")
+        return ""
+
+
 @app.post("/api/chat", tags=["chat"])
 async def chat(req: ChatRequest, request: Request, current_user: UserResponse = Depends(get_current_user)):
     """
@@ -1226,6 +1302,19 @@ async def chat(req: ChatRequest, request: Request, current_user: UserResponse = 
                 )
                 system_prompt = system_prompt + reasoning_instruction
                 logger.info(f"🧠 Reasoning model detected ({req.model}) - added <think> tag instructions")
+            
+            # ── Retrieve local RAG context for enhanced responses ──
+            local_rag_context = await get_local_rag_context(current_message_content)
+            if local_rag_context:
+                rag_instruction = (
+                    "\n\n--- RELEVANT DOCUMENTATION FROM LOCAL CORPUS ---\n"
+                    "The following is relevant context from indexed documentation. "
+                    "Use this information to provide accurate, well-informed responses:\n\n"
+                    f"{local_rag_context}\n"
+                    "--- END OF DOCUMENTATION CONTEXT ---\n"
+                )
+                system_prompt = system_prompt + rag_instruction
+                logger.info("📚 Added local RAG context to system prompt")
             
             # Build messages array with conversation history
             messages = [{"role": "system", "content": system_prompt}]
