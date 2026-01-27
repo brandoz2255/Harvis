@@ -119,6 +119,14 @@ export default function ChatPage() {
       messageContent = msgObj.content
       messageAttachments = msgObj.attachments || []
 
+      // Voice messages: just add to UI, don't send to API (already processed by mic-chat)
+      if (msgObj.inputType === 'voice') {
+        if (!isDuplicateMessage(msgObj as Message, messages)) {
+          setMessages((prev) => [...prev, msgObj as Message])
+        }
+        return // Don't make another API call - voice already handled by backend
+      }
+
       // Add user message to display immediately for objects (files/images)
       if (!isDuplicateMessage(msgObj as Message, messages)) {
         setMessages((prev) => [...prev, msgObj as Message])
@@ -527,6 +535,7 @@ export default function ChatPage() {
             isLoading={isLoading}
             isResearchMode={isResearchMode}
             selectedModel={selectedModel}
+            sessionId={currentSession?.id}
           />
         </div>
       </div>

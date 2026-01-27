@@ -2035,15 +2035,22 @@ async def mic_chat(
     model: str = Form(DEFAULT_MODEL),
     session_id: Optional[str] = Form(None),
     research_mode: str = Form("false"),
+    low_vram: bool = Form(True),
+    text_only: bool = Form(False),
     current_user: UserResponse = Depends(get_current_user)
 ):
-    # Read file content immediately before entering streaming context
+    """
+    Voice chat endpoint - transcribes audio and generates AI response with TTS.
+    Returns JSON (not SSE) for compatibility with frontend.
+    """
+    tmp_path = None
     try:
+        # ── 1. Read and save audio file ──────────────────────────────────────────────
         contents = await file.read()
         if len(contents) == 0:
             raise HTTPException(400, "No audio data received")
-            
-        # Detect format
+
+        # Detect format from header
         header = contents[:4]
         if header == b'RIFF':
             file_ext = ".wav"
@@ -2059,183 +2066,231 @@ async def mic_chat(
                 if not file_ext: file_ext = ".wav"
             else:
                 file_ext = ".wav"
-                
+
         # Save to temp file
         tmp_id = str(uuid.uuid4())
         tmp_path = os.path.join(tempfile.gettempdir(), f"{tmp_id}{file_ext}")
         with open(tmp_path, "wb") as f:
             f.write(contents)
-            
-        logger.info(f"🎤 MIC-CHAT Streaming: File saved to {tmp_path} ({len(contents)} bytes)")
-        
+
+        logger.info(f"🎤 MIC-CHAT: File saved to {tmp_path} ({len(contents)} bytes)")
+
         is_research_mode = research_mode.lower() == "true"
-        
-        async def stream_response():
+
+        # ── 2. Transcribe audio ──────────────────────────────────────────────────────
+        try:
+            transcription_result = await run_in_threadpool(transcribe_with_whisper_optimized, tmp_path)
+            text = transcription_result.get("text", "").strip()
+            logger.info(f"🎤 Transcription complete: {text[:100]}...")
+        except Exception as e:
+            logger.error(f"Transcription failed: {e}")
+            raise HTTPException(500, f"Transcription failed: {str(e)}")
+
+        if not text:
+            raise HTTPException(400, "Could not transcribe any speech from audio")
+
+        # ── 3. Load session history (like /api/chat) ─────────────────────────────────
+        history = []
+        if session_id:
             try:
-                # 1. Yield initial status
-                yield f"data: {json.dumps({'status': 'transcribing', 'progress': 0})}\n\n"
-                
-                # 2. Transcribe
-                try:
-                    # We can't easily stream the internal whisper progress, so just do it
-                    transcription_result = await run_in_threadpool(transcribe_with_whisper_optimized, tmp_path)
-                    text = transcription_result.get("text", "").strip()
-                    logger.info(f"🎤 Transcription complete: {text[:50]}...")
-                except Exception as e:
-                    logger.error(f"Transcription failed: {e}")
-                    yield f"data: {json.dumps({'status': 'error', 'error': str(e)})}\n\n"
-                    return
-                
-                if not text:
-                    yield f"data: {json.dumps({'status': 'error', 'error': 'Could not transcribe anything'})}\n\n"
-                    return
-                    
-                # Yield transcription result (optional, but good for UI feedback)
-                # yield f"data: {json.dumps({'status': 'transcribed', 'text': text})}\n\n"
-                
-                # 3. Chat / LLM
-                yield f"data: {json.dumps({'status': 'chat', 'text': text})}\n\n"
-                
-                # Prepare history/context
-                # Note: We need to handle session and history logic here similar to the original endpoint
-                # For simplicity, we'll fetch the response first then save history later
-                
-                response_text = ""
-                reasoning_content = ""
-                final_answer = ""
-                
-                try:
-                    if is_research_mode:
-                        # Research mode logic (simplified for stream)
-                         # Use backward compatible research agent for now or advanced
-                        yield f"data: {json.dumps({'status': 'researching', 'query': text})}\n\n"
-                        research_result = await run_in_threadpool(research_agent, text, model, use_advanced=False)
-                        
-                        if "error" in research_result:
-                            response_text = f"Research Error: {research_result['error']}"
-                        else:
-                            analysis = research_result.get("analysis", "No analysis available")
-                            # Format simple source list
-                            sources = research_result.get("sources", [])
-                            response_text = analysis
-                            if sources:
-                                response_text += "\n\n**Sources:**\n" + "\n".join([f"- {s.get('title', 'Link')}" for s in sources[:3]])
-                                
-                    else:
-                        # Standard Chat logic
-                        # Retrieve history if needed (skipping extensive history loading for speed in this demo, 
-                        # but in production should load session history)
-                        
-                        # Generate response
-                        # Use Ollama or Gemini
-                        if model == "gemini-1.5-flash":
-                            response_text = query_gemini(text, [])
-                        else:
-                            # Use Ollama
-                             # Load system prompt
-                            sys_prompt_path = os.path.join(os.path.dirname(__file__), "system_prompt.txt")
-                            try:
-                                with open(sys_prompt_path, 'r') as f: sys_prompt = f.read().strip()
-                            except:
-                                sys_prompt = "You are a helpful assistant."
-                                
-                            payload = {
-                                "model": model,
-                                "messages": [
-                                    {"role": "system", "content": sys_prompt},
-                                    {"role": "user", "content": text}
-                                ],
-                                "stream": False 
-                            }
-                            # We could stream LLM tokens here too! But let's keep it simple for now as user asked for TTS fix
-                            resp = await run_in_threadpool(make_ollama_request, "/api/chat", payload)
-                            response_text = resp.json().get("message", {}).get("content", "").strip()
+                from uuid import UUID
+                session_uuid = UUID(session_id)
+                recent_messages = await chat_history_manager.get_recent_messages(
+                    session_id=session_uuid,
+                    user_id=current_user.id,
+                    limit=10
+                )
+                history = chat_history_manager.format_messages_for_context(recent_messages)
+                logger.info(f"🎤 MIC-CHAT: Using session {session_id} with {len(recent_messages)} recent messages")
+            except (ValueError, Exception) as e:
+                logger.error(f"Invalid session_id or error loading context: {e}")
+                history = []
 
-                    # Process reasoning
-                    if has_reasoning_content(response_text):
-                        reasoning_content, final_answer = separate_thinking_from_final_output(response_text)
-                    else:
-                        final_answer = response_text
-                        
-                    # Save to history (fire and forget / background task ideally, or just await here)
-                    # We'll skip complex history saving in this snippet to focus on the streaming fix, 
-                    # but you should restore it if needed. 
-                    # For now invalidating the previous session object management for brevity.
-                    
-                except Exception as e:
-                    logger.error(f"Chat generation failed: {e}")
-                    yield f"data: {json.dumps({'status': 'error', 'error': 'AI response failed'})}\n\n"
-                    return
+        # Add current user message to history
+        history = history + [{"role": "user", "content": text}]
 
-                yield f"data: {json.dumps({'status': 'generating_speech', 'text': final_answer, 'reasoning': reasoning_content})}\n\n"
-                
-                # 4. TTS
-                audio_path = None
-                try:
-                    # Using existing model_manager
-                    audio_prompt_path = HARVIS_VOICE_PATH if os.path.isfile(HARVIS_VOICE_PATH) else None
-                    
-                    # Yield progress update 
-                    yield f"data: {json.dumps({'status': 'speaking', 'progress': 0})}\n\n"
-                    
-                    sr, wav = await run_in_threadpool(
-                        safe_generate_speech_optimized, 
-                        text=final_answer, 
-                        exaggeration=0.5, 
-                        temperature=0.8,
-                        audio_prompt=audio_prompt_path
-                    )
-                    
-                    yield f"data: {json.dumps({'status': 'speaking', 'progress': 50})}\n\n"
-                    
-                    if sr is not None and wav is not None:
-                        fname = f"response_{uuid.uuid4()}.wav"
-                        fpath = os.path.join(tempfile.gettempdir(), fname)
-                        sf.write(fpath, wav, sr)
-                        audio_path = f"/api/audio/{fname}"
-                        yield f"data: {json.dumps({'status': 'speaking', 'progress': 100})}\n\n"
-                    else:
-                        # TTS failed gracefully
-                        yield f"data: {json.dumps({'status': 'speaking', 'progress': 100, 'warning': 'No audio generated'})}\n\n"
-                        
-                except Exception as e:
-                    logger.error(f"TTS failed: {e}")
-                    # Continue without audio
-                    
-                # 5. Complete
-                result_payload = {
-                    "status": "complete",
-                    "final_answer": final_answer,
-                    "audio_path": audio_path,
-                    "session_id": session_id,
-                    "reasoning": reasoning_content
-                    # History could be sent here if managed
-                }
-                yield f"data: {json.dumps(result_payload)}\n\n"
-                
-            except Exception as e:
-                logger.error(f"Stream error: {e}")
-                yield f"data: {json.dumps({'status': 'error', 'error': str(e)})}\n\n"
-            finally:
-                # Cleanup temp file
-                if os.path.exists(tmp_path):
+        # ── 4. Generate AI response ──────────────────────────────────────────────────
+        response_text = ""
+        reasoning_content = ""
+        final_answer = ""
+
+        try:
+            if is_research_mode:
+                # Research mode
+                logger.info(f"🔬 MIC-CHAT: Research mode enabled for query: {text[:50]}...")
+                research_result = await run_in_threadpool(research_agent, text, model, use_advanced=False)
+
+                if "error" in research_result:
+                    response_text = f"Research Error: {research_result['error']}"
+                else:
+                    analysis = research_result.get("analysis", "No analysis available")
+                    sources = research_result.get("sources", [])
+                    response_text = analysis
+                    if sources:
+                        response_text += "\n\n**Sources:**\n" + "\n".join([f"- {s.get('title', 'Link')}" for s in sources[:3]])
+            else:
+                # Standard Chat - use Ollama or Gemini
+                if model == "gemini-1.5-flash":
+                    response_text = query_gemini(text, history[:-1])  # Exclude current message
+                else:
+                    # Load system prompt
+                    sys_prompt_path = os.path.join(os.path.dirname(__file__), "system_prompt.txt")
                     try:
-                        os.unlink(tmp_path)
-                    except: pass
-                    
-        return StreamingResponse(
-            stream_response(),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no", # Important for Nginx to not buffer
-            }
-        )
-        
+                        with open(sys_prompt_path, 'r', encoding='utf-8') as f:
+                            sys_prompt = f.read().strip()
+                    except FileNotFoundError:
+                        sys_prompt = (
+                            'You are "Jarves", a voice-first local assistant. '
+                            "Reply in ≤25 spoken-style words, sprinkling brief Spanish when natural."
+                        )
+
+                    # Build messages with history (like /api/chat)
+                    messages = [{"role": "system", "content": sys_prompt}]
+                    for msg in history[:-1]:  # Add history excluding current message
+                        messages.append({"role": msg["role"], "content": msg["content"]})
+                    messages.append({"role": "user", "content": text})  # Add current message
+
+                    logger.info(f"🎤 MIC-CHAT: Sending {len(messages)} messages to Ollama (including {len(history)-1} context messages)")
+
+                    payload = {
+                        "model": model,
+                        "messages": messages,
+                        "stream": False
+                    }
+
+                    resp = await run_in_threadpool(make_ollama_request, "/api/chat", payload)
+                    response_text = resp.json().get("message", {}).get("content", "").strip()
+
+                    # Unload model if low_vram mode and TTS will run
+                    if low_vram and not text_only:
+                        logger.info(f"🧹 [Low VRAM Mode] Unloading Ollama model {model} to free VRAM for TTS")
+                        unload_ollama_model(model, "")
+
+            # Process reasoning content
+            if has_reasoning_content(response_text):
+                reasoning_content, final_answer = separate_thinking_from_final_output(response_text)
+                logger.info(f"🧠 MIC-CHAT: Separated {len(reasoning_content)} chars reasoning from {len(final_answer)} chars answer")
+            else:
+                final_answer = response_text
+
+        except Exception as e:
+            logger.error(f"MIC-CHAT: AI generation failed: {e}")
+            raise HTTPException(500, f"AI response generation failed: {str(e)}")
+
+        # ── 5. Save to database (like /api/chat) ─────────────────────────────────────
+        try:
+            if session_id:
+                # Use existing session
+                session = await chat_history_manager.get_session(session_id, current_user.id)
+                if not session:
+                    # Session ID provided but not found - create new
+                    session = await chat_history_manager.create_session(
+                        user_id=current_user.id,
+                        title="Voice Chat",
+                        model_used=model
+                    )
+                    session_id = session.id
+            else:
+                # No session provided - create new session
+                session = await chat_history_manager.create_session(
+                    user_id=current_user.id,
+                    title="Voice Chat",
+                    model_used=model
+                )
+                session_id = session.id
+                logger.info(f"🆕 MIC-CHAT: Created new session {session_id}")
+
+            # Save user message
+            await chat_history_manager.add_message(
+                user_id=current_user.id,
+                session_id=session_id,
+                role="user",
+                content=text,
+                model_used=model,
+                input_type="voice"
+            )
+
+            # Save assistant message
+            await chat_history_manager.add_message(
+                user_id=current_user.id,
+                session_id=session_id,
+                role="assistant",
+                content=final_answer,
+                reasoning=reasoning_content if reasoning_content else None,
+                model_used=model,
+                input_type="voice"
+            )
+
+            logger.info(f"💾 MIC-CHAT: Saved messages to session {session_id}")
+
+        except Exception as e:
+            logger.error(f"MIC-CHAT: Error saving chat history: {e}")
+
+        # ── 6. Generate TTS ──────────────────────────────────────────────────────────
+        audio_path = None
+
+        if text_only:
+            logger.info("🔇 MIC-CHAT: [Text Only Mode] Skipping TTS generation")
+        else:
+            try:
+                audio_prompt_path = HARVIS_VOICE_PATH if os.path.isfile(HARVIS_VOICE_PATH) else None
+                if audio_prompt_path:
+                    logger.info(f"🎤 MIC-CHAT: Cloning voice using prompt: {audio_prompt_path}")
+
+                sr, wav = await run_in_threadpool(
+                    safe_generate_speech_optimized,
+                    text=final_answer,
+                    exaggeration=0.5,
+                    temperature=0.8,
+                    audio_prompt=audio_prompt_path,
+                    auto_unload=low_vram
+                )
+
+                if sr is not None and wav is not None and hasattr(wav, 'shape') and len(wav.shape) >= 1 and wav.shape[0] > 0:
+                    fname = f"response_{uuid.uuid4()}.wav"
+                    fpath = os.path.join(tempfile.gettempdir(), fname)
+                    sf.write(fpath, wav, sr)
+                    audio_path = f"/api/audio/{fname}"
+                    logger.info(f"🔊 MIC-CHAT: Audio written to {fpath}")
+                else:
+                    logger.warning("⚠️ MIC-CHAT: TTS returned no audio")
+
+            except Exception as e:
+                logger.error(f"❌ MIC-CHAT: TTS failed: {e}")
+                # Continue without audio - don't fail the request
+
+        # ── 7. Build response (JSON, not SSE) ────────────────────────────────────────
+        new_history = history + [{"role": "assistant", "content": final_answer}]
+
+        response_data = {
+            "history": new_history,
+            "session_id": session_id,
+            "final_answer": final_answer,
+            "transcription": text  # Include what was transcribed
+        }
+
+        if audio_path:
+            response_data["audio_path"] = audio_path
+
+        if reasoning_content:
+            response_data["reasoning"] = reasoning_content
+
+        logger.info(f"✅ MIC-CHAT: Complete - transcribed '{text[:50]}...', response '{final_answer[:50]}...'")
+
+        return response_data
+
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Mic chat initialization failed: {e}")
+        logger.error(f"MIC-CHAT: Unexpected error: {e}")
         raise HTTPException(500, str(e))
+    finally:
+        # Cleanup temp file
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except:
+                pass
 
 # Research endpoints using the enhanced research module with advanced pipeline
 from agent_research import research_agent, fact_check_agent, comparative_research_agent

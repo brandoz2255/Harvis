@@ -639,6 +639,39 @@ def unload_models():
         
     log_gpu_memory("after unload")
 
+def unload_running_ollama_models():
+    """Unload all running Ollama models"""
+    try:
+        import requests
+        ollama_url = os.getenv("OLLAMA_URL", "http://ollama:11434")
+        api_key = os.getenv("OLLAMA_API_KEY", "key")
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key != "key" else {}
+        
+        # Get running models
+        logger.info("🔍 Checking for running Ollama models...")
+        response = requests.get(f"{ollama_url}/api/ps", headers=headers, timeout=5)
+        
+        if response.status_code == 200:
+            models = response.json().get('models', [])
+            if not models:
+                logger.info("✅ No Ollama models currently running")
+                return
+
+            logger.info(f"Found {len(models)} running Ollama models: {[m['name'] for m in models]}")
+            
+            from vison_models.llm_connector import unload_ollama_model
+            
+            for model in models:
+                model_name = model.get('name')
+                if model_name:
+                    logger.info(f"🔫 Unloading Ollama model: {model_name}")
+                    unload_ollama_model(model_name, ollama_url)
+        else:
+            logger.warning(f"⚠️ Failed to check running models: {response.status_code}")
+            
+    except Exception as e:
+        logger.error(f"❌ Error unloading Ollama models: {e}")
+
 def unload_all_models():
     """Unload all models including Qwen2VL to free maximum GPU memory"""
     logger.info("🗑️ Unloading ALL models to free GPU memory for vision processing")
@@ -649,8 +682,14 @@ def unload_all_models():
     unload_models()
     
     # Unload Qwen2VL
-    from vison_models.llm_connector import unload_qwen_model
-    unload_qwen_model()
+    try:
+        from vison_models.llm_connector import unload_qwen_model
+        unload_qwen_model()
+    except Exception as e:
+        logger.warning(f"Could not unload Qwen2VL: {e}")
+
+    # Unload any running Ollama models
+    unload_running_ollama_models()
     
     # Additional aggressive cleanup
     if torch.cuda.is_available():
