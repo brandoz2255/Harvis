@@ -1,0 +1,88 @@
+# Nginx Workstation Deployment - Routes to workstation services
+# Routes to harvis-ai-backend-workstation-svc and harvis-ai-ollama-workstation
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: harvis-ai-nginx-workstation
+  namespace: ai-agents
+  labels:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: nginx
+    app.kubernetes.io/variant: workstation
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: harvis-ai
+      app.kubernetes.io/component: nginx
+      app.kubernetes.io/variant: workstation
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: harvis-ai
+        app.kubernetes.io/component: nginx
+        app.kubernetes.io/variant: workstation
+    spec:
+      # Run on workstation node
+      nodeSelector:
+        kubernetes.io/hostname: pop-os
+      containers:
+        - name: nginx
+          image: "nginx:alpine"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+            - name: https
+              containerPort: 443
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+              readOnly: true
+            - name: ssl-certs
+              mountPath: /etc/nginx/ssl
+              readOnly: true
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: harvis-ai-nginx-workstation-config
+        - name: ssl-certs
+          secret:
+            secretName: harvis-ssl-cert
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: harvis-ai-nginx-workstation
+  namespace: ai-agents
+  labels:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: nginx
+    app.kubernetes.io/variant: workstation
+  annotations:
+    metallb.universe.tf/address-pool: harvis-ip-pool
+spec:
+  type: LoadBalancer
+  ports:
+    - port: 80
+      targetPort: http
+      protocol: TCP
+      name: http
+    - port: 443
+      targetPort: https
+      protocol: TCP
+      name: https
+  selector:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: nginx
+    app.kubernetes.io/variant: workstation

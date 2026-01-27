@@ -1,38 +1,55 @@
+# Backend Workstation Deployment - Dedicated ML Node
+# Runs on Node 2 (pop-os-343570d8) with RTX 3090 Ti for ML workloads
+# NO Ollama here - calls Ollama on Node 1 over network
+#
+# Workloads:
+#   - Whisper STT (speech-to-text)
+#   - Chatterbox TTS (text-to-speech)
+#   - Voice cloning
+#   - Embedding generation
+#
+# GPU Usage: Full 24GB VRAM dedicated to ML (no LLM competition)
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: harvis-ai-merged-ollama-backend
+  name: harvis-ai-backend-workstation
   namespace: ai-agents
   labels:
     app.kubernetes.io/name: harvis-ai
-    app.kubernetes.io/component: merged-ollama-backend
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/variant: workstation
+    gpu-role: dedicated-ml
 spec:
   replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: harvis-ai
-      app.kubernetes.io/component: merged-ollama-backend
+      app.kubernetes.io/component: backend
+      app.kubernetes.io/variant: workstation
   template:
     metadata:
       labels:
         app.kubernetes.io/name: harvis-ai
-        app.kubernetes.io/component: merged-ollama-backend
+        app.kubernetes.io/component: backend
+        app.kubernetes.io/variant: workstation
+        gpu-role: dedicated-ml
     spec:
       runtimeClassName: nvidia
+      # Node 2: pop-os-343570d8 with RTX 3090 Ti (24GB VRAM) for ML
       nodeSelector:
         kubernetes.io/hostname: pop-os-343570d8
+
       initContainers:
-        # Init container to pre-download TTS and Whisper models
+        # Pre-download TTS and Whisper models
         - name: download-models
           image: "dulc3/jarvis-backend:v2.12"
           imagePullPolicy: Always
           command: ["/app/entrypoint.sh", "download-models"]
           env:
-            # Ensure init container uses same cache paths
             - name: HF_HOME
               value: "/models-cache/huggingface"
             - name: TRANSFORMERS_CACHE
-              value: "/models-cache/huggingf                                                                                                                                                                                      ace"
+              value: "/models-cache/huggingface"
             - name: WHISPER_CACHE
               value: "/models-cache/whisper"
           volumeMounts:
@@ -40,52 +57,13 @@ spec:
               mountPath: /models-cache
           resources:
             requests:
-              memory: 2Gi
-              cpu: 500m
-            limits:
               memory: 4Gi
-              cpu: 2000m
-      containers:
-        # Ollama container (existing functionality)
-        - name: ollama
-          image: "ollama/ollama:latest"
-          imagePullPolicy: IfNotPresent
-          resources:
+              cpu: 1000m
             limits:
-              nvidia.com/gpu: 1
-            requests:
               memory: 8Gi
-              cpu: 500m
-          ports:
-            - name: ollama
-              containerPort: 11434
-              protocol: TCP
-          volumeMounts:
-            - name: ollama-models
-              mountPath: /root/.ollama
-          command: ["/bin/bash", "-c"]
-          args:
-            - |
-              set -ex
-              ollama serve && ollama &&
-              sleep 2
-              ollama pull mistral
-              ollama pull codellama
-              wait -n
-          livenessProbe:
-            httpGet:
-              path: /api/tags
-              port: 11434
-            initialDelaySeconds: 60
-            periodSeconds: 30
-          readinessProbe:
-            httpGet:
-              path: /api/tags
-              port: 11434
-            initialDelaySeconds: 30
-            periodSeconds: 10
+              cpu: 4000m
 
-        # Harvis Backend container (shares GPU with Ollama)
+      containers:
         - name: harvis-backend
           image: "dulc3/jarvis-backend:v2.12"
           imagePullPolicy: Always
@@ -104,34 +82,39 @@ spec:
                 secretKeyRef:
                   name: harvis-ai-backend-secret
                   key: ollama-api-key
+            # Call Ollama on Node 1 over Kubernetes network
             - name: OLLAMA_URL
-              value: "http://localhost:11434"
+              value: "http://harvis-ai-ollama-workstation:11434"
             - name: BACKEND_URL
-              value: "http://harvis-ai-merged-backend:8000"
-            # Model cache configuration - HF_HOME is preferred by transformers library
+              value: "http://harvis-ai-backend-workstation-svc:8000"
+            # Model cache configuration
             - name: HF_HOME
               value: "/models-cache/huggingface"
             - name: TRANSFORMERS_CACHE
               value: "/models-cache/huggingface"
             - name: WHISPER_CACHE
               value: "/models-cache/whisper"
+            # Full GPU for ML workloads
+            - name: CUDA_VISIBLE_DEVICES
+              value: "0"
             # Production uvicorn settings
             - name: UVICORN_WORKERS
-              value: "1"
+              value: "2"
             - name: UVICORN_TIMEOUT_KEEP_ALIVE
               value: "120"
           envFrom:
             - configMapRef:
-                name: harvis-ai-backend-config
+                name: harvis-ai-backend-workstation-config
             - secretRef:
                 name: harvis-ai-backend-secret
           resources:
             requests:
-              memory: 8Gi
-              cpu: 1000m
+              memory: 16Gi
+              cpu: 4000m
             limits:
-              memory: 32Gi
-              cpu: 12000m
+              nvidia.com/gpu: 1  # Full RTX 3090 Ti for ML
+              memory: 48Gi
+              cpu: 16000m
           volumeMounts:
             - name: embedding
               mountPath: /app/embedding
@@ -154,36 +137,37 @@ spec:
             httpGet:
               path: /docs
               port: http
-            initialDelaySeconds: 60
+            initialDelaySeconds: 90
             periodSeconds: 30
           readinessProbe:
             httpGet:
               path: /docs
               port: http
-            initialDelaySeconds: 30
+            initialDelaySeconds: 60
             periodSeconds: 10
 
       volumes:
-        - name: ollama-models
-          persistentVolumeClaim:
-            claimName: ollama-model-cache
+        # Embeddings - local ephemeral storage (regenerable)
         - name: embedding
-          persistentVolumeClaim:
-            claimName: harvis-ai-embedding-pvc
+          emptyDir:
+            sizeLimit: 10Gi
+        # ML models cache - init container downloads models at startup
+        # Models stay in GPU memory after loading, no need for persistent storage
         - name: ml-models-cache
-          persistentVolumeClaim:
-            claimName: ml-models-cache
+          emptyDir:
+            sizeLimit: 50Gi
         - name: tmp
           emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: harvis-ai-merged-backend
+  name: harvis-ai-backend-workstation-svc
   namespace: ai-agents
   labels:
     app.kubernetes.io/name: harvis-ai
-    app.kubernetes.io/component: merged-ollama-backend
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/variant: workstation
 spec:
   type: ClusterIP
   ports:
@@ -191,10 +175,7 @@ spec:
       port: 8000
       targetPort: http
       protocol: TCP
-    - name: ollama
-      port: 11434
-      targetPort: ollama
-      protocol: TCP
   selector:
     app.kubernetes.io/name: harvis-ai
-    app.kubernetes.io/component: merged-ollama-backend
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/variant: workstation
