@@ -308,6 +308,10 @@ export default function ChatPage() {
       }
 
       // Use the Ollama vision-chat endpoint with session_id
+      // Add AbortController with extended timeout for vision processing (10 minutes)
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 600000) // 10 minutes
+
       const response = await fetch('/api/vision-chat', {
         method: 'POST',
         headers: {
@@ -326,8 +330,11 @@ export default function ChatPage() {
           low_vram: lowVram,
           text_only: textOnly
         }),
-        credentials: 'include'
+        credentials: 'include',
+        signal: controller.signal
       })
+
+      clearTimeout(timeoutId)
 
       if (!response.ok) {
         const errorText = await response.text()

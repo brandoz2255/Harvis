@@ -21,7 +21,7 @@ spec:
       runtimeClassName: nvidia
       # Node affinity: Force scheduling on Node 2 (node-gpu-2) for Ollama workload
       nodeSelector:
-        kubernetes.io/hostname: node-gpu-2
+        kubernetes.io/hostname: node-gpu-1
       containers:
         - name: ollama
           image: "ollama/ollama:latest"

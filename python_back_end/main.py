@@ -1731,7 +1731,7 @@ async def vision_chat(req: VisionChatRequest, request: Request, current_user: Us
             try:
                 sr, wav = safe_generate_speech_optimized(
                     final_answer,
-                    audio_prompt_path=HARVIS_VOICE_PATH,
+                    audio_prompt=HARVIS_VOICE_PATH,
                     exaggeration=0.5,
                     temperature=0.8,
                     cfg_weight=0.5,
