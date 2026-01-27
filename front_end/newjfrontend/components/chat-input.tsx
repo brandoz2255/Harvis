@@ -31,6 +31,7 @@ interface ChatInputProps {
   isLoading?: boolean
   isResearchMode?: boolean
   selectedModel?: string
+  sessionId?: string | null  // Current chat session ID for voice history
   className?: string
 }
 
@@ -54,7 +55,7 @@ const SUPPORTED_FILE_TYPES = {
 
 const SUPPORTED_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp']
 
-export function ChatInput({ onSend, isLoading, isResearchMode, selectedModel, className }: ChatInputProps) {
+export function ChatInput({ onSend, isLoading, isResearchMode, selectedModel, sessionId, className }: ChatInputProps) {
   const [message, setMessage] = useState("")
   const [isRecording, setIsRecording] = useState(false)
   const [isProcessingVoice, setIsProcessingVoice] = useState(false)
@@ -469,6 +470,11 @@ export function ChatInput({ onSend, isLoading, isResearchMode, selectedModel, cl
         formData.append('model', selectedModel)
       }
 
+      // Pass current session for context & history saving
+      if (sessionId) {
+        formData.append('session_id', sessionId)
+      }
+
       if (isResearchMode) {
         formData.append('research_mode', 'true')
       }
@@ -495,48 +501,18 @@ export function ChatInput({ onSend, isLoading, isResearchMode, selectedModel, cl
         throw new Error(`Backend error: ${response.status} - ${errorText}`)
       }
 
-      if (!response.body) {
-        throw new Error('ReadableStream not supported in this browser.')
+      // Backend now returns JSON (not SSE)
+      const data = await response.json()
+      console.log('🎤 Voice response received:', data)
+
+      // Store transcription if available
+      if (data.transcription) {
+        transcribedTextRef.current = data.transcription
+        console.log('📝 Captured user transcription:', data.transcription)
       }
 
-      const reader = response.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n\n')
-        buffer = lines.pop() || ''
-
-        for (const line of lines) {
-          const trimmedLine = line.trim()
-          if (trimmedLine.startsWith('data: ')) {
-            const jsonStr = trimmedLine.slice(6)
-            try {
-              const data = JSON.parse(jsonStr)
-              console.log('Voice stream status:', data.status, data)
-
-              if (data.status === 'error') {
-                throw new Error(data.error || 'Unknown streaming error')
-              }
-
-              if (data.status === 'chat' && data.text) {
-                transcribedTextRef.current = data.text
-                console.log('📝 Captured user transcription:', data.text)
-              }
-
-              if (data.status === 'complete') {
-                handleVoiceResponse(data)
-              }
-            } catch (e) {
-              console.warn('Error parsing SSE data:', e)
-            }
-          }
-        }
-      }
+      // Handle the response
+      handleVoiceResponse(data)
 
     } catch (error) {
       clearTimeout(timeoutId)

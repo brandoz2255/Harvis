@@ -1,5 +1,85 @@
 # Changes Log
 
+## 2026-01-27 - Fix Duplicate Voice Message Bug
+
+**Timestamp**: 2026-01-27 02:15:00 UTC - Fixed voice messages causing multiple AI responses
+
+### Problem Description
+
+When sending a single voice message via the microphone, the chat UI displayed 3 duplicate AI responses instead of one. The logs showed session history was being loaded from a different endpoint.
+
+### Root Cause Analysis
+
+**Protocol Mismatch**: The `/api/mic-chat` endpoint returned Server-Sent Events (SSE) format:
+```python
+yield f"data: {json.dumps(result_payload)}\n\n"
+return StreamingResponse(..., media_type="text/event-stream")
+```
+
+But the frontend (`UnifiedChatInterface.tsx:819`) incorrectly called:
+```typescript
+const data = await response.json()  // WRONG - SSE is not valid JSON!
+```
+
+This caused:
+1. `response.json()` failed to parse SSE format
+2. The retry loop (lines 783-924) caught errors and retried 3 times
+3. Each retry added a new message to the chat UI
+
+Additionally, the mic-chat endpoint had a **simplified implementation** that:
+- Didn't load session history from database
+- Only sent single transcribed message without context
+- Had comment "skipping extensive history loading for speed"
+
+### Solution Implementation
+
+Completely rewrote `/api/mic-chat` endpoint to:
+
+1. **Return JSON instead of SSE** - Matches `/api/chat` endpoint pattern
+2. **Load session history properly** - Uses `chat_history_manager.get_recent_messages()`
+3. **Save messages to database** - Persists both user and assistant messages
+4. **Include `history` field in response** - Frontend expects this for UI updates
+5. **Add `transcription` field** - Returns what was transcribed for UI display
+6. **Proper VRAM management** - Added `low_vram` and `text_only` form parameters
+
+### Files Modified
+
+1. **python_back_end/main.py** (lines 2032-2238):
+   - Removed SSE `StreamingResponse` and generator function
+   - Added session history loading (like `/api/chat`)
+   - Added database message persistence
+   - Returns JSON with `history`, `session_id`, `final_answer`, `audio_path`, `reasoning`, `transcription`
+
+### Response Format (Before vs After)
+
+**Before (SSE - broken)**:
+```
+data: {"status": "transcribing", "progress": 0}
+data: {"status": "chat", "text": "..."}
+data: {"status": "complete", "final_answer": "...", "audio_path": "..."}
+```
+
+**After (JSON - correct)**:
+```json
+{
+  "history": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}],
+  "session_id": "uuid",
+  "final_answer": "AI response text",
+  "audio_path": "/api/audio/response_xxx.wav",
+  "transcription": "What user said",
+  "reasoning": "optional thinking content"
+}
+```
+
+### Result/Status
+
+- ✅ Voice messages now return single response
+- ✅ Session history maintained across voice conversations
+- ✅ Messages properly saved to database
+- ✅ Frontend can parse response correctly
+
+---
+
 ## 2025-10-22 - Kubernetes Model Caching & Loading Fixes
 
 **Timestamp**: 2025-10-22 02:20:00 UTC - Fixed init container re-downloading models and silent model loading failures

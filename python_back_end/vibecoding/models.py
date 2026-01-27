@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 # Import auth dependencies
 from auth_utils import get_current_user
+from model_manager import unload_all_models
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,25 @@ class ModelsResponse(BaseModel):
     models: List[ModelInfo]
     total: int
     ollama_status: str = "unknown"
+
+class UnloadRequest(BaseModel):
+    model_type: str = "all"  # all, tts, whisper, llm
+
+@router.post("/unload")
+async def unload_models_endpoint(
+    request: UnloadRequest,
+    user: Dict = Depends(get_current_user)
+):
+    """Unload models to free RAM"""
+    try:
+        if request.model_type == "all":
+            unload_all_models()
+            return {"status": "success", "message": "All models unloaded", "unloaded_models": ["all"]}
+        else:
+             return {"status": "error", "message": "Only 'all' supported for now"}
+    except Exception as e:
+        logger.error(f"Error unloading models: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/available", response_model=ModelsResponse)
 async def get_available_models(
