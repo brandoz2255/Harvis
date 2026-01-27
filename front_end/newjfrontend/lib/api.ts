@@ -11,7 +11,7 @@ async function fetchWithRetry(
   url: string,
   options: RequestInit,
   maxRetries: number = 2,
-  timeoutMs: number = 600000 // 10 minutes for local hardware
+  timeoutMs: number = 3600000 // 1 hour for local hardware
 ): Promise<Response> {
   let lastError: Error | null = null
 
@@ -31,7 +31,7 @@ async function fetchWithRetry(
         headers: {
           ...options.headers,
           'Connection': 'keep-alive',
-          'Keep-Alive': 'timeout=300'
+          'Keep-Alive': 'timeout=3600'
         },
         signal: controller.signal,
       })
@@ -98,7 +98,7 @@ export const apiClient = {
           credentials: 'include',
         },
         2, // max 2 retries
-        300000 // 5 minute timeout
+        3600000 // 1 hour timeout
       )
 
       if (!response.ok) {
@@ -137,7 +137,7 @@ export const apiClient = {
           credentials: 'include',
         },
         2, // max 2 retries
-        300000 // 5 minute timeout for research
+        3600000 // 1 hour timeout for research
       )
 
       if (!response.ok) {
@@ -158,7 +158,7 @@ export const apiClient = {
       headers: {
         'Content-Type': 'application/json',
         'Connection': 'keep-alive',
-        'Keep-Alive': 'timeout=300',
+        'Keep-Alive': 'timeout=3600',
         ...getAuthHeaders(),
       },
     })
@@ -185,7 +185,7 @@ export const apiClient = {
       headers: {
         'Content-Type': 'application/json',
         'Connection': 'keep-alive',
-        'Keep-Alive': 'timeout=300',
+        'Keep-Alive': 'timeout=3600',
       },
       body: JSON.stringify({
         query,
@@ -208,7 +208,7 @@ export const apiClient = {
       headers: {
         'Content-Type': 'application/json',
         'Connection': 'keep-alive',
-        'Keep-Alive': 'timeout=300',
+        'Keep-Alive': 'timeout=3600',
         ...getAuthHeaders(),
       },
     })
@@ -226,7 +226,7 @@ export const apiClient = {
       headers: {
         'Content-Type': 'application/json',
         'Connection': 'keep-alive',
-        'Keep-Alive': 'timeout=300',
+        'Keep-Alive': 'timeout=3600',
         ...getAuthHeaders(),
       },
       body: JSON.stringify({
@@ -247,7 +247,7 @@ export const apiClient = {
       headers: {
         'Content-Type': 'application/json',
         'Connection': 'keep-alive',
-        'Keep-Alive': 'timeout=300',
+        'Keep-Alive': 'timeout=3600',
         ...getAuthHeaders(),
       },
     })
@@ -265,7 +265,7 @@ export const apiClient = {
       headers: {
         'Content-Type': 'application/json',
         'Connection': 'keep-alive',
-        'Keep-Alive': 'timeout=300',
+        'Keep-Alive': 'timeout=3600',
         ...getAuthHeaders(),
       },
     })
@@ -283,7 +283,7 @@ export const apiClient = {
       headers: {
         'Content-Type': 'application/json',
         'Connection': 'keep-alive',
-        'Keep-Alive': 'timeout=300',
+        'Keep-Alive': 'timeout=3600',
         ...getAuthHeaders(),
       },
       body: JSON.stringify({ title }),
@@ -310,7 +310,7 @@ export const apiClient = {
       headers: {
         'Content-Type': 'application/json',
         'Connection': 'keep-alive',
-        'Keep-Alive': 'timeout=300',
+        'Keep-Alive': 'timeout=3600',
         ...getAuthHeaders(),
       },
       body: JSON.stringify(payload),

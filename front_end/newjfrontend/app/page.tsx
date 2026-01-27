@@ -225,7 +225,7 @@ export default function ChatPage() {
         credentials: 'include'
       }, {
         lowVram,
-        timeout: lowVram ? 3600000 : 300000,
+        timeout: 3600000,
         maxRetries: 0
       })
 
