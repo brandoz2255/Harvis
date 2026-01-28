@@ -147,9 +147,17 @@ def load_tts_model(force_cpu=False):
     return tts_model
 
 # ─── Generate Speech ────────────────────────────────────────────────────────────
-def generate_speech(text, model, audio_prompt=None, exaggeration=0.5, temperature=0.8, cfg_weight=0.5):
+def generate_speech(text, model, audio_prompt=None, exaggeration=0.5, temperature=0.6, cfg_weight=2.5):
+    """
+    Generate speech using TTS model.
+
+    Parameters tuned to prevent hallucination:
+    - temperature=0.6 (lower = more stable, less random)
+    - cfg_weight=2.5 (higher = follows input text more closely)
+    """
     try:
         normalized = punc_norm(text)
+        logger.info(f"🔧 TTS params: temp={temperature}, cfg={cfg_weight}, exag={exaggeration}")
         # Check for CUDA availability and handle errors gracefully
         if torch.cuda.is_available():
             try:

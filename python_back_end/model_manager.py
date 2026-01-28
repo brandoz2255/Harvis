@@ -715,56 +715,114 @@ def reload_models_if_needed():
         logger.info("🔄 Reloading Whisper model")
         load_whisper_model()
 
+# ─── Text Chunking for Long TTS ──────────────────────────────────────────────
+def chunk_text_for_tts(text: str, max_chars: int = 500) -> list:
+    """
+    Split long text into chunks for stable TTS generation.
+    Chatterbox can hallucinate on very long texts, so we chunk at sentence boundaries.
+    """
+    if len(text) <= max_chars:
+        return [text]
+
+    import re
+    # Split on sentence endings while keeping the punctuation
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+
+    chunks = []
+    current_chunk = ""
+
+    for sentence in sentences:
+        # If adding this sentence would exceed max_chars, start a new chunk
+        if len(current_chunk) + len(sentence) + 1 > max_chars and current_chunk:
+            chunks.append(current_chunk.strip())
+            current_chunk = sentence
+        else:
+            current_chunk = current_chunk + " " + sentence if current_chunk else sentence
+
+    # Don't forget the last chunk
+    if current_chunk.strip():
+        chunks.append(current_chunk.strip())
+
+    logger.info(f"📝 Split text into {len(chunks)} chunks for stable TTS")
+    return chunks
+
 # ─── TTS Generation Function ────────────────────────────────────────────────
-def generate_speech(text, model=None, audio_prompt=None, exaggeration=0.5, temperature=0.8, cfg_weight=0.5):
-    """Generate speech using TTS model"""
+def generate_speech(text, model=None, audio_prompt=None, exaggeration=0.5, temperature=0.6, cfg_weight=2.5):
+    """
+    Generate speech using TTS model.
+
+    Parameters tuned to prevent hallucination:
+    - temperature=0.6 (lower = more stable, less random)
+    - cfg_weight=2.5 (higher = follows input text more closely)
+    - exaggeration=0.5 (controls expressiveness)
+    """
     from chatterbox.tts import punc_norm
+    import numpy as np
 
     if model is None:
         model = load_tts_model()
 
     try:
         logger.info(f"🎙️ Generating speech for text (length: {len(text)} chars)")
+        logger.info(f"🔧 TTS params: temp={temperature}, cfg={cfg_weight}, exag={exaggeration}")
         normalized = punc_norm(text)
         logger.info(f"📝 Normalized text: {normalized[:100]}...")
-        if torch.cuda.is_available():
-            try:
-                logger.info(f"🔊 Starting TTS generation on CUDA (exaggeration={exaggeration}, temp={temperature})")
-                wav = model.generate(
-                    normalized,
+
+        # Chunk long texts to prevent hallucination
+        chunks = chunk_text_for_tts(normalized, max_chars=500)
+        all_wavs = []
+
+        for i, chunk in enumerate(chunks):
+            logger.info(f"🔊 Generating chunk {i+1}/{len(chunks)} ({len(chunk)} chars)")
+
+            if torch.cuda.is_available():
+                try:
+                    logger.info(f"🔊 TTS on CUDA: temp={temperature}, cfg={cfg_weight}")
+                    chunk_wav = model.generate(
+                        chunk,
+                        audio_prompt_path=audio_prompt,
+                        exaggeration=exaggeration,
+                        temperature=temperature,
+                        cfg_weight=cfg_weight
+                    )
+                    logger.info(f"✅ Chunk {i+1} generated, shape: {chunk_wav.shape}")
+                except RuntimeError as e:
+                    if "CUDA" in str(e):
+                        logger.error(f"CUDA Error on chunk {i+1}: {e}")
+                        torch.cuda.empty_cache()
+                        try:
+                            chunk_wav = model.generate(
+                                chunk,
+                                audio_prompt_path=audio_prompt,
+                                exaggeration=exaggeration,
+                                temperature=temperature,
+                                cfg_weight=cfg_weight
+                            )
+                        except RuntimeError as e2:
+                            logger.error(f"CUDA Retry Failed on chunk {i+1}: {e2}")
+                            raise ValueError("CUDA error persisted after cache clear") from e2
+                    else:
+                        raise
+            else:
+                chunk_wav = model.generate(
+                    chunk,
                     audio_prompt_path=audio_prompt,
                     exaggeration=exaggeration,
                     temperature=temperature,
-                    cfg_weight=cfg_weight
+                    cfg_weight=cfg_weight,
+                    device="cpu"
                 )
-                logger.info(f"✅ TTS generation completed, audio shape: {wav.shape}")
-            except RuntimeError as e:
-                if "CUDA" in str(e):
-                    logger.error(f"CUDA Error: {e}")
-                    torch.cuda.empty_cache()
-                    try:
-                        wav = model.generate(
-                            normalized,
-                            audio_prompt_path=audio_prompt,
-                            exaggeration=exaggeration,
-                            temperature=temperature,
-                            cfg_weight=cfg_weight
-                        )
-                    except RuntimeError as e2:
-                        logger.error(f"CUDA Retry Failed: {e2}")
-                        raise ValueError("CUDA error persisted after cache clear") from e2
-                else:
-                    raise
+
+            all_wavs.append(chunk_wav.squeeze(0).numpy())
+
+        # Concatenate all chunks
+        if len(all_wavs) > 1:
+            wav = np.concatenate(all_wavs)
+            logger.info(f"✅ Concatenated {len(all_wavs)} chunks, total length: {len(wav)} samples")
         else:
-            wav = model.generate(
-                normalized,
-                audio_prompt_path=audio_prompt,
-                exaggeration=exaggeration,
-                temperature=temperature,
-                cfg_weight=cfg_weight,
-                device="cpu"
-            )
-        return (model.sr, wav.squeeze(0).numpy())
+            wav = all_wavs[0]
+
+        return (model.sr, wav)
     except Exception as e:
         logger.error(f"TTS Error: {e}")
         raise
@@ -919,9 +977,16 @@ def transcribe_with_whisper_optimized(audio_path, auto_unload=True):
             logger.info("ℹ️ Keeping Whisper model loaded (auto_unload=False)")
         # System whisper doesn't need unloading since it's not loaded in Python
 
-def generate_speech_optimized(text, audio_prompt=None, exaggeration=0.5, temperature=0.8, cfg_weight=0.5, auto_unload=True):
-    """Generate speech with VRAM optimization and optional auto-unload"""
+def generate_speech_optimized(text, audio_prompt=None, exaggeration=0.5, temperature=0.6, cfg_weight=2.5, auto_unload=True):
+    """
+    Generate speech with VRAM optimization and optional auto-unload.
+
+    Parameters tuned to prevent hallucination:
+    - temperature=0.6 (lower = more stable, less random)
+    - cfg_weight=2.5 (higher = follows input text more closely)
+    """
     logger.info(f"🔊 Starting VRAM-optimized TTS generation for: {text[:50]}...")
+    logger.info(f"🔧 TTS params: temp={temperature}, cfg={cfg_weight}, exag={exaggeration}")
 
     # Load TTS with optimization
     tts_model = use_tts_model_optimized()

@@ -150,7 +150,7 @@ from model_manager import (
 )
 
 # TTS Helper Function with graceful error handling
-def safe_generate_speech_optimized(text, audio_prompt=None, exaggeration=0.5, temperature=0.8, cfg_weight=0.5, auto_unload=True):
+def safe_generate_speech_optimized(text, audio_prompt=None, exaggeration=0.5, temperature=0.3, cfg_weight=0.7, auto_unload=True):
     """Generate speech with graceful error handling - never crashes the app"""
     try:
         result = generate_speech_optimized(text, audio_prompt, exaggeration, temperature, cfg_weight, auto_unload=auto_unload)
@@ -2326,11 +2326,15 @@ async def mic_chat(
                 if audio_prompt_path:
                     logger.info(f"🎤 MIC-CHAT: Cloning voice using prompt: {audio_prompt_path}")
 
+                # TTS params tuned to prevent hallucination:
+                # - temperature=0.6 (more stable, less random)
+                # - cfg_weight=2.5 (follows input text more closely)
                 sr, wav = await run_in_threadpool(
                     safe_generate_speech_optimized,
                     text=final_answer,
                     exaggeration=0.5,
-                    temperature=0.8,
+                    temperature=0.6,
+                    cfg_weight=2.5,
                     audio_prompt=audio_prompt_path,
                     auto_unload=low_vram
                 )

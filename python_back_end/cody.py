@@ -227,8 +227,14 @@ async def text_to_speech(request: TTSRequest):
         # Normalize text
         normalized_text = punc_norm(request.text) if hasattr(tts_model, 'punc_norm') else request.text
 
-        # Generate audio
-        audio_array = tts_model.generate(normalized_text)
+        # Generate audio with tuned parameters to prevent hallucination
+        # temperature=0.6 (more stable), cfg_weight=2.5 (follows text closely)
+        audio_array = tts_model.generate(
+            normalized_text,
+            temperature=0.6,
+            cfg_weight=2.5,
+            exaggeration=0.5
+        )
 
         # Save to file
         audio_id = str(uuid.uuid4())
@@ -263,7 +269,13 @@ async def chat(request: ChatRequest):
         if tts_model and response_text:
             try:
                 normalized_text = punc_norm(response_text)
-                audio_array = tts_model.generate(normalized_text)
+                # Tuned params to prevent hallucination
+                audio_array = tts_model.generate(
+                    normalized_text,
+                    temperature=0.6,
+                    cfg_weight=2.5,
+                    exaggeration=0.5
+                )
 
                 audio_id = str(uuid.uuid4())
                 audio_file = AUDIO_DIR / f"{audio_id}.wav"
@@ -315,7 +327,13 @@ async def voice_chat(
         if tts_model and response_text:
             try:
                 normalized_text = punc_norm(response_text)
-                audio_array = tts_model.generate(normalized_text)
+                # Tuned params to prevent hallucination
+                audio_array = tts_model.generate(
+                    normalized_text,
+                    temperature=0.6,
+                    cfg_weight=2.5,
+                    exaggeration=0.5
+                )
 
                 audio_id = str(uuid.uuid4())
                 audio_file = AUDIO_DIR / f"{audio_id}.wav"
