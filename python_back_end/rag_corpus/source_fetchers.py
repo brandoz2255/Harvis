@@ -1025,6 +1025,162 @@ class PythonDocsFetcher(BaseFetcher):
         return "".join(lines)
 
 
+class LocalDocsFetcher(BaseFetcher):
+    """Fetcher for local documentation files (markdown)."""
+    
+    SOURCE_NAME = "local_docs"
+    
+    # Default directories to scan for documentation
+    DEFAULT_DOCS_DIRS = [
+        "/app/docs",                    # Container path
+        "/workspaces/aidev/docs",       # Dev container
+        "./docs",                       # Relative to cwd
+    ]
+    
+    # File patterns to include
+    INCLUDE_PATTERNS = [
+        r"\.md$",
+        r"\.mdx$",
+        r"\.txt$",
+    ]
+    
+    # Files/directories to exclude
+    EXCLUDE_PATTERNS = [
+        r"node_modules",
+        r"\.git",
+        r"__pycache__",
+        r"\.pyc$",
+        r"\.env",
+    ]
+    
+    def __init__(self, docs_dirs: Optional[List[str]] = None):
+        super().__init__()
+        self.docs_dirs = docs_dirs or self.DEFAULT_DOCS_DIRS
+    
+    async def fetch(
+        self,
+        keywords: List[str],
+        extra_urls: List[str]
+    ) -> List[RawDocument]:
+        """Fetch local documentation files."""
+        import os
+        import glob
+        
+        documents = []
+        
+        # Find valid docs directories
+        valid_dirs = []
+        for docs_dir in self.docs_dirs:
+            expanded = os.path.expanduser(docs_dir)
+            if os.path.isdir(expanded):
+                valid_dirs.append(expanded)
+        
+        # Also check extra_urls for local paths
+        for path in extra_urls:
+            if os.path.isdir(path):
+                valid_dirs.append(path)
+            elif os.path.isfile(path):
+                doc = self._read_file(path)
+                if doc:
+                    documents.append(doc)
+        
+        if not valid_dirs:
+            logger.warning(f"No valid docs directories found. Checked: {self.docs_dirs}")
+            return documents
+        
+        logger.info(f"Scanning local docs directories: {valid_dirs}")
+        
+        for docs_dir in valid_dirs:
+            # Walk through directory
+            for root, dirs, files in os.walk(docs_dir):
+                # Filter out excluded directories
+                dirs[:] = [d for d in dirs if not any(
+                    re.search(pattern, d) for pattern in self.EXCLUDE_PATTERNS
+                )]
+                
+                for filename in files:
+                    filepath = os.path.join(root, filename)
+                    
+                    # Check if file matches include patterns
+                    if not any(re.search(pattern, filename) for pattern in self.INCLUDE_PATTERNS):
+                        continue
+                    
+                    # Check exclude patterns
+                    if any(re.search(pattern, filepath) for pattern in self.EXCLUDE_PATTERNS):
+                        continue
+                    
+                    # Read and parse file
+                    doc = self._read_file(filepath, keywords)
+                    if doc:
+                        documents.append(doc)
+        
+        logger.info(f"Fetched {len(documents)} local documentation files")
+        return documents
+    
+    def _read_file(
+        self,
+        filepath: str,
+        keywords: Optional[List[str]] = None
+    ) -> Optional[RawDocument]:
+        """Read a single documentation file."""
+        import os
+        
+        try:
+            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+            
+            # Skip empty files
+            if len(content.strip()) < 50:
+                return None
+            
+            # Skip very large files
+            if len(content) > 200000:  # 200KB
+                logger.warning(f"Skipping large file: {filepath}")
+                return None
+            
+            # Filter by keywords if provided
+            if keywords:
+                content_lower = content.lower()
+                if not any(kw.lower() in content_lower for kw in keywords):
+                    return None
+            
+            # Extract title from first heading or filename
+            title = os.path.basename(filepath)
+            lines = content.split('\n')
+            for line in lines[:10]:
+                if line.startswith('# '):
+                    title = line[2:].strip()
+                    break
+            
+            # Create file URL (file:// protocol)
+            file_url = f"file://{os.path.abspath(filepath)}"
+            
+            # Determine relative path for metadata
+            rel_path = filepath
+            for docs_dir in self.docs_dirs:
+                if filepath.startswith(docs_dir):
+                    rel_path = filepath[len(docs_dir):].lstrip('/')
+                    break
+            
+            return RawDocument(
+                id=self._generate_doc_id(file_url, content),
+                url=file_url,
+                title=title,
+                content=content,
+                source=self.SOURCE_NAME,
+                metadata={
+                    "filepath": filepath,
+                    "relative_path": rel_path,
+                    "file_type": filepath.split(".")[-1] if "." in filepath else "unknown",
+                    "size_bytes": len(content),
+                }
+            )
+            
+        except Exception as e:
+            logger.error(f"Error reading file {filepath}: {e}")
+            return None
+
+
 def get_fetcher(source: str, **kwargs) -> BaseFetcher:
     """
     Get fetcher instance for a source type.
@@ -1044,6 +1200,7 @@ def get_fetcher(source: str, **kwargs) -> BaseFetcher:
         "stack_overflow": StackOverflowFetcher,
         "github": GitHubFetcher,
         "python_docs": PythonDocsFetcher,
+        "local_docs": LocalDocsFetcher,
     }
     
     if source not in fetchers:
@@ -1051,6 +1208,9 @@ def get_fetcher(source: str, **kwargs) -> BaseFetcher:
     
     if source == "python_docs":
         return PythonDocsFetcher(**kwargs)
+    
+    if source == "local_docs":
+        return LocalDocsFetcher(**kwargs)
     
     return fetchers[source]()
 

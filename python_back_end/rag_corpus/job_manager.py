@@ -68,7 +68,7 @@ class JobManager:
         db_pool,
         rag_dir: str,
         ollama_url: str = "http://ollama:11434",
-        embedding_model: str = "nomic-embed-text"
+        embedding_model: str = "qwen3-embedding:4b-q4_K_M"
     ):
         """
         Initialize the job manager.
@@ -234,6 +234,19 @@ class JobManager:
                             keywords=job.keywords,
                             extra_urls=job.extra_urls,
                             python_libraries=job.python_libraries
+                        )
+                    # Special handling for local_docs source
+                    elif source == "local_docs":
+                        from .source_fetchers import LocalDocsFetcher
+                        # Include docs directory alongside default paths
+                        fetcher = LocalDocsFetcher(docs_dirs=[
+                            self.rag_dir,
+                            "/app/docs",
+                            "./docs",
+                        ])
+                        documents = await fetcher.fetch(
+                            keywords=job.keywords,
+                            extra_urls=job.extra_urls
                         )
                     else:
                         fetcher = self._get_fetcher(source)

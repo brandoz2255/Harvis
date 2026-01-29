@@ -25,7 +25,7 @@ class EmbeddingAdapter:
     
     def __init__(
         self,
-        model_name: str = "nomic-embed-text",
+        model_name: str = "qwen3-embedding:4b-q4_K_M",
         ollama_url: str = "http://ollama:11434",
         use_huggingface_fallback: bool = True
     ):
@@ -227,11 +227,18 @@ class EmbeddingAdapter:
         # Default dimensions for common models
         defaults = {
             "nomic-embed-text": 768,
+            "qwen3-embedding:4b-q4_K_M": 2560,
+            "qwen3-embedding": 2560,
             "mxbai-embed-large": 1024,
             "all-MiniLM-L6-v2": 384,
         }
         
-        return defaults.get(self.model_name, 384)
+        # Check for partial matches (model name without tag)
+        for key, dim in defaults.items():
+            if key in self.model_name or self.model_name in key:
+                return dim
+        
+        return defaults.get(self.model_name, 768)
 
 
 class CachedEmbeddingAdapter(EmbeddingAdapter):

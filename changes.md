@@ -1,5 +1,83 @@
 # Recent Changes and Fixes Documentation
 
+## Date: 2026-01-28
+
+### SSE Streaming with Heartbeats - Preventing Browser Idle Timeouts
+
+#### Problem:
+- Zen browser (and other browsers with aggressive tab suspension) kills long-running HTTP requests when RAM spikes
+- When browser idle timeout triggers (reduced to 30 seconds under memory pressure), users never receive responses from the server
+- This affects all long-running AI operations: LLM inference, voice transcription, TTS generation, and vision analysis
+
+#### Root Cause Analysis:
+- The `/api/chat`, `/api/mic-chat`, and `/api/vision-chat` endpoints were returning single JSON responses after potentially long operations
+- During Ollama inference (which can take 60+ seconds for complex queries), no data was sent to the browser
+- Browsers interpret this silence as an idle connection and may terminate it under memory pressure
+
+#### Solution Applied:
+1. **Added SSE Heartbeat Helper Function** (`run_ollama_with_heartbeats()`):
+   - Runs Ollama inference in a background thread
+   - Yields heartbeat events every 10 seconds while inference is in progress
+   - Returns the final result when complete
+   - Located in `python_back_end/main.py` around line 580
+
+2. **Converted `/api/chat` to SSE Streaming**:
+   - Returns `StreamingResponse` with `text/event-stream` content type
+   - Sends status updates: `starting`, `processing`, `inference`, `heartbeat`, `saving`, `generating_audio`, `complete`
+   - Heartbeats sent every 10 seconds during Ollama inference
+   - Final response includes `status: "complete"` with all data (history, audio_path, session_id, etc.)
+
+3. **Converted `/api/mic-chat` to SSE Streaming**:
+   - Same pattern as `/api/chat`
+   - Includes status for transcription phase
+   - Heartbeats during Ollama inference
+   - Final response includes transcription text
+
+4. **Converted `/api/vision-chat` to SSE Streaming**:
+   - Same pattern with image processing status
+   - Heartbeats during vision model inference
+   - Final response includes processed image count
+
+5. **Frontend Already Handles SSE**:
+   - `useApiWithRetry.ts` already detects `text/event-stream` responses
+   - Logs all status events including heartbeats
+   - Returns final `complete` event data to caller
+   - No frontend changes required
+
+#### Files Modified:
+- `python_back_end/main.py`:
+  - Added `HEARTBEAT_INTERVAL = 10` constant
+  - Added `run_ollama_with_heartbeats()` async generator function
+  - Converted `chat()` endpoint to SSE streaming
+  - Converted `mic_chat()` endpoint to SSE streaming
+  - Converted `vision_chat()` endpoint to SSE streaming
+
+#### Response Flow:
+```
+Browser Request
+    ↓
+Server: data: {"status": "starting", ...}
+    ↓
+Server: data: {"status": "inference", ...}
+    ↓ (10 seconds)
+Server: data: {"status": "heartbeat", "count": 1, "elapsed": 10.0, ...}
+    ↓ (10 seconds)
+Server: data: {"status": "heartbeat", "count": 2, "elapsed": 20.0, ...}
+    ↓ (inference complete)
+Server: data: {"status": "generating_audio", ...}
+    ↓
+Server: data: {"status": "complete", "final_answer": "...", "audio_path": "...", ...}
+```
+
+#### Result/Status:
+- Zen browser (and others) will now maintain connections during long-running operations
+- Heartbeats every 10 seconds keep the connection active
+- All existing functionality preserved (history, TTS, reasoning separation, etc.)
+- Frontend displays progress in console logs
+- No UI changes required - responses work identically
+
+---
+
 ## Date: 2025-01-21
 
 ### 9. Fixed Agent Loading and n8n Statistics Integration ✅ COMPLETED

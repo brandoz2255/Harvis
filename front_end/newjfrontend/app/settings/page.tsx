@@ -18,6 +18,7 @@ import {
     Plus,
     X,
     BookOpen,
+    FolderOpen,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -60,6 +61,12 @@ const SOURCE_CONFIG = {
         description: "Docs for any Python library",
         icon: BookOpen,
         color: "text-yellow-400",
+    },
+    local_docs: {
+        label: "Local Engineering Docs",
+        description: "Your project's /docs folder (best practices, guidelines)",
+        icon: FolderOpen,
+        color: "text-green-400",
     },
 }
 
