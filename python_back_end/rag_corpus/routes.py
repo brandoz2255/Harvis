@@ -27,7 +27,7 @@ _embedding_adapter = None
 # Configuration
 RAG_DIR = os.getenv("RAG_CORPUS_DIR", "/app/rag_corpus_data")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
-EMBEDDING_MODEL = os.getenv("RAG_EMBEDDING_MODEL", "nomic-embed-text")
+EMBEDDING_MODEL = os.getenv("RAG_EMBEDDING_MODEL", "qwen3-embedding:4b-q4_K_M")
 
 
 # ─── Pydantic Models ──────────────────────────────────────────────────────────
@@ -147,7 +147,7 @@ async def start_rag_update(request: UpdateRagRequest):
     job_manager = get_job_manager()
     
     # Validate sources
-    valid_sources = ["nextjs_docs", "stack_overflow", "github", "python_docs"]
+    valid_sources = ["nextjs_docs", "stack_overflow", "github", "python_docs", "local_docs"]
     for source in request.sources:
         if source not in valid_sources:
             raise HTTPException(
@@ -233,7 +233,7 @@ async def get_source_stats():
         total = sum(stats.values())
         
         return SourceStats(
-            available_sources=["nextjs_docs", "stack_overflow", "github", "python_docs"],
+            available_sources=["nextjs_docs", "stack_overflow", "github", "python_docs", "local_docs"],
             indexed_stats=stats,
             total_documents=total
         )
@@ -255,7 +255,7 @@ async def rebuild_source(request: RebuildSourceRequest):
     job_manager = get_job_manager()
     vectordb = get_vectordb_adapter()
     
-    valid_sources = ["nextjs_docs", "stack_overflow", "github", "python_docs"]
+    valid_sources = ["nextjs_docs", "stack_overflow", "github", "python_docs", "local_docs"]
     if request.source not in valid_sources:
         raise HTTPException(
             status_code=400,
@@ -287,7 +287,7 @@ async def clear_source(source: str):
     """Delete all vectors for a source."""
     vectordb = get_vectordb_adapter()
     
-    valid_sources = ["nextjs_docs", "stack_overflow", "github", "python_docs"]
+    valid_sources = ["nextjs_docs", "stack_overflow", "github", "python_docs", "local_docs"]
     if source not in valid_sources:
         raise HTTPException(
             status_code=400,
@@ -358,7 +358,7 @@ async def get_rag_config():
         "rag_dir": RAG_DIR,
         "ollama_url": OLLAMA_URL,
         "embedding_model": EMBEDDING_MODEL,
-        "available_sources": ["nextjs_docs", "stack_overflow", "github", "python_docs"]
+        "available_sources": ["nextjs_docs", "stack_overflow", "github", "python_docs", "local_docs"]
     }
 
 

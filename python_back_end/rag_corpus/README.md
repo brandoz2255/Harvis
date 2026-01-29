@@ -62,6 +62,7 @@ graph TD
 | `stack_overflow` | Stack Overflow Q&A | Tags (keywords) |
 | `github` | GitHub repositories | Repo URLs, keywords |
 | `python_docs` | Python library documentation | Library names (e.g., `requests`, `pandas`, `fastapi`) |
+| `local_docs` | Local markdown files from /docs directory | Auto-scans project docs folder |
 
 ## API Endpoints
 
@@ -132,7 +133,7 @@ Environment variables:
 |----------|---------|-------------|
 | `RAG_CORPUS_DIR` | `/app/rag_corpus_data` | Directory for persisting raw chunks |
 | `OLLAMA_URL` | `http://ollama:11434` | Ollama server URL |
-| `RAG_EMBEDDING_MODEL` | `nomic-embed-text` | Embedding model (768 dimensions) |
+| `RAG_EMBEDDING_MODEL` | `qwen3-embedding:4b-q4_K_M` | Embedding model (2560 dimensions) |
 
 ## Database Schema
 
