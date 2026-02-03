@@ -359,7 +359,7 @@ async def lifespan(app: FastAPI):
                 vector_db = VectorDBAdapter(
                     db_pool=app.state.pg_pool,
                     collection_name="local_rag_corpus",
-                    embedding_dimension=2560,  # qwen3-embedding dimension
+                    embedding_dimension=4096,  # qwen3-embedding dimension
                 )
 
                 # Initialize retriever with both vectordb and embedding adapters
