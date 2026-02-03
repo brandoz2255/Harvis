@@ -33,10 +33,10 @@ EMBEDDING_MODEL = os.getenv(
 )  # 768 dims, default
 
 # Per-source embedding model configuration
-# qwen3-embedding: 2560 dims - for complex technical/code content (MAX INTELLIGENCE)
-# nomic-embed-text: 768 dims - for general process documentation
+# qwen3-embedding: 4096 dims - for complex technical/code content
+# nomic-embed-text: 768 dims - for general devops/docs
 SOURCE_EMBEDDING_MODELS = {
-    # Technical/Code-heavy sources → qwen3-embedding (full 2560 dims)
+    # Technical/Code-heavy sources → qwen3-embedding (full 4096 dims)
     "kubernetes_docs": "qwen3-embedding",  # Complex edge cases, YAML configs
     "github": "qwen3-embedding",  # Code repositories
     "stack_overflow": "qwen3-embedding",  # Code Q&A with nuanced answers
@@ -61,7 +61,7 @@ def get_embedding_model_for_source(source: str) -> str:
 
 # Collection names based on embedding model (different dims need separate tables)
 EMBEDDING_COLLECTIONS = {
-    "qwen3-embedding": "local_rag_corpus_code",  # 2560 dims - code/complex
+    "qwen3-embedding": "local_rag_corpus_code",  # 4096 dims - code/complex
     "nomic-embed-text": "local_rag_corpus_docs",  # 768 dims - general docs
 }
 

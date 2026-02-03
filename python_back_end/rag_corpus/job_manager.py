@@ -267,142 +267,148 @@ class JobManager:
                     ollama_url=self.ollama_url,
                 )
 
-                # Get collection for this model
-                collection_name = get_collection_for_source(sources[0])
+                try:
+                    # Get collection for this model
+                    collection_name = get_collection_for_source(sources[0])
 
-                # Create vectordb adapter for this collection
-                from .vectordb_adapter import VectorDBAdapter
+                    # Create vectordb adapter for this collection
+                    from .vectordb_adapter import VectorDBAdapter
 
-                vectordb_adapter = VectorDBAdapter(
-                    db_pool=self.db_pool,
-                    collection_name=collection_name,
-                )
+                    vectordb_adapter = VectorDBAdapter(
+                        db_pool=self.db_pool,
+                        collection_name=collection_name,
+                    )
 
-                logger.info(
-                    f"Job {job.id}: Using model '{model_name}' → collection '{collection_name}'"
-                )
+                    logger.info(
+                        f"Job {job.id}: Using model '{model_name}' → collection '{collection_name}'"
+                    )
 
-                all_chunks = []
+                    all_chunks = []
 
-                # Phase 1: Fetch and chunk documents from each source in this group
-                for source in sources:
-                    job.progress["current_source"] = source
-                    job.progress["current_model"] = model_name
-                    job.updated_at = datetime.utcnow()
-                    logger.info(f"Job {job.id}: Fetching from {source}")
+                    # Phase 1: Fetch and chunk documents from each source in this group
+                    for source in sources:
+                        job.progress["current_source"] = source
+                        job.progress["current_model"] = model_name
+                        job.updated_at = datetime.utcnow()
+                        logger.info(f"Job {job.id}: Fetching from {source}")
 
-                    try:
-                        # Try to get source config for dynamic fetcher creation
-                        source_config = None
+                        fetcher = None
                         try:
-                            from rag_corpus.source_config import get_config_manager
+                            # Try to get source config for dynamic fetcher creation
+                            source_config = None
+                            try:
+                                from rag_corpus.source_config import get_config_manager
 
-                            config_mgr = await get_config_manager()
-                            source_config = config_mgr.get(source)
-                        except Exception:
-                            pass  # Fall back to legacy fetcher selection
+                                config_mgr = await get_config_manager()
+                                source_config = config_mgr.get(source)
+                            except Exception:
+                                pass  # Fall back to legacy fetcher selection
 
-                        if source_config:
-                            # Use dynamic config-based fetcher
-                            from .source_fetchers import get_fetcher_for_config
+                            if source_config:
+                                # Use dynamic config-based fetcher
+                                from .source_fetchers import get_fetcher_for_config
 
-                            fetcher = get_fetcher_for_config(source_config)
-                            documents = await fetcher.fetch(
-                                keywords=job.keywords, extra_urls=job.extra_urls
-                            )
-                        # Legacy handling for python_docs source
-                        elif source == "python_docs":
-                            from .source_fetchers import PythonDocsFetcher
+                                fetcher = get_fetcher_for_config(source_config)
+                                documents = await fetcher.fetch(
+                                    keywords=job.keywords, extra_urls=job.extra_urls
+                                )
+                            # Legacy handling for python_docs source
+                            elif source == "python_docs":
+                                from .source_fetchers import PythonDocsFetcher
 
-                            fetcher = PythonDocsFetcher(
-                                python_libraries=job.python_libraries
-                            )
-                            documents = await fetcher.fetch(
-                                keywords=job.keywords,
-                                extra_urls=job.extra_urls,
-                                python_libraries=job.python_libraries,
-                            )
-                        # Legacy handling for local_docs source
-                        elif source == "local_docs":
-                            from .source_fetchers import LocalDocsFetcher
+                                fetcher = PythonDocsFetcher(
+                                    python_libraries=job.python_libraries
+                                )
+                                documents = await fetcher.fetch(
+                                    keywords=job.keywords,
+                                    extra_urls=job.extra_urls,
+                                    python_libraries=job.python_libraries,
+                                )
+                            # Legacy handling for local_docs source
+                            elif source == "local_docs":
+                                from .source_fetchers import LocalDocsFetcher
 
-                            fetcher = LocalDocsFetcher(
-                                docs_dirs=[
-                                    self.rag_dir,
-                                    "/app/docs",
-                                    "./docs",
-                                ]
-                            )
-                            documents = await fetcher.fetch(
-                                keywords=job.keywords, extra_urls=job.extra_urls
-                            )
-                        else:
-                            fetcher = self._get_fetcher(source, job)
-                            documents = await fetcher.fetch(
-                                keywords=job.keywords, extra_urls=job.extra_urls
+                                fetcher = LocalDocsFetcher(
+                                    docs_dirs=[
+                                        self.rag_dir,
+                                        "/app/docs",
+                                        "./docs",
+                                    ]
+                                )
+                                documents = await fetcher.fetch(
+                                    keywords=job.keywords, extra_urls=job.extra_urls
+                                )
+                            else:
+                                fetcher = self._get_fetcher(source, job)
+                                documents = await fetcher.fetch(
+                                    keywords=job.keywords, extra_urls=job.extra_urls
+                                )
+
+                            logger.info(
+                                f"Job {job.id}: Fetched {len(documents)} documents from {source}"
                             )
 
-                        logger.info(
-                            f"Job {job.id}: Fetched {len(documents)} documents from {source}"
+                            # Chunk documents
+                            for doc in documents:
+                                chunks = chunker.chunk_document(doc)
+                                all_chunks.extend(chunks)
+
+                        except Exception as e:
+                            logger.error(f"Job {job.id}: Error fetching from {source}: {e}")
+                            # Continue with other sources
+                        finally:
+                            if fetcher and hasattr(fetcher, "close"):
+                                await fetcher.close()
+
+                    if not all_chunks:
+                        logger.warning(
+                            f"Job {job.id}: No chunks for model group {model_name}"
                         )
+                        continue
 
-                        # Chunk documents
-                        for doc in documents:
-                            chunks = chunker.chunk_document(doc)
-                            all_chunks.extend(chunks)
-
-                    except Exception as e:
-                        logger.error(f"Job {job.id}: Error fetching from {source}: {e}")
-                        # Continue with other sources
-
-                if not all_chunks:
-                    logger.warning(
-                        f"Job {job.id}: No chunks for model group {model_name}"
+                    job.progress["total_docs"] = job.progress.get("total_docs", 0) + len(
+                        all_chunks
                     )
-                    continue
+                    job.progress["current_phase"] = "embedding"
+                    job.updated_at = datetime.utcnow()
 
-                job.progress["total_docs"] = job.progress.get("total_docs", 0) + len(
-                    all_chunks
-                )
-                job.progress["current_phase"] = "embedding"
-                job.updated_at = datetime.utcnow()
-
-                # Phase 2: Generate embeddings
-                logger.info(
-                    f"Job {job.id}: Generating embeddings for {len(all_chunks)} chunks with {model_name}"
-                )
-
-                # Persist chunks to RAG directory
-                chunker.persist_chunks(all_chunks)
-
-                # Generate embeddings in batches
-                texts = [chunk.text for chunk in all_chunks]
-                embeddings = await embedding_adapter.embed_batch(texts, batch_size=32)
-
-                # Phase 3: Upsert to vector database
-                job.progress["current_phase"] = "upserting"
-                job.updated_at = datetime.utcnow()
-                logger.info(f"Job {job.id}: Upserting to {collection_name}")
-
-                from .vectordb_adapter import VectorRecord
-
-                records = []
-                for chunk, embedding in zip(all_chunks, embeddings):
-                    records.append(
-                        VectorRecord(
-                            id=chunk.id,
-                            embedding=embedding,
-                            text=chunk.text,
-                            metadata=chunk.metadata,
-                        )
+                    # Phase 2: Generate embeddings
+                    logger.info(
+                        f"Job {job.id}: Generating embeddings for {len(all_chunks)} chunks with {model_name}"
                     )
 
-                await vectordb_adapter.upsert_vectors(records)
-                total_processed += len(records)
-                job.progress["processed"] = total_processed
+                    # Persist chunks to RAG directory
+                    chunker.persist_chunks(all_chunks)
 
-                # Close embedding adapter session
-                await embedding_adapter.close()
+                    # Generate embeddings in batches
+                    texts = [chunk.text for chunk in all_chunks]
+                    embeddings = await embedding_adapter.embed_batch(texts, batch_size=32)
+
+                    # Phase 3: Upsert to vector database
+                    job.progress["current_phase"] = "upserting"
+                    job.updated_at = datetime.utcnow()
+                    logger.info(f"Job {job.id}: Upserting to {collection_name}")
+
+                    from .vectordb_adapter import VectorRecord
+
+                    records = []
+                    for chunk, embedding in zip(all_chunks, embeddings):
+                        records.append(
+                            VectorRecord(
+                                id=chunk.id,
+                                embedding=embedding,
+                                text=chunk.text,
+                                metadata=chunk.metadata,
+                            )
+                        )
+
+                    await vectordb_adapter.upsert_vectors(records)
+                    total_processed += len(records)
+                    job.progress["processed"] = total_processed
+
+                finally:
+                    # Close embedding adapter session
+                    await embedding_adapter.close()
 
             # Done!
             job.status = JobStatus.COMPLETED

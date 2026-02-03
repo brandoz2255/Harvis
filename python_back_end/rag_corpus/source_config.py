@@ -16,15 +16,17 @@ logger = logging.getLogger(__name__)
 
 class SourceCategory(str, Enum):
     """Categories for documentation sources."""
-    CODE = "code"           # Complex code/technical - uses high-dim embeddings
-    DEVOPS = "devops"       # DevOps/Infrastructure docs
-    SECURITY = "security"   # Security/Cyber docs
-    GENERAL = "general"     # General documentation
+
+    CODE = "code"  # Complex code/technical - uses high-dim embeddings
+    DEVOPS = "devops"  # DevOps/Infrastructure docs
+    SECURITY = "security"  # Security/Cyber docs
+    GENERAL = "general"  # General documentation
 
 
 class EmbeddingTier(str, Enum):
     """Embedding model tiers based on complexity needs."""
-    HIGH = "high"       # qwen3-embedding (2560 dims) - complex/code
+
+    HIGH = "high"  # qwen3-embedding (4096 dims) - complex/code
     STANDARD = "standard"  # nomic-embed-text (768 dims) - general docs
 
 
@@ -33,15 +35,15 @@ EMBEDDING_TIER_CONFIG = {
     EmbeddingTier.HIGH: {
         "model": "qwen3-embedding",
         "collection": "local_rag_corpus_code",
-        "dimensions": 2560,
-        "description": "High-dimensional embeddings for complex technical content"
+        "dimensions": 4096,
+        "description": "High-dimensional embeddings for complex technical content",
     },
     EmbeddingTier.STANDARD: {
         "model": "nomic-embed-text",
         "collection": "local_rag_corpus_docs",
         "dimensions": 768,
-        "description": "Standard embeddings for general documentation"
-    }
+        "description": "Standard embeddings for general documentation",
+    },
 }
 
 
@@ -49,24 +51,24 @@ EMBEDDING_TIER_CONFIG = {
 class SourceConfig:
     """Configuration for a documentation source."""
 
-    id: str                          # Unique identifier (e.g., "ansible_docs")
-    name: str                        # Display name (e.g., "Ansible Documentation")
-    description: str                 # Brief description
-    category: SourceCategory         # Category for grouping
-    embedding_tier: EmbeddingTier    # Which embedding model to use
-    enabled: bool = True             # Whether source is active
+    id: str  # Unique identifier (e.g., "ansible_docs")
+    name: str  # Display name (e.g., "Ansible Documentation")
+    description: str  # Brief description
+    category: SourceCategory  # Category for grouping
+    embedding_tier: EmbeddingTier  # Which embedding model to use
+    enabled: bool = True  # Whether source is active
 
     # Fetcher configuration
-    fetcher_type: str = "generic"    # Type of fetcher to use
-    base_url: str = ""               # Base documentation URL
+    fetcher_type: str = "generic"  # Type of fetcher to use
+    base_url: str = ""  # Base documentation URL
     sitemap_url: Optional[str] = None  # Sitemap URL if available
 
     # Fetcher-specific options
     options: Dict[str, Any] = field(default_factory=dict)
 
     # Rate limiting
-    rate_limit_delay: float = 0.5    # Seconds between requests
-    max_pages: int = 100             # Maximum pages to fetch
+    rate_limit_delay: float = 0.5  # Seconds between requests
+    max_pages: int = 100  # Maximum pages to fetch
 
     # Content filters
     url_patterns: List[str] = field(default_factory=list)  # URL patterns to include
@@ -102,7 +104,6 @@ class SourceConfig:
 
 DEFAULT_SOURCES: Dict[str, SourceConfig] = {
     # ─── Code/Complex Sources (High-dimensional embeddings) ───────────────────
-
     "kubernetes_docs": SourceConfig(
         id="kubernetes_docs",
         name="Kubernetes Documentation",
@@ -115,7 +116,6 @@ DEFAULT_SOURCES: Dict[str, SourceConfig] = {
         options={"topics": ["concepts", "tasks", "reference"]},
         max_pages=150,
     ),
-
     "github": SourceConfig(
         id="github",
         name="GitHub Repositories",
@@ -126,7 +126,6 @@ DEFAULT_SOURCES: Dict[str, SourceConfig] = {
         base_url="https://github.com",
         options={"default_repos": ["vercel/next.js"]},
     ),
-
     "stack_overflow": SourceConfig(
         id="stack_overflow",
         name="Stack Overflow Q&A",
@@ -137,21 +136,18 @@ DEFAULT_SOURCES: Dict[str, SourceConfig] = {
         base_url="https://stackoverflow.com",
         options={"default_tags": ["kubernetes", "docker", "python", "devops"]},
     ),
-
     # ─── DevOps Sources (Standard embeddings) ─────────────────────────────────
-
     "docker_docs": SourceConfig(
         id="docker_docs",
         name="Docker Documentation",
         description="Official Docker documentation",
         category=SourceCategory.DEVOPS,
-        embedding_tier=EmbeddingTier.STANDARD,
+        embedding_tier=EmbeddingTier.HIGH,
         fetcher_type="docker",
         base_url="https://docs.docker.com",
         sitemap_url="https://docs.docker.com/sitemap.xml",
         options={"topics": ["engine", "compose", "swarm"]},
     ),
-
     "ansible_docs": SourceConfig(
         id="ansible_docs",
         name="Ansible Documentation",
@@ -164,7 +160,6 @@ DEFAULT_SOURCES: Dict[str, SourceConfig] = {
         url_patterns=["/docs/", "/playbooks/", "/modules/", "/collections/"],
         exclude_patterns=["/ja/", "/ko/", "/zh/"],  # Exclude non-English
     ),
-
     "helm_docs": SourceConfig(
         id="helm_docs",
         name="Helm Documentation",
@@ -176,7 +171,6 @@ DEFAULT_SOURCES: Dict[str, SourceConfig] = {
         sitemap_url="https://helm.sh/sitemap.xml",
         url_patterns=["/docs/"],
     ),
-
     "terraform_docs": SourceConfig(
         id="terraform_docs",
         name="Terraform Documentation",
@@ -187,7 +181,6 @@ DEFAULT_SOURCES: Dict[str, SourceConfig] = {
         base_url="https://developer.hashicorp.com/terraform/docs",
         url_patterns=["/terraform/"],
     ),
-
     "gitlab_docs": SourceConfig(
         id="gitlab_docs",
         name="GitLab Documentation",
@@ -200,7 +193,6 @@ DEFAULT_SOURCES: Dict[str, SourceConfig] = {
         url_patterns=["/ee/ci/", "/ee/user/", "/runner/"],
         max_pages=150,
     ),
-
     "github_actions_docs": SourceConfig(
         id="github_actions_docs",
         name="GitHub Actions Documentation",
@@ -211,7 +203,6 @@ DEFAULT_SOURCES: Dict[str, SourceConfig] = {
         base_url="https://docs.github.com/en/actions",
         url_patterns=["/actions/"],
     ),
-
     "argocd_docs": SourceConfig(
         id="argocd_docs",
         name="ArgoCD Documentation",
@@ -222,7 +213,6 @@ DEFAULT_SOURCES: Dict[str, SourceConfig] = {
         base_url="https://argo-cd.readthedocs.io/en/stable",
         url_patterns=["/user-guide/", "/operator-manual/", "/getting_started/"],
     ),
-
     "prometheus_docs": SourceConfig(
         id="prometheus_docs",
         name="Prometheus Documentation",
@@ -233,7 +223,6 @@ DEFAULT_SOURCES: Dict[str, SourceConfig] = {
         base_url="https://prometheus.io/docs",
         url_patterns=["/docs/"],
     ),
-
     "grafana_docs": SourceConfig(
         id="grafana_docs",
         name="Grafana Documentation",
@@ -244,9 +233,7 @@ DEFAULT_SOURCES: Dict[str, SourceConfig] = {
         base_url="https://grafana.com/docs/grafana/latest",
         url_patterns=["/docs/grafana/"],
     ),
-
     # ─── Security/Cyber Sources ───────────────────────────────────────────────
-
     "mitre_attack": SourceConfig(
         id="mitre_attack",
         name="MITRE ATT&CK",
@@ -257,7 +244,6 @@ DEFAULT_SOURCES: Dict[str, SourceConfig] = {
         base_url="https://attack.mitre.org",
         url_patterns=["/techniques/", "/tactics/", "/mitigations/"],
     ),
-
     "owasp_docs": SourceConfig(
         id="owasp_docs",
         name="OWASP Documentation",
@@ -268,31 +254,27 @@ DEFAULT_SOURCES: Dict[str, SourceConfig] = {
         base_url="https://cheatsheetseries.owasp.org",
         url_patterns=["/cheatsheets/"],
     ),
-
     # ─── General Documentation ────────────────────────────────────────────────
-
     "python_docs": SourceConfig(
         id="python_docs",
         name="Python Library Documentation",
         description="Documentation for Python libraries",
         category=SourceCategory.GENERAL,
-        embedding_tier=EmbeddingTier.STANDARD,
+        embedding_tier=EmbeddingTier.HIGH,
         fetcher_type="python",
         base_url="https://docs.python.org",
         options={"libraries": []},
     ),
-
     "nextjs_docs": SourceConfig(
         id="nextjs_docs",
         name="Next.js Documentation",
         description="Next.js React framework documentation",
         category=SourceCategory.GENERAL,
-        embedding_tier=EmbeddingTier.STANDARD,
+        embedding_tier=EmbeddingTier.HIGH,
         fetcher_type="nextjs",
         base_url="https://nextjs.org/docs",
         sitemap_url="https://nextjs.org/sitemap.xml",
     ),
-
     "local_docs": SourceConfig(
         id="local_docs",
         name="Local Documentation",
@@ -341,7 +323,9 @@ class SourceConfigManager:
                 logger.warning(f"Could not load configs from DB, using defaults: {e}")
 
         self._initialized = True
-        logger.info(f"Source config manager initialized with {len(self._cache)} sources")
+        logger.info(
+            f"Source config manager initialized with {len(self._cache)} sources"
+        )
 
     async def _ensure_table(self) -> None:
         """Ensure the config table exists."""
@@ -361,7 +345,7 @@ class SourceConfigManager:
             rows = await conn.fetch("SELECT id, config FROM rag_source_configs")
             for row in rows:
                 try:
-                    config = SourceConfig.from_dict(json.loads(row['config']))
+                    config = SourceConfig.from_dict(json.loads(row["config"]))
                     self._cache[config.id] = config
                 except Exception as e:
                     logger.warning(f"Error loading config {row['id']}: {e}")
@@ -372,13 +356,17 @@ class SourceConfigManager:
             return
 
         async with self.db_pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 INSERT INTO rag_source_configs (id, config, updated_at)
                 VALUES ($1, $2::jsonb, NOW())
                 ON CONFLICT (id) DO UPDATE SET
                     config = $2::jsonb,
                     updated_at = NOW()
-            """, config.id, json.dumps(config.to_dict()))
+            """,
+                config.id,
+                json.dumps(config.to_dict()),
+            )
 
     async def _delete_from_db(self, source_id: str) -> None:
         """Delete config from database."""
@@ -387,8 +375,7 @@ class SourceConfigManager:
 
         async with self.db_pool.acquire() as conn:
             await conn.execute(
-                "DELETE FROM rag_source_configs WHERE id = $1",
-                source_id
+                "DELETE FROM rag_source_configs WHERE id = $1", source_id
             )
 
     def get_all(self) -> Dict[str, SourceConfig]:
