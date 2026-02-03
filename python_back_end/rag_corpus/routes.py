@@ -48,6 +48,12 @@ SOURCE_EMBEDDING_MODELS = {
 
 def get_embedding_model_for_source(source: str) -> str:
     """Get the appropriate embedding model for a source type."""
+    # Try dynamic config first
+    if _config_manager:
+        config = _config_manager.get(source)
+        if config:
+            return config.get_embedding_model()
+    # Fallback to static config
     return SOURCE_EMBEDDING_MODELS.get(source, EMBEDDING_MODEL)
 
 # Collection names based on embedding model (different dims need separate tables)
@@ -58,8 +64,20 @@ EMBEDDING_COLLECTIONS = {
 
 def get_collection_for_source(source: str) -> str:
     """Get the vector collection name for a source type."""
+    # Try dynamic config first
+    if _config_manager:
+        config = _config_manager.get(source)
+        if config:
+            return config.get_collection()
+    # Fallback to static config
     model = get_embedding_model_for_source(source)
     return EMBEDDING_COLLECTIONS.get(model, "local_rag_corpus_docs")
+
+def get_valid_sources() -> List[str]:
+    """Get list of all valid source IDs."""
+    if _config_manager:
+        return _config_manager.get_valid_source_ids()
+    return list(SOURCE_EMBEDDING_MODELS.keys())
 
 
 # ─── Pydantic Models ──────────────────────────────────────────────────────────
@@ -258,16 +276,8 @@ async def start_rag_update(request: UpdateRagRequest):
     """
     job_manager = get_job_manager()
 
-    # Validate sources
-    valid_sources = [
-        "nextjs_docs",
-        "stack_overflow",
-        "github",
-        "python_docs",
-        "local_docs",
-        "docker_docs",
-        "kubernetes_docs",
-    ]
+    # Validate sources using dynamic config
+    valid_sources = get_valid_sources()
     for source in request.sources:
         if source not in valid_sources:
             raise HTTPException(
@@ -362,15 +372,7 @@ async def get_source_stats():
         total = sum(all_stats.values())
 
         return SourceStats(
-            available_sources=[
-                "nextjs_docs",
-                "stack_overflow",
-                "github",
-                "python_docs",
-                "local_docs",
-                "docker_docs",
-                "kubernetes_docs",
-            ],
+            available_sources=get_valid_sources(),
             indexed_stats=all_stats,
             total_documents=total,
         )
@@ -391,15 +393,7 @@ async def rebuild_source(request: RebuildSourceRequest):
     """
     job_manager = get_job_manager()
 
-    valid_sources = [
-        "nextjs_docs",
-        "stack_overflow",
-        "github",
-        "python_docs",
-        "local_docs",
-        "docker_docs",
-        "kubernetes_docs",
-    ]
+    valid_sources = get_valid_sources()
     if request.source not in valid_sources:
         raise HTTPException(
             status_code=400,
@@ -436,15 +430,7 @@ async def rebuild_source(request: RebuildSourceRequest):
 @router.delete("/sources/{source}")
 async def clear_source(source: str):
     """Delete all vectors for a source from the appropriate collection."""
-    valid_sources = [
-        "nextjs_docs",
-        "stack_overflow",
-        "github",
-        "python_docs",
-        "local_docs",
-        "docker_docs",
-        "kubernetes_docs",
-    ]
+    valid_sources = get_valid_sources()
     if source not in valid_sources:
         raise HTTPException(
             status_code=400, detail=f"Invalid source: {source}. Valid: {valid_sources}"
@@ -515,33 +501,36 @@ async def rag_health_check():
 @router.get("/config")
 async def get_rag_config():
     """Get current RAG corpus configuration with multi-model setup."""
+    # Get dynamic sources if available
+    available_sources = get_valid_sources()
+
+    # Build source model mapping from config
+    source_model_mapping = {}
+    if _config_manager:
+        source_model_mapping = _config_manager.get_source_model_mapping()
+    else:
+        source_model_mapping = SOURCE_EMBEDDING_MODELS
+
     return {
         "rag_dir": RAG_DIR,
         "ollama_url": OLLAMA_URL,
         "default_embedding_model": EMBEDDING_MODEL,
-        "source_embedding_models": SOURCE_EMBEDDING_MODELS,
+        "source_embedding_models": source_model_mapping,
         "collections": EMBEDDING_COLLECTIONS,
-        "available_sources": [
-            "nextjs_docs",
-            "stack_overflow",
-            "github",
-            "python_docs",
-            "local_docs",
-            "docker_docs",
-            "kubernetes_docs",
-        ],
-        "source_categories": {
-            "code_complex": {
-                "sources": ["kubernetes_docs", "github", "stack_overflow"],
+        "available_sources": available_sources,
+        "source_count": len(available_sources),
+        "embedding_tiers": {
+            "high": {
                 "model": "qwen3-embedding",
                 "collection": "local_rag_corpus_code",
                 "dimensions": 2560,
+                "description": "For complex code/technical content",
             },
-            "devops_general": {
-                "sources": ["docker_docs", "python_docs", "nextjs_docs", "local_docs"],
+            "standard": {
                 "model": "nomic-embed-text",
                 "collection": "local_rag_corpus_docs",
                 "dimensions": 768,
+                "description": "For general documentation",
             },
         },
     }
@@ -606,3 +595,254 @@ async def get_ollama_models():
     except Exception as e:
         logger.error(f"Error getting models: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SOURCE CONFIGURATION MANAGEMENT API
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def get_config_manager_instance():
+    """Get the config manager instance."""
+    if _config_manager is None:
+        raise HTTPException(
+            status_code=503, detail="Source config manager not initialized"
+        )
+    return _config_manager
+
+
+@router.get("/sources/config")
+async def list_source_configs():
+    """
+    List all available source configurations.
+
+    Returns sources grouped by category with their embedding tier info.
+    """
+    config_mgr = get_config_manager_instance()
+
+    all_configs = config_mgr.get_all()
+
+    # Group by category
+    by_category = {}
+    for source_id, config in all_configs.items():
+        category = config.category.value
+        if category not in by_category:
+            by_category[category] = []
+        by_category[category].append({
+            "id": config.id,
+            "name": config.name,
+            "description": config.description,
+            "enabled": config.enabled,
+            "embedding_tier": config.embedding_tier.value,
+            "embedding_model": config.get_embedding_model(),
+            "collection": config.get_collection(),
+            "fetcher_type": config.fetcher_type,
+            "base_url": config.base_url,
+        })
+
+    return {
+        "sources": by_category,
+        "total_count": len(all_configs),
+        "enabled_count": len(config_mgr.get_enabled()),
+        "categories": ["code", "devops", "security", "general"],
+        "embedding_tiers": {
+            "high": {"model": "qwen3-embedding", "dimensions": 2560},
+            "standard": {"model": "nomic-embed-text", "dimensions": 768},
+        },
+    }
+
+
+@router.get("/sources/config/{source_id}")
+async def get_source_config(source_id: str):
+    """Get configuration for a specific source."""
+    config_mgr = get_config_manager_instance()
+
+    config = config_mgr.get(source_id)
+    if not config:
+        raise HTTPException(status_code=404, detail=f"Source not found: {source_id}")
+
+    return config.to_dict()
+
+
+@router.post("/sources/config")
+async def add_source_config(request: SourceConfigRequest):
+    """
+    Add a new source configuration.
+
+    This allows adding custom documentation sources via the API/UI.
+    """
+    config_mgr = get_config_manager_instance()
+
+    # Check if source already exists
+    if config_mgr.get(request.id):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Source already exists: {request.id}. Use PUT to update."
+        )
+
+    try:
+        from rag_corpus.source_config import SourceConfig, SourceCategory, EmbeddingTier
+
+        config = SourceConfig(
+            id=request.id,
+            name=request.name,
+            description=request.description,
+            category=SourceCategory(request.category),
+            embedding_tier=EmbeddingTier(request.embedding_tier),
+            enabled=request.enabled,
+            fetcher_type=request.fetcher_type,
+            base_url=request.base_url,
+            sitemap_url=request.sitemap_url,
+            options=request.options,
+            rate_limit_delay=request.rate_limit_delay,
+            max_pages=request.max_pages,
+            url_patterns=request.url_patterns,
+            exclude_patterns=request.exclude_patterns,
+        )
+
+        await config_mgr.add(config)
+
+        return {
+            "message": f"Added source: {request.id}",
+            "config": config.to_dict(),
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to add source config: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/sources/config/{source_id}")
+async def update_source_config(source_id: str, request: SourceConfigRequest):
+    """Update an existing source configuration."""
+    config_mgr = get_config_manager_instance()
+
+    if not config_mgr.get(source_id):
+        raise HTTPException(status_code=404, detail=f"Source not found: {source_id}")
+
+    try:
+        from rag_corpus.source_config import SourceConfig, SourceCategory, EmbeddingTier
+
+        config = SourceConfig(
+            id=source_id,  # Use path param, not body
+            name=request.name,
+            description=request.description,
+            category=SourceCategory(request.category),
+            embedding_tier=EmbeddingTier(request.embedding_tier),
+            enabled=request.enabled,
+            fetcher_type=request.fetcher_type,
+            base_url=request.base_url,
+            sitemap_url=request.sitemap_url,
+            options=request.options,
+            rate_limit_delay=request.rate_limit_delay,
+            max_pages=request.max_pages,
+            url_patterns=request.url_patterns,
+            exclude_patterns=request.exclude_patterns,
+        )
+
+        await config_mgr.update(config)
+
+        return {
+            "message": f"Updated source: {source_id}",
+            "config": config.to_dict(),
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to update source config: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/sources/config/{source_id}")
+async def delete_source_config(source_id: str):
+    """Delete a source configuration."""
+    config_mgr = get_config_manager_instance()
+
+    if not config_mgr.get(source_id):
+        raise HTTPException(status_code=404, detail=f"Source not found: {source_id}")
+
+    try:
+        await config_mgr.delete(source_id)
+        return {"message": f"Deleted source: {source_id}"}
+
+    except Exception as e:
+        logger.error(f"Failed to delete source config: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/sources/config/{source_id}/toggle")
+async def toggle_source(source_id: str, request: SourceToggleRequest):
+    """Enable or disable a source."""
+    config_mgr = get_config_manager_instance()
+
+    if not config_mgr.get(source_id):
+        raise HTTPException(status_code=404, detail=f"Source not found: {source_id}")
+
+    try:
+        await config_mgr.toggle_enabled(source_id, request.enabled)
+
+        return {
+            "message": f"{'Enabled' if request.enabled else 'Disabled'} source: {source_id}",
+            "enabled": request.enabled,
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to toggle source: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/sources/config/reset")
+async def reset_source_configs():
+    """Reset all source configurations to defaults."""
+    config_mgr = get_config_manager_instance()
+
+    try:
+        await config_mgr.reset_to_defaults()
+        return {
+            "message": "Reset all source configurations to defaults",
+            "source_count": len(config_mgr.get_all()),
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to reset configs: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/sources/categories")
+async def get_source_categories():
+    """Get available source categories and their descriptions."""
+    return {
+        "categories": {
+            "code": {
+                "name": "Code/Complex",
+                "description": "Complex technical content, code repositories, Q&A",
+                "embedding_tier": "high",
+                "model": "qwen3-embedding",
+                "dimensions": 2560,
+                "examples": ["kubernetes_docs", "github", "stack_overflow"],
+            },
+            "devops": {
+                "name": "DevOps/Infrastructure",
+                "description": "DevOps tools, CI/CD, infrastructure documentation",
+                "embedding_tier": "standard",
+                "model": "nomic-embed-text",
+                "dimensions": 768,
+                "examples": ["docker_docs", "ansible_docs", "helm_docs", "terraform_docs"],
+            },
+            "security": {
+                "name": "Security/Cyber",
+                "description": "Security frameworks, threat intelligence, playbooks",
+                "embedding_tier": "standard",
+                "model": "nomic-embed-text",
+                "dimensions": 768,
+                "examples": ["mitre_attack", "owasp_docs"],
+            },
+            "general": {
+                "name": "General Documentation",
+                "description": "General programming docs, frameworks, local files",
+                "embedding_tier": "standard",
+                "model": "nomic-embed-text",
+                "dimensions": 768,
+                "examples": ["python_docs", "nextjs_docs", "local_docs"],
+            },
+        },
+    }

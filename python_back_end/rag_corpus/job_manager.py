@@ -289,8 +289,24 @@ class JobManager:
                     logger.info(f"Job {job.id}: Fetching from {source}")
 
                     try:
-                        # Special handling for python_docs source
-                        if source == "python_docs":
+                        # Try to get source config for dynamic fetcher creation
+                        source_config = None
+                        try:
+                            from rag_corpus.source_config import get_config_manager
+                            config_mgr = await get_config_manager()
+                            source_config = config_mgr.get(source)
+                        except Exception:
+                            pass  # Fall back to legacy fetcher selection
+
+                        if source_config:
+                            # Use dynamic config-based fetcher
+                            from .source_fetchers import get_fetcher_for_config
+                            fetcher = get_fetcher_for_config(source_config)
+                            documents = await fetcher.fetch(
+                                keywords=job.keywords, extra_urls=job.extra_urls
+                            )
+                        # Legacy handling for python_docs source
+                        elif source == "python_docs":
                             from .source_fetchers import PythonDocsFetcher
                             fetcher = PythonDocsFetcher(
                                 python_libraries=job.python_libraries
@@ -300,7 +316,7 @@ class JobManager:
                                 extra_urls=job.extra_urls,
                                 python_libraries=job.python_libraries,
                             )
-                        # Special handling for local_docs source
+                        # Legacy handling for local_docs source
                         elif source == "local_docs":
                             from .source_fetchers import LocalDocsFetcher
                             fetcher = LocalDocsFetcher(
