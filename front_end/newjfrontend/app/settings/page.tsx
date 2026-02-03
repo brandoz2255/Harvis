@@ -31,10 +31,8 @@ import {
     rebuildRagSource,
     clearRagSource,
     getRagHealth,
-    getOllamaModels,
     type RagJob,
     type SourceStats,
-    type OllamaModel,
 } from "@/lib/rag"
 
 // Source configuration
@@ -129,11 +127,6 @@ export default function SettingsPage() {
     const [rebuildingSource, setRebuildingSource] = useState<string | null>(null)
     const [clearingSource, setClearingSource] = useState<string | null>(null)
 
-    // Embedding model state
-    const [availableModels, setAvailableModels] = useState<OllamaModel[]>([])
-    const [selectedModel, setSelectedModel] = useState<string>("qwen3-embedding:4b-q4_K_M")
-    const [isLoadingModels, setIsLoadingModels] = useState(true)
-
     // Load source stats
     const loadStats = useCallback(async () => {
         try {
@@ -153,28 +146,6 @@ export default function SettingsPage() {
             setHealthStatus(health.status)
         } catch {
             setHealthStatus("unavailable")
-        }
-    }, [])
-
-    // Load available Ollama models
-    const loadModels = useCallback(async () => {
-        try {
-            const response = await getOllamaModels()
-            setAvailableModels(response.models)
-
-            // Prefer Qwen3 if available, otherwise backend default
-            const hasQwen = response.models.some(m => m.name.includes("qwen3"))
-            if (hasQwen) {
-                // Keep the default state or find specific qwen model
-                const qwenModel = response.models.find(m => m.name === "qwen3-embedding:4b-q4_K_M")?.name
-                if (qwenModel) setSelectedModel(qwenModel)
-            } else {
-                setSelectedModel(response.current_model)
-            }
-        } catch (error) {
-            console.error("Failed to load models:", error)
-        } finally {
-            setIsLoadingModels(false)
         }
     }, [])
 
@@ -205,8 +176,7 @@ export default function SettingsPage() {
     useEffect(() => {
         loadStats()
         checkHealth()
-        loadModels()
-    }, [loadStats, checkHealth, loadModels])
+    }, [loadStats, checkHealth])
 
     // Source toggle
     const toggleSource = (source: SourceKey) => {
@@ -304,7 +274,6 @@ export default function SettingsPage() {
                 python_libraries: pythonLibraries.length > 0 ? pythonLibraries : undefined,
                 docker_topics: dockerTopics.length > 0 ? dockerTopics : undefined,
                 kubernetes_topics: kubernetesTopics.length > 0 ? kubernetesTopics : undefined,
-                embedding_model: selectedModel,
             })
 
             // Get initial job status
@@ -694,44 +663,6 @@ export default function SettingsPage() {
                                     </div>
                                 ))}
                             </div>
-                        )}
-                    </div>
-
-                    {/* Embedding Model Selector */}
-                    <div className="space-y-3 p-4 rounded-lg border border-border bg-muted/30">
-                        <label className="text-sm font-medium flex items-center gap-2">
-                            <Database className="h-4 w-4 text-cyan-400" />
-                            Embedding Model
-                        </label>
-                        <p className="text-xs text-muted-foreground">
-                            Select the Ollama model to use for generating embeddings
-                        </p>
-                        {isLoadingModels ? (
-                            <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                                <Loader2 className="h-4 w-4 animate-spin" />
-                                Loading models...
-                            </div>
-                        ) : availableModels.length > 0 ? (
-                            <select
-                                value={selectedModel}
-                                onChange={(e) => setSelectedModel(e.target.value)}
-                                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
-                            >
-                                {availableModels.map((model) => (
-                                    <option key={model.name} value={model.name}>
-                                        {model.name} {model.is_embedding_model && "⭐"} ({model.size_gb} GB)
-                                    </option>
-                                ))}
-                            </select>
-                        ) : (
-                            <p className="text-sm text-yellow-400">
-                                No models found. Make sure Ollama is running and has embedding models installed.
-                            </p>
-                        )}
-                        {availableModels.filter(m => m.is_embedding_model).length === 0 && availableModels.length > 0 && (
-                            <p className="text-xs text-yellow-400">
-                                ⚠️ No specialized embedding models detected. Consider running: <code className="bg-muted px-1 rounded">ollama pull nomic-embed-text</code>
-                            </p>
                         )}
                     </div>
 

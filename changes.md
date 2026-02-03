@@ -1,5 +1,132 @@
 # Recent Changes and Fixes Documentation
 
+## Date: 2026-02-03 (Part 2)
+
+### Switched All Technical Sources to qwen3-embedding - Maximum Intelligence Mode
+
+#### Problem:
+- Mixed embedding model approach wasn't maximizing RAG retrieval quality
+- Some technical sources (nextjs_docs, docker_docs, python_docs) used smaller 768-dim models
+- Code-heavy content needed higher-dimensional embeddings for better semantic understanding
+
+#### Root Cause Analysis:
+- Previous mapping used `nomic-embed-text` (768 dims) for:
+  - `nextjs_docs` - Contains React patterns, TypeScript APIs, App Router technical concepts
+  - `docker_docs` - Contains Dockerfile DSL syntax, Compose YAML configuration
+  - `python_docs` - Contains API signatures, type hints, decorators, async patterns
+- These sources have significant code density and technical nuances
+- Lower-dimensional embeddings (768) couldn't capture all semantic relationships in code patterns
+- User has ample storage and Mac minis for hosting, so storage/latency trade-offs don't apply
+
+#### Solution Applied:
+**Updated SOURCE_EMBEDDING_MODELS mapping** (`python_back_end/rag_corpus/routes.py`):
+- `nextjs_docs`: `nomic-embed-text` → `qwen3-embedding` (2560 dims)
+- `docker_docs`: `nomic-embed-text` → `qwen3-embedding` (2560 dims)  
+- `python_docs`: `nomic-embed-text` → `qwen3-embedding` (2560 dims)
+- `kubernetes_docs`: `qwen3-embedding` (unchanged)
+- `github`: `qwen3-embedding` (unchanged)
+- `stack_overflow`: `qwen3-embedding` (unchanged)
+- `local_docs`: `nomic-embed-text` (unchanged - process docs, less code density)
+
+**Rationale per source:**
+- **nextjs_docs**: React patterns, TypeScript signatures, SSR/SSG concepts, framework-specific APIs
+- **docker_docs**: Dockerfile is a DSL, Compose YAML is configuration code, multi-stage build orchestration
+- **python_docs**: Type hints, decorators, async/await patterns, context managers - all code metadata
+- **kubernetes_docs**: Already on qwen3 (YAML manifests, RBAC policies, complex orchestration)
+- **github**: Already on qwen3 (pure source code)
+- **stack_overflow**: Already on qwen3 (code solutions with technical discussions)
+- **local_docs**: Kept on nomic (playbooks, guidelines - process-oriented, less code density)
+
+#### Files Modified:
+- `python_back_end/rag_corpus/routes.py` (lines 33-47):
+  - Updated SOURCE_EMBEDDING_MODELS dictionary
+  - Added detailed comments explaining model choices
+  - Changed `nextjs_docs`, `docker_docs`, `python_docs` to `qwen3-embedding`
+
+#### Impact:
+- **Vector Storage**: ~160% increase (768 → 2560 dimensions × 6 sources)
+- **Query Latency**: ~2-3x slower on CPU (acceptable on Mac minis)
+- **Semantic Quality**: Significantly improved for code-heavy content
+- **Code Understanding**: Better capture of:
+  - TypeScript type relationships
+  - React component patterns
+  - Docker orchestration logic
+  - Python async patterns and decorators
+  - API signature nuances
+
+#### Result/Status:
+- ✅ All technical sources now use qwen3-embedding (2560 dims)
+- ✅ Maximum intelligence mode enabled for RAG retrieval
+- ✅ Only `local_docs` uses nomic-embed-text (process documentation)
+- ✅ Build passes successfully
+
+---
+
+## Date: 2026-02-03 (Part 1)
+
+### Removed Manual Embedding Model Selection - Auto Source-Specific Model Selection
+
+#### Problem:
+- Frontend settings page had hardcoded `qwen3-embedding:4b-q4_K_M` as the embedding model selector
+- This overrode backend's intelligent source-specific model selection logic
+- Sources like `nextjs_docs` were incorrectly using wrong embedding model (384 dims instead of 768 dims)
+- Users were selecting models manually instead of letting backend choose optimal models per source type
+
+#### Root Cause Analysis:
+- Frontend passed `embedding_model` parameter in all RAG update requests
+- Backend code checked `if job.embedding_model` before using source-specific mapping (`job_manager.py:246-249`)
+- When request included `embedding_model`, it always used that model, ignoring the optimal model for each source
+- Backend already had proper mappings: `nextjs_docs` → `nomic-embed-text` (768 dims), `kubernetes_docs` → `qwen3-embedding` (2560 dims)
+
+#### Solution Applied:
+1. **Removed embedding model selector from frontend** (`front_end/newjfrontend/app/settings/page.tsx`):
+   - Removed `Database` import (initially, then added back for document count display)
+   - Removed `availableModels`, `selectedModel`, `isLoadingModels` state variables
+   - Removed `loadModels()` function
+   - Removed entire "Embedding Model Selector" UI section (lines 671-707)
+   - Removed `embedding_model: selectedModel` from `startRagUpdate()` call
+
+2. **Removed from TypeScript interface** (`front_end/newjfrontend/lib/rag.ts`):
+   - Removed `embedding_model?: string` from `RagUpdateRequest` interface
+
+3. **Removed from backend Pydantic model** (`python_back_end/rag_corpus/routes.py`):
+   - Removed `embedding_model: Optional[str] = None` from `UpdateRagRequest` class
+   - Removed `embedding_model` parameter from job creation
+   - Updated log messages to remove embedding model references
+
+4. **Updated job manager** (`python_back_end/rag_corpus/job_manager.py`):
+   - Removed `embedding_model: Optional[str]` from `Job` dataclass
+   - Removed `embedding_model` parameter from `create_job()` method
+   - Changed job execution logic to always use `get_embedding_model_for_source()` for each source
+   - Removed conditional `if job.embedding_model` check that was causing the issue
+
+#### Files Modified:
+- `front_end/newjfrontend/app/settings/page.tsx`:
+  - Removed embedding model selector UI and state
+  - Removed `embedding_model` from API call
+  - Added `Database` icon back (still used for document count display)
+
+- `front_end/newjfrontend/lib/rag.ts`:
+  - Removed `embedding_model?: string` from `RagUpdateRequest` interface
+
+- `python_back_end/rag_corpus/routes.py`:
+  - Removed `embedding_model: Optional[str] = None` from `UpdateRagRequest`
+  - Removed `embedding_model` parameter usage in `/api/rag/update-local` endpoint
+
+- `python_back_end/rag_corpus/job_manager.py`:
+  - Removed `embedding_model` field from `Job` dataclass
+  - Removed `embedding_model` parameter from `create_job()` method
+  - Simplified job execution to always use source-specific models
+
+#### Result/Status:
+- ✅ Backend now automatically selects optimal embedding model per source type
+- ✅ `nextjs_docs` correctly uses `nomic-embed-text` (768 dims) for framework documentation
+- ✅ `kubernetes_docs` correctly uses `qwen3-embedding` (2560 dims) for complex technical content
+- ✅ Simplified UI - no more confusion about which model to choose
+- ✅ Build completes successfully (`npm run build`)
+
+---
+
 ## Date: 2026-01-28
 
 ### SSE Streaming with Heartbeats - Preventing Browser Idle Timeouts

@@ -28,23 +28,25 @@ _config_manager = None  # Dynamic source configuration
 # Configuration
 RAG_DIR = os.getenv("RAG_CORPUS_DIR", "/app/rag_corpus_data")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
-EMBEDDING_MODEL = os.getenv("RAG_EMBEDDING_MODEL", "nomic-embed-text")  # 768 dims, default
+EMBEDDING_MODEL = os.getenv(
+    "RAG_EMBEDDING_MODEL", "nomic-embed-text"
+)  # 768 dims, default
 
 # Per-source embedding model configuration
-# qwen3-embedding: 2560 dims - for complex technical/code content
-# nomic-embed-text: 768 dims - for general devops/docs
+# qwen3-embedding: 2560 dims - for complex technical/code content (MAX INTELLIGENCE)
+# nomic-embed-text: 768 dims - for general process documentation
 SOURCE_EMBEDDING_MODELS = {
-    # Complex/Code-heavy sources → qwen3-embedding (full)
-    "kubernetes_docs": "qwen3-embedding",      # Complex edge cases, YAML configs
-    "github": "qwen3-embedding",               # Code repositories
-    "stack_overflow": "qwen3-embedding",       # Code Q&A with nuanced answers
-
-    # DevOps/General docs → nomic-embed-text
-    "docker_docs": "nomic-embed-text",         # DevOps containerization
-    "python_docs": "nomic-embed-text",         # API documentation
-    "nextjs_docs": "nomic-embed-text",         # Framework docs
-    "local_docs": "nomic-embed-text",          # Playbooks, guides, cyber docs
+    # Technical/Code-heavy sources → qwen3-embedding (full 2560 dims)
+    "kubernetes_docs": "qwen3-embedding",  # Complex edge cases, YAML configs
+    "github": "qwen3-embedding",  # Code repositories
+    "stack_overflow": "qwen3-embedding",  # Code Q&A with nuanced answers
+    "docker_docs": "qwen3-embedding",  # Dockerfile DSL, Compose YAML, orchestration
+    "python_docs": "qwen3-embedding",  # API signatures, type hints, decorators, async patterns
+    "nextjs_docs": "qwen3-embedding",  # React patterns, TypeScript APIs, App Router concepts
+    # Process/General docs → nomic-embed-text (768 dims)
+    "local_docs": "nomic-embed-text",  # Playbooks, guidelines, best practices (less code density)
 }
+
 
 def get_embedding_model_for_source(source: str) -> str:
     """Get the appropriate embedding model for a source type."""
@@ -56,11 +58,13 @@ def get_embedding_model_for_source(source: str) -> str:
     # Fallback to static config
     return SOURCE_EMBEDDING_MODELS.get(source, EMBEDDING_MODEL)
 
+
 # Collection names based on embedding model (different dims need separate tables)
 EMBEDDING_COLLECTIONS = {
-    "qwen3-embedding": "local_rag_corpus_code",    # 2560 dims - code/complex
-    "nomic-embed-text": "local_rag_corpus_docs",   # 768 dims - general docs
+    "qwen3-embedding": "local_rag_corpus_code",  # 2560 dims - code/complex
+    "nomic-embed-text": "local_rag_corpus_docs",  # 768 dims - general docs
 }
+
 
 def get_collection_for_source(source: str) -> str:
     """Get the vector collection name for a source type."""
@@ -72,6 +76,7 @@ def get_collection_for_source(source: str) -> str:
     # Fallback to static config
     model = get_embedding_model_for_source(source)
     return EMBEDDING_COLLECTIONS.get(model, "local_rag_corpus_docs")
+
 
 def get_valid_sources() -> List[str]:
     """Get list of all valid source IDs."""
@@ -98,7 +103,6 @@ class UpdateRagRequest(BaseModel):
     kubernetes_topics: Optional[List[str]] = (
         None  # For kubernetes_docs source (concepts, tasks, networking, etc.)
     )
-    embedding_model: Optional[str] = None  # Ollama embedding model to use
 
 
 class RebuildSourceRequest(BaseModel):
@@ -144,6 +148,7 @@ class SourceConfigRequest(BaseModel):
 
 class SourceToggleRequest(BaseModel):
     """Request to enable/disable a source."""
+
     enabled: bool
 
 
@@ -180,7 +185,9 @@ async def initialize_rag_corpus(db_pool) -> bool:
                 _embedding_adapters[model_name] = EmbeddingAdapter(
                     model_name=model_name, ollama_url=OLLAMA_URL
                 )
-                logger.info(f"Initialized embedding adapter: {model_name} ({config['dimensions']} dims)")
+                logger.info(
+                    f"Initialized embedding adapter: {model_name} ({config['dimensions']} dims)"
+                )
 
         # Initialize vector DB adapters for each collection
         for tier, config in EMBEDDING_TIER_CONFIG.items():
@@ -209,6 +216,7 @@ async def initialize_rag_corpus(db_pool) -> bool:
     except Exception as e:
         logger.error(f"❌ Failed to initialize RAG corpus: {e}")
         import traceback
+
         traceback.print_exc()
         return False
 
@@ -231,7 +239,9 @@ def get_vectordb_adapter(collection: str = None):
     if collection:
         adapter = _vectordb_adapters.get(collection)
         if not adapter:
-            raise HTTPException(status_code=404, detail=f"Collection not found: {collection}")
+            raise HTTPException(
+                status_code=404, detail=f"Collection not found: {collection}"
+            )
         return adapter
     # Return first adapter as default (for backwards compatibility)
     return next(iter(_vectordb_adapters.values()))
@@ -287,11 +297,9 @@ async def start_rag_update(request: UpdateRagRequest):
 
     try:
         # Log what we received
-        logger.info(
-            f"RAG Update Request - sources: {request.sources}, embedding_model: {request.embedding_model}"
-        )
+        logger.info(f"RAG Update Request - sources: {request.sources}")
 
-        # Create job
+        # Create job - backend automatically selects optimal embedding model per source
         job_id = await job_manager.create_job(
             sources=request.sources,
             keywords=request.keywords,
@@ -299,15 +307,12 @@ async def start_rag_update(request: UpdateRagRequest):
             python_libraries=request.python_libraries,
             docker_topics=request.docker_topics,
             kubernetes_topics=request.kubernetes_topics,
-            embedding_model=request.embedding_model,
         )
 
         # Start background execution
         asyncio.create_task(job_manager.run_job_async(job_id))
 
-        logger.info(
-            f"Started RAG update job {job_id} for sources: {request.sources} with embedding_model: {request.embedding_model}"
-        )
+        logger.info(f"Started RAG update job {job_id} for sources: {request.sources}")
 
         return JobResponse(
             job_id=job_id,
@@ -408,7 +413,9 @@ async def rebuild_source(request: RebuildSourceRequest):
 
         # Delete existing vectors
         deleted = await vectordb.delete_by_source(request.source)
-        logger.info(f"Deleted {deleted} vectors for source {request.source} from {collection_name}")
+        logger.info(
+            f"Deleted {deleted} vectors for source {request.source} from {collection_name}"
+        )
 
         # Start new job (will auto-select correct model based on source)
         job_id = await job_manager.create_job(sources=[request.source])
@@ -458,7 +465,12 @@ async def clear_source(source: str):
 @router.get("/health")
 async def rag_health_check():
     """Check health of RAG corpus services (multi-model)."""
-    health = {"status": "healthy", "services": {}, "collections": {}, "embedding_models": {}}
+    health = {
+        "status": "healthy",
+        "services": {},
+        "collections": {},
+        "embedding_models": {},
+    }
 
     # Check job manager
     try:
@@ -490,7 +502,10 @@ async def rag_health_check():
             embed_health = await adapter.check_health()
             health["embedding_models"][model_name] = embed_health
         except Exception as e:
-            health["embedding_models"][model_name] = {"status": "error", "error": str(e)}
+            health["embedding_models"][model_name] = {
+                "status": "error",
+                "error": str(e),
+            }
             health["status"] = "degraded"
 
     health["services"]["embedding"] = "ok" if _embedding_adapters else "not_initialized"
@@ -628,17 +643,19 @@ async def list_source_configs():
         category = config.category.value
         if category not in by_category:
             by_category[category] = []
-        by_category[category].append({
-            "id": config.id,
-            "name": config.name,
-            "description": config.description,
-            "enabled": config.enabled,
-            "embedding_tier": config.embedding_tier.value,
-            "embedding_model": config.get_embedding_model(),
-            "collection": config.get_collection(),
-            "fetcher_type": config.fetcher_type,
-            "base_url": config.base_url,
-        })
+        by_category[category].append(
+            {
+                "id": config.id,
+                "name": config.name,
+                "description": config.description,
+                "enabled": config.enabled,
+                "embedding_tier": config.embedding_tier.value,
+                "embedding_model": config.get_embedding_model(),
+                "collection": config.get_collection(),
+                "fetcher_type": config.fetcher_type,
+                "base_url": config.base_url,
+            }
+        )
 
     return {
         "sources": by_category,
@@ -677,7 +694,7 @@ async def add_source_config(request: SourceConfigRequest):
     if config_mgr.get(request.id):
         raise HTTPException(
             status_code=400,
-            detail=f"Source already exists: {request.id}. Use PUT to update."
+            detail=f"Source already exists: {request.id}. Use PUT to update.",
         )
 
     try:
@@ -826,7 +843,12 @@ async def get_source_categories():
                 "embedding_tier": "standard",
                 "model": "nomic-embed-text",
                 "dimensions": 768,
-                "examples": ["docker_docs", "ansible_docs", "helm_docs", "terraform_docs"],
+                "examples": [
+                    "docker_docs",
+                    "ansible_docs",
+                    "helm_docs",
+                    "terraform_docs",
+                ],
             },
             "security": {
                 "name": "Security/Cyber",

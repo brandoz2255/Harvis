@@ -39,7 +39,6 @@ class Job:
     kubernetes_topics: List[str] = field(
         default_factory=list
     )  # For kubernetes_docs source
-    embedding_model: Optional[str] = None  # Ollama model to use for embeddings
     progress: Dict[str, Any] = field(default_factory=dict)
     error: Optional[str] = None
     created_at: datetime = field(default_factory=datetime.utcnow)
@@ -144,7 +143,6 @@ class JobManager:
         python_libraries: Optional[List[str]] = None,
         docker_topics: Optional[List[str]] = None,
         kubernetes_topics: Optional[List[str]] = None,
-        embedding_model: Optional[str] = None,
     ) -> str:
         """
         Create a new RAG update job.
@@ -156,7 +154,6 @@ class JobManager:
             python_libraries: Optional Python library names for python_docs source
             docker_topics: Optional Docker topics for docker_docs source (engine, compose, swarm, etc.)
             kubernetes_topics: Optional Kubernetes topics for kubernetes_docs source (concepts, tasks, networking, etc.)
-            embedding_model: Optional Ollama model for embeddings
 
         Returns:
             Job ID
@@ -171,7 +168,6 @@ class JobManager:
             python_libraries=python_libraries or [],
             docker_topics=docker_topics or [],
             kubernetes_topics=kubernetes_topics or [],
-            embedding_model=embedding_model or self.embedding_model,
             progress={
                 "total_docs": 0,
                 "processed": 0,
@@ -180,9 +176,7 @@ class JobManager:
             },
         )
         self._jobs[job_id] = job
-        logger.info(
-            f"Created RAG update job {job_id} for sources: {sources} with model: {job.embedding_model}"
-        )
+        logger.info(f"Created RAG update job {job_id} for sources: {sources}")
         return job_id
 
     def get_job(self, job_id: str) -> Optional[Job]:
@@ -231,37 +225,43 @@ class JobManager:
 
             # Import source-to-model mapping
             try:
-                from rag_corpus.routes import get_embedding_model_for_source, get_collection_for_source
+                from rag_corpus.routes import (
+                    get_embedding_model_for_source,
+                    get_collection_for_source,
+                )
             except ImportError:
-                # Fallback if routes not available
+                # Fallback if routes not available - use default model
                 def get_embedding_model_for_source(s):
-                    return job.embedding_model or self.embedding_model
+                    return self.embedding_model
+
                 def get_collection_for_source(s):
                     return "local_rag_corpus"
 
             # Group sources by their embedding model
             sources_by_model = {}
             for source in job.sources:
-                # Allow job-level override, otherwise use source-specific model
-                if job.embedding_model:
-                    model = job.embedding_model
-                else:
-                    model = get_embedding_model_for_source(source)
+                # Always use source-specific model for optimal embeddings
+                model = get_embedding_model_for_source(source)
 
                 if model not in sources_by_model:
                     sources_by_model[model] = []
                 sources_by_model[model].append(source)
 
-            logger.info(f"Job {job.id}: Processing sources grouped by model: {sources_by_model}")
+            logger.info(
+                f"Job {job.id}: Processing sources grouped by model: {sources_by_model}"
+            )
 
             total_processed = 0
 
             # Process each model group separately
             for model_name, sources in sources_by_model.items():
-                logger.info(f"Job {job.id}: Processing {sources} with model {model_name}")
+                logger.info(
+                    f"Job {job.id}: Processing {sources} with model {model_name}"
+                )
 
                 # Create embedding adapter for this model
                 from .embedding_adapter import EmbeddingAdapter
+
                 embedding_adapter = EmbeddingAdapter(
                     model_name=model_name,
                     ollama_url=self.ollama_url,
@@ -272,12 +272,15 @@ class JobManager:
 
                 # Create vectordb adapter for this collection
                 from .vectordb_adapter import VectorDBAdapter
+
                 vectordb_adapter = VectorDBAdapter(
                     db_pool=self.db_pool,
                     collection_name=collection_name,
                 )
 
-                logger.info(f"Job {job.id}: Using model '{model_name}' → collection '{collection_name}'")
+                logger.info(
+                    f"Job {job.id}: Using model '{model_name}' → collection '{collection_name}'"
+                )
 
                 all_chunks = []
 
@@ -293,6 +296,7 @@ class JobManager:
                         source_config = None
                         try:
                             from rag_corpus.source_config import get_config_manager
+
                             config_mgr = await get_config_manager()
                             source_config = config_mgr.get(source)
                         except Exception:
@@ -301,6 +305,7 @@ class JobManager:
                         if source_config:
                             # Use dynamic config-based fetcher
                             from .source_fetchers import get_fetcher_for_config
+
                             fetcher = get_fetcher_for_config(source_config)
                             documents = await fetcher.fetch(
                                 keywords=job.keywords, extra_urls=job.extra_urls
@@ -308,6 +313,7 @@ class JobManager:
                         # Legacy handling for python_docs source
                         elif source == "python_docs":
                             from .source_fetchers import PythonDocsFetcher
+
                             fetcher = PythonDocsFetcher(
                                 python_libraries=job.python_libraries
                             )
@@ -319,6 +325,7 @@ class JobManager:
                         # Legacy handling for local_docs source
                         elif source == "local_docs":
                             from .source_fetchers import LocalDocsFetcher
+
                             fetcher = LocalDocsFetcher(
                                 docs_dirs=[
                                     self.rag_dir,
@@ -349,10 +356,14 @@ class JobManager:
                         # Continue with other sources
 
                 if not all_chunks:
-                    logger.warning(f"Job {job.id}: No chunks for model group {model_name}")
+                    logger.warning(
+                        f"Job {job.id}: No chunks for model group {model_name}"
+                    )
                     continue
 
-                job.progress["total_docs"] = job.progress.get("total_docs", 0) + len(all_chunks)
+                job.progress["total_docs"] = job.progress.get("total_docs", 0) + len(
+                    all_chunks
+                )
                 job.progress["current_phase"] = "embedding"
                 job.updated_at = datetime.utcnow()
 

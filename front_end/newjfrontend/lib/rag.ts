@@ -15,7 +15,6 @@ export interface RagUpdateRequest {
     python_libraries?: string[];
     docker_topics?: string[];      // For docker_docs source (engine, compose, swarm, etc.)
     kubernetes_topics?: string[];  // For kubernetes_docs source (concepts, tasks, networking, etc.)
-    embedding_model?: string;
 }
 
 export interface JobProgress {
