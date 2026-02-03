@@ -2,16 +2,17 @@
 RAG Corpus Manager Module
 
 This module provides functionality for managing local RAG corpus including:
-- Source fetching (Next.js docs, Stack Overflow, GitHub, Python docs)
+- Dynamic source configuration (DevOps, Security, Code, General)
+- Source fetching (K8s, Docker, Ansible, Helm, GitLab, GitHub, etc.)
 - Document chunking and processing
-- Embedding generation via Ollama or HuggingFace
-- Vector database operations with pgvector
+- Embedding generation via Ollama (multi-model support)
+- Vector database operations with pgvector (multi-collection)
 
 Usage:
-    from rag_corpus import JobManager, SourceStats
-    
+    from rag_corpus import JobManager, SourceConfigManager
+
     job_manager = JobManager(db_pool, rag_dir)
-    job_id = await job_manager.create_job(sources=["nextjs_docs"])
+    job_id = await job_manager.create_job(sources=["kubernetes_docs", "ansible_docs"])
     await job_manager.run_job_async(job_id)
 """
 
@@ -22,11 +23,30 @@ from .source_fetchers import (
     StackOverflowFetcher,
     GitHubFetcher,
     PythonDocsFetcher,
-    get_fetcher
+    DockerDocsFetcher,
+    KubernetesDocsFetcher,
+    GenericDocsFetcher,
+    get_fetcher,
+    get_fetcher_for_config,
 )
 from .chunker import DocumentChunker, Chunk, RawDocument
 from .embedding_adapter import EmbeddingAdapter
-from .vectordb_adapter import VectorDBAdapter, VectorRecord, SearchResult, LocalRAGRetriever
+from .vectordb_adapter import (
+    VectorDBAdapter,
+    VectorRecord,
+    SearchResult,
+    LocalRAGRetriever,
+    MultiCollectionRetriever,
+)
+from .source_config import (
+    SourceConfig,
+    SourceCategory,
+    EmbeddingTier,
+    SourceConfigManager,
+    get_config_manager,
+    DEFAULT_SOURCES,
+    EMBEDDING_TIER_CONFIG,
+)
 from .routes import router as rag_router, initialize_rag_corpus
 
 __all__ = [
@@ -40,7 +60,11 @@ __all__ = [
     "StackOverflowFetcher",
     "GitHubFetcher",
     "PythonDocsFetcher",
+    "DockerDocsFetcher",
+    "KubernetesDocsFetcher",
+    "GenericDocsFetcher",
     "get_fetcher",
+    "get_fetcher_for_config",
     # Processing
     "DocumentChunker",
     "Chunk",
@@ -51,6 +75,15 @@ __all__ = [
     "VectorRecord",
     "SearchResult",
     "LocalRAGRetriever",
+    "MultiCollectionRetriever",
+    # Source Configuration
+    "SourceConfig",
+    "SourceCategory",
+    "EmbeddingTier",
+    "SourceConfigManager",
+    "get_config_manager",
+    "DEFAULT_SOURCES",
+    "EMBEDDING_TIER_CONFIG",
     # API
     "rag_router",
     "initialize_rag_corpus",
