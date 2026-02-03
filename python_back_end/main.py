@@ -270,8 +270,13 @@ try:
         rag_router,
         initialize_rag_corpus,
         LocalRAGRetriever,
+        MultiCollectionRetriever,
         VectorDBAdapter,
         EmbeddingAdapter,
+        get_all_vectordb_adapters,
+        get_all_embedding_adapters,
+        get_config_manager_instance,
+        EMBEDDING_COLLECTIONS,
     )
 
     RAG_CORPUS_AVAILABLE = True
@@ -347,55 +352,58 @@ async def lifespan(app: FastAPI):
         if RAG_CORPUS_AVAILABLE:
             global local_rag_retriever
             try:
-                # Initialize embedding adapter with correct Ollama URL
-                ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11434")
-                logger.info(
-                    f"🔗 Initializing EmbeddingAdapter with Ollama URL: {ollama_url}"
-                )
-                embedding_adapter = EmbeddingAdapter(ollama_url=ollama_url)
-
-                # Initialize vector DB adapter with db_pool (not embedding_adapter)
-                # IMPORTANT: Must match the collection name used by job_manager ("local_rag_corpus")
-                vector_db = VectorDBAdapter(
-                    db_pool=app.state.pg_pool,
-                    collection_name="local_rag_corpus",
-                    embedding_dimension=4096,  # qwen3-embedding dimension
-                )
-
-                # Initialize retriever with both vectordb and embedding adapters
-                local_rag_retriever = LocalRAGRetriever(
-                    vectordb_adapter=vector_db,
-                    embedding_adapter=embedding_adapter,
-                    default_k=5,
-                    score_threshold=0.5,
-                )
-                logger.info("✅ Global RAG retriever initialized")
-
-                # Initialize RAG corpus services (JobManager, VectorDBAdapter for routes)
+                # Initialize RAG corpus services first to setup globals
                 logger.info("🔄 Initializing RAG corpus services...")
                 rag_initialized = await initialize_rag_corpus(app.state.pg_pool)
+                
                 if rag_initialized:
                     logger.info("✅ RAG corpus services initialized successfully")
+                    
+                    # Get adapters and config from initialized module
+                    vectordb_adapters = get_all_vectordb_adapters()
+                    embedding_adapters = get_all_embedding_adapters()
+                    config_mgr = get_config_manager_instance()
+                    
+                    # Build mappings
+                    source_model_mapping = config_mgr.get_source_model_mapping()
+                    model_collection_mapping = EMBEDDING_COLLECTIONS
+                    
+                    # Initialize multi-collection retriever
+                    local_rag_retriever = MultiCollectionRetriever(
+                        vectordb_adapters=vectordb_adapters,
+                        embedding_adapters=embedding_adapters,
+                        source_to_model=source_model_mapping,
+                        model_to_collection=model_collection_mapping,
+                        default_k=5,
+                        score_threshold=0.5
+                    )
+                    logger.info("✅ Global Multi-Collection RAG retriever initialized")
 
                     # Verify documents are indexed
                     try:
-                        stats = await vector_db.get_source_stats()
-                        total_docs = sum(stats.values())
-                        logger.info(
-                            f"📊 RAG: Vector DB contains {total_docs} total documents"
-                        )
-
-                        # Check for Docker and K8s docs specifically
-                        docker_count = stats.get("docker_docs", 0)
-                        k8s_count = stats.get("kubernetes_docs", 0)
-                        logger.info(
-                            f"📊 RAG: Docker docs: {docker_count}, K8s docs: {k8s_count}"
-                        )
-                        logger.info(f"📊 RAG: All sources: {stats}")
+                        total_docs = 0
+                        stats_summary = {}
+                        
+                        for name, adapter in vectordb_adapters.items():
+                            try:
+                                stats = await adapter.get_source_stats()
+                                count = sum(stats.values())
+                                total_docs += count
+                                stats_summary[name] = stats
+                            except Exception as inner_e:
+                                logger.warning(f"Failed to get stats for {name}: {inner_e}")
+                            
+                        logger.info(f"📊 RAG: Vector DB contains {total_docs} total documents across {len(vectordb_adapters)} collections")
+                        logger.info(f"📊 RAG: Stats per collection: {stats_summary}")
                     except Exception as e:
                         logger.warning(f"⚠️ Could not get document stats: {e}")
+                else:
+                    logger.error("❌ RAG services failed to initialize")
+
             except Exception as e:
                 logger.error(f"❌ Failed to initialize global RAG retriever: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
 
     except Exception as e:
         logger.error(f"❌ Database connection failed: {e}")

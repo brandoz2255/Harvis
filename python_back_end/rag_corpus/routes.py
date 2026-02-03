@@ -270,6 +270,15 @@ def get_embedding_adapter(model: str = None):
     return next(iter(_embedding_adapters.values()))
 
 
+def get_all_embedding_adapters():
+    """Get all embedding adapters."""
+    if not _embedding_adapters:
+        raise HTTPException(
+            status_code=503, detail="RAG corpus service not initialized"
+        )
+    return _embedding_adapters
+
+
 # ─── Routes ───────────────────────────────────────────────────────────────────
 
 
@@ -538,7 +547,7 @@ async def get_rag_config():
             "high": {
                 "model": "qwen3-embedding",
                 "collection": "local_rag_corpus_code",
-                "dimensions": 2560,
+                "dimensions": 4096,
                 "description": "For complex code/technical content",
             },
             "standard": {

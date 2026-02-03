@@ -47,7 +47,14 @@ from .source_config import (
     DEFAULT_SOURCES,
     EMBEDDING_TIER_CONFIG,
 )
-from .routes import router as rag_router, initialize_rag_corpus
+from .routes import (
+    router as rag_router,
+    initialize_rag_corpus,
+    get_all_vectordb_adapters,
+    get_all_embedding_adapters,
+    get_config_manager_instance,
+    EMBEDDING_COLLECTIONS,
+)
 
 __all__ = [
     # Job Management
@@ -87,5 +94,9 @@ __all__ = [
     # API
     "rag_router",
     "initialize_rag_corpus",
+    "get_all_vectordb_adapters",
+    "get_all_embedding_adapters",
+    "get_config_manager_instance",
+    "EMBEDDING_COLLECTIONS",
 ]
 
