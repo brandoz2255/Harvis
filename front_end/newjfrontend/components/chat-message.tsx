@@ -1,8 +1,6 @@
 "use client"
 
-import React from "react"
-
-import { useState } from "react"
+import React, { useState, useMemo } from "react"
 import { cn } from "@/lib/utils"
 import {
   Copy,
@@ -26,11 +24,12 @@ import { Highlight, themes } from "prism-react-renderer"
 
 // Utility to separate thinking/reasoning from final answer
 // Supports both <think>...</think> and <thinking>...</thinking> formats
+// Handles partial tags during streaming
 function separateThinkingFromContent(content: string): { reasoning: string; finalAnswer: string } {
   let reasoning = ''
   let remainingContent = content
 
-  // Match both <think>...</think> and <thinking>...</thinking> tags (case insensitive)
+  // 1. Handle complete blocks
   const patterns = [
     /<think>([\s\S]*?)<\/think>/gi,
     /<thinking>([\s\S]*?)<\/thinking>/gi,
@@ -44,6 +43,29 @@ function separateThinkingFromContent(content: string): { reasoning: string; fina
     }
     // Remove tags from content
     remainingContent = remainingContent.replace(regex, '')
+  }
+
+  // 2. Handle open/unclosed blocks (common during streaming)
+  const openTags = [
+    { start: '<think>', end: '</think>' },
+    { start: '<thinking>', end: '</thinking>' }
+  ]
+
+  for (const tag of openTags) {
+    const startIndex = remainingContent.toLowerCase().lastIndexOf(tag.start)
+    if (startIndex !== -1) {
+      // Check if this tag is already closed (it shouldn't be if it's the last one and regex didn't catch it)
+      const endIndex = remainingContent.toLowerCase().indexOf(tag.end, startIndex)
+
+      if (endIndex === -1) {
+        // Tag is open, extract everything after it
+        const openReasoning = remainingContent.slice(startIndex + tag.start.length)
+        reasoning += openReasoning.trim()
+        // Final answer is everything before the tag
+        remainingContent = remainingContent.slice(0, startIndex)
+        break // Only handle the last open tag
+      }
+    }
   }
 
   // Clean up
@@ -74,9 +96,10 @@ interface ChatMessageProps {
   searchQuery?: string
   videos?: VideoResult[]  // YouTube videos from research
   audioUrl?: string
-  reasoning?: string
+  reasoning?: string | { steps: string[]; conclusion: string }
   imageUrl?: string
   inputType?: 'text' | 'voice' | 'screen' | 'image' | 'file'
+  status?: 'pending' | 'streaming' | 'sent' | 'failed'
 }
 
 // Language mapping for prism-react-renderer
@@ -151,7 +174,7 @@ function CodeBlock({ code, language }: { code: string; language: string }) {
   )
 }
 
-export function ChatMessage({
+export const ChatMessage = React.memo(function ChatMessage({
   role,
   content,
   timestamp,
@@ -163,19 +186,119 @@ export function ChatMessage({
   reasoning: propReasoning,
   imageUrl,
   inputType,
+  status,
 }: ChatMessageProps) {
   const [copied, setCopied] = useState(false)
   const [showVoice, setShowVoice] = useState(false)
   const [feedback, setFeedback] = useState<"up" | "down" | null>(null)
 
-  // Process content to separate reasoning from final answer
-  // This handles cases where <think> tags are still in the content
-  const { reasoning: extractedReasoning, finalAnswer } = separateThinkingFromContent(content || '')
+  // Memoize content processing to avoid re-computation during streaming
+  const { reasoning: extractedReasoning, finalAnswer } = useMemo(() => 
+    separateThinkingFromContent(content || ''), 
+    [content]
+  )
 
   // Use extracted reasoning if available, otherwise use prop
   const reasoning = extractedReasoning || propReasoning || ''
   // Use cleaned content (without think tags) for display
-  const displayContent = finalAnswer || content || ''
+  const displayContent = finalAnswer
+  
+  // Memoize markdown components to prevent re-creation on every render
+  const markdownComponents = useMemo(() => ({
+    // Style code blocks with syntax highlighting using prism-react-renderer
+    code({ node, inline, className, children, ...props }: any) {
+      const match = /language-(\w+)/.exec(className || '')
+      const codeString = String(children).replace(/\n$/, '')
+
+      if (!inline && match) {
+        const language = match[1]
+        return <CodeBlock code={codeString} language={language} />
+      }
+
+      // Check if it's a multi-line code block without language specified
+      if (!inline && codeString.includes('\n')) {
+        return <CodeBlock code={codeString} language="text" />
+      }
+
+      return (
+        <code className="rounded-md bg-violet-500/20 px-1.5 py-0.5 text-sm font-mono text-violet-300" {...props}>
+          {children}
+        </code>
+      )
+    },
+    // Style links
+    a({ children, href, ...props }: any) {
+      return (
+        <a
+          href={href}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-primary hover:underline inline-flex items-center gap-1"
+          {...props}
+        >
+          {children}
+          <ExternalLink className="h-3 w-3" />
+        </a>
+      )
+    },
+    // Style paragraphs
+    p({ children, ...props }: any) {
+      return (
+        <p className="text-sm leading-relaxed mb-2 last:mb-0" {...props}>
+          {children}
+        </p>
+      )
+    },
+    // Style lists
+    ul({ children, ...props }: any) {
+      return (
+        <ul className="list-disc list-inside space-y-1 mb-2" {...props}>
+          {children}
+        </ul>
+      )
+    },
+    ol({ children, ...props }: any) {
+      return (
+        <ol className="list-decimal list-inside space-y-1 mb-2" {...props}>
+          {children}
+        </ol>
+      )
+    },
+    // Style headings
+    h1({ children, ...props }: any) {
+      return <h1 className="text-xl font-bold mb-2" {...props}>{children}</h1>
+    },
+    h2({ children, ...props }: any) {
+      return <h2 className="text-lg font-bold mb-2" {...props}>{children}</h2>
+    },
+    h3({ children, ...props }: any) {
+      return <h3 className="text-base font-semibold mb-1" {...props}>{children}</h3>
+    },
+    // Style blockquotes
+    blockquote({ children, ...props }: any) {
+      return (
+        <blockquote className="border-l-4 border-primary/30 pl-4 italic text-muted-foreground my-2" {...props}>
+          {children}
+        </blockquote>
+      )
+    },
+    // Style tables
+    table({ children, ...props }: any) {
+      return (
+        <div className="overflow-x-auto my-2">
+          <table className="min-w-full border border-border" {...props}>
+            {children}
+          </table>
+        </div>
+      )
+    },
+    th({ children, ...props }: any) {
+      return <th className="border border-border bg-muted px-3 py-1 text-left text-sm font-semibold" {...props}>{children}</th>
+    },
+    td({ children, ...props }: any) {
+      return <td className="border border-border px-3 py-1 text-sm" {...props}>{children}</td>
+    },
+  }), []) // Empty deps since these components don't depend on props
 
   const handleCopy = async () => {
     await navigator.clipboard.writeText(displayContent)
@@ -203,6 +326,7 @@ export function ChatMessage({
           role === "user" && "items-end"
         )}
       >
+
         <div
           className={cn(
             "rounded-2xl px-4 py-3",
@@ -213,103 +337,28 @@ export function ChatMessage({
         >
           {role === "assistant" ? (
             <div className="prose prose-sm dark:prose-invert max-w-none">
+              {/* Show thinking indicator when content is empty (streaming reasoning) */}
+              {/* Show thinking indicator only when content is empty AND we are still waiting/streaming */}
+              {(!displayContent || displayContent.length === 0) && (status === 'pending' || status === 'streaming' || !status) && (
+                <div className="flex items-center gap-2 text-muted-foreground italic">
+                  <div className="flex gap-1">
+                    <div className="h-2 w-2 animate-bounce rounded-full bg-primary/50 [animation-delay:-0.3s]" />
+                    <div className="h-2 w-2 animate-bounce rounded-full bg-primary/50 [animation-delay:-0.15s]" />
+                    <div className="h-2 w-2 animate-bounce rounded-full bg-primary/50" />
+                  </div>
+                  <span className="text-sm">Thinking...</span>
+                </div>
+              )}
+
+              {/* Show "Empty response" if finished but no content (e.g. backend error or empty generation) */}
+              {(!displayContent || displayContent.length === 0) && status === 'sent' && (
+                <div className="text-muted-foreground italic text-sm">
+                  (No content received)
+                </div>
+              )}
               <ReactMarkdown
                 remarkPlugins={[remarkGfm]}
-                components={{
-                  // Style code blocks with syntax highlighting using prism-react-renderer
-                  code({ node, inline, className, children, ...props }: any) {
-                    const match = /language-(\w+)/.exec(className || '')
-                    const codeString = String(children).replace(/\n$/, '')
-
-                    if (!inline && match) {
-                      const language = match[1]
-                      return <CodeBlock code={codeString} language={language} />
-                    }
-
-                    // Check if it's a multi-line code block without language specified
-                    if (!inline && codeString.includes('\n')) {
-                      return <CodeBlock code={codeString} language="text" />
-                    }
-
-                    return (
-                      <code className="rounded-md bg-violet-500/20 px-1.5 py-0.5 text-sm font-mono text-violet-300" {...props}>
-                        {children}
-                      </code>
-                    )
-                  },
-                  // Style links
-                  a({ children, href, ...props }: any) {
-                    return (
-                      <a
-                        href={href}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-primary hover:underline inline-flex items-center gap-1"
-                        {...props}
-                      >
-                        {children}
-                        <ExternalLink className="h-3 w-3" />
-                      </a>
-                    )
-                  },
-                  // Style paragraphs
-                  p({ children, ...props }: any) {
-                    return (
-                      <p className="text-sm leading-relaxed mb-2 last:mb-0" {...props}>
-                        {children}
-                      </p>
-                    )
-                  },
-                  // Style lists
-                  ul({ children, ...props }: any) {
-                    return (
-                      <ul className="list-disc list-inside space-y-1 mb-2" {...props}>
-                        {children}
-                      </ul>
-                    )
-                  },
-                  ol({ children, ...props }: any) {
-                    return (
-                      <ol className="list-decimal list-inside space-y-1 mb-2" {...props}>
-                        {children}
-                      </ol>
-                    )
-                  },
-                  // Style headings
-                  h1({ children, ...props }: any) {
-                    return <h1 className="text-xl font-bold mb-2" {...props}>{children}</h1>
-                  },
-                  h2({ children, ...props }: any) {
-                    return <h2 className="text-lg font-bold mb-2" {...props}>{children}</h2>
-                  },
-                  h3({ children, ...props }: any) {
-                    return <h3 className="text-base font-semibold mb-1" {...props}>{children}</h3>
-                  },
-                  // Style blockquotes
-                  blockquote({ children, ...props }: any) {
-                    return (
-                      <blockquote className="border-l-4 border-primary/30 pl-4 italic text-muted-foreground my-2" {...props}>
-                        {children}
-                      </blockquote>
-                    )
-                  },
-                  // Style tables
-                  table({ children, ...props }: any) {
-                    return (
-                      <div className="overflow-x-auto my-2">
-                        <table className="min-w-full border border-border" {...props}>
-                          {children}
-                        </table>
-                      </div>
-                    )
-                  },
-                  th({ children, ...props }: any) {
-                    return <th className="border border-border bg-muted px-3 py-1 text-left text-sm font-semibold" {...props}>{children}</th>
-                  },
-                  td({ children, ...props }: any) {
-                    return <td className="border border-border px-3 py-1 text-sm" {...props}>{children}</td>
-                  },
-                }}
+                components={markdownComponents}
               >
                 {displayContent}
               </ReactMarkdown>
@@ -340,15 +389,6 @@ export function ChatMessage({
           )}
         </div>
 
-        {/* Code Blocks */}
-        {codeBlocks?.map((block, index) => (
-          <div key={`code-${index}`} className="w-full">
-            {block.title && (
-              <div className="text-xs text-muted-foreground mb-1">{block.title}</div>
-            )}
-            <CodeBlock code={block.code} language={block.language} />
-          </div>
-        ))}
 
         {/* Video Carousel - Perplexity-style */}
         {videos && videos.length > 0 && (
@@ -413,6 +453,16 @@ export function ChatMessage({
           </div>
         )}
 
+        {/* Code Blocks */}
+        {codeBlocks?.map((block, index) => (
+          <div key={`code-${index}`} className="w-full">
+            {block.title && (
+              <div className="text-xs text-muted-foreground mb-1">{block.title}</div>
+            )}
+            <CodeBlock code={block.code} language={block.language} />
+          </div>
+        ))}
+
         {/* Audio Waveform */}
         {role === "assistant" && audioUrl && (
           <AudioWaveform audioUrl={audioUrl} />
@@ -420,7 +470,10 @@ export function ChatMessage({
 
         {/* Reasoning Content */}
         {role === "assistant" && reasoning && (
-          <ReasoningPanel reasoning={reasoning} />
+          <ReasoningPanel
+            reasoning={reasoning}
+            defaultExpanded={!displayContent || displayContent.length < 5}
+          />
         )}
 
         {/* Voice Player (Fallback for TTS) */}
@@ -508,4 +561,22 @@ export function ChatMessage({
       )}
     </div>
   )
-}
+}, (prevProps, nextProps) => {
+  // Custom comparison function for React.memo
+  // Only re-render if these specific props have changed
+  // This prevents unnecessary re-renders during streaming
+  return (
+    prevProps.role === nextProps.role &&
+    prevProps.content === nextProps.content &&
+    prevProps.timestamp === nextProps.timestamp &&
+    prevProps.status === nextProps.status &&
+    prevProps.audioUrl === nextProps.audioUrl &&
+    prevProps.imageUrl === nextProps.imageUrl &&
+    prevProps.inputType === nextProps.inputType &&
+    prevProps.searchQuery === nextProps.searchQuery &&
+    // Deep comparison for arrays
+    JSON.stringify(prevProps.searchResults) === JSON.stringify(nextProps.searchResults) &&
+    JSON.stringify(prevProps.videos) === JSON.stringify(nextProps.videos) &&
+    JSON.stringify(prevProps.codeBlocks) === JSON.stringify(nextProps.codeBlocks)
+  )
+})

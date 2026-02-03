@@ -32,6 +32,7 @@ The Harvis AI Project is a sophisticated, voice-activated AI assistant designed 
 - **Authentication:** JWT-based with bcrypt password hashing
 - **AI/LLM:** 
   - Ollama for local language model hosting
+  - **External Model Support:** Ability to route specific large models (e.g., `qwen3:235b`) to external Ollama endpoints, with automatic API key authentication.
   - Qwen2-VL for visual understanding
   - **VibeAgent:** Located in `python_back_end/ollama_cli/vibe_agent.py`, this module orchestrates the AI-powered coding experience.
   - **Web Search:** LangChain-based with DuckDuckGo integration

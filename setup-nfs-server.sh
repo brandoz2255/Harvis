@@ -10,8 +10,10 @@ echo "=== Setting up NFS Server for ML Models Shared Storage ==="
 echo "Creating NFS export directories..."
 mkdir -p /srv/nfs/ml-models-cache
 mkdir -p /srv/nfs/ollama-models
+mkdir -p /srv/nfs/harvis-audio
 chmod 777 /srv/nfs/ml-models-cache
 chmod 777 /srv/nfs/ollama-models
+chmod 777 /srv/nfs/harvis-audio
 
 # Configure NFS exports
 echo "Configuring NFS exports..."
@@ -21,6 +23,8 @@ cat > /etc/exports <<EOF
 /srv/nfs/ml-models-cache 139.182.180.0/24(rw,sync,no_subtree_check,no_root_squash)
 /srv/nfs/ollama-models 192.168.1.0/24(rw,sync,no_subtree_check,no_root_squash)
 /srv/nfs/ollama-models 139.182.180.0/24(rw,sync,no_subtree_check,no_root_squash)
+/srv/nfs/harvis-audio 192.168.1.0/24(rw,sync,no_subtree_check,no_root_squash)
+/srv/nfs/harvis-audio 139.182.180.0/24(rw,sync,no_subtree_check,no_root_squash)
 EOF
 
 # Export the NFS shares

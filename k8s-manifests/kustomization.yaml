@@ -12,6 +12,7 @@ resources:
   # Storage
   - storage/pvcs.yaml
   - storage/nfs-storage.yaml
+  - storage/audio-storage.yaml
 
   # Services
   - services/postgresql.yaml

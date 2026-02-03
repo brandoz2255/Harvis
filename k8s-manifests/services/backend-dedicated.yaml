@@ -139,7 +139,8 @@ spec:
           persistentVolumeClaim:
             claimName: ml-models-local-pvc  # Local storage on node1 for fast model access
         - name: tmp
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: harvis-audio-pvc
 ---
 apiVersion: v1
 kind: Service

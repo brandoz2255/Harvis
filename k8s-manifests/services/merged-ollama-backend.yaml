@@ -20,11 +20,11 @@ spec:
     spec:
       runtimeClassName: nvidia
       nodeSelector:
-        kubernetes.io/hostname: pop-os-343570d8
+        kubernetes.io/hostname: dulc3-os
       initContainers:
         # Init container to pre-download TTS and Whisper models
         - name: download-models
-          image: "dulc3/jarvis-backend:v2.17"
+          image: "dulc3/jarvis-backend:v2.23"
           imagePullPolicy: Always
           command: ["/app/entrypoint.sh", "download-models"]
           env:
@@ -87,7 +87,7 @@ spec:
 
         # Harvis Backend container (shares GPU with Ollama)
         - name: harvis-backend
-          image: "dulc3/jarvis-backend:v2.18"
+          image: "dulc3/jarvis-backend:v2.23"
           imagePullPolicy: Always
           ports:
             - name: http
@@ -104,6 +104,21 @@ spec:
                 secretKeyRef:
                   name: harvis-ai-backend-secret
                   key: ollama-api-key
+            # External Ollama - set correct BASE URL (code appends /api/chat, /api/tags, etc.)
+            # Examples:
+            #   If OpenWebUI is at https://coyotedev.ngrok.app/ollama/api/chat
+            #   Then set: https://coyotedev.ngrok.app/ollama (without /api/chat)
+            #
+            #   If exposed directly at https://coyotedev.ngrok.app/api/chat
+            #   Then set: https://coyotedev.ngrok.app
+            - name: EXTERNAL_OLLAMA_URL
+              value: "https://coyotedev.ngrok.app/ollama"
+            - name: EXTERNAL_OLLAMA_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-backend-secret
+                  key: external-ollama-api-key
+                  optional: true
             - name: OLLAMA_URL
               value: "http://localhost:11434"
             - name: BACKEND_URL
@@ -174,7 +189,8 @@ spec:
           persistentVolumeClaim:
             claimName: ml-models-cache
         - name: tmp
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: harvis-audio-pvc
 ---
 apiVersion: v1
 kind: Service

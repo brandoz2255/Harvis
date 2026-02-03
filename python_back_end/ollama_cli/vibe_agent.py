@@ -30,20 +30,27 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ─── Ollama Configuration with Cloud/Local Fallback ──────────────────────────
-CLOUD_OLLAMA_URL = os.getenv("OLLAMA_CLOUD_URL", "https://coyotegpt.ngrok.app/ollama")
+CLOUD_OLLAMA_URL = os.getenv("EXTERNAL_OLLAMA_URL", "https://coyotedev.ngrok.app")
 LOCAL_OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
-API_KEY = os.getenv("OLLAMA_API_KEY", "key")
-DEFAULT_MODEL = "llama3.2:3b"
-
 def make_ollama_request(endpoint, payload, timeout=90):
     """Make a POST request to Ollama with automatic fallback from cloud to local.
     Returns the response object from the successful request."""
-    headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY != "key" else {}
+    
+    # External API key for cloud requests
+    external_api_key = os.getenv("EXTERNAL_OLLAMA_API_KEY", "")
+    external_headers = {
+        "Authorization": f"Bearer {external_api_key}",
+        "ngrok-skip-browser-warning": "true",
+        "User-Agent": "Harvis-Backend"
+    } if external_api_key else {
+        "ngrok-skip-browser-warning": "true",
+        "User-Agent": "Harvis-Backend"
+    }
     
     # Try cloud first
     try:
         logger.info("🌐 Trying cloud Ollama: %s", CLOUD_OLLAMA_URL)
-        response = requests.post(f"{CLOUD_OLLAMA_URL}{endpoint}", json=payload, headers=headers, timeout=timeout)
+        response = requests.post(f"{CLOUD_OLLAMA_URL}{endpoint}", json=payload, headers=external_headers, timeout=timeout)
         if response.status_code == 200:
             logger.info("✅ Cloud Ollama request successful")
             return response

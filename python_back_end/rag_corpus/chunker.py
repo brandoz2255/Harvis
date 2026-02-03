@@ -149,9 +149,19 @@ class DocumentChunker:
         self,
         doc: RawDocument,
         text: str,
-        index: int
+        index: int,
+        max_chunk_size: int = 6000  # Safe limit for most embedding models
     ) -> Chunk:
         """Create a chunk with metadata."""
+        # Hard cap on chunk size to prevent context length errors
+        if len(text) > max_chunk_size:
+            logger.warning(f"Chunk {index} for doc {doc.id} exceeds max size ({len(text)} > {max_chunk_size}), truncating")
+            text = text[:max_chunk_size]
+            # Try to end at a sentence boundary
+            last_period = text.rfind('. ')
+            if last_period > max_chunk_size * 0.8:
+                text = text[:last_period + 1]
+
         # Generate unique chunk ID
         chunk_id = hashlib.sha256(
             f"{doc.id}:{index}:{text[:100]}".encode()

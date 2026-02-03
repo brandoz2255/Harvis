@@ -392,8 +392,8 @@ data:
                 proxy_set_header Cookie $http_cookie;
             }
 
-            # ==== Serve audio files from temp directory ====
-            location /audio/ {
+            # Serve audio files from temp directory
+            location /api/audio/ {
                 alias /tmp/;
                 add_header Content-Type application/octet-stream;
                 autoindex on;

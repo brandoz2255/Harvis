@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class RawDocument:
     """Raw document fetched from a source."""
+
     id: str
     url: str
     title: str
@@ -37,13 +38,13 @@ class RawDocument:
 
 class BaseFetcher(ABC):
     """Base class for content fetchers."""
-    
+
     SOURCE_NAME: str = "unknown"
     RATE_LIMIT_DELAY: float = 0.5  # seconds between requests
-    
+
     def __init__(self):
         self._session: Optional[aiohttp.ClientSession] = None
-    
+
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create HTTP session."""
         if self._session is None or self._session.closed:
@@ -51,33 +52,31 @@ class BaseFetcher(ABC):
                 timeout=aiohttp.ClientTimeout(total=30),
                 headers={
                     "User-Agent": "Harvis-RAG-Bot/1.0 (https://github.com/harvis)"
-                }
+                },
             )
         return self._session
-    
+
     async def close(self):
         """Close HTTP session."""
         if self._session and not self._session.closed:
             await self._session.close()
-    
+
     @abstractmethod
     async def fetch(
-        self,
-        keywords: List[str],
-        extra_urls: List[str]
+        self, keywords: List[str], extra_urls: List[str]
     ) -> List[RawDocument]:
         """
         Fetch documents from the source.
-        
+
         Args:
             keywords: Keywords to filter/search content
             extra_urls: Specific URLs to fetch
-            
+
         Returns:
             List of raw documents
         """
         pass
-    
+
     def _generate_doc_id(self, url: str, content: str) -> str:
         """Generate unique document ID from URL and content."""
         hash_input = f"{url}:{content[:500]}"
@@ -86,11 +85,11 @@ class BaseFetcher(ABC):
 
 class NextJSDocsFetcher(BaseFetcher):
     """Fetcher for Next.js documentation."""
-    
+
     SOURCE_NAME = "nextjs_docs"
     BASE_URL = "https://nextjs.org/docs"
     RATE_LIMIT_DELAY = 0.5
-    
+
     # Key documentation sections to crawl
     DOC_SECTIONS = [
         "/docs/app",
@@ -98,19 +97,17 @@ class NextJSDocsFetcher(BaseFetcher):
         "/docs/getting-started",
         "/docs/api-reference",
     ]
-    
+
     async def fetch(
-        self,
-        keywords: List[str],
-        extra_urls: List[str]
+        self, keywords: List[str], extra_urls: List[str]
     ) -> List[RawDocument]:
         """Fetch Next.js documentation."""
         documents = []
         session = await self._get_session()
-        
+
         # Collect URLs to fetch
         urls_to_fetch = set(extra_urls)
-        
+
         # If keywords provided, search for relevant pages
         if keywords:
             logger.info(f"Searching Next.js docs for keywords: {keywords}")
@@ -120,7 +117,7 @@ class NextJSDocsFetcher(BaseFetcher):
         else:
             # Fetch main documentation index
             urls_to_fetch.add(self.BASE_URL)
-        
+
         # Fetch sitemap to get all doc URLs
         try:
             sitemap_urls = await self._fetch_sitemap(session)
@@ -135,9 +132,9 @@ class NextJSDocsFetcher(BaseFetcher):
                 urls_to_fetch.update(list(sitemap_urls)[:50])
         except Exception as e:
             logger.warning(f"Could not fetch sitemap: {e}")
-        
+
         logger.info(f"Fetching {len(urls_to_fetch)} Next.js doc pages")
-        
+
         # Fetch each page
         for url in urls_to_fetch:
             try:
@@ -156,20 +153,20 @@ class NextJSDocsFetcher(BaseFetcher):
                         documents.append(doc)
                 else:
                     logger.warning(f"Could not extract content from: {url}")
-                
+
                 await asyncio.sleep(self.RATE_LIMIT_DELAY)
-                
+
             except Exception as e:
                 logger.error(f"Error fetching {url}: {e}")
-        
+
         logger.info(f"Fetched {len(documents)} Next.js documents")
         return documents
-    
+
     async def _fetch_sitemap(self, session: aiohttp.ClientSession) -> set:
         """Fetch URLs from Next.js sitemap."""
         urls = set()
         sitemap_url = "https://nextjs.org/sitemap.xml"
-        
+
         try:
             async with session.get(sitemap_url) as resp:
                 if resp.status == 200:
@@ -182,13 +179,11 @@ class NextJSDocsFetcher(BaseFetcher):
                             urls.add(url)
         except Exception as e:
             logger.warning(f"Sitemap fetch failed: {e}")
-        
+
         return urls
-    
+
     async def _fetch_page(
-        self,
-        session: aiohttp.ClientSession,
-        url: str
+        self, session: aiohttp.ClientSession, url: str
     ) -> Optional[RawDocument]:
         """Fetch and parse a single documentation page."""
         try:
@@ -196,14 +191,18 @@ class NextJSDocsFetcher(BaseFetcher):
                 if resp.status != 200:
                     logger.warning(f"Non-200 status for {url}: {resp.status}")
                     return None
-                
+
                 html = await resp.text()
                 soup = BeautifulSoup(html, "html.parser")
-                
+
                 # Extract title
                 title_tag = soup.find("h1")
-                title = title_tag.get_text(strip=True) if title_tag else "Next.js Documentation"
-                
+                title = (
+                    title_tag.get_text(strip=True)
+                    if title_tag
+                    else "Next.js Documentation"
+                )
+
                 # Extract main content - try multiple selectors
                 main_content = None
                 selectors = [
@@ -213,35 +212,37 @@ class NextJSDocsFetcher(BaseFetcher):
                     ("div", {"role": "main"}),
                     ("div", {"id": re.compile(r"content|docs|main")}),
                 ]
-                
+
                 for tag, attrs in selectors:
                     main_content = soup.find(tag, attrs) if attrs else soup.find(tag)
                     if main_content:
                         break
-                
+
                 # Last resort: use body
                 if not main_content:
                     main_content = soup.find("body")
                     if main_content:
                         logger.debug(f"Using body as fallback for: {url}")
-                
+
                 if not main_content:
                     logger.warning(f"No content found for: {url}")
                     return None
-                
+
                 # Clean content - remove scripts, nav, etc.
-                for tag in main_content.find_all(["script", "style", "nav", "footer", "aside", "header"]):
+                for tag in main_content.find_all(
+                    ["script", "style", "nav", "footer", "aside", "header"]
+                ):
                     tag.decompose()
-                
+
                 # Get text content with basic formatting
                 content = self._extract_text_with_structure(main_content)
-                
+
                 if len(content) < 100:  # Skip very short pages
                     logger.debug(f"Content too short ({len(content)} chars) for: {url}")
                     return None
-                
+
                 logger.debug(f"Extracted {len(content)} chars from: {url}")
-                
+
                 return RawDocument(
                     id=self._generate_doc_id(url, content),
                     url=url,
@@ -251,17 +252,17 @@ class NextJSDocsFetcher(BaseFetcher):
                     metadata={
                         "section": self._get_section(url),
                         "url_path": urlparse(url).path,
-                    }
+                    },
                 )
-                
+
         except Exception as e:
             logger.error(f"Error parsing {url}: {e}")
             return None
-    
+
     def _extract_text_with_structure(self, element) -> str:
         """Extract text while preserving some structure."""
         lines = []
-        
+
         for child in element.descendants:
             if child.name in ["h1", "h2", "h3", "h4"]:
                 text = child.get_text(strip=True)
@@ -284,9 +285,9 @@ class NextJSDocsFetcher(BaseFetcher):
                 text = child.get_text(strip=True)
                 if text:
                     lines.append(f"• {text}\n")
-        
+
         return "".join(lines)
-    
+
     def _get_section(self, url: str) -> str:
         """Extract section from URL."""
         path = urlparse(url).path
@@ -298,41 +299,39 @@ class NextJSDocsFetcher(BaseFetcher):
 
 class StackOverflowFetcher(BaseFetcher):
     """Fetcher for Stack Overflow Q&A."""
-    
+
     SOURCE_NAME = "stack_overflow"
     API_BASE = "https://api.stackexchange.com/2.3"
     RATE_LIMIT_DELAY = 1.0  # Stack Exchange has strict rate limits
-    
+
     DEFAULT_TAGS = ["next.js", "react", "javascript", "typescript"]
-    
+
     async def fetch(
-        self,
-        keywords: List[str],
-        extra_urls: List[str]
+        self, keywords: List[str], extra_urls: List[str]
     ) -> List[RawDocument]:
         """Fetch Stack Overflow questions and answers."""
         documents = []
         session = await self._get_session()
-        
+
         # Build search query
         tags = keywords if keywords else self.DEFAULT_TAGS
-        
+
         logger.info(f"Searching Stack Overflow for tags: {tags}")
-        
+
         # Fetch questions for each tag
         for tag in tags[:5]:  # Limit tags to avoid rate limits
             try:
                 questions = await self._search_questions(session, tag)
-                
+
                 for q in questions:
                     doc = await self._fetch_question_with_answers(session, q)
                     if doc:
                         documents.append(doc)
                     await asyncio.sleep(self.RATE_LIMIT_DELAY)
-                
+
             except Exception as e:
                 logger.error(f"Error fetching SO questions for {tag}: {e}")
-        
+
         # Also fetch any specific URLs provided
         for url in extra_urls:
             if "stackoverflow.com/questions" in url:
@@ -344,15 +343,12 @@ class StackOverflowFetcher(BaseFetcher):
                             documents.append(doc)
                 except Exception as e:
                     logger.error(f"Error fetching {url}: {e}")
-        
+
         logger.info(f"Fetched {len(documents)} Stack Overflow documents")
         return documents
-    
+
     async def _search_questions(
-        self,
-        session: aiohttp.ClientSession,
-        tag: str,
-        page_size: int = 20
+        self, session: aiohttp.ClientSession, tag: str, page_size: int = 20
     ) -> List[Dict]:
         """Search for questions by tag."""
         params = {
@@ -361,9 +357,9 @@ class StackOverflowFetcher(BaseFetcher):
             "tagged": tag,
             "site": "stackoverflow",
             "filter": "withbody",
-            "pagesize": page_size
+            "pagesize": page_size,
         }
-        
+
         async with session.get(f"{self.API_BASE}/questions", params=params) as resp:
             if resp.status == 200:
                 data = await resp.json()
@@ -371,55 +367,55 @@ class StackOverflowFetcher(BaseFetcher):
             else:
                 logger.warning(f"SO API returned {resp.status}")
                 return []
-    
+
     async def _fetch_question_with_answers(
-        self,
-        session: aiohttp.ClientSession,
-        question: Dict
+        self, session: aiohttp.ClientSession, question: Dict
     ) -> Optional[RawDocument]:
         """Fetch question with its answers."""
         q_id = question.get("question_id")
         if not q_id:
             return None
-        
+
         # Get answers
         params = {
             "order": "desc",
             "sort": "votes",
             "site": "stackoverflow",
-            "filter": "withbody"
+            "filter": "withbody",
         }
-        
+
         answers = []
         try:
-            async with session.get(f"{self.API_BASE}/questions/{q_id}/answers", params=params) as resp:
+            async with session.get(
+                f"{self.API_BASE}/questions/{q_id}/answers", params=params
+            ) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     answers = data.get("items", [])
         except Exception as e:
             logger.warning(f"Could not fetch answers for {q_id}: {e}")
-        
+
         # Build document content
         title = question.get("title", "Stack Overflow Question")
         q_body = self._clean_html(question.get("body", ""))
-        
+
         content_parts = [
             f"# {title}\n",
             f"## Question\n{q_body}\n",
         ]
-        
+
         # Add top answers
         for i, answer in enumerate(answers[:3]):  # Top 3 answers
             a_body = self._clean_html(answer.get("body", ""))
             score = answer.get("score", 0)
             is_accepted = answer.get("is_accepted", False)
-            
+
             marker = "✓ Accepted Answer" if is_accepted else f"Answer (Score: {score})"
             content_parts.append(f"\n## {marker}\n{a_body}\n")
-        
+
         content = "\n".join(content_parts)
         url = question.get("link", f"https://stackoverflow.com/questions/{q_id}")
-        
+
         return RawDocument(
             id=self._generate_doc_id(url, content),
             url=url,
@@ -432,40 +428,37 @@ class StackOverflowFetcher(BaseFetcher):
                 "answer_count": len(answers),
                 "tags": question.get("tags", []),
                 "is_answered": question.get("is_answered", False),
-            }
+            },
         )
-    
+
     async def _fetch_question_by_id(
-        self,
-        session: aiohttp.ClientSession,
-        question_id: int
+        self, session: aiohttp.ClientSession, question_id: int
     ) -> Optional[RawDocument]:
         """Fetch a specific question by ID."""
-        params = {
-            "site": "stackoverflow",
-            "filter": "withbody"
-        }
-        
-        async with session.get(f"{self.API_BASE}/questions/{question_id}", params=params) as resp:
+        params = {"site": "stackoverflow", "filter": "withbody"}
+
+        async with session.get(
+            f"{self.API_BASE}/questions/{question_id}", params=params
+        ) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 items = data.get("items", [])
                 if items:
                     return await self._fetch_question_with_answers(session, items[0])
         return None
-    
+
     def _clean_html(self, html: str) -> str:
         """Clean HTML to plain text."""
         soup = BeautifulSoup(html, "html.parser")
-        
+
         # Handle code blocks
         for code in soup.find_all("code"):
             code.replace_with(f"`{code.get_text()}`")
         for pre in soup.find_all("pre"):
             pre.replace_with(f"\n```\n{pre.get_text()}\n```\n")
-        
+
         return soup.get_text(separator="\n").strip()
-    
+
     def _extract_question_id(self, url: str) -> Optional[int]:
         """Extract question ID from SO URL."""
         match = re.search(r"/questions/(\d+)", url)
@@ -474,16 +467,16 @@ class StackOverflowFetcher(BaseFetcher):
 
 class GitHubFetcher(BaseFetcher):
     """Fetcher for GitHub repositories."""
-    
+
     SOURCE_NAME = "github"
     API_BASE = "https://api.github.com"
     RATE_LIMIT_DELAY = 0.5
-    
+
     # Default repos to check for Next.js examples
     DEFAULT_REPOS = [
         "vercel/next.js",
     ]
-    
+
     # File patterns to include
     INCLUDE_PATTERNS = [
         r"\.md$",
@@ -491,7 +484,7 @@ class GitHubFetcher(BaseFetcher):
         r"\.tsx?$",
         r"\.jsx?$",
     ]
-    
+
     # Paths to exclude
     EXCLUDE_PATHS = [
         "node_modules",
@@ -503,11 +496,11 @@ class GitHubFetcher(BaseFetcher):
         "yarn.lock",
         "pnpm-lock.yaml",
     ]
-    
+
     def __init__(self, github_token: Optional[str] = None):
         super().__init__()
         self.github_token = github_token
-    
+
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get session with GitHub auth headers."""
         if self._session is None or self._session.closed:
@@ -517,109 +510,101 @@ class GitHubFetcher(BaseFetcher):
             }
             if self.github_token:
                 headers["Authorization"] = f"token {self.github_token}"
-            
+
             self._session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=30),
-                headers=headers
+                timeout=aiohttp.ClientTimeout(total=30), headers=headers
             )
         return self._session
-    
+
     async def fetch(
-        self,
-        keywords: List[str],
-        extra_urls: List[str]
+        self, keywords: List[str], extra_urls: List[str]
     ) -> List[RawDocument]:
         """Fetch content from GitHub repositories."""
         documents = []
         session = await self._get_session()
-        
+
         repos_to_fetch = set()
-        
+
         # Parse extra URLs for repos
         for url in extra_urls:
             if "github.com" in url:
                 repo = self._parse_github_url(url)
                 if repo:
                     repos_to_fetch.add(repo)
-        
+
         # Use default repos if none specified
         if not repos_to_fetch and not keywords:
             repos_to_fetch.update(self.DEFAULT_REPOS)
-        
+
         # Search for repos if keywords provided
         if keywords:
             search_repos = await self._search_repos(session, keywords)
             repos_to_fetch.update(search_repos[:5])  # Limit results
-        
+
         logger.info(f"Fetching from GitHub repos: {repos_to_fetch}")
-        
+
         for repo in repos_to_fetch:
             try:
                 repo_docs = await self._fetch_repo_contents(session, repo, keywords)
                 documents.extend(repo_docs)
             except Exception as e:
                 logger.error(f"Error fetching repo {repo}: {e}")
-        
+
         logger.info(f"Fetched {len(documents)} GitHub documents")
         return documents
-    
+
     async def _search_repos(
-        self,
-        session: aiohttp.ClientSession,
-        keywords: List[str]
+        self, session: aiohttp.ClientSession, keywords: List[str]
     ) -> List[str]:
         """Search for repositories by keywords."""
         query = " ".join(keywords) + " language:typescript language:javascript"
-        params = {
-            "q": query,
-            "sort": "stars",
-            "order": "desc",
-            "per_page": 10
-        }
-        
+        params = {"q": query, "sort": "stars", "order": "desc", "per_page": 10}
+
         repos = []
         try:
-            async with session.get(f"{self.API_BASE}/search/repositories", params=params) as resp:
+            async with session.get(
+                f"{self.API_BASE}/search/repositories", params=params
+            ) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     for item in data.get("items", []):
                         repos.append(item["full_name"])
         except Exception as e:
             logger.warning(f"GitHub search failed: {e}")
-        
+
         return repos
-    
+
     async def _fetch_repo_contents(
         self,
         session: aiohttp.ClientSession,
         repo: str,
         keywords: List[str],
-        path: str = ""
+        path: str = "",
     ) -> List[RawDocument]:
         """Fetch relevant files from a repository."""
         documents = []
-        
+
         # Get repo contents at path
         url = f"{self.API_BASE}/repos/{repo}/contents/{path}"
-        
+
         try:
             async with session.get(url) as resp:
                 if resp.status != 200:
                     return documents
-                
+
                 items = await resp.json()
-                
+
                 if not isinstance(items, list):
                     items = [items]
-                
+
                 for item in items:
                     item_path = item.get("path", "")
                     item_type = item.get("type")
-                    
+
                     # Skip excluded paths
                     if any(excl in item_path for excl in self.EXCLUDE_PATHS):
                         continue
-                    
+
                     if item_type == "dir":
                         # Recurse into directories (limit depth)
                         if item_path.count("/") < 3:
@@ -628,7 +613,7 @@ class GitHubFetcher(BaseFetcher):
                             )
                             documents.extend(sub_docs)
                             await asyncio.sleep(0.2)
-                    
+
                     elif item_type == "file":
                         # Check if file matches patterns
                         if self._should_fetch_file(item_path):
@@ -638,44 +623,40 @@ class GitHubFetcher(BaseFetcher):
                             if doc:
                                 documents.append(doc)
                             await asyncio.sleep(0.2)
-                
+
         except Exception as e:
             logger.error(f"Error fetching {repo}/{path}: {e}")
-        
+
         return documents
-    
+
     async def _fetch_file_content(
-        self,
-        session: aiohttp.ClientSession,
-        repo: str,
-        item: Dict,
-        keywords: List[str]
+        self, session: aiohttp.ClientSession, repo: str, item: Dict, keywords: List[str]
     ) -> Optional[RawDocument]:
         """Fetch content of a single file."""
         download_url = item.get("download_url")
         if not download_url:
             return None
-        
+
         try:
             async with session.get(download_url) as resp:
                 if resp.status != 200:
                     return None
-                
+
                 content = await resp.text()
-                
+
                 # Filter by keywords if provided
                 if keywords:
                     content_lower = content.lower()
                     if not any(kw.lower() in content_lower for kw in keywords):
                         return None
-                
+
                 # Skip very large files
                 if len(content) > 100000:  # 100KB
                     return None
-                
+
                 file_path = item.get("path", "")
                 html_url = item.get("html_url", download_url)
-                
+
                 return RawDocument(
                     id=self._generate_doc_id(html_url, content),
                     url=html_url,
@@ -685,19 +666,21 @@ class GitHubFetcher(BaseFetcher):
                     metadata={
                         "repo": repo,
                         "path": file_path,
-                        "file_type": file_path.split(".")[-1] if "." in file_path else "unknown",
+                        "file_type": file_path.split(".")[-1]
+                        if "." in file_path
+                        else "unknown",
                         "size": item.get("size", 0),
-                    }
+                    },
                 )
-                
+
         except Exception as e:
             logger.error(f"Error fetching file content: {e}")
             return None
-    
+
     def _should_fetch_file(self, path: str) -> bool:
         """Check if file should be fetched based on patterns."""
         return any(re.search(pattern, path) for pattern in self.INCLUDE_PATTERNS)
-    
+
     def _parse_github_url(self, url: str) -> Optional[str]:
         """Parse GitHub URL to extract repo name."""
         match = re.search(r"github\.com/([^/]+/[^/]+)", url)
@@ -706,17 +689,17 @@ class GitHubFetcher(BaseFetcher):
 
 class PythonDocsFetcher(BaseFetcher):
     """Fetcher for Python library documentation."""
-    
+
     SOURCE_NAME = "python_docs"
     RATE_LIMIT_DELAY = 0.5
-    
+
     # Common documentation hosts
     DOCS_HOSTS = [
         "readthedocs.io",
         "rtfd.io",
         "docs.python.org",
     ]
-    
+
     # Popular libraries with known doc URLs
     KNOWN_DOCS = {
         "requests": "https://requests.readthedocs.io/en/stable/",
@@ -748,30 +731,30 @@ class PythonDocsFetcher(BaseFetcher):
         "pillow": "https://pillow.readthedocs.io/en/stable/",
         "langchain": "https://python.langchain.com/docs/",
     }
-    
+
     def __init__(self, python_libraries: Optional[List[str]] = None):
         super().__init__()
         self.python_libraries = python_libraries or []
-    
+
     async def fetch(
         self,
         keywords: List[str],
         extra_urls: List[str],
-        python_libraries: Optional[List[str]] = None
+        python_libraries: Optional[List[str]] = None,
     ) -> List[RawDocument]:
         """Fetch Python library documentation."""
         documents = []
         session = await self._get_session()
-        
+
         # Use provided libraries or from initialization
         libraries = python_libraries or self.python_libraries or keywords
-        
+
         if not libraries and not extra_urls:
             logger.warning("No Python libraries specified for documentation fetch")
             return documents
-        
+
         logger.info(f"Fetching Python docs for libraries: {libraries}")
-        
+
         # Fetch documentation for each library
         for lib in libraries:
             lib_lower = lib.lower().strip()
@@ -780,53 +763,55 @@ class PythonDocsFetcher(BaseFetcher):
                 documents.extend(lib_docs)
             except Exception as e:
                 logger.error(f"Error fetching docs for {lib}: {e}")
-        
+
         # Also fetch specific URLs
         for url in extra_urls:
-            if any(host in url for host in self.DOCS_HOSTS + ["python.org", "palletsprojects.com", "pydata.org"]):
+            if any(
+                host in url
+                for host in self.DOCS_HOSTS
+                + ["python.org", "palletsprojects.com", "pydata.org"]
+            ):
                 try:
                     doc = await self._fetch_doc_page(session, url, "custom")
                     if doc:
                         documents.append(doc)
                 except Exception as e:
                     logger.error(f"Error fetching {url}: {e}")
-        
+
         logger.info(f"Fetched {len(documents)} Python documentation pages")
         return documents
-    
+
     async def _fetch_library_docs(
-        self,
-        session: aiohttp.ClientSession,
-        library: str
+        self, session: aiohttp.ClientSession, library: str
     ) -> List[RawDocument]:
         """Fetch documentation for a specific library."""
         documents = []
-        
+
         # Check for known documentation URL
         docs_url = self.KNOWN_DOCS.get(library)
-        
+
         if not docs_url:
             # Try to find docs via ReadTheDocs
             docs_url = await self._find_readthedocs_url(session, library)
-        
+
         if not docs_url:
             # Try PyPI for project URL
             docs_url = await self._find_pypi_docs_url(session, library)
-        
+
         if not docs_url:
             logger.warning(f"Could not find documentation URL for {library}")
             return documents
-        
+
         logger.info(f"Found docs for {library}: {docs_url}")
-        
+
         # Fetch main page
         main_doc = await self._fetch_doc_page(session, docs_url, library)
         if main_doc:
             documents.append(main_doc)
-        
+
         # Try to find and fetch linked documentation pages
         linked_pages = await self._find_doc_links(session, docs_url, library)
-        
+
         for page_url in list(linked_pages)[:30]:  # Limit pages per library
             try:
                 doc = await self._fetch_doc_page(session, page_url, library)
@@ -835,13 +820,11 @@ class PythonDocsFetcher(BaseFetcher):
                 await asyncio.sleep(self.RATE_LIMIT_DELAY)
             except Exception as e:
                 logger.error(f"Error fetching {page_url}: {e}")
-        
+
         return documents
-    
+
     async def _find_readthedocs_url(
-        self,
-        session: aiohttp.ClientSession,
-        library: str
+        self, session: aiohttp.ClientSession, library: str
     ) -> Optional[str]:
         """Try to find ReadTheDocs URL for a library."""
         # Common RTD URL patterns
@@ -850,7 +833,7 @@ class PythonDocsFetcher(BaseFetcher):
             f"https://{library}.readthedocs.io/en/latest/",
             f"https://{library.replace('-', '')}.readthedocs.io/en/stable/",
         ]
-        
+
         for url in patterns:
             try:
                 async with session.head(url, allow_redirects=True) as resp:
@@ -858,30 +841,31 @@ class PythonDocsFetcher(BaseFetcher):
                         return str(resp.url)
             except:
                 pass
-        
+
         return None
-    
+
     async def _find_pypi_docs_url(
-        self,
-        session: aiohttp.ClientSession,
-        library: str
+        self, session: aiohttp.ClientSession, library: str
     ) -> Optional[str]:
         """Find documentation URL from PyPI package info."""
         pypi_url = f"https://pypi.org/pypi/{library}/json"
-        
+
         try:
             async with session.get(pypi_url) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     info = data.get("info", {})
-                    
+
                     # Check project_urls for documentation
                     project_urls = info.get("project_urls") or {}
                     for key, url in project_urls.items():
                         key_lower = key.lower()
-                        if any(k in key_lower for k in ["doc", "document", "guide", "reference"]):
+                        if any(
+                            k in key_lower
+                            for k in ["doc", "document", "guide", "reference"]
+                        ):
                             return url
-                    
+
                     # Fall back to home page or project URL
                     for key in ["home_page", "project_url"]:
                         url = info.get(key)
@@ -889,95 +873,107 @@ class PythonDocsFetcher(BaseFetcher):
                             return url
         except Exception as e:
             logger.warning(f"PyPI lookup failed for {library}: {e}")
-        
+
         return None
-    
+
     async def _find_doc_links(
-        self,
-        session: aiohttp.ClientSession,
-        base_url: str,
-        library: str
+        self, session: aiohttp.ClientSession, base_url: str, library: str
     ) -> set:
         """Find documentation page links from base URL."""
         links = set()
-        
+
         try:
             async with session.get(base_url) as resp:
                 if resp.status != 200:
                     return links
-                
+
                 html = await resp.text()
                 soup = BeautifulSoup(html, "html.parser")
-                
+
                 # Find relevant links
                 base_domain = urlparse(base_url).netloc
-                
+
                 for a in soup.find_all("a", href=True):
                     href = a["href"]
-                    
+
                     # Make absolute URL
                     if href.startswith("/"):
                         href = urljoin(base_url, href)
                     elif not href.startswith("http"):
                         href = urljoin(base_url, href)
-                    
+
                     # Only include links to same domain
                     if urlparse(href).netloc == base_domain:
                         # Skip anchors and common non-doc paths
-                        if "#" not in href and not any(skip in href for skip in [
-                            "/search", "/genindex", "/py-modindex", "/_", "/edit/",
-                            ".zip", ".tar", ".pdf", ".png", ".jpg", ".svg"
-                        ]):
+                        if "#" not in href and not any(
+                            skip in href
+                            for skip in [
+                                "/search",
+                                "/genindex",
+                                "/py-modindex",
+                                "/_",
+                                "/edit/",
+                                ".zip",
+                                ".tar",
+                                ".pdf",
+                                ".png",
+                                ".jpg",
+                                ".svg",
+                            ]
+                        ):
                             links.add(href)
-                
+
         except Exception as e:
             logger.warning(f"Could not find doc links: {e}")
-        
+
         return links
-    
+
     async def _fetch_doc_page(
-        self,
-        session: aiohttp.ClientSession,
-        url: str,
-        library: str
+        self, session: aiohttp.ClientSession, url: str, library: str
     ) -> Optional[RawDocument]:
         """Fetch and parse a documentation page."""
         try:
             async with session.get(url) as resp:
                 if resp.status != 200:
                     return None
-                
+
                 html = await resp.text()
                 soup = BeautifulSoup(html, "html.parser")
-                
+
                 # Extract title
                 title_tag = soup.find("h1") or soup.find("title")
-                title = title_tag.get_text(strip=True) if title_tag else f"{library} Documentation"
-                
+                title = (
+                    title_tag.get_text(strip=True)
+                    if title_tag
+                    else f"{library} Documentation"
+                )
+
                 # Extract main content
                 main = (
-                    soup.find("main") or
-                    soup.find("article") or
-                    soup.find("div", {"role": "main"}) or
-                    soup.find("div", class_=re.compile(r"document|content|body"))
+                    soup.find("main")
+                    or soup.find("article")
+                    or soup.find("div", {"role": "main"})
+                    or soup.find("div", class_=re.compile(r"document|content|body"))
                 )
-                
+
                 if not main:
                     main = soup.find("body")
-                
+
                 if not main:
                     return None
-                
+
                 # Remove unwanted elements
-                for tag in main.find_all(["script", "style", "nav", "aside", "footer", "header"]):
+                for tag in main.find_all(
+                    ["script", "style", "nav", "aside", "footer", "header"]
+                ):
                     tag.decompose()
-                
+
                 # Extract structured text
                 content = self._extract_doc_content(main)
-                
+
                 if len(content) < 100:
                     return None
-                
+
                 return RawDocument(
                     id=self._generate_doc_id(url, content),
                     url=url,
@@ -987,19 +983,19 @@ class PythonDocsFetcher(BaseFetcher):
                     metadata={
                         "library": library,
                         "url_path": urlparse(url).path,
-                    }
+                    },
                 )
-                
+
         except Exception as e:
             logger.error(f"Error fetching doc page {url}: {e}")
             return None
-    
+
     def _extract_doc_content(self, element) -> str:
         """Extract text content preserving structure."""
         lines = []
-        
+
         for child in element.descendants:
-            if hasattr(child, 'name'):
+            if hasattr(child, "name"):
                 if child.name in ["h1", "h2", "h3", "h4", "h5"]:
                     text = child.get_text(strip=True)
                     if text:
@@ -1021,29 +1017,29 @@ class PythonDocsFetcher(BaseFetcher):
                     text = child.get_text(strip=True)
                     if text:
                         lines.append(f"`{text}`")
-        
+
         return "".join(lines)
 
 
 class LocalDocsFetcher(BaseFetcher):
     """Fetcher for local documentation files (markdown)."""
-    
+
     SOURCE_NAME = "local_docs"
-    
+
     # Default directories to scan for documentation
     DEFAULT_DOCS_DIRS = [
-        "/app/docs",                    # Container path
-        "/workspaces/aidev/docs",       # Dev container
-        "./docs",                       # Relative to cwd
+        "/app/docs",  # Container path
+        "/workspaces/aidev/docs",  # Dev container
+        "./docs",  # Relative to cwd
     ]
-    
+
     # File patterns to include
     INCLUDE_PATTERNS = [
         r"\.md$",
         r"\.mdx$",
         r"\.txt$",
     ]
-    
+
     # Files/directories to exclude
     EXCLUDE_PATTERNS = [
         r"node_modules",
@@ -1052,29 +1048,27 @@ class LocalDocsFetcher(BaseFetcher):
         r"\.pyc$",
         r"\.env",
     ]
-    
+
     def __init__(self, docs_dirs: Optional[List[str]] = None):
         super().__init__()
         self.docs_dirs = docs_dirs or self.DEFAULT_DOCS_DIRS
-    
+
     async def fetch(
-        self,
-        keywords: List[str],
-        extra_urls: List[str]
+        self, keywords: List[str], extra_urls: List[str]
     ) -> List[RawDocument]:
         """Fetch local documentation files."""
         import os
         import glob
-        
+
         documents = []
-        
+
         # Find valid docs directories
         valid_dirs = []
         for docs_dir in self.docs_dirs:
             expanded = os.path.expanduser(docs_dir)
             if os.path.isdir(expanded):
                 valid_dirs.append(expanded)
-        
+
         # Also check extra_urls for local paths
         for path in extra_urls:
             if os.path.isdir(path):
@@ -1083,85 +1077,95 @@ class LocalDocsFetcher(BaseFetcher):
                 doc = self._read_file(path)
                 if doc:
                     documents.append(doc)
-        
+
         if not valid_dirs:
-            logger.warning(f"No valid docs directories found. Checked: {self.docs_dirs}")
+            logger.warning(
+                f"No valid docs directories found. Checked: {self.docs_dirs}"
+            )
             return documents
-        
+
         logger.info(f"Scanning local docs directories: {valid_dirs}")
-        
+
         for docs_dir in valid_dirs:
             # Walk through directory
             for root, dirs, files in os.walk(docs_dir):
                 # Filter out excluded directories
-                dirs[:] = [d for d in dirs if not any(
-                    re.search(pattern, d) for pattern in self.EXCLUDE_PATTERNS
-                )]
-                
+                dirs[:] = [
+                    d
+                    for d in dirs
+                    if not any(
+                        re.search(pattern, d) for pattern in self.EXCLUDE_PATTERNS
+                    )
+                ]
+
                 for filename in files:
                     filepath = os.path.join(root, filename)
-                    
+
                     # Check if file matches include patterns
-                    if not any(re.search(pattern, filename) for pattern in self.INCLUDE_PATTERNS):
+                    if not any(
+                        re.search(pattern, filename)
+                        for pattern in self.INCLUDE_PATTERNS
+                    ):
                         continue
-                    
+
                     # Check exclude patterns
-                    if any(re.search(pattern, filepath) for pattern in self.EXCLUDE_PATTERNS):
+                    if any(
+                        re.search(pattern, filepath)
+                        for pattern in self.EXCLUDE_PATTERNS
+                    ):
                         continue
-                    
+
                     # Read and parse file
                     doc = self._read_file(filepath, keywords)
                     if doc:
                         documents.append(doc)
-        
+
         logger.info(f"Fetched {len(documents)} local documentation files")
         return documents
-    
+
     def _read_file(
-        self,
-        filepath: str,
-        keywords: Optional[List[str]] = None
+        self, filepath: str, keywords: Optional[List[str]] = None
     ) -> Optional[RawDocument]:
         """Read a single documentation file."""
         import os
-        
+
         try:
-            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+            with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
                 content = f.read()
-            
+
             # Skip empty files
             if len(content.strip()) < 50:
                 return None
-            
+
             # Skip very large files
             if len(content) > 200000:  # 200KB
                 logger.warning(f"Skipping large file: {filepath}")
                 return None
-            
+
             # Filter by keywords if provided
             if keywords:
                 content_lower = content.lower()
                 if not any(kw.lower() in content_lower for kw in keywords):
                     return None
-            
+
             # Extract title from first heading or filename
             title = os.path.basename(filepath)
-            lines = content.split('\n')
+            lines = content.split("\n")
             for line in lines[:10]:
-                if line.startswith('# '):
+                if line.startswith("# "):
                     title = line[2:].strip()
                     break
-            
+
             # Create file URL (file:// protocol)
             file_url = f"file://{os.path.abspath(filepath)}"
-            
+
             # Determine relative path for metadata
             rel_path = filepath
             for docs_dir in self.docs_dirs:
                 if filepath.startswith(docs_dir):
-                    rel_path = filepath[len(docs_dir):].lstrip('/')
+                    rel_path = filepath[len(docs_dir) :].lstrip("/")
                     break
-            
+
             return RawDocument(
                 id=self._generate_doc_id(file_url, content),
                 url=file_url,
@@ -1171,27 +1175,932 @@ class LocalDocsFetcher(BaseFetcher):
                 metadata={
                     "filepath": filepath,
                     "relative_path": rel_path,
-                    "file_type": filepath.split(".")[-1] if "." in filepath else "unknown",
+                    "file_type": filepath.split(".")[-1]
+                    if "." in filepath
+                    else "unknown",
                     "size_bytes": len(content),
-                }
+                },
             )
-            
+
         except Exception as e:
             logger.error(f"Error reading file {filepath}: {e}")
             return None
 
 
+class DockerDocsFetcher(BaseFetcher):
+    """Fetcher for Docker documentation."""
+
+    SOURCE_NAME = "docker_docs"
+    BASE_URL = "https://docs.docker.com"
+    RATE_LIMIT_DELAY = 0.5
+
+    # Known documentation sections/topics
+    KNOWN_TOPICS = {
+        "engine": "https://docs.docker.com/engine/",
+        "compose": "https://docs.docker.com/compose/",
+        "swarm": "https://docs.docker.com/engine/swarm/",
+        "registry": "https://docs.docker.com/registry/",
+        "hub": "https://docs.docker.com/docker-hub/",
+        "buildx": "https://docs.docker.com/build/",
+        "cli": "https://docs.docker.com/engine/reference/commandline/",
+        "dockerfile": "https://docs.docker.com/engine/reference/builder/",
+        "networking": "https://docs.docker.com/network/",
+        "storage": "https://docs.docker.com/storage/",
+        "security": "https://docs.docker.com/engine/security/",
+    }
+
+    def __init__(self, docker_topics: Optional[List[str]] = None):
+        super().__init__()
+        self.docker_topics = docker_topics or []
+
+    async def fetch(
+        self, keywords: List[str], extra_urls: List[str]
+    ) -> List[RawDocument]:
+        """Fetch Docker documentation."""
+        documents = []
+        session = await self._get_session()
+
+        # 1. If topics specified, fetch those sections
+        if self.docker_topics:
+            logger.info(f"Fetching Docker docs for topics: {self.docker_topics}")
+            for topic in self.docker_topics:
+                if topic in self.KNOWN_TOPICS:
+                    topic_url = self.KNOWN_TOPICS[topic]
+                    try:
+                        topic_docs = await self._fetch_section(
+                            session, topic_url, topic
+                        )
+                        documents.extend(topic_docs)
+                    except Exception as e:
+                        logger.error(f"Error fetching Docker topic {topic}: {e}")
+                else:
+                    logger.warning(
+                        f"Unknown Docker topic: {topic}. Valid topics: {list(self.KNOWN_TOPICS.keys())}"
+                    )
+
+        # 2. Fetch custom URLs
+        for url in extra_urls:
+            if "docs.docker.com" in url or "docker.com" in url:
+                try:
+                    doc = await self._fetch_doc_page(session, url, "custom")
+                    if doc:
+                        documents.append(doc)
+                except Exception as e:
+                    logger.error(f"Error fetching Docker URL {url}: {e}")
+
+        # 3. If no topics/URLs specified, fetch all from sitemap
+        if not self.docker_topics and not extra_urls:
+            logger.info("Fetching all Docker documentation from sitemap")
+            try:
+                all_docs = await self._fetch_from_sitemap(session)
+                documents.extend(all_docs)
+            except Exception as e:
+                logger.error(f"Error fetching Docker sitemap: {e}")
+
+        logger.info(f"Fetched {len(documents)} Docker documents")
+        return documents
+
+    async def _fetch_section(
+        self, session: aiohttp.ClientSession, section_url: str, topic: str
+    ) -> List[RawDocument]:
+        """Fetch all pages from a documentation section."""
+        documents = []
+
+        try:
+            # Fetch the section page
+            async with session.get(section_url) as resp:
+                if resp.status != 200:
+                    logger.warning(f"Non-200 status for {section_url}: {resp.status}")
+                    return documents
+
+                html = await resp.text()
+                soup = BeautifulSoup(html, "html.parser")
+
+                # Find all links within this section
+                section_links = set()
+                base_domain = urlparse(section_url).netloc
+
+                for a in soup.find_all("a", href=True):
+                    href = a["href"]
+                    # Make absolute URL
+                    if href.startswith("/"):
+                        href = urljoin(f"https://{base_domain}", href)
+                    elif not href.startswith("http"):
+                        href = urljoin(section_url, href)
+
+                    # Only include links to same domain and within docs
+                    if urlparse(href).netloc == base_domain and "/" in href:
+                        # Skip anchors, images, and non-doc paths
+                        if "#" not in href and not any(
+                            skip in href.lower()
+                            for skip in [
+                                ".png",
+                                ".jpg",
+                                ".gif",
+                                ".pdf",
+                                ".zip",
+                                ".tar",
+                                "/search",
+                                "/genindex",
+                                "/_",
+                            ]
+                        ):
+                            section_links.add(href)
+
+                # Limit to first 30 pages per section
+                for page_url in list(section_links)[:30]:
+                    try:
+                        doc = await self._fetch_doc_page(session, page_url, topic)
+                        if doc:
+                            documents.append(doc)
+                        await asyncio.sleep(self.RATE_LIMIT_DELAY)
+                    except Exception as e:
+                        logger.debug(f"Error fetching {page_url}: {e}")
+
+        except Exception as e:
+            logger.error(f"Error fetching section {section_url}: {e}")
+
+        return documents
+
+    async def _fetch_from_sitemap(
+        self, session: aiohttp.ClientSession
+    ) -> List[RawDocument]:
+        """Fetch all documentation pages from sitemap."""
+        documents = []
+
+        try:
+            sitemap_url = "https://docs.docker.com/sitemap.xml"
+            async with session.get(sitemap_url) as resp:
+                if resp.status == 200:
+                    text = await resp.text()
+                    soup = BeautifulSoup(text, "lxml-xml")
+
+                    urls = []
+                    for loc in soup.find_all("loc"):
+                        url = loc.text.strip()
+                        # Filter to only documentation pages
+                        if "/" in url and not any(
+                            skip in url for skip in [".png", ".jpg", ".gif", ".pdf"]
+                        ):
+                            urls.append(url)
+
+                    logger.info(f"Found {len(urls)} URLs in Docker sitemap")
+
+                    # Limit to first 100 pages for performance
+                    for url in urls[:100]:
+                        try:
+                            doc = await self._fetch_doc_page(session, url, "general")
+                            if doc:
+                                documents.append(doc)
+                            await asyncio.sleep(self.RATE_LIMIT_DELAY)
+                        except Exception as e:
+                            logger.debug(f"Error fetching {url}: {e}")
+                else:
+                    logger.warning(f"Docker sitemap returned status {resp.status}")
+        except Exception as e:
+            logger.error(f"Error fetching Docker sitemap: {e}")
+
+        return documents
+
+    async def _fetch_doc_page(
+        self, session: aiohttp.ClientSession, url: str, topic: str
+    ) -> Optional[RawDocument]:
+        """Fetch and parse a single documentation page."""
+        try:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    return None
+
+                html = await resp.text()
+                soup = BeautifulSoup(html, "html.parser")
+
+                # Extract title
+                title_tag = soup.find("h1") or soup.find("title")
+                title = (
+                    title_tag.get_text(strip=True)
+                    if title_tag
+                    else "Docker Documentation"
+                )
+
+                # Extract main content
+                main = (
+                    soup.find("main")
+                    or soup.find("article")
+                    or soup.find("div", {"role": "main"})
+                    or soup.find("div", class_=re.compile(r"content|body|article"))
+                )
+
+                if not main:
+                    main = soup.find("body")
+
+                if not main:
+                    return None
+
+                # Remove unwanted elements
+                for tag in main.find_all(
+                    ["script", "style", "nav", "aside", "footer", "header"]
+                ):
+                    tag.decompose()
+
+                # Extract structured text
+                content = self._extract_doc_content(main)
+
+                if len(content) < 100:
+                    return None
+
+                return RawDocument(
+                    id=self._generate_doc_id(url, content),
+                    url=url,
+                    title=title,
+                    content=content,
+                    source=self.SOURCE_NAME,
+                    metadata={
+                        "topic": topic,
+                        "url_path": urlparse(url).path,
+                    },
+                )
+
+        except Exception as e:
+            logger.error(f"Error fetching Docker doc page {url}: {e}")
+            return None
+
+    def _extract_doc_content(self, element) -> str:
+        """Extract text content preserving structure."""
+        lines = []
+
+        for child in element.descendants:
+            if hasattr(child, "name"):
+                if child.name in ["h1", "h2", "h3", "h4", "h5"]:
+                    text = child.get_text(strip=True)
+                    if text:
+                        level = int(child.name[1])
+                        lines.append(f"\n{'#' * level} {text}\n")
+                elif child.name == "p":
+                    text = child.get_text(strip=True)
+                    if text:
+                        lines.append(text + "\n")
+                elif child.name == "li":
+                    text = child.get_text(strip=True)
+                    if text:
+                        lines.append(f"• {text}\n")
+                elif child.name == "pre":
+                    code = child.get_text()
+                    if code:
+                        lines.append(f"\n```\n{code}\n```\n")
+                elif child.name == "code" and child.parent.name != "pre":
+                    text = child.get_text(strip=True)
+                    if text:
+                        lines.append(f"`{text}`")
+
+        return "".join(lines)
+
+
+class KubernetesDocsFetcher(BaseFetcher):
+    """Fetcher for Kubernetes documentation."""
+
+    SOURCE_NAME = "kubernetes_docs"
+    BASE_URL = "https://kubernetes.io/docs"
+    RATE_LIMIT_DELAY = 0.5
+
+    # Known documentation sections/topics
+    KNOWN_TOPICS = {
+        "concepts": "https://kubernetes.io/docs/concepts/",
+        "tasks": "https://kubernetes.io/docs/tasks/",
+        "reference": "https://kubernetes.io/docs/reference/",
+        "tutorials": "https://kubernetes.io/docs/tutorials/",
+        "setup": "https://kubernetes.io/docs/setup/",
+        "networking": "https://kubernetes.io/docs/concepts/services-networking/",
+        "storage": "https://kubernetes.io/docs/concepts/storage/",
+        "security": "https://kubernetes.io/docs/concepts/security/",
+        "scheduling": "https://kubernetes.io/docs/concepts/scheduling-eviction/",
+        "workloads": "https://kubernetes.io/docs/concepts/workloads/",
+    }
+
+    def __init__(self, kubernetes_topics: Optional[List[str]] = None):
+        super().__init__()
+        self.kubernetes_topics = kubernetes_topics or []
+
+    async def fetch(
+        self, keywords: List[str], extra_urls: List[str]
+    ) -> List[RawDocument]:
+        """Fetch Kubernetes documentation."""
+        documents = []
+        session = await self._get_session()
+
+        # 1. If topics specified, fetch those sections
+        if self.kubernetes_topics:
+            logger.info(
+                f"Fetching Kubernetes docs for topics: {self.kubernetes_topics}"
+            )
+            for topic in self.kubernetes_topics:
+                if topic in self.KNOWN_TOPICS:
+                    topic_url = self.KNOWN_TOPICS[topic]
+                    try:
+                        topic_docs = await self._fetch_section(
+                            session, topic_url, topic
+                        )
+                        documents.extend(topic_docs)
+                    except Exception as e:
+                        logger.error(f"Error fetching Kubernetes topic {topic}: {e}")
+                else:
+                    logger.warning(
+                        f"Unknown Kubernetes topic: {topic}. Valid topics: {list(self.KNOWN_TOPICS.keys())}"
+                    )
+
+        # 2. Fetch custom URLs
+        for url in extra_urls:
+            if "kubernetes.io" in url or "k8s.io" in url:
+                try:
+                    doc = await self._fetch_doc_page(session, url, "custom")
+                    if doc:
+                        documents.append(doc)
+                except Exception as e:
+                    logger.error(f"Error fetching Kubernetes URL {url}: {e}")
+
+        # 3. If no topics/URLs specified, fetch all from sitemap
+        if not self.kubernetes_topics and not extra_urls:
+            logger.info("Fetching all Kubernetes documentation from sitemap")
+            try:
+                all_docs = await self._fetch_from_sitemap(session)
+                documents.extend(all_docs)
+            except Exception as e:
+                logger.error(f"Error fetching Kubernetes sitemap: {e}")
+
+        logger.info(f"Fetched {len(documents)} Kubernetes documents")
+        return documents
+
+    async def _fetch_section(
+        self, session: aiohttp.ClientSession, section_url: str, topic: str
+    ) -> List[RawDocument]:
+        """Fetch all pages from a documentation section."""
+        documents = []
+
+        try:
+            # Fetch the section page
+            async with session.get(section_url) as resp:
+                if resp.status != 200:
+                    logger.warning(f"Non-200 status for {section_url}: {resp.status}")
+                    return documents
+
+                html = await resp.text()
+                soup = BeautifulSoup(html, "html.parser")
+
+                # Find all links within this section
+                section_links = set()
+                base_domain = urlparse(section_url).netloc
+
+                for a in soup.find_all("a", href=True):
+                    href = a["href"]
+                    # Make absolute URL
+                    if href.startswith("/"):
+                        href = urljoin(f"https://{base_domain}", href)
+                    elif not href.startswith("http"):
+                        href = urljoin(section_url, href)
+
+                    # Only include links to same domain and within docs
+                    if urlparse(href).netloc == base_domain and "/docs/" in href:
+                        # Skip anchors, images, and non-doc paths
+                        if "#" not in href and not any(
+                            skip in href.lower()
+                            for skip in [
+                                ".png",
+                                ".jpg",
+                                ".gif",
+                                ".pdf",
+                                ".zip",
+                                ".tar",
+                                "/search",
+                                "/genindex",
+                                "/_",
+                            ]
+                        ):
+                            section_links.add(href)
+
+                # Limit to first 30 pages per section
+                for page_url in list(section_links)[:30]:
+                    try:
+                        doc = await self._fetch_doc_page(session, page_url, topic)
+                        if doc:
+                            documents.append(doc)
+                        await asyncio.sleep(self.RATE_LIMIT_DELAY)
+                    except Exception as e:
+                        logger.debug(f"Error fetching {page_url}: {e}")
+
+        except Exception as e:
+            logger.error(f"Error fetching section {section_url}: {e}")
+
+        return documents
+
+    async def _fetch_from_sitemap(
+        self, session: aiohttp.ClientSession
+    ) -> List[RawDocument]:
+        """Fetch all documentation pages from sitemap."""
+        documents = []
+
+        try:
+            # Kubernetes uses a sitemap index, so we need to fetch the English sitemap directly
+            # The main sitemap.xml is a sitemapindex pointing to language-specific sitemaps
+            sitemap_url = "https://kubernetes.io/en/sitemap.xml"
+            logger.info(f"Fetching Kubernetes English sitemap: {sitemap_url}")
+
+            async with session.get(sitemap_url) as resp:
+                if resp.status == 200:
+                    text = await resp.text()
+                    soup = BeautifulSoup(text, "lxml-xml")
+
+                    urls = []
+
+                    # Check if this is a sitemap index (contains <sitemapindex> root)
+                    if soup.find("sitemapindex"):
+                        logger.info("Found sitemap index, fetching nested sitemaps")
+                        # This shouldn't happen for the /en/ sitemap, but handle it anyway
+                        for sitemap_loc in soup.find_all("loc"):
+                            nested_url = sitemap_loc.text.strip()
+                            if "sitemap" in nested_url.lower():
+                                nested_urls = await self._parse_sitemap(session, nested_url)
+                                urls.extend(nested_urls)
+                    else:
+                        # Regular sitemap with direct URLs
+                        for loc in soup.find_all("loc"):
+                            url = loc.text.strip()
+                            # Filter to only documentation pages
+                            if "/docs/" in url and not any(
+                                skip in url for skip in [".png", ".jpg", ".gif", ".pdf"]
+                            ):
+                                urls.append(url)
+
+                    logger.info(f"Found {len(urls)} URLs in Kubernetes sitemap")
+
+                    # Limit to first 100 pages for performance
+                    for url in urls[:100]:
+                        try:
+                            doc = await self._fetch_doc_page(session, url, "general")
+                            if doc:
+                                documents.append(doc)
+                            await asyncio.sleep(self.RATE_LIMIT_DELAY)
+                        except Exception as e:
+                            logger.debug(f"Error fetching {url}: {e}")
+                else:
+                    logger.warning(f"Kubernetes sitemap returned status {resp.status}")
+        except Exception as e:
+            logger.error(f"Error fetching Kubernetes sitemap: {e}")
+
+        return documents
+
+    async def _parse_sitemap(
+        self, session: aiohttp.ClientSession, sitemap_url: str
+    ) -> List[str]:
+        """Parse a sitemap and extract documentation URLs."""
+        urls = []
+        try:
+            async with session.get(sitemap_url) as resp:
+                if resp.status == 200:
+                    text = await resp.text()
+                    soup = BeautifulSoup(text, "lxml-xml")
+                    for loc in soup.find_all("loc"):
+                        url = loc.text.strip()
+                        if "/docs/" in url and not any(
+                            skip in url for skip in [".png", ".jpg", ".gif", ".pdf"]
+                        ):
+                            urls.append(url)
+        except Exception as e:
+            logger.warning(f"Error parsing sitemap {sitemap_url}: {e}")
+        return urls
+
+    async def _fetch_doc_page(
+        self, session: aiohttp.ClientSession, url: str, topic: str
+    ) -> Optional[RawDocument]:
+        """Fetch and parse a single documentation page."""
+        try:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    return None
+
+                html = await resp.text()
+                soup = BeautifulSoup(html, "html.parser")
+
+                # Extract title
+                title_tag = soup.find("h1") or soup.find("title")
+                title = (
+                    title_tag.get_text(strip=True)
+                    if title_tag
+                    else "Kubernetes Documentation"
+                )
+
+                # Extract main content
+                main = (
+                    soup.find("main")
+                    or soup.find("article")
+                    or soup.find("div", {"role": "main"})
+                    or soup.find("div", class_=re.compile(r"content|body|article"))
+                )
+
+                if not main:
+                    main = soup.find("body")
+
+                if not main:
+                    return None
+
+                # Remove unwanted elements
+                for tag in main.find_all(
+                    ["script", "style", "nav", "aside", "footer", "header"]
+                ):
+                    tag.decompose()
+
+                # Extract structured text
+                content = self._extract_doc_content(main)
+
+                if len(content) < 100:
+                    return None
+
+                return RawDocument(
+                    id=self._generate_doc_id(url, content),
+                    url=url,
+                    title=title,
+                    content=content,
+                    source=self.SOURCE_NAME,
+                    metadata={
+                        "topic": topic,
+                        "url_path": urlparse(url).path,
+                    },
+                )
+
+        except Exception as e:
+            logger.error(f"Error fetching Kubernetes doc page {url}: {e}")
+            return None
+
+    def _extract_doc_content(self, element) -> str:
+        """Extract text content preserving structure."""
+        lines = []
+
+        for child in element.descendants:
+            if hasattr(child, "name"):
+                if child.name in ["h1", "h2", "h3", "h4", "h5"]:
+                    text = child.get_text(strip=True)
+                    if text:
+                        level = int(child.name[1])
+                        lines.append(f"\n{'#' * level} {text}\n")
+                elif child.name == "p":
+                    text = child.get_text(strip=True)
+                    if text:
+                        lines.append(text + "\n")
+                elif child.name == "li":
+                    text = child.get_text(strip=True)
+                    if text:
+                        lines.append(f"• {text}\n")
+                elif child.name == "pre":
+                    code = child.get_text()
+                    if code:
+                        lines.append(f"\n```\n{code}\n```\n")
+                elif child.name == "code" and child.parent.name != "pre":
+                    text = child.get_text(strip=True)
+                    if text:
+                        lines.append(f"`{text}`")
+
+        return "".join(lines)
+
+
+class GenericDocsFetcher(BaseFetcher):
+    """
+    Generic fetcher for documentation sites.
+
+    Configurable via SourceConfig to handle various documentation sites
+    without requiring custom fetcher code.
+    """
+
+    SOURCE_NAME = "generic_docs"
+    RATE_LIMIT_DELAY = 0.5
+
+    def __init__(
+        self,
+        source_id: str = "generic",
+        base_url: str = "",
+        sitemap_url: Optional[str] = None,
+        url_patterns: Optional[List[str]] = None,
+        exclude_patterns: Optional[List[str]] = None,
+        max_pages: int = 100,
+        rate_limit_delay: float = 0.5,
+    ):
+        super().__init__()
+        self.source_id = source_id
+        self.SOURCE_NAME = source_id
+        self.base_url = base_url.rstrip("/")
+        self.sitemap_url = sitemap_url
+        self.url_patterns = url_patterns or []
+        self.exclude_patterns = exclude_patterns or []
+        self.max_pages = max_pages
+        self.RATE_LIMIT_DELAY = rate_limit_delay
+
+    async def fetch(
+        self, keywords: List[str], extra_urls: List[str]
+    ) -> List[RawDocument]:
+        """Fetch documentation from the configured site."""
+        documents = []
+        session = await self._get_session()
+
+        urls_to_fetch = set(extra_urls)
+
+        # Try to get URLs from sitemap first
+        if self.sitemap_url:
+            try:
+                sitemap_urls = await self._fetch_sitemap(session, self.sitemap_url)
+                urls_to_fetch.update(sitemap_urls)
+                logger.info(f"Found {len(sitemap_urls)} URLs from sitemap for {self.source_id}")
+            except Exception as e:
+                logger.warning(f"Could not fetch sitemap for {self.source_id}: {e}")
+
+        # If no sitemap or empty, try crawling from base URL
+        if not urls_to_fetch and self.base_url:
+            urls_to_fetch.add(self.base_url)
+            try:
+                crawled = await self._crawl_links(session, self.base_url)
+                urls_to_fetch.update(crawled)
+            except Exception as e:
+                logger.warning(f"Could not crawl {self.base_url}: {e}")
+
+        # Filter URLs by patterns
+        urls_to_fetch = self._filter_urls(urls_to_fetch)
+
+        # Limit number of pages
+        urls_list = list(urls_to_fetch)[:self.max_pages]
+        logger.info(f"Fetching {len(urls_list)} pages for {self.source_id}")
+
+        # Fetch each page
+        for url in urls_list:
+            try:
+                doc = await self._fetch_page(session, url)
+                if doc:
+                    # Filter by keywords if provided
+                    if keywords:
+                        content_lower = doc.content.lower()
+                        if any(kw.lower() in content_lower for kw in keywords):
+                            documents.append(doc)
+                    else:
+                        documents.append(doc)
+
+                await asyncio.sleep(self.RATE_LIMIT_DELAY)
+
+            except Exception as e:
+                logger.debug(f"Error fetching {url}: {e}")
+
+        logger.info(f"Fetched {len(documents)} documents for {self.source_id}")
+        return documents
+
+    async def _fetch_sitemap(self, session: aiohttp.ClientSession, sitemap_url: str) -> set:
+        """Fetch URLs from sitemap (handles sitemap indexes too)."""
+        urls = set()
+
+        try:
+            async with session.get(sitemap_url) as resp:
+                if resp.status != 200:
+                    return urls
+
+                text = await resp.text()
+                soup = BeautifulSoup(text, "lxml-xml")
+
+                # Check if this is a sitemap index
+                if soup.find("sitemapindex"):
+                    # Fetch nested sitemaps
+                    for sitemap_loc in soup.find_all("loc"):
+                        nested_url = sitemap_loc.text.strip()
+                        if "sitemap" in nested_url.lower():
+                            nested_urls = await self._fetch_sitemap(session, nested_url)
+                            urls.update(nested_urls)
+                            if len(urls) >= self.max_pages * 2:
+                                break
+                else:
+                    # Regular sitemap
+                    for loc in soup.find_all("loc"):
+                        url = loc.text.strip()
+                        urls.add(url)
+
+        except Exception as e:
+            logger.warning(f"Error parsing sitemap {sitemap_url}: {e}")
+
+        return urls
+
+    async def _crawl_links(self, session: aiohttp.ClientSession, start_url: str, depth: int = 2) -> set:
+        """Crawl links from a starting URL."""
+        urls = set()
+        visited = set()
+        to_visit = [(start_url, 0)]
+        base_domain = urlparse(start_url).netloc
+
+        while to_visit and len(urls) < self.max_pages * 2:
+            current_url, current_depth = to_visit.pop(0)
+
+            if current_url in visited or current_depth > depth:
+                continue
+
+            visited.add(current_url)
+
+            try:
+                async with session.get(current_url) as resp:
+                    if resp.status != 200:
+                        continue
+
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, "html.parser")
+
+                    for a in soup.find_all("a", href=True):
+                        href = a["href"]
+
+                        # Make absolute
+                        if href.startswith("/"):
+                            href = urljoin(f"https://{base_domain}", href)
+                        elif not href.startswith("http"):
+                            href = urljoin(current_url, href)
+
+                        # Only same domain
+                        if urlparse(href).netloc == base_domain:
+                            # Skip anchors, files, etc.
+                            if "#" not in href and not any(
+                                ext in href.lower()
+                                for ext in [".png", ".jpg", ".gif", ".pdf", ".zip", ".tar"]
+                            ):
+                                urls.add(href)
+                                if current_depth < depth:
+                                    to_visit.append((href, current_depth + 1))
+
+                await asyncio.sleep(0.2)
+
+            except Exception as e:
+                logger.debug(f"Error crawling {current_url}: {e}")
+
+        return urls
+
+    def _filter_urls(self, urls: set) -> set:
+        """Filter URLs by configured patterns."""
+        filtered = set()
+
+        for url in urls:
+            # Check include patterns (if specified, URL must match at least one)
+            if self.url_patterns:
+                if not any(pattern in url for pattern in self.url_patterns):
+                    continue
+
+            # Check exclude patterns
+            if self.exclude_patterns:
+                if any(pattern in url for pattern in self.exclude_patterns):
+                    continue
+
+            filtered.add(url)
+
+        return filtered
+
+    async def _fetch_page(
+        self, session: aiohttp.ClientSession, url: str
+    ) -> Optional[RawDocument]:
+        """Fetch and parse a single documentation page."""
+        try:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    return None
+
+                html = await resp.text()
+                soup = BeautifulSoup(html, "html.parser")
+
+                # Extract title
+                title_tag = soup.find("h1") or soup.find("title")
+                title = (
+                    title_tag.get_text(strip=True)
+                    if title_tag
+                    else "Documentation"
+                )
+
+                # Extract main content - try multiple selectors
+                main = (
+                    soup.find("main")
+                    or soup.find("article")
+                    or soup.find("div", {"role": "main"})
+                    or soup.find("div", class_=re.compile(r"content|body|article|docs|prose"))
+                    or soup.find("div", id=re.compile(r"content|docs|main"))
+                )
+
+                if not main:
+                    main = soup.find("body")
+
+                if not main:
+                    return None
+
+                # Remove unwanted elements
+                for tag in main.find_all(
+                    ["script", "style", "nav", "aside", "footer", "header", "noscript"]
+                ):
+                    tag.decompose()
+
+                # Extract structured text
+                content = self._extract_doc_content(main)
+
+                if len(content) < 100:
+                    return None
+
+                return RawDocument(
+                    id=self._generate_doc_id(url, content),
+                    url=url,
+                    title=title,
+                    content=content,
+                    source=self.SOURCE_NAME,
+                    metadata={
+                        "url_path": urlparse(url).path,
+                    },
+                )
+
+        except Exception as e:
+            logger.debug(f"Error fetching page {url}: {e}")
+            return None
+
+    def _extract_doc_content(self, element) -> str:
+        """Extract text content preserving structure."""
+        lines = []
+
+        for child in element.descendants:
+            if hasattr(child, "name"):
+                if child.name in ["h1", "h2", "h3", "h4", "h5"]:
+                    text = child.get_text(strip=True)
+                    if text:
+                        level = int(child.name[1])
+                        lines.append(f"\n{'#' * level} {text}\n")
+                elif child.name == "p":
+                    text = child.get_text(strip=True)
+                    if text:
+                        lines.append(text + "\n")
+                elif child.name == "li":
+                    text = child.get_text(strip=True)
+                    if text:
+                        lines.append(f"- {text}\n")
+                elif child.name == "pre":
+                    code = child.get_text()
+                    if code:
+                        lines.append(f"\n```\n{code}\n```\n")
+                elif child.name == "code" and child.parent.name != "pre":
+                    text = child.get_text(strip=True)
+                    if text:
+                        lines.append(f"`{text}`")
+
+        return "".join(lines)
+
+
+def get_fetcher_for_config(config) -> BaseFetcher:
+    """
+    Get fetcher instance based on SourceConfig.
+
+    Args:
+        config: SourceConfig instance
+
+    Returns:
+        Appropriate fetcher instance
+    """
+    fetcher_type = config.fetcher_type
+
+    if fetcher_type == "kubernetes":
+        return KubernetesDocsFetcher(
+            kubernetes_topics=config.options.get("topics", [])
+        )
+    elif fetcher_type == "docker":
+        return DockerDocsFetcher(
+            docker_topics=config.options.get("topics", [])
+        )
+    elif fetcher_type == "github":
+        return GitHubFetcher(
+            github_token=config.options.get("github_token")
+        )
+    elif fetcher_type == "stackoverflow":
+        return StackOverflowFetcher()
+    elif fetcher_type == "nextjs":
+        return NextJSDocsFetcher()
+    elif fetcher_type == "python":
+        return PythonDocsFetcher(
+            python_libraries=config.options.get("libraries", [])
+        )
+    elif fetcher_type == "local":
+        return LocalDocsFetcher(
+            docs_dirs=config.options.get("docs_dirs", [])
+        )
+    else:
+        # Use generic fetcher
+        return GenericDocsFetcher(
+            source_id=config.id,
+            base_url=config.base_url,
+            sitemap_url=config.sitemap_url,
+            url_patterns=config.url_patterns,
+            exclude_patterns=config.exclude_patterns,
+            max_pages=config.max_pages,
+            rate_limit_delay=config.rate_limit_delay,
+        )
+
+
 def get_fetcher(source: str, **kwargs) -> BaseFetcher:
     """
     Get fetcher instance for a source type.
-    
+
     Args:
         source: Source type name
         **kwargs: Additional arguments for fetcher initialization
-        
+
     Returns:
         Fetcher instance
-        
+
     Raises:
         ValueError: If source type is unknown
     """
@@ -1201,16 +2110,25 @@ def get_fetcher(source: str, **kwargs) -> BaseFetcher:
         "github": GitHubFetcher,
         "python_docs": PythonDocsFetcher,
         "local_docs": LocalDocsFetcher,
+        "docker_docs": DockerDocsFetcher,
+        "kubernetes_docs": KubernetesDocsFetcher,
     }
-    
+
     if source not in fetchers:
-        raise ValueError(f"Unknown source type: {source}. Available: {list(fetchers.keys())}")
-    
+        raise ValueError(
+            f"Unknown source type: {source}. Available: {list(fetchers.keys())}"
+        )
+
     if source == "python_docs":
         return PythonDocsFetcher(**kwargs)
-    
+
     if source == "local_docs":
         return LocalDocsFetcher(**kwargs)
-    
-    return fetchers[source]()
 
+    if source == "docker_docs":
+        return DockerDocsFetcher(docker_topics=kwargs.get("docker_topics"))
+
+    if source == "kubernetes_docs":
+        return KubernetesDocsFetcher(kubernetes_topics=kwargs.get("kubernetes_topics"))
+
+    return fetchers[source]()

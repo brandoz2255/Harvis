@@ -23,10 +23,10 @@ spec:
         app.kubernetes.io/component: frontend
     spec:
       nodeSelector:
-        kubernetes.io/hostname: pop-os
+        kubernetes.io/hostname: dulc3-os
       containers:
         - name: frontend
-          image: "dulc3/jarvis-frontend:v2.8" # {"$imagepolicy": "flux-system:harvis-frontend-prod"}
+          image: "dulc3/jarvis-frontend:v2.13" # {"$imagepolicy": "flux-system:harvis-frontend-prod"}
           imagePullPolicy: Always
           ports:
             - name: http

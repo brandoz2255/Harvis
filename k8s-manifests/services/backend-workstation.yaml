@@ -157,7 +157,8 @@ spec:
           emptyDir:
             sizeLimit: 50Gi
         - name: tmp
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: harvis-audio-pvc
 ---
 apiVersion: v1
 kind: Service

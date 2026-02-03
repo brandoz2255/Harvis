@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: nfs-harvis-audio-pv
+  labels:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: shared-audio
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: nfs-shared
+  mountOptions:
+    - hard
+    - nfsvers=4.1
+    - noatime
+    - nodiratime
+  nfs:
+    server: 139.182.180.198  # Control plane node public IP
+    path: /srv/nfs/harvis-audio
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: harvis-audio-pvc
+  namespace: ai-agents
+  labels:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: shared-audio
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: nfs-shared
+  resources:
+    requests:
+      storage: 10Gi
+  volumeName: nfs-harvis-audio-pv

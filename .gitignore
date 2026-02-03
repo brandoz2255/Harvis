@@ -18,6 +18,7 @@ __pycache__
 **/values-local.yaml
 **/secrets.yaml
 **/secret-*.yaml
+k8s-manifests/base/secrets.yaml
 
 # Ignore Helm chart values with personal info
 harvis-helm-chart/values-production.yaml

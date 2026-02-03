@@ -53,7 +53,7 @@ export interface Message {
   content: string
   timestamp: Date
   model?: string
-  status?: "pending" | "sent" | "failed"
+  status?: "pending" | "sent" | "failed" | "streaming"
   audioUrl?: string
   reasoning?: string
   searchResults?: SearchResult[]
