@@ -1,9 +1,9 @@
 "use client"
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { Brain, RefreshCw, CheckCircle, AlertCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { apiClient } from '@/lib/api'
+import { apiClient, getAuthHeaders } from '@/lib/api'
 
 interface ModelInfo {
     name: string
@@ -34,20 +34,34 @@ export default function ModelSelector({
     const [models, setModels] = useState<ModelInfo[]>([])
     const [isLoading, setIsLoading] = useState(false)
     const [error, setError] = useState<string | null>(null)
+    const isFetchingModels = useRef(false)
 
     const fetchModels = useCallback(async () => {
+        if (isFetchingModels.current) return
+        isFetchingModels.current = true
         setIsLoading(true)
         setError(null)
 
-        try {
-            const data = await apiClient.getAvailableModels()
+        const controller = new AbortController()
+        const timeoutId = setTimeout(() => controller.abort(), 10000) // 10s timeout for model list
 
-            const modelInfos: ModelInfo[] = data.models?.map((model: any) => ({
+        try {
+            const response = await fetch('/api/ollama-models', {
+                signal: controller.signal,
+                headers: {
+                    ...getAuthHeaders(),
+                }
+            })
+
+            if (!response.ok) throw new Error('Failed to fetch models')
+            const data = await response.json()
+
+            const modelInfos: ModelInfo[] = (Array.isArray(data) ? data : data.models || []).map((model: any) => ({
                 name: model.name || model,
                 displayName: model.displayName || model.name || model,
                 status: model.status || 'available',
                 size: model.size,
-            })) || []
+            }))
 
             setModels(modelInfos)
 
@@ -60,18 +74,26 @@ export default function ModelSelector({
             }
 
         } catch (err) {
-            setError(err instanceof Error ? err.message : 'Failed to load models')
-            setModels([
-                {
-                    name: 'offline-mode',
-                    displayName: 'Offline Mode',
-                    status: 'offline',
-                }
-            ])
+            if ((err as Error).name === 'AbortError') {
+                console.warn('[ModelSelector] Fetch aborted or timed out')
+            } else {
+                setError(err instanceof Error ? err.message : 'Failed to load models')
+            }
+            if (models.length === 0) {
+                setModels([
+                    {
+                        name: 'offline-mode',
+                        displayName: 'Offline Mode',
+                        status: 'offline',
+                    }
+                ])
+            }
         } finally {
+            clearTimeout(timeoutId)
             setIsLoading(false)
+            isFetchingModels.current = false
         }
-    }, [selectedModel, onModelChange])
+    }, [selectedModel, onModelChange, models.length])
 
     useEffect(() => {
         fetchModels()

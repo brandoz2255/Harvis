@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useRef, useEffect } from "react"
+import { useState, useRef, useEffect, useMemo, useCallback } from "react"
 import { useRouter } from "next/navigation"
 import { v4 as uuidv4 } from 'uuid'
 import { ChatSidebar } from "@/components/chat-sidebar"
@@ -16,6 +16,9 @@ import { apiClient } from "@/lib/api"
 import { useUser } from "@/lib/auth/UserProvider"
 import type { Message, MessageObject, Attachment } from "@/types/message"
 import { isVisionModel } from "@/types/message"
+import { useChat } from "@ai-sdk/react"
+// @ts-ignore
+import { Message as AiMessage } from "ai"
 
 import { useApiWithRetry } from "@/hooks/useApiWithRetry"
 
@@ -26,10 +29,14 @@ export default function ChatPage() {
   const [lowVram, setLowVram] = useState(false)
   const [textOnly, setTextOnly] = useState(false)
   const [isResearchMode, setIsResearchMode] = useState(false)
-  const [messages, setMessages] = useState<Message[]>([])
+  const [localMessages, setLocalMessages] = useState<Message[]>([])
   const [isLoading, setIsLoading] = useState(false)
+
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const scrollRef = useRef<HTMLDivElement>(null)
+  
+  // Use a ref to track if we should skip the next scroll (to prevent scroll jank during streaming)
+  const skipNextScrollRef = useRef(false)
 
   // Auth protection
   useEffect(() => {
@@ -49,68 +56,219 @@ export default function ChatPage() {
     isLoadingMessages,
   } = useChatHistoryStore()
 
-  // Fetch sessions on mount (only if user exists)
+  // Vercel AI SDK integration
+  const { 
+    messages: aiMessages, 
+    append, 
+    setMessages: setAiMessages, 
+    isLoading: isAiLoading, 
+    data: aiData 
+  } = useChat({
+    api: '/api/ai-chat',
+    body: {
+      model: selectedModel,
+      sessionId: currentSession?.id || null,
+      textOnly: textOnly,
+      lowVram: lowVram,
+    },
+    onError: (e: any) => {
+      console.error("AI SDK Error:", e)
+      setIsLoading(false)
+    },
+    onFinish: (message: any) => {
+      setIsLoading(false)
+      fetchSessions()
+    }
+  })
+
+  // Track data in refs to avoid re-renders during streaming
+  const audioUrlMapRef = useRef<Map<string, string>>(new Map())
+  const searchResultsMapRef = useRef<Map<string, any[]>>(new Map())
+  const videosMapRef = useRef<Map<string, any[]>>(new Map())
+  const reasoningMapRef = useRef<Map<string, string>>(new Map())
+  const processedDataLengthRef = useRef(0)
+  
+  // Track previous aiData length to detect new data
+  const prevAiDataLengthRef = useRef(0)
+
+  // Process aiData updates in a separate effect (doesn't trigger re-renders of messages)
+  useEffect(() => {
+    if (!aiData || aiData.length === 0) {
+      processedDataLengthRef.current = 0
+      prevAiDataLengthRef.current = 0
+      return
+    }
+
+    // Only process if we have new data
+    if (aiData.length > prevAiDataLengthRef.current) {
+      const assistantMsgIds = aiMessages
+        .filter((m: any) => m.role === 'assistant')
+        .map((m: any) => m.id)
+      const lastAssistantId = assistantMsgIds[assistantMsgIds.length - 1]
+
+      const newItems = aiData.slice(prevAiDataLengthRef.current)
+      prevAiDataLengthRef.current = aiData.length
+
+      // Process new data items
+      const mappedAudioUrls = new Set(audioUrlMapRef.current.values())
+      
+      newItems.forEach((data: any) => {
+        // Audio URLs
+        if (data?.audioPath && !mappedAudioUrls.has(data.audioPath) && lastAssistantId) {
+          audioUrlMapRef.current.set(lastAssistantId, data.audioPath)
+          mappedAudioUrls.add(data.audioPath)
+        }
+        
+        // Search results
+        const results = data?.searchResults || data?.results || data?.sources
+        if (results && lastAssistantId && !searchResultsMapRef.current.has(lastAssistantId)) {
+          searchResultsMapRef.current.set(lastAssistantId, results)
+        }
+        
+        // Videos
+        if (data?.videos && lastAssistantId && !videosMapRef.current.has(lastAssistantId)) {
+          videosMapRef.current.set(lastAssistantId, data.videos)
+        }
+      })
+    }
+  }, [aiData, aiMessages])
+
+  // Use useMemo to convert AI messages to local format - this prevents re-renders during streaming
+  const convertedMessages = useMemo<Message[]>(() => {
+    if (aiMessages.length === 0) return []
+    
+    return aiMessages.map((m: any, index: number): Message => {
+      const reasoningTool = m.toolInvocations?.find((t: any) => t.toolName === 'reasoning')
+      const toolReasoning = reasoningTool?.result?.reasoning
+      const reasoning = toolReasoning || reasoningMapRef.current.get(m.id)
+
+      return {
+        id: m.id,
+        role: m.role as "user" | "assistant",
+        content: m.content,
+        timestamp: m.createdAt || new Date(),
+        model: selectedModel,
+        status: (index === aiMessages.length - 1 && isAiLoading) ? 'streaming' : 'sent',
+        reasoning: reasoning,
+        audioUrl: audioUrlMapRef.current.get(m.id),
+        searchResults: searchResultsMapRef.current.get(m.id),
+        videos: videosMapRef.current.get(m.id),
+      }
+    })
+  }, [aiMessages, selectedModel, isAiLoading])
+
+  // Merge converted messages with local messages (for non-AI SDK modes)
+  const messages = useMemo(() => {
+    if (convertedMessages.length > 0) {
+      return convertedMessages
+    }
+    return localMessages
+  }, [convertedMessages, localMessages])
+
+  // Sync loaded history INTO AI SDK
+  useEffect(() => {
+    if (currentSession && storeMessages && storeMessages.length > 0 && aiMessages.length === 0) {
+      // Clear the maps first when loading new history
+      searchResultsMapRef.current.clear()
+      videosMapRef.current.clear()
+      audioUrlMapRef.current.clear()
+      reasoningMapRef.current.clear()
+      processedDataLengthRef.current = 0
+      prevAiDataLengthRef.current = 0
+
+      const formattedForAi: any[] = storeMessages.map((msg: any) => {
+        const msgId = msg.id?.toString() || uuidv4()
+
+        if (msg.metadata) {
+          const sources = msg.metadata.sources || msg.metadata.searchResults
+          const videos = msg.metadata.videos
+
+          if (sources && sources.length > 0) {
+            searchResultsMapRef.current.set(msgId, sources)
+          }
+          if (videos && videos.length > 0) {
+            videosMapRef.current.set(msgId, videos)
+          }
+        }
+
+        if (msg.reasoning) {
+          reasoningMapRef.current.set(msgId, msg.reasoning)
+        }
+
+        return {
+          id: msgId,
+          role: msg.role,
+          content: msg.content,
+          createdAt: new Date(msg.created_at || Date.now()),
+        }
+      })
+      setAiMessages(formattedForAi)
+    }
+  }, [storeMessages, currentSession, setAiMessages, aiMessages.length])
+
+  // Fetch sessions on mount
   useEffect(() => {
     if (user) {
       fetchSessions()
     }
   }, [fetchSessions, user])
 
-  // Sync messages from store
+  // Optimized scroll to bottom - only scroll on significant changes, not every token
   useEffect(() => {
-    if (currentSession && storeMessages) {
-      const formattedMessages: Message[] = storeMessages.map((msg: any) => ({
-        id: msg.id?.toString(),
-        role: msg.role,
-        content: msg.content,
-        timestamp: new Date(msg.created_at || Date.now()),
-        model: msg.model_used,
-        status: "sent",
-        searchResults: msg.metadata?.searchResults,
-        searchQuery: msg.metadata?.searchQuery,
-        audioUrl: msg.metadata?.audio_path,
-      }))
-      setMessages(formattedMessages)
-    } else if (!currentSession) {
-      // Clear messages when no session is selected
-      setMessages([])
+    if (skipNextScrollRef.current) {
+      skipNextScrollRef.current = false
+      return
     }
-  }, [currentSession, storeMessages])
-
-  useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+    
+    if (scrollRef.current && messages.length > 0) {
+      // Use requestAnimationFrame for smooth scrolling
+      requestAnimationFrame(() => {
+        scrollRef.current?.scrollTo({
+          top: scrollRef.current.scrollHeight,
+          behavior: 'smooth'
+        })
+      })
     }
-  }, [messages])
+  }, [messages.length]) // Only scroll when message count changes, not on every content update
 
-  const handleNewChat = async () => {
+  const handleNewChat = useCallback(async () => {
     const newSession = await createNewChat()
     if (newSession) {
-      setMessages([])
+      setLocalMessages([])
+      setAiMessages([])
+      audioUrlMapRef.current.clear()
+      searchResultsMapRef.current.clear()
+      videosMapRef.current.clear()
+      reasoningMapRef.current.clear()
     }
-  }
+  }, [createNewChat, setAiMessages])
 
-  const handleSelectChat = async (id: string) => {
+  const handleSelectChat = useCallback(async (id: string) => {
+    setAiMessages([])
+    setLocalMessages([])
+    audioUrlMapRef.current.clear()
+    searchResultsMapRef.current.clear()
+    videosMapRef.current.clear()
+    reasoningMapRef.current.clear()
     await selectSession(id)
     setSidebarOpen(false)
-  }
+  }, [selectSession, setAiMessages])
 
-  const isDuplicateMessage = (newMessage: Message, existingMessages: Message[]): boolean => {
+  const isDuplicateMessage = useCallback((newMessage: Message, existingMessages: Message[]): boolean => {
     const recentMessages = existingMessages.slice(-3)
     return recentMessages.some(msg =>
       msg.role === newMessage.role &&
       msg.content === newMessage.content &&
       Math.abs(msg.timestamp.getTime() - newMessage.timestamp.getTime()) < 2000
     )
-  }
+  }, [])
 
   const { fetchWithRetry } = useApiWithRetry()
 
-  const handleSendMessage = async (input: string | MessageObject) => {
+  const handleSendMessage = useCallback(async (input: string | MessageObject) => {
     let messageContent = ""
     let messageAttachments: Attachment[] = []
 
-    // 1. Unify input handling and optimistic updates
     if (typeof input === 'string') {
       messageContent = input
       if (!messageContent.trim()) return
@@ -119,31 +277,22 @@ export default function ChatPage() {
       messageContent = msgObj.content
       messageAttachments = msgObj.attachments || []
 
-      // Voice messages: just add to UI, don't send to API (already processed by mic-chat)
       if (msgObj.inputType === 'voice') {
         if (!isDuplicateMessage(msgObj as Message, messages)) {
-          setMessages((prev) => [...prev, msgObj as Message])
+          setLocalMessages((prev) => [...prev, msgObj as Message])
         }
-        return // Don't make another API call - voice already handled by backend
+        return
       }
 
-      // Add user message to display immediately for objects (files/images)
       if (!isDuplicateMessage(msgObj as Message, messages)) {
-        setMessages((prev) => [...prev, msgObj as Message])
+        setLocalMessages((prev) => [...prev, msgObj as Message])
       }
     }
 
     if (isLoading) return
 
-    // 2. Handle Vision (Images) - Specific branch
-    // If it has images AND a vision model is selected, use vision endpoint 
     const hasImages = messageAttachments.some(a => a.type === 'image')
     if (hasImages && isVisionModel(selectedModel || '')) {
-      // Vision logic (already adds its own messages to state?)
-      // The current handleVisionMessage adds assistant response but NOT user message?
-      // Wait, standard handleSendMessage "string" path adds user message. 
-      // The "object" path above adds it.
-      // So we are good on user message.
       const imageAttachment = messageAttachments.find(a => a.type === 'image')
       if (imageAttachment) {
         await handleVisionMessage(messageContent, imageAttachment.data, messageAttachments)
@@ -151,11 +300,9 @@ export default function ChatPage() {
       return
     }
 
-    // 3. Normal Chat (Text + Files)
-
+    const assistantId = uuidv4()
     const tempId = uuidv4()
 
-    // If it was a string input, we haven't added it to state yet.
     if (typeof input === 'string') {
       const userMessage: Message = {
         tempId,
@@ -165,17 +312,32 @@ export default function ChatPage() {
         model: selectedModel,
         status: "pending",
       }
-      setMessages((prev) => [...prev, userMessage])
-    } else {
-      // If it was an object, we already added it, but let's treat it as pending
-      // (The optimistic add above doesn't set status usually? MessageObject doesn't have status)
-      // Actually MessageObject (from types) doesn't have status. Message does.
-      // We might want to update the status of the last message if needed, but let's leave it simple.
+      setLocalMessages((prev) => [...prev, userMessage])
+
+      if (isResearchMode || isVisionModel(selectedModel || '')) {
+        const placeholderAiMsg: Message = {
+          id: assistantId,
+          role: 'assistant',
+          content: '',
+          timestamp: new Date(),
+          model: selectedModel,
+          status: 'streaming'
+        }
+        setLocalMessages((prev) => [...prev, placeholderAiMsg])
+      }
+
+      if (!isResearchMode && !isVisionModel(selectedModel || '')) {
+        setIsLoading(true)
+        await append({
+          role: 'user',
+          content: messageContent,
+        })
+        return;
+      }
     }
 
     setIsLoading(true)
 
-    // Create session if none exists
     let sessionId = currentSession?.id
     if (!sessionId) {
       const newSession = await createNewChat()
@@ -183,30 +345,26 @@ export default function ChatPage() {
     }
 
     try {
-      // Get auth token
       const token = localStorage.getItem('token')
       if (!token) {
         throw new Error('Authentication required. Please log in again.')
       }
 
-      // Determine endpoint based on research mode
       const endpoint = isResearchMode ? '/api/research-chat' : '/api/chat'
 
-      // Build request payload
       const requestBody: any = {
         message: messageContent,
         history: messages.map(m => ({
           role: m.role,
           content: m.content
         })),
-        model: selectedModel || 'mistral',
+        model: selectedModel,
         session_id: sessionId || null,
         low_vram: lowVram,
         text_only: textOnly,
         attachments: messageAttachments.length > 0 ? messageAttachments : undefined
       }
 
-      // Add research mode parameters
       if (isResearchMode) {
         requestBody.enableWebSearch = true
         requestBody.exaggeration = 0.5
@@ -214,7 +372,6 @@ export default function ChatPage() {
         requestBody.cfg_weight = 0.5
       }
 
-      // Use fetchWithRetry for all modes (it handles both JSON and SSE)
       const data = await fetchWithRetry(endpoint, {
         method: 'POST',
         headers: {
@@ -226,19 +383,77 @@ export default function ChatPage() {
       }, {
         lowVram,
         timeout: 3600000,
-        maxRetries: 0
+        maxRetries: 0,
+        onChunk: (chunk: any) => {
+          setLocalMessages((prev) => {
+            const newMessages = [...prev]
+            const index = newMessages.findIndex(m => m.id === assistantId)
+            if (index === -1) return prev
+
+            const currentMsg = newMessages[index]
+            let updates: Partial<Message> = {}
+            let hasUpdates = false
+
+            if (chunk.status === 'progress' || chunk.status === 'researching') {
+              const statusText = chunk.message || chunk.detail
+              if (statusText) {
+                updates.reasoning = (currentMsg.reasoning || '') + (currentMsg.reasoning ? '\n' : '') + `> ${statusText}`
+                hasUpdates = true
+              }
+            }
+
+            if (chunk.status === 'streaming' && chunk.content) {
+              updates.content = (currentMsg.content || '') + chunk.content
+              updates.status = 'sent'
+              hasUpdates = true
+            }
+
+            if (chunk.status === 'complete') {
+              const finalContent = chunk.response || chunk.final_answer
+              if (finalContent) {
+                updates.content = finalContent
+                updates.status = 'sent'
+                hasUpdates = true
+              }
+              if (chunk.reasoning) {
+                updates.reasoning = chunk.reasoning
+                hasUpdates = true
+              }
+              if (chunk.audio_path) {
+                updates.audioUrl = chunk.audio_path
+                hasUpdates = true
+              }
+            }
+
+            if (chunk.sources || chunk.search_results) {
+              updates.searchResults = chunk.sources || chunk.search_results
+              hasUpdates = true
+            }
+
+            if (chunk.videos) {
+              updates.videos = chunk.videos
+              hasUpdates = true
+            }
+
+            if (hasUpdates) {
+              return newMessages.map((msg, i) =>
+                i === index ? { ...msg, ...updates } : msg
+              )
+            }
+
+            return prev
+          })
+        }
       })
 
-      // Update user message to sent (if we had a tempId)
       if (typeof input === 'string') {
-        setMessages((prev) =>
+        setLocalMessages((prev) =>
           prev.map((msg) =>
             msg.tempId === tempId ? { ...msg, status: "sent" } : msg
           )
         )
       }
 
-      // Create assistant message with all response data
       const assistantContent = data.final_answer ||
         data.response ||
         (data.history && data.history.length > 0
@@ -252,37 +467,33 @@ export default function ChatPage() {
         timestamp: new Date(),
         model: selectedModel,
         status: "sent",
-        audioUrl: data.audio_path,
+        audioUrl: data.audio_path || undefined,
         reasoning: data.reasoning,
-        searchResults: data.search_results || data.sources,  // Handle both formats
+        searchResults: data.search_results || data.sources,
         searchQuery: data.searchQuery,
-        videos: data.videos,  // YouTube videos from research
-        autoResearched: data.auto_researched,  // Perplexity-style auto-research indicator
+        videos: data.videos,
+        autoResearched: data.auto_researched,
       }
 
-      if (!isDuplicateMessage(assistantMessage, messages)) {
-        setMessages((prev) => [...prev, assistantMessage])
-      }
+      setLocalMessages((prev) =>
+        prev.map(msg => msg.id === assistantId ? assistantMessage : msg)
+      )
     } catch (error) {
       console.error("Chat error:", error)
-      // Mark message as failed
       if (typeof input === 'string') {
-        setMessages((prev) =>
+        setLocalMessages((prev) =>
           prev.map((msg) =>
             msg.tempId === tempId ? { ...msg, status: "failed" } : msg
           )
         )
-      } else {
-        // Add error annotation to the last message? Or just alert?
-        // For now, let's just log it. The UI doesn't track status for input objects well yet.
       }
     } finally {
       setIsLoading(false)
     }
-  }
+  }, [messages, isLoading, selectedModel, isResearchMode, currentSession, lowVram, textOnly, isDuplicateMessage, fetchWithRetry, append, createNewChat])
 
-  // Handle vision messages (images/screenshots) - Uses Ollama VL models
-  const handleVisionMessage = async (prompt: string, imageData: string, attachments: Attachment[]) => {
+  // Handle vision messages
+  const handleVisionMessage = useCallback(async (prompt: string, imageData: string, attachments: Attachment[]) => {
     setIsLoading(true)
 
     try {
@@ -291,28 +502,17 @@ export default function ChatPage() {
         throw new Error('Authentication required')
       }
 
-      // Collect all images from attachments
       const images = attachments
         .filter(a => a.type === 'image')
         .map(a => a.data)
 
-      // Get or create session (same as regular chat)
       let sessionId = currentSession?.id
       if (!sessionId) {
-        console.log('🖼️ Vision: No current session, creating new one')
         const newSession = await createNewChat()
         sessionId = newSession?.id
-        console.log(`🖼️ Vision: Created new session: ${sessionId}`)
-      } else {
-        console.log(`🖼️ Vision: Using existing session: ${sessionId}`)
       }
 
-      // Use the Ollama vision-chat endpoint with session_id
-      // Add AbortController with extended timeout for vision processing (10 minutes)
-      const controller = new AbortController()
-      const timeoutId = setTimeout(() => controller.abort(), 600000) // 10 minutes
-
-      const response = await fetch('/api/vision-chat', {
+      const data = await fetchWithRetry('/api/vision-chat', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -326,37 +526,24 @@ export default function ChatPage() {
             content: m.content
           })),
           model: selectedModel,
-          session_id: sessionId,  // Pass session_id for unified history
+          session_id: sessionId,
           low_vram: lowVram,
           text_only: textOnly
         }),
-        credentials: 'include',
-        signal: controller.signal
+        credentials: 'include'
+      }, {
+        timeout: 600000,
+        lowVram: lowVram
       })
 
-      clearTimeout(timeoutId)
-
-      if (!response.ok) {
-        const errorText = await response.text()
-        throw new Error(`Vision analysis failed: ${errorText}`)
-      }
-
-      const data = await response.json()
-
-      // If backend created a new session, just update the session reference
-      // Don't call selectSession as that would clear messages and reload from DB
       if (data.session_id && data.session_id !== sessionId) {
-        console.log(`🖼️ Vision: Backend created/used session ${data.session_id}`)
-        // Refresh sessions list to pick up the new session in sidebar
         await fetchSessions()
-        // Note: Don't select the session here - we already have the messages in local state
       }
 
-      // Create assistant message with vision analysis
       const assistantMessage: Message = {
         id: (Date.now() + 1).toString(),
         role: "assistant",
-        content: data.response || 'I analyzed the image.',
+        content: data.response || data.final_answer || 'I analyzed the image.',
         timestamp: new Date(),
         model: selectedModel,
         status: "sent",
@@ -364,12 +551,11 @@ export default function ChatPage() {
         reasoning: data.reasoning,
       }
 
-      setMessages((prev) => [...prev, assistantMessage])
+      setLocalMessages((prev) => [...prev, assistantMessage])
 
     } catch (error) {
       console.error("Vision error:", error)
 
-      // Add error message
       const errorMessage: Message = {
         id: (Date.now() + 1).toString(),
         role: "assistant",
@@ -378,11 +564,35 @@ export default function ChatPage() {
         model: selectedModel,
         status: "failed",
       }
-      setMessages((prev) => [...prev, errorMessage])
+      setLocalMessages((prev) => [...prev, errorMessage])
     } finally {
       setIsLoading(false)
     }
-  }
+  }, [currentSession, selectedModel, messages, lowVram, textOnly, fetchWithRetry, createNewChat, fetchSessions])
+
+  // Memoize the message list rendering to prevent re-renders during streaming
+  const messageList = useMemo(() => {
+    return messages.map((message, index) => (
+      <ChatMessage
+        key={message.id || message.tempId || index}
+        role={message.role}
+        content={message.content}
+        timestamp={message.timestamp.toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+        })}
+        codeBlocks={message.codeBlocks}
+        searchResults={message.searchResults}
+        searchQuery={message.searchQuery}
+        videos={message.videos}
+        audioUrl={message.audioUrl}
+        reasoning={message.reasoning}
+        imageUrl={message.imageUrl}
+        inputType={message.inputType}
+        status={message.status}
+      />
+    ))
+  }, [messages])
 
   if (isAuthLoading) {
     return (
@@ -393,7 +603,7 @@ export default function ChatPage() {
   }
 
   if (!user) {
-    return null // Will redirect in useEffect
+    return null
   }
 
   return (
@@ -429,7 +639,7 @@ export default function ChatPage() {
 
       {/* Main Content */}
       <div className="flex flex-1 flex-col overflow-hidden">
-        {/* Header - Sticky at top */}
+        {/* Header */}
         <header className="sticky top-0 z-10 shrink-0 flex items-center gap-4 border-b border-border bg-background px-4 py-3">
           <Button
             variant="ghost"
@@ -466,7 +676,7 @@ export default function ChatPage() {
           </div>
         </header>
 
-        {/* Chat Area - Scrollable middle section */}
+        {/* Chat Area */}
         <div className="flex-1 overflow-y-auto" ref={scrollRef}>
           <div className="mx-auto max-w-4xl px-4 py-6">
             {messages.length === 0 ? (
@@ -500,27 +710,9 @@ export default function ChatPage() {
                 </div>
               </div>
             ) : (
-              messages.map((message, index) => (
-                <ChatMessage
-                  key={message.id || message.tempId || index}
-                  role={message.role}
-                  content={message.content}
-                  timestamp={message.timestamp.toLocaleTimeString([], {
-                    hour: "2-digit",
-                    minute: "2-digit",
-                  })}
-                  codeBlocks={message.codeBlocks}
-                  searchResults={message.searchResults}
-                  searchQuery={message.searchQuery}
-                  videos={message.videos}
-                  audioUrl={message.audioUrl}
-                  reasoning={message.reasoning}
-                  imageUrl={message.imageUrl}
-                  inputType={message.inputType}
-                />
-              ))
+              messageList
             )}
-            {isLoading && (
+            {isLoading && messages[messages.length - 1]?.role !== 'assistant' && (
               <div className="flex items-center gap-4 py-6">
                 <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/20">
                   <Sparkles className="h-4 w-4 animate-pulse text-primary" />
@@ -535,7 +727,7 @@ export default function ChatPage() {
           </div>
         </div>
 
-        {/* Input Area - Sticky at bottom */}
+        {/* Input Area */}
         <div className="sticky bottom-0 z-10 shrink-0 border-t border-border bg-background">
           <ChatInput
             onSend={handleSendMessage}

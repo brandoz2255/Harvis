@@ -25,7 +25,7 @@ class EmbeddingAdapter:
     
     def __init__(
         self,
-        model_name: str = "qwen3-embedding:4b-q4_K_M",
+        model_name: str = "nomic-embed-text",  # 768 dims, excellent quality
         ollama_url: str = "http://ollama:11434",
         use_huggingface_fallback: bool = True
     ):
@@ -121,15 +121,42 @@ class EmbeddingAdapter:
         
         return embeddings
     
+    def _truncate_text(self, text: str, max_chars: int = 8000) -> str:
+        """
+        Truncate text to stay within model context limits.
+
+        Most embedding models have 8192 token limits.
+        Using ~4 chars per token as rough estimate, 8000 chars ≈ 2000 tokens (safe margin).
+        """
+        if len(text) <= max_chars:
+            return text
+
+        # Truncate and try to end at a sentence/word boundary
+        truncated = text[:max_chars]
+
+        # Try to end at sentence boundary
+        last_period = truncated.rfind('. ')
+        last_newline = truncated.rfind('\n')
+        break_point = max(last_period, last_newline)
+
+        if break_point > max_chars * 0.8:  # Only use if we keep at least 80%
+            truncated = truncated[:break_point + 1]
+
+        logger.debug(f"Truncated text from {len(text)} to {len(truncated)} chars")
+        return truncated
+
     async def _embed_with_ollama(self, text: str) -> List[float]:
         """Generate embedding using Ollama API."""
         session = await self._get_session()
-        
+
+        # Truncate text to prevent context length errors
+        text = self._truncate_text(text)
+
         payload = {
             "model": self.model_name,
             "prompt": text
         }
-        
+
         logger.debug(f"Calling Ollama embeddings API with model: {self.model_name}")
         
         async with session.post(
@@ -170,7 +197,10 @@ class EmbeddingAdapter:
         model = self._get_huggingface_model()
         if model is None:
             raise RuntimeError("No embedding model available")
-        
+
+        # Truncate for HuggingFace models (typically 512 token limit)
+        text = self._truncate_text(text, max_chars=2000)
+
         embedding = model.encode(text, convert_to_numpy=True)
         return embedding.tolist()
     
@@ -227,9 +257,10 @@ class EmbeddingAdapter:
         # Default dimensions for common models
         defaults = {
             "nomic-embed-text": 768,
-            "qwen3-embedding:4b-q4_K_M": 2560,
-            "qwen3-embedding": 2560,
+            "qwen3-embedding:4b-q4_K_M": 384,  # Quantized version outputs 384
+            "qwen3-embedding": 2560,  # Full version outputs 2560
             "mxbai-embed-large": 1024,
+            "snowflake-arctic-embed": 1024,
             "all-MiniLM-L6-v2": 384,
         }
         

@@ -1,6 +1,9 @@
 """
 Model Management System for GPU Memory Optimization
 Handles loading/unloading of TTS, Whisper, and Qwen2VL models
+
+IMPORTANT: TTS (ChatterboxTTS) is loaded LAZILY to avoid allocating VRAM/RAM
+when running in text_only mode. This prevents unnecessary memory usage.
 """
 
 import os
@@ -10,19 +13,46 @@ import time
 import gc
 from typing import Optional
 
-# Import model classes
-try:
-    import whisper
-except ImportError:
-    # Try alternative whisper import
-    try:
-        import openai_whisper as whisper
-    except ImportError:
-        logger.error("No whisper package found. Please install with: pip install openai-whisper")
-        whisper = None
-from chatterbox.tts import ChatterboxTTS
-
 logger = logging.getLogger(__name__)
+
+# ─── Lazy TTS Import ─────────────────────────────────────────────────────────
+# ChatterboxTTS is NOT imported at module level to avoid allocating memory
+# when text_only mode is used. It will be imported on first use.
+ChatterboxTTS = None  # Will be lazily loaded
+
+def _lazy_import_chatterbox():
+    """Lazily import ChatterboxTTS only when needed."""
+    global ChatterboxTTS
+    if ChatterboxTTS is None:
+        try:
+            from chatterbox.tts import ChatterboxTTS as _ChatterboxTTS
+            ChatterboxTTS = _ChatterboxTTS
+            logger.info("✅ ChatterboxTTS loaded (lazy import)")
+        except ImportError as e:
+            logger.error(f"❌ Failed to import ChatterboxTTS: {e}")
+            raise
+    return ChatterboxTTS
+
+# ─── Lazy Whisper Import ─────────────────────────────────────────────────────
+whisper = None  # Will be lazily loaded
+
+def _lazy_import_whisper():
+    """Lazily import Whisper only when needed."""
+    global whisper
+    if whisper is None:
+        try:
+            import whisper as _whisper
+            whisper = _whisper
+            logger.info("✅ Whisper loaded (lazy import)")
+        except ImportError:
+            try:
+                import openai_whisper as _whisper
+                whisper = _whisper
+                logger.info("✅ Whisper (openai-whisper) loaded (lazy import)")
+            except ImportError:
+                logger.error("❌ No whisper package found. Install with: pip install openai-whisper")
+                return None
+    return whisper
 
 # ─── Global Model Variables ─────────────────────────────────────────────────
 tts_model = None
@@ -188,12 +218,18 @@ def auto_cleanup_if_needed(threshold_percent=75):
 
 # ─── Model Loading Functions ────────────────────────────────────────────────
 def load_tts_model(force_cpu=False):
-    """Load TTS model with memory management"""
-    global tts_model
+    """Load TTS model with memory management.
+
+    NOTE: ChatterboxTTS is lazily imported here to avoid allocating VRAM/RAM
+    when text_only mode is used.
+    """
+    global tts_model, ChatterboxTTS
     tts_device = "cuda" if torch.cuda.is_available() and not force_cpu else "cpu"
 
     if tts_model is None:
         try:
+            # Lazy import ChatterboxTTS only when needed
+            ChatterboxTTS = _lazy_import_chatterbox()
             logger.info(f"🔊 Loading TTS model on device: {tts_device}")
 
             # LOG CACHE CONFIGURATION
@@ -383,9 +419,15 @@ def load_tts_model(force_cpu=False):
     return tts_model
 
 def load_whisper_model():
-    """Load Whisper model with memory management"""
-    global whisper_model
+    """Load Whisper model with memory management.
+
+    NOTE: Whisper is lazily imported here to avoid allocating memory
+    when not needed.
+    """
+    global whisper_model, whisper
     if whisper_model is None:
+        # Lazy import whisper only when needed
+        whisper = _lazy_import_whisper()
         if whisper is None:
             logger.error("❌ Whisper not available - install with: pip install openai-whisper")
             return None
@@ -577,66 +619,138 @@ def load_whisper_model():
 
 # ─── Model Unloading Functions ──────────────────────────────────────────────
 def unload_tts_model():
-    """Unload only TTS model to free GPU memory for Whisper"""
+    """Unload TTS model to free both GPU VRAM and CPU RAM"""
     global tts_model
-    
+
     if tts_model is not None:
-        logger.info("🗑️ Unloading TTS model to free GPU memory for Whisper")
+        logger.info("🗑️ Unloading TTS model to free GPU VRAM and CPU RAM")
+
+        # Move model to CPU first if on CUDA (helps release VRAM faster)
+        try:
+            if hasattr(tts_model, 'to'):
+                tts_model.to('cpu')
+        except Exception as e:
+            logger.debug(f"Could not move TTS model to CPU: {e}")
+
+        # Clear any internal caches/buffers the model might have
+        try:
+            if hasattr(tts_model, 'cpu'):
+                tts_model.cpu()
+            # Clear any state_dict that might be cached
+            if hasattr(tts_model, '_modules'):
+                for module in tts_model._modules.values():
+                    if module is not None and hasattr(module, '_parameters'):
+                        for param in list(module._parameters.values()):
+                            if param is not None:
+                                param.data = torch.empty(0)
+        except Exception as e:
+            logger.debug(f"Could not clear TTS internal state: {e}")
+
+        # Delete the model reference
         del tts_model
         tts_model = None
-        
-        # Aggressive GPU cleanup
+
+        # Aggressive GPU cleanup (if CUDA available)
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
-            gc.collect()
+
+        # CRITICAL: Always run garbage collection for CPU RAM cleanup
+        # Run multiple passes as cyclic GC may need multiple iterations
+        gc.collect()
+        gc.collect()
+        gc.collect()
+
+        # Final CUDA cleanup after GC
+        if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        
+
+        logger.info("✅ TTS model unloaded (VRAM + CPU RAM freed)")
         log_gpu_memory("after TTS unload")
 
 def unload_whisper_model():
-    """Unload only Whisper model to free GPU memory for TTS"""
+    """Unload Whisper model to free both GPU VRAM and CPU RAM"""
     global whisper_model
-    
+
     if whisper_model is not None:
-        logger.info("🗑️ Unloading Whisper model to free GPU memory for TTS")
+        logger.info("🗑️ Unloading Whisper model to free GPU VRAM and CPU RAM")
+
+        # Move model to CPU first if on CUDA (helps release VRAM faster)
+        try:
+            if hasattr(whisper_model, 'to'):
+                whisper_model.to('cpu')
+        except Exception as e:
+            logger.debug(f"Could not move Whisper model to CPU: {e}")
+
+        # Clear any internal caches/buffers
+        try:
+            if hasattr(whisper_model, 'cpu'):
+                whisper_model.cpu()
+        except Exception as e:
+            logger.debug(f"Could not clear Whisper internal state: {e}")
+
+        # Delete the model reference
         del whisper_model
         whisper_model = None
-        
-        # Aggressive GPU cleanup
+
+        # Aggressive GPU cleanup (if CUDA available)
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
-            gc.collect()
+
+        # CRITICAL: Always run garbage collection for CPU RAM cleanup
+        gc.collect()
+        gc.collect()
+        gc.collect()
+
+        # Final CUDA cleanup after GC
+        if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        
+
+        logger.info("✅ Whisper model unloaded (VRAM + CPU RAM freed)")
         log_gpu_memory("after Whisper unload")
 
 def unload_models():
-    """Unload TTS and Whisper models to free GPU memory"""
+    """Unload TTS and Whisper models to free both GPU VRAM and CPU RAM"""
     global tts_model, whisper_model
-    
+
     log_gpu_memory("before unload")
-    
+
+    # Move models to CPU first to release VRAM faster
+    for model, name in [(tts_model, "TTS"), (whisper_model, "Whisper")]:
+        if model is not None:
+            try:
+                if hasattr(model, 'to'):
+                    model.to('cpu')
+            except Exception as e:
+                logger.debug(f"Could not move {name} model to CPU: {e}")
+
     if tts_model is not None:
-        logger.info("🗑️ Unloading TTS model to free GPU memory")
+        logger.info("🗑️ Unloading TTS model to free VRAM + CPU RAM")
         del tts_model
         tts_model = None
-    
+
     if whisper_model is not None:
-        logger.info("🗑️ Unloading Whisper model to free GPU memory")
+        logger.info("🗑️ Unloading Whisper model to free VRAM + CPU RAM")
         del whisper_model
         whisper_model = None
-    
-    # Aggressive GPU cleanup
+
+    # Aggressive GPU cleanup (if CUDA available)
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
-        # Force garbage collection
-        gc.collect()
-        # Clear cache again after GC
+
+    # CRITICAL: Always run garbage collection for CPU RAM cleanup
+    # Run multiple passes as cyclic GC may need multiple iterations
+    gc.collect()
+    gc.collect()
+    gc.collect()
+
+    # Final CUDA cleanup after GC
+    if torch.cuda.is_available():
         torch.cuda.empty_cache()
-        
+
+    logger.info("✅ All models unloaded (VRAM + CPU RAM freed)")
     log_gpu_memory("after unload")
 
 def unload_running_ollama_models():

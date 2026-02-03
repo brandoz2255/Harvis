@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
 interface ReasoningPanelProps {
-  reasoning: string
+  reasoning: string | { steps: string[]; conclusion: string }
   defaultExpanded?: boolean
 }
 
@@ -18,22 +18,35 @@ export function ReasoningPanel({ reasoning, defaultExpanded = false }: Reasoning
 
   useEffect(() => {
     if (reasoning) {
-      setWordCount(reasoning.split(/\s+/).filter(Boolean).length)
+      if (typeof reasoning === 'string') {
+        setWordCount(reasoning.split(/\s+/).filter(Boolean).length)
+      } else {
+        // Count words in steps and conclusion
+        const text = reasoning.steps.join(' ') + ' ' + reasoning.conclusion
+        setWordCount(text.split(/\s+/).filter(Boolean).length)
+      }
     }
   }, [reasoning])
 
-  if (!reasoning || reasoning.trim() === '') return null
+  if (!reasoning) return null
+  if (typeof reasoning === 'string' && reasoning.trim() === '') return null
 
   // Clean the reasoning text (remove any remaining think/thinking tags)
-  const cleanReasoning = reasoning
-    .replace(/<\/?think>/gi, '')
-    .replace(/<\/?thinking>/gi, '')
-    .replace(/^[\s\n]+|[\s\n]+$/g, '')
+  const cleanReasoning = typeof reasoning === 'string'
+    ? reasoning
+      .replace(/<\/?think>/gi, '')
+      .replace(/<\/?thinking>/gi, '')
+      .replace(/^[\s\n]+|[\s\n]+$/g, '')
+    : ''
 
   if (!cleanReasoning) return null
 
   const handleCopy = async () => {
-    await navigator.clipboard.writeText(cleanReasoning)
+    const textToCopy = typeof reasoning === 'string'
+      ? cleanReasoning
+      : `Steps:\n${reasoning.steps.map((s, i) => `${i + 1}. ${s}`).join('\n')}\n\nConclusion: ${reasoning.conclusion}`
+
+    await navigator.clipboard.writeText(textToCopy)
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
   }
@@ -126,27 +139,47 @@ export function ReasoningPanel({ reasoning, defaultExpanded = false }: Reasoning
             <div className="absolute top-6 left-6 w-px h-full bg-gradient-to-b from-violet-500/50 via-purple-500/30 to-transparent pointer-events-none" />
 
             <div className="relative pl-4">
-              {/* Format reasoning with visual hierarchy */}
-              <div className="text-sm text-violet-200/80 leading-relaxed whitespace-pre-wrap font-mono">
-                {cleanReasoning.split('\n').map((line, i) => {
-                  // Highlight numbered steps or bullet points
-                  const isStep = /^[\d]+[.)]|^[-•*]/.test(line.trim())
-                  const isHeading = line.trim().length < 50 && (line.trim().endsWith(':') || /^[A-Z]/.test(line.trim()))
+              {typeof reasoning === 'string' ? (
+                /* Format reasoning with visual hierarchy (Legacy String Mode) */
+                <div className="text-sm text-violet-200/80 leading-relaxed whitespace-pre-wrap font-mono">
+                  {cleanReasoning.split('\n').map((line, i) => {
+                    // Highlight numbered steps or bullet points
+                    const isStep = /^[\d]+[.)]|^[-•*]/.test(line.trim())
+                    const isHeading = line.trim().length < 50 && (line.trim().endsWith(':') || /^[A-Z]/.test(line.trim()))
 
-                  return (
-                    <div
-                      key={i}
-                      className={cn(
-                        "py-0.5",
-                        isStep && "text-violet-300 font-medium",
-                        isHeading && !isStep && "text-purple-300 font-semibold mt-2"
-                      )}
-                    >
-                      {line || '\u00A0'}
+                    return (
+                      <div
+                        key={i}
+                        className={cn(
+                          "py-0.5",
+                          isStep && "text-violet-300 font-medium",
+                          isHeading && !isStep && "text-purple-300 font-semibold mt-2"
+                        )}
+                      >
+                        {line || '\u00A0'}
+                      </div>
+                    )
+                  })}
+                </div>
+              ) : (
+                /* Structured Reasoning Mode */
+                <div className="text-sm text-violet-200/80 leading-relaxed font-mono space-y-4">
+                  <div className="space-y-2">
+                    {reasoning.steps.map((step, i) => (
+                      <div key={i} className="flex gap-2">
+                        <span className="text-violet-400 font-bold shrink-0">{i + 1}.</span>
+                        <span className="text-violet-200/80">{step}</span>
+                      </div>
+                    ))}
+                  </div>
+                  {reasoning.conclusion && (
+                    <div className="mt-4 pt-3 border-t border-violet-500/20">
+                      <span className="text-purple-300 font-semibold block mb-1">Conclusion:</span>
+                      <span className="text-violet-100">{reasoning.conclusion}</span>
                     </div>
-                  )
-                })}
-              </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
 
@@ -159,7 +192,10 @@ export function ReasoningPanel({ reasoning, defaultExpanded = false }: Reasoning
       {!isExpanded && (
         <div className="px-4 pb-3">
           <div className="text-xs text-violet-400/60 italic truncate">
-            {cleanReasoning.slice(0, 100)}...
+            {typeof reasoning === 'string'
+              ? cleanReasoning.slice(0, 100)
+              : reasoning.steps[0]?.slice(0, 100) || reasoning.conclusion.slice(0, 100)
+            }...
           </div>
         </div>
       )}

@@ -3,7 +3,7 @@
 import type React from "react"
 
 import { useState, useRef, useEffect } from "react"
-import { Play, Pause } from "lucide-react"
+import { Play, Pause, AlertCircle } from "lucide-react"
 import { Button } from "@/components/ui/button"
 
 interface AudioWaveformProps {
@@ -16,8 +16,19 @@ export function AudioWaveform({ audioUrl, duration: propDuration }: AudioWavefor
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(propDuration || 0)
   const [waveformBars, setWaveformBars] = useState<number[]>([])
+  const [loadError, setLoadError] = useState(false)
+  const [isLoading, setIsLoading] = useState(true)
   const audioRef = useRef<HTMLAudioElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
+
+  // Reset state when audioUrl changes
+  useEffect(() => {
+    setLoadError(false)
+    setIsLoading(true)
+    setIsPlaying(false)
+    setCurrentTime(0)
+    if (!propDuration) setDuration(0)
+  }, [audioUrl])
 
   // Update duration if prop changes
   useEffect(() => {
@@ -50,9 +61,23 @@ export function AudioWaveform({ audioUrl, duration: propDuration }: AudioWavefor
   }
 
   const handleLoadedMetadata = () => {
+    setIsLoading(false)
+    setLoadError(false)
     if (audioRef.current && !propDuration) {
       setDuration(audioRef.current.duration)
     }
+  }
+
+  const handleError = () => {
+    setIsLoading(false)
+    setLoadError(true)
+    setIsPlaying(false)
+    console.warn('AudioWaveform: Failed to load audio from:', audioUrl)
+  }
+
+  const handleCanPlay = () => {
+    setIsLoading(false)
+    setLoadError(false)
   }
 
   const handleSeek = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -80,14 +105,34 @@ export function AudioWaveform({ audioUrl, duration: propDuration }: AudioWavefor
 
   const progress = (currentTime / duration) * 100
 
+  // Don't render if no valid URL
+  if (!audioUrl || audioUrl.trim() === '') {
+    return null
+  }
+
+  // Show error state
+  if (loadError) {
+    return (
+      <div className="mt-3 pt-3 border-t border-border/50">
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <AlertCircle className="h-4 w-4 text-orange-500" />
+          <span>Audio unavailable</span>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="mt-3 pt-3 border-t border-border/50">
-      <audio 
-        ref={audioRef} 
-        src={audioUrl} 
-        onTimeUpdate={handleTimeUpdate} 
+      <audio
+        ref={audioRef}
+        src={audioUrl}
+        onTimeUpdate={handleTimeUpdate}
         onEnded={handleEnded}
         onLoadedMetadata={handleLoadedMetadata}
+        onError={handleError}
+        onCanPlay={handleCanPlay}
+        preload="metadata"
       />
 
       {/* Play Controls */}

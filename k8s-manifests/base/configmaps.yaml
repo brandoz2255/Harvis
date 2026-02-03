@@ -50,6 +50,8 @@ data:
   NODE_ENV: "production"
   NEXT_TELEMETRY_DISABLED: "1"
   NEXT_PUBLIC_BACKEND_URL: ""
+  # Backend URL for server-side API routes (Next.js API routes calling Python backend)
+  BACKEND_URL: "http://harvis-ai-merged-backend:8000"
 ---
 apiVersion: v1
 kind: ConfigMap

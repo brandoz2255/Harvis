@@ -46,6 +46,8 @@ spec:
             - name: ssl-certs
               mountPath: /etc/nginx/ssl
               readOnly: true
+            - name: tmp
+              mountPath: /tmp
       volumes:
         - name: nginx-config
           configMap:
@@ -53,6 +55,9 @@ spec:
         - name: ssl-certs
           secret:
             secretName: harvis-ssl-cert
+        - name: tmp
+          persistentVolumeClaim:
+            claimName: harvis-audio-pvc
 ---
 apiVersion: v1
 kind: Service

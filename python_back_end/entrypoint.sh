@@ -16,9 +16,9 @@ download-models)
   ;;
 
 app)
-  echo "🚀 Running in APP MODE - starting uvicorn server..."
+  echo "🚀 Running in APP MODE - starting uvicorn server with ${UVICORN_WORKERS:-1} workers..."
   shift
-  exec uvicorn main:app --host 0.0.0.0 --port 8000 "$@"
+  exec uvicorn main:app --host 0.0.0.0 --port 8000 --workers "${UVICORN_WORKERS:-1}" "$@"
   ;;
 
 *)

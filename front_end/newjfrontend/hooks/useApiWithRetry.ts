@@ -5,6 +5,7 @@ interface ApiOptions {
     maxRetries?: number
     retryDelay?: number
     lowVram?: boolean
+    onChunk?: (data: any) => void
 }
 
 export const useApiWithRetry = () => {
@@ -17,7 +18,8 @@ export const useApiWithRetry = () => {
             timeout = 3600000, // 1 hour default (increased from 5min)
             maxRetries = 0,
             retryDelay = 2000,
-            lowVram = false
+            lowVram = false,
+            onChunk
         } = apiOptions
 
         const controller = new AbortController()
@@ -25,7 +27,7 @@ export const useApiWithRetry = () => {
             lowVram ? 3600000 : timeout)
 
         try {
-            console.log(`🌐 Fetching ${url} with timeout ${timeout/1000}s`)
+            console.log(`🌐 Fetching ${url} with timeout ${timeout / 1000}s`)
 
             const response = await fetch(url, {
                 ...options,
@@ -80,6 +82,11 @@ export const useApiWithRetry = () => {
                                 try {
                                     const data = JSON.parse(jsonStr)
                                     console.log('📡 Stream status:', data.status, data.message || data.detail || '')
+
+                                    // Invoke callback with every chunk
+                                    if (onChunk) {
+                                        onChunk(data)
+                                    }
 
                                     if (data.status === 'error') {
                                         streamError = data.error || 'Unknown stream error'
