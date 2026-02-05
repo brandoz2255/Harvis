@@ -56,6 +56,17 @@ The Harvis AI Project is a sophisticated, voice-activated AI assistant designed 
 - An NVIDIA GPU with CUDA drivers is recommended for optimal performance, but not strictly required.
 - `ffmpeg` for audio processing.
 
+### Quick Start (Local Development)
+
+The fastest way to get started locally:
+
+```bash
+docker-compose build
+docker-compose up
+```
+
+That's it! The application will be available at `http://localhost:3000`.
+
 ### Installation & Usage
 
 1.  **Clone the repository:**
