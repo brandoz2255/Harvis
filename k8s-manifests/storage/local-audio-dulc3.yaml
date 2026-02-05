@@ -1,0 +1,45 @@
+# Local Audio Storage for dulc3-os (personal workstation)
+# This replaces the NFS-based harvis-audio-pvc for local development
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: local-audio-dulc3-pv
+  labels:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: local-audio
+    node: dulc3-os
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-node-storage
+  local:
+    path: /mnt/harvis-audio
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - dulc3-os
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: harvis-audio-local
+  namespace: ai-agents
+  labels:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: local-audio
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-node-storage
+  resources:
+    requests:
+      storage: 10Gi
+  volumeName: local-audio-dulc3-pv

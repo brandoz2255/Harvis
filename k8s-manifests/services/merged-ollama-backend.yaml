@@ -24,7 +24,7 @@ spec:
       initContainers:
         # Init container to pre-download TTS and Whisper models
         - name: download-models
-          image: "dulc3/jarvis-backend:v2.23"
+          image: "dulc3/jarvis-backend:v2.26.5"
           imagePullPolicy: Always
           command: ["/app/entrypoint.sh", "download-models"]
           env:
@@ -87,7 +87,7 @@ spec:
 
         # Harvis Backend container (shares GPU with Ollama)
         - name: harvis-backend
-          image: "dulc3/jarvis-backend:v2.23"
+          image: "dulc3/jarvis-backend:v2.26.5"
           imagePullPolicy: Always
           ports:
             - name: http
@@ -154,6 +154,8 @@ spec:
               mountPath: /tmp
             - name: ml-models-cache
               mountPath: /models-cache
+            - name: images
+              mountPath: /app/images
           command: ["uvicorn"]
           args:
             - "main:app"
@@ -189,8 +191,12 @@ spec:
           persistentVolumeClaim:
             claimName: ml-models-cache
         - name: tmp
+          hostPath:
+            path: /var/lib/harvis/audio
+            type: DirectoryOrCreate
+        - name: images
           persistentVolumeClaim:
-            claimName: harvis-audio-pvc
+            claimName: harvis-images-pvc
 ---
 apiVersion: v1
 kind: Service

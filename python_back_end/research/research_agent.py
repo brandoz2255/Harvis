@@ -196,9 +196,21 @@ class ResearchAgent:
 
         # Deduplicate videos
         videos = self._deduplicate_videos(all_search_data.get("videos", []), params.get("max_videos", 4))
-        
+
+        # Fetch transcripts for top videos (if search agent supports it)
+        if videos and hasattr(self.search_agent, 'fetch_video_transcripts'):
+            logger.info(f"Fetching transcripts for {min(3, len(videos))} videos...")
+            videos = self.search_agent.fetch_video_transcripts(videos, max_videos=3, timeout_s=15)
+            transcript_count = sum(1 for v in videos if v.get('hasTranscript', False))
+            logger.info(f"Fetched {transcript_count} video transcripts")
+
         # Prepare context for LLM
         context = self._prepare_research_context(search_data)
+
+        # Add video transcript context if available
+        video_context = self._prepare_video_context(videos)
+        if video_context:
+            context += "\n" + video_context
         
         # Debug: Log the context being sent to LLM
         logger.info(f"Context length: {len(context)} characters")
@@ -231,10 +243,11 @@ After paragraphs, give actionable recommendations:
 
 RULES:
 1. Only cite [1], [2], etc. - numbers must match sources above
-2. Never write "Source X says/states/mentions" - banned phrase
-3. No made-up statistics unless directly quoted from source
-4. No template text like "[Your answer]" or "domain.com"
-5. Just answer the question naturally with citations
+2. For video transcripts, cite as [V1], [V2] - but prefer web sources
+3. Never write "Source X says/states/mentions" - banned phrase
+4. No made-up statistics unless directly quoted from source
+5. No template text like "[Your answer]" or "domain.com"
+6. Just answer the question naturally with citations
 
 DO NOT include a Sources section - that's handled separately.
 """
@@ -564,7 +577,55 @@ Chunk {chunk_label}:
 """)
 
         return "\n".join(context_parts)
-    
+
+    def _prepare_video_context(self, videos: List[Dict[str, Any]]) -> str:
+        """
+        Format video transcripts for LLM context with citation labels [V1], [V2], etc.
+        Only includes videos that have transcripts.
+
+        Args:
+            videos: List of video results with optional transcript field
+
+        Returns:
+            Formatted video context string, or empty string if no transcripts
+        """
+        if not videos:
+            return ""
+
+        # Filter to only videos with transcripts
+        videos_with_transcripts = [v for v in videos if v.get('hasTranscript') and v.get('transcript')]
+
+        if not videos_with_transcripts:
+            return ""
+
+        context_parts = ["""
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║ YOUTUBE VIDEO TRANSCRIPTS: Additional context from related videos. Cite as    ║
+║ [V1], [V2], etc. These may provide practical demonstrations or explanations.  ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
+"""]
+
+        for i, video in enumerate(videos_with_transcripts, 1):
+            title = video.get('title', 'Unknown Video')
+            channel = video.get('channel', 'Unknown Channel')
+            url = video.get('url', '')
+            transcript = video.get('transcript', '')
+
+            # Truncate transcript to avoid context overflow (keep first 2000 chars)
+            if len(transcript) > 2000:
+                transcript = transcript[:2000] + "... [transcript truncated]"
+
+            context_parts.append(f"""
+═══ Video [V{i}] ═══════════════════════════════════════════════════════════════
+Title: {title}
+Channel: {channel}
+URL: {url}
+─── Transcript (citable as [V{i}]) ───
+{transcript}
+""")
+
+        return "\n".join(context_parts)
+
     def _get_research_system_prompt(self, depth: str) -> str:
         """Get system prompt based on research depth"""
         base_prompt = """You are a research assistant. Answer questions using ONLY the provided search results.

@@ -52,6 +52,7 @@ export default function ChatPage() {
     fetchSessions,
     createNewChat,
     selectSession,
+    setCurrentSession,
     messages: storeMessages,
     isLoadingMessages,
   } = useChatHistoryStore()
@@ -118,20 +119,39 @@ export default function ChatPage() {
           audioUrlMapRef.current.set(lastAssistantId, data.audioPath)
           mappedAudioUrls.add(data.audioPath)
         }
-        
+
         // Search results
         const results = data?.searchResults || data?.results || data?.sources
         if (results && lastAssistantId && !searchResultsMapRef.current.has(lastAssistantId)) {
           searchResultsMapRef.current.set(lastAssistantId, results)
         }
-        
+
         // Videos
         if (data?.videos && lastAssistantId && !videosMapRef.current.has(lastAssistantId)) {
           videosMapRef.current.set(lastAssistantId, data.videos)
         }
+
+        // Session ID - sync currentSession when backend creates/returns a session
+        // This ensures vision/screenshare uses the same session as regular chat
+        if (data?.sessionId && data.sessionId !== currentSession?.id) {
+          console.log(`[AI-Chat] Syncing session from backend: ${data.sessionId}`)
+          // Find or create the session object to set as current
+          const existingSession = sessions.find(s => s.id === data.sessionId)
+          if (existingSession) {
+            setCurrentSession(existingSession)
+          } else {
+            // Session was just created - fetch sessions and set the new one
+            fetchSessions().then(() => {
+              const newSession = useChatHistoryStore.getState().sessions.find(s => s.id === data.sessionId)
+              if (newSession) {
+                setCurrentSession(newSession)
+              }
+            })
+          }
+        }
       })
     }
-  }, [aiData, aiMessages])
+  }, [aiData, aiMessages, currentSession?.id, sessions, setCurrentSession, fetchSessions])
 
   // Use useMemo to convert AI messages to local format - this prevents re-renders during streaming
   const convertedMessages = useMemo<Message[]>(() => {
@@ -153,16 +173,36 @@ export default function ChatPage() {
         audioUrl: audioUrlMapRef.current.get(m.id),
         searchResults: searchResultsMapRef.current.get(m.id),
         videos: videosMapRef.current.get(m.id),
+        metadata: m.metadata,
+        inputType: m.inputType,
       }
     })
   }, [aiMessages, selectedModel, isAiLoading])
 
-  // Merge converted messages with local messages (for non-AI SDK modes)
+  // Unified message merging - combines AI SDK messages with local messages
+  // This ensures text, vision, voice, and all modes appear together seamlessly
   const messages = useMemo(() => {
-    if (convertedMessages.length > 0) {
-      return convertedMessages
-    }
-    return localMessages
+    // Start with AI SDK messages (converted from aiMessages)
+    const merged = [...convertedMessages]
+    
+    // Add localMessages that aren't already in merged
+    localMessages.forEach(localMsg => {
+      const exists = merged.some(m => 
+        // Check by ID
+        (m.id && m.id === localMsg.id) ||
+        (m.tempId && m.tempId === localMsg.tempId) ||
+        // Check by content + role + timestamp (within 2 seconds)
+        (m.role === localMsg.role && 
+         m.content === localMsg.content &&
+         Math.abs(m.timestamp.getTime() - localMsg.timestamp.getTime()) < 2000)
+      )
+      if (!exists) {
+        merged.push(localMsg)
+      }
+    })
+    
+    // Sort by timestamp to maintain chronological order
+    return merged.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())
   }, [convertedMessages, localMessages])
 
   // Sync loaded history INTO AI SDK
@@ -200,6 +240,8 @@ export default function ChatPage() {
           role: msg.role,
           content: msg.content,
           createdAt: new Date(msg.created_at || Date.now()),
+          metadata: msg.metadata,
+          inputType: msg.input_type,
         }
       })
       setAiMessages(formattedForAi)
@@ -295,7 +337,10 @@ export default function ChatPage() {
     if (hasImages && isVisionModel(selectedModel || '')) {
       const imageAttachment = messageAttachments.find(a => a.type === 'image')
       if (imageAttachment) {
-        await handleVisionMessage(messageContent, imageAttachment.data, messageAttachments)
+        // Get the user message that was just added to update its status later
+        const lastMessage = messages[messages.length - 1]
+        const userTempId = lastMessage?.tempId || lastMessage?.id
+        await handleVisionMessage(messageContent, imageAttachment.data, messageAttachments, userTempId)
       }
       return
     }
@@ -493,8 +538,20 @@ export default function ChatPage() {
   }, [messages, isLoading, selectedModel, isResearchMode, currentSession, lowVram, textOnly, isDuplicateMessage, fetchWithRetry, append, createNewChat])
 
   // Handle vision messages
-  const handleVisionMessage = useCallback(async (prompt: string, imageData: string, attachments: Attachment[]) => {
+  const handleVisionMessage = useCallback(async (prompt: string, imageData: string, attachments: Attachment[], userTempId?: string) => {
     setIsLoading(true)
+
+    // Add placeholder assistant message (user message already added by handleSendMessage)
+    const assistantId = (Date.now() + 1).toString()
+    const placeholderAiMsg: Message = {
+      id: assistantId,
+      role: 'assistant',
+      content: '',
+      timestamp: new Date(),
+      model: selectedModel,
+      status: 'streaming'
+    }
+    setLocalMessages((prev) => [...prev, placeholderAiMsg])
 
     try {
       const token = localStorage.getItem('token')
@@ -536,12 +593,32 @@ export default function ChatPage() {
         lowVram: lowVram
       })
 
-      if (data.session_id && data.session_id !== sessionId) {
-        await fetchSessions()
+      // Sync currentSession with the session used/created by vision-chat
+      if (data.session_id) {
+        console.log(`[Vision] Session from backend: ${data.session_id}`)
+        if (data.session_id !== currentSession?.id) {
+          await fetchSessions()
+          // Find and set the session as current
+          const visionSession = useChatHistoryStore.getState().sessions.find(s => s.id === data.session_id)
+          if (visionSession) {
+            setCurrentSession(visionSession)
+            console.log(`[Vision] Set currentSession to: ${visionSession.id}`)
+          }
+        }
       }
 
+      // Update user message status to sent
+      if (userTempId) {
+        setLocalMessages((prev) =>
+          prev.map((msg) =>
+            (msg.id === userTempId || msg.tempId === userTempId) ? { ...msg, status: "sent" } : msg
+          )
+        )
+      }
+
+      // Update assistant placeholder with actual response
       const assistantMessage: Message = {
-        id: (Date.now() + 1).toString(),
+        id: assistantId,
         role: "assistant",
         content: data.response || data.final_answer || 'I analyzed the image.',
         timestamp: new Date(),
@@ -551,24 +628,42 @@ export default function ChatPage() {
         reasoning: data.reasoning,
       }
 
-      setLocalMessages((prev) => [...prev, assistantMessage])
+      setLocalMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === assistantId ? assistantMessage : msg
+        )
+      )
 
     } catch (error) {
       console.error("Vision error:", error)
 
+      // Update user message status to failed
+      if (userTempId) {
+        setLocalMessages((prev) =>
+          prev.map((msg) =>
+            (msg.id === userTempId || msg.tempId === userTempId) ? { ...msg, status: "failed" } : msg
+          )
+        )
+      }
+
+      // Update assistant placeholder with error message
       const errorMessage: Message = {
-        id: (Date.now() + 1).toString(),
+        id: assistantId,
         role: "assistant",
         content: `Vision analysis failed: ${error instanceof Error ? error.message : 'Unknown error'}. Make sure you have a VL model selected and pulled (llava, moondream, bakllava, etc.) on your Ollama server.`,
         timestamp: new Date(),
         model: selectedModel,
         status: "failed",
       }
-      setLocalMessages((prev) => [...prev, errorMessage])
+      setLocalMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === assistantId ? errorMessage : msg
+        )
+      )
     } finally {
       setIsLoading(false)
     }
-  }, [currentSession, selectedModel, messages, lowVram, textOnly, fetchWithRetry, createNewChat, fetchSessions])
+  }, [currentSession, selectedModel, messages, lowVram, textOnly, fetchWithRetry, createNewChat, fetchSessions, setCurrentSession])
 
   // Memoize the message list rendering to prevent re-renders during streaming
   const messageList = useMemo(() => {
@@ -590,6 +685,7 @@ export default function ChatPage() {
         imageUrl={message.imageUrl}
         inputType={message.inputType}
         status={message.status}
+        metadata={message.metadata}
       />
     ))
   }, [messages])

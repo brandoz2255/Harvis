@@ -190,7 +190,7 @@ export function ChatSidebar({
         onClick={toggleMinimize}
         className={cn(
           "fixed z-50 flex h-8 w-8 items-center justify-center rounded-full border border-border bg-background shadow-md transition-all duration-300 ease-in-out hover:bg-accent hover:shadow-lg",
-          isMinimized ? "left-[3.75rem] top-4" : "left-[16.25rem] top-4"
+          isMinimized ? "left-[3.375rem] top-4" : "left-[14.625rem] top-4"
         )}
         title={isMinimized ? "Expand sidebar" : "Minimize sidebar"}
       >

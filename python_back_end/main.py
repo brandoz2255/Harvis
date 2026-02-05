@@ -67,6 +67,11 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 60
 print(f"Backend JWT_SECRET loaded: {SECRET_KEY[:10]}... Length: {len(SECRET_KEY)}")
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# Images storage directory (mounted via PVC in K8s)
+IMAGES_DIR = os.getenv("IMAGES_DIR", "/app/images")
+os.makedirs(IMAGES_DIR, exist_ok=True)
+print(f"Images directory: {IMAGES_DIR}")
 security = HTTPBearer(auto_error=False)
 
 # Database connection
@@ -355,19 +360,19 @@ async def lifespan(app: FastAPI):
                 # Initialize RAG corpus services first to setup globals
                 logger.info("🔄 Initializing RAG corpus services...")
                 rag_initialized = await initialize_rag_corpus(app.state.pg_pool)
-                
+
                 if rag_initialized:
                     logger.info("✅ RAG corpus services initialized successfully")
-                    
+
                     # Get adapters and config from initialized module
                     vectordb_adapters = get_all_vectordb_adapters()
                     embedding_adapters = get_all_embedding_adapters()
                     config_mgr = get_config_manager_instance()
-                    
+
                     # Build mappings
                     source_model_mapping = config_mgr.get_source_model_mapping()
                     model_collection_mapping = EMBEDDING_COLLECTIONS
-                    
+
                     # Initialize multi-collection retriever
                     local_rag_retriever = MultiCollectionRetriever(
                         vectordb_adapters=vectordb_adapters,
@@ -375,7 +380,7 @@ async def lifespan(app: FastAPI):
                         source_to_model=source_model_mapping,
                         model_to_collection=model_collection_mapping,
                         default_k=5,
-                        score_threshold=0.5
+                        score_threshold=0.5,
                     )
                     logger.info("✅ Global Multi-Collection RAG retriever initialized")
 
@@ -383,7 +388,7 @@ async def lifespan(app: FastAPI):
                     try:
                         total_docs = 0
                         stats_summary = {}
-                        
+
                         for name, adapter in vectordb_adapters.items():
                             try:
                                 stats = await adapter.get_source_stats()
@@ -391,9 +396,13 @@ async def lifespan(app: FastAPI):
                                 total_docs += count
                                 stats_summary[name] = stats
                             except Exception as inner_e:
-                                logger.warning(f"Failed to get stats for {name}: {inner_e}")
-                            
-                        logger.info(f"📊 RAG: Vector DB contains {total_docs} total documents across {len(vectordb_adapters)} collections")
+                                logger.warning(
+                                    f"Failed to get stats for {name}: {inner_e}"
+                                )
+
+                        logger.info(
+                            f"📊 RAG: Vector DB contains {total_docs} total documents across {len(vectordb_adapters)} collections"
+                        )
                         logger.info(f"📊 RAG: Stats per collection: {stats_summary}")
                     except Exception as e:
                         logger.warning(f"⚠️ Could not get document stats: {e}")
@@ -403,6 +412,7 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.error(f"❌ Failed to initialize global RAG retriever: {e}")
                 import traceback
+
                 logger.error(traceback.format_exc())
 
     except Exception as e:
@@ -2221,6 +2231,7 @@ async def vision_chat(
             # Extract base64 data from images and ensure proper format
             yield f"data: {json.dumps({'status': 'processing', 'detail': 'Processing images...'})}\n\n"
             processed_images = []
+            saved_image_paths = []  # Track saved image file paths
             for idx, img in enumerate(req.images):
                 try:
                     logger.info(
@@ -2290,6 +2301,19 @@ async def vision_chat(
 
                         clean_b64 = base64.b64encode(decoded).decode("utf-8")
                         processed_images.append(clean_b64)
+
+                        # Save image to disk for persistence
+                        try:
+                            image_filename = f"{uuid.uuid4()}.png"
+                            image_path = os.path.join(IMAGES_DIR, image_filename)
+                            with open(image_path, "wb") as img_file:
+                                img_file.write(decoded)
+                            saved_image_paths.append(f"/api/images/{image_filename}")
+                            logger.info(f"🖼️ Image {idx + 1}: Saved to {image_path}")
+                        except Exception as save_err:
+                            logger.error(
+                                f"🖼️ Image {idx + 1}: Failed to save to disk: {save_err}"
+                            )
 
                     except Exception as decode_err:
                         logger.error(
@@ -2413,8 +2437,12 @@ async def vision_chat(
                     logger.info(f"🖼️ VISION: Created new session: {session_id}")
 
                 user_content = req.message or "What do you see in this image?"
-                if len(processed_images) > 0:
-                    user_content = f"[Image attached] {user_content}"
+
+                # Build metadata with image paths if images were saved
+                metadata = {}
+                if saved_image_paths:
+                    metadata["images"] = saved_image_paths
+                    metadata["image_count"] = len(saved_image_paths)
 
                 await chat_history_manager.add_message(
                     user_id=current_user.id,
@@ -2423,6 +2451,7 @@ async def vision_chat(
                     content=user_content,
                     model_used=req.model,
                     input_type="screen",
+                    metadata=metadata,
                 )
                 await chat_history_manager.add_message(
                     user_id=current_user.id,
@@ -2518,6 +2547,19 @@ async def serve_audio(filename: str):
     if not os.path.exists(full_path):
         raise HTTPException(404, f"Audio file not found: {filename}")
     return FileResponse(full_path, media_type="audio/wav")
+
+
+@app.get("/api/images/{filename}", tags=["images"])
+async def serve_image(
+    filename: str, current_user: UserResponse = Depends(get_current_user)
+):
+    """
+    Serve chat images from persistent storage. Requires authentication.
+    """
+    full_path = os.path.join(IMAGES_DIR, filename)
+    if not os.path.exists(full_path):
+        raise HTTPException(404, f"Image file not found: {filename}")
+    return FileResponse(full_path, media_type="image/png")
 
 
 @app.post("/api/analyze-screen", tags=["vision"])

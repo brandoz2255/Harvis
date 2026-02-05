@@ -14,15 +14,19 @@ export interface VideoResult {
   views?: string
   description?: string
   published?: string
+  videoId?: string          // YouTube video ID for embedding
+  transcript?: string       // Transcript text from the video
+  hasTranscript?: boolean   // Flag indicating transcript availability
 }
 
 interface VideoCarouselProps {
   videos: VideoResult[]
   compact?: boolean
   className?: string
+  onPlayVideo?: (video: VideoResult) => void  // Callback for inline playback
 }
 
-export function VideoCarousel({ videos, compact = false, className }: VideoCarouselProps) {
+export function VideoCarousel({ videos, compact = false, className, onPlayVideo }: VideoCarouselProps) {
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const [canScrollLeft, setCanScrollLeft] = useState(false)
   const [canScrollRight, setCanScrollRight] = useState(true)
@@ -77,7 +81,7 @@ export function VideoCarousel({ videos, compact = false, className }: VideoCarou
           style={{ scrollbarWidth: "none", msOverflowStyle: "none" }}
         >
           {videos.map((video, index) => (
-            <VideoCard key={index} video={video} compact={compact} />
+            <VideoCard key={index} video={video} compact={compact} onPlay={onPlayVideo} />
           ))}
         </div>
 
@@ -101,19 +105,26 @@ export function VideoCarousel({ videos, compact = false, className }: VideoCarou
 interface VideoCardProps {
   video: VideoResult
   compact?: boolean
+  onPlay?: (video: VideoResult) => void
 }
 
-function VideoCard({ video, compact }: VideoCardProps) {
+function VideoCard({ video, compact, onPlay }: VideoCardProps) {
   const [imageError, setImageError] = useState(false)
   const [isHovered, setIsHovered] = useState(false)
 
-  const openVideo = () => {
-    window.open(video.url, "_blank", "noopener,noreferrer")
+  const handleClick = () => {
+    // If onPlay callback is provided and video has a videoId, use inline playback
+    if (onPlay && video.videoId) {
+      onPlay(video)
+    } else {
+      // Fallback to opening in new window
+      window.open(video.url, "_blank", "noopener,noreferrer")
+    }
   }
 
   return (
     <div
-      onClick={openVideo}
+      onClick={handleClick}
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
       className={cn(

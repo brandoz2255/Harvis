@@ -26,9 +26,26 @@ RUN rm -f package-lock.json && \
 FROM node:20-alpine AS builder
 WORKDIR /app
 
+# Cache-busting ARG - change this value to force a complete rebuild
+ARG BUILD_TIMESTAMP=unknown
+ARG GIT_COMMIT=unknown
+
 # Copy dev dependencies for building
 COPY --from=deps-dev /app/node_modules ./node_modules
-COPY . .
+
+# Echo build info for debugging
+RUN echo "Building frontend at ${BUILD_TIMESTAMP} commit ${GIT_COMMIT}"
+
+# Copy source files individually for better cache invalidation
+# This ensures any source code change invalidates the build
+COPY app ./app
+COPY components ./components
+COPY hooks ./hooks
+COPY lib ./lib
+COPY stores ./stores
+COPY types ./types
+COPY public ./public
+COPY *.json *.ts *.js *.mjs ./
 
 # Build the application
 ENV NODE_ENV=production

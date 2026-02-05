@@ -18,6 +18,7 @@ import { VoicePlayer } from "@/components/voice-player"
 import { AudioWaveform } from "@/components/ui/audio-waveform"
 import { ReasoningPanel } from "@/components/reasoning-panel"
 import { VideoCarousel, type VideoResult } from "@/components/video-carousel"
+import { YouTubeEmbed } from "@/components/youtube-embed"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { Highlight, themes } from "prism-react-renderer"
@@ -98,8 +99,14 @@ interface ChatMessageProps {
   audioUrl?: string
   reasoning?: string | { steps: string[]; conclusion: string }
   imageUrl?: string
+  imageUrls?: string[]
   inputType?: 'text' | 'voice' | 'screen' | 'image' | 'file'
   status?: 'pending' | 'streaming' | 'sent' | 'failed'
+  metadata?: {
+    images?: string[]
+    image_count?: number
+    [key: string]: any
+  }
 }
 
 // Language mapping for prism-react-renderer
@@ -185,12 +192,15 @@ export const ChatMessage = React.memo(function ChatMessage({
   audioUrl,
   reasoning: propReasoning,
   imageUrl,
+  imageUrls,
   inputType,
   status,
+  metadata,
 }: ChatMessageProps) {
   const [copied, setCopied] = useState(false)
   const [showVoice, setShowVoice] = useState(false)
   const [feedback, setFeedback] = useState<"up" | "down" | null>(null)
+  const [playingVideo, setPlayingVideo] = useState<VideoResult | null>(null)
 
   // Memoize content processing to avoid re-computation during streaming
   const { reasoning: extractedReasoning, finalAnswer } = useMemo(() => 
@@ -365,7 +375,21 @@ export const ChatMessage = React.memo(function ChatMessage({
             </div>
           ) : (
             <div className="space-y-2">
-              {/* Display image if present in user message */}
+              {/* Display images from metadata (persisted images) */}
+              {metadata?.images && metadata.images.length > 0 && (
+                <div className="grid grid-cols-1 gap-2">
+                  {metadata.images.map((imgUrl, idx) => (
+                    <div key={idx} className="rounded-lg overflow-hidden max-w-sm">
+                      <img
+                        src={imgUrl}
+                        alt={`Attached image ${idx + 1}`}
+                        className="w-full h-auto"
+                      />
+                    </div>
+                  ))}
+                </div>
+              )}
+              {/* Display image if present in user message (for non-persisted/local images) */}
               {imageUrl && (
                 <div className="rounded-lg overflow-hidden max-w-xs">
                   <img
@@ -392,7 +416,25 @@ export const ChatMessage = React.memo(function ChatMessage({
 
         {/* Video Carousel - Perplexity-style */}
         {videos && videos.length > 0 && (
-          <VideoCarousel videos={videos} className="mt-3" />
+          <>
+            <VideoCarousel
+              videos={videos}
+              className="mt-3"
+              onPlayVideo={setPlayingVideo}
+            />
+            {/* Embedded YouTube Player */}
+            {playingVideo && playingVideo.videoId && (
+              <div className="mt-3">
+                <YouTubeEmbed
+                  videoId={playingVideo.videoId}
+                  title={playingVideo.title}
+                  transcript={playingVideo.transcript}
+                  hasTranscript={playingVideo.hasTranscript}
+                  onClose={() => setPlayingVideo(null)}
+                />
+              </div>
+            )}
+          </>
         )}
 
         {/* Search Results - Perplexity-style source cards */}
@@ -572,11 +614,13 @@ export const ChatMessage = React.memo(function ChatMessage({
     prevProps.status === nextProps.status &&
     prevProps.audioUrl === nextProps.audioUrl &&
     prevProps.imageUrl === nextProps.imageUrl &&
+    prevProps.imageUrls === nextProps.imageUrls &&
     prevProps.inputType === nextProps.inputType &&
     prevProps.searchQuery === nextProps.searchQuery &&
     // Deep comparison for arrays
     JSON.stringify(prevProps.searchResults) === JSON.stringify(nextProps.searchResults) &&
     JSON.stringify(prevProps.videos) === JSON.stringify(nextProps.videos) &&
-    JSON.stringify(prevProps.codeBlocks) === JSON.stringify(nextProps.codeBlocks)
+    JSON.stringify(prevProps.codeBlocks) === JSON.stringify(nextProps.codeBlocks) &&
+    JSON.stringify(prevProps.metadata) === JSON.stringify(nextProps.metadata)
   )
 })

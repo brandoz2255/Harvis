@@ -9,8 +9,11 @@ from ddgs import DDGS
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 import requests
 from newspaper import Article
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
+
+# Import YouTube transcript extraction
+from research.extract.youtube import extract_youtube
 
 logger = logging.getLogger(__name__)
 
@@ -453,7 +456,10 @@ class WebSearchAgent:
                     "views": video.get('views', ''),
                     "description": video.get('description', video.get('body', ''))[:200],
                     "published": video.get('published', ''),
-                    "source": "YouTube"
+                    "source": "YouTube",
+                    "videoId": video_id,  # Include video ID for embedding
+                    "transcript": "",  # Will be populated by fetch_video_transcripts
+                    "hasTranscript": False  # Will be set by fetch_video_transcripts
                 }
 
                 formatted_videos.append(formatted_video)
@@ -556,6 +562,74 @@ class WebSearchAgent:
                 result["extracted_content"] = extracted_content
 
         return result
+
+    def fetch_video_transcripts(self, videos: List[Dict[str, Any]], max_videos: int = 3, timeout_s: int = 15) -> List[Dict[str, Any]]:
+        """
+        Fetch transcripts for top N videos in parallel.
+
+        Args:
+            videos: List of video results from search_youtube_videos()
+            max_videos: Maximum videos to fetch transcripts for (default 3)
+            timeout_s: Timeout per transcript fetch in seconds
+
+        Returns:
+            Same list of videos with transcript, hasTranscript fields populated
+        """
+        if not videos:
+            return videos
+
+        videos_to_process = videos[:max_videos]
+        logger.info(f"Fetching transcripts for {len(videos_to_process)} videos")
+
+        def fetch_single_transcript(video: Dict[str, Any]) -> Dict[str, Any]:
+            """Fetch transcript for a single video"""
+            url = video.get('url', '')
+            video_id = video.get('videoId', '')
+
+            if not url and not video_id:
+                return video
+
+            try:
+                # Use the existing extract_youtube function
+                transcript_url = url if url else f"https://youtube.com/watch?v={video_id}"
+                transcript_data = extract_youtube(transcript_url, timeout_s=timeout_s)
+
+                if transcript_data.get('success') and transcript_data.get('text'):
+                    # Limit transcript length to avoid context overflow
+                    video['transcript'] = transcript_data['text'][:4000]
+                    video['hasTranscript'] = True
+                    logger.info(f"Successfully fetched transcript for: {video.get('title', 'Unknown')[:50]}")
+                else:
+                    video['transcript'] = ''
+                    video['hasTranscript'] = False
+                    logger.debug(f"No transcript available for: {video.get('title', 'Unknown')[:50]}")
+
+            except Exception as e:
+                logger.warning(f"Transcript fetch failed for {url}: {e}")
+                video['transcript'] = ''
+                video['hasTranscript'] = False
+
+            return video
+
+        # Fetch transcripts in parallel with timeout
+        with ThreadPoolExecutor(max_workers=min(3, len(videos_to_process))) as executor:
+            future_to_video = {
+                executor.submit(fetch_single_transcript, video): video
+                for video in videos_to_process
+            }
+
+            try:
+                for future in as_completed(future_to_video, timeout=timeout_s + 5):
+                    # Results are already updated in-place in the video dict
+                    pass
+            except TimeoutError:
+                logger.warning("Transcript fetching timed out, returning partial results")
+
+        # Count successful transcripts
+        success_count = sum(1 for v in videos_to_process if v.get('hasTranscript', False))
+        logger.info(f"Fetched {success_count}/{len(videos_to_process)} video transcripts")
+
+        return videos
 
 
 class TavilySearchAgent:

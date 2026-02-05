@@ -92,10 +92,19 @@ services:
       - ollama-n8n-network
 
   # Next.js Frontend (New UI)
+  # REBUILD TIPS:
+  #   Quick rebuild (use cache):   docker-compose build frontend
+  #   Smart rebuild (recommended): ./scripts/rebuild-frontend.sh
+  #   Full rebuild (no cache):     ./scripts/rebuild-frontend.sh --no-cache
   frontend:
     build:
       context: ./front_end/newjfrontend
       dockerfile: Dockerfile
+      args:
+        # These args help bust Docker cache when rebuilding
+        # Change BUILD_TIMESTAMP to force a fresh build
+        BUILD_TIMESTAMP: ${BUILD_TIMESTAMP:-default}
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
     container_name: harvis-frontend
     restart: unless-stopped
     ports:

@@ -72,3 +72,18 @@ spec:
   resources:
     requests:
       storage: 20Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: harvis-images-pvc
+  namespace: ai-agents
+  labels:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: backend
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi

@@ -14,6 +14,9 @@ export interface VideoResult {
   views?: string
   description?: string
   published?: string
+  videoId?: string          // YouTube video ID for embedding
+  transcript?: string       // Transcript text from the video
+  hasTranscript?: boolean   // Flag indicating transcript availability
 }
 
 export interface ImageAttachment {
@@ -67,7 +70,13 @@ export interface Message {
   }>
   attachments?: Attachment[]
   imageUrl?: string // For displaying image in message
+  imageUrls?: string[] // Multiple image URLs from backend
   autoResearched?: boolean // Perplexity-style auto-research indicator
+  metadata?: {
+    images?: string[]
+    image_count?: number
+    [key: string]: any
+  }
 }
 
 export interface MessageObject {
