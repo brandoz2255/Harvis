@@ -26,7 +26,7 @@ spec:
         kubernetes.io/hostname: dulc3-os
       containers:
         - name: frontend
-          image: "dulc3/jarvis-frontend:v2.26.5" # {"$imagepolicy": "flux-system:harvis-frontend-prod"}
+          image: "dulc3/jarvis-frontend:v2.27.0" # {"$imagepolicy": "flux-system:harvis-frontend-prod"}
           imagePullPolicy: Always
           ports:
             - name: http

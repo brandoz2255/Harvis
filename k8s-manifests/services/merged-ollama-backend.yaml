@@ -24,7 +24,7 @@ spec:
       initContainers:
         # Init container to pre-download TTS and Whisper models
         - name: download-models
-          image: "dulc3/jarvis-backend:v2.26.5"
+          image: "dulc3/jarvis-backend:v2.27.0"
           imagePullPolicy: Always
           command: ["/app/entrypoint.sh", "download-models"]
           env:
@@ -87,7 +87,7 @@ spec:
 
         # Harvis Backend container (shares GPU with Ollama)
         - name: harvis-backend
-          image: "dulc3/jarvis-backend:v2.26.5"
+          image: "dulc3/jarvis-backend:v2.27.0"
           imagePullPolicy: Always
           ports:
             - name: http
