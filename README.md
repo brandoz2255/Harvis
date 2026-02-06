@@ -32,7 +32,7 @@ sudo apt install docker-ce docker-ce-cli containerd.io docker-buildx-plugin dock
     ```
 <img width="862" height="67" alt="database" src="https://github.com/user-attachments/assets/95cdb166-c8d7-4fc2-8ea0-0b5f2a2500d4" />
 
-## 3.⚠️Make sure your GPU has the correct drivers (NVIDIA recommended)⚠️
+## 3.⚠️Make sure your GPU has the correct drivers (NVIDIA recommended
 https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html
 
 ## 5.  **Build and run with Docker Compose:**
