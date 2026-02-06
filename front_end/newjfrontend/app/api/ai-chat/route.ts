@@ -342,9 +342,25 @@ export async function POST(req: NextRequest) {
 
   } catch (error) {
     console.error('[AI-Chat] Route error:', error);
-    return new Response(JSON.stringify({ error: 'Internal server error' }), {
-      status: 500,
-      headers: { 'Content-Type': 'application/json' }
+    // CRITICAL: Always return a stream response, never JSON, to prevent AI SDK "Error in input stream"
+    const encoder = new TextEncoder();
+    const errorMessage = error instanceof Error ? error.message : 'Internal server error';
+    const stream = new ReadableStream({
+      start(controller) {
+        // Send error in AI SDK format: 3:"error message"\n
+        const encodedError = JSON.stringify(errorMessage);
+        controller.enqueue(encoder.encode(`3:${encodedError}\n`));
+        controller.close();
+      }
+    });
+    return new Response(stream, {
+      status: 200, // Return 200 so client stream reader starts
+      headers: {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'X-Vercel-AI-Data-Stream': 'v1',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+      }
     });
   }
 }
