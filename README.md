@@ -17,31 +17,33 @@ sudo apt install docker-ce docker-ce-cli containerd.io docker-buildx-plugin dock
 ### Installation & Usage
 
 ## 1.  **Clone the repository:**
-    ```bash
-    git clone [<repository_url>]
+```bash
+    git clone <repository_url>
     cd Harvis
-
-    ```
-    <img width="760" height="163" alt="clone" src="https://github.com/user-attachments/assets/f0ddf838-296e-4ecd-bb91-e34414f0b930" />
+```
+<img width="760" height="163" alt="clone" src="https://github.com/user-attachments/assets/f0ddf838-296e-4ecd-bb91-e34414f0b930" />
+    
 ## 2.  **Set up environment variables:**
-    Create `.env.local` in `front_end/jfrontend/` with:
-    ```bash
+Create .env.local in front_end/jfrontend/ with:
+    
+```bash
     DATABASE_URL=postgresql://user:password@localhost:5432/harvis
     JWT_SECRET=your-jwt-secret-key
     BACKEND_URL=http://backend:8000
-    ```
+```
 <img width="862" height="67" alt="database" src="https://github.com/user-attachments/assets/95cdb166-c8d7-4fc2-8ea0-0b5f2a2500d4" />
 
 ## 3.⚠️Make sure your GPU has the correct drivers (NVIDIA recommended
 https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html
 
 ## 5.  **Build and run with Docker Compose:**
-    This is the recommended way to run the entire application stack.
-    ```bash
+This is the recommended way to run the entire application stack.
+    
+```bash
     sudo apt install docker-compose-plugin -y
     sudo docker-compose up --build -d
     docker network create ollama-n8n-network
-    ```
+```
 <img width="1389" height="140" alt="build" src="https://github.com/user-attachments/assets/175e2994-f92b-4d18-86e4-509f8d2144b6" />
 
 ## 5.  **Access the application:**
