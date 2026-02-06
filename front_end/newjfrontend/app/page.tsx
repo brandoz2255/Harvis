@@ -34,7 +34,7 @@ export default function ChatPage() {
 
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const scrollRef = useRef<HTMLDivElement>(null)
-  
+
   // Use a ref to track if we should skip the next scroll (to prevent scroll jank during streaming)
   const skipNextScrollRef = useRef(false)
 
@@ -58,12 +58,12 @@ export default function ChatPage() {
   } = useChatHistoryStore()
 
   // Vercel AI SDK integration
-  const { 
-    messages: aiMessages, 
-    append, 
-    setMessages: setAiMessages, 
-    isLoading: isAiLoading, 
-    data: aiData 
+  const {
+    messages: aiMessages,
+    append,
+    setMessages: setAiMessages,
+    isLoading: isAiLoading,
+    data: aiData
   } = useChat({
     api: '/api/ai-chat',
     body: {
@@ -87,8 +87,9 @@ export default function ChatPage() {
   const searchResultsMapRef = useRef<Map<string, any[]>>(new Map())
   const videosMapRef = useRef<Map<string, any[]>>(new Map())
   const reasoningMapRef = useRef<Map<string, string>>(new Map())
+  const researchChainMapRef = useRef<Map<string, any>>(new Map())
   const processedDataLengthRef = useRef(0)
-  
+
   // Track previous aiData length to detect new data
   const prevAiDataLengthRef = useRef(0)
 
@@ -112,7 +113,7 @@ export default function ChatPage() {
 
       // Process new data items
       const mappedAudioUrls = new Set(audioUrlMapRef.current.values())
-      
+
       newItems.forEach((data: any) => {
         // Audio URLs
         if (data?.audioPath && !mappedAudioUrls.has(data.audioPath) && lastAssistantId) {
@@ -156,7 +157,7 @@ export default function ChatPage() {
   // Use useMemo to convert AI messages to local format - this prevents re-renders during streaming
   const convertedMessages = useMemo<Message[]>(() => {
     if (aiMessages.length === 0) return []
-    
+
     return aiMessages.map((m: any, index: number): Message => {
       const reasoningTool = m.toolInvocations?.find((t: any) => t.toolName === 'reasoning')
       const toolReasoning = reasoningTool?.result?.reasoning
@@ -170,6 +171,7 @@ export default function ChatPage() {
         model: selectedModel,
         status: (index === aiMessages.length - 1 && isAiLoading) ? 'streaming' : 'sent',
         reasoning: reasoning,
+        researchChain: researchChainMapRef.current.get(m.id),
         audioUrl: audioUrlMapRef.current.get(m.id),
         searchResults: searchResultsMapRef.current.get(m.id),
         videos: videosMapRef.current.get(m.id),
@@ -184,23 +186,23 @@ export default function ChatPage() {
   const messages = useMemo(() => {
     // Start with AI SDK messages (converted from aiMessages)
     const merged = [...convertedMessages]
-    
+
     // Add localMessages that aren't already in merged
     localMessages.forEach(localMsg => {
-      const exists = merged.some(m => 
+      const exists = merged.some(m =>
         // Check by ID
         (m.id && m.id === localMsg.id) ||
         (m.tempId && m.tempId === localMsg.tempId) ||
         // Check by content + role + timestamp (within 2 seconds)
-        (m.role === localMsg.role && 
-         m.content === localMsg.content &&
-         Math.abs(m.timestamp.getTime() - localMsg.timestamp.getTime()) < 2000)
+        (m.role === localMsg.role &&
+          m.content === localMsg.content &&
+          Math.abs(m.timestamp.getTime() - localMsg.timestamp.getTime()) < 2000)
       )
       if (!exists) {
         merged.push(localMsg)
       }
     })
-    
+
     // Sort by timestamp to maintain chronological order
     return merged.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())
   }, [convertedMessages, localMessages])
@@ -213,6 +215,7 @@ export default function ChatPage() {
       videosMapRef.current.clear()
       audioUrlMapRef.current.clear()
       reasoningMapRef.current.clear()
+      researchChainMapRef.current.clear()
       processedDataLengthRef.current = 0
       prevAiDataLengthRef.current = 0
 
@@ -233,6 +236,10 @@ export default function ChatPage() {
 
         if (msg.reasoning) {
           reasoningMapRef.current.set(msgId, msg.reasoning)
+        }
+
+        if (msg.researchChain) {
+          researchChainMapRef.current.set(msgId, msg.researchChain)
         }
 
         return {
@@ -261,7 +268,7 @@ export default function ChatPage() {
       skipNextScrollRef.current = false
       return
     }
-    
+
     if (scrollRef.current && messages.length > 0) {
       // Use requestAnimationFrame for smooth scrolling
       requestAnimationFrame(() => {
@@ -292,6 +299,7 @@ export default function ChatPage() {
     searchResultsMapRef.current.clear()
     videosMapRef.current.clear()
     reasoningMapRef.current.clear()
+    researchChainMapRef.current.clear()
     await selectSession(id)
     setSidebarOpen(false)
   }, [selectSession, setAiMessages])
@@ -480,6 +488,12 @@ export default function ChatPage() {
               hasUpdates = true
             }
 
+            if (chunk.research_chain) {
+              updates.researchChain = chunk.research_chain
+              researchChainMapRef.current.set(assistantId, chunk.research_chain)
+              hasUpdates = true
+            }
+
             if (hasUpdates) {
               return newMessages.map((msg, i) =>
                 i === index ? { ...msg, ...updates } : msg
@@ -517,6 +531,7 @@ export default function ChatPage() {
         searchResults: data.search_results || data.sources,
         searchQuery: data.searchQuery,
         videos: data.videos,
+        researchChain: data.research_chain,
         autoResearched: data.auto_researched,
       }
 
@@ -686,6 +701,7 @@ export default function ChatPage() {
         inputType={message.inputType}
         status={message.status}
         metadata={message.metadata}
+        researchChain={message.researchChain}
       />
     ))
   }, [messages])

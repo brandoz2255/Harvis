@@ -1,8 +1,8 @@
-"""
-Hook for OpenClaw API calls
-
-Provides methods for interacting with OpenClaw backend.
-"""
+/**
+ * Hook for OpenClaw API calls
+ * 
+ * Provides methods for interacting with OpenClaw backend.
+ */
 
 'use client'
 

@@ -1,8 +1,8 @@
-"""
-MCP Plugin Manager Component
-
-UI for managing MCP server registrations.
-"""
+/**
+ * MCP Plugin Manager Component
+ * 
+ * UI for managing MCP server registrations.
+ */
 
 'use client'
 
@@ -37,7 +37,7 @@ import {
   Power,
   PowerOff,
   Server,
-  Tool,
+  Wrench,
 } from 'lucide-react'
 
 interface MCPServer {
@@ -290,7 +290,7 @@ export function MCPPluginManager() {
                           </p>
                           {server.tools.length > 0 && (
                             <div className="flex items-center gap-1 mt-2">
-                              <Tool className="w-3 h-3" />
+                              <Wrench className="w-3 h-3" />
                               <span className="text-xs text-muted-foreground">
                                 {server.tools.length} tools available
                               </span>

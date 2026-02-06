@@ -1,9 +1,9 @@
-"""
-OpenClaw Workspace Component
-
-Main workspace view when an OpenClaw task is active.
-Displays task progress, live preview, event logs, and artifacts.
-"""
+/**
+ * OpenClaw Workspace Component
+ * 
+ * Main workspace view when an OpenClaw task is active.
+ * Displays task progress, live preview, event logs, and artifacts.
+ */
 
 'use client'
 
@@ -123,11 +123,11 @@ export function OpenClawWorkspace() {
           )}
           {(currentTask.status === 'running' ||
             currentTask.status === 'paused') && (
-            <Button variant="destructive" size="sm">
-              <Square className="w-4 h-4 mr-2" />
-              Stop
-            </Button>
-          )}
+              <Button variant="destructive" size="sm">
+                <Square className="w-4 h-4 mr-2" />
+                Stop
+              </Button>
+            )}
           <Button
             variant="ghost"
             size="sm"
@@ -161,7 +161,7 @@ export function OpenClawWorkspace() {
       {/* Main Content */}
       <Tabs
         value={activeTab}
-        onValueChange={(v) => setActiveTab(v as typeof activeTab)}
+        onValueChange={(v: string) => setActiveTab(v as typeof activeTab)}
         className="flex-1 flex flex-col"
       >
         <TabsList className="mx-4 mt-2">
@@ -190,9 +190,8 @@ export function OpenClawWorkspace() {
               {currentTask.steps.map((step, index) => (
                 <Card
                   key={index}
-                  className={`transition-colors ${
-                    step.status === 'running' ? 'border-blue-500' : ''
-                  }`}
+                  className={`transition-colors ${step.status === 'running' ? 'border-blue-500' : ''
+                    }`}
                 >
                   <CardContent className="p-4">
                     <div className="flex items-start gap-3">
@@ -280,11 +279,10 @@ export function OpenClawWorkspace() {
                     <button
                       key={screenshot.id}
                       onClick={() => setSelectedScreenshot(screenshot.url)}
-                      className={`flex-shrink-0 w-24 h-16 rounded overflow-hidden border-2 transition-colors ${
-                        selectedScreenshot === screenshot.url
-                          ? 'border-primary'
-                          : 'border-muted hover:border-muted-foreground'
-                      }`}
+                      className={`flex-shrink-0 w-24 h-16 rounded overflow-hidden border-2 transition-colors ${selectedScreenshot === screenshot.url
+                        ? 'border-primary'
+                        : 'border-muted hover:border-muted-foreground'
+                        }`}
                     >
                       <img
                         src={screenshot.thumbnailUrl || screenshot.url}
