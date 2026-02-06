@@ -1,8 +1,8 @@
-"""
-Workspace Layout Component
-
-Manages the layout switching between normal chat and workspace mode.
-"""
+/**
+ * Workspace Layout Component
+ * 
+ * Manages the layout switching between normal chat and workspace mode.
+ */
 
 'use client'
 

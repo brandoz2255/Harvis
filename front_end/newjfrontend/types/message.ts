@@ -3,6 +3,8 @@ export interface SearchResult {
   url: string
   snippet: string
   source?: string
+  domain?: string
+  favicon?: string
 }
 
 export interface VideoResult {
@@ -77,6 +79,37 @@ export interface Message {
     image_count?: number
     [key: string]: any
   }
+  researchChain?: ResearchChainData
+}
+
+export interface ThinkingStep {
+  type: "thinking"
+  content: string
+}
+
+export interface SearchStep {
+  type: "search"
+  query: string
+  resultCount: number
+  results: Array<{
+    title: string
+    url: string
+    domain: string
+  }>
+}
+
+export interface ReadStep {
+  type: "read"
+  domain: string
+  summary: string
+}
+
+export type ResearchStep = ThinkingStep | SearchStep | ReadStep
+
+export interface ResearchChainData {
+  summary: string
+  steps: ResearchStep[]
+  isLoading?: boolean
 }
 
 export interface MessageObject {

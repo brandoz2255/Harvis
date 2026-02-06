@@ -5,31 +5,13 @@ import { Clock, Globe, FileText, ChevronDown, Search } from "lucide-react"
 import { cn } from "@/lib/utils"
 
 // Types for research chain steps
-export interface ThinkingStep {
-    type: "thinking"
-    content: string
-}
-
-export interface SearchResult {
-    title: string
-    url: string
-    domain: string
-}
-
-export interface SearchStep {
-    type: "search"
-    query: string
-    resultCount: number
-    results: SearchResult[]
-}
-
-export interface ReadStep {
-    type: "read"
-    domain: string
-    summary: string
-}
-
-export type ResearchStep = ThinkingStep | SearchStep | ReadStep
+import {
+    ThinkingStep,
+    SearchStep,
+    ReadStep,
+    ResearchStep,
+    ResearchChainData
+} from "@/types/message"
 
 export interface ResearchChainProps {
     /** Summary text shown in the collapsed header */

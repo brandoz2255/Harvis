@@ -17,8 +17,9 @@ import { Button } from "@/components/ui/button"
 import { VoicePlayer } from "@/components/voice-player"
 import { AudioWaveform } from "@/components/ui/audio-waveform"
 import { ReasoningPanel } from "@/components/reasoning-panel"
-import { ResearchChain, type ResearchStep } from "@/components/research-chain"
-import { VideoCarousel, type VideoResult } from "@/components/video-carousel"
+import { ResearchChain } from "@/components/research-chain"
+import type { Message, VideoResult, ResearchChainData, ResearchStep } from "@/types/message"
+import { VideoCarousel } from "@/components/video-carousel"
 import { YouTubeEmbed } from "@/components/youtube-embed"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
@@ -109,11 +110,7 @@ interface ChatMessageProps {
     [key: string]: any
   }
   /** Research chain steps for visualizing AI research process */
-  researchChain?: {
-    summary: string
-    steps: ResearchStep[]
-    isLoading?: boolean
-  }
+  researchChain?: ResearchChainData
 }
 
 // Language mapping for prism-react-renderer

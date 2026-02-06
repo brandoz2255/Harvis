@@ -1,8 +1,8 @@
-"""
-Task Starter Component
-
-Button and dialog to start OpenClaw tasks from the chat interface.
-"""
+/**
+ * Task Starter Component
+ * 
+ * Button and dialog to start OpenClaw tasks from the chat interface.
+ */
 
 'use client'
 
