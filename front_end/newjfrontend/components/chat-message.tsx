@@ -17,6 +17,7 @@ import { Button } from "@/components/ui/button"
 import { VoicePlayer } from "@/components/voice-player"
 import { AudioWaveform } from "@/components/ui/audio-waveform"
 import { ReasoningPanel } from "@/components/reasoning-panel"
+import { ResearchChain, type ResearchStep } from "@/components/research-chain"
 import { VideoCarousel, type VideoResult } from "@/components/video-carousel"
 import { YouTubeEmbed } from "@/components/youtube-embed"
 import ReactMarkdown from "react-markdown"
@@ -107,6 +108,12 @@ interface ChatMessageProps {
     image_count?: number
     [key: string]: any
   }
+  /** Research chain steps for visualizing AI research process */
+  researchChain?: {
+    summary: string
+    steps: ResearchStep[]
+    isLoading?: boolean
+  }
 }
 
 // Language mapping for prism-react-renderer
@@ -196,6 +203,7 @@ export const ChatMessage = React.memo(function ChatMessage({
   inputType,
   status,
   metadata,
+  researchChain,
 }: ChatMessageProps) {
   const [copied, setCopied] = useState(false)
   const [showVoice, setShowVoice] = useState(false)
@@ -203,8 +211,8 @@ export const ChatMessage = React.memo(function ChatMessage({
   const [playingVideo, setPlayingVideo] = useState<VideoResult | null>(null)
 
   // Memoize content processing to avoid re-computation during streaming
-  const { reasoning: extractedReasoning, finalAnswer } = useMemo(() => 
-    separateThinkingFromContent(content || ''), 
+  const { reasoning: extractedReasoning, finalAnswer } = useMemo(() =>
+    separateThinkingFromContent(content || ''),
     [content]
   )
 
@@ -212,7 +220,7 @@ export const ChatMessage = React.memo(function ChatMessage({
   const reasoning = extractedReasoning || propReasoning || ''
   // Use cleaned content (without think tags) for display
   const displayContent = finalAnswer
-  
+
   // Memoize markdown components to prevent re-creation on every render
   const markdownComponents = useMemo(() => ({
     // Style code blocks with syntax highlighting using prism-react-renderer
@@ -336,6 +344,16 @@ export const ChatMessage = React.memo(function ChatMessage({
           role === "user" && "items-end"
         )}
       >
+
+        {/* Research Chain - show AI research process */}
+        {role === "assistant" && researchChain && (
+          <ResearchChain
+            summary={researchChain.summary}
+            steps={researchChain.steps}
+            isLoading={researchChain.isLoading}
+            className="mb-3"
+          />
+        )}
 
         <div
           className={cn(
@@ -621,6 +639,7 @@ export const ChatMessage = React.memo(function ChatMessage({
     JSON.stringify(prevProps.searchResults) === JSON.stringify(nextProps.searchResults) &&
     JSON.stringify(prevProps.videos) === JSON.stringify(nextProps.videos) &&
     JSON.stringify(prevProps.codeBlocks) === JSON.stringify(nextProps.codeBlocks) &&
-    JSON.stringify(prevProps.metadata) === JSON.stringify(nextProps.metadata)
+    JSON.stringify(prevProps.metadata) === JSON.stringify(nextProps.metadata) &&
+    JSON.stringify(prevProps.researchChain) === JSON.stringify(nextProps.researchChain)
   )
 })
