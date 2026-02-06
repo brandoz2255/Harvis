@@ -57,6 +57,28 @@ export async function POST(req: NextRequest) {
 
     console.log(`[AI-Chat] Calling backend at ${BACKEND_URL} - model: ${model || 'mistral'}, session: ${validSessionId || 'new'}, message: ${messageContent.slice(0, 50)}...`);
 
+    // Helper to return a stream with an error message
+    const createErrorStreamResponse = (errorMessage: string, status: number = 500) => {
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream({
+        start(controller) {
+          // Send error in AI SDK format: 3:"error message"\n
+          const encodedError = JSON.stringify(errorMessage);
+          controller.enqueue(encoder.encode(`3:${encodedError}\n`));
+          controller.close();
+        }
+      });
+      return new Response(stream, {
+        status: 200, // Always return 200 so client stream reader starts
+        headers: {
+          'Content-Type': 'text/plain; charset=utf-8',
+          'X-Vercel-AI-Data-Stream': 'v1',
+          'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive',
+        }
+      });
+    };
+
     // Call Python backend with SSE streaming
     let backendResponse;
     try {
@@ -78,27 +100,18 @@ export async function POST(req: NextRequest) {
       });
     } catch (fetchError) {
       console.error('[AI-Chat] Fetch to backend failed:', fetchError);
-      return new Response(JSON.stringify({ error: `Failed to connect to backend: ${fetchError}` }), {
-        status: 503,
-        headers: { 'Content-Type': 'application/json' }
-      });
+      return createErrorStreamResponse(`Failed to connect to backend: ${fetchError}`);
     }
 
     if (!backendResponse.ok) {
       const errorText = await backendResponse.text();
       console.error('[AI-Chat] Backend error:', backendResponse.status, errorText);
-      return new Response(JSON.stringify({ error: `Backend error: ${backendResponse.status} - ${errorText}` }), {
-        status: backendResponse.status,
-        headers: { 'Content-Type': 'application/json' }
-      });
+      return createErrorStreamResponse(`Backend error: ${backendResponse.status} - ${errorText}`);
     }
 
     if (!backendResponse.body) {
       console.error('[AI-Chat] Backend response has no body');
-      return new Response(JSON.stringify({ error: 'Backend returned empty response' }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json' }
-      });
+      return createErrorStreamResponse('Backend returned empty response');
     }
 
     // Create a readable stream that transforms SSE to AI SDK format
