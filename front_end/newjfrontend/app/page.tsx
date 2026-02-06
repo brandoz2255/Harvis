@@ -132,6 +132,11 @@ export default function ChatPage() {
           videosMapRef.current.set(lastAssistantId, data.videos)
         }
 
+        // Research Chain
+        if (data?.research_chain && lastAssistantId) {
+          researchChainMapRef.current.set(lastAssistantId, data.research_chain)
+        }
+
         // Session ID - sync currentSession when backend creates/returns a session
         // This ensures vision/screenshare uses the same session as regular chat
         if (data?.sessionId && data.sessionId !== currentSession?.id) {
