@@ -132,9 +132,52 @@ export default function ChatPage() {
           videosMapRef.current.set(lastAssistantId, data.videos)
         }
 
-        // Research Chain
-        if (data?.research_chain && lastAssistantId) {
-          researchChainMapRef.current.set(lastAssistantId, data.research_chain)
+        // Research Chain - Handle pre-formed chain or build from logs
+        if (lastAssistantId) {
+          // Case 1: Pre-formed chain object
+          if (data?.research_chain) {
+            researchChainMapRef.current.set(lastAssistantId, data.research_chain)
+          }
+          // Case 2: Incremental logs/progress -> Build chain locally
+          else if (data?.status === 'progress' || data?.status === 'researching' || data?.type === 'log') {
+            const logMessage = data.message || data.detail || data.content
+            if (logMessage && typeof logMessage === 'string') {
+              const currentChain = researchChainMapRef.current.get(lastAssistantId) || {
+                summary: "Researching...",
+                steps: [],
+                isLoading: true
+              }
+
+              // Avoid duplicate steps
+              const lastStep = currentChain.steps[currentChain.steps.length - 1] as any
+              if (!lastStep || (lastStep.content !== logMessage && lastStep.query !== logMessage && lastStep.domain !== logMessage)) {
+
+                // Heuristic to determine step type
+                const lowerLog = logMessage.toLowerCase()
+                if (lowerLog.includes('search') || lowerLog.includes('googl')) {
+                  currentChain.steps.push({
+                    type: 'search',
+                    query: logMessage.replace(/searching for|search/gi, '').trim() || logMessage,
+                    resultCount: 0,
+                    results: []
+                  })
+                } else if (lowerLog.includes('read') || lowerLog.includes('brow') || lowerLog.includes('access')) {
+                  currentChain.steps.push({
+                    type: 'read',
+                    domain: logMessage, // Can be refined to extract domain
+                    summary: 'Reading content...'
+                  })
+                } else {
+                  currentChain.steps.push({
+                    type: 'thinking',
+                    content: logMessage
+                  })
+                }
+
+                researchChainMapRef.current.set(lastAssistantId, { ...currentChain })
+              }
+            }
+          }
         }
 
         // Session ID - sync currentSession when backend creates/returns a session
@@ -455,8 +498,40 @@ export default function ChatPage() {
             if (chunk.status === 'progress' || chunk.status === 'researching') {
               const statusText = chunk.message || chunk.detail
               if (statusText) {
-                updates.reasoning = (currentMsg.reasoning || '') + (currentMsg.reasoning ? '\n' : '') + `> ${statusText}`
-                hasUpdates = true
+                // Build research chain from logs
+                const currentChain = currentMsg.researchChain || {
+                  summary: "Researching...",
+                  steps: [],
+                  isLoading: true
+                }
+
+                // Avoid duplicate steps
+                const lastStep = currentChain.steps[currentChain.steps.length - 1] as any
+                if (!lastStep || (lastStep.content !== statusText && lastStep.query !== statusText && lastStep.domain !== statusText)) {
+                  const lowerLog = statusText.toLowerCase()
+                  if (lowerLog.includes('search') || lowerLog.includes('googl')) {
+                    currentChain.steps.push({
+                      type: 'search',
+                      query: statusText.replace(/searching for|search/gi, '').trim() || statusText,
+                      resultCount: 0,
+                      results: []
+                    })
+                  } else if (lowerLog.includes('read') || lowerLog.includes('brow') || lowerLog.includes('access') || lowerLog.includes('fetch')) {
+                    currentChain.steps.push({
+                      type: 'read',
+                      domain: statusText,
+                      summary: 'Reading content...'
+                    })
+                  } else {
+                    currentChain.steps.push({
+                      type: 'thinking',
+                      content: statusText
+                    })
+                  }
+                  updates.researchChain = { ...currentChain }
+                  researchChainMapRef.current.set(assistantId, updates.researchChain)
+                  hasUpdates = true
+                }
               }
             }
 
@@ -479,6 +554,16 @@ export default function ChatPage() {
               }
               if (chunk.audio_path) {
                 updates.audioUrl = chunk.audio_path
+                hasUpdates = true
+              }
+              // Mark research chain as complete
+              if (currentMsg.researchChain) {
+                updates.researchChain = {
+                  ...currentMsg.researchChain,
+                  isLoading: false,
+                  summary: chunk.research_summary || currentMsg.researchChain.summary || "Research completed"
+                }
+                researchChainMapRef.current.set(assistantId, updates.researchChain)
                 hasUpdates = true
               }
             }

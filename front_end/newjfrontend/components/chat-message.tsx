@@ -363,8 +363,8 @@ export const ChatMessage = React.memo(function ChatMessage({
           {role === "assistant" ? (
             <div className="prose prose-sm dark:prose-invert max-w-none">
               {/* Show thinking indicator when content is empty (streaming reasoning) */}
-              {/* Show thinking indicator only when content is empty AND we are still waiting/streaming */}
-              {(!displayContent || displayContent.length === 0) && (status === 'pending' || status === 'streaming' || !status) && (
+              {/* Show thinking indicator only when content is empty AND we are still waiting/streaming AND no research chain */}
+              {(!displayContent || displayContent.length === 0) && (status === 'pending' || status === 'streaming' || !status) && !researchChain && (
                 <div className="flex items-center gap-2 text-muted-foreground italic">
                   <div className="flex gap-1">
                     <div className="h-2 w-2 animate-bounce rounded-full bg-primary/50 [animation-delay:-0.3s]" />
@@ -375,10 +375,22 @@ export const ChatMessage = React.memo(function ChatMessage({
                 </div>
               )}
 
-              {/* Show "Empty response" if finished but no content (e.g. backend error or empty generation) */}
-              {(!displayContent || displayContent.length === 0) && status === 'sent' && (
+              {/* Show "Empty response" if finished but no content AND no research chain (e.g. backend error) */}
+              {(!displayContent || displayContent.length === 0) && status === 'sent' && !researchChain && (
                 <div className="text-muted-foreground italic text-sm">
                   (No content received)
+                </div>
+              )}
+
+              {/* Show generating message if we have research but no content yet */}
+              {(!displayContent || displayContent.length === 0) && researchChain && status !== 'sent' && (
+                <div className="flex items-center gap-2 text-muted-foreground italic">
+                  <div className="flex gap-1">
+                    <div className="h-2 w-2 animate-bounce rounded-full bg-primary/50 [animation-delay:-0.3s]" />
+                    <div className="h-2 w-2 animate-bounce rounded-full bg-primary/50 [animation-delay:-0.15s]" />
+                    <div className="h-2 w-2 animate-bounce rounded-full bg-primary/50" />
+                  </div>
+                  <span className="text-sm">Generating response...</span>
                 </div>
               )}
               <ReactMarkdown
