@@ -1,6 +1,54 @@
 # The Harvis AI Project
+### Quick Start (Local Development)
 
-<img width="1653" height="1392" alt="image" src="https://github.com/user-attachments/assets/36dd9d2d-9313-41bb-9491-313838ed5e97" />
+The fastest way to get started locally:
+
+Run the following command to uninstall all conflicting packages:
+
+```bash
+sudo apt remove $(dpkg --get-selections docker.io docker-compose docker-compose-v2 docker-doc podman-docker co
+```
+To install Docker :
+
+```bash
+sudo apt install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+```
+
+### Installation & Usage
+
+## 1.  **Clone the repository:**
+    ```bash
+    git clone [<repository_url>]
+    cd Harvis
+
+    ```
+    <img width="760" height="163" alt="clone" src="https://github.com/user-attachments/assets/f0ddf838-296e-4ecd-bb91-e34414f0b930" />
+## 2.  **Set up environment variables:**
+    Create `.env.local` in `front_end/jfrontend/` with:
+    ```bash
+    DATABASE_URL=postgresql://user:password@localhost:5432/harvis
+    JWT_SECRET=your-jwt-secret-key
+    BACKEND_URL=http://backend:8000
+    ```
+<img width="862" height="67" alt="database" src="https://github.com/user-attachments/assets/95cdb166-c8d7-4fc2-8ea0-0b5f2a2500d4" />
+
+## 3. ⚠️Make sure your GPU has the correct drivers (NVIDIA recommended)⚠️
+https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html
+
+## 5.  **Build and run with Docker Compose:**
+    This is the recommended way to run the entire application stack.
+    ```bash
+    sudo apt install docker-compose-plugin -y
+    sudo docker-compose up --build -d
+    docker network create ollama-n8n-network
+    ```
+<img width="1389" height="140" alt="build" src="https://github.com/user-attachments/assets/175e2994-f92b-4d18-86e4-509f8d2144b6" />
+
+## 5.  **Access the application:**
+The web interface will be available at `http://localhost:3000`.
+
+<img width="1924" height="973" alt="image" src="https://github.com/user-attachments/assets/9b456d3d-efb7-4375-95c8-cd03a85dd4fd" />
+
 
 
 The Harvis AI Project is a sophisticated, voice-activated AI assistant designed to be a proactive and interactive partner on your computer. It combines the power of large language models, voice synthesis, and system automation to provide a seamless interface for controlling your digital environment, retrieving information, and assisting with various tasks.
@@ -20,6 +68,8 @@ The Harvis AI Project is a sophisticated, voice-activated AI assistant designed 
 - **Extensible and Modular:** Built with a modern tech stack that allows for easy expansion and customization.
 
 ## Tech Stack
+
+<img width="1653" height="1392" alt="image" src="https://github.com/user-attachments/assets/36dd9d2d-9313-41bb-9491-313838ed5e97" />
 
 ### Frontend
 - **Framework:** Next.js (React)
@@ -56,41 +106,6 @@ The Harvis AI Project is a sophisticated, voice-activated AI assistant designed 
 - An NVIDIA GPU with CUDA drivers is recommended for optimal performance, but not strictly required.
 - `ffmpeg` for audio processing.
 
-### Quick Start (Local Development)
-
-The fastest way to get started locally:
-
-```bash
-docker-compose build
-docker-compose up
-```
-
-That's it! The application will be available at `http://localhost:3000`.
-
-### Installation & Usage
-
-1.  **Clone the repository:**
-    ```bash
-    git clone <repository_url>
-    cd aidev
-    ```
-
-2.  **Set up environment variables:**
-    Create `.env.local` in `front_end/jfrontend/` with:
-    ```bash
-    DATABASE_URL=postgresql://user:password@localhost:5432/harvis
-    JWT_SECRET=your-jwt-secret-key
-    BACKEND_URL=http://backend:8000
-    ```
-
-3.  **Build and run with Docker Compose:**
-    This is the recommended way to run the entire application stack.
-    ```bash
-    docker-compose up --build -d
-    ```
-
-4.  **Access the application:**
-    The web interface will be available at `http://localhost:3000`.
 
 ## n8n Workflow Automation API
 
