@@ -74,6 +74,12 @@ export default function ChatPage() {
     },
     onError: (e: any) => {
       console.error("AI SDK Error:", e)
+      console.error("AI SDK Error details:", {
+        message: e?.message,
+        cause: e?.cause,
+        name: e?.name,
+        stack: e?.stack?.slice(0, 500)
+      })
       setIsLoading(false)
     },
     onFinish: (message: any) => {
@@ -505,32 +511,92 @@ export default function ChatPage() {
                   isLoading: true
                 }
 
-                // Avoid duplicate steps
-                const lastStep = currentChain.steps[currentChain.steps.length - 1] as any
-                if (!lastStep || (lastStep.content !== statusText && lastStep.query !== statusText && lastStep.domain !== statusText)) {
-                  const lowerLog = statusText.toLowerCase()
-                  if (lowerLog.includes('search') || lowerLog.includes('googl')) {
-                    currentChain.steps.push({
-                      type: 'search',
-                      query: statusText.replace(/searching for|search/gi, '').trim() || statusText,
-                      resultCount: 0,
-                      results: []
-                    })
-                  } else if (lowerLog.includes('read') || lowerLog.includes('brow') || lowerLog.includes('access') || lowerLog.includes('fetch')) {
-                    currentChain.steps.push({
-                      type: 'read',
-                      domain: statusText,
-                      summary: 'Reading content...'
-                    })
-                  } else {
-                    currentChain.steps.push({
-                      type: 'thinking',
-                      content: statusText
-                    })
+                const lowerLog = statusText.toLowerCase()
+
+                // Check for result count updates (e.g., "Found 5 relevant search results for query:")
+                const resultCountMatch = statusText.match(/Found (\d+) relevant search results/i)
+                if (resultCountMatch) {
+                  const count = parseInt(resultCountMatch[1], 10)
+                  // Update the last search step's result count
+                  for (let i = currentChain.steps.length - 1; i >= 0; i--) {
+                    if (currentChain.steps[i].type === 'search') {
+                      (currentChain.steps[i] as any).resultCount = count
+                      break
+                    }
                   }
                   updates.researchChain = { ...currentChain }
                   researchChainMapRef.current.set(assistantId, updates.researchChain)
                   hasUpdates = true
+                }
+                // Check for URL extraction from raw result logs (e.g., "Raw result 1: Title='...', URL='...'")
+                else if (statusText.includes("Raw result") || statusText.includes("URL='")) {
+                  const urlMatch = statusText.match(/URL='([^']+)'/i)
+                  const titleMatch = statusText.match(/Title='([^']+)'/i)
+                  if (urlMatch) {
+                    const url = urlMatch[1]
+                    const title = titleMatch ? titleMatch[1] : url
+                    // Extract domain from URL
+                    let domain = url
+                    try {
+                      domain = new URL(url).hostname.replace('www.', '')
+                    } catch { }
+
+                    // Add to the last search step's results
+                    for (let i = currentChain.steps.length - 1; i >= 0; i--) {
+                      if (currentChain.steps[i].type === 'search') {
+                        const searchStep = currentChain.steps[i] as any
+                        // Avoid duplicates
+                        if (!searchStep.results.some((r: any) => r.url === url)) {
+                          searchStep.results.push({ title, url, domain })
+                          searchStep.resultCount = searchStep.results.length
+                        }
+                        break
+                      }
+                    }
+                    updates.researchChain = { ...currentChain }
+                    researchChainMapRef.current.set(assistantId, updates.researchChain)
+                    hasUpdates = true
+                  }
+                }
+                // Avoid duplicate steps for other log types
+                else {
+                  const lastStep = currentChain.steps[currentChain.steps.length - 1] as any
+                  if (!lastStep || (lastStep.content !== statusText && lastStep.query !== statusText && lastStep.domain !== statusText)) {
+                    if (lowerLog.includes('searching for') || lowerLog.includes('search') && !lowerLog.includes('result')) {
+                      // Extract actual query from "Searching for: 'query'" format
+                      const queryMatch = statusText.match(/['"]([^'"]+)['"]/i)
+                      const query = queryMatch ? queryMatch[1] : statusText.replace(/searching for|search/gi, '').trim() || statusText
+                      currentChain.steps.push({
+                        type: 'search',
+                        query: query,
+                        resultCount: 0,
+                        results: []
+                      })
+                    } else if (lowerLog.includes('read') || lowerLog.includes('brow') || lowerLog.includes('access') || lowerLog.includes('fetch') || lowerLog.includes('extract')) {
+                      // Extract domain from URL if present
+                      const urlInLog = statusText.match(/https?:\/\/[^\s]+/i)
+                      let domain = statusText
+                      if (urlInLog) {
+                        try {
+                          domain = new URL(urlInLog[0]).hostname.replace('www.', '')
+                        } catch { }
+                      }
+                      currentChain.steps.push({
+                        type: 'read',
+                        domain: domain,
+                        summary: 'Reading content...'
+                      })
+                    } else if (!lowerLog.includes('ddgs') && !lowerLog.includes('primp') && !lowerLog.includes('response:')) {
+                      // Filter out noisy internal logs
+                      currentChain.steps.push({
+                        type: 'thinking',
+                        content: statusText
+                      })
+                    }
+                    updates.researchChain = { ...currentChain }
+                    researchChainMapRef.current.set(assistantId, updates.researchChain)
+                    hasUpdates = true
+                  }
                 }
               }
             }
@@ -609,8 +675,12 @@ export default function ChatPage() {
           ? data.history[data.history.length - 1]?.content
           : '')
 
+      // CRITICAL: Use the SAME assistantId we created at the start, not a new one
+      // Also preserve the research chain we built during streaming if backend didn't send one
+      const existingResearchChain = researchChainMapRef.current.get(assistantId)
+
       const assistantMessage: Message = {
-        id: (Date.now() + 1).toString(),
+        id: assistantId,  // Use the same ID, not a new one!
         role: "assistant",
         content: assistantContent,
         timestamp: new Date(),
@@ -621,7 +691,7 @@ export default function ChatPage() {
         searchResults: data.search_results || data.sources,
         searchQuery: data.searchQuery,
         videos: data.videos,
-        researchChain: data.research_chain,
+        researchChain: data.research_chain || (existingResearchChain ? { ...existingResearchChain, isLoading: false } : undefined),
         autoResearched: data.auto_researched,
       }
 
