@@ -125,6 +125,9 @@ export async function POST(req: NextRequest) {
         const safeEnqueue = (data: Uint8Array): boolean => {
           if (isClosed) return false;
           try {
+            // Debug: log what we're sending
+            const textData = new TextDecoder().decode(data);
+            console.log(`[AI-Chat] Enqueuing (${data.length} bytes):`, textData.slice(0, 200));
             controller.enqueue(data);
             return true;
           } catch (e) {
