@@ -66,6 +66,8 @@ export default function ChatPage() {
     data: aiData
   } = useChat({
     api: '/api/ai-chat',
+    // Add auth headers dynamically via credentials - simpler than custom fetch
+    credentials: 'include',
     body: {
       model: selectedModel,
       sessionId: currentSession?.id || null,
@@ -80,6 +82,10 @@ export default function ChatPage() {
         name: e?.name,
         stack: e?.stack?.slice(0, 500)
       })
+      // Check if this is a non-stream response error (backend down, etc.)
+      if (e?.message?.includes('input stream') || e?.name === 'TypeError') {
+        console.error("AI SDK: Received non-stream response. Backend may be down or returned invalid data.")
+      }
       setIsLoading(false)
     },
     onFinish: (message: any) => {

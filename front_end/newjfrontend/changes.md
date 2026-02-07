@@ -154,3 +154,117 @@ const messages = useMemo(() => {
 
 ### Build Status
 ✅ Build successful - no TypeScript errors
+
+## 2026-02-06: AI SDK Input Stream Error Fix
+
+### Problem
+User encountering `AI SDK Error: TypeError: Error in input stream` when using the chat interface.
+
+**Error Details:**
+```
+AI SDK Error: TypeError: Error in input stream
+AI SDK Error details: { message: "Error in input stream", cause: undefined, name: "TypeError" }
+```
+
+### Root Cause Analysis
+The error occurs when the AI SDK client-side stream handler receives something that isn't a valid readable stream. Common causes:
+1. API route returning JSON error instead of a stream
+2. Backend connection failures returning HTML/JSON responses
+3. Missing Authorization headers preventing backend authentication
+4. Nginx proxy buffering/caching interfering with streaming
+
+### Solution
+
+#### 1. Nginx Configuration Fix
+**File:** `/nginx.conf`
+
+Added missing streaming directives to the `/api/ai-chat` location:
+- `proxy_cache off;` - Disables response caching
+- `chunked_transfer_encoding on;` - Enables chunked transfer for streaming
+- Authorization and Cookie header forwarding
+
+```nginx
+location /api/ai-chat {
+    proxy_pass http://frontend_api;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header Authorization $http_authorization;
+    proxy_set_header Cookie $http_cookie;
+
+    # Critical for streaming: disable buffering and caching
+    proxy_buffering off;
+    proxy_cache off;
+    chunked_transfer_encoding on;
+
+    proxy_read_timeout 3600s;
+}
+```
+
+#### 2. Client-Side Error Handling
+**File:** `front_end/newjfrontend/app/page.tsx`
+
+Added custom `fetch` function to `useChat` that:
+- Dynamically adds Authorization header from localStorage
+- Catches HTTP errors and converts JSON responses to AI SDK stream format
+- Handles network errors gracefully with proper stream error format
+
+```typescript
+fetch: async (input, init) => {
+  const token = localStorage.getItem('token')
+  const headers = new Headers(init?.headers)
+  if (token) headers.set('Authorization', `Bearer ${token}`)
+
+  try {
+    const response = await fetch(input, { ...init, headers })
+
+    // Convert JSON errors to stream-compatible format
+    if (!response.ok && contentType.includes('application/json')) {
+      const errorData = await response.json()
+      return new Response(streamWithError(errorData), {
+        status: 200,
+        headers: { 'Content-Type': 'text/plain; charset=utf-8', 'X-Vercel-AI-Data-Stream': 'v1' }
+      })
+    }
+    return response
+  } catch (fetchError) {
+    // Return stream with error for network failures
+    return new Response(streamWithError(fetchError.message), ...)
+  }
+}
+```
+
+### Files Modified
+1. `/nginx.conf` - Added streaming directives and header forwarding
+2. `front_end/newjfrontend/app/page.tsx` - Added custom fetch with error handling
+
+### Rebuild Required
+The frontend container must be rebuilt to pick up the API route and client code changes:
+
+```bash
+# Force rebuild frontend container
+docker compose build --no-cache harvis-frontend
+
+# Recreate and restart
+docker compose up -d --force-recreate harvis-frontend
+
+# Or for standalone containers:
+docker build --no-cache -t harvis-frontend:latest front_end/newjfrontend/
+docker compose up -d
+
+# Also restart nginx to pick up config changes
+docker compose restart nginx
+```
+
+### Verification
+After rebuild, check logs for:
+- `[AI-Chat] Calling backend at...` - Confirms new API route code is active
+- `[AI-Chat] Enqueuing...` - Shows stream chunks being processed
+- No more `TypeError: Error in input stream` errors
+
+### Console Logs to Watch
+- `AI SDK fetch: Backend returned JSON error:` - If backend returns JSON instead of stream
+- `AI SDK fetch error:` - Network/connection failures
+- `AI SDK: Received non-stream response...` - Generic stream format error
