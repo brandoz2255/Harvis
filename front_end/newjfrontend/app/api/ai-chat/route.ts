@@ -233,8 +233,16 @@ export async function POST(req: NextRequest) {
 
                   if ((!fullText || fullText.trim().length === 0) && contentToSend) {
                     console.log(`[AI-Chat] Streaming full content from COMPLETE event (${contentToSend.length} chars)`);
-                    const encodedContent = JSON.stringify(contentToSend);
-                    safeEnqueue(encoder.encode(`0:${encodedContent}\n`));
+
+                    // Stream in smaller chunks to avoid overwhelming the parser
+                    // and to provide better streaming UX
+                    const CHUNK_SIZE = 100; // chars per chunk
+                    for (let i = 0; i < contentToSend.length; i += CHUNK_SIZE) {
+                      if (isClosed) break;
+                      const chunk = contentToSend.slice(i, i + CHUNK_SIZE);
+                      const encodedContent = JSON.stringify(chunk);
+                      safeEnqueue(encoder.encode(`0:${encodedContent}\n`));
+                    }
                     fullText = contentToSend; // Update fullText to reflect that we sent it
                   } else {
                     if (!contentToSend) console.log('[AI-Chat] No content to send in complete event');
@@ -291,7 +299,15 @@ export async function POST(req: NextRequest) {
                     safeEnqueue(encoder.encode(`2:${JSON.stringify([customData])}\n`));
                   }
 
-                  // Finish message (d: prefix)
+                  // Finish event (e: prefix) - required before d: finish data
+                  const finishEvent = {
+                    finishReason: 'stop',
+                    usage: { promptTokens: 0, completionTokens: 0 },
+                    isContinued: false
+                  };
+                  safeEnqueue(encoder.encode(`e:${JSON.stringify(finishEvent)}\n`));
+
+                  // Finish data (d: prefix)
                   const finishData = {
                     finishReason: 'stop',
                     usage: { promptTokens: 0, completionTokens: 0 }
@@ -314,6 +330,15 @@ export async function POST(req: NextRequest) {
 
           // If no complete message was received but we have text, send finish
           if (fullText && !finalAnswer && !isClosed) {
+            // Finish event (e: prefix)
+            const finishEvent = {
+              finishReason: 'stop',
+              usage: { promptTokens: 0, completionTokens: 0 },
+              isContinued: false
+            };
+            safeEnqueue(encoder.encode(`e:${JSON.stringify(finishEvent)}\n`));
+
+            // Finish data (d: prefix)
             const finishData = {
               finishReason: 'stop',
               usage: { promptTokens: 0, completionTokens: 0 }

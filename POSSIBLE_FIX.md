@@ -19,33 +19,26 @@ This error typically means the AI‑SDK’s client‑side stream handler is rece
 3. **Invalid Response Format:** The server is sending non‑stream data (like a plain JSON object) instead of the expected NDJSON or AI‑SDK‑compatible chunks.
 4. **Network/Proxy Issues:** Nginx or Docker networking might be buffering the response or returning a 502/504 error page (HTML) instead of the expected stream.
 
-## Debugging Steps
+## Latest Research Findings (Updated)
+- **Client Code is Updated:** The user logs show "AI SDK Error details:", which confirms the changes to `page.tsx` have been applied.
+- **Error Persistence:** The `TypeError: Error in input stream` persists, which means the API route is **still** returning a non-stream response (likely JSON) or closing the connection early.
+- **Docker Production Mode:** The `Dockerfile` builds a production app (`npm run build`). API routes in production builds are **compiled** and do not hot-reload from volume mounts like client components potentially might (depending on setup). 
+- **Conclusion:** The `api/ai-chat/route.ts` changes (specifically the fix to return stream errors instead of JSON) likely have **not** been applied because the container wasn't fully rebuilt after that specific change.
 
-### 1. Check the API Route Response
-In the browser’s **Network tab**, inspect the `/api/chat` request:
-- **Status Code:** Should be 200. If 4xx/5xx, that's the issue.
-- **Content-Type:** Should be `text/plain` or `application/json` (depending on streaming mode), NOT `text/html`.
-- **Response Body:** Check if it contains the stream data (lines starting with `0:`, `d:`, etc.) or if it's a JSON error message.
+## Action Plan
+1. **Force Rebuild:** You must force a rebuild of the frontend container to compile the new API route code.
+   ```bash
+   docker compose build --no-cache harvis-frontend
+   docker compose up -d --force-recreate harvis-frontend
+   ```
+2. **Verify API Route:** After rebuild, if the backend is down, the API route should now return a valid stream with an error chunk (`3:"..."`) instead of a 500 JSON response.
+3. **Check Logs:** Watch the `harvis-frontend` logs. You should see `[AI-Chat] Enqueuing ...` logs if the new API route code is active.
 
-### 2. Log Response Before Streaming (Client-Side)
-Modify `fetchWithRetry` or the place where `fetch` is called to log the response before it's passed to the AI SDK:
+## Debugging Checklist
+- [ ] Run `docker compose build harvis-frontend`
+- [ ] Restart container
+- [ ] Check logs for `[AI-Chat] Call to backend...` (indicates route is running)
 
-```typescript
-const res = await fetch("...");
-console.log("status:", res.status);
-// WARNING: Reading the body here will consume the stream! Only do this for debugging non-200 responses.
-if (!res.ok) {
-  console.log("error body:", await res.text());
-}
-```
-
-### 3. Verify Server-Side Stream Construction
-Ensure the API route returns a proper `ReadableStream` and not `null`/`undefined`.
-- If manually creating a stream: ensure `getReader()` is valid and `controller.enqueue` is getting `Uint8Array` data.
-- If using `streamText`: ensure `toDataStreamResponse()` is called.
-
-### 4. Check Client-Side Usage
-Ensure `response.body` is being passed correctly to `AI.createStreamableValue` or similar. If `response.body` is null, you’ll get `TypeError: Error in input stream`.
 
 ## Proposed Fixes
 
