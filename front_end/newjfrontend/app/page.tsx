@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useRef, useEffect, useMemo, useCallback } from "react"
+import { flushSync } from "react-dom"
 import { useRouter } from "next/navigation"
 import { v4 as uuidv4 } from 'uuid'
 import { ChatSidebar } from "@/components/chat-sidebar"
@@ -105,114 +106,245 @@ export default function ChatPage() {
   // Track previous aiData length to detect new data
   const prevAiDataLengthRef = useRef(0)
 
+  // Buffer for research events that arrive before assistant message exists
+  const pendingResearchEventsRef = useRef<any[]>([])
+
+  // State trigger to force re-render when research chain updates
+  const [researchChainUpdateTrigger, setResearchChainUpdateTrigger] = useState(0)
+
+  // Helper function to process a single research event and update the chain
+  // Uses immutable updates to ensure React detects changes
+  const processResearchEvent = useCallback((data: any, assistantId: string) => {
+    // Case 1: Pre-formed chain object
+    if (data?.research_chain) {
+      researchChainMapRef.current.set(assistantId, data.research_chain)
+      return true
+    }
+    // Case 2: Structured research events from auto-research streaming
+    else if (data?.status === 'researching' && data?.eventType) {
+      const currentChain = researchChainMapRef.current.get(assistantId) || {
+        summary: "Researching...",
+        steps: [],
+        isLoading: true
+      }
+
+      const eventType = data.eventType
+
+      if (eventType === 'search_query') {
+        const query = data.query || data.detail
+        if (query) {
+          const newSteps = [...currentChain.steps, {
+            type: 'search',
+            query: query,
+            resultCount: 0,
+            results: []
+          }]
+          researchChainMapRef.current.set(assistantId, { ...currentChain, steps: newSteps })
+          return true
+        }
+      }
+      else if (eventType === 'search_result') {
+        const title = data.title || 'Unknown'
+        const url = data.url || ''
+        const domain = data.domain || ''
+
+        // Create new steps array with updated search step (immutable)
+        const newSteps = currentChain.steps.map((step: any, i: number) => {
+          const isLastSearch = step.type === 'search' &&
+            !currentChain.steps.slice(i + 1).some((s: any) => s.type === 'search')
+
+          if (isLastSearch && !step.results.some((r: any) => r.url === url)) {
+            return {
+              ...step,
+              results: [...step.results, { title, url, domain }],
+              resultCount: step.results.length + 1
+            }
+          }
+          return step
+        })
+        researchChainMapRef.current.set(assistantId, { ...currentChain, steps: newSteps })
+        return true
+      }
+      else if (eventType === 'reading') {
+        const domain = data.domain || data.detail
+        if (domain) {
+          const newSteps = [...currentChain.steps, {
+            type: 'read',
+            domain: domain,
+            summary: 'Reading content...'
+          }]
+          researchChainMapRef.current.set(assistantId, { ...currentChain, steps: newSteps })
+          return true
+        }
+      }
+    }
+    // Case 3: Legacy log parsing for backward compatibility
+    else if (data?.status === 'progress' || data?.status === 'researching' || data?.type === 'log') {
+      const logMessage = data.message || data.detail || data.content
+      if (logMessage && typeof logMessage === 'string') {
+        const currentChain = researchChainMapRef.current.get(assistantId) || {
+          summary: "Researching...",
+          steps: [],
+          isLoading: true
+        }
+
+        const lastStep = currentChain.steps[currentChain.steps.length - 1] as any
+        if (!lastStep || (lastStep.content !== logMessage && lastStep.query !== logMessage && lastStep.domain !== logMessage)) {
+          const lowerLog = logMessage.toLowerCase()
+          let newStep: any = null
+
+          if (lowerLog.includes('search') || lowerLog.includes('googl')) {
+            newStep = {
+              type: 'search',
+              query: logMessage.replace(/searching for|search/gi, '').trim() || logMessage,
+              resultCount: 0,
+              results: []
+            }
+          } else if (lowerLog.includes('read') || lowerLog.includes('brow') || lowerLog.includes('access')) {
+            newStep = {
+              type: 'read',
+              domain: logMessage,
+              summary: 'Reading content...'
+            }
+          } else {
+            newStep = {
+              type: 'thinking',
+              content: logMessage
+            }
+          }
+
+          if (newStep) {
+            const newSteps = [...currentChain.steps, newStep]
+            researchChainMapRef.current.set(assistantId, { ...currentChain, steps: newSteps })
+            return true
+          }
+        }
+      }
+    }
+    return false
+  }, [])
+
   // Process aiData updates in a separate effect (doesn't trigger re-renders of messages)
   useEffect(() => {
     if (!aiData || aiData.length === 0) {
       processedDataLengthRef.current = 0
       prevAiDataLengthRef.current = 0
+      pendingResearchEventsRef.current = []
       return
     }
 
-    // Only process if we have new data
-    if (aiData.length > prevAiDataLengthRef.current) {
-      const assistantMsgIds = aiMessages
-        .filter((m: any) => m.role === 'assistant')
-        .map((m: any) => m.id)
-      const lastAssistantId = assistantMsgIds[assistantMsgIds.length - 1]
+    const assistantMsgIds = aiMessages
+      .filter((m: any) => m.role === 'assistant')
+      .map((m: any) => m.id)
+    const lastAssistantId = assistantMsgIds[assistantMsgIds.length - 1]
 
+    // Process any pending research events now that we have an assistant message
+    if (lastAssistantId && pendingResearchEventsRef.current.length > 0) {
+      console.log(`[AI-Chat] Processing ${pendingResearchEventsRef.current.length} buffered research events for ${lastAssistantId}`)
+      let updated = false
+      pendingResearchEventsRef.current.forEach(event => {
+        if (processResearchEvent(event, lastAssistantId)) {
+          updated = true
+        }
+      })
+      pendingResearchEventsRef.current = []
+      if (updated) {
+        setResearchChainUpdateTrigger(prev => prev + 1)
+      }
+    }
+
+    // Only process new data items
+    if (aiData.length > prevAiDataLengthRef.current) {
       const newItems = aiData.slice(prevAiDataLengthRef.current)
       prevAiDataLengthRef.current = aiData.length
 
-      // Process new data items
       const mappedAudioUrls = new Set(audioUrlMapRef.current.values())
+      let chainUpdated = false
 
-      newItems.forEach((data: any) => {
-        // Audio URLs
-        if (data?.audioPath && !mappedAudioUrls.has(data.audioPath) && lastAssistantId) {
-          audioUrlMapRef.current.set(lastAssistantId, data.audioPath)
-          mappedAudioUrls.add(data.audioPath)
-        }
+      newItems.forEach((rawData: any) => {
+        // AI SDK wraps data in arrays when sent via 2:[...], so unwrap if needed
+        const dataItems = Array.isArray(rawData) ? rawData : [rawData]
 
-        // Search results
-        const results = data?.searchResults || data?.results || data?.sources
-        if (results && lastAssistantId && !searchResultsMapRef.current.has(lastAssistantId)) {
-          searchResultsMapRef.current.set(lastAssistantId, results)
-        }
-
-        // Videos
-        if (data?.videos && lastAssistantId && !videosMapRef.current.has(lastAssistantId)) {
-          videosMapRef.current.set(lastAssistantId, data.videos)
-        }
-
-        // Research Chain - Handle pre-formed chain or build from logs
-        if (lastAssistantId) {
-          // Case 1: Pre-formed chain object
-          if (data?.research_chain) {
-            researchChainMapRef.current.set(lastAssistantId, data.research_chain)
+        dataItems.forEach((data: any) => {
+          // Audio URLs
+          if (data?.audioPath && !mappedAudioUrls.has(data.audioPath) && lastAssistantId) {
+            audioUrlMapRef.current.set(lastAssistantId, data.audioPath)
+            mappedAudioUrls.add(data.audioPath)
           }
-          // Case 2: Incremental logs/progress -> Build chain locally
-          else if (data?.status === 'progress' || data?.status === 'researching' || data?.type === 'log') {
-            const logMessage = data.message || data.detail || data.content
-            if (logMessage && typeof logMessage === 'string') {
-              const currentChain = researchChainMapRef.current.get(lastAssistantId) || {
+
+          // Search results
+          const results = data?.searchResults || data?.results || data?.sources
+          if (results && lastAssistantId && !searchResultsMapRef.current.has(lastAssistantId)) {
+            searchResultsMapRef.current.set(lastAssistantId, results)
+          }
+
+          // Videos
+          if (data?.videos && lastAssistantId && !videosMapRef.current.has(lastAssistantId)) {
+            videosMapRef.current.set(lastAssistantId, data.videos)
+          }
+
+          // Research Chain - Handle with buffering if no assistant message yet
+          const isResearchEvent = data?.research_chain ||
+            (data?.status === 'researching') ||
+            (data?.status === 'progress') ||
+            (data?.type === 'log')
+
+          if (isResearchEvent) {
+            console.log('[AI-Chat] Research event received:', {
+              status: data?.status,
+              eventType: data?.eventType,
+              lastAssistantId,
+              aiMessagesCount: aiMessages.length,
+              isAutoResearch: data?.isAutoResearch
+            })
+
+            // FIX: Initialize research chain for auto-research mode (same UI as forced research)
+            // This ensures the "Researching..." UI appears even when user didn't toggle research mode
+            if (data?.isAutoResearch && lastAssistantId && !researchChainMapRef.current.has(lastAssistantId)) {
+              console.log('[AI-Chat] Auto-research detected, initializing research chain for', lastAssistantId)
+              researchChainMapRef.current.set(lastAssistantId, {
                 summary: "Researching...",
                 steps: [],
                 isLoading: true
+              })
+              chainUpdated = true
+            }
+
+            if (lastAssistantId) {
+              if (processResearchEvent(data, lastAssistantId)) {
+                console.log('[AI-Chat] Research chain updated for', lastAssistantId)
+                chainUpdated = true
               }
-
-              // Avoid duplicate steps
-              const lastStep = currentChain.steps[currentChain.steps.length - 1] as any
-              if (!lastStep || (lastStep.content !== logMessage && lastStep.query !== logMessage && lastStep.domain !== logMessage)) {
-
-                // Heuristic to determine step type
-                const lowerLog = logMessage.toLowerCase()
-                if (lowerLog.includes('search') || lowerLog.includes('googl')) {
-                  currentChain.steps.push({
-                    type: 'search',
-                    query: logMessage.replace(/searching for|search/gi, '').trim() || logMessage,
-                    resultCount: 0,
-                    results: []
-                  })
-                } else if (lowerLog.includes('read') || lowerLog.includes('brow') || lowerLog.includes('access')) {
-                  currentChain.steps.push({
-                    type: 'read',
-                    domain: logMessage, // Can be refined to extract domain
-                    summary: 'Reading content...'
-                  })
-                } else {
-                  currentChain.steps.push({
-                    type: 'thinking',
-                    content: logMessage
-                  })
-                }
-
-                researchChainMapRef.current.set(lastAssistantId, { ...currentChain })
-              }
+            } else {
+              // Buffer research events until assistant message exists
+              console.log('[AI-Chat] Buffering research event (no assistant message yet)', data?.eventType)
+              pendingResearchEventsRef.current.push(data)
             }
           }
-        }
 
-        // Session ID - sync currentSession when backend creates/returns a session
-        // This ensures vision/screenshare uses the same session as regular chat
-        if (data?.sessionId && data.sessionId !== currentSession?.id) {
-          console.log(`[AI-Chat] Syncing session from backend: ${data.sessionId}`)
-          // Find or create the session object to set as current
-          const existingSession = sessions.find(s => s.id === data.sessionId)
-          if (existingSession) {
-            setCurrentSession(existingSession)
-          } else {
-            // Session was just created - fetch sessions and set the new one
-            fetchSessions().then(() => {
-              const newSession = useChatHistoryStore.getState().sessions.find(s => s.id === data.sessionId)
-              if (newSession) {
-                setCurrentSession(newSession)
-              }
-            })
+          // Session ID - sync currentSession when backend creates/returns a session
+          if (data?.sessionId && data.sessionId !== currentSession?.id) {
+            console.log(`[AI-Chat] Syncing session from backend: ${data.sessionId}`)
+            const existingSession = sessions.find(s => s.id === data.sessionId)
+            if (existingSession) {
+              setCurrentSession(existingSession)
+            } else {
+              fetchSessions().then(() => {
+                const newSession = useChatHistoryStore.getState().sessions.find(s => s.id === data.sessionId)
+                if (newSession) {
+                  setCurrentSession(newSession)
+                }
+              })
+            }
           }
-        }
-      })
+        }) // End of dataItems.forEach
+      }) // End of newItems.forEach
+
+      if (chainUpdated) {
+        setResearchChainUpdateTrigger(prev => prev + 1)
+      }
     }
-  }, [aiData, aiMessages, currentSession?.id, sessions, setCurrentSession, fetchSessions])
+  }, [aiData, aiMessages, currentSession?.id, sessions, setCurrentSession, fetchSessions, processResearchEvent])
 
   // Use useMemo to convert AI messages to local format - this prevents re-renders during streaming
   const convertedMessages = useMemo<Message[]>(() => {
@@ -239,7 +371,7 @@ export default function ChatPage() {
         inputType: m.inputType,
       }
     })
-  }, [aiMessages, selectedModel, isAiLoading])
+  }, [aiMessages, selectedModel, isAiLoading, researchChainUpdateTrigger])
 
   // Unified message merging - combines AI SDK messages with local messages
   // This ensures text, vision, voice, and all modes appear together seamlessly
@@ -434,9 +566,21 @@ export default function ChatPage() {
           content: '',
           timestamp: new Date(),
           model: selectedModel,
-          status: 'streaming'
+          status: 'streaming',
+          // Initialize research chain for research mode to show live progress immediately
+          ...(isResearchMode && {
+            researchChain: {
+              summary: "Researching...",
+              steps: [],
+              isLoading: true
+            }
+          })
         }
         setLocalMessages((prev) => [...prev, placeholderAiMsg])
+        // Store in ref for streaming updates
+        if (isResearchMode) {
+          researchChainMapRef.current.set(assistantId, placeholderAiMsg.researchChain!)
+        }
       }
 
       if (!isResearchMode && !isVisionModel(selectedModel || '')) {
@@ -498,7 +642,9 @@ export default function ChatPage() {
         timeout: 3600000,
         maxRetries: 0,
         onChunk: (chunk: any) => {
-          setLocalMessages((prev) => {
+          // FIX: Use flushSync to force immediate re-render for live streaming UI
+          // Without this, React batches updates and UI only refreshes at the end
+          flushSync(() => setLocalMessages((prev) => {
             const newMessages = [...prev]
             const index = newMessages.findIndex(m => m.id === assistantId)
             if (index === -1) return prev
@@ -509,53 +655,82 @@ export default function ChatPage() {
 
             if (chunk.status === 'progress' || chunk.status === 'researching') {
               const statusText = chunk.message || chunk.detail
-              if (statusText) {
+              const eventType = chunk.type
+              
+              if (statusText || eventType) {
                 // Build research chain from logs
-                const currentChain = currentMsg.researchChain || {
-                  summary: "Researching...",
-                  steps: [],
-                  isLoading: true
-                }
-
-                const lowerLog = statusText.toLowerCase()
-
-                // Check for result count updates (e.g., "Found 5 relevant search results for query:")
-                const resultCountMatch = statusText.match(/Found (\d+) relevant search results/i)
-                if (resultCountMatch) {
-                  const count = parseInt(resultCountMatch[1], 10)
-                  // Update the last search step's result count
-                  for (let i = currentChain.steps.length - 1; i >= 0; i--) {
-                    if (currentChain.steps[i].type === 'search') {
-                      (currentChain.steps[i] as any).resultCount = count
-                      break
-                    }
+                // Check ref first in case the initial state update hasn't propagated yet
+                const currentChain = currentMsg.researchChain || 
+                  researchChainMapRef.current.get(assistantId) || {
+                    summary: "Researching...",
+                    steps: [],
+                    isLoading: true
                   }
-                  updates.researchChain = { ...currentChain }
+
+                // Handle structured event types from backend streaming
+                // IMPORTANT: Create new arrays/objects to ensure React detects changes
+                if (eventType === 'search_query') {
+                  // New search query started
+                  const query = chunk.query || statusText
+                  const newSteps = [...currentChain.steps, {
+                    type: 'search',
+                    query: query,
+                    resultCount: 0,
+                    results: []
+                  }]
+                  updates.researchChain = { ...currentChain, steps: newSteps }
                   researchChainMapRef.current.set(assistantId, updates.researchChain)
                   hasUpdates = true
                 }
-                // Check for URL extraction from raw result logs (e.g., "Raw result 1: Title='...', URL='...'")
-                else if (statusText.includes("Raw result") || statusText.includes("URL='")) {
-                  const urlMatch = statusText.match(/URL='([^']+)'/i)
-                  const titleMatch = statusText.match(/Title='([^']+)'/i)
-                  if (urlMatch) {
-                    const url = urlMatch[1]
-                    const title = titleMatch ? titleMatch[1] : url
-                    // Extract domain from URL
-                    let domain = url
-                    try {
-                      domain = new URL(url).hostname.replace('www.', '')
-                    } catch { }
+                else if (eventType === 'search_result') {
+                  // Search result found - add to last search step
+                  const title = chunk.title || 'Unknown'
+                  const url = chunk.url || ''
+                  const domain = chunk.domain || ''
 
-                    // Add to the last search step's results
+                  // Create new steps array with updated search step
+                  const newSteps = currentChain.steps.map((step: any, i: number) => {
+                    // Find the last search step
+                    const isLastSearch = step.type === 'search' &&
+                      !currentChain.steps.slice(i + 1).some((s: any) => s.type === 'search')
+
+                    if (isLastSearch && !step.results.some((r: any) => r.url === url)) {
+                      return {
+                        ...step,
+                        results: [...step.results, { title, url, domain }],
+                        resultCount: step.results.length + 1
+                      }
+                    }
+                    return step
+                  })
+                  updates.researchChain = { ...currentChain, steps: newSteps }
+                  researchChainMapRef.current.set(assistantId, updates.researchChain)
+                  hasUpdates = true
+                }
+                else if (eventType === 'reading') {
+                  // Reading content from a domain
+                  const domain = chunk.domain || statusText
+                  const newSteps = [...currentChain.steps, {
+                    type: 'read',
+                    domain: domain,
+                    summary: 'Reading content...'
+                  }]
+                  updates.researchChain = { ...currentChain, steps: newSteps }
+                  researchChainMapRef.current.set(assistantId, updates.researchChain)
+                  hasUpdates = true
+                }
+                // Legacy log parsing for backward compatibility
+                else if (statusText) {
+                  const lowerLog = statusText.toLowerCase()
+
+                  // Check for result count updates (e.g. "Found 5 relevant search results for query:")
+                  const resultCountMatch = statusText.match(/Found (\d+) relevant search results/i)
+                  if (resultCountMatch) {
+                    const count = parseInt(resultCountMatch[1], 10)
+                    // Update the last search step's result count
                     for (let i = currentChain.steps.length - 1; i >= 0; i--) {
                       if (currentChain.steps[i].type === 'search') {
-                        const searchStep = currentChain.steps[i] as any
-                        // Avoid duplicates
-                        if (!searchStep.results.some((r: any) => r.url === url)) {
-                          searchStep.results.push({ title, url, domain })
-                          searchStep.resultCount = searchStep.results.length
-                        }
+                        (currentChain.steps[i] as any).resultCount = count
                         break
                       }
                     }
@@ -563,45 +738,79 @@ export default function ChatPage() {
                     researchChainMapRef.current.set(assistantId, updates.researchChain)
                     hasUpdates = true
                   }
-                }
-                // Avoid duplicate steps for other log types
-                else {
-                  const lastStep = currentChain.steps[currentChain.steps.length - 1] as any
-                  if (!lastStep || (lastStep.content !== statusText && lastStep.query !== statusText && lastStep.domain !== statusText)) {
-                    if (lowerLog.includes('searching for') || lowerLog.includes('search') && !lowerLog.includes('result')) {
-                      // Extract actual query from "Searching for: 'query'" format
-                      const queryMatch = statusText.match(/['"]([^'"]+)['"]/i)
-                      const query = queryMatch ? queryMatch[1] : statusText.replace(/searching for|search/gi, '').trim() || statusText
-                      currentChain.steps.push({
-                        type: 'search',
-                        query: query,
-                        resultCount: 0,
-                        results: []
+                  // Check for URL extraction from raw result logs (e.g. "Raw result 1: Title='...', URL='...'")
+                  else if (statusText.includes("Raw result") || statusText.includes("URL='")) {
+                    const urlMatch = statusText.match(/URL='([^']+)'/i)
+                    const titleMatch = statusText.match(/Title='([^']+)'/i)
+                    if (urlMatch) {
+                      const url = urlMatch[1]
+                      const title = titleMatch ? titleMatch[1] : url
+                      let domain = url
+                      try {
+                        domain = new URL(url).hostname.replace('www.', '')
+                      } catch { }
+
+                      // Create new steps array with updated search step (immutable update)
+                      const newSteps = currentChain.steps.map((step: any, i: number) => {
+                        const isLastSearch = step.type === 'search' &&
+                          !currentChain.steps.slice(i + 1).some((s: any) => s.type === 'search')
+
+                        if (isLastSearch && !step.results.some((r: any) => r.url === url)) {
+                          return {
+                            ...step,
+                            results: [...step.results, { title, url, domain }],
+                            resultCount: step.results.length + 1
+                          }
+                        }
+                        return step
                       })
-                    } else if (lowerLog.includes('read') || lowerLog.includes('brow') || lowerLog.includes('access') || lowerLog.includes('fetch') || lowerLog.includes('extract')) {
-                      // Extract domain from URL if present
-                      const urlInLog = statusText.match(/https?:\/\/[^\s]+/i)
-                      let domain = statusText
-                      if (urlInLog) {
-                        try {
-                          domain = new URL(urlInLog[0]).hostname.replace('www.', '')
-                        } catch { }
-                      }
-                      currentChain.steps.push({
-                        type: 'read',
-                        domain: domain,
-                        summary: 'Reading content...'
-                      })
-                    } else if (!lowerLog.includes('ddgs') && !lowerLog.includes('primp') && !lowerLog.includes('response:')) {
-                      // Filter out noisy internal logs
-                      currentChain.steps.push({
-                        type: 'thinking',
-                        content: statusText
-                      })
+                      updates.researchChain = { ...currentChain, steps: newSteps }
+                      researchChainMapRef.current.set(assistantId, updates.researchChain)
+                      hasUpdates = true
                     }
-                    updates.researchChain = { ...currentChain }
-                    researchChainMapRef.current.set(assistantId, updates.researchChain)
-                    hasUpdates = true
+                  }
+                  // Avoid duplicate steps for other log types
+                  else {
+                    const lastStep = currentChain.steps[currentChain.steps.length - 1] as any
+                    if (!lastStep || (lastStep.content !== statusText && lastStep.query !== statusText && lastStep.domain !== statusText)) {
+                      let newStep: any = null
+
+                      if (lowerLog.includes('searching for') || lowerLog.includes('search') && !lowerLog.includes('result')) {
+                        const queryMatch = statusText.match(/['"]([^'"]+)['"]/i)
+                        const query = queryMatch ? queryMatch[1] : statusText.replace(/searching for|search/gi, '').trim() || statusText
+                        newStep = {
+                          type: 'search',
+                          query: query,
+                          resultCount: 0,
+                          results: []
+                        }
+                      } else if (lowerLog.includes('read') || lowerLog.includes('brow') || lowerLog.includes('access') || lowerLog.includes('fetch') || lowerLog.includes('extract')) {
+                        const urlInLog = statusText.match(/https?:\/\/[^\s]+/i)
+                        let domain = statusText
+                        if (urlInLog) {
+                          try {
+                            domain = new URL(urlInLog[0]).hostname.replace('www.', '')
+                          } catch { }
+                        }
+                        newStep = {
+                          type: 'read',
+                          domain: domain,
+                          summary: 'Reading content...'
+                        }
+                      } else if (!lowerLog.includes('ddgs') && !lowerLog.includes('primp') && !lowerLog.includes('response:')) {
+                        newStep = {
+                          type: 'thinking',
+                          content: statusText
+                        }
+                      }
+
+                      if (newStep) {
+                        const newSteps = [...currentChain.steps, newStep]
+                        updates.researchChain = { ...currentChain, steps: newSteps }
+                        researchChainMapRef.current.set(assistantId, updates.researchChain)
+                        hasUpdates = true
+                      }
+                    }
                   }
                 }
               }
@@ -628,12 +837,15 @@ export default function ChatPage() {
                 updates.audioUrl = chunk.audio_path
                 hasUpdates = true
               }
-              // Mark research chain as complete
-              if (currentMsg.researchChain) {
+              // Mark research chain as complete (check both message state AND ref for auto-research)
+              const chainFromMsg = currentMsg.researchChain
+              const chainFromRef = researchChainMapRef.current.get(assistantId)
+              const existingChain = chainFromMsg || chainFromRef
+              if (existingChain) {
                 updates.researchChain = {
-                  ...currentMsg.researchChain,
+                  ...existingChain,
                   isLoading: false,
-                  summary: chunk.research_summary || currentMsg.researchChain.summary || "Research completed"
+                  summary: chunk.research_summary || existingChain.summary || "Research completed"
                 }
                 researchChainMapRef.current.set(assistantId, updates.researchChain)
                 hasUpdates = true
@@ -663,7 +875,7 @@ export default function ChatPage() {
             }
 
             return prev
-          })
+          }))
         }
       })
 

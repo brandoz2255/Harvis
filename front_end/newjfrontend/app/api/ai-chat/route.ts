@@ -120,6 +120,7 @@ export async function POST(req: NextRequest) {
     let reasoning = '';
     let finalAnswer = '';
     let buffer = '';
+    let assistantMessageCreated = false; // Track if we've created the assistant message
 
     const stream = new ReadableStream({
       async start(controller) {
@@ -201,11 +202,12 @@ export async function POST(req: NextRequest) {
                   // Stream text chunk in AI SDK format
                   // Format: 0:"text"\n (text part)
                   fullText += data.content;
+                  assistantMessageCreated = true; // Mark that assistant message now exists
                   // Ensure content is properly escaped for AI SDK
                   const encodedContent = JSON.stringify(data.content);
                   safeEnqueue(encoder.encode(`0:${encodedContent}\n`));
                 }
-                else if (data.status === 'generating_audio' || data.status === 'processing' || data.status === 'researching') {
+                else if (data.status === 'generating_audio' || data.status === 'processing') {
                   // Send status update as custom data (2: prefix) to keep connection alive
                   // and inform frontend of current state
                   const statusData = {
@@ -214,6 +216,33 @@ export async function POST(req: NextRequest) {
                     detail: data.detail || data.message || ''
                   };
                   safeEnqueue(encoder.encode(`2:${JSON.stringify([statusData])}\n`));
+                }
+                else if (data.status === 'researching') {
+                  // CRITICAL: Send a text chunk FIRST to create the assistant message
+                  // This ensures research events have a message ID to attach to in the frontend
+                  if (!assistantMessageCreated) {
+                    console.log('[AI-Chat] Creating assistant message for research events (sending placeholder)');
+                    // Send a single space to force message creation (will be trimmed later)
+                    safeEnqueue(encoder.encode(`0:" "\n`));
+                    assistantMessageCreated = true;
+                  }
+
+                  // Forward research progress events with full details
+                  // This includes search_query, search_result, reading events
+                  const researchData = {
+                    type: 'status_update',
+                    status: data.status,
+                    detail: data.detail || data.message || '',
+                    // Include all research event fields
+                    eventType: data.type,  // search_query, search_result, reading
+                    query: data.query,
+                    title: data.title,
+                    url: data.url,
+                    domain: data.domain,
+                    // Signal that this is auto-research for frontend to initialize research chain
+                    isAutoResearch: true
+                  };
+                  safeEnqueue(encoder.encode(`2:${JSON.stringify([researchData])}\n`));
                 }
                 // IMPORTANT: Check for 'complete' status BEFORE checking sources/videos
                 // because the complete event can contain all of these fields together.

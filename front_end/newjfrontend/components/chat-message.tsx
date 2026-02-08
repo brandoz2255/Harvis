@@ -362,19 +362,6 @@ export const ChatMessage = React.memo(function ChatMessage({
         >
           {role === "assistant" ? (
             <div className="prose prose-sm dark:prose-invert max-w-none">
-              {/* Show thinking indicator when content is empty (streaming reasoning) */}
-              {/* Show thinking indicator only when content is empty AND we are still waiting/streaming AND no research chain */}
-              {(!displayContent || displayContent.length === 0) && (status === 'pending' || status === 'streaming' || !status) && !researchChain && (
-                <div className="flex items-center gap-2 text-muted-foreground italic">
-                  <div className="flex gap-1">
-                    <div className="h-2 w-2 animate-bounce rounded-full bg-primary/50 [animation-delay:-0.3s]" />
-                    <div className="h-2 w-2 animate-bounce rounded-full bg-primary/50 [animation-delay:-0.15s]" />
-                    <div className="h-2 w-2 animate-bounce rounded-full bg-primary/50" />
-                  </div>
-                  <span className="text-sm">Thinking...</span>
-                </div>
-              )}
-
               {/* Show "Empty response" if finished but no content AND no research chain (e.g. backend error) */}
               {(!displayContent || displayContent.length === 0) && status === 'sent' && !researchChain && (
                 <div className="text-muted-foreground italic text-sm">
@@ -382,17 +369,15 @@ export const ChatMessage = React.memo(function ChatMessage({
                 </div>
               )}
 
-              {/* Show generating message if we have research but no content yet */}
-              {(!displayContent || displayContent.length === 0) && researchChain && status !== 'sent' && (
-                <div className="flex items-center gap-2 text-muted-foreground italic">
-                  <div className="flex gap-1">
-                    <div className="h-2 w-2 animate-bounce rounded-full bg-primary/50 [animation-delay:-0.3s]" />
-                    <div className="h-2 w-2 animate-bounce rounded-full bg-primary/50 [animation-delay:-0.15s]" />
-                    <div className="h-2 w-2 animate-bounce rounded-full bg-primary/50" />
-                  </div>
-                  <span className="text-sm">Generating response...</span>
+              {/* Show loading dots when streaming with no content yet (and no researchChain showing) */}
+              {(!displayContent || displayContent.length === 0) && (status === 'streaming' || status === 'pending') && !researchChain && (
+                <div className="flex items-center gap-2 py-1">
+                  <div className="h-2 w-2 animate-bounce rounded-full bg-primary [animation-delay:-0.3s]" />
+                  <div className="h-2 w-2 animate-bounce rounded-full bg-primary [animation-delay:-0.15s]" />
+                  <div className="h-2 w-2 animate-bounce rounded-full bg-primary" />
                 </div>
               )}
+
               <ReactMarkdown
                 remarkPlugins={[remarkGfm]}
                 components={markdownComponents}

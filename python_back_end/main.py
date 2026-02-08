@@ -1603,20 +1603,55 @@ async def chat(
                 )
                 yield f"data: {json.dumps({'status': 'researching', 'detail': 'Auto-research triggered, searching the web...'})}\n\n"
                 try:
-                    from agent_research import research_agent
+                    # Use streaming research agent for live progress updates
+                    analysis = ""
+                    sources = []
+                    videos = []
 
-                    research_result = await run_in_threadpool(
-                        research_agent,
-                        current_message_content,
-                        req.model,
-                        use_advanced=False,
-                    )
+                    async for event in async_research_agent_streaming(
+                        current_message_content, req.model
+                    ):
+                        event_type = event.get("type")
 
-                    if "error" not in research_result:
-                        analysis = research_result.get("analysis", "")
-                        sources = research_result.get("sources", [])
-                        videos = research_result.get("videos", [])
+                        if event_type == "search_query":
+                            # Forward search query to frontend
+                            query = event["query"]
+                            yield f"data: {json.dumps({'status': 'researching', 'detail': f'Searching for: {query}', 'type': 'search_query', 'query': query})}\n\n"
+                            logger.info(
+                                f"[Auto-Research] Streaming search query: {query}"
+                            )
 
+                        elif event_type == "search_result":
+                            # Forward search result to frontend
+                            title = event["title"]
+                            yield f"data: {json.dumps({'status': 'researching', 'detail': f'Found: {title}', 'type': 'search_result', 'title': title, 'url': event['url'], 'domain': event['domain']})}\n\n"
+
+                        elif event_type == "reading":
+                            # Forward reading progress to frontend
+                            domain = event["domain"]
+                            yield f"data: {json.dumps({'status': 'researching', 'detail': f'Reading {domain}...', 'type': 'reading', 'domain': domain, 'url': event['url']})}\n\n"
+
+                        elif event_type == "analysis":
+                            # Forward analysis progress
+                            yield f"data: {json.dumps({'status': 'researching', 'detail': event.get('detail', 'Analyzing...')})}\n\n"
+
+                        elif event_type == "complete":
+                            # Store final result
+                            result_data = event.get("result", {})
+                            analysis = result_data.get("analysis", "")
+                            sources = result_data.get("sources", [])
+                            sources_found = result_data.get("sources_found", 0)
+                            videos = result_data.get("videos", [])
+                            logger.info(
+                                f"[Auto-Research] Streaming research complete. Found {sources_found} sources"
+                            )
+
+                        elif event_type == "error":
+                            analysis = (
+                                f"Research Error: {event.get('error', 'Unknown error')}"
+                            )
+
+                    if analysis and not analysis.startswith("Research Error:"):
                         response_data = {
                             "status": "complete",
                             "response": analysis,
@@ -3341,13 +3376,13 @@ async def mic_chat(
                 pass
 
 
-
 # Research endpoints using the enhanced research module with advanced pipeline
 from agent_research import research_agent, fact_check_agent, comparative_research_agent
 from agent_research import (
     async_research_agent,
     async_fact_check_agent,
     async_comparative_research_agent,
+    async_research_agent_streaming,
 )
 from agent_research import get_research_agent_stats, get_mcp_tool
 from research.web_search import WebSearchAgent
@@ -3425,31 +3460,66 @@ async def research_chat(
                     if isinstance(response_data, dict):
                         videos = response_data.get("videos", [])
                 else:
-                    # Standard research
-                    yield f"data: {json.dumps({'status': 'researching', 'detail': 'Analyzing search results'})}\n\n"
-                    response_data = await run_in_threadpool(
-                        research_agent, req.message, req.model, use_advanced=False
+                    # Standard research with live streaming progress
+                    logger.info(
+                        f"[Research Chat] Starting streaming research for: {req.message}"
                     )
 
-                    if "error" in response_data:
-                        response_content = f"Research Error: {response_data['error']}"
-                    else:
-                        analysis = response_data.get(
-                            "analysis", "No analysis available"
-                        )
-                        sources = response_data.get("sources", [])
-                        sources_found = response_data.get("sources_found", 0)
-                        videos = response_data.get("videos", [])  # Get YouTube videos
+                    # Stream research progress events to frontend
+                    async for event in async_research_agent_streaming(
+                        req.message, req.model
+                    ):
+                        event_type = event.get("type")
 
-                        response_content = f"{analysis}\n\n"
-                        if sources:
-                            response_content += (
-                                f"**Sources ({sources_found} found):**\n"
+                        if event_type == "search_query":
+                            # Forward search query to frontend
+                            query = event["query"]
+                            yield f"data: {json.dumps({'status': 'researching', 'detail': f'Searching for: {query}', 'type': 'search_query', 'query': query})}\n\n"
+                            logger.info(
+                                f"[Research Chat] Streaming search query: {query}"
                             )
-                            for i, source in enumerate(sources[:5], 1):
-                                title = source.get("title", "Unknown Title")
-                                url = source.get("url", "No URL")
-                                response_content += f"{i}. [{title}]({url})\n"
+
+                        elif event_type == "search_result":
+                            # Forward search result to frontend
+                            title = event["title"]
+                            yield f"data: {json.dumps({'status': 'researching', 'detail': f'Found: {title}', 'type': 'search_result', 'title': title, 'url': event['url'], 'domain': event['domain']})}\n\n"
+
+                        elif event_type == "reading":
+                            # Forward reading progress to frontend
+                            domain = event["domain"]
+                            yield f"data: {json.dumps({'status': 'researching', 'detail': f'Reading {domain}...', 'type': 'reading', 'domain': domain, 'url': event['url']})}\n\n"
+
+                        elif event_type == "analysis":
+                            # Forward analysis progress
+                            yield f"data: {json.dumps({'status': 'researching', 'detail': event.get('detail', 'Analyzing...')})}\n\n"
+
+                        elif event_type == "complete":
+                            # Store final result
+                            result_data = event.get("result", {})
+                            analysis = result_data.get(
+                                "analysis", "No analysis available"
+                            )
+                            sources = result_data.get("sources", [])
+                            sources_found = result_data.get("sources_found", 0)
+                            videos = result_data.get("videos", [])
+
+                            response_content = f"{analysis}\n\n"
+                            if sources:
+                                response_content += (
+                                    f"**Sources ({sources_found} found):**\n"
+                                )
+                                for i, source in enumerate(sources[:5], 1):
+                                    title = source.get("title", "Unknown Title")
+                                    url = source.get("url", "No URL")
+                                    response_content += f"{i}. [{title}]({url})\n"
+                            logger.info(
+                                f"[Research Chat] Streaming research complete. Found {sources_found} sources"
+                            )
+
+                        elif event_type == "error":
+                            response_content = (
+                                f"Research Error: {event.get('error', 'Unknown error')}"
+                            )
 
             except Exception as e:
                 logger.error(f"Research failed: {e}")

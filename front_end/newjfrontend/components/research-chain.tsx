@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { Clock, Globe, FileText, ChevronDown, Search } from "lucide-react"
 import { cn } from "@/lib/utils"
 
@@ -39,7 +39,15 @@ export function ResearchChain({
     isLoading = false,
     className,
 }: ResearchChainProps) {
-    const [isExpanded, setIsExpanded] = useState(defaultExpanded)
+    // Auto-expand when loading to show live progress
+    const [isExpanded, setIsExpanded] = useState(defaultExpanded || isLoading)
+
+    // Auto-expand when loading starts (for streaming research)
+    useEffect(() => {
+        if (isLoading) {
+            setIsExpanded(true)
+        }
+    }, [isLoading])
 
     return (
         <div
