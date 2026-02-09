@@ -13,6 +13,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks, Request
 from fastapi.responses import JSONResponse
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
 from .models import (
     Notebook, NotebookSource, NotebookNote, NotebookChatMessage,
@@ -914,6 +915,558 @@ async def list_podcast_styles():
     return {"styles": PodcastGenerator.get_available_styles()}
 
 
+# Standalone podcast generation endpoint (for Open Notebook integration)
+class StandalonePodcastRequest(BaseModel):
+    """Request for generating a podcast without notebook ownership verification"""
+    notebook_id: str  # String ID from Open Notebook (e.g., "notebook:xyz")
+    title: str
+    style: str = "conversational"
+    speakers: int = 2
+    duration_minutes: int = 10
+    generate_audio: bool = True
+    source_ids: Optional[List[str]] = None
+    note_ids: Optional[List[str]] = None
+    content: Optional[str] = None  # Direct content to use
+    custom_speakers: Optional[List[Dict[str, Any]]] = None
+
+    class Config:
+        extra = "allow"
+
+
+class StandalonePodcastAudioRequest(BaseModel):
+    """Generate audio from an already-created (and optionally edited) transcript."""
+    podcast_id: Optional[str] = None  # If provided, updates existing standalone_podcasts row
+    notebook_id: str
+    title: str
+    style: str = "conversational"
+    speakers: int = 2
+    duration_minutes: int = 10
+    transcript: List[Dict[str, Any]]
+    custom_speakers: Optional[List[Dict[str, Any]]] = None
+
+    class Config:
+        extra = "allow"
+
+
+async def _fetch_podcast_content(podcast_request: StandalonePodcastRequest, logger) -> str:
+    """Helper to fetch content from sources/notes for podcast generation"""
+    import httpx
+    
+    content = podcast_request.content or ""
+    
+    # If source_ids provided, fetch content from Open Notebook
+    if podcast_request.source_ids and not content:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            for source_id in podcast_request.source_ids[:5]:  # Limit to 5 sources
+                try:
+                    # Fetch source from Open Notebook API
+                    resp = await client.get(
+                        f"http://open-notebook:5055/api/sources/{source_id}"
+                    )
+                    if resp.status_code == 200:
+                        source_data = resp.json()
+                        source_content = source_data.get("full_text") or source_data.get("content") or ""
+                        if source_content:
+                            content += f"\n\n=== SOURCE: {source_data.get('title', 'Untitled')} ===\n{source_content}"
+                except Exception as e:
+                    logger.warning(f"Failed to fetch source {source_id}: {e}")
+    
+    # If note_ids provided, fetch content from Open Notebook
+    if podcast_request.note_ids and not content:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            for note_id in podcast_request.note_ids[:5]:  # Limit to 5 notes
+                try:
+                    resp = await client.get(
+                        f"http://open-notebook:5055/api/notes/{note_id}"
+                    )
+                    if resp.status_code == 200:
+                        note_data = resp.json()
+                        note_content = note_data.get("content") or ""
+                        if note_content:
+                            content += f"\n\n=== NOTE: {note_data.get('title', 'Untitled')} ===\n{note_content}"
+                except Exception as e:
+                    logger.warning(f"Failed to fetch note {note_id}: {e}")
+    
+    return content
+
+
+async def _save_podcast_to_db(
+    manager,
+    user_id: int,
+    podcast_request: StandalonePodcastRequest,
+    result: dict
+) -> dict:
+    """Save podcast result to database and return formatted response"""
+    import json
+    
+    async with manager.db_pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO standalone_podcasts 
+                (notebook_id, user_id, title, status, style, speakers, duration_minutes,
+                 audio_path, audio_url, transcript, outline, error_message, duration_seconds,
+                 source_ids, note_ids, speaker_profiles, script, completed_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
+                    CASE WHEN $4 IN ('completed', 'script_only', 'error') THEN CURRENT_TIMESTAMP ELSE NULL END)
+            RETURNING id, notebook_id, user_id, title, status, style, speakers, duration_minutes,
+                      audio_path, audio_url, transcript, outline, error_message, duration_seconds,
+                      source_ids, note_ids, speaker_profiles, script, created_at, completed_at
+        """,
+            podcast_request.notebook_id,
+            user_id,
+            podcast_request.title,
+            result.get("status", "completed"),
+            podcast_request.style,
+            podcast_request.speakers,
+            podcast_request.duration_minutes,
+            result.get("audio_path"),
+            result.get("audio_url"),
+            json.dumps(result.get("transcript", [])),
+            result.get("outline"),
+            json.dumps(result.get("error") or result.get("audio_error")) if isinstance(result.get("error") or result.get("audio_error"), dict) else (result.get("error") or result.get("audio_error")),
+            result.get("duration_seconds"),
+            podcast_request.source_ids or [],
+            podcast_request.note_ids or [],
+            json.dumps(podcast_request.custom_speakers or []),
+            json.dumps(result.get("script") or None)
+        )
+    
+    return {
+        "id": str(row["id"]),
+        "notebook_id": row["notebook_id"],
+        "title": row["title"],
+        "status": row["status"],
+        "style": row["style"],
+        "speakers": row["speakers"],
+        "duration_minutes": row["duration_minutes"],
+        "audio_path": row["audio_path"],
+        "audio_url": row["audio_url"],
+        "transcript": json.loads(row["transcript"]) if row["transcript"] else [],
+        "outline": row["outline"],
+        "error_message": row["error_message"],
+        "duration_seconds": row["duration_seconds"],
+        "source_ids": row["source_ids"],
+        "note_ids": row["note_ids"],
+        "speaker_profiles": json.loads(row["speaker_profiles"]) if row["speaker_profiles"] else [],
+        "script": json.loads(row["script"]) if row["script"] else None,
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+        "completed_at": row["completed_at"].isoformat() if row["completed_at"] else None
+    }
+
+
+async def _update_standalone_podcast_audio_in_db(
+    manager,
+    user_id: int,
+    podcast_id: str,
+    podcast_request: StandalonePodcastAudioRequest,
+    result: dict
+) -> dict:
+    """Update an existing standalone_podcasts row with audio generation result."""
+    import json
+    from uuid import UUID
+
+    try:
+        podcast_uuid = UUID(podcast_id)
+    except ValueError:
+        raise HTTPException(400, "Invalid podcast ID")
+
+    async with manager.db_pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE standalone_podcasts
+            SET title = $1,
+                status = $2,
+                style = $3,
+                speakers = $4,
+                duration_minutes = $5,
+                audio_path = $6,
+                audio_url = $7,
+                transcript = $8,
+                script = $9,
+                speaker_profiles = $10,
+                error_message = $11,
+                duration_seconds = $12,
+                completed_at = CASE WHEN $2 IN ('completed', 'script_only', 'error') THEN CURRENT_TIMESTAMP ELSE NULL END
+            WHERE id = $13 AND user_id = $14
+            RETURNING id, notebook_id, user_id, title, status, style, speakers, duration_minutes,
+                      audio_path, audio_url, transcript, outline, error_message, duration_seconds,
+                      source_ids, note_ids, speaker_profiles, script, created_at, completed_at
+        """,
+            podcast_request.title,
+            result.get("status", "completed"),
+            podcast_request.style,
+            podcast_request.speakers,
+            podcast_request.duration_minutes,
+            result.get("audio_path"),
+            result.get("audio_url"),
+            json.dumps(result.get("transcript", [])),
+            json.dumps(result.get("script") or None),
+            json.dumps(podcast_request.custom_speakers or []),
+            json.dumps(result.get("error") or result.get("audio_error")) if isinstance(result.get("error") or result.get("audio_error"), dict) else (result.get("error") or result.get("audio_error")),
+            result.get("duration_seconds"),
+            podcast_uuid,
+            user_id
+        )
+
+        if not row:
+            raise HTTPException(404, "Podcast not found")
+
+    return {
+        "id": str(row["id"]),
+        "notebook_id": row["notebook_id"],
+        "title": row["title"],
+        "status": row["status"],
+        "style": row["style"],
+        "speakers": row["speakers"],
+        "duration_minutes": row["duration_minutes"],
+        "audio_path": row["audio_path"],
+        "audio_url": row["audio_url"],
+        "transcript": json.loads(row["transcript"]) if row["transcript"] else [],
+        "outline": row["outline"],
+        "error_message": row["error_message"],
+        "duration_seconds": row["duration_seconds"],
+        "source_ids": row["source_ids"],
+        "note_ids": row["note_ids"],
+        "speaker_profiles": json.loads(row["speaker_profiles"]) if row["speaker_profiles"] else [],
+        "script": json.loads(row["script"]) if row["script"] else None,
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+        "completed_at": row["completed_at"].isoformat() if row["completed_at"] else None
+    }
+
+
+@router.get("/podcasts/by-notebook/{notebook_id}")
+async def list_standalone_podcasts(
+    notebook_id: str,
+    current_user: Dict = Depends(get_current_user_from_request),
+    manager: NotebookManager = Depends(get_notebook_manager)
+):
+    """List all podcasts for an Open Notebook notebook"""
+    import json
+    
+    async with manager.db_pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT id, notebook_id, user_id, title, status, style, speakers, duration_minutes,
+                   audio_path, audio_url, transcript, outline, error_message, duration_seconds,
+                   source_ids, note_ids, speaker_profiles, script, created_at, completed_at
+            FROM standalone_podcasts
+            WHERE notebook_id = $1 AND user_id = $2
+            ORDER BY created_at DESC
+        """, notebook_id, current_user["id"])
+    
+    podcasts = []
+    for row in rows:
+        podcasts.append({
+            "id": str(row["id"]),
+            "notebook_id": row["notebook_id"],
+            "title": row["title"],
+            "status": row["status"],
+            "style": row["style"],
+            "speakers": row["speakers"],
+            "duration_minutes": row["duration_minutes"],
+            "audio_path": row["audio_path"],
+            "audio_url": row["audio_url"],
+            "transcript": json.loads(row["transcript"]) if row["transcript"] else [],
+            "outline": row["outline"],
+            "error_message": row["error_message"],
+            "duration_seconds": row["duration_seconds"],
+            "source_ids": row["source_ids"],
+            "note_ids": row["note_ids"],
+            "speaker_profiles": json.loads(row["speaker_profiles"]) if row["speaker_profiles"] else [],
+            "script": json.loads(row["script"]) if row["script"] else None,
+            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+            "completed_at": row["completed_at"].isoformat() if row["completed_at"] else None
+        })
+    
+    return {"podcasts": podcasts, "count": len(podcasts)}
+
+
+@router.delete("/podcasts/{podcast_id}")
+async def delete_standalone_podcast(
+    podcast_id: str,
+    current_user: Dict = Depends(get_current_user_from_request),
+    manager: NotebookManager = Depends(get_notebook_manager)
+):
+    """Delete a standalone podcast"""
+    import os
+    from uuid import UUID
+    
+    try:
+        podcast_uuid = UUID(podcast_id)
+    except ValueError:
+        raise HTTPException(400, "Invalid podcast ID")
+    
+    async with manager.db_pool.acquire() as conn:
+        # Get podcast to check ownership and get audio path
+        row = await conn.fetchrow("""
+            SELECT audio_path FROM standalone_podcasts
+            WHERE id = $1 AND user_id = $2
+        """, podcast_uuid, current_user["id"])
+        
+        if not row:
+            raise HTTPException(404, "Podcast not found")
+        
+        # Delete audio file if exists
+        if row["audio_path"] and os.path.exists(row["audio_path"]):
+            try:
+                os.remove(row["audio_path"])
+            except Exception:
+                pass
+        
+        # Delete from database
+        await conn.execute("""
+            DELETE FROM standalone_podcasts WHERE id = $1
+        """, podcast_uuid)
+    
+    return {"success": True, "message": "Podcast deleted"}
+
+
+@router.post("/podcasts/generate")
+async def generate_standalone_podcast(
+    podcast_request: StandalonePodcastRequest,
+    background_tasks: BackgroundTasks = None,
+    request: Request = None,
+    current_user: Dict = Depends(get_current_user_from_request),
+    manager: NotebookManager = Depends(get_notebook_manager)
+):
+    """
+    Generate a podcast from content (standalone, works with Open Notebook IDs).
+    This endpoint doesn't require notebook ownership verification.
+    Saves the podcast to the database for persistence.
+    """
+    from open_notebook.podcast import PodcastGenerator
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
+    try:
+        content = await _fetch_podcast_content(podcast_request, logger)
+        
+        if not content.strip():
+            raise HTTPException(400, "No content available. Provide content, source_ids, or note_ids.")
+        
+        # Generate podcast directly
+        generator = PodcastGenerator()
+        result = await generator.generate(
+            content=content,
+            title=podcast_request.title,
+            speakers=podcast_request.speakers,
+            duration_minutes=podcast_request.duration_minutes,
+            style=podcast_request.style,
+            custom_speakers=podcast_request.custom_speakers,
+            generate_audio=podcast_request.generate_audio
+        )
+        
+        # Save to database
+        saved_podcast = await _save_podcast_to_db(manager, current_user["id"], podcast_request, result)
+        return saved_podcast
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to generate podcast: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/podcasts/generate/stream")
+async def generate_standalone_podcast_stream(
+    podcast_request: StandalonePodcastRequest,
+    request: Request = None,
+    current_user: Dict = Depends(get_current_user_from_request),
+    manager: NotebookManager = Depends(get_notebook_manager)
+):
+    """
+    Generate a podcast with Server-Sent Events (SSE) progress streaming.
+    Returns progress updates and final result as SSE events.
+    Saves the podcast to the database for persistence.
+    
+    Event types:
+    - progress: {step: 'outline'|'script'|'audio', message: string}
+    - result: Final podcast data (saved to database)
+    - error: Error message
+    """
+    from open_notebook.podcast import PodcastGenerator
+    from fastapi.responses import StreamingResponse
+    import json
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    user_id = current_user["id"]
+    
+    async def generate_sse_events():
+        try:
+            content = await _fetch_podcast_content(podcast_request, logger)
+            
+            if not content.strip():
+                yield f"event: error\ndata: {json.dumps({'error': 'No content available. Provide content, source_ids, or note_ids.'})}\n\n"
+                return
+            
+            # Generate podcast with progress streaming
+            generator = PodcastGenerator()
+            
+            async for event in generator.generate_with_progress(
+                content=content,
+                title=podcast_request.title,
+                speakers=podcast_request.speakers,
+                duration_minutes=podcast_request.duration_minutes,
+                style=podcast_request.style,
+                custom_speakers=podcast_request.custom_speakers,
+                generate_audio=podcast_request.generate_audio
+            ):
+                event_type = event.get("event", "progress")
+                event_data = event.get("data", {})
+                
+                if event_type == "result":
+                    # Save to database
+                    result = event_data
+                    try:
+                        saved_podcast = await _save_podcast_to_db(manager, user_id, podcast_request, result)
+                        yield f"event: result\ndata: {json.dumps(saved_podcast)}\n\n"
+                    except Exception as db_error:
+                        logger.error(f"Failed to save podcast to database: {db_error}")
+                        # Still return result even if DB save fails
+                        final_data = {
+                            "id": result.get("title", "").replace(" ", "_").lower()[:20],
+                            "title": podcast_request.title,
+                            "status": result.get("status", "completed"),
+                            "style": podcast_request.style,
+                            "speakers": podcast_request.speakers,
+                            "duration_minutes": podcast_request.duration_minutes,
+                            "audio_path": result.get("audio_path"),
+                            "audio_url": result.get("audio_url"),
+                            "transcript": result.get("transcript", []),
+                            "outline": result.get("outline"),
+                            "error_message": json.dumps(result.get("error") or result.get("audio_error")) if isinstance(result.get("error") or result.get("audio_error"), dict) else (result.get("error") or result.get("audio_error")),
+                            "duration_seconds": result.get("duration_seconds"),
+                            "created_at": result.get("started_at"),
+                            "completed_at": result.get("completed_at")
+                        }
+                        yield f"event: result\ndata: {json.dumps(final_data)}\n\n"
+                else:
+                    yield f"event: {event_type}\ndata: {json.dumps(event_data)}\n\n"
+                    
+        except Exception as e:
+            logger.error(f"Failed to generate podcast: {e}")
+            yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
+    
+    return StreamingResponse(
+        generate_sse_events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"  # Disable nginx buffering
+        }
+    )
+
+
+@router.get("/podcasts/audio/{filename}")
+async def serve_standalone_podcast_audio(
+    filename: str,
+    current_user: Dict = Depends(get_current_user_from_request)
+):
+    """Serve audio file for standalone podcast generation"""
+    import os
+    
+    from open_notebook.podcast.audio import PODCAST_OUTPUT_PATH
+
+    # Sanitize filename to prevent directory traversal
+    safe_filename = os.path.basename(filename)
+    audio_path = os.path.join(PODCAST_OUTPUT_PATH, "audio", safe_filename)
+    
+    if not os.path.exists(audio_path):
+        raise HTTPException(status_code=404, detail="Audio file not found")
+    
+    media_type = "audio/mpeg" if audio_path.endswith(".mp3") else "audio/wav"
+    return FileResponse(audio_path, media_type=media_type, filename=safe_filename)
+
+
+@router.post("/podcasts/generate/audio")
+async def generate_standalone_podcast_audio_from_script(
+    audio_request: StandalonePodcastAudioRequest,
+    current_user: Dict = Depends(get_current_user_from_request),
+    manager: NotebookManager = Depends(get_notebook_manager)
+):
+    """
+    Generate podcast audio from a provided transcript (no LLM call).
+    Intended for the \"script-only -> edit -> generate audio\" flow.
+    """
+    import logging
+    from open_notebook.podcast.audio import AudioGenerator
+    from open_notebook.podcast.script import get_default_speakers
+
+    logger = logging.getLogger(__name__)
+    user_id = current_user["id"]
+
+    try:
+        speaker_profiles = (audio_request.custom_speakers or get_default_speakers())[: audio_request.speakers]
+
+        # Build a script dict in the shape AudioGenerator expects
+        transcript = audio_request.transcript or []
+        cleaned_transcript = []
+        for seg in transcript:
+            speaker = (seg.get("speaker") or "").strip()
+            dialogue = (seg.get("dialogue") or seg.get("text") or "").strip()
+            if speaker and dialogue:
+                cleaned_transcript.append({"speaker": speaker, "dialogue": dialogue})
+
+        if not cleaned_transcript:
+            raise HTTPException(400, "No valid transcript segments provided")
+
+        script = {
+            "title": audio_request.title,
+            "style": audio_request.style,
+            "duration_minutes": audio_request.duration_minutes,
+            "speakers": speaker_profiles,
+            "transcript": cleaned_transcript
+        }
+
+        audio_generator = AudioGenerator()
+        audio_result = await audio_generator.generate_audio(script)
+
+        result = {
+            "title": audio_request.title,
+            "style": audio_request.style,
+            "duration_minutes": audio_request.duration_minutes,
+            "transcript": cleaned_transcript,
+            "script": script
+        }
+
+        if "error" in audio_result:
+            result["status"] = "error"
+            result["error"] = audio_result.get("error")
+        else:
+            result["audio_path"] = audio_result.get("audio_path")
+            result["audio_url"] = audio_generator.get_audio_url(audio_result.get("audio_path", ""))
+            result["duration_seconds"] = audio_result.get("duration_seconds")
+            result["status"] = "completed"
+
+        # Persist (update existing if podcast_id provided, otherwise insert new)
+        if audio_request.podcast_id:
+            return await _update_standalone_podcast_audio_in_db(
+                manager=manager,
+                user_id=user_id,
+                podcast_id=audio_request.podcast_id,
+                podcast_request=audio_request,
+                result=result
+            )
+
+        # Insert new row
+        standalone_req = StandalonePodcastRequest(
+            notebook_id=audio_request.notebook_id,
+            title=audio_request.title,
+            style=audio_request.style,
+            speakers=audio_request.speakers,
+            duration_minutes=audio_request.duration_minutes,
+            generate_audio=True,
+            custom_speakers=audio_request.custom_speakers
+        )
+        return await _save_podcast_to_db(manager, user_id, standalone_req, result)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to generate podcast audio from script: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/{notebook_id}/podcasts")
 async def generate_podcast(
     notebook_id: UUID,
@@ -1035,7 +1588,8 @@ async def _run_podcast_generation(db_pool, podcast_id: UUID, notebook_id: UUID, 
             title=request.title,
             speakers=request.speakers,
             duration_minutes=request.duration_minutes,
-            style=request.style.value
+            style=request.style.value,
+            custom_speakers=getattr(request, "custom_speakers", None)
         )
         
         # Update database with result

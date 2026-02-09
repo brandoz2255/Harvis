@@ -29,6 +29,7 @@ interface SourcesColumnProps {
   onAddSource: () => void
   onDeleteSource: (sourceId: string) => void
   onTransformSource: (source: NotebookSource) => void
+  onViewSource?: (source: NotebookSource) => void
 }
 
 const sourceTypeIcon = (source: NotebookSource) => {
@@ -73,6 +74,7 @@ export default function SourcesColumn({
   onAddSource,
   onDeleteSource,
   onTransformSource,
+  onViewSource,
 }: SourcesColumnProps) {
   const countLabel = useMemo(
     () => `Sources (${sources.length})`,
@@ -108,6 +110,11 @@ export default function SourcesColumn({
               <div
                 key={source.id}
                 className="border border-gray-800 rounded-lg p-3 bg-gray-900/40 hover:bg-gray-900 transition-colors"
+                onClick={() => {
+                  if (onViewSource) {
+                    onViewSource(source)
+                  }
+                }}
               >
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex items-center gap-2 min-w-0">
@@ -116,8 +123,29 @@ export default function SourcesColumn({
                       <div className="text-sm text-white truncate">
                         {source.title || source.original_filename || "Untitled"}
                       </div>
-                      <div className="text-xs text-gray-500">
-                        {indicator.emoji} {indicator.label}
+                      <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
+                        <span>{indicator.emoji} {indicator.label}</span>
+                        {source.status === 'processing' || source.status === 'pending' ? (
+                          <span className="inline-flex items-center gap-1 rounded bg-blue-500/10 px-1.5 py-0.5 text-blue-400">
+                            <span className="h-1.5 w-1.5 rounded-full bg-blue-400 animate-pulse" />
+                            Processing
+                          </span>
+                        ) : source.status === 'ready' ? (
+                          <span className="inline-flex items-center gap-1 rounded bg-green-500/10 px-1.5 py-0.5 text-green-400">
+                            <span className="h-1.5 w-1.5 rounded-full bg-green-400" />
+                            Ready
+                          </span>
+                        ) : source.status === 'error' ? (
+                          <span className="inline-flex items-center gap-1 rounded bg-red-500/10 px-1.5 py-0.5 text-red-400">
+                            <span className="h-1.5 w-1.5 rounded-full bg-red-400" />
+                            Failed
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 rounded bg-gray-500/10 px-1.5 py-0.5 text-gray-400">
+                            <span className="h-1.5 w-1.5 rounded-full bg-gray-400" />
+                            {source.status}
+                          </span>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -164,5 +192,6 @@ export default function SourcesColumn({
     </div>
   )
 }
+
 
 

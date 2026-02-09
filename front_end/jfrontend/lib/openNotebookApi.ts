@@ -40,19 +40,29 @@ export interface NotebookUpdate {
 export interface Source {
   id: string;
   title: string;
-  source_type: string;
+  source_type?: string;
   content?: string;
   url?: string;
   file_path?: string;
-  processing_status: 'pending' | 'processing' | 'completed' | 'failed';
+  asset?: {
+    file_path?: string;
+    url?: string;
+  } | null;
+  processing_status?: 'pending' | 'processing' | 'completed' | 'failed';
+  status?: 'new' | 'processing' | 'completed' | 'failed';
+  processing_info?: {
+    status?: 'pending' | 'processing' | 'completed' | 'failed';
+  };
   error_message?: string;
+  full_text?: string | null;
   created: string;
   updated: string;
   asset_count?: number;
+  embedded_chunks?: number;
 }
 
 export interface SourceCreate {
-  type: 'file' | 'url' | 'text' | 'youtube';
+  type: 'upload' | 'link' | 'text' | 'youtube';
   url?: string;
   content?: string;
   title?: string;
@@ -325,7 +335,7 @@ export const SourcesAPI = {
     async_processing?: boolean;
   }): Promise<Source> {
     const formData = new FormData();
-    formData.append('type', 'url');
+    formData.append('type', 'link');
     formData.append('url', data.url);
     if (data.title) formData.append('title', data.title);
     if (data.notebook_id) formData.append('notebook_id', data.notebook_id);
@@ -385,7 +395,7 @@ export const SourcesAPI = {
     async_processing?: boolean;
   }): Promise<Source> {
     const formData = new FormData();
-    formData.append('type', 'file');
+    formData.append('type', 'upload');
     formData.append('file', data.file);
     if (data.title) formData.append('title', data.title);
     if (data.notebook_id) formData.append('notebook_id', data.notebook_id);

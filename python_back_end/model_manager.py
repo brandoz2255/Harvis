@@ -10,6 +10,8 @@ import time
 import gc
 from typing import Optional
 
+logger = logging.getLogger(__name__)
+
 # Import model classes
 try:
     import whisper
@@ -21,12 +23,40 @@ except ImportError:
         logger.error("No whisper package found. Please install with: pip install openai-whisper")
         whisper = None
 from chatterbox.tts import ChatterboxTTS
+from tts_engine_manager import (
+    TTSMode,
+    set_mode,
+    get_mode,
+    generate_speech as tts_generate_speech,
+    generate_podcast_segment,
+    get_engine_status,
+    unload_all_engines,
+    load_chatterbox,
+    unload_chatterbox,
+)
+
+# ─── MONKEYPATCH: Fix broken perth dependency in Chatterbox ─────────────────
+try:
+    import perth
+    if not hasattr(perth, 'PerthImplicitWatermarker'):
+        logger.warning("⚠️ Patching missing 'PerthImplicitWatermarker' in perth module")
+        class MockWatermarker:
+            def __init__(self): pass
+            def __call__(self, *args, **kwargs): return None
+            def embed(self, audio, sample_rate): return audio
+            def apply_watermark(self, audio, sample_rate): return audio # Correct method name
+        perth.PerthImplicitWatermarker = MockWatermarker
+except ImportError:
+    pass
+except Exception as e:
+    logger.warning(f"Failed to patch perth: {e}")
 
 logger = logging.getLogger(__name__)
 
 # ─── Global Model Variables ─────────────────────────────────────────────────
 tts_model = None
 whisper_model = None
+_cuda_is_broken = False  # Flag to disable CUDA if architecture mismatch detected
 
 # ─── VRAM Management ────────────────────────────────────────────────────────
 def get_vram_threshold():
@@ -189,7 +219,12 @@ def auto_cleanup_if_needed(threshold_percent=75):
 # ─── Model Loading Functions ────────────────────────────────────────────────
 def load_tts_model(force_cpu=False):
     """Load TTS model with memory management"""
-    global tts_model
+    global tts_model, _cuda_is_broken
+    
+    if _cuda_is_broken:
+        logger.warning("⚠️ CUDA marked as broken, forcing CPU load for TTS")
+        force_cpu = True
+        
     tts_device = "cuda" if torch.cuda.is_available() and not force_cpu else "cpu"
 
     if tts_model is None:
@@ -657,6 +692,9 @@ def generate_speech(text, model=None, audio_prompt=None, exaggeration=0.5, tempe
 
     if model is None:
         model = load_tts_model()
+    
+    if model is None:
+        raise RuntimeError("TTS Model could not be loaded (returned None)")
 
     try:
         logger.info(f"🎙️ Generating speech for text (length: {len(text)} chars)")
@@ -674,20 +712,37 @@ def generate_speech(text, model=None, audio_prompt=None, exaggeration=0.5, tempe
                 )
                 logger.info(f"✅ TTS generation completed, audio shape: {wav.shape}")
             except RuntimeError as e:
-                if "CUDA" in str(e):
+                if "CUDA" in str(e) or "no kernel image" in str(e):
                     logger.error(f"CUDA Error: {e}")
+                    logger.warning("⚠️ CUDA ARCHITECTURE ERROR DETECTED (RTX 50-series?)")
+                    logger.warning("Falling back to CPU-only mode for Chatterbox via FULL RELOAD.")
+                    
+                    # Mark CUDA as broken globally so we don't retry it
+                    global _cuda_is_broken
+                    _cuda_is_broken = True
+                    
+                    # Unload the broken GPU model
                     torch.cuda.empty_cache()
+                    unload_tts_model()
+                    
                     try:
+                        # Reload model specifically on CPU
+                        # load_tts_model will see _cuda_is_broken and use CPU
+                        model = load_tts_model(force_cpu=True)
+                        
+                        logger.info("🔄 Model reloaded on CPU. Retrying generation...")
                         wav = model.generate(
                             normalized,
                             audio_prompt_path=audio_prompt,
                             exaggeration=exaggeration,
                             temperature=temperature,
-                            cfg_weight=cfg_weight
+                            cfg_weight=cfg_weight,
+                            device="cpu"
                         )
-                    except RuntimeError as e2:
-                        logger.error(f"CUDA Retry Failed: {e2}")
-                        raise ValueError("CUDA error persisted after cache clear") from e2
+                        logger.info("✅ Chatterbox CPU fallback generation successful")
+                    except Exception as e2:
+                        logger.error(f"CPU Fallback and Reload Failed: {e2}")
+                        raise ValueError("Generation failed on both GPU and CPU") from e2
                 else:
                     raise
         else:
@@ -898,3 +953,52 @@ def get_whisper_model():
     if whisper_model is None:
         load_whisper_model()
     return whisper_model
+
+# ─── Smart Generation Function ──────────────────────────────────────────────
+def generate_speech_smart(
+    text: str,
+    mode: str = "auto",
+    voice_model: Optional[str] = None,
+    audio_prompt: Optional[str] = None,
+    **kwargs
+):
+    """
+    Smart speech generation that picks the right engine
+    
+    Args:
+        text: Text to speak
+        mode: "interactive", "podcast", "lightweight", or "auto"
+        voice_model: RVC model name (for podcast mode)
+        audio_prompt: Audio file for cloning (for interactive mode)
+    
+    Returns:
+        (sample_rate, audio_array)
+    """
+    if mode == "auto":
+        # Auto-detect based on context
+        if voice_model:
+            mode = "podcast"
+        elif audio_prompt:
+            mode = "interactive"
+        else:
+            mode = "interactive"  # Default to Chatterbox
+    
+    mode_map = {
+        "interactive": TTSMode.INTERACTIVE,
+        "podcast": TTSMode.PODCAST,
+        "lightweight": TTSMode.LIGHTWEIGHT
+    }
+    
+    target_mode = mode_map.get(mode, TTSMode.INTERACTIVE)
+    
+    if target_mode == TTSMode.INTERACTIVE:
+        return generate_speech_optimized(text, audio_prompt=audio_prompt, **kwargs)
+        
+    return tts_generate_speech(
+        text,
+        mode=target_mode,
+        voice_model=voice_model,
+        audio_prompt=audio_prompt,
+        **kwargs
+    )
+

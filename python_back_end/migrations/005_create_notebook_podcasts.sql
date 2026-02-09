@@ -59,3 +59,9 @@ CREATE TRIGGER trigger_podcast_speaker_profile_updated_at
     EXECUTE FUNCTION update_podcast_speaker_profile_updated_at();
 
 
+
+
+
+
+
+

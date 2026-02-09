@@ -111,11 +111,11 @@ export default function PodcastGenerator({
   const [loadingPodcasts, setLoadingPodcasts] = useState(true)
   const [playingId, setPlayingId] = useState<string | null>(null)
   const [audioElement, setAudioElement] = useState<HTMLAudioElement | null>(null)
-  
+
   // Voice selection state
   const [voiceMapping, setVoiceMapping] = useState<Record<string, string>>({})
   const [showVoiceSelection, setShowVoiceSelection] = useState(false)
-  
+
   // Voice store
   const { voices, fetchVoices, isLoading: loadingVoices } = useVoiceStore()
 
@@ -177,7 +177,7 @@ export default function PodcastGenerator({
 
       const podcast = await response.json()
       setPodcasts(prev => [podcast, ...prev])
-      
+
       // Start polling for status
       pollPodcastStatus(podcast.id)
     } catch (err: any) {
@@ -197,7 +197,7 @@ export default function PodcastGenerator({
         if (response.ok) {
           const podcast = await response.json()
           setPodcasts(prev => prev.map(p => p.id === podcastId ? podcast : p))
-          
+
           if (podcast.status === 'completed' || podcast.status === 'error') {
             clearInterval(interval)
           }
@@ -307,11 +307,10 @@ export default function PodcastGenerator({
                   <button
                     key={s.id}
                     onClick={() => setStyle(s.id)}
-                    className={`p-3 rounded-xl border text-center transition-all ${
-                      style === s.id
-                        ? 'border-orange-500 bg-orange-500/10'
-                        : 'border-white/10 hover:border-white/20 bg-white/5'
-                    }`}
+                    className={`p-3 rounded-xl border text-center transition-all ${style === s.id
+                      ? 'border-orange-500 bg-orange-500/10'
+                      : 'border-white/10 hover:border-white/20 bg-white/5'
+                      }`}
                   >
                     <div className={`mx-auto mb-1.5 ${style === s.id ? 'text-orange-400' : 'text-white/40'}`}>
                       {s.icon}
@@ -357,87 +356,19 @@ export default function PodcastGenerator({
               </div>
             </div>
 
-            {/* Voice Selection Section */}
-            <div>
-              <button
-                onClick={() => setShowVoiceSelection(!showVoiceSelection)}
-                className="flex items-center gap-2 text-sm text-white/70 hover:text-white transition-colors"
-              >
-                <Headphones className="w-4 h-4" />
-                Voice Selection
-                <ChevronDown className={`w-4 h-4 transition-transform ${showVoiceSelection ? 'rotate-180' : ''}`} />
-                {Object.keys(voiceMapping).length > 0 && (
-                  <span className="px-2 py-0.5 text-xs bg-orange-500/20 text-orange-400 rounded-full">
-                    {Object.keys(voiceMapping).length} assigned
-                  </span>
-                )}
-              </button>
-
-              {showVoiceSelection && (
-                <div className="mt-4 space-y-3">
-                  {loadingVoices ? (
-                    <div className="flex items-center justify-center py-4">
-                      <Loader2 className="w-5 h-5 animate-spin text-white/40" />
-                    </div>
-                  ) : availableVoices.length === 0 ? (
-                    <div className="p-4 rounded-xl bg-white/5 border border-dashed border-white/20 text-center">
-                      <Mic className="w-8 h-8 mx-auto text-white/20 mb-2" />
-                      <p className="text-sm text-white/50">No voices available</p>
-                      <p className="text-xs text-white/30 mt-1">
-                        Clone voices in the Voice Studio to use them here
-                      </p>
-                    </div>
-                  ) : (
-                    <>
-                      {Array.from({ length: speakers }).map((_, index) => {
-                        const selectedVoice = getVoiceForSpeaker(index)
-                        return (
-                          <div key={index} className="flex items-center gap-3">
-                            <div className={`flex items-center gap-2 w-28 px-3 py-2 rounded-lg bg-gradient-to-r ${SPEAKER_COLORS[index]} bg-opacity-20`}>
-                              <UserCircle2 className="w-4 h-4 text-white" />
-                              <span className="text-sm text-white font-medium">{SPEAKER_LABELS[index]}</span>
-                            </div>
-                            <select
-                              value={voiceMapping[String(index + 1)] || ''}
-                              onChange={(e) => updateVoiceMapping(index, e.target.value)}
-                              className="flex-1 px-4 py-2.5 bg-white/5 border border-white/10 rounded-xl text-sm text-white focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent transition-all"
-                            >
-                              <option value="">Default Voice</option>
-                              <optgroup label="Your Voices">
-                                {availableVoices
-                                  .filter(v => v.voice_type === 'user')
-                                  .map(voice => (
-                                    <option key={voice.voice_id} value={voice.voice_id}>
-                                      {voice.voice_name}
-                                    </option>
-                                  ))}
-                              </optgroup>
-                              <optgroup label="Voice Presets">
-                                {availableVoices
-                                  .filter(v => v.voice_type === 'builtin' && v.activated)
-                                  .map(voice => (
-                                    <option key={voice.voice_id} value={voice.voice_id}>
-                                      {voice.voice_name}
-                                    </option>
-                                  ))}
-                              </optgroup>
-                            </select>
-                            {selectedVoice && (
-                              <div className="flex items-center gap-1 text-xs text-white/40">
-                                <Volume2 className="w-3 h-3" />
-                                {selectedVoice.quality_score ? `${Math.round(selectedVoice.quality_score * 100)}%` : 'Ready'}
-                              </div>
-                            )}
-                          </div>
-                        )
-                      })}
-                      <p className="text-xs text-white/40 mt-2">
-                        💡 Tip: Leave as "Default Voice" to use the system's standard TTS voices
-                      </p>
-                    </>
-                  )}
-                </div>
-              )}
+            {/* Coming Soon Notice */}
+            <div className="bg-blue-500/10 border border-blue-500/30 rounded-xl p-3 flex items-start gap-3">
+              <div className="p-1.5 bg-blue-500/20 rounded-lg shrink-0">
+                <Sparkles className="w-4 h-4 text-blue-400" />
+              </div>
+              <div>
+                <p className="text-sm font-medium text-blue-400">Voice Studio Under Construction</p>
+                <p className="text-xs text-blue-300/70 mt-1">
+                  We're currently upgrading our voice engine. For now, all podcasts use the default
+                  <span className="text-white font-medium"> Harvis</span> voice for maximum stability.
+                  Custom voices will return soon!
+                </p>
+              </div>
             </div>
 
             {/* Error */}
@@ -514,7 +445,7 @@ export default function PodcastGenerator({
                           <p className="text-xs text-red-400 mt-1">{podcast.error_message}</p>
                         )}
                       </div>
-                      
+
                       {podcast.status === 'completed' && podcast.audio_path && (
                         <div className="flex items-center gap-2">
                           <button
@@ -564,8 +495,8 @@ export default function PodcastGenerator({
               </div>
             )}
           </div>
-        </div>
-      </div>
-    </div>
+        </div >
+      </div >
+    </div >
   )
 }

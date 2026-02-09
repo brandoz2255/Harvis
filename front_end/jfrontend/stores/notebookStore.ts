@@ -107,7 +107,7 @@ interface NotebookState {
   deleteNotebook: (notebookId: string) => Promise<void>
 
   // Actions - Sources
-  fetchSources: (notebookId: string) => Promise<void>
+  fetchSources: (notebookId?: string) => Promise<void>
   uploadSource: (notebookId: string, file: File, title?: string) => Promise<NotebookSource | null>
   addUrlSource: (notebookId: string, url: string, title?: string) => Promise<NotebookSource | null>
   addTextSource: (notebookId: string, title: string, content: string) => Promise<NotebookSource | null>
@@ -159,6 +159,8 @@ function mapSourceToNotebookSource(source: Source, notebookId: string): Notebook
     pdf: 'pdf',
     audio: 'audio',
     video: 'transcript',
+    link: 'url',
+    upload: 'doc',
   }
 
   // Map processing_status to our status
@@ -166,22 +168,44 @@ function mapSourceToNotebookSource(source: Source, notebookId: string): Notebook
     pending: 'pending',
     processing: 'processing',
     completed: 'ready',
+    ready: 'ready',
     failed: 'error',
+    error: 'error',
   }
+
+  const sourceType = source.source_type
+  const assetUrl = source.asset?.url
+  const assetFilePath = source.asset?.file_path || source.file_path
+  const fileExt = assetFilePath?.split('.').pop()?.toLowerCase()
+  const inferredType = assetUrl
+    ? 'url'
+    : fileExt === 'pdf'
+      ? 'pdf'
+      : assetFilePath
+        ? 'doc'
+        : 'text'
+
+  const rawStatus =
+    source.processing_status ||
+    source.processing_info?.status ||
+    source.status ||
+    'pending'
+
+  const mappedStatus = statusMap[rawStatus] || 'pending'
 
   return {
     id: source.id,
     notebook_id: notebookId,
-    type: typeMap[source.source_type] || 'doc',
+    type: typeMap[sourceType || inferredType] || 'doc',
     title: source.title,
-    storage_path: source.file_path,
+    storage_path: assetFilePath,
     original_filename: source.title,
     metadata: {},
-    status: statusMap[source.processing_status] || 'pending',
+    status: mappedStatus,
     error_message: source.error_message,
     created_at: source.created,
     updated_at: source.updated,
-    chunk_count: source.asset_count || 0,
+    chunk_count: source.asset_count || source.embedded_chunks || 0,
   }
 }
 
@@ -369,13 +393,12 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
 
   // ─── Source Actions ───────────────────────────────────────────────────────────
 
-  fetchSources: async (notebookId: string) => {
+  fetchSources: async (notebookId?: string) => {
     set({ isLoadingSources: true })
 
     try {
       const sources = await OpenNotebookAPI.sources.list(notebookId)
-      const mappedSources = sources.map(s => mapSourceToNotebookSource(s, notebookId))
-      
+      const mappedSources = sources.map(s => mapSourceToNotebookSource(s, notebookId || ''))
       set({ sources: mappedSources, isLoadingSources: false })
     } catch (error) {
       console.error('Error fetching sources:', error)
@@ -476,13 +499,16 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
         pending: 'pending',
         processing: 'processing',
         completed: 'ready',
+        ready: 'ready',
         failed: 'error',
+        error: 'error',
       }
+      const mappedStatus = statusMap[status.status] || 'pending'
       
       set(state => ({
         sources: state.sources.map(s =>
           s.id === sourceId
-            ? { ...s, status: statusMap[status.status] || s.status, error_message: status.error }
+            ? { ...s, status: mappedStatus || s.status, error_message: status.error }
             : s
         ),
       }))

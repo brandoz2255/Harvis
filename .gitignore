@@ -80,3 +80,6 @@ python_back_end/whisper_models/
 **/*.bin
 **/*.safetensors
 **/*.ckpt
+
+# Podcast audio data (generated files, persisted via bind mount)
+python_back_end/podcast_data/

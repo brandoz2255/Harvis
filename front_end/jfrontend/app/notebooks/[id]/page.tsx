@@ -13,6 +13,8 @@ import PodcastView from '@/components/notebook/PodcastView'
 import NoteEditorDialog from '@/components/notebook/NoteEditorDialog'
 import { ContextMode } from '@/components/notebook/types'
 import { Loader2, AlertCircle, ArrowLeft, FileText, MessageSquare, Mic, StickyNote } from 'lucide-react'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import OpenNotebookAPI from '@/lib/openNotebookApi'
 
 export default function NotebookWorkspacePage() {
   const router = useRouter()
@@ -55,6 +57,10 @@ export default function NotebookWorkspacePage() {
   const [editingNote, setEditingNote] = useState<NotebookNote | null>(null)
   const [mobileTab, setMobileTab] = useState<'sources' | 'notes' | 'chat' | 'podcast'>('chat')
   const [activeView, setActiveView] = useState<'workspace' | 'podcast'>('workspace')
+  const [selectedSource, setSelectedSource] = useState<NotebookSource | null>(null)
+  const [sourceDetail, setSourceDetail] = useState<string | null>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
+  const [detailError, setDetailError] = useState<string | null>(null)
 
   const [contextSelections, setContextSelections] = useState<{
     sources: Record<string, ContextMode>
@@ -142,6 +148,21 @@ export default function NotebookWorkspacePage() {
   const handleSourceTransform = (source: NotebookSource) => {
     setTransformSource(source)
     setShowTransformPanel(true)
+  }
+
+  const handleViewSource = async (source: NotebookSource) => {
+    setSelectedSource(source)
+    setDetailLoading(true)
+    setDetailError(null)
+    setSourceDetail(null)
+    try {
+      const result = await OpenNotebookAPI.sources.get(source.id)
+      setSourceDetail(result.full_text || result.content || '')
+    } catch (error: any) {
+      setDetailError(error?.message || 'Failed to load source content')
+    } finally {
+      setDetailLoading(false)
+    }
   }
 
   const handleFileUpload = async (files: FileList) => {
@@ -318,6 +339,7 @@ export default function NotebookWorkspacePage() {
             onAddSource={() => setShowAddSourceModal(true)}
             onDeleteSource={handleSourceDelete}
             onTransformSource={handleSourceTransform}
+            onViewSource={handleViewSource}
           />
           <NotesColumn
             notes={notes}
@@ -362,6 +384,7 @@ export default function NotebookWorkspacePage() {
               onAddSource={() => setShowAddSourceModal(true)}
               onDeleteSource={handleSourceDelete}
               onTransformSource={handleSourceTransform}
+              onViewSource={handleViewSource}
             />
           )}
           {mobileTab === 'notes' && (
@@ -439,6 +462,29 @@ export default function NotebookWorkspacePage() {
           }
         }}
       />
+
+      <Dialog open={!!selectedSource} onOpenChange={(open) => !open && setSelectedSource(null)}>
+        <DialogContent className="max-w-3xl bg-[#0a0a0a] border border-gray-800 text-white">
+          <DialogHeader>
+            <DialogTitle>Extracted Content</DialogTitle>
+            <DialogDescription className="text-gray-400">
+              {selectedSource?.title || selectedSource?.original_filename || 'Source'}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="max-h-[60vh] overflow-y-auto rounded-lg border border-gray-800 bg-[#111111] p-4 text-sm text-gray-200 whitespace-pre-wrap">
+            {detailLoading && (
+              <div className="flex items-center gap-2 text-gray-400">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Loading extracted content...
+              </div>
+            )}
+            {detailError && (
+              <div className="text-red-400">{detailError}</div>
+            )}
+            {!detailLoading && !detailError && (sourceDetail || 'No extracted content available yet.')}
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* Error Toast */}
       {error && (
