@@ -1,0 +1,1938 @@
+# HARVIS AI: VibeVoice + Open Notebook Podcast Generation Master Prompt
+
+## 🎯 OBJECTIVE
+
+Fix and integrate the podcast generation system in HARVIS AI by combining:
+1. **VibeVoice** (Microsoft's voice cloning TTS) for multi-speaker audio generation
+2. **Open Notebook** source management for content extraction
+3. **Voice Library** for user-cloned character voices
+4. **Automated script generation** from research sources
+
+**Current Problem**: Podcast generation is failing - need end-to-end working pipeline.
+
+---
+
+## 📊 SYSTEM OVERVIEW
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                            HARVIS AI PODCAST PIPELINE                          │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                 │
+│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐ │
+│  │   SOURCES    │    │   SCRIPT     │    │    VOICE     │    │    AUDIO     │ │
+│  │   (Input)    │───▶│  GENERATOR   │───▶│   CLONING    │───▶│   OUTPUT     │ │
+│  └──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘ │
+│        │                    │                    │                    │        │
+│        ▼                    ▼                    ▼                    ▼        │
+│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐ │
+│  │ • PDFs       │    │ • LLM Script │    │ • VibeVoice  │    │ • WAV/MP3    │ │
+│  │ • URLs       │    │   Generation │    │   1.5B Model │    │ • Streaming  │ │
+│  │ • YouTube    │    │ • Multi-turn │    │ • Voice      │    │ • Chapters   │ │
+│  │ • Text       │    │   Dialog     │    │   Embeddings │    │ • Metadata   │ │
+│  │ • Audio      │    │ • Citations  │    │ • Zero-shot  │    │              │ │
+│  └──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘ │
+│                                                                                 │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 🛠️ CURRENT ARCHITECTURE
+
+### Existing Components (HARVIS AI)
+
+| Component | Status | Location |
+|-----------|--------|----------|
+| **FastAPI Backend** | ✅ Working | `python_back_end/main.py` |
+| **Next.js Frontend** | ✅ Working | `front_end/jfrontend/` |
+| **PostgreSQL** | ✅ Working | User data, chat history |
+| **ChatterboxTTS** | ⚠️ Limited | Single voice, OOM issues |
+| **Whisper STT** | ✅ Working | Voice transcription |
+| **Model Manager** | ✅ Working | `python_back_end/model_manager.py` |
+| **VRAM Management** | ✅ Working | 7-8GB constraint handling |
+
+### New Components Needed
+
+| Component | Purpose | Status |
+|-----------|---------|--------|
+| **VibeVoice Service** | Multi-speaker TTS with voice cloning | 🔴 Not integrated |
+| **SurrealDB** | Open Notebook document storage | 🔴 Not running |
+| **Voice Library** | Store cloned voice embeddings | 🔴 Not built |
+| **Podcast Generator** | Script + audio generation | 🔴 Failing |
+| **Source Processor** | Content extraction pipeline | 🔴 Not integrated |
+
+---
+
+## 📦 PHASE 1: VIBEVOICE TTS SERVICE
+
+### 1.1 Model Specifications
+
+```yaml
+Model: microsoft/VibeVoice-1.5B
+License: MIT (fully open, no access token required)
+Parameters: 1.5 billion
+VRAM Usage: 
+  - Full precision: ~8GB
+  - 4-bit quantization: ~6GB (recommended)
+  - 8-bit quantization: ~7GB
+Capabilities:
+  - Zero-shot voice cloning (10-60 second samples)
+  - Multi-speaker generation (up to 4 speakers)
+  - Long-form audio (up to 90 minutes)
+  - English + Chinese (experimental multilingual)
+Quality: Excellent for cloned voices
+```
+
+### 1.2 Create TTS Service Structure
+
+```bash
+# Directory structure
+python_back_end/
+└── tts_service/
+    ├── __init__.py
+    ├── server.py              # FastAPI TTS service
+    ├── engines/
+    │   ├── __init__.py
+    │   └── vibevoice.py       # VibeVoice implementation
+    ├── models/
+    │   ├── __init__.py
+    │   └── voice.py           # Voice data models
+    └── utils/
+        ├── __init__.py
+        └── audio.py           # Audio processing utilities
+```
+
+### 1.3 VibeVoice Engine Implementation
+
+**File: `python_back_end/tts_service/engines/vibevoice.py`**
+
+```python
+"""
+VibeVoice Engine - Zero-shot voice cloning TTS
+"""
+import torch
+import numpy as np
+import soundfile as sf
+from pathlib import Path
+from typing import Optional, List, Dict, Any
+import logging
+from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
+
+@dataclass
+class VoiceProfile:
+    """Stores voice embedding and metadata"""
+    voice_id: str
+    name: str
+    embedding_path: Path
+    sample_rate: int = 24000
+    description: str = ""
+    created_at: str = ""
+
+class VibeVoiceEngine:
+    """
+    VibeVoice TTS Engine with voice cloning support
+    
+    Hardware requirements:
+    - NVIDIA GPU with 7-8GB VRAM
+    - Uses 4-bit quantization by default
+    """
+    
+    def __init__(
+        self,
+        model_id: str = "microsoft/VibeVoice-1.5B",
+        device: str = "auto",
+        quantize_4bit: bool = True,
+        voices_dir: Path = Path("/app/voices"),
+        cache_dir: Path = Path("/app/models")
+    ):
+        self.model_id = model_id
+        self.quantize_4bit = quantize_4bit
+        self.voices_dir = voices_dir
+        self.cache_dir = cache_dir
+        
+        # Determine device
+        if device == "auto":
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        else:
+            self.device = device
+            
+        # Determine dtype
+        if self.device == "cuda" and torch.cuda.is_bf16_supported():
+            self.dtype = torch.bfloat16
+        else:
+            self.dtype = torch.float32
+            
+        self.model = None
+        self.processor = None
+        self.is_loaded = False
+        
+        # Create directories
+        self.voices_dir.mkdir(parents=True, exist_ok=True)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        
+        logger.info(f"VibeVoice Engine initialized: device={self.device}, dtype={self.dtype}")
+    
+    async def load_model(self) -> bool:
+        """Load VibeVoice model with optional quantization"""
+        try:
+            logger.info(f"Loading VibeVoice model: {self.model_id}")
+            
+            from transformers import (
+                VibeVoiceForConditionalGenerationInference,
+                VibeVoiceProcessor,
+                BitsAndBytesConfig
+            )
+            
+            # Configure quantization for VRAM optimization
+            if self.quantize_4bit and self.device == "cuda":
+                quantization_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_compute_dtype=self.dtype,
+                    bnb_4bit_use_double_quant=True,
+                    bnb_4bit_quant_type="nf4"
+                )
+                logger.info("Using 4-bit quantization for VRAM optimization")
+            else:
+                quantization_config = None
+            
+            # Load model
+            self.model = VibeVoiceForConditionalGenerationInference.from_pretrained(
+                self.model_id,
+                torch_dtype=self.dtype,
+                device_map=self.device,
+                quantization_config=quantization_config,
+                cache_dir=str(self.cache_dir)
+            )
+            
+            # Load processor
+            self.processor = VibeVoiceProcessor.from_pretrained(
+                self.model_id,
+                cache_dir=str(self.cache_dir)
+            )
+            
+            self.is_loaded = True
+            logger.info("✅ VibeVoice model loaded successfully")
+            return True
+            
+        except ImportError as e:
+            logger.error(f"❌ Missing transformers VibeVoice support: {e}")
+            logger.error("Install: pip install git+https://github.com/huggingface/transformers.git@vibevoice-support")
+            return False
+        except Exception as e:
+            logger.error(f"❌ Failed to load VibeVoice model: {e}")
+            return False
+    
+    async def clone_voice(
+        self,
+        audio_data: bytes,
+        voice_name: str,
+        description: str = ""
+    ) -> Dict[str, Any]:
+        """
+        Clone a voice from audio sample
+        
+        Requirements:
+        - Audio: 10-60 seconds of clear speech
+        - Format: WAV, MP3, M4A (auto-converted to mono 24kHz)
+        - Quality: Minimal background noise
+        """
+        if not self.is_loaded:
+            raise RuntimeError("Model not loaded. Call load_model() first.")
+        
+        try:
+            import tempfile
+            import librosa
+            
+            # Save audio to temp file
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                f.write(audio_data)
+                temp_path = f.name
+            
+            # Load and preprocess audio
+            audio, sr = librosa.load(temp_path, sr=24000, mono=True)
+            
+            # Validate duration
+            duration = len(audio) / sr
+            if duration < 10:
+                return {"error": "Audio too short. Need at least 10 seconds."}
+            if duration > 60:
+                logger.warning(f"Audio longer than 60s ({duration:.1f}s), truncating...")
+                audio = audio[:60 * sr]
+            
+            # Generate voice embedding
+            inputs = self.processor(
+                audio=audio,
+                sampling_rate=24000,
+                return_tensors="pt"
+            ).to(self.device)
+            
+            with torch.no_grad():
+                voice_embedding = self.model.encode_voice(inputs)
+            
+            # Save embedding
+            voice_id = voice_name.lower().replace(" ", "_")
+            embedding_path = self.voices_dir / f"{voice_id}.pt"
+            torch.save(voice_embedding.cpu(), embedding_path)
+            
+            # Create voice profile
+            profile = VoiceProfile(
+                voice_id=voice_id,
+                name=voice_name,
+                embedding_path=embedding_path,
+                description=description,
+                created_at=str(torch.datetime.now())
+            )
+            
+            # Save profile metadata
+            metadata_path = self.voices_dir / f"{voice_id}.json"
+            import json
+            with open(metadata_path, "w") as f:
+                json.dump({
+                    "voice_id": profile.voice_id,
+                    "name": profile.name,
+                    "description": profile.description,
+                    "sample_rate": profile.sample_rate,
+                    "created_at": profile.created_at,
+                    "duration_seconds": duration
+                }, f, indent=2)
+            
+            # Cleanup
+            Path(temp_path).unlink()
+            
+            logger.info(f"✅ Voice cloned: {voice_name} ({duration:.1f}s sample)")
+            
+            return {
+                "voice_id": voice_id,
+                "name": voice_name,
+                "duration_seconds": duration,
+                "quality_score": self._estimate_quality(audio),
+                "embedding_path": str(embedding_path)
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Voice cloning failed: {e}")
+            return {"error": str(e)}
+    
+    def _estimate_quality(self, audio: np.ndarray) -> float:
+        """Estimate audio quality score 0-1"""
+        # Simple SNR-based quality estimate
+        signal_power = np.mean(audio ** 2)
+        noise_estimate = np.var(audio[audio < np.percentile(audio, 10)])
+        snr = 10 * np.log10(signal_power / (noise_estimate + 1e-10))
+        return min(1.0, max(0.0, snr / 40))  # Normalize to 0-1
+    
+    async def generate_speech(
+        self,
+        text: str,
+        voice_id: str,
+        output_path: Optional[Path] = None,
+        cfg_scale: float = 1.3,
+        inference_steps: int = 10
+    ) -> Path:
+        """Generate speech from text using cloned voice"""
+        if not self.is_loaded:
+            raise RuntimeError("Model not loaded. Call load_model() first.")
+        
+        # Load voice embedding
+        embedding_path = self.voices_dir / f"{voice_id}.pt"
+        if not embedding_path.exists():
+            raise FileNotFoundError(f"Voice not found: {voice_id}")
+        
+        voice_embedding = torch.load(embedding_path).to(self.device)
+        
+        # Generate speech
+        inputs = self.processor(
+            text=text,
+            return_tensors="pt"
+        ).to(self.device)
+        
+        with torch.no_grad():
+            audio = self.model.generate(
+                **inputs,
+                voice_embedding=voice_embedding,
+                cfg_scale=cfg_scale,
+                num_inference_steps=inference_steps
+            )
+        
+        # Convert to numpy
+        audio_np = audio.cpu().numpy().squeeze()
+        
+        # Save output
+        if output_path is None:
+            import uuid
+            output_path = Path(f"/tmp/tts_{uuid.uuid4()}.wav")
+        
+        sf.write(str(output_path), audio_np, 24000)
+        
+        return output_path
+    
+    async def generate_podcast(
+        self,
+        script: List[Dict[str, str]],
+        voice_mapping: Dict[str, str],
+        output_path: Path,
+        crossfade_ms: int = 100
+    ) -> Dict[str, Any]:
+        """
+        Generate multi-speaker podcast from script
+        
+        Args:
+            script: List of {"speaker": "1", "text": "Hello..."} 
+            voice_mapping: {"1": "voice_id_1", "2": "voice_id_2"}
+            output_path: Output audio file path
+            crossfade_ms: Crossfade between speakers
+        """
+        if not self.is_loaded:
+            raise RuntimeError("Model not loaded. Call load_model() first.")
+        
+        audio_segments = []
+        total_duration = 0
+        
+        for i, turn in enumerate(script):
+            speaker = turn["speaker"]
+            text = turn["text"]
+            voice_id = voice_mapping.get(speaker)
+            
+            if not voice_id:
+                logger.warning(f"No voice mapped for speaker {speaker}, skipping")
+                continue
+            
+            logger.info(f"Generating turn {i+1}/{len(script)}: Speaker {speaker}")
+            
+            # Generate speech for this turn
+            segment_path = await self.generate_speech(
+                text=text,
+                voice_id=voice_id
+            )
+            
+            # Load generated audio
+            audio, sr = sf.read(str(segment_path))
+            audio_segments.append(audio)
+            total_duration += len(audio) / sr
+            
+            # Cleanup temp file
+            segment_path.unlink()
+        
+        # Concatenate with crossfade
+        final_audio = self._concatenate_with_crossfade(
+            audio_segments,
+            crossfade_samples=int(24000 * crossfade_ms / 1000)
+        )
+        
+        # Save final podcast
+        sf.write(str(output_path), final_audio, 24000)
+        
+        return {
+            "output_path": str(output_path),
+            "duration_seconds": total_duration,
+            "num_turns": len(script),
+            "speakers": list(voice_mapping.keys())
+        }
+    
+    def _concatenate_with_crossfade(
+        self,
+        segments: List[np.ndarray],
+        crossfade_samples: int
+    ) -> np.ndarray:
+        """Concatenate audio segments with crossfade"""
+        if not segments:
+            return np.array([])
+        
+        if len(segments) == 1:
+            return segments[0]
+        
+        result = segments[0]
+        
+        for segment in segments[1:]:
+            if crossfade_samples > 0 and len(result) > crossfade_samples:
+                # Apply crossfade
+                fade_out = np.linspace(1, 0, crossfade_samples)
+                fade_in = np.linspace(0, 1, crossfade_samples)
+                
+                result[-crossfade_samples:] *= fade_out
+                segment[:crossfade_samples] *= fade_in
+                
+                # Overlap
+                result[-crossfade_samples:] += segment[:crossfade_samples]
+                result = np.concatenate([result, segment[crossfade_samples:]])
+            else:
+                result = np.concatenate([result, segment])
+        
+        return result
+    
+    async def list_voices(self) -> List[Dict[str, Any]]:
+        """List all available cloned voices"""
+        voices = []
+        
+        for metadata_file in self.voices_dir.glob("*.json"):
+            import json
+            with open(metadata_file) as f:
+                voices.append(json.load(f))
+        
+        return voices
+    
+    async def delete_voice(self, voice_id: str) -> bool:
+        """Delete a cloned voice"""
+        embedding_path = self.voices_dir / f"{voice_id}.pt"
+        metadata_path = self.voices_dir / f"{voice_id}.json"
+        
+        deleted = False
+        if embedding_path.exists():
+            embedding_path.unlink()
+            deleted = True
+        if metadata_path.exists():
+            metadata_path.unlink()
+            deleted = True
+        
+        return deleted
+    
+    def unload(self):
+        """Unload model to free VRAM"""
+        if self.model is not None:
+            del self.model
+            self.model = None
+        if self.processor is not None:
+            del self.processor
+            self.processor = None
+        
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        self.is_loaded = False
+        logger.info("VibeVoice model unloaded")
+```
+
+### 1.4 TTS Service API
+
+**File: `python_back_end/tts_service/server.py`**
+
+```python
+"""
+VibeVoice TTS Service - Standalone FastAPI service
+"""
+from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+from typing import List, Dict, Optional
+from pathlib import Path
+import logging
+import os
+
+from .engines.vibevoice import VibeVoiceEngine
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+app = FastAPI(
+    title="HARVIS TTS Service",
+    description="VibeVoice-powered voice cloning and podcast generation",
+    version="1.0.0"
+)
+
+# Configuration
+VOICES_DIR = Path(os.getenv("VOICES_DIR", "/app/voices"))
+MODELS_DIR = Path(os.getenv("MODELS_DIR", "/app/models"))
+OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "/app/output"))
+QUANTIZE_4BIT = os.getenv("QUANTIZE_4BIT", "true").lower() == "true"
+
+# Create directories
+for d in [VOICES_DIR, MODELS_DIR, OUTPUT_DIR]:
+    d.mkdir(parents=True, exist_ok=True)
+
+# Initialize engine (lazy loading)
+engine: Optional[VibeVoiceEngine] = None
+
+# ─── Models ───────────────────────────────────────────────────────────────────
+
+class CloneVoiceRequest(BaseModel):
+    voice_name: str
+    description: str = ""
+
+class GenerateSpeechRequest(BaseModel):
+    text: str
+    voice_id: str
+    cfg_scale: float = 1.3
+    inference_steps: int = 10
+
+class ScriptTurn(BaseModel):
+    speaker: str
+    text: str
+
+class GeneratePodcastRequest(BaseModel):
+    script: List[ScriptTurn]
+    voice_mapping: Dict[str, str]  # {"speaker_id": "voice_id"}
+    crossfade_ms: int = 100
+    output_filename: Optional[str] = None
+
+# ─── Startup/Shutdown ─────────────────────────────────────────────────────────
+
+@app.on_event("startup")
+async def startup():
+    global engine
+    engine = VibeVoiceEngine(
+        quantize_4bit=QUANTIZE_4BIT,
+        voices_dir=VOICES_DIR,
+        cache_dir=MODELS_DIR
+    )
+    await engine.load_model()
+
+@app.on_event("shutdown")
+async def shutdown():
+    global engine
+    if engine:
+        engine.unload()
+
+# ─── Health Check ─────────────────────────────────────────────────────────────
+
+@app.get("/health")
+async def health():
+    return {
+        "status": "healthy",
+        "model_loaded": engine.is_loaded if engine else False,
+        "device": engine.device if engine else None,
+        "quantized": QUANTIZE_4BIT
+    }
+
+# ─── Voice Management ─────────────────────────────────────────────────────────
+
+@app.post("/voices/clone")
+async def clone_voice(
+    file: UploadFile = File(...),
+    voice_name: str = "",
+    description: str = ""
+):
+    """Clone a voice from audio sample (10-60 seconds)"""
+    if not engine or not engine.is_loaded:
+        raise HTTPException(503, "TTS engine not ready")
+    
+    if not voice_name:
+        voice_name = file.filename.rsplit(".", 1)[0]
+    
+    audio_data = await file.read()
+    result = await engine.clone_voice(audio_data, voice_name, description)
+    
+    if "error" in result:
+        raise HTTPException(400, result["error"])
+    
+    return result
+
+@app.get("/voices")
+async def list_voices():
+    """List all cloned voices"""
+    if not engine:
+        raise HTTPException(503, "TTS engine not ready")
+    return await engine.list_voices()
+
+@app.get("/voices/{voice_id}")
+async def get_voice(voice_id: str):
+    """Get voice details"""
+    if not engine:
+        raise HTTPException(503, "TTS engine not ready")
+    
+    voices = await engine.list_voices()
+    for v in voices:
+        if v["voice_id"] == voice_id:
+            return v
+    
+    raise HTTPException(404, f"Voice not found: {voice_id}")
+
+@app.delete("/voices/{voice_id}")
+async def delete_voice(voice_id: str):
+    """Delete a cloned voice"""
+    if not engine:
+        raise HTTPException(503, "TTS engine not ready")
+    
+    if await engine.delete_voice(voice_id):
+        return {"deleted": True, "voice_id": voice_id}
+    raise HTTPException(404, f"Voice not found: {voice_id}")
+
+# ─── Speech Generation ────────────────────────────────────────────────────────
+
+@app.post("/generate/speech")
+async def generate_speech(request: GenerateSpeechRequest):
+    """Generate speech from text using cloned voice"""
+    if not engine or not engine.is_loaded:
+        raise HTTPException(503, "TTS engine not ready")
+    
+    try:
+        import uuid
+        output_path = OUTPUT_DIR / f"speech_{uuid.uuid4()}.wav"
+        
+        await engine.generate_speech(
+            text=request.text,
+            voice_id=request.voice_id,
+            output_path=output_path,
+            cfg_scale=request.cfg_scale,
+            inference_steps=request.inference_steps
+        )
+        
+        return {
+            "audio_url": f"/audio/{output_path.name}",
+            "voice_id": request.voice_id
+        }
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except Exception as e:
+        logger.error(f"Speech generation failed: {e}")
+        raise HTTPException(500, str(e))
+
+# ─── Podcast Generation ───────────────────────────────────────────────────────
+
+@app.post("/generate/podcast")
+async def generate_podcast(request: GeneratePodcastRequest):
+    """Generate multi-speaker podcast from script"""
+    if not engine or not engine.is_loaded:
+        raise HTTPException(503, "TTS engine not ready")
+    
+    try:
+        import uuid
+        filename = request.output_filename or f"podcast_{uuid.uuid4()}.wav"
+        output_path = OUTPUT_DIR / filename
+        
+        # Convert script to dict format
+        script = [{"speaker": t.speaker, "text": t.text} for t in request.script]
+        
+        result = await engine.generate_podcast(
+            script=script,
+            voice_mapping=request.voice_mapping,
+            output_path=output_path,
+            crossfade_ms=request.crossfade_ms
+        )
+        
+        result["audio_url"] = f"/audio/{output_path.name}"
+        return result
+        
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except Exception as e:
+        logger.error(f"Podcast generation failed: {e}")
+        raise HTTPException(500, str(e))
+
+# ─── Audio Serving ────────────────────────────────────────────────────────────
+
+@app.get("/audio/{filename}")
+async def get_audio(filename: str):
+    """Download generated audio"""
+    audio_path = OUTPUT_DIR / filename
+    if not audio_path.exists():
+        raise HTTPException(404, "Audio not found")
+    return FileResponse(audio_path, media_type="audio/wav")
+```
+
+### 1.5 Docker Configuration
+
+**File: `docker/tts-service/Dockerfile`**
+
+```dockerfile
+FROM nvidia/cuda:12.1-runtime-ubuntu22.04
+
+# Install Python and dependencies
+RUN apt-get update && apt-get install -y \
+    python3.11 \
+    python3-pip \
+    ffmpeg \
+    libsndfile1 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install Python packages
+COPY requirements-tts.txt .
+RUN pip3 install --no-cache-dir -r requirements-tts.txt
+
+# Copy TTS service
+COPY python_back_end/tts_service/ ./tts_service/
+
+# Create directories
+RUN mkdir -p /app/voices /app/models /app/output
+
+# Environment
+ENV VOICES_DIR=/app/voices
+ENV MODELS_DIR=/app/models
+ENV OUTPUT_DIR=/app/output
+ENV QUANTIZE_4BIT=true
+
+EXPOSE 8001
+
+CMD ["uvicorn", "tts_service.server:app", "--host", "0.0.0.0", "--port", "8001"]
+```
+
+**File: `docker/tts-service/requirements-tts.txt`**
+
+```txt
+# Core
+fastapi>=0.109.0
+uvicorn>=0.27.0
+python-multipart>=0.0.9
+
+# VibeVoice (install from PR branch with VibeVoice support)
+# pip install git+https://github.com/huggingface/transformers.git@vibevoice-support
+transformers>=4.37.0
+accelerate>=0.25.0
+bitsandbytes>=0.42.0  # For 4-bit quantization
+
+# Audio processing
+torch>=2.1.0
+torchaudio>=2.1.0
+soundfile>=0.12.1
+librosa>=0.10.1
+numpy>=1.24.0
+
+# Utilities
+pydantic>=2.0.0
+```
+
+**Add to `docker-compose.yaml`:**
+
+```yaml
+  tts-service:
+    build:
+      context: .
+      dockerfile: docker/tts-service/Dockerfile
+    container_name: harvis-tts
+    restart: unless-stopped
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - QUANTIZE_4BIT=true
+    volumes:
+      - tts_voices:/app/voices
+      - tts_models:/app/models
+      - tts_output:/app/output
+    networks:
+      - ollama-n8n-network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  tts_voices:
+  tts_models:
+  tts_output:
+```
+
+---
+
+## 📦 PHASE 2: OPEN NOTEBOOK SOURCE MANAGEMENT
+
+### 2.1 SurrealDB Setup
+
+**Add to `docker-compose.yaml`:**
+
+```yaml
+  surrealdb:
+    image: surrealdb/surrealdb:latest
+    container_name: harvis-surrealdb
+    restart: unless-stopped
+    ports:
+      - "8080:8000"  # Avoid conflict with backend
+    volumes:
+      - surreal_data:/mydata
+    command: start --log debug --user root --pass root file:/mydata/database.db
+    networks:
+      - ollama-n8n-network
+
+volumes:
+  surreal_data:
+```
+
+### 2.2 Source Processing Pipeline
+
+**File: `python_back_end/notebook/source_processor.py`**
+
+```python
+"""
+Source Processor - Extract content from various formats
+"""
+from pathlib import Path
+from typing import Dict, Any, Optional, List
+import logging
+import httpx
+from dataclasses import dataclass
+from enum import Enum
+
+logger = logging.getLogger(__name__)
+
+class SourceType(Enum):
+    PDF = "pdf"
+    URL = "url"
+    YOUTUBE = "youtube"
+    TEXT = "text"
+    AUDIO = "audio"
+    UNKNOWN = "unknown"
+
+@dataclass
+class ProcessedSource:
+    source_type: SourceType
+    title: str
+    content: str
+    metadata: Dict[str, Any]
+    chunks: List[str]  # For vector search
+
+class SourceProcessor:
+    """Process various source types into text content"""
+    
+    def __init__(self, chunk_size: int = 1000, chunk_overlap: int = 200):
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
+    
+    async def process(self, source: str, source_type: Optional[SourceType] = None) -> ProcessedSource:
+        """Process a source and extract content"""
+        
+        # Auto-detect source type
+        if source_type is None:
+            source_type = self._detect_type(source)
+        
+        processors = {
+            SourceType.PDF: self._process_pdf,
+            SourceType.URL: self._process_url,
+            SourceType.YOUTUBE: self._process_youtube,
+            SourceType.TEXT: self._process_text,
+            SourceType.AUDIO: self._process_audio,
+        }
+        
+        processor = processors.get(source_type, self._process_text)
+        return await processor(source)
+    
+    def _detect_type(self, source: str) -> SourceType:
+        """Auto-detect source type"""
+        source_lower = source.lower()
+        
+        if source_lower.endswith(".pdf"):
+            return SourceType.PDF
+        elif "youtube.com" in source_lower or "youtu.be" in source_lower:
+            return SourceType.YOUTUBE
+        elif source_lower.startswith("http"):
+            return SourceType.URL
+        elif source_lower.endswith((".mp3", ".wav", ".m4a", ".ogg")):
+            return SourceType.AUDIO
+        else:
+            return SourceType.TEXT
+    
+    async def _process_pdf(self, source: str) -> ProcessedSource:
+        """Extract text from PDF"""
+        try:
+            import fitz  # PyMuPDF
+            
+            doc = fitz.open(source)
+            text = ""
+            for page in doc:
+                text += page.get_text()
+            
+            title = doc.metadata.get("title", Path(source).stem)
+            
+            return ProcessedSource(
+                source_type=SourceType.PDF,
+                title=title,
+                content=text,
+                metadata={"pages": len(doc), "path": source},
+                chunks=self._chunk_text(text)
+            )
+        except Exception as e:
+            logger.error(f"PDF processing failed: {e}")
+            raise
+    
+    async def _process_url(self, source: str) -> ProcessedSource:
+        """Extract content from web URL"""
+        try:
+            from bs4 import BeautifulSoup
+            
+            async with httpx.AsyncClient() as client:
+                response = await client.get(source, follow_redirects=True)
+                response.raise_for_status()
+            
+            soup = BeautifulSoup(response.text, "html.parser")
+            
+            # Remove scripts and styles
+            for script in soup(["script", "style", "nav", "footer"]):
+                script.decompose()
+            
+            title = soup.title.string if soup.title else source
+            text = soup.get_text(separator="\n", strip=True)
+            
+            return ProcessedSource(
+                source_type=SourceType.URL,
+                title=title,
+                content=text,
+                metadata={"url": source},
+                chunks=self._chunk_text(text)
+            )
+        except Exception as e:
+            logger.error(f"URL processing failed: {e}")
+            raise
+    
+    async def _process_youtube(self, source: str) -> ProcessedSource:
+        """Extract transcript from YouTube video"""
+        try:
+            from youtube_transcript_api import YouTubeTranscriptApi
+            import re
+            
+            # Extract video ID
+            video_id = None
+            patterns = [
+                r'(?:v=|\/)([0-9A-Za-z_-]{11}).*',
+                r'(?:youtu\.be\/)([0-9A-Za-z_-]{11})'
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, source)
+                if match:
+                    video_id = match.group(1)
+                    break
+            
+            if not video_id:
+                raise ValueError("Could not extract YouTube video ID")
+            
+            # Get transcript
+            transcript = YouTubeTranscriptApi.get_transcript(video_id)
+            text = " ".join([t["text"] for t in transcript])
+            
+            return ProcessedSource(
+                source_type=SourceType.YOUTUBE,
+                title=f"YouTube: {video_id}",
+                content=text,
+                metadata={"video_id": video_id, "url": source},
+                chunks=self._chunk_text(text)
+            )
+        except Exception as e:
+            logger.error(f"YouTube processing failed: {e}")
+            raise
+    
+    async def _process_audio(self, source: str) -> ProcessedSource:
+        """Transcribe audio file"""
+        try:
+            # Use Whisper for transcription
+            import whisper
+            
+            model = whisper.load_model("base")
+            result = model.transcribe(source)
+            text = result["text"]
+            
+            return ProcessedSource(
+                source_type=SourceType.AUDIO,
+                title=Path(source).stem,
+                content=text,
+                metadata={"path": source, "duration": result.get("duration")},
+                chunks=self._chunk_text(text)
+            )
+        except Exception as e:
+            logger.error(f"Audio processing failed: {e}")
+            raise
+    
+    async def _process_text(self, source: str) -> ProcessedSource:
+        """Process plain text or file"""
+        if Path(source).exists():
+            text = Path(source).read_text()
+            title = Path(source).stem
+        else:
+            text = source
+            title = text[:50] + "..." if len(text) > 50 else text
+        
+        return ProcessedSource(
+            source_type=SourceType.TEXT,
+            title=title,
+            content=text,
+            metadata={},
+            chunks=self._chunk_text(text)
+        )
+    
+    def _chunk_text(self, text: str) -> List[str]:
+        """Split text into overlapping chunks for vector search"""
+        chunks = []
+        start = 0
+        
+        while start < len(text):
+            end = start + self.chunk_size
+            chunk = text[start:end]
+            
+            # Try to end at sentence boundary
+            if end < len(text):
+                last_period = chunk.rfind(".")
+                if last_period > self.chunk_size // 2:
+                    chunk = chunk[:last_period + 1]
+                    end = start + last_period + 1
+            
+            chunks.append(chunk.strip())
+            start = end - self.chunk_overlap
+        
+        return chunks
+```
+
+### 2.3 Script Generator
+
+**File: `python_back_end/notebook/script_generator.py`**
+
+```python
+"""
+Podcast Script Generator - Transform sources into conversational scripts
+"""
+from typing import List, Dict, Any, Optional
+import logging
+from dataclasses import dataclass
+import json
+
+logger = logging.getLogger(__name__)
+
+@dataclass
+class PodcastConfig:
+    num_speakers: int = 2
+    style: str = "conversational"  # conversational, interview, educational
+    duration_minutes: int = 15
+    include_citations: bool = True
+    language: str = "english"
+
+class ScriptGenerator:
+    """Generate podcast scripts from source content using LLM"""
+    
+    def __init__(self, llm_client, model: str = "mistral"):
+        self.llm = llm_client
+        self.model = model
+    
+    async def generate_script(
+        self,
+        sources: List[Dict[str, str]],  # [{"title": ..., "content": ...}]
+        config: PodcastConfig
+    ) -> List[Dict[str, str]]:
+        """Generate podcast script from sources"""
+        
+        # Build context from sources
+        source_context = self._build_source_context(sources)
+        
+        # Generate script with LLM
+        prompt = self._build_prompt(source_context, config)
+        
+        response = await self.llm.generate(
+            model=self.model,
+            prompt=prompt,
+            system=self._get_system_prompt(config)
+        )
+        
+        # Parse script
+        script = self._parse_script(response, config.num_speakers)
+        
+        return script
+    
+    def _build_source_context(self, sources: List[Dict[str, str]]) -> str:
+        """Combine sources into context string"""
+        context_parts = []
+        
+        for i, source in enumerate(sources, 1):
+            context_parts.append(f"## Source {i}: {source['title']}\n{source['content'][:5000]}")
+        
+        return "\n\n---\n\n".join(context_parts)
+    
+    def _get_system_prompt(self, config: PodcastConfig) -> str:
+        """Get system prompt for script generation"""
+        
+        style_guides = {
+            "conversational": """
+                Create a natural, engaging conversation between hosts.
+                Include reactions, questions, and follow-ups.
+                Make it sound like two friends discussing interesting topics.
+            """,
+            "interview": """
+                Create an interview format with one host asking questions.
+                The expert provides detailed, insightful answers.
+                Include follow-up questions that probe deeper.
+            """,
+            "educational": """
+                Create an educational podcast that teaches the topic clearly.
+                Break down complex concepts into understandable parts.
+                Use examples and analogies to illustrate points.
+            """
+        }
+        
+        return f"""You are a professional podcast script writer.
+
+{style_guides.get(config.style, style_guides['conversational'])}
+
+Guidelines:
+- Create engaging, natural dialogue
+- Include speaker labels (Speaker 1, Speaker 2, etc.)
+- Target approximately {config.duration_minutes} minutes of content
+- Each speaker turn should be 20-50 words
+- Include natural transitions and reactions
+- {"Reference sources with [Source N] citations" if config.include_citations else ""}
+- Language: {config.language}
+
+Output format (JSON):
+[
+    {{"speaker": "1", "text": "..."}},
+    {{"speaker": "2", "text": "..."}},
+    ...
+]
+"""
+    
+    def _build_prompt(self, source_context: str, config: PodcastConfig) -> str:
+        """Build the generation prompt"""
+        return f"""Based on the following source materials, create a {config.style} podcast script with {config.num_speakers} speakers.
+
+SOURCE MATERIALS:
+{source_context}
+
+Generate the complete podcast script as JSON array with speaker turns.
+Remember to make it engaging and approximately {config.duration_minutes} minutes when spoken."""
+    
+    def _parse_script(self, response: str, num_speakers: int) -> List[Dict[str, str]]:
+        """Parse LLM response into script format"""
+        try:
+            # Try to extract JSON from response
+            import re
+            
+            # Find JSON array in response
+            json_match = re.search(r'\[[\s\S]*\]', response)
+            if json_match:
+                script = json.loads(json_match.group())
+                return script
+            
+            # Fallback: Parse line by line
+            script = []
+            current_speaker = "1"
+            
+            for line in response.split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # Check for speaker label
+                speaker_match = re.match(r'^(?:Speaker\s*)?(\d+)[:\-]?\s*(.+)$', line, re.IGNORECASE)
+                if speaker_match:
+                    speaker = speaker_match.group(1)
+                    text = speaker_match.group(2).strip()
+                    if text:
+                        script.append({"speaker": speaker, "text": text})
+                elif line:
+                    # Alternate speakers
+                    script.append({"speaker": current_speaker, "text": line})
+                    current_speaker = "2" if current_speaker == "1" else "1"
+            
+            return script
+            
+        except Exception as e:
+            logger.error(f"Script parsing failed: {e}")
+            # Return minimal fallback script
+            return [
+                {"speaker": "1", "text": "Welcome to the podcast."},
+                {"speaker": "2", "text": "Thanks for having me."}
+            ]
+```
+
+---
+
+## 📦 PHASE 3: INTEGRATION - PODCAST API ROUTES
+
+### 3.1 Main Backend Integration
+
+**File: `python_back_end/routes/podcast.py`**
+
+```python
+"""
+Podcast Generation API Routes
+"""
+from fastapi import APIRouter, HTTPException, UploadFile, File, Depends
+from pydantic import BaseModel
+from typing import List, Dict, Optional
+import httpx
+import logging
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/podcast", tags=["podcast"])
+
+# TTS Service URL (internal Docker network)
+TTS_SERVICE_URL = "http://harvis-tts:8001"
+
+# ─── Models ───────────────────────────────────────────────────────────────────
+
+class VoiceCloneRequest(BaseModel):
+    voice_name: str
+    description: str = ""
+
+class PodcastGenerateRequest(BaseModel):
+    sources: List[Dict[str, str]]  # [{"title": ..., "content": ...}]
+    num_speakers: int = 2
+    style: str = "conversational"
+    duration_minutes: int = 15
+    voice_mapping: Dict[str, str]  # {"1": "voice_id", "2": "voice_id"}
+    include_citations: bool = True
+
+class QuickPodcastRequest(BaseModel):
+    """Generate podcast from notebook sources"""
+    notebook_id: str
+    voice_mapping: Dict[str, str]
+    style: str = "conversational"
+    duration_minutes: int = 15
+
+# ─── Voice Management ─────────────────────────────────────────────────────────
+
+@router.post("/voices/clone")
+async def clone_voice(
+    file: UploadFile = File(...),
+    voice_name: str = "",
+    description: str = ""
+):
+    """Clone a voice from audio sample"""
+    try:
+        async with httpx.AsyncClient() as client:
+            files = {"file": (file.filename, await file.read(), file.content_type)}
+            data = {"voice_name": voice_name, "description": description}
+            
+            response = await client.post(
+                f"{TTS_SERVICE_URL}/voices/clone",
+                files=files,
+                data=data,
+                timeout=120.0
+            )
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPError as e:
+        logger.error(f"Voice cloning failed: {e}")
+        raise HTTPException(500, f"Voice cloning failed: {str(e)}")
+
+@router.get("/voices")
+async def list_voices():
+    """List all cloned voices"""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{TTS_SERVICE_URL}/voices")
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPError as e:
+        raise HTTPException(500, f"Failed to fetch voices: {str(e)}")
+
+@router.delete("/voices/{voice_id}")
+async def delete_voice(voice_id: str):
+    """Delete a cloned voice"""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.delete(f"{TTS_SERVICE_URL}/voices/{voice_id}")
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPError as e:
+        raise HTTPException(500, f"Failed to delete voice: {str(e)}")
+
+# ─── Podcast Generation ───────────────────────────────────────────────────────
+
+@router.post("/generate")
+async def generate_podcast(request: PodcastGenerateRequest):
+    """Generate podcast from sources with cloned voices"""
+    from ..notebook.script_generator import ScriptGenerator, PodcastConfig
+    from ..ollama_utils import get_ollama_client
+    
+    try:
+        # 1. Generate script from sources
+        logger.info(f"Generating script for {len(request.sources)} sources")
+        
+        llm = await get_ollama_client()
+        generator = ScriptGenerator(llm)
+        
+        config = PodcastConfig(
+            num_speakers=request.num_speakers,
+            style=request.style,
+            duration_minutes=request.duration_minutes,
+            include_citations=request.include_citations
+        )
+        
+        script = await generator.generate_script(request.sources, config)
+        logger.info(f"Generated script with {len(script)} turns")
+        
+        # 2. Generate audio with TTS service
+        async with httpx.AsyncClient(timeout=600.0) as client:  # 10 min timeout
+            podcast_request = {
+                "script": script,
+                "voice_mapping": request.voice_mapping
+            }
+            
+            response = await client.post(
+                f"{TTS_SERVICE_URL}/generate/podcast",
+                json=podcast_request
+            )
+            response.raise_for_status()
+            result = response.json()
+        
+        return {
+            "script": script,
+            "audio_url": result["audio_url"],
+            "duration_seconds": result["duration_seconds"],
+            "num_turns": result["num_turns"]
+        }
+        
+    except Exception as e:
+        logger.error(f"Podcast generation failed: {e}")
+        raise HTTPException(500, f"Podcast generation failed: {str(e)}")
+
+@router.post("/generate/from-notebook")
+async def generate_podcast_from_notebook(request: QuickPodcastRequest):
+    """Generate podcast from notebook sources"""
+    from ..notebook.source_processor import SourceProcessor
+    # Import notebook service to get sources
+    
+    try:
+        # 1. Fetch sources from notebook
+        # TODO: Implement SurrealDB notebook query
+        
+        # 2. Process sources
+        processor = SourceProcessor()
+        processed_sources = []
+        
+        # For now, placeholder - will integrate with SurrealDB
+        raise HTTPException(501, "Notebook integration pending - use /generate endpoint directly")
+        
+    except Exception as e:
+        logger.error(f"Notebook podcast generation failed: {e}")
+        raise HTTPException(500, str(e))
+
+# ─── Audio Proxy ──────────────────────────────────────────────────────────────
+
+@router.get("/audio/{filename}")
+async def get_podcast_audio(filename: str):
+    """Proxy audio from TTS service"""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{TTS_SERVICE_URL}/audio/{filename}",
+                follow_redirects=True
+            )
+            response.raise_for_status()
+            
+            from fastapi.responses import Response
+            return Response(
+                content=response.content,
+                media_type="audio/wav"
+            )
+    except httpx.HTTPError as e:
+        raise HTTPException(404, "Audio not found")
+```
+
+### 3.2 Register Routes in Main App
+
+**Add to `python_back_end/main.py`:**
+
+```python
+# Import podcast routes
+from routes.podcast import router as podcast_router
+
+# Include podcast router
+app.include_router(podcast_router)
+```
+
+---
+
+## 📦 PHASE 4: FRONTEND COMPONENTS
+
+### 4.1 Voice Library Component
+
+**File: `front_end/jfrontend/components/podcast/VoiceLibrary.tsx`**
+
+```tsx
+'use client';
+
+import { useState, useEffect } from 'react';
+import { Upload, Trash2, Play, Mic } from 'lucide-react';
+
+interface Voice {
+  voice_id: string;
+  name: string;
+  description: string;
+  duration_seconds: number;
+  created_at: string;
+}
+
+export function VoiceLibrary() {
+  const [voices, setVoices] = useState<Voice[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [uploading, setUploading] = useState(false);
+
+  useEffect(() => {
+    fetchVoices();
+  }, []);
+
+  const fetchVoices = async () => {
+    try {
+      const res = await fetch('/api/podcast/voices');
+      const data = await res.json();
+      setVoices(data);
+    } catch (error) {
+      console.error('Failed to fetch voices:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setUploading(true);
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('voice_name', file.name.replace(/\.[^/.]+$/, ''));
+
+    try {
+      const res = await fetch('/api/podcast/voices/clone', {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (res.ok) {
+        fetchVoices();
+      } else {
+        const error = await res.json();
+        alert(error.detail || 'Failed to clone voice');
+      }
+    } catch (error) {
+      console.error('Upload failed:', error);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleDelete = async (voiceId: string) => {
+    if (!confirm('Delete this voice?')) return;
+
+    try {
+      await fetch(`/api/podcast/voices/${voiceId}`, { method: 'DELETE' });
+      fetchVoices();
+    } catch (error) {
+      console.error('Delete failed:', error);
+    }
+  };
+
+  return (
+    <div className="p-6 bg-gray-900 rounded-lg">
+      <div className="flex justify-between items-center mb-6">
+        <h2 className="text-xl font-bold text-white flex items-center gap-2">
+          <Mic className="w-5 h-5" />
+          Voice Library
+        </h2>
+        
+        <label className="cursor-pointer">
+          <input
+            type="file"
+            accept="audio/*"
+            onChange={handleUpload}
+            className="hidden"
+            disabled={uploading}
+          />
+          <span className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-white transition-colors">
+            <Upload className="w-4 h-4" />
+            {uploading ? 'Cloning...' : 'Clone Voice'}
+          </span>
+        </label>
+      </div>
+
+      {loading ? (
+        <div className="text-gray-400">Loading voices...</div>
+      ) : voices.length === 0 ? (
+        <div className="text-center py-12 text-gray-400">
+          <Mic className="w-12 h-12 mx-auto mb-4 opacity-50" />
+          <p>No voices cloned yet.</p>
+          <p className="text-sm mt-2">Upload a 10-60 second audio sample to clone a voice.</p>
+        </div>
+      ) : (
+        <div className="grid gap-4">
+          {voices.map((voice) => (
+            <div
+              key={voice.voice_id}
+              className="flex items-center justify-between p-4 bg-gray-800 rounded-lg"
+            >
+              <div>
+                <h3 className="font-medium text-white">{voice.name}</h3>
+                <p className="text-sm text-gray-400">
+                  {voice.duration_seconds?.toFixed(1)}s sample • {voice.description || 'No description'}
+                </p>
+              </div>
+              
+              <div className="flex gap-2">
+                <button
+                  onClick={() => handleDelete(voice.voice_id)}
+                  className="p-2 text-gray-400 hover:text-red-400 transition-colors"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+### 4.2 Podcast Generator Component
+
+**File: `front_end/jfrontend/components/podcast/PodcastGenerator.tsx`**
+
+```tsx
+'use client';
+
+import { useState, useEffect } from 'react';
+import { Play, Loader2, Radio } from 'lucide-react';
+
+interface Voice {
+  voice_id: string;
+  name: string;
+}
+
+interface PodcastGeneratorProps {
+  sources: Array<{ title: string; content: string }>;
+}
+
+export function PodcastGenerator({ sources }: PodcastGeneratorProps) {
+  const [voices, setVoices] = useState<Voice[]>([]);
+  const [voiceMapping, setVoiceMapping] = useState<Record<string, string>>({});
+  const [numSpeakers, setNumSpeakers] = useState(2);
+  const [style, setStyle] = useState('conversational');
+  const [duration, setDuration] = useState(15);
+  const [generating, setGenerating] = useState(false);
+  const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [script, setScript] = useState<Array<{ speaker: string; text: string }>>([]);
+
+  useEffect(() => {
+    fetchVoices();
+  }, []);
+
+  const fetchVoices = async () => {
+    const res = await fetch('/api/podcast/voices');
+    const data = await res.json();
+    setVoices(data);
+    
+    // Auto-assign first voices
+    const mapping: Record<string, string> = {};
+    for (let i = 1; i <= numSpeakers && i <= data.length; i++) {
+      mapping[String(i)] = data[i - 1]?.voice_id || '';
+    }
+    setVoiceMapping(mapping);
+  };
+
+  const handleGenerate = async () => {
+    if (sources.length === 0) {
+      alert('No sources available');
+      return;
+    }
+
+    const hasAllVoices = Object.values(voiceMapping).every(v => v);
+    if (!hasAllVoices) {
+      alert('Please assign voices to all speakers');
+      return;
+    }
+
+    setGenerating(true);
+    setAudioUrl(null);
+    setScript([]);
+
+    try {
+      const res = await fetch('/api/podcast/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sources,
+          num_speakers: numSpeakers,
+          style,
+          duration_minutes: duration,
+          voice_mapping: voiceMapping,
+          include_citations: true,
+        }),
+      });
+
+      if (!res.ok) {
+        const error = await res.json();
+        throw new Error(error.detail || 'Generation failed');
+      }
+
+      const data = await res.json();
+      setScript(data.script);
+      setAudioUrl(data.audio_url);
+    } catch (error: any) {
+      alert(error.message);
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  return (
+    <div className="p-6 bg-gray-900 rounded-lg">
+      <h2 className="text-xl font-bold text-white flex items-center gap-2 mb-6">
+        <Radio className="w-5 h-5" />
+        Podcast Generator
+      </h2>
+
+      {/* Configuration */}
+      <div className="space-y-4 mb-6">
+        {/* Style */}
+        <div>
+          <label className="block text-sm font-medium text-gray-300 mb-2">
+            Style
+          </label>
+          <select
+            value={style}
+            onChange={(e) => setStyle(e.target.value)}
+            className="w-full p-2 bg-gray-800 border border-gray-700 rounded text-white"
+          >
+            <option value="conversational">Conversational</option>
+            <option value="interview">Interview</option>
+            <option value="educational">Educational</option>
+          </select>
+        </div>
+
+        {/* Duration */}
+        <div>
+          <label className="block text-sm font-medium text-gray-300 mb-2">
+            Duration: {duration} minutes
+          </label>
+          <input
+            type="range"
+            min="5"
+            max="60"
+            value={duration}
+            onChange={(e) => setDuration(parseInt(e.target.value))}
+            className="w-full"
+          />
+        </div>
+
+        {/* Speakers */}
+        <div>
+          <label className="block text-sm font-medium text-gray-300 mb-2">
+            Number of Speakers
+          </label>
+          <select
+            value={numSpeakers}
+            onChange={(e) => setNumSpeakers(parseInt(e.target.value))}
+            className="w-full p-2 bg-gray-800 border border-gray-700 rounded text-white"
+          >
+            {[1, 2, 3, 4].map((n) => (
+              <option key={n} value={n}>{n} Speaker{n > 1 ? 's' : ''}</option>
+            ))}
+          </select>
+        </div>
+
+        {/* Voice Mapping */}
+        <div>
+          <label className="block text-sm font-medium text-gray-300 mb-2">
+            Voice Assignment
+          </label>
+          <div className="space-y-2">
+            {Array.from({ length: numSpeakers }, (_, i) => i + 1).map((speaker) => (
+              <div key={speaker} className="flex items-center gap-2">
+                <span className="text-gray-400 w-24">Speaker {speaker}:</span>
+                <select
+                  value={voiceMapping[String(speaker)] || ''}
+                  onChange={(e) => setVoiceMapping(prev => ({
+                    ...prev,
+                    [String(speaker)]: e.target.value
+                  }))}
+                  className="flex-1 p-2 bg-gray-800 border border-gray-700 rounded text-white"
+                >
+                  <option value="">Select voice...</option>
+                  {voices.map((v) => (
+                    <option key={v.voice_id} value={v.voice_id}>{v.name}</option>
+                  ))}
+                </select>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Generate Button */}
+      <button
+        onClick={handleGenerate}
+        disabled={generating || voices.length === 0}
+        className="w-full py-3 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 rounded-lg text-white font-medium flex items-center justify-center gap-2 transition-colors"
+      >
+        {generating ? (
+          <>
+            <Loader2 className="w-5 h-5 animate-spin" />
+            Generating Podcast...
+          </>
+        ) : (
+          <>
+            <Play className="w-5 h-5" />
+            Generate Podcast
+          </>
+        )}
+      </button>
+
+      {/* Audio Player */}
+      {audioUrl && (
+        <div className="mt-6 p-4 bg-gray-800 rounded-lg">
+          <h3 className="text-white font-medium mb-3">🎙️ Your Podcast</h3>
+          <audio controls className="w-full" src={audioUrl} />
+        </div>
+      )}
+
+      {/* Script Preview */}
+      {script.length > 0 && (
+        <div className="mt-6">
+          <h3 className="text-white font-medium mb-3">📜 Script</h3>
+          <div className="max-h-64 overflow-y-auto space-y-2">
+            {script.map((turn, i) => (
+              <div key={i} className="p-2 bg-gray-800 rounded">
+                <span className="text-blue-400 font-medium">Speaker {turn.speaker}:</span>
+                <span className="text-gray-300 ml-2">{turn.text}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+---
+
+## 📦 PHASE 5: DEPLOYMENT CHECKLIST
+
+### 5.1 Docker Commands
+
+```bash
+# Build TTS service
+docker-compose build tts-service
+
+# Start all services
+docker-compose up -d
+
+# Check TTS service health
+curl http://localhost:8001/health
+
+# View TTS service logs
+docker logs harvis-tts -f
+
+# Check GPU in TTS container
+docker exec harvis-tts nvidia-smi
+
+# Restart TTS service
+docker-compose restart tts-service
+```
+
+### 5.2 Environment Variables
+
+**Add to `.env`:**
+
+```env
+# TTS Service
+TTS_SERVICE_URL=http://harvis-tts:8001
+QUANTIZE_4BIT=true
+
+# SurrealDB (for Open Notebook)
+SURREAL_URL=ws://harvis-surrealdb:8000/rpc
+SURREAL_USER=root
+SURREAL_PASSWORD=root
+SURREAL_NAMESPACE=harvis_notebook
+SURREAL_DATABASE=production
+```
+
+### 5.3 Nginx Configuration Update
+
+**Add to `nginx.conf`:**
+
+```nginx
+# TTS Service proxy
+location /api/podcast/ {
+    proxy_pass http://harvis-tts:8001/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    
+    # Extended timeouts for podcast generation
+    proxy_read_timeout 600;
+    proxy_connect_timeout 60;
+    proxy_send_timeout 600;
+    
+    # Large file uploads for voice samples
+    client_max_body_size 100M;
+}
+
+# Audio file serving
+location /api/podcast/audio/ {
+    proxy_pass http://harvis-tts:8001/audio/;
+    proxy_set_header Host $host;
+}
+```
+
+---
+
+## 🐛 TROUBLESHOOTING
+
+### Common Issues
+
+| Issue | Solution |
+|-------|----------|
+| TTS service won't start | Check GPU: `nvidia-smi` |
+| Out of VRAM | Enable 4-bit: `QUANTIZE_4BIT=true` |
+| Audio too short for cloning | Need 10+ seconds |
+| Poor voice quality | Increase `inference_steps` to 20-50 |
+| Model not downloading | Check HuggingFace cache permissions |
+| Podcast generation timeout | Increase nginx timeout to 600s |
+| Voice not found | Check `/app/voices` directory in container |
+
+### Debug Commands
+
+```bash
+# Check VRAM usage
+docker exec harvis-tts nvidia-smi --query-gpu=memory.used,memory.total --format=csv
+
+# Test TTS API directly
+curl -X POST http://localhost:8001/generate/speech \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Hello world", "voice_id": "test_voice"}'
+
+# List cloned voices
+curl http://localhost:8001/voices
+
+# Check TTS service logs
+docker logs harvis-tts --tail 100 -f
+```
+
+---
+
+## 📊 RESOURCE REQUIREMENTS
+
+```
+TTS Service:
+├── CPU: ~20% (during generation)
+├── RAM: ~16GB (recommended)
+├── VRAM: ~6-7GB (with 4-bit quantization)
+└── Disk: ~15GB (model + workspace)
+
+Generation Speed:
+├── Voice cloning: ~30 seconds
+├── 1 min audio: ~30 seconds
+├── 15 min podcast: ~5 minutes
+└── 90 min podcast: ~30 minutes
+```
+
+---
+
+## 🎯 SUCCESS CRITERIA
+
+After implementation, verify:
+
+- [ ] TTS service starts and passes health check
+- [ ] Voice cloning works with 10-60 second samples
+- [ ] Multi-speaker podcast generation works
+- [ ] Audio plays correctly in browser
+- [ ] Script generation produces coherent dialogue
+- [ ] Sources are properly processed and used
+- [ ] VRAM stays under 8GB during generation
+
+---
+
+## 📚 REFERENCES
+
+- **VibeVoice Paper**: https://arxiv.org/abs/2501.01421
+- **HuggingFace Model**: https://huggingface.co/microsoft/VibeVoice-1.5B
+- **Open Notebook**: https://github.com/lfnovo/open-notebook
+- **Esperanto (AI Providers)**: https://github.com/lfnovo/esperanto
+
+---
+
+*Master Prompt v1.0 - HARVIS AI Podcast Generation with VibeVoice*

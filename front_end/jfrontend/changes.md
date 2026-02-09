@@ -1,3 +1,43 @@
+## 2026-01-13 - RVC Audio Quality Improvements (Block Processing & AutoTune)
+
+**Timestamp**: 2026-01-13 UTC
+
+**Feature**: High-Fidelity RVC Podcast Generation
+
+**Description**:
+Overhauled the RVC (Retrieval-based Voice Conversion) pipeline to eliminate "choppy" artifacts and improve voice consistency in podcasts. Introduced block-based processing and automatic per-voice calibration.
+
+**Problem**:
+Previous RVC implementation processed audio segment-by-segment, leading to audible clicks, boundary artifacts, and "steppy" pitch changes between sentences. Voice settings (index rate, protection) were often suboptimal for specific voices.
+
+**Solution**:
+1.  **Block Processing**:
+    -   Consecutive segments from the same speaker are now grouped into a single "block".
+    -   Base TTS is generated for all segments, then concatenated with spacing.
+    -   RVC conversion runs on the *entire block* at once, ensuring cross-sentence fluidity.
+    -   Converted audio is sliced back into segments for final stitching.
+
+2.  **RVC AutoTune**:
+    -   New `calibrate_voice` system automatically tests a grid of RVC parameters (pitch method, index rate, RMS mix) for each new voice.
+    -   Selects the most stable configuration based on a custom artifact scoring metric (penalizing silence/clipping/jumps).
+    -   Caches optimal settings in `calibration_cache.json` for subsequent zero-latency generation.
+
+3.  **Audio Post-Processing**:
+    -   Added a mastering chain with High-Pass Filter (80Hz) to remove rumble.
+    -   Applied peak normalization (-1dB) for consistent podcast volume.
+
+**Files Modified**:
+-   `python_back_end/tts_system/engines/rvc_engine.py`: Added `convert_block`, `calibrate_voice`, `_score_artifact`.
+-   `python_back_end/tts_system/engines/vibevoice_engine.py`: Updated `generate_podcast` to use block strategy.
+-   `python_back_end/tts_system/utils/audio_post.py`: New mastering utilities.
+
+**Result/Status**: ✅ Complete
+-   Podcasts now sound significantly smoother with fewer artifacts.
+-   Voice identity is more consistent across long generations.
+-   AutoTune ensures new voices sound good without manual tuning.
+
+---
+
 ## 2026-01-12 - Open Notebook UI Implementation
 
 **Timestamp**: 2026-01-12 UTC

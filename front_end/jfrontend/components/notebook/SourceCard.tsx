@@ -108,7 +108,7 @@ export function SourceCard({
   const handleCardClick = () => {
     if (onClick) {
       onClick()
-    } else if (onView && source.status === 'ready') {
+    } else if (onView) {
       onView()
     }
   }
@@ -178,7 +178,7 @@ export function SourceCard({
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-              {onView && source.status === 'ready' && (
+              {onView && (
                 <DropdownMenuItem
                   onSelect={(e) => {
                     e.preventDefault()

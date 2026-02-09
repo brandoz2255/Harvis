@@ -1,0 +1,125 @@
+Defaulting to user installation because normal site-packages is not writeable
+Collecting piper-tts
+  Downloading piper_tts-1.4.0-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.manylinux_2_28_x86_64.whl.metadata (2.3 kB)
+Collecting fairseq
+  Downloading fairseq-0.12.2.tar.gz (9.6 MB)
+     ━━━━━━ 9.6/9… 22.6   eta 0:00:00
+            MB     MB/s              
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Installing backend dependencies: started
+  Installing backend dependencies: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Collecting faiss-cpu
+  Downloading faiss_cpu-1.13.2-cp310-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl.metadata (7.6 kB)
+Collecting pyworld
+  Downloading pyworld-0.3.5.tar.gz (261 kB)
+     ━━━━━━ 261.0… 12.3   eta 0:00:00
+            kB     MB/s              
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Collecting torchcrepe
+  Downloading torchcrepe-0.0.24-py3-none-any.whl.metadata (8.3 kB)
+Collecting praat-parselmouth
+  Downloading praat_parselmouth-0.4.7-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (2.9 kB)
+Collecting rvc-python
+  Using cached rvc_python-0.1.5-py3-none-any.whl.metadata (8.6 kB)
+Collecting onnxruntime<2,>=1 (from piper-tts)
+  Downloading onnxruntime-1.23.2-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl.metadata (5.1 kB)
+Requirement already satisfied: cffi in /home/ommblitz/.local/lib/python3.12/site-packages (from fairseq) (2.0.0)
+Collecting cython (from fairseq)
+  Using cached cython-3.2.4-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (7.5 kB)
+Collecting hydra-core<1.1,>=1.0.7 (from fairseq)
+  Downloading hydra_core-1.0.7-py3-none-any.whl.metadata (3.7 kB)
+Collecting omegaconf<2.1 (from fairseq)
+  Downloading omegaconf-2.0.6-py3-none-any.whl.metadata (3.0 kB)
+Requirement already satisfied: numpy in /home/ommblitz/.local/lib/python3.12/site-packages (from fairseq) (2.3.5)
+Requirement already satisfied: regex in /home/ommblitz/.local/lib/python3.12/site-packages (from fairseq) (2026.1.15)
+Collecting sacrebleu>=1.4.12 (from fairseq)
+  Downloading sacrebleu-2.6.0-py3-none-any.whl.metadata (39 kB)
+Requirement already satisfied: torch in /home/ommblitz/.local/lib/python3.12/site-packages (from fairseq) (2.10.0)
+Requirement already satisfied: tqdm in /home/ommblitz/.local/lib/python3.12/site-packages (from fairseq) (4.67.3)
+Collecting bitarray (from fairseq)
+  Downloading bitarray-3.8.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (34 kB)
+Requirement already satisfied: torchaudio>=0.8.0 in /home/ommblitz/.local/lib/python3.12/site-packages (from fairseq) (2.10.0)
+Requirement already satisfied: packaging in /usr/lib/python3/dist-packages (from faiss-cpu) (24.0)
+Requirement already satisfied: librosa>=0.9.1 in /home/ommblitz/.local/lib/python3.12/site-packages (from torchcrepe) (0.11.0)
+Collecting resampy (from torchcrepe)
+  Downloading resampy-0.4.3-py3-none-any.whl.metadata (3.0 kB)
+Requirement already satisfied: scipy in /home/ommblitz/.local/lib/python3.12/site-packages (from torchcrepe) (1.17.0)
+Collecting av (from rvc-python)
+  Downloading av-16.1.0-cp312-cp312-manylinux_2_28_x86_64.whl.metadata (4.6 kB)
+INFO: pip is looking at multiple versions of rvc-python to determine which version is compatible with other requirements. This could take a while.
+Collecting rvc-python
+  Downloading rvc_python-0.1.4-py3-none-any.whl.metadata (8.6 kB)
+  Downloading rvc_python-0.1.3-py3-none-any.whl.metadata (8.3 kB)
+  Downloading rvc_python-0.1.2-py3-none-any.whl.metadata (8.2 kB)
+  Downloading rvc_python-0.1.1-py3-none-any.whl.metadata (8.2 kB)
+  Downloading rvc_python-0.1.0-py3-none-any.whl.metadata (8.1 kB)
+  Downloading rvc_python-0.0.7-py3-none-any.whl.metadata (8.4 kB)
+  Downloading rvc_python-0.0.6-py3-none-any.whl.metadata (8.4 kB)
+Collecting ffmpeg-python (from rvc-python)
+  Downloading ffmpeg_python-0.2.0-py3-none-any.whl.metadata (1.7 kB)
+Collecting loguru (from rvc-python)
+  Downloading loguru-0.7.3-py3-none-any.whl.metadata (22 kB)
+Collecting numpy (from fairseq)
+  Using cached numpy-1.25.2.tar.gz (10.8 MB)
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'error'
+  error: subprocess-exited-with-error
+  
+  × Getting requirements to build wheel did not run successfully.
+  │ exit code: 1
+  ╰─> [33 lines of output]
+      Traceback (most recent call last):
+        File "/usr/lib/python3/dist-packages/pip/_vendor/pyproject_hooks/_in_process/_in_process.py", line 353, in <module>
+          main()
+        File "/usr/lib/python3/dist-packages/pip/_vendor/pyproject_hooks/_in_process/_in_process.py", line 335, in main
+          json_out['return_val'] = hook(**hook_input['kwargs'])
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/usr/lib/python3/dist-packages/pip/_vendor/pyproject_hooks/_in_process/_in_process.py", line 112, in get_requires_for_build_wheel
+          backend = _build_backend()
+                    ^^^^^^^^^^^^^^^^
+        File "/usr/lib/python3/dist-packages/pip/_vendor/pyproject_hooks/_in_process/_in_process.py", line 77, in _build_backend
+          obj = import_module(mod_path)
+                ^^^^^^^^^^^^^^^^^^^^^^^
+        File "/usr/lib/python3.12/importlib/__init__.py", line 90, in import_module
+          return _bootstrap._gcd_import(name[level:], package, level)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+        File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+        File "<frozen importlib._bootstrap>", line 1310, in _find_and_load_unlocked
+        File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+        File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+        File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+        File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+        File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+        File "<frozen importlib._bootstrap_external>", line 995, in exec_module
+        File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+        File "/tmp/pip-build-env-ea8xz5t4/overlay/local/lib/python3.12/dist-packages/setuptools/__init__.py", line 16, in <module>
+          import setuptools.version
+        File "/tmp/pip-build-env-ea8xz5t4/overlay/local/lib/python3.12/dist-packages/setuptools/version.py", line 1, in <module>
+          import pkg_resources
+        File "/tmp/pip-build-env-ea8xz5t4/overlay/local/lib/python3.12/dist-packages/pkg_resources/__init__.py", line 2172, in <module>
+          register_finder(pkgutil.ImpImporter, find_on_path)
+                          ^^^^^^^^^^^^^^^^^^^
+      AttributeError: module 'pkgutil' has no attribute 'ImpImporter'. Did you mean: 'zipimporter'?
+      [end of output]
+  
+  note: This error originates from a subprocess, and is likely not a problem with pip.
+error: subprocess-exited-with-error
+
+× Getting requirements to build wheel did not run successfully.
+│ exit code: 1
+╰─> See above for output.
+
+note: This error originates from a subprocess, and is likely not a problem with pip.

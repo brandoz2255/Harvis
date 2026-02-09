@@ -1,0 +1,22 @@
+Collecting omegaconf
+  Downloading omegaconf-2.3.0-py3-none-any.whl.metadata (3.9 kB)
+Collecting antlr4-python3-runtime==4.9.* (from omegaconf)
+  Downloading antlr4-python3-runtime-4.9.3.tar.gz (117 kB)
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Requirement already satisfied: PyYAML>=5.1.0 in /usr/local/lib/python3.11/dist-packages (from omegaconf) (6.0.3)
+Downloading omegaconf-2.3.0-py3-none-any.whl (79 kB)
+Building wheels for collected packages: antlr4-python3-runtime
+  Building wheel for antlr4-python3-runtime (pyproject.toml): started
+  Building wheel for antlr4-python3-runtime (pyproject.toml): finished with status 'done'
+  Created wheel for antlr4-python3-runtime: filename=antlr4_python3_runtime-4.9.3-py3-none-any.whl size=144591 sha256=8a0c0f22235b9b482da2395ce6b1e35b419008f486b9c897ab0035c1fd406a2e
+  Stored in directory: /tmp/pip-ephem-wheel-cache-u98ock53/wheels/1a/97/32/461f837398029ad76911109f07047fde1d7b661a147c7c56d1
+Successfully built antlr4-python3-runtime
+Installing collected packages: antlr4-python3-runtime, omegaconf
+
+Successfully installed antlr4-python3-runtime-4.9.3 omegaconf-2.3.0
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.

@@ -1,0 +1,67 @@
+Testing chatterbox import...
+Traceback (most recent call last):
+  File "/home/ommblitz/Projects/clone3/aidev/python_back_end/debug_chatterbox.py", line 7, in <module>
+    import chatterbox
+  File "/home/ommblitz/.local/lib/python3.12/site-packages/chatterbox/__init__.py", line 9, in <module>
+    from .tts import ChatterboxTTS
+  File "/home/ommblitz/.local/lib/python3.12/site-packages/chatterbox/tts.py", line 11, in <module>
+    from .models.t3 import T3
+  File "/home/ommblitz/.local/lib/python3.12/site-packages/chatterbox/models/t3/__init__.py", line 1, in <module>
+    from .t3 import T3
+  File "/home/ommblitz/.local/lib/python3.12/site-packages/chatterbox/models/t3/t3.py", line 12, in <module>
+    from transformers import LlamaModel, LlamaConfig, GPT2Config, GPT2Model
+  File "/home/ommblitz/.local/lib/python3.12/site-packages/transformers/__init__.py", line 30, in <module>
+    from . import dependency_versions_check
+  File "/home/ommblitz/.local/lib/python3.12/site-packages/transformers/dependency_versions_check.py", line 16, in <module>
+    from .utils.versions import require_version, require_version_core
+  File "/home/ommblitz/.local/lib/python3.12/site-packages/transformers/utils/__init__.py", line 22, in <module>
+    from .auto_docstring import (
+  File "/home/ommblitz/.local/lib/python3.12/site-packages/transformers/utils/auto_docstring.py", line 30, in <module>
+    from .generic import ModelOutput
+  File "/home/ommblitz/.local/lib/python3.12/site-packages/transformers/utils/generic.py", line 47, in <module>
+    from ..model_debugging_utils import model_addition_debugger_context
+  File "/home/ommblitz/.local/lib/python3.12/site-packages/transformers/model_debugging_utils.py", line 34, in <module>
+    import torch.distributed.tensor
+  File "/home/ommblitz/.local/lib/python3.12/site-packages/torch/distributed/tensor/__init__.py", line 4, in <module>
+    import torch.distributed.tensor._ops  # force import all built-in dtensor ops
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ommblitz/.local/lib/python3.12/site-packages/torch/distributed/tensor/_ops/__init__.py", line 8, in <module>
+    from ._tensor_ops import *  # noqa: F403
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ommblitz/.local/lib/python3.12/site-packages/torch/distributed/tensor/_ops/_tensor_ops.py", line 41, in <module>
+    from torch.fx.experimental.symbolic_shapes import statically_known_true
+  File "/home/ommblitz/.local/lib/python3.12/site-packages/torch/fx/experimental/symbolic_shapes.py", line 77, in <module>
+    from torch.utils._sympy.functions import (
+  File "/home/ommblitz/.local/lib/python3.12/site-packages/torch/utils/_sympy/functions.py", line 1266, in <module>
+    class RoundToInt(sympy.Function):
+  File "/home/ommblitz/.local/lib/python3.12/site-packages/sympy/core/function.py", line 167, in __init__
+    nargs = kwargs.pop('nargs', cls.__dict__.get('nargs', arity(cls)))
+                                                          ^^^^^^^^^^
+  File "/home/ommblitz/.local/lib/python3.12/site-packages/sympy/core/function.py", line 146, in arity
+    parameters = inspect.signature(eval_).parameters.items()
+                 ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/inspect.py", line 3310, in signature
+    return Signature.from_callable(obj, follow_wrapped=follow_wrapped,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/inspect.py", line 3054, in from_callable
+    return _signature_from_callable(obj, sigcls=cls,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/inspect.py", line 2496, in _signature_from_callable
+    sig = _get_signature_of(obj.__func__)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/inspect.py", line 2566, in _signature_from_callable
+    return _signature_from_function(sigcls, obj,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/inspect.py", line 2411, in _signature_from_function
+    parameters.append(Parameter(name, annotation=annotation,
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/inspect.py", line 2714, in __init__
+    self._kind = _ParameterKind(kind)
+                 ^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/enum.py", line 757, in __call__
+    return cls.__new__(cls, value)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/enum.py", line 1129, in __new__
+    def __new__(cls, value):
+
+KeyboardInterrupt

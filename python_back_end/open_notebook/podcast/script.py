@@ -16,21 +16,22 @@ logger = logging.getLogger(__name__)
 # Configuration
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
 CLOUD_OLLAMA_URL = os.getenv("OLLAMA_CLOUD_URL", "https://coyotegpt.ngrok.app/ollama")
-DEFAULT_MODEL = os.getenv("PODCAST_MODEL", "mistral")
+# Use gpt-oss:latest as default (available locally, 20.9B model good for conversation)
+DEFAULT_MODEL = os.getenv("PODCAST_MODEL", "gpt-oss:latest")
 
 # Default speaker profiles
 DEFAULT_SPEAKERS = [
     {
-        "name": "Alex",
+        "name": "Host",
         "role": "Host",
-        "personality": "Curious, engaging, asks clarifying questions",
-        "voice_id": "voice_1"
+        "personality": "Warm, engaging, concise; avoids long self-intros; focuses on the topic",
+        "voice_id": None
     },
     {
-        "name": "Jordan", 
-        "role": "Expert",
-        "personality": "Knowledgeable, explains concepts clearly, provides examples",
-        "voice_id": "voice_2"
+        "name": "Guest",
+        "role": "Guest",
+        "personality": "Knowledgeable, clear explanations, practical examples; avoids naming themselves unless asked",
+        "voice_id": None
     }
 ]
 
@@ -152,6 +153,8 @@ Guidelines:
 - Cover all key points from the outline
 - End with a clear conclusion
 - Only use these speaker names: {', '.join(speaker_names)}
+- Speakers must refer to themselves and each other ONLY using the provided names. Do not introduce or rename yourself as anyone else.
+- Do not add extra speakers beyond the provided names.
 
 SCRIPT (JSON only, no markdown):"""
 
@@ -203,7 +206,7 @@ SCRIPT (JSON only, no markdown):"""
                         "top_p": 0.95,
                     }
                 },
-                timeout=180  # Longer timeout for script generation
+                timeout=600  # Extended timeout for large model script generation (10 min)
             )
             
             if response.status_code == 200:
@@ -223,7 +226,7 @@ SCRIPT (JSON only, no markdown):"""
                     "prompt": prompt,
                     "stream": False
                 },
-                timeout=180
+                timeout=600  # Extended timeout for cloud fallback (10 min)
             )
             
             if response.status_code == 200:

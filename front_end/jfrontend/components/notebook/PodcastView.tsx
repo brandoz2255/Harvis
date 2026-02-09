@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react'
 import { NotebookSource, NotebookNote } from '@/stores/notebookStore'
+import { useVoiceStore, Voice, RVCVoice } from '@/stores/voiceStore'
 import {
   Mic,
   Play,
@@ -27,7 +28,10 @@ import {
   FileText,
   StickyNote,
   AlertCircle,
-  Info
+  Info,
+  Headphones,
+  UserCircle2,
+  Sparkles
 } from 'lucide-react'
 
 interface PodcastStyle {
@@ -45,20 +49,39 @@ const PODCAST_STYLES: PodcastStyle[] = [
   { id: 'storytelling', name: 'Storytelling', description: 'Narrative format', icon: <BookOpen className="w-5 h-5" /> },
 ]
 
+const SPEAKER_LABELS = ['Host', 'Guest 1', 'Guest 2', 'Guest 3']
+
+const SPEAKER_COLORS = [
+  'from-violet-500 to-fuchsia-500',
+  'from-emerald-500 to-teal-500',
+  'from-amber-500 to-orange-500',
+  'from-sky-500 to-blue-500'
+]
+
 interface Podcast {
   id: string
   title: string
-  status: 'pending' | 'generating' | 'completed' | 'error'
+  status: 'pending' | 'generating' | 'completed' | 'script_only' | 'error'
   style: string
   speakers: number
   duration_minutes: number
   audio_path?: string
+  audio_url?: string  // URL to access the audio file
   transcript?: Array<{ speaker: string; dialogue: string }>
   outline?: string
   error_message?: string
   duration_seconds?: number
+  speaker_profiles?: Array<{ name: string; role?: string; personality?: string; voice_id?: string }>
+  script?: any
   created_at: string
   completed_at?: string
+}
+
+interface SpeakerProfileDraft {
+  name: string
+  role?: string
+  personality?: string
+  rvc_voice_id?: string  // RVC character voice slug
 }
 
 interface PodcastViewProps {
@@ -68,6 +91,19 @@ interface PodcastViewProps {
   notes?: NotebookNote[]
 }
 
+// Generation step type for progress tracking
+type GenerationStep = 'outline' | 'script' | 'audio' | null
+
+// Step display config
+const STEP_CONFIG: Record<string, { label: string; description: string; order: number }> = {
+  outline: { label: 'Outline', description: 'Generating podcast outline...', order: 1 },
+  script: { label: 'Script', description: 'Writing podcast script...', order: 2 },
+  audio: { label: 'Audio', description: 'Creating podcast audio...', order: 3 },
+}
+
+const DEFAULT_SPEAKER_NAMES = ['Host', 'Guest', 'Speaker 3', 'Speaker 4']
+const DEFAULT_SPEAKER_ROLES = ['Host', 'Guest', 'Speaker', 'Speaker']
+
 export default function PodcastView({ notebookId, notebookTitle, sources, notes = [] }: PodcastViewProps) {
   const [title, setTitle] = useState(`${notebookTitle} Podcast`)
   const [style, setStyle] = useState('conversational')
@@ -76,17 +112,60 @@ export default function PodcastView({ notebookId, notebookTitle, sources, notes 
   const [selectedSources, setSelectedSources] = useState<Set<string>>(new Set())
   const [selectedNotes, setSelectedNotes] = useState<Set<string>>(new Set())
   const [isGenerating, setIsGenerating] = useState(false)
+  const [generationStep, setGenerationStep] = useState<GenerationStep>(null)
+  const [generationMessage, setGenerationMessage] = useState<string>('')
   const [error, setError] = useState<string | null>(null)
   const [podcasts, setPodcasts] = useState<Podcast[]>([])
   const [loadingPodcasts, setLoadingPodcasts] = useState(true)
   const [showContentSelector, setShowContentSelector] = useState(true)  // Start expanded
+  const [voiceMapping, setVoiceMapping] = useState<Record<string, string>>({})
+  const [showVoiceSelection, setShowVoiceSelection] = useState(false)
+  const [generateAudioAutomatically, setGenerateAudioAutomatically] = useState(true)
+
+  const [speakerProfilesDraft, setSpeakerProfilesDraft] = useState<SpeakerProfileDraft[]>([
+    { name: DEFAULT_SPEAKER_NAMES[0], role: DEFAULT_SPEAKER_ROLES[0], personality: '' },
+    { name: DEFAULT_SPEAKER_NAMES[1], role: DEFAULT_SPEAKER_ROLES[1], personality: '' },
+  ])
+
+  // Script editing flow
+  const [showScriptEditor, setShowScriptEditor] = useState(false)
+  const [draftPodcastId, setDraftPodcastId] = useState<string | null>(null)
+  const [draftTranscript, setDraftTranscript] = useState<Array<{ speaker: string; dialogue: string }>>([])
+  const [draftSpeakerProfiles, setDraftSpeakerProfiles] = useState<Array<{ name: string; role?: string; personality?: string; voice_id?: string }>>([])
+  const [isGeneratingAudioFromDraft, setIsGeneratingAudioFromDraft] = useState(false)
+
+  const {
+    voices,
+    rvcVoices,
+    rvcAvailable,
+    fetchVoices,
+    fetchRvcVoices,
+    isLoading: loadingVoices
+  } = useVoiceStore()
 
   const readySources = sources.filter(s => s.status === 'ready')
 
-  // Load existing podcasts
   useEffect(() => {
-    fetchPodcasts()
-  }, [notebookId])
+    fetchVoices()
+    fetchRvcVoices()
+  }, [fetchVoices, fetchRvcVoices])
+
+  // Keep speaker profile draft array sized to `speakers`
+  useEffect(() => {
+    setSpeakerProfilesDraft(prev => {
+      const next = [...prev]
+      for (let i = 0; i < speakers; i++) {
+        if (!next[i]) {
+          next[i] = {
+            name: DEFAULT_SPEAKER_NAMES[i] || `Speaker ${i + 1}`,
+            role: DEFAULT_SPEAKER_ROLES[i] || 'Speaker',
+            personality: ''
+          }
+        }
+      }
+      return next.slice(0, speakers)
+    })
+  }, [speakers])
 
   // Select all ready sources by default
   useEffect(() => {
@@ -103,11 +182,14 @@ export default function PodcastView({ notebookId, notebookTitle, sources, notes 
   }, [notes])
 
   const fetchPodcasts = async () => {
+    setLoadingPodcasts(true)
     try {
       const token = localStorage.getItem('token')
-      const response = await fetch(`/api/notebooks/${notebookId}/podcasts`, {
-        headers: token ? { 'Authorization': `Bearer ${token}` } : {},
-        credentials: 'include'
+      const response = await fetch(`/api/notebooks/podcasts/by-notebook/${encodeURIComponent(notebookId)}`, {
+        headers: {
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+        },
+        credentials: 'include',
       })
       if (response.ok) {
         const data = await response.json()
@@ -120,15 +202,149 @@ export default function PodcastView({ notebookId, notebookTitle, sources, notes 
     }
   }
 
+  // Load saved podcasts on mount
+  useEffect(() => {
+    if (notebookId) {
+      fetchPodcasts()
+    }
+  }, [notebookId])
+
   const handleGenerate = async () => {
     if (!title.trim() || totalSelected === 0) return
 
     setIsGenerating(true)
+    setGenerationStep('outline')  // Start with outline step immediately
+    setGenerationMessage('Starting podcast generation...')
     setError(null)
+    setShowScriptEditor(false)
+    setDraftPodcastId(null)
+    setDraftTranscript([])
+    setDraftSpeakerProfiles([])
 
     try {
       const token = localStorage.getItem('token')
-      const response = await fetch(`/api/notebooks/${notebookId}/podcasts`, {
+      const sourcesArray = Array.from(selectedSources)
+      const notesArray = Array.from(selectedNotes)
+
+      const customSpeakers = Array.from({ length: speakers }).map((_, index) => {
+        const base = speakerProfilesDraft[index] || { name: DEFAULT_SPEAKER_NAMES[index] || `Speaker ${index + 1}` }
+        return {
+          name: (base.name || DEFAULT_SPEAKER_NAMES[index] || `Speaker ${index + 1}`).trim(),
+          role: (base.role || DEFAULT_SPEAKER_ROLES[index] || 'Speaker').trim(),
+          personality: (base.personality || '').trim() || undefined,
+          voice_id: voiceMapping[String(index + 1)] || undefined,
+          rvc_voice_id: base.rvc_voice_id || undefined  // RVC character voice
+        }
+      })
+
+      const requestBody = {
+        notebook_id: notebookId,
+        title: title.trim(),
+        style,
+        speakers,
+        duration_minutes: duration,
+        source_ids: sourcesArray.length > 0 ? sourcesArray : undefined,
+        note_ids: notesArray.length > 0 ? notesArray : undefined,
+        generate_audio: generateAudioAutomatically,
+        custom_speakers: customSpeakers
+      }
+
+      // Use SSE streaming endpoint for progress updates
+      const response = await fetch('/api/notebooks/podcasts/generate/stream', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+        },
+        credentials: 'include',
+        body: JSON.stringify(requestBody)
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        let errorMessage = 'Failed to generate podcast'
+        if (typeof errorData.detail === 'string') {
+          errorMessage = errorData.detail
+        } else if (Array.isArray(errorData.detail)) {
+          errorMessage = errorData.detail.map((e: any) => e.msg || e.message || JSON.stringify(e)).join(', ')
+        }
+        throw new Error(errorMessage)
+      }
+
+      // Process SSE stream
+      const reader = response.body?.getReader()
+      const decoder = new TextDecoder()
+
+      if (!reader) {
+        throw new Error('Failed to read response stream')
+      }
+
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+
+        // Process complete SSE events
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || '' // Keep incomplete line in buffer
+
+        let currentEvent = ''
+        let currentData = ''
+
+        for (const line of lines) {
+          if (line.startsWith('event:')) {
+            currentEvent = line.slice(6).trim()
+          } else if (line.startsWith('data:')) {
+            currentData = line.slice(5).trim()
+          } else if (line === '' && currentData) {
+            // End of event
+            try {
+              const eventData = JSON.parse(currentData)
+              if (currentEvent === 'progress') {
+                setGenerationStep(eventData.step as GenerationStep)
+                setGenerationMessage(eventData.message || '')
+              } else if (currentEvent === 'result') {
+                setPodcasts(prev => [eventData, ...prev])
+                setTitle(`${notebookTitle} Podcast ${podcasts.length + 2}`)
+
+                // If script-only (audio disabled), show editor to tweak and then generate audio
+                if (eventData?.status === 'script_only' && Array.isArray(eventData?.transcript)) {
+                  setDraftPodcastId(eventData.id)
+                  setDraftTranscript(eventData.transcript)
+                  setDraftSpeakerProfiles(eventData.speaker_profiles || requestBody.custom_speakers || [])
+                  setShowScriptEditor(true)
+                }
+              } else if (currentEvent === 'error') {
+                throw new Error(eventData.error || 'Generation failed')
+              }
+            } catch (parseError) {
+              console.error('Failed to parse SSE event:', parseError)
+            }
+            currentEvent = ''
+            currentData = ''
+          }
+        }
+      }
+    } catch (err: any) {
+      setError(err.message || 'Failed to generate podcast')
+    } finally {
+      setIsGenerating(false)
+      setGenerationStep(null)
+      setGenerationMessage('')
+    }
+  }
+
+  const handleGenerateAudioFromEditedScript = async () => {
+    if (!draftTranscript.length) return
+
+    setIsGeneratingAudioFromDraft(true)
+    setError(null)
+    try {
+      const token = localStorage.getItem('token')
+      const response = await fetch('/api/notebooks/podcasts/generate/audio', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -136,59 +352,69 @@ export default function PodcastView({ notebookId, notebookTitle, sources, notes 
         },
         credentials: 'include',
         body: JSON.stringify({
+          podcast_id: draftPodcastId,
+          notebook_id: notebookId,
           title: title.trim(),
           style,
           speakers,
           duration_minutes: duration,
-          source_ids: Array.from(selectedSources),
-          note_ids: Array.from(selectedNotes)
+          transcript: draftTranscript,
+          custom_speakers: draftSpeakerProfiles
         })
       })
-
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}))
-        throw new Error(errorData.detail || 'Failed to start podcast generation')
+        throw new Error(errorData.detail || 'Failed to generate audio')
       }
-
-      const podcast = await response.json()
-      setPodcasts(prev => [podcast, ...prev])
-      pollPodcastStatus(podcast.id)
-      
-      // Reset title for next podcast
-      setTitle(`${notebookTitle} Podcast ${podcasts.length + 2}`)
-    } catch (err: any) {
-      setError(err.message || 'Failed to generate podcast')
+      const saved = await response.json()
+      // Replace existing draft row if present, otherwise prepend
+      setPodcasts(prev => {
+        const idx = prev.findIndex(p => p.id === saved.id)
+        if (idx >= 0) {
+          const copy = [...prev]
+          copy[idx] = saved
+          return copy
+        }
+        return [saved, ...prev]
+      })
+      setShowScriptEditor(false)
+      setDraftPodcastId(null)
+      setDraftTranscript([])
+      setDraftSpeakerProfiles([])
+    } catch (e: any) {
+      setError(e.message || 'Failed to generate audio')
     } finally {
-      setIsGenerating(false)
+      setIsGeneratingAudioFromDraft(false)
     }
   }
 
   const pollPodcastStatus = async (podcastId: string) => {
-    const token = localStorage.getItem('token')
-    const interval = setInterval(async () => {
-      try {
-        const response = await fetch(
-          `/api/notebooks/${notebookId}/podcasts/${podcastId}`,
-          {
-            headers: token ? { 'Authorization': `Bearer ${token}` } : {},
-            credentials: 'include'
-          }
-        )
-        if (response.ok) {
-          const podcast = await response.json()
-          setPodcasts(prev => prev.map(p => p.id === podcastId ? podcast : p))
+    // Standalone endpoint generates synchronously, no polling needed
+    // This function is kept for future async generation support
+  }
 
-          if (podcast.status === 'completed' || podcast.status === 'error') {
-            clearInterval(interval)
-          }
-        }
-      } catch (err) {
-        console.error('Failed to poll podcast status:', err)
+  const handleDeletePodcast = async (podcastId: string) => {
+    const confirmed = window.confirm('Are you sure you want to delete this podcast?')
+    if (!confirmed) return
+
+    try {
+      const token = localStorage.getItem('token')
+      const response = await fetch(`/api/notebooks/podcasts/${podcastId}`, {
+        method: 'DELETE',
+        headers: {
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+        },
+        credentials: 'include',
+      })
+      if (response.ok) {
+        setPodcasts(prev => prev.filter(p => p.id !== podcastId))
+      } else {
+        const errorData = await response.json().catch(() => ({}))
+        console.error('Failed to delete podcast:', errorData)
       }
-    }, 5000)
-
-    // Stop polling after 10 minutes
-    setTimeout(() => clearInterval(interval), 600000)
+    } catch (err) {
+      console.error('Failed to delete podcast:', err)
+    }
   }
 
   const toggleSourceSelection = (sourceId: string) => {
@@ -227,8 +453,21 @@ export default function PodcastView({ notebookId, notebookTitle, sources, notes 
     setSelectedNotes(new Set())
   }
 
+  const updateVoiceMapping = (speakerIndex: number, voiceId: string) => {
+    setVoiceMapping(prev => ({
+      ...prev,
+      [String(speakerIndex + 1)]: voiceId
+    }))
+  }
+
+  const getVoiceForSpeaker = (speakerIndex: number): Voice | undefined => {
+    const voiceId = voiceMapping[String(speakerIndex + 1)]
+    return voices.find(v => v.voice_id === voiceId)
+  }
+
   const totalSelected = selectedSources.size + selectedNotes.size
   const hasContent = readySources.length > 0 || notes.length > 0
+  const availableVoices = voices.filter(v => v.voice_type === 'user' || v.activated)
 
   return (
     <div className="flex-1 flex overflow-hidden bg-[#0a0a0a]">
@@ -267,11 +506,10 @@ export default function PodcastView({ notebookId, notebookTitle, sources, notes 
                 <button
                   key={s.id}
                   onClick={() => setStyle(s.id)}
-                  className={`flex items-center gap-3 p-3 rounded-xl border transition-all text-left ${
-                    style === s.id
+                  className={`flex items-center gap-3 p-3 rounded-xl border transition-all text-left ${style === s.id
                       ? 'border-orange-500 bg-orange-500/10'
                       : 'border-gray-800 hover:border-gray-700 bg-[#111111]'
-                  }`}
+                    }`}
                 >
                   <div className={`${style === s.id ? 'text-orange-400' : 'text-gray-400'}`}>
                     {s.icon}
@@ -325,6 +563,142 @@ export default function PodcastView({ notebookId, notebookTitle, sources, notes 
             </div>
           </div>
 
+          {/* Audio generation toggle */}
+          <div className="flex items-center justify-between p-4 rounded-xl bg-[#111111] border border-gray-800">
+            <div className="flex items-start gap-3">
+              <Info className="w-4 h-4 text-gray-500 mt-0.5" />
+              <div>
+                <p className="text-sm text-gray-200 font-medium">Generate audio automatically</p>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Turn off to generate a script first, edit it, then generate audio.
+                </p>
+              </div>
+            </div>
+            <label className="flex items-center gap-2 text-sm text-gray-400 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={generateAudioAutomatically}
+                onChange={(e) => setGenerateAudioAutomatically(e.target.checked)}
+                className="rounded border-gray-600 bg-gray-800 text-orange-500 focus:ring-orange-500"
+              />
+            </label>
+          </div>
+
+          {/* Voice Selection */}
+          <div>
+            <button
+              onClick={() => setShowVoiceSelection(!showVoiceSelection)}
+              className="flex items-center gap-2 text-sm text-gray-400 hover:text-gray-200 transition-colors"
+            >
+              <Headphones className="w-4 h-4" />
+              Voice Profiles
+              <ChevronDown className={`w-4 h-4 transition-transform ${showVoiceSelection ? 'rotate-180' : ''}`} />
+              {Object.values(voiceMapping).some(Boolean) && (
+                <span className="px-2 py-0.5 text-xs bg-orange-500/20 text-orange-400 rounded-full">
+                  {Object.values(voiceMapping).filter(Boolean).length} assigned
+                </span>
+              )}
+            </button>
+
+            {showVoiceSelection && (
+              <div className="mt-3 space-y-3">
+                {loadingVoices ? (
+                  <div className="flex items-center justify-center py-4">
+                    <Loader2 className="w-5 h-5 animate-spin text-gray-500" />
+                  </div>
+                ) : availableVoices.length === 0 ? (
+                  <div className="p-4 rounded-xl bg-[#111111] border border-dashed border-gray-800 text-center">
+                    <Mic className="w-8 h-8 mx-auto text-gray-600 mb-2" />
+                    <p className="text-sm text-gray-500">No voices available</p>
+                    <p className="text-xs text-gray-600 mt-1">
+                      Clone voices in Voice Studio to use them here
+                    </p>
+                  </div>
+                ) : (
+                  <>
+                    {Array.from({ length: speakers }).map((_, index) => {
+                      const selectedVoice = getVoiceForSpeaker(index)
+                      return (
+                        <div key={index} className="space-y-2">
+                          <div className="flex items-center gap-3">
+                            <div className={`flex items-center gap-2 w-28 px-3 py-2 rounded-lg bg-gradient-to-r ${SPEAKER_COLORS[index]} bg-opacity-20`}>
+                              <UserCircle2 className="w-4 h-4 text-white" />
+                              <span className="text-sm text-white font-medium">{SPEAKER_LABELS[index]}</span>
+                            </div>
+                            {/* Unified Voice Selector: Cloned + RVC in one dropdown */}
+                            {/* Disabled Voice Selector - Restricted to Harvis */}
+                            <div className="flex-1 px-4 py-2.5 bg-[#111111] border border-gray-800 rounded-xl text-sm text-gray-400 flex items-center justify-between cursor-not-allowed opacity-75">
+                              <span>Harvis (Default)</span>
+                              <div className="flex items-center gap-2">
+                                <span className="text-[10px] uppercase font-bold tracking-wider text-orange-500/80">Only Available</span>
+                              </div>
+                            </div>
+
+                            {selectedVoice && (
+                              <div className="flex items-center gap-1 text-xs text-gray-500">
+                                <Volume2 className="w-3 h-3" />
+                                {selectedVoice.quality_score ? `${Math.round(selectedVoice.quality_score * 100)}%` : 'Ready'}
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Speaker identity & persona */}
+                          <div className="grid grid-cols-2 gap-3 pl-[7.5rem]">
+                            <div>
+                              <label className="block text-[11px] text-gray-500 mb-1">Speaker name (in script)</label>
+                              <input
+                                type="text"
+                                value={speakerProfilesDraft[index]?.name || ''}
+                                onChange={(e) => {
+                                  const v = e.target.value
+                                  setSpeakerProfilesDraft(prev => {
+                                    const next = [...prev]
+                                    next[index] = { ...(next[index] || {} as any), name: v }
+                                    return next
+                                  })
+                                }}
+                                placeholder={DEFAULT_SPEAKER_NAMES[index] || `Speaker ${index + 1}`}
+                                className="w-full px-3 py-2 bg-[#0f0f0f] border border-gray-800 rounded-lg text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-orange-500"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[11px] text-gray-500 mb-1">Persona / instructions</label>
+                              <input
+                                type="text"
+                                value={speakerProfilesDraft[index]?.personality || ''}
+                                onChange={(e) => {
+                                  const v = e.target.value
+                                  setSpeakerProfilesDraft(prev => {
+                                    const next = [...prev]
+                                    next[index] = { ...(next[index] || {} as any), personality: v }
+                                    return next
+                                  })
+                                }}
+                                placeholder="e.g., confident, concise, no intro"
+                                className="w-full px-3 py-2 bg-[#0f0f0f] border border-gray-800 rounded-lg text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-orange-500"
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      )
+                    })}
+                    <div className="mt-4 bg-blue-500/10 border border-blue-500/20 rounded-xl p-3 flex items-start gap-3">
+                      <div className="p-1.5 bg-blue-500/20 rounded-lg shrink-0">
+                        <Sparkles className="w-4 h-4 text-blue-400" />
+                      </div>
+                      <div>
+                        <p className="text-sm font-medium text-blue-400">Voice Update In Progress</p>
+                        <p className="text-xs text-blue-300/70 mt-1">
+                          We are enhancing our voice engine. During this period, all podcasts are generated using the stable <span className="text-white font-medium">Harvis</span> default voice.
+                        </p>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+
           {/* Content Selection */}
           <div>
             <div className="flex items-center justify-between mb-2">
@@ -333,7 +707,7 @@ export default function PodcastView({ notebookId, notebookTitle, sources, notes 
                 {totalSelected} item{totalSelected !== 1 ? 's' : ''} selected
               </span>
             </div>
-            
+
             {!hasContent ? (
               <div className="p-4 bg-yellow-500/10 border border-yellow-500/30 rounded-xl">
                 <div className="flex items-start gap-3">
@@ -374,7 +748,7 @@ export default function PodcastView({ notebookId, notebookTitle, sources, notes 
                       </button>
                     )}
                   </button>
-                  
+
                   {showContentSelector && (
                     <div className="border-t border-gray-800 max-h-40 overflow-y-auto">
                       {readySources.length === 0 ? (
@@ -422,7 +796,7 @@ export default function PodcastView({ notebookId, notebookTitle, sources, notes 
                         {selectedNotes.size === notes.length ? 'Deselect all' : 'Select all'}
                       </button>
                     </div>
-                    
+
                     <div className="border-t border-gray-800 max-h-32 overflow-y-auto">
                       {notes.map(note => (
                         <label
@@ -449,7 +823,7 @@ export default function PodcastView({ notebookId, notebookTitle, sources, notes 
               </div>
             )}
           </div>
-          
+
           {/* Info Box */}
           {hasContent && totalSelected > 0 && (
             <div className="p-3 bg-gray-800/30 border border-gray-700 rounded-xl flex items-start gap-2">
@@ -463,10 +837,61 @@ export default function PodcastView({ notebookId, notebookTitle, sources, notes 
           {/* Error */}
           {error && (
             <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-xl text-red-400 text-sm">
-              {error}
+              {typeof error === 'object' ? JSON.stringify(error) : error}
             </div>
           )}
         </div>
+
+        {/* Generation Progress */}
+        {isGenerating && generationStep && (
+          <div className="px-6 py-4 border-t border-gray-800">
+            <div className="space-y-3">
+              {/* Step indicators */}
+              <div className="flex items-center justify-between gap-2">
+                {Object.entries(STEP_CONFIG).map(([step, config]) => {
+                  const isActive = generationStep === step
+                  const isCompleted = generationStep && STEP_CONFIG[generationStep]?.order > config.order
+
+                  return (
+                    <div
+                      key={step}
+                      className={`flex-1 flex flex-col items-center gap-1.5 p-2 rounded-lg transition-all ${isActive ? 'bg-orange-500/20 border border-orange-500/40' :
+                          isCompleted ? 'bg-green-500/10 border border-green-500/30' :
+                            'bg-gray-800/50 border border-gray-700/50'
+                        }`}
+                    >
+                      <div className={`w-6 h-6 rounded-full flex items-center justify-center ${isActive ? 'bg-orange-500 text-white' :
+                          isCompleted ? 'bg-green-500 text-white' :
+                            'bg-gray-700 text-gray-400'
+                        }`}>
+                        {isCompleted ? (
+                          <Check className="w-3.5 h-3.5" />
+                        ) : isActive ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <span className="text-xs font-medium">{config.order}</span>
+                        )}
+                      </div>
+                      <span className={`text-xs font-medium ${isActive ? 'text-orange-400' :
+                          isCompleted ? 'text-green-400' :
+                            'text-gray-500'
+                        }`}>
+                        {config.label}
+                      </span>
+                    </div>
+                  )
+                })}
+              </div>
+
+              {/* Current step message */}
+              <div className="text-center">
+                <p className="text-sm text-gray-400 animate-pulse">
+                  {generationMessage || STEP_CONFIG[generationStep]?.description || 'Processing...'}
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Generate Button */}
         <div className="p-6 border-t border-gray-800 space-y-3">
@@ -478,7 +903,7 @@ export default function PodcastView({ notebookId, notebookTitle, sources, notes 
             {isGenerating ? (
               <>
                 <Loader2 className="w-5 h-5 animate-spin" />
-                Starting Generation...
+                {generationStep ? `${STEP_CONFIG[generationStep]?.label || 'Processing'}...` : 'Starting Generation...'}
               </>
             ) : (
               <>
@@ -487,7 +912,7 @@ export default function PodcastView({ notebookId, notebookTitle, sources, notes 
               </>
             )}
           </button>
-          
+
           {totalSelected === 0 && hasContent && (
             <p className="text-xs text-center text-gray-500">
               Select at least one source or note to generate a podcast
@@ -509,6 +934,91 @@ export default function PodcastView({ notebookId, notebookTitle, sources, notes 
         </div>
 
         <div className="flex-1 overflow-y-auto p-6">
+          {showScriptEditor && (
+            <div className="mb-6 p-4 bg-[#111111] border border-orange-500/30 rounded-xl">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <h4 className="text-sm font-semibold text-white">Edit script (optional)</h4>
+                  <p className="text-xs text-gray-500 mt-1">
+                    Tweak a few lines, then generate audio using your selected voice profiles.
+                  </p>
+                </div>
+                <button
+                  onClick={() => setShowScriptEditor(false)}
+                  className="text-xs text-gray-400 hover:text-white"
+                >
+                  Hide
+                </button>
+              </div>
+
+              <div className="mt-4 space-y-3 max-h-80 overflow-y-auto pr-1">
+                {draftTranscript.slice(0, 60).map((seg, idx) => (
+                  <div key={idx} className="p-3 rounded-lg bg-[#0f0f0f] border border-gray-800">
+                    <div className="flex items-center gap-2 mb-2">
+                      <label className="text-xs text-gray-500">Speaker</label>
+                      <select
+                        value={seg.speaker}
+                        onChange={(e) => {
+                          const v = e.target.value
+                          setDraftTranscript(prev => {
+                            const next = [...prev]
+                            next[idx] = { ...next[idx], speaker: v }
+                            return next
+                          })
+                        }}
+                        className="px-2 py-1 bg-[#111111] border border-gray-800 rounded text-xs text-white focus:outline-none focus:ring-2 focus:ring-orange-500"
+                      >
+                        {draftSpeakerProfiles.map(sp => (
+                          <option key={sp.name} value={sp.name}>{sp.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <textarea
+                      value={seg.dialogue}
+                      onChange={(e) => {
+                        const v = e.target.value
+                        setDraftTranscript(prev => {
+                          const next = [...prev]
+                          next[idx] = { ...next[idx], dialogue: v }
+                          return next
+                        })
+                      }}
+                      rows={2}
+                      className="w-full px-3 py-2 bg-[#111111] border border-gray-800 rounded-lg text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-orange-500"
+                    />
+                  </div>
+                ))}
+                {draftTranscript.length > 60 && (
+                  <p className="text-xs text-gray-500">
+                    Showing first 60 segments. Generate audio to render the full script.
+                  </p>
+                )}
+              </div>
+
+              <div className="mt-4 flex items-center gap-3">
+                <button
+                  onClick={handleGenerateAudioFromEditedScript}
+                  disabled={isGeneratingAudioFromDraft || draftTranscript.length === 0}
+                  className="px-4 py-2 bg-gradient-to-r from-orange-500 to-pink-500 text-white rounded-lg hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium flex items-center gap-2"
+                >
+                  {isGeneratingAudioFromDraft ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mic className="w-4 h-4" />}
+                  Generate Audio from Edited Script
+                </button>
+                <button
+                  onClick={() => {
+                    setShowScriptEditor(false)
+                    setDraftPodcastId(null)
+                    setDraftTranscript([])
+                    setDraftSpeakerProfiles([])
+                  }}
+                  className="px-3 py-2 bg-gray-800 text-gray-200 rounded-lg hover:bg-gray-700 text-sm"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+
           {loadingPodcasts ? (
             <div className="flex items-center justify-center h-64">
               <Loader2 className="w-8 h-8 animate-spin text-gray-400" />
@@ -526,7 +1036,7 @@ export default function PodcastView({ notebookId, notebookTitle, sources, notes 
           ) : (
             <div className="space-y-4">
               {podcasts.map((podcast) => (
-                <PodcastCard key={podcast.id} podcast={podcast} />
+                <PodcastCard key={podcast.id} podcast={podcast} onDelete={handleDeletePodcast} />
               ))}
             </div>
           )}
@@ -536,26 +1046,73 @@ export default function PodcastView({ notebookId, notebookTitle, sources, notes 
   )
 }
 
+// Format a timestamp into a relative time string
+function formatRelativeTime(dateString: string): string {
+  const now = Date.now()
+  const date = new Date(dateString).getTime()
+  const diffMs = now - date
+  const diffSec = Math.floor(diffMs / 1000)
+  const diffMin = Math.floor(diffSec / 60)
+  const diffHr = Math.floor(diffMin / 60)
+  const diffDay = Math.floor(diffHr / 24)
+
+  if (diffSec < 60) return 'just now'
+  if (diffMin < 60) return `${diffMin}m ago`
+  if (diffHr < 24) return `${diffHr}h ago`
+  if (diffDay < 7) return `${diffDay}d ago`
+  return new Date(dateString).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+}
+
 // Podcast Card Component
-function PodcastCard({ podcast }: { podcast: Podcast }) {
+function PodcastCard({ podcast, onDelete }: { podcast: Podcast; onDelete: (id: string) => void }) {
   const [isPlaying, setIsPlaying] = useState(false)
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(0)
   const [showTranscript, setShowTranscript] = useState(false)
   const audioRef = useRef<HTMLAudioElement | null>(null)
+  const blobUrlRef = useRef<string | null>(null)
 
-  const togglePlayback = () => {
+  // Cleanup blob URL on unmount
+  useEffect(() => {
+    return () => {
+      if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current)
+      if (audioRef.current) { audioRef.current.pause(); audioRef.current = null }
+    }
+  }, [])
+
+  // Fetch audio with auth headers and return a blob URL
+  const fetchAuthenticatedAudio = async (url: string): Promise<string> => {
+    const token = localStorage.getItem('token')
+    const headers: Record<string, string> = {}
+    if (token) headers['Authorization'] = `Bearer ${token}`
+    const response = await fetch(url, { headers, credentials: 'include' })
+    if (!response.ok) throw new Error(`Audio fetch failed: ${response.status}`)
+    const blob = await response.blob()
+    return URL.createObjectURL(blob)
+  }
+
+  const togglePlayback = async () => {
     if (!audioRef.current) {
-      audioRef.current = new Audio(podcast.audio_path)
-      audioRef.current.addEventListener('timeupdate', () => {
-        setCurrentTime(audioRef.current?.currentTime || 0)
-      })
-      audioRef.current.addEventListener('loadedmetadata', () => {
-        setDuration(audioRef.current?.duration || 0)
-      })
-      audioRef.current.addEventListener('ended', () => {
-        setIsPlaying(false)
-      })
+      const audioSource = podcast.audio_url || podcast.audio_path
+      if (!audioSource) return
+
+      try {
+        const blobUrl = await fetchAuthenticatedAudio(audioSource)
+        blobUrlRef.current = blobUrl
+        audioRef.current = new Audio(blobUrl)
+        audioRef.current.addEventListener('timeupdate', () => {
+          setCurrentTime(audioRef.current?.currentTime || 0)
+        })
+        audioRef.current.addEventListener('loadedmetadata', () => {
+          setDuration(audioRef.current?.duration || 0)
+        })
+        audioRef.current.addEventListener('ended', () => {
+          setIsPlaying(false)
+        })
+      } catch (err) {
+        console.error('Failed to load podcast audio:', err)
+        return
+      }
     }
 
     if (isPlaying) {
@@ -584,6 +1141,8 @@ function PodcastCard({ podcast }: { podcast: Podcast }) {
         )
       case 'completed':
         return <span className="px-2 py-1 text-xs bg-green-500/20 text-green-400 rounded-lg">Ready</span>
+      case 'script_only':
+        return <span className="px-2 py-1 text-xs bg-purple-500/20 text-purple-300 rounded-lg">Script only</span>
       case 'error':
         return <span className="px-2 py-1 text-xs bg-red-500/20 text-red-400 rounded-lg">Error</span>
       default:
@@ -603,37 +1162,62 @@ function PodcastCard({ podcast }: { podcast: Podcast }) {
             <span className="capitalize">{podcast.style}</span>
             <span>{podcast.speakers} speakers</span>
             <span>~{podcast.duration_minutes} min</span>
+            {podcast.created_at && (
+              <span title={new Date(podcast.created_at).toLocaleString()}>
+                {formatRelativeTime(podcast.created_at)}
+              </span>
+            )}
           </div>
           {podcast.error_message && (
-            <p className="text-xs text-red-400 mt-2">{podcast.error_message}</p>
+            <p className="text-xs text-red-400 mt-2">{typeof podcast.error_message === 'object' ? JSON.stringify(podcast.error_message) : podcast.error_message}</p>
           )}
         </div>
 
-        {podcast.status === 'completed' && podcast.audio_path && (
-          <div className="flex items-center gap-2">
-            <button
-              onClick={togglePlayback}
-              className="w-10 h-10 flex items-center justify-center bg-orange-500 hover:bg-orange-600 rounded-full transition-colors"
-            >
-              {isPlaying ? (
-                <Pause className="w-5 h-5 text-white" />
-              ) : (
-                <Play className="w-5 h-5 text-white ml-0.5" />
-              )}
-            </button>
-            <a
-              href={podcast.audio_path}
-              download
-              className="w-10 h-10 flex items-center justify-center bg-gray-800 hover:bg-gray-700 rounded-full transition-colors"
-            >
-              <Download className="w-4 h-4 text-white" />
-            </a>
-          </div>
-        )}
+        <div className="flex items-center gap-2">
+          {podcast.status === 'completed' && (podcast.audio_url || podcast.audio_path) && (
+            <>
+              <button
+                onClick={togglePlayback}
+                className="w-10 h-10 flex items-center justify-center bg-orange-500 hover:bg-orange-600 rounded-full transition-colors"
+              >
+                {isPlaying ? (
+                  <Pause className="w-5 h-5 text-white" />
+                ) : (
+                  <Play className="w-5 h-5 text-white ml-0.5" />
+                )}
+              </button>
+              <button
+                onClick={async () => {
+                  const audioSource = podcast.audio_url || podcast.audio_path
+                  if (!audioSource) return
+                  try {
+                    const blobUrl = blobUrlRef.current || await fetchAuthenticatedAudio(audioSource)
+                    const a = document.createElement('a')
+                    a.href = blobUrl
+                    a.download = audioSource.split('/').pop() || 'podcast.wav'
+                    a.click()
+                  } catch (err) {
+                    console.error('Failed to download podcast audio:', err)
+                  }
+                }}
+                className="w-10 h-10 flex items-center justify-center bg-gray-800 hover:bg-gray-700 rounded-full transition-colors"
+              >
+                <Download className="w-4 h-4 text-white" />
+              </button>
+            </>
+          )}
+          <button
+            onClick={() => onDelete(podcast.id)}
+            className="w-10 h-10 flex items-center justify-center bg-gray-800 hover:bg-red-500/20 hover:text-red-400 text-gray-400 rounded-full transition-colors"
+            title="Delete podcast"
+          >
+            <Trash2 className="w-4 h-4" />
+          </button>
+        </div>
       </div>
 
       {/* Audio Progress */}
-      {podcast.status === 'completed' && podcast.audio_path && isPlaying && (
+      {podcast.status === 'completed' && (podcast.audio_url || podcast.audio_path) && isPlaying && (
         <div className="mt-4">
           <div className="h-1 bg-gray-800 rounded-full overflow-hidden">
             <div

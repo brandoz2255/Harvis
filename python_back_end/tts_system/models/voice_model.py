@@ -60,7 +60,8 @@ class ScriptSegment(BaseModel):
 class PodcastRequest(BaseModel):
     """Request to generate a podcast"""
     script: List[ScriptSegment]
-    voice_mapping: Dict[str, str]  # speaker_id -> voice_id
+    voice_mapping: Dict[str, str]  # speaker_id -> voice_id (base TTS)
+    rvc_voice_mapping: Optional[Dict[str, str]] = None  # speaker_id -> rvc_voice_slug
     settings: Optional[GenerationSettings] = None
     output_format: str = Field(default="wav", pattern="^(wav|mp3|ogg)$")
     normalize_audio: bool = True

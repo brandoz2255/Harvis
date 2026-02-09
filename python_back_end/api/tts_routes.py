@@ -265,3 +265,72 @@ async def tts_health():
                 "status": "unavailable",
                 "error": str(e)
             }
+
+
+# ─── RVC Voice Management (Proxy) ────────────────────────────────────────────
+
+@router.get("/rvc/voices")
+async def list_rvc_voices(user_id: Optional[str] = None):
+    """List all RVC character voices"""
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        try:
+            params = {"user_id": user_id} if user_id else {}
+            response = await client.get(f"{TTS_SERVICE_URL}/rvc/voices", params=params)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(e.response.status_code, e.response.text)
+        except httpx.RequestError as e:
+            logger.warning(f"TTS service not available for RVC voices: {e}")
+            return {"voices": [], "rvc_available": False}
+
+
+@router.get("/rvc/voices/user/{user_id}")
+async def list_user_rvc_voices(user_id: str):
+    """List RVC voices for a specific user"""
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        try:
+            response = await client.get(f"{TTS_SERVICE_URL}/rvc/voices/user/{user_id}")
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(e.response.status_code, e.response.text)
+        except httpx.RequestError as e:
+            logger.warning(f"TTS service not available for user RVC voices: {e}")
+            return {"voices": [], "rvc_available": False}
+
+
+@router.get("/rvc/catalog/search")
+async def search_rvc_catalog(
+    q: str = Query("", description="Search query"),
+    category: str = Query("", description="Filter by category"),
+    page: int = Query(1, ge=1, description="Page number"),
+    per_page: int = Query(20, ge=1, le=100, description="Results per page")
+):
+    """Search voice models from voice-models.com catalog"""
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        try:
+            params = {"q": q, "category": category, "page": page, "per_page": per_page}
+            response = await client.get(f"{TTS_SERVICE_URL}/rvc/catalog/search", params=params)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(e.response.status_code, e.response.text)
+        except httpx.RequestError as e:
+            logger.warning(f"TTS service not available for catalog search: {e}")
+            raise HTTPException(503, "Voice catalog service unavailable")
+
+
+@router.post("/rvc/voices/import-url")
+async def import_rvc_voice_from_url(request: Dict[str, Any]):
+    """Import RVC voice from URL (e.g., voice-models.com)"""
+    async with httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0)) as client:
+        try:
+            response = await client.post(f"{TTS_SERVICE_URL}/rvc/voices/import-url", json=request)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(e.response.status_code, e.response.text)
+        except httpx.RequestError as e:
+            logger.error(f"TTS service connection error for import: {e}")
+            raise HTTPException(503, "TTS service unavailable")

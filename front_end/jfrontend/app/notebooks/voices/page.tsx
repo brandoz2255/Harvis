@@ -53,7 +53,7 @@ export default function NotebookVoicesPage() {
   const [isPlaying, setIsPlaying] = useState(false)
   const [audioDuration, setAudioDuration] = useState<number | null>(null)
   const [audioProgress, setAudioProgress] = useState(0)
-  
+
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const progressIntervalRef = useRef<NodeJS.Timeout | null>(null)
 
@@ -111,7 +111,7 @@ export default function NotebookVoicesPage() {
     try {
       if (!audioRef.current || audioRef.current.src !== generatedAudioUrl) {
         audioRef.current = new Audio(`/api/tts${generatedAudioUrl}`)
-        
+
         audioRef.current.onended = () => {
           setIsPlaying(false)
           setAudioProgress(0)
@@ -146,7 +146,7 @@ export default function NotebookVoicesPage() {
   // Download generated audio
   const handleDownload = () => {
     if (!generatedAudioUrl) return
-    
+
     const link = document.createElement('a')
     link.href = `/api/tts${generatedAudioUrl}`
     link.download = `voice-studio-${Date.now()}.wav`
@@ -193,6 +193,20 @@ export default function NotebookVoicesPage() {
           </div>
         </div>
 
+        {/* Development Warning */}
+        <div className="mb-6 bg-gradient-to-r from-blue-600/10 to-cyan-600/10 border border-blue-500/20 rounded-xl p-4 flex items-center gap-4">
+          <div className="p-2 bg-blue-500/20 rounded-lg">
+            <Sparkles className="w-5 h-5 text-blue-400" />
+          </div>
+          <div className="flex-1">
+            <h3 className="text-sm font-medium text-blue-400">Voice Studio Under Construction</h3>
+            <p className="text-sm text-blue-300/70 mt-0.5">
+              We are currently upgrading our voice cloning engine. Some features may be experimental or unavailable.
+              Podcasts are currently restricted to the default Harvis voice.
+            </p>
+          </div>
+        </div>
+
         <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
           {/* Voice Library - Left Column */}
           <div className="lg:col-span-3">
@@ -201,7 +215,7 @@ export default function NotebookVoicesPage() {
                 <Headphones className="w-4 h-4 text-blue-400" />
                 Voice Library
               </h2>
-              
+
               <VoiceLibrary
                 onSelect={setSelectedVoice}
                 selectedVoiceId={selectedVoice?.voice_id}

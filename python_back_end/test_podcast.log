@@ -1,0 +1,162 @@
+2026-02-04 09:44:48,501 - __main__ - ERROR - Test failed with exception: No module named 'langgraph'
+Traceback (most recent call last):
+  File "/home/ommblitz/Projects/clone3/aidev/python_back_end/test_podcast_gen.py", line 30, in test_generation
+    from open_notebook.podcast import PodcastGenerator
+  File "/home/ommblitz/Projects/clone3/aidev/python_back_end/open_notebook/__init__.py", line 7, in <module>
+    from .graphs import build_transform_graph, build_chat_graph
+  File "/home/ommblitz/Projects/clone3/aidev/python_back_end/open_notebook/graphs/__init__.py", line 5, in <module>
+    from .transform_graph import build_transform_graph, TransformState
+  File "/home/ommblitz/Projects/clone3/aidev/python_back_end/open_notebook/graphs/transform_graph.py", line 12, in <module>
+    from langgraph.graph import StateGraph, END
+ModuleNotFoundError: No module named 'langgraph'
+2026-02-04 09:47:30,729 - __main__ - ERROR - Test failed with exception: No module named 'langgraph'
+Traceback (most recent call last):
+  File "/home/ommblitz/Projects/clone3/aidev/python_back_end/test_podcast_gen.py", line 30, in test_generation
+    from open_notebook.podcast import PodcastGenerator
+  File "/home/ommblitz/Projects/clone3/aidev/python_back_end/open_notebook/__init__.py", line 7, in <module>
+    from .graphs import build_transform_graph, build_chat_graph
+  File "/home/ommblitz/Projects/clone3/aidev/python_back_end/open_notebook/graphs/__init__.py", line 5, in <module>
+    from .transform_graph import build_transform_graph, TransformState
+  File "/home/ommblitz/Projects/clone3/aidev/python_back_end/open_notebook/graphs/transform_graph.py", line 12, in <module>
+    from langgraph.graph import StateGraph, END
+ModuleNotFoundError: No module named 'langgraph'
+2026-02-04 09:48:31,315 - open_notebook.podcast.generator - INFO - Generating podcast outline for: Agentic Coding Test
+2026-02-04 09:49:40,480 - open_notebook.podcast.generator - INFO - Generating podcast script for: Agentic Coding Test
+2026-02-04 09:50:45,237 - open_notebook.podcast.generator - INFO - Generating podcast audio for: Agentic Coding Test
+2026-02-04 09:50:45,238 - open_notebook.podcast.audio - ERROR - Chatterbox TTS not available
+2026-02-04 09:50:45,239 - __main__ - INFO - \nGeneration Result:
+2026-02-04 09:50:45,239 - __main__ - INFO - Status: script_only
+2026-02-04 09:50:45,239 - __main__ - INFO - Audio Path: None
+2026-02-04 09:50:45,239 - __main__ - INFO - Transcript Length: 8
+2026-02-04 09:53:00,335 - open_notebook.podcast.generator - INFO - Generating podcast outline for: Agentic Coding Test
+2026-02-04 09:53:52,145 - open_notebook.podcast.generator - INFO - Generating podcast script for: Agentic Coding Test
+2026-02-04 09:54:45,050 - open_notebook.podcast.generator - INFO - Generating podcast audio for: Agentic Coding Test
+2026-02-04 09:54:45,055 - open_notebook.podcast.audio - ERROR - Chatterbox TTS not available
+2026-02-04 09:54:45,056 - __main__ - INFO - \nGeneration Result:
+2026-02-04 09:54:45,056 - __main__ - INFO - Status: script_only
+2026-02-04 09:54:45,056 - __main__ - INFO - Audio Path: None
+2026-02-04 09:54:45,056 - __main__ - INFO - Transcript Length: 8
+2026-02-04 09:56:10,617 - open_notebook.podcast.generator - INFO - Generating podcast outline for: Agentic Coding Test
+2026-02-04 09:56:55,344 - open_notebook.podcast.generator - INFO - Generating podcast script for: Agentic Coding Test
+2026-02-04 09:57:26,849 - open_notebook.podcast.generator - INFO - Generating podcast audio for: Agentic Coding Test
+2026-02-04 09:57:26,857 - open_notebook.podcast.audio - ERROR - Chatterbox TTS not available
+2026-02-04 09:57:26,858 - __main__ - INFO - \nGeneration Result:
+2026-02-04 09:57:26,858 - __main__ - INFO - Status: script_only
+2026-02-04 09:57:26,858 - __main__ - INFO - Audio Path: None
+2026-02-04 09:57:26,858 - __main__ - INFO - Transcript Length: 7
+2026-02-04 10:02:14,667 - open_notebook.podcast.generator - INFO - Generating podcast outline for: Agentic Coding Test
+2026-02-04 10:03:36,027 - open_notebook.podcast.generator - INFO - Generating podcast script for: Agentic Coding Test
+2026-02-04 10:04:21,808 - open_notebook.podcast.generator - INFO - Generating podcast audio for: Agentic Coding Test
+2026-02-04 10:04:22,630 - open_notebook.podcast.audio - ERROR - Chatterbox TTS not available
+2026-02-04 10:04:22,630 - __main__ - INFO - \nGeneration Result:
+2026-02-04 10:04:22,630 - __main__ - INFO - Status: script_only
+2026-02-04 10:04:22,630 - __main__ - INFO - Audio Path: None
+2026-02-04 10:04:22,630 - __main__ - INFO - Transcript Length: 12
+2026-02-04 10:05:10,661 - open_notebook.podcast.generator - INFO - Generating podcast outline for: Agentic Coding Test
+2026-02-04 10:06:16,204 - open_notebook.podcast.generator - INFO - Generating podcast script for: Agentic Coding Test
+2026-02-04 10:07:38,646 - open_notebook.podcast.generator - INFO - Generating podcast audio for: Agentic Coding Test
+2026-02-04 10:07:39,367 - open_notebook.podcast.audio - ERROR - Chatterbox TTS not available
+2026-02-04 10:07:39,367 - __main__ - INFO - \nGeneration Result:
+2026-02-04 10:07:39,367 - __main__ - INFO - Status: script_only
+2026-02-04 10:07:39,367 - __main__ - INFO - Audio Path: None
+2026-02-04 10:07:39,367 - __main__ - INFO - Transcript Length: 10
+2026-02-04 10:11:18,419 - open_notebook.podcast.generator - INFO - Generating podcast outline for: Agentic Coding Test
+2026-02-04 10:12:39,609 - open_notebook.podcast.generator - INFO - Generating podcast script for: Agentic Coding Test
+2026-02-04 10:13:31,980 - open_notebook.podcast.generator - INFO - Generating podcast audio for: Agentic Coding Test
+2026-02-04 10:13:32,792 - open_notebook.podcast.audio - ERROR - Chatterbox TTS not available
+2026-02-04 10:13:32,792 - __main__ - INFO - \nGeneration Result:
+2026-02-04 10:13:32,792 - __main__ - INFO - Status: script_only
+2026-02-04 10:13:32,792 - __main__ - INFO - Audio Path: None
+2026-02-04 10:13:32,792 - __main__ - INFO - Transcript Length: 9
+2026-02-04 10:14:16,523 - open_notebook.podcast.generator - INFO - Generating podcast outline for: Agentic Coding Test
+2026-02-04 10:14:59,796 - open_notebook.podcast.generator - INFO - Generating podcast script for: Agentic Coding Test
+2026-02-04 10:16:05,164 - open_notebook.podcast.generator - INFO - Generating podcast audio for: Agentic Coding Test
+2026-02-04 10:16:07,999 - open_notebook.podcast.audio - ERROR - Chatterbox TTS not available
+2026-02-04 10:16:07,999 - __main__ - INFO - \nGeneration Result:
+2026-02-04 10:16:07,999 - __main__ - INFO - Status: script_only
+2026-02-04 10:16:07,999 - __main__ - INFO - Audio Path: None
+2026-02-04 10:16:07,999 - __main__ - INFO - Transcript Length: 7
+2026-02-04 10:16:55,979 - open_notebook.podcast.generator - INFO - Generating podcast outline for: Agentic Coding Test
+2026-02-04 10:17:43,335 - open_notebook.podcast.generator - INFO - Generating podcast script for: Agentic Coding Test
+2026-02-04 10:18:34,418 - open_notebook.podcast.generator - INFO - Generating podcast audio for: Agentic Coding Test
+2026-02-04 10:18:36,773 - open_notebook.podcast.audio - ERROR - Chatterbox TTS not available
+2026-02-04 10:18:36,773 - __main__ - INFO - \nGeneration Result:
+2026-02-04 10:18:36,773 - __main__ - INFO - Status: script_only
+2026-02-04 10:18:36,773 - __main__ - INFO - Audio Path: None
+2026-02-04 10:18:36,773 - __main__ - INFO - Transcript Length: 9
+2026-02-04 10:19:18,577 - open_notebook.podcast.generator - INFO - Generating podcast outline for: Agentic Coding Test
+2026-02-04 10:20:07,722 - open_notebook.podcast.generator - INFO - Generating podcast script for: Agentic Coding Test
+2026-02-04 10:20:57,511 - open_notebook.podcast.generator - INFO - Generating podcast audio for: Agentic Coding Test
+2026-02-04 10:20:59,814 - open_notebook.podcast.audio - ERROR - Chatterbox TTS not available
+2026-02-04 10:20:59,814 - __main__ - INFO - \nGeneration Result:
+2026-02-04 10:20:59,814 - __main__ - INFO - Status: script_only
+2026-02-04 10:20:59,814 - __main__ - INFO - Audio Path: None
+2026-02-04 10:20:59,814 - __main__ - INFO - Transcript Length: 7
+2026-02-04 10:21:37,782 - open_notebook.podcast.generator - INFO - Generating podcast outline for: Agentic Coding Test
+2026-02-04 10:23:02,988 - open_notebook.podcast.generator - INFO - Generating podcast script for: Agentic Coding Test
+2026-02-04 10:23:12,033 - open_notebook.podcast.generator - INFO - Generating podcast outline for: Agentic Coding Test
+2026-02-04 10:23:42,976 - open_notebook.podcast.generator - INFO - Generating podcast audio for: Agentic Coding Test
+2026-02-04 10:23:48,883 - open_notebook.podcast.audio - ERROR - Chatterbox TTS not available
+2026-02-04 10:23:48,884 - __main__ - INFO - \nGeneration Result:
+2026-02-04 10:23:48,884 - __main__ - INFO - Status: script_only
+2026-02-04 10:23:48,884 - __main__ - INFO - Audio Path: None
+2026-02-04 10:23:48,884 - __main__ - INFO - Transcript Length: 9
+2026-02-04 10:24:42,503 - open_notebook.podcast.generator - INFO - Generating podcast script for: Agentic Coding Test
+2026-02-04 10:24:57,486 - open_notebook.podcast.generator - INFO - Generating podcast outline for: Agentic Coding Test
+2026-02-04 10:26:10,542 - open_notebook.podcast.generator - INFO - Generating podcast audio for: Agentic Coding Test
+2026-02-04 10:26:16,809 - httpx - INFO - HTTP Request: HEAD https://huggingface.co/ResembleAI/chatterbox/resolve/main/ve.safetensors "HTTP/1.1 302 Found"
+2026-02-04 10:26:16,896 - httpx - INFO - HTTP Request: GET https://huggingface.co/api/models/ResembleAI/chatterbox/xet-read-token/05e904af2b5c7f8e482687a9d7336c5c824467d9 "HTTP/1.1 200 OK"
+2026-02-04 10:26:17,796 - httpx - INFO - HTTP Request: HEAD https://huggingface.co/ResembleAI/chatterbox/resolve/main/t3_cfg.safetensors "HTTP/1.1 302 Found"
+2026-02-04 10:27:08,461 - httpx - INFO - HTTP Request: HEAD https://huggingface.co/ResembleAI/chatterbox/resolve/main/s3gen.safetensors "HTTP/1.1 302 Found"
+2026-02-04 10:27:17,016 - open_notebook.podcast.generator - INFO - Generating podcast script for: Agentic Coding Test
+2026-02-04 10:27:45,301 - httpx - INFO - HTTP Request: HEAD https://huggingface.co/ResembleAI/chatterbox/resolve/main/tokenizer.json "HTTP/1.1 307 Temporary Redirect"
+2026-02-04 10:27:45,312 - httpx - INFO - HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/ResembleAI/chatterbox/05e904af2b5c7f8e482687a9d7336c5c824467d9/tokenizer.json "HTTP/1.1 200 OK"
+2026-02-04 10:27:45,327 - httpx - INFO - HTTP Request: GET https://huggingface.co/api/resolve-cache/models/ResembleAI/chatterbox/05e904af2b5c7f8e482687a9d7336c5c824467d9/tokenizer.json "HTTP/1.1 200 OK"
+2026-02-04 10:27:45,411 - httpx - INFO - HTTP Request: HEAD https://huggingface.co/ResembleAI/chatterbox/resolve/main/conds.pt "HTTP/1.1 302 Found"
+2026-02-04 10:27:49,874 - open_notebook.podcast.audio - ERROR - Chatterbox generation failed: CUDA out of memory. Tried to allocate 20.00 MiB. GPU 0 has a total capacity of 7.50 GiB of which 51.06 MiB is free. Process 3572 has 788.00 MiB memory in use. Process 54012 has 4.84 GiB memory in use. Including non-PyTorch memory, this process has 998.00 MiB memory in use. Of the allocated memory 837.56 MiB is allocated by PyTorch, and 4.44 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+2026-02-04 10:27:50,109 - __main__ - INFO - \nGeneration Result:
+2026-02-04 10:27:50,109 - __main__ - INFO - Status: script_only
+2026-02-04 10:27:50,109 - __main__ - INFO - Audio Path: None
+2026-02-04 10:27:50,109 - __main__ - INFO - Transcript Length: 7
+2026-02-04 10:27:52,764 - open_notebook.podcast.generator - INFO - Generating podcast audio for: Agentic Coding Test
+2026-02-04 10:27:55,827 - httpx - INFO - HTTP Request: HEAD https://huggingface.co/ResembleAI/chatterbox/resolve/main/ve.safetensors "HTTP/1.1 302 Found"
+2026-02-04 10:27:55,920 - httpx - INFO - HTTP Request: HEAD https://huggingface.co/ResembleAI/chatterbox/resolve/main/t3_cfg.safetensors "HTTP/1.1 302 Found"
+2026-02-04 10:27:56,031 - httpx - INFO - HTTP Request: HEAD https://huggingface.co/ResembleAI/chatterbox/resolve/main/s3gen.safetensors "HTTP/1.1 302 Found"
+2026-02-04 10:27:56,236 - httpx - INFO - HTTP Request: HEAD https://huggingface.co/ResembleAI/chatterbox/resolve/main/tokenizer.json "HTTP/1.1 307 Temporary Redirect"
+2026-02-04 10:27:56,236 - huggingface_hub.utils._http - WARNING - Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-02-04 10:27:56,245 - httpx - INFO - HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/ResembleAI/chatterbox/05e904af2b5c7f8e482687a9d7336c5c824467d9/tokenizer.json "HTTP/1.1 200 OK"
+2026-02-04 10:27:56,354 - httpx - INFO - HTTP Request: HEAD https://huggingface.co/ResembleAI/chatterbox/resolve/main/conds.pt "HTTP/1.1 302 Found"
+2026-02-04 10:27:59,020 - open_notebook.podcast.audio - ERROR - Chatterbox generation failed: CUDA out of memory. Tried to allocate 16.00 MiB. GPU 0 has a total capacity of 7.50 GiB of which 41.94 MiB is free. Process 3572 has 788.00 MiB memory in use. Process 54012 has 4.84 GiB memory in use. Including non-PyTorch memory, this process has 1018.00 MiB memory in use. Of the allocated memory 853.56 MiB is allocated by PyTorch, and 8.44 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+2026-02-04 10:27:59,106 - __main__ - INFO - \nGeneration Result:
+2026-02-04 10:27:59,106 - __main__ - INFO - Status: script_only
+2026-02-04 10:27:59,106 - __main__ - INFO - Audio Path: None
+2026-02-04 10:27:59,106 - __main__ - INFO - Transcript Length: 7
+2026-02-04 10:28:45,648 - open_notebook.podcast.generator - INFO - Generating podcast outline for: Agentic Coding Test
+2026-02-04 10:29:53,342 - open_notebook.podcast.generator - INFO - Generating podcast outline for: Agentic Coding Test
+2026-02-04 10:30:42,365 - open_notebook.podcast.generator - INFO - Generating podcast script for: Agentic Coding Test
+2026-02-04 10:31:20,735 - open_notebook.podcast.generator - INFO - Generating podcast audio for: Agentic Coding Test
+2026-02-04 10:31:23,853 - httpx - INFO - HTTP Request: HEAD https://huggingface.co/ResembleAI/chatterbox/resolve/main/ve.safetensors "HTTP/1.1 302 Found"
+2026-02-04 10:31:23,938 - httpx - INFO - HTTP Request: HEAD https://huggingface.co/ResembleAI/chatterbox/resolve/main/t3_cfg.safetensors "HTTP/1.1 302 Found"
+2026-02-04 10:31:24,022 - httpx - INFO - HTTP Request: HEAD https://huggingface.co/ResembleAI/chatterbox/resolve/main/s3gen.safetensors "HTTP/1.1 302 Found"
+2026-02-04 10:31:24,105 - httpx - INFO - HTTP Request: HEAD https://huggingface.co/ResembleAI/chatterbox/resolve/main/tokenizer.json "HTTP/1.1 307 Temporary Redirect"
+2026-02-04 10:31:24,112 - httpx - INFO - HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/ResembleAI/chatterbox/05e904af2b5c7f8e482687a9d7336c5c824467d9/tokenizer.json "HTTP/1.1 200 OK"
+2026-02-04 10:31:24,193 - httpx - INFO - HTTP Request: HEAD https://huggingface.co/ResembleAI/chatterbox/resolve/main/conds.pt "HTTP/1.1 302 Found"
+2026-02-04 10:31:26,851 - open_notebook.podcast.audio - ERROR - Chatterbox generation failed: CUDA out of memory. Tried to allocate 16.00 MiB. GPU 0 has a total capacity of 7.50 GiB of which 33.88 MiB is free. Process 3572 has 788.00 MiB memory in use. Process 54012 has 4.84 GiB memory in use. Including non-PyTorch memory, this process has 1018.00 MiB memory in use. Of the allocated memory 853.56 MiB is allocated by PyTorch, and 8.44 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+2026-02-04 10:31:26,934 - __main__ - INFO - \nGeneration Result:
+2026-02-04 10:31:26,934 - __main__ - INFO - Status: script_only
+2026-02-04 10:31:26,934 - __main__ - INFO - Audio Path: None
+2026-02-04 10:31:26,934 - __main__ - INFO - Transcript Length: 7
+2026-02-04 10:33:05,490 - open_notebook.podcast.generator - INFO - Generating podcast outline for: Agentic Coding Test
+2026-02-04 10:33:57,584 - open_notebook.podcast.generator - INFO - Generating podcast script for: Agentic Coding Test
+2026-02-04 10:34:36,381 - open_notebook.podcast.generator - INFO - Generating podcast audio for: Agentic Coding Test
+2026-02-04 10:34:39,381 - httpx - INFO - HTTP Request: HEAD https://huggingface.co/ResembleAI/chatterbox/resolve/main/ve.safetensors "HTTP/1.1 302 Found"
+2026-02-04 10:34:39,467 - httpx - INFO - HTTP Request: HEAD https://huggingface.co/ResembleAI/chatterbox/resolve/main/t3_cfg.safetensors "HTTP/1.1 302 Found"
+2026-02-04 10:34:39,555 - httpx - INFO - HTTP Request: HEAD https://huggingface.co/ResembleAI/chatterbox/resolve/main/s3gen.safetensors "HTTP/1.1 302 Found"
+2026-02-04 10:34:39,687 - httpx - INFO - HTTP Request: HEAD https://huggingface.co/ResembleAI/chatterbox/resolve/main/tokenizer.json "HTTP/1.1 307 Temporary Redirect"
+2026-02-04 10:34:39,697 - httpx - INFO - HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/ResembleAI/chatterbox/05e904af2b5c7f8e482687a9d7336c5c824467d9/tokenizer.json "HTTP/1.1 200 OK"
+2026-02-04 10:34:39,794 - httpx - INFO - HTTP Request: HEAD https://huggingface.co/ResembleAI/chatterbox/resolve/main/conds.pt "HTTP/1.1 302 Found"
+2026-02-04 10:34:42,378 - open_notebook.podcast.audio - ERROR - Chatterbox generation failed: CUDA out of memory. Tried to allocate 20.00 MiB. GPU 0 has a total capacity of 7.50 GiB of which 42.25 MiB is free. Process 3572 has 788.00 MiB memory in use. Process 54012 has 4.84 GiB memory in use. Including non-PyTorch memory, this process has 742.00 MiB memory in use. Of the allocated memory 581.53 MiB is allocated by PyTorch, and 4.47 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+2026-02-04 10:34:42,468 - __main__ - INFO - \nGeneration Result:
+2026-02-04 10:34:42,468 - __main__ - INFO - Status: script_only
+2026-02-04 10:34:42,468 - __main__ - INFO - Audio Path: None
+2026-02-04 10:34:42,468 - __main__ - INFO - Transcript Length: 7

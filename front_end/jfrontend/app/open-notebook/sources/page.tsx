@@ -26,6 +26,8 @@ import { Button } from '@/components/ui/button'
 import { SourceCard, SourceCardCompact } from '@/components/notebook/SourceCard'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 import { useCreateDialogsStore } from '@/stores/openNotebookUiStore'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import OpenNotebookAPI from '@/lib/openNotebookApi'
 
 // Source type icons mapping
 const SOURCE_TYPE_ICONS: Record<string, React.ElementType> = {
@@ -66,6 +68,11 @@ export default function OpenNotebookSourcesPage() {
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid')
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [deleteConfirmSource, setDeleteConfirmSource] = useState<string | null>(null)
+  const [selectedSource, setSelectedSource] = useState<NotebookSource | null>(null)
+  const [sourceDetail, setSourceDetail] = useState<string | null>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
+  const [detailError, setDetailError] = useState<string | null>(null)
+  const [isAutoRefreshing, setIsAutoRefreshing] = useState(false)
 
   useEffect(() => {
     checkServiceHealth()
@@ -87,6 +94,34 @@ export default function OpenNotebookSourcesPage() {
     setIsRefreshing(true)
     await fetchSources()
     setIsRefreshing(false)
+  }
+
+  useEffect(() => {
+    const hasProcessing = sources.some((s) => s.status === 'processing' || s.status === 'pending')
+    if (!hasProcessing) {
+      setIsAutoRefreshing(false)
+      return
+    }
+    setIsAutoRefreshing(true)
+    const interval = setInterval(async () => {
+      await fetchSources()
+    }, 4000)
+    return () => clearInterval(interval)
+  }, [sources, fetchSources])
+
+  const handleViewSource = async (source: NotebookSource) => {
+    setSelectedSource(source)
+    setDetailLoading(true)
+    setDetailError(null)
+    setSourceDetail(null)
+    try {
+      const result = await OpenNotebookAPI.sources.get(source.id)
+      setSourceDetail(result.full_text || result.content || '')
+    } catch (error: any) {
+      setDetailError(error?.message || 'Failed to load source content')
+    } finally {
+      setDetailLoading(false)
+    }
   }
 
   const handleDeleteSource = async () => {
@@ -177,6 +212,13 @@ export default function OpenNotebookSourcesPage() {
             >
               <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} />
             </button>
+            {/* Auto-refresh Indicator */}
+            {isAutoRefreshing && (
+              <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs bg-blue-500/10 text-blue-500 border border-blue-500/20">
+                <Loader2 className="w-3 h-3 animate-spin" />
+                Auto-refreshing...
+              </div>
+            )}
             {/* Service Status */}
             <div className={`flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs ${
               isOpenNotebookAvailable
@@ -300,6 +342,7 @@ export default function OpenNotebookSourcesPage() {
                 source={source}
                 showContextToggle={false}
                 onDelete={() => setDeleteConfirmSource(source.id)}
+                onView={() => handleViewSource(source)}
               />
             ))}
           </div>
@@ -309,7 +352,7 @@ export default function OpenNotebookSourcesPage() {
               <SourceCardCompact
                 key={source.id}
                 source={source}
-                onClick={() => {}}
+                onClick={() => handleViewSource(source)}
               />
             ))}
           </div>
@@ -325,6 +368,29 @@ export default function OpenNotebookSourcesPage() {
           confirmVariant="destructive"
           onConfirm={handleDeleteSource}
         />
+
+        <Dialog open={!!selectedSource} onOpenChange={(open) => !open && setSelectedSource(null)}>
+          <DialogContent className="max-w-3xl bg-[#0a0a0a] border border-gray-800 text-white">
+            <DialogHeader>
+              <DialogTitle>Extracted Content</DialogTitle>
+              <DialogDescription className="text-gray-400">
+                {selectedSource?.title || selectedSource?.original_filename || 'Source'}
+              </DialogDescription>
+            </DialogHeader>
+            <div className="max-h-[60vh] overflow-y-auto rounded-lg border border-gray-800 bg-[#111111] p-4 text-sm text-gray-200 whitespace-pre-wrap">
+              {detailLoading && (
+                <div className="flex items-center gap-2 text-gray-400">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Loading extracted content...
+                </div>
+              )}
+              {detailError && (
+                <div className="text-red-400">{detailError}</div>
+              )}
+              {!detailLoading && !detailError && (sourceDetail || 'No extracted content available yet.')}
+            </div>
+          </DialogContent>
+        </Dialog>
       </div>
     </div>
   )

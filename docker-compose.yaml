@@ -112,14 +112,24 @@ services:
       TTS_HOST: "0.0.0.0"
       TTS_PORT: "8001"
       QUANTIZE_4BIT: "true"
+      # Force GPU mode for RTX 50 series (sm_120) with PyTorch nightly
+      TTS_FORCE_GPU: "true"
+      # Enable Dia for voice cloning (uses GPU)
+      TTS_ENABLE_DIA: "true"
       # Storage paths (inside container)
       VOICES_DIR: /app/voices
       OUTPUT_DIR: /app/output
       MODEL_CACHE_DIR: /app/models
+      # RVC Configuration
+      RVC_MODELS_DIR: /app/rvc_models
+      RVC_ASSETS_DIR: /app/assets
+      RVC_MAX_CACHED_MODELS: "4"
     volumes:
       - tts_voices:/app/voices
       - tts_output:/app/output
       - tts_models:/app/models
+      - tts_rvc_models:/app/rvc_models
+      - tts_rvc_assets:/app/assets
       - ./python_back_end/tts_system:/app/tts_system:ro
     deploy:
       resources:
@@ -150,5 +160,7 @@ volumes:
   tts_voices:
   tts_output:
   tts_models:
+  tts_rvc_models:
+  tts_rvc_assets:
 
 

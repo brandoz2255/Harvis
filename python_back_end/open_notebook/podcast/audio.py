@@ -13,8 +13,13 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Configuration
-PODCAST_OUTPUT_PATH = os.getenv("PODCAST_OUTPUT_PATH", "/data/podcasts")
+PODCAST_OUTPUT_PATH = os.getenv("PODCAST_OUTPUT_PATH", "/app/podcast_data")
 TTS_PROVIDER = os.getenv("PODCAST_TTS_PROVIDER", "chatterbox")
+TTS_SERVICE_URL = os.getenv("TTS_SERVICE_URL", "http://tts-service:8001")
+PODCAST_TTS_CFG_SCALE = float(os.getenv("PODCAST_TTS_CFG_SCALE", "1.6"))
+PODCAST_TTS_TEMPERATURE = float(os.getenv("PODCAST_TTS_TEMPERATURE", "0.4"))
+PODCAST_TTS_NORMALIZE_AUDIO = os.getenv("PODCAST_TTS_NORMALIZE_AUDIO", "true").lower() in ("1", "true", "yes", "y")
+PODCAST_TTS_SILENCE_BETWEEN_SPEAKERS = float(os.getenv("PODCAST_TTS_SILENCE_BETWEEN_SPEAKERS", "0.3"))
 
 # Voice mappings for different TTS providers
 CHATTERBOX_VOICES = {
@@ -61,18 +66,112 @@ class AudioGenerator:
         if not transcript:
             return {"error": "No transcript provided"}
         
-        # Generate unique filename if not provided
+        voice_mapping = {
+            speaker.get("name"): speaker.get("voice_id")
+            for speaker in speakers
+            if speaker.get("voice_id")
+        }
+
+        # Extract RVC voice mapping if speakers have rvc_voice_id
+        rvc_voice_mapping = {
+            speaker.get("name"): speaker.get("rvc_voice_id")
+            for speaker in speakers
+            if speaker.get("rvc_voice_id")
+        }
+
+        # If no explicit voice_mapping, build a default one using "__default__"
+        # so the TTS service can generate with its default engine (VITS/SpeechT5)
+        if not voice_mapping:
+            unique_speakers = sorted({
+                seg.get("speaker", "Speaker")
+                for seg in transcript
+                if seg.get("dialogue", "").strip()
+            })
+            voice_mapping = {name: "__default__" for name in unique_speakers}
+            logger.info(f"No voice_ids on speakers, using TTS service default for: {unique_speakers}")
+
         if not output_filename:
-            output_filename = f"podcast_{uuid4().hex[:8]}.mp3"
-        
-        output_path = os.path.join(self.output_path, "audio", output_filename)
-        
-        if self.tts_provider == "chatterbox":
-            return await self._generate_with_chatterbox(transcript, speakers, output_path)
-        elif self.tts_provider == "elevenlabs":
-            return await self._generate_with_elevenlabs(transcript, speakers, output_path)
+            output_filename = f"podcast_{uuid4().hex[:8]}.wav"
         else:
-            return await self._generate_with_chatterbox(transcript, speakers, output_path)
+            output_filename = os.path.splitext(output_filename)[0] + ".wav"
+        output_path = os.path.join(self.output_path, "audio", output_filename)
+
+        return await self._generate_with_tts_service(
+            transcript, voice_mapping, output_path,
+            rvc_voice_mapping=rvc_voice_mapping if rvc_voice_mapping else None
+        )
+
+    async def _generate_with_tts_service(
+        self,
+        transcript: List[Dict[str, str]],
+        voice_mapping: Dict[str, str],
+        output_path: str,
+        rvc_voice_mapping: Optional[Dict[str, str]] = None
+    ) -> Dict[str, Any]:
+        """Generate audio using the TTS service with voice mapping and optional RVC."""
+        try:
+            import httpx
+        except ImportError:
+            return {"error": "httpx library not available"}
+
+        script_segments = [
+            {"speaker": segment.get("speaker", "Speaker"), "text": segment.get("dialogue", "")}
+            for segment in transcript
+            if segment.get("dialogue", "").strip()
+        ]
+
+        if not script_segments:
+            return {"error": "No valid script segments"}
+
+        payload = {
+            "script": script_segments,
+            "voice_mapping": voice_mapping,
+            "output_format": "wav",
+            "normalize_audio": PODCAST_TTS_NORMALIZE_AUDIO,
+            "add_silence_between_speakers": PODCAST_TTS_SILENCE_BETWEEN_SPEAKERS,
+            "settings": {
+                # For Dia/VibeVoice: lower temperature improves consistency; moderate cfg_scale improves adherence
+                "cfg_scale": PODCAST_TTS_CFG_SCALE,
+                "temperature": PODCAST_TTS_TEMPERATURE,
+            }
+        }
+        
+        # Add RVC voice mapping if provided
+        if rvc_voice_mapping:
+            payload["rvc_voice_mapping"] = rvc_voice_mapping
+            logger.info(f"Using RVC voices for speakers: {list(rvc_voice_mapping.keys())}")
+
+        try:
+            async with httpx.AsyncClient(timeout=600.0) as client:
+                response = await client.post(f"{TTS_SERVICE_URL}/generate/podcast", json=payload)
+                if response.status_code != 200:
+                    try:
+                        return {"error": response.json()}
+                    except Exception:
+                        return {"error": response.text}
+
+                result = response.json()
+                audio_url = result.get("audio_url")
+                if not audio_url:
+                    return {"error": "TTS service returned no audio URL"}
+
+                audio_response = await client.get(f"{TTS_SERVICE_URL}{audio_url}")
+                if audio_response.status_code != 200:
+                    return {"error": "Failed to download audio from TTS service"}
+
+                with open(output_path, "wb") as f:
+                    f.write(audio_response.content)
+
+            duration_seconds = result.get("duration")
+            return {
+                "audio_path": output_path,
+                "duration_seconds": int(duration_seconds) if duration_seconds else None,
+                "segments_count": len(script_segments),
+                "provider": "tts-service"
+            }
+        except Exception as e:
+            logger.error(f"TTS service generation failed: {e}")
+            return {"error": str(e)}
     
     async def _generate_with_chatterbox(
         self,
@@ -80,56 +179,72 @@ class AudioGenerator:
         speakers: List[Dict[str, str]],
         output_path: str
     ) -> Dict[str, Any]:
-        """Generate audio using Chatterbox TTS"""
+        """Generate audio using Chatterbox TTS via central model_manager"""
         try:
-            from chatterbox.tts import ChatterboxTTS
-            import torch
+            # Use the robust model_manager which handles CPU fallback and monkeypatches
+            import sys
+            # Ensure parent package is in path content root if needed
+            # In a proper app structure getting 'model_manager' should be straightforward
+            # But let's be safe usually it is available in context
+            try:
+                import model_manager
+            except ImportError:
+                # Fallback implementation if running standalone context
+                import sys
+                sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
+                import model_manager
+
             import soundfile as sf
-        except ImportError:
-            logger.error("Chatterbox TTS not available")
-            return {"error": "Chatterbox TTS not installed"}
+            import numpy as np
+            import torch
+        except ImportError as e:
+            logger.error(f"Required modules not available: {e}")
+            return {"error": f"Import error: {e}"}
         
         try:
-            # Initialize Chatterbox
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            model = ChatterboxTTS.from_pretrained(device=device)
-            
-            # Create speaker voice map
-            speaker_names = {s["name"]: i for i, s in enumerate(speakers)}
-            
             audio_segments = []
-            sample_rate = 24000  # Chatterbox default
-            
+            segment_errors = []
+            sample_rate = 24000
+            total_segments = 0
+
             for segment in transcript:
                 speaker = segment.get("speaker", "Speaker")
                 dialogue = segment.get("dialogue", "")
-                
+
                 if not dialogue.strip():
                     continue
-                
-                # Generate audio for this segment
+
+                total_segments += 1
+
+                # Generate audio for this segment using robust manager
                 try:
-                    wav = model.generate(dialogue)
-                    
-                    # Convert to numpy if tensor
-                    if hasattr(wav, 'cpu'):
-                        wav = wav.cpu().numpy()
-                    
+                    # generate_speech returns (sr, audio_numpy_array)
+                    # It handles loading, caching, and CPU fallback automatically
+                    sr, wav = model_manager.generate_speech(dialogue)
+                    sample_rate = sr
+
                     audio_segments.append(wav)
-                    
-                    # Add small pause between segments
-                    pause = torch.zeros(int(sample_rate * 0.5)).numpy()
+
+                    # Add small pause between segments (0.5s)
+                    pause = np.zeros(int(sample_rate * 0.5), dtype=np.float32)
                     audio_segments.append(pause)
-                    
+
                 except Exception as e:
-                    logger.warning(f"Failed to generate segment: {e}")
+                    import traceback
+                    error_detail = f"Segment {total_segments} ({speaker}): {type(e).__name__}: {e}"
+                    segment_errors.append(error_detail)
+                    logger.error(f"Failed to generate segment: {error_detail}")
+                    logger.error(traceback.format_exc())
                     continue
-            
+
             if not audio_segments:
-                return {"error": "No audio segments generated"}
+                error_msg = f"No audio segments generated. {total_segments} segment(s) attempted, all failed."
+                if segment_errors:
+                    error_msg += f" Errors: {'; '.join(segment_errors[:5])}"
+                logger.error(error_msg)
+                return {"error": error_msg}
             
             # Concatenate all segments
-            import numpy as np
             full_audio = np.concatenate(audio_segments)
             
             # Save as MP3 (via WAV first, then convert)
@@ -185,41 +300,55 @@ class AudioGenerator:
                 speaker_voices[name] = ELEVENLABS_VOICES.get(voice_key, ELEVENLABS_VOICES["voice_1"])
             
             audio_segments = []
-            
+            segment_errors = []
+            total_segments = 0
+
             for segment in transcript:
                 speaker = segment.get("speaker", "Speaker")
                 dialogue = segment.get("dialogue", "")
-                
+
                 if not dialogue.strip():
                     continue
-                
+
+                total_segments += 1
                 voice_id = speaker_voices.get(speaker, ELEVENLABS_VOICES["voice_1"])
-                
+
                 # Call ElevenLabs API
-                response = requests.post(
-                    f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
-                    headers={
-                        "xi-api-key": api_key,
-                        "Content-Type": "application/json"
-                    },
-                    json={
-                        "text": dialogue,
-                        "model_id": "eleven_monolingual_v1",
-                        "voice_settings": {
-                            "stability": 0.5,
-                            "similarity_boost": 0.75
-                        }
-                    },
-                    timeout=60
-                )
-                
-                if response.status_code == 200:
-                    audio_segments.append(response.content)
-                else:
-                    logger.warning(f"ElevenLabs API error: {response.status_code}")
-            
+                try:
+                    response = requests.post(
+                        f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
+                        headers={
+                            "xi-api-key": api_key,
+                            "Content-Type": "application/json"
+                        },
+                        json={
+                            "text": dialogue,
+                            "model_id": "eleven_monolingual_v1",
+                            "voice_settings": {
+                                "stability": 0.5,
+                                "similarity_boost": 0.75
+                            }
+                        },
+                        timeout=60
+                    )
+
+                    if response.status_code == 200:
+                        audio_segments.append(response.content)
+                    else:
+                        error_detail = f"Segment {total_segments} ({speaker}): HTTP {response.status_code} - {response.text[:200]}"
+                        segment_errors.append(error_detail)
+                        logger.warning(f"ElevenLabs API error: {error_detail}")
+                except Exception as e:
+                    error_detail = f"Segment {total_segments} ({speaker}): {type(e).__name__}: {e}"
+                    segment_errors.append(error_detail)
+                    logger.error(f"ElevenLabs request failed: {error_detail}")
+
             if not audio_segments:
-                return {"error": "No audio segments generated"}
+                error_msg = f"No audio segments generated. {total_segments} segment(s) attempted, all failed."
+                if segment_errors:
+                    error_msg += f" Errors: {'; '.join(segment_errors[:5])}"
+                logger.error(error_msg)
+                return {"error": error_msg}
             
             # Combine audio segments
             from pydub import AudioSegment

@@ -1,0 +1,40 @@
+INFO:__main__:🧪 Testing AudioGenerator with Chatterbox (expecting CPU fallback)...
+WARNING:model_manager:⚠️ Patching missing 'PerthImplicitWatermarker' in perth module
+INFO:model_manager:VRAM threshold set to 10.0 GiB
+INFO:model_manager:🔊 Loading TTS model on device: cuda
+INFO:model_manager:📁 HuggingFace cache directory: /home/ommblitz/.cache/huggingface
+INFO:model_manager:📦 HF cache contains 2 items: ['hub', 'xet']
+INFO:model_manager:🔧 Starting comprehensive CUDA diagnostics for TTS...
+INFO:model_manager:📊 CUDA Device Count: 1
+INFO:model_manager:📊 Current CUDA Device: 0
+INFO:model_manager:📊 CUDA Device Name: NVIDIA GeForce RTX 5070 Laptop GPU
+INFO:model_manager:🧪 Testing basic CUDA memory operations...
+INFO:model_manager:✅ Basic CUDA tensor creation successful: cuda:0
+WARNING:model_manager:⚠️ pynvml not available, skipping NVML memory check
+INFO:model_manager:🔧 Performing aggressive GPU memory cleanup before TTS...
+INFO:model_manager:🔍 GPU Memory before TTS load after cleanup: 0.00GB allocated, 0.00GB reserved, 7.50GB free
+INFO:model_manager:🚀 Attempting ChatterboxTTS.from_pretrained(device='cuda')...
+INFO:model_manager:✅ ChatterboxTTS import successful
+INFO:model_manager:🔄 Loading ChatterboxTTS with cache_dir=/home/ommblitz/.cache/huggingface
+INFO:model_manager:📥 This may use cached models or download if cache is missing...
+INFO:httpx:HTTP Request: HEAD https://huggingface.co/ResembleAI/chatterbox/resolve/main/ve.safetensors "HTTP/1.1 302 Found"
+INFO:httpx:HTTP Request: HEAD https://huggingface.co/ResembleAI/chatterbox/resolve/main/t3_cfg.safetensors "HTTP/1.1 302 Found"
+INFO:httpx:HTTP Request: HEAD https://huggingface.co/ResembleAI/chatterbox/resolve/main/s3gen.safetensors "HTTP/1.1 302 Found"
+INFO:httpx:HTTP Request: HEAD https://huggingface.co/ResembleAI/chatterbox/resolve/main/tokenizer.json "HTTP/1.1 307 Temporary Redirect"
+INFO:httpx:HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/ResembleAI/chatterbox/05e904af2b5c7f8e482687a9d7336c5c824467d9/tokenizer.json "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: HEAD https://huggingface.co/ResembleAI/chatterbox/resolve/main/conds.pt "HTTP/1.1 302 Found"
+/home/ommblitz/.local/lib/python3.12/site-packages/diffusers/models/lora.py:393: FutureWarning: `LoRACompatibleLinear` is deprecated and will be removed in version 1.0.0. Use of `LoRACompatibleLinear` is deprecated. Please switch to PEFT backend by installing PEFT: `pip install peft`.
+  deprecate("LoRACompatibleLinear", "1.0.0", deprecation_message)
+INFO:root:input frame rate=25
+INFO:model_manager:✅ TTS model loaded successfully on CUDA
+INFO:model_manager:🎙️ Generating speech for text (length: 47 chars)
+INFO:model_manager:📝 Normalized text: This is a test of the emergency podcast system....
+INFO:model_manager:🔊 Starting TTS generation on CUDA (exaggeration=0.5, temp=0.8)
+/usr/lib/python3.12/contextlib.py:105: FutureWarning: `torch.backends.cuda.sdp_kernel()` is deprecated. In the future, this context manager will be removed. Please see `torch.nn.attention.sdpa_kernel()` for the new context manager, with updated signature.
+  self.gen = func(*args, **kwds)
+`sdpa` attention does not support `output_attentions=True`. Please set your attention to `eager` if you want any of these features.
+Sampling:   0%|          | 0/1000 [00:00<?, ?it/s]Sampling:   0%|          | 1/1000 [00:00<01:58,  8.44it/s]Sampling:   1%|          | 12/1000 [00:00<00:16, 60.92it/s]Sampling:   2%|▏         | 23/1000 [00:00<00:12, 78.87it/s]Sampling:   3%|▎         | 33/1000 [00:00<00:11, 86.06it/s]Sampling:   4%|▍         | 43/1000 [00:00<00:10, 89.15it/s]Sampling:   5%|▌         | 53/1000 [00:00<00:10, 92.33it/s]Sampling:   6%|▋         | 63/1000 [00:00<00:09, 93.90it/s]INFO:chatterbox.models.t3.t3:✅ EOS token detected! Stopping generation at step 67
+Sampling:   7%|▋         | 66/1000 [00:00<00:11, 84.15it/s]
+INFO:model_manager:✅ TTS generation completed, audio shape: torch.Size([1, 63360])
+INFO:__main__:✅ Generation Success: /tmp/podcast_test/audio/test_fallback.wav
+INFO:__main__:✅ Audio file is valid.
