@@ -170,3 +170,82 @@ async for event in async_research_agent_streaming(current_message_content, req.m
 - `front_end/newjfrontend/components/chat-message.tsx` - Replace indicators
 - `python_back_end/main.py` - Enable streaming for auto-research
 
+
+## 2026-02-10: Fix AI SDK Errors and Enhanced Auto-Research
+
+### Problems
+1. **AI SDK "Failed to connect to backend" errors** - Stream randomly disconnects with `SocketError: other side closed`
+2. **Auto-research not using full research agent** - Only using basic agent with 5 results instead of enhanced agent with 20 results
+3. **Responses not saving to chat history** - Random failures to persist messages when stream errors occur
+
+### Root Causes
+1. **No retry logic** - Backend connection failures had no retry mechanism
+2. **No keepalive** - Long-running streams would timeout due to inactivity
+3. **Wrong research agent** - `async_research_agent_streaming` was using basic `research_agent_instance` with max 5 results instead of `enhanced_research_agent_instance` with max 20 results
+
+### Fixes Applied
+
+#### 1. AI-Chat Route - Add Retry Logic and Keepalive
+**File:** `front_end/newjfrontend/app/api/ai-chat/route.ts`
+
+**Changes:**
+- Added `MAX_RETRIES = 3` with 1-second delay between attempts
+- Added `fetchWithRetry()` helper function with timeout handling (30s)
+- Added keepalive/ping mechanism - sends `:ping\n` comment every 15 seconds of inactivity
+- Improved error handling with proper cleanup of timers
+- Better safeEnqueue/safeClose handling to prevent double-close errors
+
+**Key improvements:**
+```typescript
+const fetchWithRetry = async (retries = MAX_RETRIES): Promise<Response> => {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
+      const response = await fetch(`${BACKEND_URL}/api/chat`, {...});
+      clearTimeout(timeoutId);
+      return response;
+    } catch (error) {
+      if (attempt < retries) await new Promise(r => setTimeout(r, RETRY_DELAY));
+    }
+  }
+};
+```
+
+#### 2. Python Backend - Use Enhanced Research Agent for Auto-Research
+**File:** `python_back_end/agent_research.py` (lines 225-400)
+
+**Changes:**
+- Updated `async_research_agent_streaming()` to accept `use_enhanced: bool = True` parameter
+- Modified function to use `enhanced_research_agent_instance` by default (20 results instead of 5)
+- Increased content extraction limit from 3 to 5 URLs for enhanced mode
+- Added support for enhanced agent's advanced pipeline when available
+- Better URL/domain extraction with null safety checks
+
+**Key changes:**
+```python
+agent = enhanced_research_agent_instance if use_enhanced else research_agent_instance
+max_results = 20 if use_enhanced else 5
+
+# Use enhanced web search with more results
+search_results = agent.web_search.search_web(search_query, num_results=max_results)
+```
+
+#### 3. Improved Stream Completion Handling
+**File:** `front_end/newjfrontend/app/api/ai-chat/route.ts`
+
+**Changes:**
+- Ensures finish events are sent even if stream ends unexpectedly
+- Better handling of partial/incomplete streams
+- Logs stream completion stats for debugging
+
+### Verification
+- Retry logic tested with simulated failures
+- Keepalive prevents timeout on long research operations  
+- Enhanced agent uses 20 search results vs 5
+- Type checking passes
+- All existing functionality preserved
+
+### Files Modified
+- `front_end/newjfrontend/app/api/ai-chat/route.ts` - Retry logic, keepalive, error handling
+- `python_back_end/agent_research.py` - Enhanced research agent integration

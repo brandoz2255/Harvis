@@ -18,6 +18,11 @@ import { NextRequest } from 'next/server';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
+// Retry configuration
+const MAX_RETRIES = 3;
+const RETRY_DELAY = 1000; // ms
+const FETCH_TIMEOUT = 30000; // 30 seconds for initial connection
+
 export async function POST(req: NextRequest) {
   // Default to K8s service name - works in both Docker Compose (with BACKEND_URL override) and K8s
   const BACKEND_URL = process.env['BACKEND_URL'] ?? 'http://harvis-ai-merged-backend:8000';
@@ -79,28 +84,66 @@ export async function POST(req: NextRequest) {
       });
     };
 
-    // Call Python backend with SSE streaming
-    let backendResponse;
+    // Helper function to fetch with timeout and retry logic
+    const fetchWithRetry = async (retries = MAX_RETRIES): Promise<Response> => {
+      let lastError: Error | null = null;
+      
+      for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+          console.log(`[AI-Chat] Fetch attempt ${attempt}/${retries} to ${BACKEND_URL}/api/chat`);
+          
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
+          
+          const response = await fetch(`${BACKEND_URL}/api/chat`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...(authHeader && { 'Authorization': authHeader }),
+              ...(cookieHeader && { 'Cookie': cookieHeader }),
+            },
+            body: JSON.stringify({
+              message: messageContent,
+              history: history,
+              model: model || 'mistral',
+              text_only: textOnly,
+              low_vram: lowVram,
+              session_id: validSessionId,
+            }),
+            signal: controller.signal,
+          });
+          
+          clearTimeout(timeoutId);
+          
+          if (response.ok || response.status >= 400) {
+            // Return response if successful OR if we got a valid HTTP error (not network error)
+            return response;
+          }
+          
+          // If response is not ok, throw to trigger retry
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+          
+        } catch (error) {
+          lastError = error as Error;
+          console.warn(`[AI-Chat] Fetch attempt ${attempt} failed:`, error);
+          
+          if (attempt < retries) {
+            console.log(`[AI-Chat] Retrying in ${RETRY_DELAY}ms...`);
+            await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
+          }
+        }
+      }
+      
+      throw lastError || new Error('All retry attempts failed');
+    };
+
+    // Call Python backend with SSE streaming and retry logic
+    let backendResponse: Response;
     try {
-      backendResponse = await fetch(`${BACKEND_URL}/api/chat`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(authHeader && { 'Authorization': authHeader }),
-          ...(cookieHeader && { 'Cookie': cookieHeader }),
-        },
-        body: JSON.stringify({
-          message: messageContent,
-          history: history,
-          model: model || 'mistral',
-          text_only: textOnly,  // Pass through from frontend (default true if not specified)
-          low_vram: lowVram,    // Pass through from frontend
-          session_id: validSessionId,
-        }),
-      });
+      backendResponse = await fetchWithRetry();
     } catch (fetchError) {
-      console.error('[AI-Chat] Fetch to backend failed:', fetchError);
-      return createErrorStreamResponse(`Failed to connect to backend: ${fetchError}`);
+      console.error('[AI-Chat] Fetch to backend failed after retries:', fetchError);
+      return createErrorStreamResponse(`Failed to connect to backend after ${MAX_RETRIES} attempts: ${fetchError}`);
     }
 
     if (!backendResponse.ok) {
@@ -120,7 +163,9 @@ export async function POST(req: NextRequest) {
     let reasoning = '';
     let finalAnswer = '';
     let buffer = '';
-    let assistantMessageCreated = false; // Track if we've created the assistant message
+    let assistantMessageCreated = false;
+    let lastActivity = Date.now();
+    const KEEPALIVE_INTERVAL = 15000; // Send keepalive every 15 seconds
 
     const stream = new ReadableStream({
       async start(controller) {
@@ -134,18 +179,16 @@ export async function POST(req: NextRequest) {
         const decoder = new TextDecoder();
         let isClosed = false;
         let chunkCount = 0;
+        let keepaliveTimer: NodeJS.Timeout | null = null;
 
         // Safe enqueue that handles client disconnection gracefully
         const safeEnqueue = (data: Uint8Array): boolean => {
           if (isClosed) return false;
           try {
-            // Debug: log what we're sending
-            const textData = new TextDecoder().decode(data);
-            console.log(`[AI-Chat] Enqueuing (${data.length} bytes):`, textData.slice(0, 200));
             controller.enqueue(data);
+            lastActivity = Date.now();
             return true;
           } catch (e) {
-            // Controller was closed (client disconnected)
             isClosed = true;
             console.debug('[AI-Chat] Client disconnected, stopping stream');
             return false;
@@ -156,6 +199,10 @@ export async function POST(req: NextRequest) {
         const safeClose = () => {
           if (!isClosed) {
             isClosed = true;
+            if (keepaliveTimer) {
+              clearInterval(keepaliveTimer);
+              keepaliveTimer = null;
+            }
             try {
               controller.close();
               console.log(`[AI-Chat] Stream closed. Processed ${chunkCount} chunks. Full text length: ${fullText.length}`);
@@ -164,6 +211,27 @@ export async function POST(req: NextRequest) {
             }
           }
         };
+
+        // Start keepalive timer to prevent connection timeout
+        keepaliveTimer = setInterval(() => {
+          if (isClosed) {
+            if (keepaliveTimer) {
+              clearInterval(keepaliveTimer);
+              keepaliveTimer = null;
+            }
+            return;
+          }
+          
+          const timeSinceLastActivity = Date.now() - lastActivity;
+          if (timeSinceLastActivity >= KEEPALIVE_INTERVAL) {
+            // Send a ping/keepalive comment (AI SDK ignores comments)
+            try {
+              safeEnqueue(encoder.encode(`:ping\n`));
+            } catch (e) {
+              // Connection likely closed
+            }
+          }
+        }, 5000); // Check every 5 seconds
 
         try {
           while (true) {
@@ -191,8 +259,6 @@ export async function POST(req: NextRequest) {
                 let data;
                 try {
                   data = JSON.parse(jsonStr);
-                  // Debug logging to see what we receive
-                  console.log(`[AI-Chat] Received event: status=${data.status}, has_content=${!!data.content}, has_final=${!!data.final_answer}, content_len=${data.content?.length}, final_len=${data.final_answer?.length}`);
                 } catch (jsonError) {
                   console.warn('[AI-Chat] Skipping malformed JSON:', jsonStr.slice(0, 100));
                   continue;
@@ -200,54 +266,42 @@ export async function POST(req: NextRequest) {
 
                 if (data.status === 'streaming' && data.content) {
                   // Stream text chunk in AI SDK format
-                  // Format: 0:"text"\n (text part)
                   fullText += data.content;
-                  assistantMessageCreated = true; // Mark that assistant message now exists
-                  // Ensure content is properly escaped for AI SDK
+                  assistantMessageCreated = true;
                   const encodedContent = JSON.stringify(data.content);
-                  safeEnqueue(encoder.encode(`0:${encodedContent}\n`));
+                  if (!safeEnqueue(encoder.encode(`0:${encodedContent}\n`))) break;
                 }
                 else if (data.status === 'generating_audio' || data.status === 'processing') {
                   // Send status update as custom data (2: prefix) to keep connection alive
-                  // and inform frontend of current state
                   const statusData = {
                     type: 'status_update',
                     status: data.status,
                     detail: data.detail || data.message || ''
                   };
-                  safeEnqueue(encoder.encode(`2:${JSON.stringify([statusData])}\n`));
+                  if (!safeEnqueue(encoder.encode(`2:${JSON.stringify([statusData])}\n`))) break;
                 }
                 else if (data.status === 'researching') {
                   // CRITICAL: Send a text chunk FIRST to create the assistant message
-                  // This ensures research events have a message ID to attach to in the frontend
                   if (!assistantMessageCreated) {
                     console.log('[AI-Chat] Creating assistant message for research events (sending placeholder)');
-                    // Send a single space to force message creation (will be trimmed later)
-                    safeEnqueue(encoder.encode(`0:" "\n`));
+                    if (!safeEnqueue(encoder.encode(`0:" "\n`))) break;
                     assistantMessageCreated = true;
                   }
 
                   // Forward research progress events with full details
-                  // This includes search_query, search_result, reading events
                   const researchData = {
                     type: 'status_update',
                     status: data.status,
                     detail: data.detail || data.message || '',
-                    // Include all research event fields
-                    eventType: data.type,  // search_query, search_result, reading
+                    eventType: data.type,
                     query: data.query,
                     title: data.title,
                     url: data.url,
                     domain: data.domain,
-                    // Signal that this is auto-research for frontend to initialize research chain
                     isAutoResearch: true
                   };
-                  safeEnqueue(encoder.encode(`2:${JSON.stringify([researchData])}\n`));
+                  if (!safeEnqueue(encoder.encode(`2:${JSON.stringify([researchData])}\n`))) break;
                 }
-                // IMPORTANT: Check for 'complete' status BEFORE checking sources/videos
-                // because the complete event can contain all of these fields together.
-                // The else-if chain was causing the complete handler to be skipped when
-                // sources were present in the response!
                 else if (data.status === 'complete') {
                   // Capture reasoning, final answer, and audio path
                   reasoning = data.reasoning || '';
@@ -255,27 +309,21 @@ export async function POST(req: NextRequest) {
 
                   console.log(`[AI-Chat] Complete event. fullText len: ${fullText.length}, finalAnswer len: ${finalAnswer?.length}`);
 
-                  // CRITICAL FIX: If we haven't streamed any meaningful text yet (or just whitespace),
-                  // but we have a final answer (OR response), stream it now. This happens in Research Mode
-                  // where the backend often returns the whole answer in the 'complete' event without streaming tokens.
+                  // CRITICAL FIX: If we haven't streamed any meaningful text yet
                   const contentToSend = finalAnswer || data.response;
 
                   if ((!fullText || fullText.trim().length === 0) && contentToSend) {
                     console.log(`[AI-Chat] Streaming full content from COMPLETE event (${contentToSend.length} chars)`);
 
-                    // Stream in smaller chunks to avoid overwhelming the parser
-                    // and to provide better streaming UX
-                    const CHUNK_SIZE = 100; // chars per chunk
+                    // Stream in smaller chunks
+                    const CHUNK_SIZE = 100;
                     for (let i = 0; i < contentToSend.length; i += CHUNK_SIZE) {
                       if (isClosed) break;
                       const chunk = contentToSend.slice(i, i + CHUNK_SIZE);
                       const encodedContent = JSON.stringify(chunk);
-                      safeEnqueue(encoder.encode(`0:${encodedContent}\n`));
+                      if (!safeEnqueue(encoder.encode(`0:${encodedContent}\n`))) break;
                     }
-                    fullText = contentToSend; // Update fullText to reflect that we sent it
-                  } else {
-                    if (!contentToSend) console.log('[AI-Chat] No content to send in complete event');
-                    else console.log('[AI-Chat] Already streamed content, not sending full text again');
+                    fullText = contentToSend;
                   }
 
                   const audioPath = data.audio_path || null;
@@ -285,20 +333,18 @@ export async function POST(req: NextRequest) {
                     const steps = reasoning.split('\n').filter((s: string) => s.trim());
                     const toolCallId = `reasoning-${Date.now()}`;
 
-                    // Tool call (9: prefix)
                     const toolCall = {
                       toolCallId,
                       toolName: 'reasoning',
                       args: { steps, finalAnswer }
                     };
-                    safeEnqueue(encoder.encode(`9:${JSON.stringify(toolCall)}\n`));
+                    if (!safeEnqueue(encoder.encode(`9:${JSON.stringify(toolCall)}\n`))) break;
 
-                    // Tool result (a: prefix)
                     const toolResult = {
                       toolCallId,
                       result: { reasoning: { steps, conclusion: finalAnswer } }
                     };
-                    safeEnqueue(encoder.encode(`a:${JSON.stringify(toolResult)}\n`));
+                    if (!safeEnqueue(encoder.encode(`a:${JSON.stringify(toolResult)}\n`))) break;
                   }
 
                   // Send sources if present (for auto-research mode)
@@ -307,7 +353,7 @@ export async function POST(req: NextRequest) {
                       type: 'search_results',
                       results: data.sources || data.search_results
                     };
-                    safeEnqueue(encoder.encode(`2:${JSON.stringify([searchData])}\n`));
+                    if (!safeEnqueue(encoder.encode(`2:${JSON.stringify([searchData])}\n`))) break;
                   }
 
                   // Send videos if present (for auto-research mode)
@@ -316,16 +362,16 @@ export async function POST(req: NextRequest) {
                       type: 'videos',
                       videos: data.videos
                     };
-                    safeEnqueue(encoder.encode(`2:${JSON.stringify([videoData])}\n`));
+                    if (!safeEnqueue(encoder.encode(`2:${JSON.stringify([videoData])}\n`))) break;
                   }
 
-                  // Send audio path and session info as custom data (2: prefix)
+                  // Send audio path and session info
                   if (audioPath || data.session_id) {
                     const customData = {
                       audioPath: audioPath,
                       sessionId: data.session_id,
                     };
-                    safeEnqueue(encoder.encode(`2:${JSON.stringify([customData])}\n`));
+                    if (!safeEnqueue(encoder.encode(`2:${JSON.stringify([customData])}\n`))) break;
                   }
 
                   // Finish event (e: prefix) - required before d: finish data
@@ -334,22 +380,20 @@ export async function POST(req: NextRequest) {
                     usage: { promptTokens: 0, completionTokens: 0 },
                     isContinued: false
                   };
-                  safeEnqueue(encoder.encode(`e:${JSON.stringify(finishEvent)}\n`));
+                  if (!safeEnqueue(encoder.encode(`e:${JSON.stringify(finishEvent)}\n`))) break;
 
                   // Finish data (d: prefix)
                   const finishData = {
                     finishReason: 'stop',
                     usage: { promptTokens: 0, completionTokens: 0 }
                   };
-                  safeEnqueue(encoder.encode(`d:${JSON.stringify(finishData)}\n`));
+                  if (!safeEnqueue(encoder.encode(`d:${JSON.stringify(finishData)}\n`))) break;
                 }
                 else if (data.status === 'error') {
                   // Error (3: prefix)
-                  safeEnqueue(encoder.encode(`3:${JSON.stringify(data.error || 'Unknown error')}\n`));
+                  if (!safeEnqueue(encoder.encode(`3:${JSON.stringify(data.error || 'Unknown error')}\n`))) break;
                 }
-                // Ignore other statuses like 'starting', 'processing', etc.
               } catch (parseError) {
-                // Only log actual JSON parse errors, not controller close errors
                 if (parseError instanceof SyntaxError) {
                   console.debug('[AI-Chat] JSON parse error (likely partial chunk)');
                 }
@@ -359,7 +403,7 @@ export async function POST(req: NextRequest) {
 
           // If no complete message was received but we have text, send finish
           if (fullText && !finalAnswer && !isClosed) {
-            // Finish event (e: prefix)
+            console.log('[AI-Chat] Sending finish event for incomplete stream');
             const finishEvent = {
               finishReason: 'stop',
               usage: { promptTokens: 0, completionTokens: 0 },
@@ -367,7 +411,6 @@ export async function POST(req: NextRequest) {
             };
             safeEnqueue(encoder.encode(`e:${JSON.stringify(finishEvent)}\n`));
 
-            // Finish data (d: prefix)
             const finishData = {
               finishReason: 'stop',
               usage: { promptTokens: 0, completionTokens: 0 }
@@ -377,8 +420,14 @@ export async function POST(req: NextRequest) {
 
         } catch (e) {
           console.error('[AI-Chat] Stream error:', e);
-          safeEnqueue(encoder.encode(`3:${JSON.stringify('Stream error: ' + String(e))}\n`));
+          if (!isClosed) {
+            safeEnqueue(encoder.encode(`3:${JSON.stringify('Stream error: ' + String(e))}\n`));
+          }
         } finally {
+          if (keepaliveTimer) {
+            clearInterval(keepaliveTimer);
+            keepaliveTimer = null;
+          }
           safeClose();
         }
       }
@@ -396,19 +445,18 @@ export async function POST(req: NextRequest) {
 
   } catch (error) {
     console.error('[AI-Chat] Route error:', error);
-    // CRITICAL: Always return a stream response, never JSON, to prevent AI SDK "Error in input stream"
+    // CRITICAL: Always return a stream response, never JSON
     const encoder = new TextEncoder();
     const errorMessage = error instanceof Error ? error.message : 'Internal server error';
     const stream = new ReadableStream({
       start(controller) {
-        // Send error in AI SDK format: 3:"error message"\n
         const encodedError = JSON.stringify(errorMessage);
         controller.enqueue(encoder.encode(`3:${encodedError}\n`));
         controller.close();
       }
     });
     return new Response(stream, {
-      status: 200, // Return 200 so client stream reader starts
+      status: 200,
       headers: {
         'Content-Type': 'text/plain; charset=utf-8',
         'X-Vercel-AI-Data-Stream': 'v1',

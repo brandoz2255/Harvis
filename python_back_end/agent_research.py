@@ -222,9 +222,12 @@ async def async_comparative_research_agent(
         return f"Comparison failed: {str(e)}"
 
 
-async def async_research_agent_streaming(query: str, model: str = "mistral"):
+async def async_research_agent_streaming(
+    query: str, model: str = "mistral", use_enhanced: bool = True
+):
     """
     Async streaming research agent that yields progress events for real-time UI updates.
+    Uses the enhanced research agent for better results (20 sources vs 5).
 
     Yields dictionaries with progress information:
     - {'type': 'search_query', 'query': 'search term'} - When starting a search
@@ -235,10 +238,36 @@ async def async_research_agent_streaming(query: str, model: str = "mistral"):
     - {'type': 'error', 'error': '...'} - On error
     """
     try:
-        logger.info(f"[Streaming Research] Starting research on: {query}")
+        logger.info(
+            f"[Streaming Research] Starting research on: {query} (enhanced={use_enhanced})"
+        )
 
-        # Generate search queries
-        search_queries = research_agent_instance._generate_search_queries(query, model)
+        # Use enhanced agent for better search capabilities (20 results vs 5)
+        agent = (
+            enhanced_research_agent_instance
+            if use_enhanced
+            else research_agent_instance
+        )
+        max_results = 20 if use_enhanced else 5
+
+        # Generate search queries using enhanced agent if available
+        if use_enhanced and hasattr(agent, "advanced_agent") and agent.advanced_agent:
+            # Use enhanced agent's query generation
+            search_queries = [query]  # Start with the main query
+            try:
+                # Try to generate additional queries via the advanced agent
+                additional_queries = await agent.advanced_agent._generate_queries(query)
+                if additional_queries:
+                    search_queries.extend(additional_queries[:2])  # Add up to 2 more
+            except Exception as e:
+                logger.warning(
+                    f"[Streaming Research] Could not generate additional queries: {e}"
+                )
+        else:
+            search_queries = research_agent_instance._generate_search_queries(
+                query, model
+            )
+
         logger.info(
             f"[Streaming Research] Generated {len(search_queries)} search queries: {search_queries}"
         )
@@ -250,23 +279,32 @@ async def async_research_agent_streaming(query: str, model: str = "mistral"):
             logger.info(f"[Streaming Research] Searching for: '{search_query}'")
             yield {"type": "search_query", "query": search_query}
 
-            # Search the web
-            search_results = research_agent_instance.search_agent.search_web(
-                search_query, num_results=5
-            )
+            # Search the web using enhanced agent's web search (more results)
+            if use_enhanced:
+                search_results = agent.web_search.search_web(
+                    search_query, num_results=max_results
+                )
+            else:
+                search_results = research_agent_instance.search_agent.search_web(
+                    search_query, num_results=max_results
+                )
             logger.info(
                 f"[Streaming Research] Found {len(search_results)} results for '{search_query}'"
             )
 
             # Yield each result as it's found
             for result in search_results:
-                url = result.get("url", "")
-                title = result.get("title", "Unknown")
+                url = result.get("url") or ""
+                title = result.get("title") or "Unknown"
                 domain = ""
                 try:
                     from urllib.parse import urlparse
 
-                    domain = urlparse(url).hostname.replace("www.", "")
+                    parsed = urlparse(url)
+                    if parsed.hostname:
+                        domain = parsed.hostname.replace("www.", "")
+                    else:
+                        domain = url
                 except:
                     domain = url
 
@@ -279,8 +317,9 @@ async def async_research_agent_streaming(query: str, model: str = "mistral"):
 
                 all_search_data["search_results"].append(result)
 
-            # Extract content from top results
-            for result in search_results[:3]:  # Limit to top 3 for speed
+            # Extract content from top results (increased to 5 for enhanced mode)
+            extract_limit = 5 if use_enhanced else 3
+            for result in search_results[:extract_limit]:
                 url = result.get("url", "")
                 if url:
                     try:
@@ -297,20 +336,86 @@ async def async_research_agent_streaming(query: str, model: str = "mistral"):
                         )
                         yield {"type": "reading", "domain": domain, "url": url}
 
-                        content = research_agent_instance.search_agent.extract_content_from_url(
-                            url
-                        )
-                        if content.get("success"):
+                        if use_enhanced:
+                            content = agent.web_search.extract_content_from_url(url)
+                        else:
+                            content = research_agent_instance.search_agent.extract_content_from_url(
+                                url
+                            )
+
+                        if isinstance(content, dict) and content.get("success"):
                             all_search_data["extracted_content"].append(content)
+                        elif isinstance(content, str) and content:
+                            all_search_data["extracted_content"].append(
+                                {"success": True, "content": content, "url": url}
+                            )
                     except Exception as e:
                         logger.warning(
                             f"[Streaming Research] Failed to extract from {url}: {e}"
                         )
 
         # Yield analysis progress
-        yield {"type": "analysis", "detail": "Analyzing search results..."}
+        yield {
+            "type": "analysis",
+            "detail": "Analyzing search results with enhanced pipeline...",
+        }
 
-        # Prepare context and perform analysis
+        # Use enhanced analysis if available
+        if use_enhanced and hasattr(agent, "advanced_agent") and agent.advanced_agent:
+            try:
+                # Run advanced research pipeline
+                logger.info(
+                    "[Streaming Research] Using advanced pipeline for synthesis"
+                )
+                advanced_result = await agent.advanced_agent.research(query)
+
+                if advanced_result.success:
+                    analysis = advanced_result.response
+                    quality_sources = all_search_data.get("search_results", [])
+                    quality_sources = quality_sources[:15]  # Cap at 15 sources
+
+                    # Compile final result
+                    result = {
+                        "type": "complete",
+                        "result": {
+                            "topic": query,
+                            "analysis": analysis,
+                            "research_depth": "enhanced",
+                            "model_used": model,
+                            "sources_found": len(
+                                all_search_data.get("search_results", [])
+                            ),
+                            "sources_used": len(quality_sources),
+                            "sources": [
+                                {
+                                    "title": s.get("title", "Unknown"),
+                                    "url": s.get("url", ""),
+                                    "snippet": s.get("snippet", "")[:200],
+                                }
+                                for s in quality_sources[:8]
+                            ],
+                            "confidence_score": getattr(
+                                advanced_result, "confidence_score", 0.0
+                            ),
+                            "total_duration": getattr(
+                                advanced_result, "total_duration", 0.0
+                            ),
+                            "timestamp": research_agent_instance._get_timestamp()
+                            if hasattr(research_agent_instance, "_get_timestamp")
+                            else "",
+                        },
+                    }
+                    logger.info(
+                        f"[Streaming Research] Enhanced pipeline completed. Used {len(quality_sources)} sources"
+                    )
+                    yield result
+                    return
+            except Exception as e:
+                logger.warning(
+                    f"[Streaming Research] Enhanced pipeline failed, falling back: {e}"
+                )
+
+        # Fallback to standard analysis
         context = research_agent_instance._prepare_research_context(all_search_data)
         system_prompt = research_agent_instance._get_research_system_prompt("standard")
 
