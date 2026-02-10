@@ -23,6 +23,62 @@ import { Message as AiMessage } from "ai"
 
 import { useApiWithRetry } from "@/hooks/useApiWithRetry"
 
+// Auto-research detection (mirrors backend logic)
+// Returns true for queries that need fresh/current information
+function shouldAutoResearch(message: string): boolean {
+  const msgLower = message.toLowerCase()
+
+  // Keywords that indicate need for current/fresh information
+  const freshnessKeywords = [
+    "new", "latest", "current", "2026", "2025", "today", "this week",
+    "recently", "best", "top", "recommend", "compare", "vs", "which should",
+    "roadmap", "release", "what changed", "update", "version", "trending",
+    "popular", "modern", "state of the art", "sota"
+  ]
+
+  // Keywords that indicate conceptual questions (don't need web search)
+  const conceptualKeywords = [
+    "explain", "what is", "how does", "define", "tutorial",
+    "teach me", "understand", "concept", "basics", "fundamentals"
+  ]
+
+  // Explicit research requests always trigger
+  const explicitResearch = [
+    "search", "look up", "find sources", "research", "browse",
+    "check online", "google", "web search"
+  ]
+
+  // Check for explicit research request first
+  for (const keyword of explicitResearch) {
+    if (msgLower.includes(keyword)) {
+      console.log(`[AutoResearch] Triggered by explicit keyword: '${keyword}'`)
+      return true
+    }
+  }
+
+  // Check for conceptual questions (skip research)
+  for (const keyword of conceptualKeywords) {
+    if (msgLower.includes(keyword)) {
+      // But override if freshness is also present
+      const hasFreshness = freshnessKeywords.some(fk => msgLower.includes(fk))
+      if (!hasFreshness) {
+        console.log(`[AutoResearch] Conceptual question, skipping`)
+        return false
+      }
+    }
+  }
+
+  // Check for freshness keywords
+  for (const keyword of freshnessKeywords) {
+    if (msgLower.includes(keyword)) {
+      console.log(`[AutoResearch] Triggered by freshness keyword: '${keyword}'`)
+      return true
+    }
+  }
+
+  return false
+}
+
 export default function ChatPage() {
   const router = useRouter()
   const { user, isLoading: isAuthLoading } = useUser()
@@ -533,6 +589,9 @@ export default function ChatPage() {
 
     if (isLoading) return
 
+    // Check if this query should trigger auto-research (bypass AI SDK streaming)
+    const isAutoResearch = shouldAutoResearch(messageContent)
+
     const hasImages = messageAttachments.some(a => a.type === 'image')
     if (hasImages && isVisionModel(selectedModel || '')) {
       const imageAttachment = messageAttachments.find(a => a.type === 'image')
@@ -559,7 +618,7 @@ export default function ChatPage() {
       }
       setLocalMessages((prev) => [...prev, userMessage])
 
-      if (isResearchMode || isVisionModel(selectedModel || '')) {
+      if (isResearchMode || isAutoResearch || isVisionModel(selectedModel || '')) {
         const placeholderAiMsg: Message = {
           id: assistantId,
           role: 'assistant',
@@ -567,10 +626,10 @@ export default function ChatPage() {
           timestamp: new Date(),
           model: selectedModel,
           status: 'streaming',
-          // Initialize research chain for research mode to show live progress immediately
-          ...(isResearchMode && {
+          // Initialize research chain for research mode or auto-research
+          ...((isResearchMode || isAutoResearch) && {
             researchChain: {
-              summary: "Researching...",
+              summary: isAutoResearch ? "Auto-researching..." : "Researching...",
               steps: [],
               isLoading: true
             }
@@ -578,18 +637,24 @@ export default function ChatPage() {
         }
         setLocalMessages((prev) => [...prev, placeholderAiMsg])
         // Store in ref for streaming updates
-        if (isResearchMode) {
+        if (isResearchMode || isAutoResearch) {
           researchChainMapRef.current.set(assistantId, placeholderAiMsg.researchChain!)
         }
       }
 
-      if (!isResearchMode && !isVisionModel(selectedModel || '')) {
+      if (!isResearchMode && !isAutoResearch && !isVisionModel(selectedModel || '')) {
+        // Regular chat - use AI SDK streaming
         setIsLoading(true)
         await append({
           role: 'user',
           content: messageContent,
         })
         return;
+      }
+
+      // Log auto-research detection
+      if (isAutoResearch && !isResearchMode) {
+        console.log('[AutoResearch] Using non-streaming path for auto-research query')
       }
     }
 
@@ -607,7 +672,13 @@ export default function ChatPage() {
         throw new Error('Authentication required. Please log in again.')
       }
 
-      const endpoint = isResearchMode ? '/api/research-chat' : '/api/chat'
+      // Use research endpoint for both explicit research mode and auto-research
+      const useResearchEndpoint = isResearchMode || isAutoResearch
+      const endpoint = useResearchEndpoint ? '/api/research-chat' : '/api/chat'
+
+      if (isAutoResearch) {
+        console.log('[AutoResearch] Routing to research endpoint for query:', messageContent.slice(0, 50))
+      }
 
       const requestBody: any = {
         message: messageContent,
@@ -622,7 +693,8 @@ export default function ChatPage() {
         attachments: messageAttachments.length > 0 ? messageAttachments : undefined
       }
 
-      if (isResearchMode) {
+      // Add research parameters for both explicit research and auto-research
+      if (useResearchEndpoint) {
         requestBody.enableWebSearch = true
         requestBody.exaggeration = 0.5
         requestBody.temperature = 0.8

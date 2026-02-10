@@ -264,8 +264,11 @@ async def async_research_agent_streaming(
                     f"[Streaming Research] Could not generate additional queries: {e}"
                 )
         else:
-            search_queries = research_agent_instance._generate_search_queries(
-                query, model
+            # Use async version for non-blocking query generation
+            search_queries = (
+                await research_agent_instance._async_generate_search_queries(
+                    query, model
+                )
             )
 
         logger.info(
@@ -360,111 +363,208 @@ async def async_research_agent_streaming(
             "detail": "Analyzing search results with enhanced pipeline...",
         }
 
-        # Use enhanced analysis if available
+        # Use enhanced analysis with proper pipeline integration
         if use_enhanced and hasattr(agent, "advanced_agent") and agent.advanced_agent:
             try:
-                # Run advanced research pipeline
                 logger.info(
-                    "[Streaming Research] Using advanced pipeline for synthesis"
+                    "[Streaming Research] 🚀 USING ENHANCED PIPELINE with BM25 ranking and map/reduce synthesis"
                 )
-                advanced_result = await agent.advanced_agent.research(query)
 
-                if advanced_result.success:
-                    analysis = advanced_result.response
-                    quality_sources = all_search_data.get("search_results", [])
-                    quality_sources = quality_sources[:15]  # Cap at 15 sources
+                # Convert search results to format expected by pipeline
+                from research.core.types import DocChunk
 
-                    # Compile final result
-                    result = {
-                        "type": "complete",
-                        "result": {
-                            "topic": query,
-                            "analysis": analysis,
-                            "research_depth": "enhanced",
-                            "model_used": model,
-                            "sources_found": len(
-                                all_search_data.get("search_results", [])
-                            ),
-                            "sources_used": len(quality_sources),
-                            "sources": [
-                                {
-                                    "title": s.get("title", "Unknown"),
-                                    "url": s.get("url", ""),
-                                    "snippet": s.get("snippet", "")[:200],
-                                }
-                                for s in quality_sources[:8]
-                            ],
-                            "confidence_score": getattr(
-                                advanced_result, "confidence_score", 0.0
-                            ),
-                            "total_duration": getattr(
-                                advanced_result, "total_duration", 0.0
-                            ),
-                            "timestamp": research_agent_instance._get_timestamp()
-                            if hasattr(research_agent_instance, "_get_timestamp")
-                            else "",
-                        },
-                    }
+                # Create DocChunks from extracted content for ranking
+                chunks = []
+                for content_data in all_search_data.get("extracted_content", []):
+                    if isinstance(content_data, dict) and content_data.get("success"):
+                        chunk = DocChunk(
+                            url=content_data.get("url", ""),
+                            title=content_data.get("title", "Unknown"),
+                            text=content_data.get("content", "")[:8000],  # Limit size
+                            start=0,
+                            end=len(content_data.get("content", "")),
+                            meta={"source": content_data.get("url", "")},
+                        )
+                        chunks.append(chunk)
+
+                # If no extracted content, create chunks from search results
+                if not chunks:
+                    for result in all_search_data.get("search_results", [])[:10]:
+                        chunk = DocChunk(
+                            url=result.get("url", ""),
+                            title=result.get("title", "Unknown"),
+                            text=result.get("snippet", ""),
+                            start=0,
+                            end=len(result.get("snippet", "")),
+                            meta={"source": result.get("url", "")},
+                        )
+                        chunks.append(chunk)
+
+                # Use pipeline's ranking stage
+                advanced_agent = agent.advanced_agent
+                yield {"type": "analysis", "detail": "Ranking content relevance..."}
+
+                try:
+                    ranked_chunks = await advanced_agent._ranking_stage(query, chunks)
                     logger.info(
-                        f"[Streaming Research] Enhanced pipeline completed. Used {len(quality_sources)} sources"
+                        f"[Streaming Research] Ranked {len(ranked_chunks)} chunks"
                     )
-                    yield result
-                    return
+                except Exception as e:
+                    logger.warning(f"Ranking failed, using all chunks: {e}")
+                    ranked_chunks = chunks[:15]  # Use top 15 without ranking
+
+                # Use pipeline's synthesis stage with map/reduce
+                yield {
+                    "type": "analysis",
+                    "detail": "Synthesizing comprehensive answer...",
+                }
+
+                try:
+                    from research.synth.map_reduce import quick_map_reduce
+                    from research.llm.model_policy import TaskType, get_model_for_task
+                    from research.llm.ollama_client import OllamaClient
+
+                    # Get synthesis model
+                    synthesis_model = get_model_for_task(TaskType.SYNTHESIS)
+
+                    # Run map/reduce synthesis
+                    map_results, reduce_result = await quick_map_reduce(
+                        query=query,
+                        chunks=ranked_chunks[:15],  # Top 15 chunks
+                        llm_client=OllamaClient(),
+                        model=synthesis_model,
+                        max_concurrent=3,
+                    )
+
+                    if reduce_result and reduce_result.success:
+                        analysis = reduce_result.synthesis
+                        logger.info(
+                            f"[Streaming Research] ✅ Map/reduce synthesis successful - ANALYSIS GENERATED ({len(analysis)} chars)"
+                        )
+                        logger.info(
+                            f"[Streaming Research] ✅ Using ENHANCED PIPELINE with BM25 ranking - synthesis complete"
+                        )
+                    else:
+                        raise Exception("Map/reduce synthesis failed")
+
+                except Exception as e:
+                    logger.warning(
+                        f"Map/reduce synthesis failed: {e}, using direct LLM"
+                    )
+                    # Fallback to direct LLM synthesis
+                    synthesis_prompt = f"""Based on the following research findings, provide a comprehensive answer to the question.
+
+Question: {query}
+
+Research Findings:
+"""
+                    for i, chunk in enumerate(ranked_chunks[:10], 1):
+                        synthesis_prompt += (
+                            f"\n{i}. {chunk.title}\n{chunk.text[:1000]}\n"
+                        )
+
+                    synthesis_prompt += f"\n\nProvide a comprehensive, well-structured answer to: {query}"
+
+                    # Use async version for non-blocking LLM call
+                    analysis = await research_agent_instance.async_query_llm(
+                        synthesis_prompt,
+                        model,
+                        "You are a research assistant. Synthesize information from multiple sources into a clear, comprehensive answer. Include specific details and cite sources where possible.",
+                    )
+
+                # Format sources for output
+                quality_sources = all_search_data.get("search_results", [])
+                quality_sources = quality_sources[:15]
+
+                # Compile final result
+                result = {
+                    "type": "complete",
+                    "result": {
+                        "topic": query,
+                        "analysis": analysis,
+                        "research_depth": "enhanced",
+                        "model_used": model,
+                        "sources_found": len(all_search_data.get("search_results", [])),
+                        "sources_used": len(quality_sources),
+                        "sources": [
+                            {
+                                "title": s.get("title", "Unknown"),
+                                "url": s.get("url", ""),
+                                "snippet": s.get("snippet", "")[:200],
+                            }
+                            for s in quality_sources[:8]
+                        ],
+                        "timestamp": research_agent_instance._get_timestamp(),
+                    },
+                }
+                logger.info(
+                    f"[Streaming Research] Enhanced pipeline completed. Used {len(quality_sources)} sources"
+                )
+                yield result
+                return
             except Exception as e:
                 logger.warning(
                     f"[Streaming Research] Enhanced pipeline failed, falling back: {e}"
                 )
+                import traceback
 
-        # Fallback to standard analysis
-        context = research_agent_instance._prepare_research_context(all_search_data)
-        system_prompt = research_agent_instance._get_research_system_prompt("standard")
+                logger.warning(f"Pipeline error traceback: {traceback.format_exc()}")
 
-        research_prompt = f"""
-QUESTION: {query}
-
-{context}
-
-Provide a comprehensive analysis with actionable recommendations.
-DO NOT include a Sources section - that's handled separately.
-"""
-
-        analysis = research_agent_instance.query_llm(
-            research_prompt, model, system_prompt
-        )
-        analysis = research_agent_instance._finalize_research_output(analysis)
-
-        # Filter and rank sources
-        raw_sources = all_search_data.get("search_results", [])
-        quality_sources = research_agent_instance._filter_and_rank_sources(
-            raw_sources, min_sources=3, max_sources=8
-        )
-
-        # Quality validation
-        source_count = len(quality_sources)
-        analysis, validation_result = research_agent_instance._rewrite_with_validation(
-            analysis, source_count, query, context, model
-        )
-
-        # Compile final result
-        result = {
-            "type": "complete",
-            "result": {
-                "topic": query,
-                "analysis": analysis,
-                "research_depth": "standard",
-                "model_used": model,
-                "sources_found": len(raw_sources),
-                "sources_used": len(quality_sources),
-                "sources": research_agent_instance._format_sources(quality_sources),
-                "quality_validation": validation_result,
-                "timestamp": research_agent_instance._get_timestamp(),
-            },
-        }
-
+        # Fallback to async standard analysis (non-blocking for K8s health checks)
         logger.info(
-            f"[Streaming Research] Completed. Used {len(quality_sources)}/{len(raw_sources)} sources"
+            "[Streaming Research] Using async_research_topic for fallback analysis"
         )
-        yield result
+        yield {"type": "analysis", "detail": "Running async research analysis..."}
+
+        try:
+            # Use the new fully async research method
+            research_result = await research_agent_instance.async_research_topic(
+                topic=query,
+                model=model,
+                research_depth="standard",
+                include_sources=True,
+            )
+
+            analysis = research_result.get("analysis", "")
+            quality_sources = research_result.get("sources", [])
+            raw_sources = research_result.get("raw_search_results", [])
+
+            # Compile final result
+            result = {
+                "type": "complete",
+                "result": {
+                    "topic": query,
+                    "analysis": analysis,
+                    "research_depth": "standard",
+                    "model_used": model,
+                    "sources_found": len(raw_sources),
+                    "sources_used": len(quality_sources),
+                    "sources": quality_sources[:8],
+                    "timestamp": research_agent_instance._get_timestamp(),
+                },
+            }
+
+            logger.info(
+                f"[Streaming Research] Async fallback completed. Used {len(quality_sources)}/{len(raw_sources)} sources"
+            )
+            yield result
+
+        except Exception as e:
+            logger.error(f"[Streaming Research] Async fallback failed: {e}")
+            # Last resort: return what we have
+            yield {
+                "type": "complete",
+                "result": {
+                    "topic": query,
+                    "analysis": f"Research completed but analysis generation failed: {str(e)}",
+                    "research_depth": "standard",
+                    "model_used": model,
+                    "sources_found": len(all_search_data.get("search_results", [])),
+                    "sources_used": 0,
+                    "sources": [],
+                    "timestamp": research_agent_instance._get_timestamp(),
+                },
+            }
 
     except Exception as e:
         logger.error(f"[Streaming Research] Error: {e}")

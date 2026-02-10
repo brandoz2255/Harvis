@@ -1079,6 +1079,12 @@ async def root() -> FileResponse:
     raise HTTPException(404, "Frontend not found")
 
 
+@app.get("/health", tags=["health"])
+async def health_check():
+    """Lightweight health check for K8s liveness probe - responds immediately"""
+    return {"status": "healthy", "timestamp": time.time()}
+
+
 # ─── Chat History Endpoints ───────────────────────────────────────────────────────
 @app.post(
     "/api/chat-history/sessions", response_model=ChatSession, tags=["chat-history"]
