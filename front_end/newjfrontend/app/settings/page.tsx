@@ -20,6 +20,10 @@ import {
     BookOpen,
     FolderOpen,
     Container,
+    Shield,
+    Bug,
+    Lock,
+    FileWarning,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -37,6 +41,7 @@ import {
 
 // Source configuration
 const SOURCE_CONFIG = {
+    // Development sources
     nextjs_docs: {
         label: "Next.js Documentation",
         description: "Official Next.js docs from nextjs.org",
@@ -65,6 +70,7 @@ const SOURCE_CONFIG = {
         color: "text-yellow-400",
         group: "development",
     },
+    // Containerization sources
     docker_docs: {
         label: "Docker Documentation",
         description: "Docker Engine, Compose, Swarm, Registry, and best practices",
@@ -79,6 +85,57 @@ const SOURCE_CONFIG = {
         color: "text-blue-600",
         group: "containerization",
     },
+    // Security/Cyber sources
+    mitre_attack: {
+        label: "MITRE ATT&CK",
+        description: "Adversary tactics, techniques, and procedures framework",
+        icon: Shield,
+        color: "text-red-500",
+        group: "security",
+    },
+    owasp_docs: {
+        label: "OWASP Cheat Sheets",
+        description: "OWASP security guides and cheat sheets",
+        icon: Lock,
+        color: "text-red-400",
+        group: "security",
+    },
+    owasp_top10: {
+        label: "OWASP Top 10",
+        description: "Top 10 web application security risks",
+        icon: FileWarning,
+        color: "text-red-600",
+        group: "security",
+    },
+    nist_csf: {
+        label: "NIST Cybersecurity Framework",
+        description: "NIST security guidelines and best practices",
+        icon: Shield,
+        color: "text-blue-500",
+        group: "security",
+    },
+    cis_benchmarks: {
+        label: "CIS Benchmarks",
+        description: "Center for Internet Security hardening guides",
+        icon: Lock,
+        color: "text-green-500",
+        group: "security",
+    },
+    nvd_nist: {
+        label: "NVD (CVE Database)",
+        description: "National Vulnerability Database - CVE information",
+        icon: Bug,
+        color: "text-orange-500",
+        group: "security",
+    },
+    sans_reading_room: {
+        label: "SANS Reading Room",
+        description: "SANS Institute security whitepapers and research",
+        icon: BookOpen,
+        color: "text-purple-500",
+        group: "security",
+    },
+    // Local sources
     local_docs: {
         label: "Local Engineering Docs",
         description: "Your project's /docs folder (best practices, guidelines)",
@@ -422,6 +479,52 @@ export default function SettingsPage() {
                                             >
                                                 <div className="flex items-center justify-between">
                                                     <div className={`p-2 rounded-lg bg-background/50 ${isSelected ? "ring-2 ring-primary/50" : ""}`}>
+                                                        <Icon className={`h-5 w-5 ${config.color}`} />
+                                                    </div>
+                                                    <Checkbox checked={isSelected} className="pointer-events-none" />
+                                                </div>
+                                                <div>
+                                                    <h3 className="font-semibold">{config.label}</h3>
+                                                    <p className="text-xs text-muted-foreground mt-1">{config.description}</p>
+                                                </div>
+                                                <div className="text-xs text-muted-foreground mt-auto pt-2 border-t border-border/50">
+                                                    {docCount} documents
+                                                </div>
+                                            </button>
+                                        )
+                                    })}
+                            </div>
+                        </div>
+
+                        {/* Security/Cyber Group */}
+                        <div className="space-y-4">
+                            <h3 className="text-sm font-medium text-muted-foreground uppercase tracking-wide flex items-center gap-2">
+                                <Shield className="h-4 w-4 text-red-500" />
+                                Security & Cyber
+                            </h3>
+                            <p className="text-xs text-muted-foreground -mt-2">
+                                Hardening guides, vulnerability databases, and security frameworks for cyber competitions
+                            </p>
+                            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                                {(Object.keys(SOURCE_CONFIG) as SourceKey[])
+                                    .filter((source) => SOURCE_CONFIG[source].group === "security")
+                                    .map((source) => {
+                                        const config = SOURCE_CONFIG[source]
+                                        const Icon = config.icon
+                                        const isSelected = selectedSources.has(source)
+                                        const docCount = sourceStats?.indexed_stats[source] || 0
+
+                                        return (
+                                            <button
+                                                key={source}
+                                                onClick={() => toggleSource(source)}
+                                                className={`relative flex flex-col gap-3 rounded-xl border-2 p-5 text-left transition-all hover:scale-[1.02] ${isSelected
+                                                    ? "border-red-500 bg-red-500/10 shadow-lg shadow-red-500/20"
+                                                    : "border-border bg-card hover:border-red-500/50"
+                                                    }`}
+                                            >
+                                                <div className="flex items-center justify-between">
+                                                    <div className={`p-2 rounded-lg bg-background/50 ${isSelected ? "ring-2 ring-red-500/50" : ""}`}>
                                                         <Icon className={`h-5 w-5 ${config.color}`} />
                                                     </div>
                                                     <Checkbox checked={isSelected} className="pointer-events-none" />

@@ -45,6 +45,14 @@ SOURCE_EMBEDDING_MODELS = {
     "nextjs_docs": "qwen3-embedding",  # React patterns, TypeScript APIs, App Router concepts
     # Process/General docs → nomic-embed-text (768 dims)
     "local_docs": "nomic-embed-text",  # Playbooks, guidelines, best practices (less code density)
+    # Security/Cyber sources → nomic-embed-text (768 dims) - procedural docs
+    "mitre_attack": "nomic-embed-text",  # Adversary tactics and techniques
+    "owasp_docs": "nomic-embed-text",  # OWASP security guides and cheat sheets
+    "owasp_top10": "nomic-embed-text",  # OWASP Top 10 vulnerabilities
+    "nist_csf": "nomic-embed-text",  # NIST Cybersecurity Framework
+    "cis_benchmarks": "nomic-embed-text",  # CIS hardening benchmarks
+    "nvd_nist": "nomic-embed-text",  # National Vulnerability Database
+    "sans_reading_room": "nomic-embed-text",  # SANS security whitepapers
 }
 
 
@@ -170,9 +178,17 @@ async def initialize_rag_corpus(db_pool) -> bool:
     try:
         from rag_corpus import JobManager, VectorDBAdapter, EmbeddingAdapter
         from rag_corpus.source_config import get_config_manager, EMBEDDING_TIER_CONFIG
+        from rag_corpus.init_tables import ensure_rag_tables_exist
 
         # Ensure RAG directory exists
         os.makedirs(RAG_DIR, exist_ok=True)
+
+        # Ensure vector tables exist before any RAG operations
+        tables_ok = await ensure_rag_tables_exist(db_pool)
+        if tables_ok:
+            logger.info("✅ RAG vector tables verified/created")
+        else:
+            logger.warning("⚠️ RAG table initialization had issues - continuing anyway")
 
         # Initialize dynamic config manager
         _config_manager = await get_config_manager(db_pool)

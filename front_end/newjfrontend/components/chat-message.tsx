@@ -619,6 +619,13 @@ export const ChatMessage = React.memo(function ChatMessage({
   // Custom comparison function for React.memo
   // Only re-render if these specific props have changed
   // This prevents unnecessary re-renders during streaming
+
+  // CRITICAL: Always re-render if research chain is actively loading/streaming
+  // This ensures live updates appear in the UI during research
+  if (nextProps.researchChain?.isLoading || prevProps.researchChain?.isLoading) {
+    return false // false means "props are different, do re-render"
+  }
+
   return (
     prevProps.role === nextProps.role &&
     prevProps.content === nextProps.content &&

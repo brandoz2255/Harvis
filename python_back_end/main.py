@@ -74,6 +74,14 @@ os.makedirs(IMAGES_DIR, exist_ok=True)
 print(f"Images directory: {IMAGES_DIR}")
 security = HTTPBearer(auto_error=False)
 
+# ─── RAG Configuration ─────────────────────────────────────────────────────────
+# Centralized config for RAG retrieval - supports environment variable overrides
+RAG_CONFIG = {
+    "default_k": int(os.getenv("RAG_DEFAULT_K", "5")),
+    "score_threshold": float(os.getenv("RAG_SCORE_THRESHOLD", "0.35")),
+    "max_context_length": int(os.getenv("RAG_MAX_CONTEXT_LENGTH", "4000")),
+}
+
 # Database connection
 DATABASE_URL = os.getenv(
     "DATABASE_URL", "postgresql://pguser:pgpassword@pgsql-db:5432/database"
@@ -342,9 +350,10 @@ async def lifespan(app: FastAPI):
         )
         app.state.pg_pool = await asyncpg.create_pool(
             dsn=database_url,
-            min_size=1,
-            max_size=10,
-            command_timeout=30,  # Increased from 5 to 30 seconds
+            min_size=5,  # Increased from 1 for faster RAG queries
+            max_size=20,  # Increased from 10 for concurrent RAG operations
+            command_timeout=30,
+            max_inactive_connection_lifetime=300,  # 5 minutes - clean up stale connections
         )
         logger.info("✅ Database connection pool created")
 
@@ -373,16 +382,19 @@ async def lifespan(app: FastAPI):
                     source_model_mapping = config_mgr.get_source_model_mapping()
                     model_collection_mapping = EMBEDDING_COLLECTIONS
 
-                    # Initialize multi-collection retriever
+                    # Initialize multi-collection retriever with centralized config
                     local_rag_retriever = MultiCollectionRetriever(
                         vectordb_adapters=vectordb_adapters,
                         embedding_adapters=embedding_adapters,
                         source_to_model=source_model_mapping,
                         model_to_collection=model_collection_mapping,
-                        default_k=5,
-                        score_threshold=0.5,
+                        default_k=RAG_CONFIG["default_k"],
+                        score_threshold=RAG_CONFIG["score_threshold"],
                     )
-                    logger.info("✅ Global Multi-Collection RAG retriever initialized")
+                    logger.info(
+                        f"✅ Global Multi-Collection RAG retriever initialized "
+                        f"(k={RAG_CONFIG['default_k']}, threshold={RAG_CONFIG['score_threshold']})"
+                    )
 
                     # Verify documents are indexed
                     try:
@@ -1484,11 +1496,19 @@ def should_auto_research(message: str) -> bool:
 
 
 # ── Local RAG Context Helper ────────────────────────────────────────────────────
-async def get_local_rag_context(query: str, max_length: int = 2000) -> str:
+async def get_local_rag_context(query: str, max_length: int = None) -> str:
     """
     Retrieve relevant context from the local RAG corpus.
     Returns formatted context string or empty string if unavailable.
+
+    Uses RAG_CONFIG for default values:
+    - default_k: Number of results to retrieve (default: 5)
+    - max_context_length: Max chars for context (default: 4000)
     """
+    # Use RAG_CONFIG defaults if not specified
+    if max_length is None:
+        max_length = RAG_CONFIG["max_context_length"]
+
     logger.info(f"🔍 RAG: Starting context retrieval for query: '{query[:100]}...'")
 
     if local_rag_retriever is None:
@@ -1496,12 +1516,13 @@ async def get_local_rag_context(query: str, max_length: int = 2000) -> str:
         return ""
 
     try:
+        k = RAG_CONFIG["default_k"]
         logger.info(
-            f"🔍 RAG: Retriever initialized, querying with k=3, max_length={max_length}"
+            f"🔍 RAG: Retriever initialized, querying with k={k}, max_length={max_length}"
         )
 
-        # First, let's check if we can retrieve raw results
-        raw_results = await local_rag_retriever.retrieve(query, k=3)
+        # First, let's check if we can retrieve raw results (uses retriever's default_k)
+        raw_results = await local_rag_retriever.retrieve(query)
         logger.info(f"🔍 RAG: Retrieved {len(raw_results)} raw results from vector DB")
 
         if raw_results:
@@ -1516,9 +1537,9 @@ async def get_local_rag_context(query: str, max_length: int = 2000) -> str:
                 "⚠️ RAG: No results returned from vector DB - documents may not be indexed or query doesn't match"
             )
 
-        # Now get formatted context
+        # Now get formatted context (uses retriever's default_k)
         context = await local_rag_retriever.get_context_string(
-            query=query, k=3, max_length=max_length
+            query=query, max_length=max_length
         )
 
         if context:
