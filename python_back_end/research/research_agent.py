@@ -197,7 +197,7 @@ class ResearchAgent:
         }
 
         try:
-            response = make_ollama_request("/api/chat", payload, timeout=120)
+            response = make_ollama_request("/api/chat", payload, timeout=600)  # 10 min for large models
 
             result = response.json()
             return result.get("message", {}).get("content", "").strip()
@@ -237,7 +237,7 @@ class ResearchAgent:
         }
 
         try:
-            result = await async_make_ollama_request("/api/chat", payload, timeout=120)
+            result = await async_make_ollama_request("/api/chat", payload, timeout=600)  # 10 min for large models
             return result.get("message", {}).get("content", "").strip()
 
         except Exception as e:
