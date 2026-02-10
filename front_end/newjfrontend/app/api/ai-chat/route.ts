@@ -224,9 +224,9 @@ export async function POST(req: NextRequest) {
           
           const timeSinceLastActivity = Date.now() - lastActivity;
           if (timeSinceLastActivity >= KEEPALIVE_INTERVAL) {
-            // Send a ping/keepalive comment (AI SDK ignores comments)
+            // Send empty text chunk as keepalive (0: prefix for AI SDK data protocol)
             try {
-              safeEnqueue(encoder.encode(`:ping\n`));
+              safeEnqueue(encoder.encode(`0:""\n`));
             } catch (e) {
               // Connection likely closed
             }
@@ -250,10 +250,24 @@ export async function POST(req: NextRequest) {
 
             for (const line of lines) {
               if (isClosed) break;
-              if (!line.startsWith('data: ')) continue;
+              
+              // Skip empty lines, comments (keepalive), and malformed lines
+              const trimmedLine = line.trim();
+              if (!trimmedLine || trimmedLine.startsWith(':')) {
+                continue;
+              }
+              
+              // Only process valid SSE data lines
+              if (!trimmedLine.startsWith('data: ')) {
+                // Log any non-data lines that aren't keepalive comments for debugging
+                if (!trimmedLine.startsWith(':')) {
+                  console.warn('[AI-Chat] Skipping unexpected line:', trimmedLine.slice(0, 100));
+                }
+                continue;
+              }
 
               try {
-                const jsonStr = line.slice(6).trim();
+                const jsonStr = trimmedLine.slice(6).trim();
                 if (!jsonStr) continue;
 
                 let data;
@@ -266,9 +280,11 @@ export async function POST(req: NextRequest) {
 
                 if (data.status === 'streaming' && data.content) {
                   // Stream text chunk in AI SDK format
-                  fullText += data.content;
+                  // Sanitize content to prevent newlines from breaking the stream protocol
+                  const sanitizedContent = data.content.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+                  fullText += sanitizedContent;
                   assistantMessageCreated = true;
-                  const encodedContent = JSON.stringify(data.content);
+                  const encodedContent = JSON.stringify(sanitizedContent);
                   if (!safeEnqueue(encoder.encode(`0:${encodedContent}\n`))) break;
                 }
                 else if (data.status === 'generating_audio' || data.status === 'processing') {
@@ -281,26 +297,20 @@ export async function POST(req: NextRequest) {
                   if (!safeEnqueue(encoder.encode(`2:${JSON.stringify([statusData])}\n`))) break;
                 }
                 else if (data.status === 'researching') {
-                  // CRITICAL: Send a text chunk FIRST to create the assistant message
+                  // CRITICAL FIX: For auto-research mode, just log research progress
+                  // Don't send through AI SDK stream to avoid parsing errors
+                  // The research chain UI will be updated separately via the complete event
+                  console.log('[AI-Chat] Auto-research progress (buffered):', data.detail || data.type);
+                  
+                  // Create assistant message on first research event if needed
                   if (!assistantMessageCreated) {
-                    console.log('[AI-Chat] Creating assistant message for research events (sending placeholder)');
+                    console.log('[AI-Chat] Creating assistant message placeholder for auto-research');
                     if (!safeEnqueue(encoder.encode(`0:" "\n`))) break;
                     assistantMessageCreated = true;
                   }
-
-                  // Forward research progress events with full details
-                  const researchData = {
-                    type: 'status_update',
-                    status: data.status,
-                    detail: data.detail || data.message || '',
-                    eventType: data.type,
-                    query: data.query,
-                    title: data.title,
-                    url: data.url,
-                    domain: data.domain,
-                    isAutoResearch: true
-                  };
-                  if (!safeEnqueue(encoder.encode(`2:${JSON.stringify([researchData])}\n`))) break;
+                  
+                  // NOTE: Research chain events are NOT sent through AI SDK stream
+                  // They will be included in the final response with the complete event
                 }
                 else if (data.status === 'complete') {
                   // Capture reasoning, final answer, and audio path
@@ -315,44 +325,37 @@ export async function POST(req: NextRequest) {
                   if ((!fullText || fullText.trim().length === 0) && contentToSend) {
                     console.log(`[AI-Chat] Streaming full content from COMPLETE event (${contentToSend.length} chars)`);
 
-                    // Stream in smaller chunks
-                    const CHUNK_SIZE = 100;
-                    for (let i = 0; i < contentToSend.length; i += CHUNK_SIZE) {
-                      if (isClosed) break;
-                      const chunk = contentToSend.slice(i, i + CHUNK_SIZE);
-                      const encodedContent = JSON.stringify(chunk);
-                      if (!safeEnqueue(encoder.encode(`0:${encodedContent}\n`))) break;
-                    }
+                    // CRITICAL: Send entire content as a single chunk to avoid streaming issues
+                    // The AI SDK can handle the full content at once, and this prevents
+                    // issues with newline boundaries when chunking
+                    const encodedContent = JSON.stringify(contentToSend);
+                    console.log(`[AI-Chat] Sending content with 0: prefix, length: ${encodedContent.length}`);
+                    if (!safeEnqueue(encoder.encode(`0:${encodedContent}\n`))) break;
                     fullText = contentToSend;
+                    console.log(`[AI-Chat] Content sent successfully`);
                   }
 
                   const audioPath = data.audio_path || null;
 
-                  // If we have reasoning, send it as a tool invocation
+                  // If we have reasoning, send it via data stream (2: prefix)
                   if (reasoning) {
                     const steps = reasoning.split('\n').filter((s: string) => s.trim());
-                    const toolCallId = `reasoning-${Date.now()}`;
-
-                    const toolCall = {
-                      toolCallId,
-                      toolName: 'reasoning',
-                      args: { steps, finalAnswer }
+                    const reasoningData = {
+                      type: 'reasoning',
+                      steps,
+                      finalAnswer
                     };
-                    if (!safeEnqueue(encoder.encode(`9:${JSON.stringify(toolCall)}\n`))) break;
-
-                    const toolResult = {
-                      toolCallId,
-                      result: { reasoning: { steps, conclusion: finalAnswer } }
-                    };
-                    if (!safeEnqueue(encoder.encode(`a:${JSON.stringify(toolResult)}\n`))) break;
+                    if (!safeEnqueue(encoder.encode(`2:${JSON.stringify([reasoningData])}\n`))) break;
                   }
 
                   // Send sources if present (for auto-research mode)
                   if (data.sources || data.search_results) {
                     const searchData = {
                       type: 'search_results',
-                      results: data.sources || data.search_results
+                      results: data.sources || data.search_results,
+                      isAutoResearch: data.auto_researched || false
                     };
+                    console.log(`[AI-Chat] Sending ${searchData.results?.length || 0} sources from complete event`);
                     if (!safeEnqueue(encoder.encode(`2:${JSON.stringify([searchData])}\n`))) break;
                   }
 
@@ -401,9 +404,14 @@ export async function POST(req: NextRequest) {
             }
           }
 
-          // If no complete message was received but we have text, send finish
+          // If no complete message was received but we have text, send content and finish
           if (fullText && !finalAnswer && !isClosed) {
-            console.log('[AI-Chat] Sending finish event for incomplete stream');
+            console.log('[AI-Chat] Sending content and finish for incomplete stream');
+            
+            // Send the content we collected
+            const encodedContent = JSON.stringify(fullText);
+            safeEnqueue(encoder.encode(`0:${encodedContent}\n`));
+            
             const finishEvent = {
               finishReason: 'stop',
               usage: { promptTokens: 0, completionTokens: 0 },

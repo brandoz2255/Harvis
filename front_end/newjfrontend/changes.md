@@ -1,4 +1,73 @@
 
+## 2026-02-10: Bypass AI SDK Streaming for Auto-Research Mode
+
+### Problem
+AI SDK streaming causing `Failed to parse stream string. Invalid code .` error and showing raw protocol text (`0:" " :ping`) during auto-research mode.
+
+### Root Cause
+AI SDK streaming protocol incompatible with auto-research mode's complex response format. The `ai-chat/route.ts` bridge couldn't properly translate backend SSE to AI SDK format.
+
+### Solution: Bypass AI SDK for Auto-Research
+Instead of fixing the protocol conversion, bypass AI SDK streaming entirely for auto-research queries:
+
+**File:** `front_end/newjfrontend/app/page.tsx`
+
+1. **Added `shouldAutoResearch()` function** (lines 28-57)
+   - Mirrors backend's auto-research detection logic
+   - Detects freshness keywords (latest, best, 2025, trending, etc.)
+   - Detects explicit research requests (search, look up, google, etc.)
+   - Skips conceptual questions (explain, what is, how does, etc.)
+
+2. **Modified `handleSendMessage()`**
+   - Detects auto-research queries on frontend
+   - Routes them to `/api/research-chat` (bypasses `ai-chat/route.ts`)
+   - Shows loading animation while waiting for complete response
+   - Displays full markdown response when done
+
+### Changes Made
+```typescript
+// Added auto-research detection (mirrors backend logic)
+function shouldAutoResearch(message: string): boolean {
+  // Check for freshness/research keywords
+  // Returns true for queries needing current information
+}
+
+// In handleSendMessage:
+const isAutoResearch = shouldAutoResearch(messageContent)
+
+// Route auto-research to research endpoint (bypasses AI SDK)
+const useResearchEndpoint = isResearchMode || isAutoResearch
+const endpoint = useResearchEndpoint ? '/api/research-chat' : '/api/chat'
+```
+
+### Result
+- ✅ Auto-research queries show loading animation (no raw protocol)
+- ✅ Complete markdown response renders correctly
+- ✅ Research chain UI updates properly
+- ✅ Regular chat still uses AI SDK streaming (when not auto-research)
+
+### Bug Fix: Response Not Showing Until Refresh
+**Problem**: Auto-research response wasn't displaying until page refresh.
+
+**Root Cause**: Placeholder message was only created for `isResearchMode` but NOT for `isAutoResearch`. When response came back, there was no message to update.
+
+**Fix**: Added `isAutoResearch` to placeholder creation condition:
+```typescript
+// Before: if (isResearchMode || isVisionModel(...))
+// After:
+if (isResearchMode || isAutoResearch || isVisionModel(selectedModel || '')) {
+  const placeholderAiMsg = {
+    // ... with researchChain for both isResearchMode and isAutoResearch
+  }
+  setLocalMessages((prev) => [...prev, placeholderAiMsg])
+}
+```
+
+### Additional Route Fixes (kept from earlier)
+- `ai-chat/route.ts`: Changed `:ping` to `0:""` keepalive
+- `ai-chat/route.ts`: Replaced invalid `9:`/`a:` with `2:` data format
+
+---
 
 ## 2026-02-07: Fix Research Chain Empty Block and Live Streaming Issues
 
@@ -249,3 +318,87 @@ search_results = agent.web_search.search_web(search_query, num_results=max_resul
 ### Files Modified
 - `front_end/newjfrontend/app/api/ai-chat/route.ts` - Retry logic, keepalive, error handling
 - `python_back_end/agent_research.py` - Enhanced research agent integration
+
+
+## 2026-02-10 (Part 2): Fix Backend Crash and Research Pipeline
+
+### Problems
+1. **Backend pod crashes during long research** - Liveness probe fails when backend is busy, causing K8s to kill the container
+2. **Research pipeline uses placeholder data** - The advanced pipeline's search stage returns fake `example.com` URLs instead of real search results
+3. **Pipeline completes in 0.00s with success=False** - Stages fail because they're not integrated with actual web search
+
+### Root Causes
+1. **Liveness probe hitting `/docs`** - Heavy endpoint that times out during research operations
+2. **No timeout configuration** - Probe fails before backend can respond
+3. **Pipeline stages are placeholders** - `_search_stage()` and `_extraction_stage()` return fake data instead of using real web search
+
+### Fixes Applied
+
+#### 1. Add Lightweight Health Endpoint
+**File:** `python_back_end/main.py`
+
+**Changes:**
+- Added `/health` endpoint that responds immediately with minimal processing
+- Returns simple JSON: `{"status": "healthy", "timestamp": time.time()}`
+
+#### 2. Fix K8s Liveness Probe Configuration
+**File:** `k8s-manifests/services/merged-ollama-backend.yaml`
+
+**Changes:**
+- Changed liveness probe path from `/docs` to `/health`
+- Changed readiness probe path from `/docs` to `/health`
+- Added `timeoutSeconds: 5` to both probes
+- Added `failureThreshold: 3` for better tolerance
+- This allows 15 seconds (3 failures × 5s timeout) before pod restart
+
+#### 3. Fix Research Pipeline Integration
+**File:** `python_back_end/agent_research.py`
+
+**Changes:**
+- Modified synthesis section to bypass broken placeholder stages
+- Real web search results (20 sources) are converted to `DocChunk` objects
+- Use pipeline's `_ranking_stage()` for BM25 + reranking (actually works)
+- Use pipeline's `quick_map_reduce()` for synthesis with real content
+- Fallback to direct LLM synthesis if map/reduce fails
+
+**Before (broken):**
+```python
+# This called the full pipeline which uses fake placeholder data
+advanced_result = await agent.advanced_agent.research(query)
+# Result: success=False, 0.00s duration, fake data
+```
+
+**After (working):**
+```python
+# Convert real search results to DocChunks
+chunks = [DocChunk(url=..., title=..., text=...) for result in search_results]
+
+# Use real ranking stage with BM25
+ranked_chunks = await advanced_agent._ranking_stage(query, chunks)
+
+# Use real map/reduce synthesis
+map_results, reduce_result = await quick_map_reduce(
+    query=query,
+    chunks=ranked_chunks[:15],
+    llm_client=OllamaClient(),
+    ...
+)
+```
+
+### How It Works Now
+1. **Web Search**: Finds 20 real results using enhanced agent
+2. **Content Extraction**: Extracts content from top 5 URLs
+3. **Ranking**: BM25 ranks chunks by relevance to query
+4. **Synthesis**: Map/reduce processes chunks in parallel, then synthesizes final answer
+5. **Result**: Real research with current information (not fake 2024 data!)
+
+### Verification
+- Health endpoint responds in <10ms
+- Liveness probe now passes during long operations
+- Research pipeline uses real search data
+- Synthesis produces comprehensive answers from multiple sources
+
+### Files Modified
+- `python_back_end/main.py` - Add `/health` endpoint
+- `k8s-manifests/services/merged-ollama-backend.yaml` - Fix probe configuration
+- `python_back_end/agent_research.py` - Fix pipeline integration

@@ -13,12 +13,17 @@ MAP_PROMPT = """You are a research analyst extracting key information from a doc
 
 Your task:
 1. Extract the most relevant information that answers or relates to the user's query
-2. Identify key facts, claims, and insights  
+2. Identify key facts, claims, and insights
 3. Note any supporting evidence or data points
 4. Preserve important quotes that directly support findings
 5. Maintain factual accuracy - do not infer beyond what the text states
 
-CRITICAL: For any claims or quotes you extract, include the EXACT text from the source that supports it.
+CRITICAL ANTI-HALLUCINATION RULES:
+- For any claims or quotes you extract, include the EXACT text from the source
+- For specs (versions, dates, numbers, features): ONLY extract what's explicitly written
+- If the source mentions something but doesn't give details, note "details not provided"
+- NEVER infer or guess values that aren't explicitly stated
+- If information is ambiguous, note the ambiguity rather than resolving it arbitrarily
 
 Query: {query}
 
