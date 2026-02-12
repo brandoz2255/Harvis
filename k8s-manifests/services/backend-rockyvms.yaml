@@ -1,0 +1,170 @@
+# Harvis AI Backend - RockyVMs Deployment
+# Runs on RockyVMs cluster with artifact storage support
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: harvis-ai-backend
+  namespace: ai-agents
+  labels:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: harvis-ai
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: harvis-ai
+      app.kubernetes.io/component: backend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: harvis-ai
+        app.kubernetes.io/component: backend
+    spec:
+      # Run on RockyVMs (not pop-os)
+      # This allows GPU workloads on RockyVMs with NVIDIA drivers
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: NotIn
+                    values:
+                      - pop-os
+                      - pop-os-343570d8
+      
+      runtimeClassName: nvidia
+      
+      containers:
+        - name: harvis-backend
+          image: "harvis-backend:latest"
+          imagePullPolicy: Always
+          
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+            requests:
+              memory: 8Gi
+              cpu: 2000m
+          
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-backend-secret
+                  key: database-url
+            
+            - name: OLLAMA_URL
+              value: "http://harvis-ai-ollama:11434"
+            
+            - name: BACKEND_URL
+              value: "http://harvis-ai-backend.ai-agents.svc.cluster.local:8000"
+            
+            # Model cache paths
+            - name: HF_HOME
+              value: "/models-cache/huggingface"
+            - name: TRANSFORMERS_CACHE
+              value: "/models-cache/huggingface"
+            - name: WHISPER_CACHE
+              value: "/models-cache/whisper"
+            
+            # Artifact storage configuration
+            - name: ARTIFACT_STORAGE_DIR
+              value: "/data/artifacts"
+            - name: ARTIFACT_EXECUTOR_NAMESPACE
+              value: "artifact-executor"
+            - name: ARTIFACT_EXECUTOR_SERVICE
+              value: "http://artifact-executor.artifact-executor.svc.cluster.local:8080"
+            - name: ARTIFACT_EXECUTOR_NODE
+              value: "rockyvm3"
+            - name: ARTIFACT_PORT_START
+              value: "30000"
+            - name: ARTIFACT_PORT_END
+              value: "31000"
+            
+            # Uvicorn settings
+            - name: UVICORN_WORKERS
+              value: "2"
+            - name: UVICORN_TIMEOUT_KEEP_ALIVE
+              value: "120"
+            
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          
+          envFrom:
+            - configMapRef:
+                name: harvis-ai-backend-config
+            - secretRef:
+                name: harvis-ai-backend-secret
+          
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: ml-models-cache
+              mountPath: /models-cache
+            - name: artifact-storage
+              mountPath: /data/artifacts
+          
+          command: ["uvicorn"]
+          args:
+            - "main:app"
+            - "--host"
+            - "0.0.0.0"
+            - "--port"
+            - "8000"
+            - "--timeout-keep-alive"
+            - "120"
+            - "--log-level"
+            - "info"
+          
+          livenessProbe:
+            httpGet:
+              path: /docs
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+          
+          readinessProbe:
+            httpGet:
+              path: /docs
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+      
+      volumes:
+        - name: ml-models-cache
+          persistentVolumeClaim:
+            claimName: ml-models-local-pvc
+        - name: tmp
+          emptyDir:
+            sizeLimit: 5Gi
+        - name: artifact-storage
+          persistentVolumeClaim:
+            claimName: harvis-artifacts-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: harvis-ai-backend
+  namespace: ai-agents
+  labels:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: backend
+spec:
+  type: ClusterIP
+  ports:
+    - name: backend
+      port: 8000
+      targetPort: http
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: backend

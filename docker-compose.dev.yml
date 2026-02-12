@@ -44,6 +44,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       # Mount model cache for faster startup
       - backend-models-cache:/models-cache
+      # Artifact storage for generated documents
+      - artifact_data:/data/artifacts
 
     ports:
       - "8000:8000"
@@ -66,6 +68,9 @@ services:
       - HF_HOME=/models-cache/huggingface
       - TRANSFORMERS_CACHE=/models-cache/huggingface
       - WHISPER_CACHE=/models-cache/whisper
+
+      # Artifact storage for generated documents
+      - ARTIFACT_STORAGE_DIR=/data/artifacts
 
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload --log-level debug
 

@@ -62,3 +62,9 @@ yt-dlp>=2024.0.0
 pypdf>=3.0.0
 python-magic>=0.4.27
 python-docx
+
+# Document generation for artifacts
+openpyxl>=3.1.0
+python-pptx>=0.6.21
+weasyprint>=60.0
+reportlab>=4.0.0

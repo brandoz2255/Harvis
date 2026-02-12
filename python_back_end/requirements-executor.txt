@@ -1,0 +1,14 @@
+# Requirements for Artifact Executor Service
+# Minimal dependencies for running inside executor pods
+
+# FastAPI framework
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+
+# HTTP client for callbacks
+aiohttp>=3.9.0
+
+# Pydantic for models (same as main backend)
+pydantic>=2.5.0
+
+# No document generation libraries needed - executor only builds code

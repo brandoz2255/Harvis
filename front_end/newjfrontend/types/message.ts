@@ -80,6 +80,7 @@ export interface Message {
     [key: string]: any
   }
   researchChain?: ResearchChainData
+  artifact?: Artifact // AI-generated document or website artifact
 }
 
 export interface ThinkingStep {
@@ -112,6 +113,38 @@ export interface ResearchChainData {
   isLoading?: boolean
 }
 
+// Artifact types for AI-generated documents and websites
+export type ArtifactType = 'spreadsheet' | 'document' | 'pdf' | 'presentation' | 'website' | 'app' | 'code'
+export type ArtifactStatus = 'pending' | 'generating' | 'ready' | 'failed' | 'expired'
+
+export interface ArtifactContent {
+  // For code/website artifacts
+  files?: Record<string, string>
+  entryFile?: string
+  framework?: string
+  dependencies?: Record<string, string>
+  // For document artifacts (preview data)
+  previewHtml?: string
+  pageCount?: number
+}
+
+export interface Artifact {
+  id: string
+  type: ArtifactType
+  title: string
+  description?: string
+  status: ArtifactStatus
+  downloadUrl?: string
+  previewUrl?: string
+  content?: ArtifactContent
+  framework?: string
+  dependencies?: Record<string, string>
+  fileSize?: number
+  mimeType?: string
+  errorMessage?: string
+  createdAt?: Date
+}
+
 export interface MessageObject {
   id: string
   role: 'user' | 'assistant'
@@ -129,7 +162,8 @@ export interface MessageObject {
 export const VL_MODEL_PATTERNS = [
   'vision', 'vl', 'llava', 'bakllava', 'moondream',
   'minicpm-v', 'qwen2-vl', 'qwen-vl', 'cogvlm', 'internvl',
-  'phi-3-vision', 'deepseek-vl', 'yi-vl', 'gemma-2-vision'
+  'phi-3-vision', 'deepseek-vl', 'yi-vl', 'gemma-2-vision',
+  'kimi', 'moonshot'  // Kimi models support vision even without "vl" in name
 ]
 
 export function isVisionModel(modelName: string): boolean {

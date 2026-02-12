@@ -60,6 +60,18 @@ from vibecoding import (
 from vibecoding.core import initialize_vibe_agent
 from file_processing import extract_text_from_file
 
+# Import artifacts module for document/website generation
+from artifacts import (
+    artifact_router,
+    extract_artifact_manifest,
+    clean_response_content,
+    ArtifactManifest,
+    ArtifactStorage,
+)
+
+# Initialize artifact storage
+artifact_storage = ArtifactStorage()
+
 from pydantic import BaseModel
 import torch, soundfile as sf
 import whisper  # Import Whisper
@@ -91,21 +103,38 @@ _api_key_cipher = Fernet(_api_key_fernet_key)
 def encrypt_api_key(api_key: str) -> str:
     """Encrypt an API key using Fernet symmetric encryption."""
     if not api_key:
+        logger.warning("encrypt_api_key: Empty API key provided")
         return ""
+
+    logger.info(
+        f"encrypt_api_key: INPUT length={len(api_key)}, preview={api_key[:8]}...{api_key[-4:]}"
+    )
     encrypted = _api_key_cipher.encrypt(api_key.encode())
-    return base64.urlsafe_b64encode(encrypted).decode()
+    encrypted_b64 = base64.urlsafe_b64encode(encrypted).decode()
+    logger.info(
+        f"encrypt_api_key: OUTPUT length={len(encrypted_b64)}, preview={encrypted_b64[:30]}..."
+    )
+    return encrypted_b64
 
 
 def decrypt_api_key(encrypted_key: str) -> str:
     """Decrypt an API key that was encrypted with encrypt_api_key."""
     if not encrypted_key:
+        logger.warning("decrypt_api_key: Empty encrypted key provided")
         return ""
     try:
         encrypted_bytes = base64.urlsafe_b64decode(encrypted_key.encode())
         decrypted = _api_key_cipher.decrypt(encrypted_bytes)
-        return decrypted.decode()
+        decrypted_str = decrypted.decode()
+        logger.info(
+            f"decrypt_api_key: Successfully decrypted key, length={len(decrypted_str)}"
+        )
+        return decrypted_str
     except Exception as e:
         logger.error(f"Failed to decrypt API key: {e}")
+        logger.error(
+            f"Encrypted key length: {len(encrypted_key)}, prefix: {encrypted_key[:20]}..."
+        )
         return ""
 
 
@@ -113,6 +142,7 @@ async def get_user_api_key(
     pool, user_id: int, provider_name: str
 ) -> Optional[Dict[str, Any]]:
     """Get a user's API key for a specific provider."""
+    logger.info(f"get_user_api_key: Looking for {provider_name} key for user {user_id}")
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
@@ -124,15 +154,24 @@ async def get_user_api_key(
             provider_name,
         )
         if row:
+            encrypted_key = row["api_key_encrypted"]
+            logger.info(
+                f"get_user_api_key: Found encrypted key, length={len(encrypted_key) if encrypted_key else 0}"
+            )
+            decrypted_key = decrypt_api_key(encrypted_key)
+            logger.info(
+                f"get_user_api_key: Decrypted key length={len(decrypted_key) if decrypted_key else 0}"
+            )
             return {
                 "id": row["id"],
                 "provider_name": row["provider_name"],
-                "api_key": decrypt_api_key(row["api_key_encrypted"]),
+                "api_key": decrypted_key,
                 "api_url": row["api_url"],
                 "is_active": row["is_active"],
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
             }
+        logger.warning(f"get_user_api_key: No key found for {provider_name}")
         return None
 
 
@@ -706,6 +745,9 @@ app.include_router(containers_router)
 # Include RAG corpus router
 if RAG_CORPUS_AVAILABLE:
     app.include_router(rag_router)
+
+# Include artifacts router
+app.include_router(artifact_router)
 
 # ─── Device & models -----------------------------------------------------------
 device = 0 if torch.cuda.is_available() else -1
@@ -1640,6 +1682,12 @@ async def create_or_update_api_key(
     if not pool:
         raise HTTPException(status_code=500, detail="Database not available")
 
+    # Log what we received
+    received_key = api_key_data.api_key
+    logger.info(
+        f"API SAVE: Received key for provider={api_key_data.provider_name}, length={len(received_key) if received_key else 0}, preview={received_key[:8] if received_key else 'EMPTY'}...{received_key[-4:] if received_key and len(received_key) > 4 else 'NONE'}"
+    )
+
     # Encrypt the API key
     encrypted_key = encrypt_api_key(api_key_data.api_key)
 
@@ -2185,12 +2233,29 @@ async def chat(
                 )
 
                 if not moonshot_config or not moonshot_config.get("api_key"):
+                    logger.error(
+                        f"Moonshot API key not found or empty for user {current_user.id}"
+                    )
                     yield f"data: {json.dumps({'status': 'error', 'error': 'Moonshot API key not configured. Please add your API key in Profile settings.'})}\n\n"
                     return
 
+                # Debug: Log API key info (safely)
+                api_key = moonshot_config["api_key"]
+                if len(api_key) > 0:
+                    prefix = api_key[:4] if len(api_key) >= 4 else api_key[:2]
+                    suffix = api_key[-4:] if len(api_key) >= 4 else api_key[-2:]
+                    middle_len = max(0, len(api_key) - len(prefix) - len(suffix))
+                    middle = "*" * middle_len
+                    masked_key = f"{prefix}{middle}{suffix}"
+                    logger.info(
+                        f"🌙 Moonshot API key: {masked_key} (length={len(api_key)})"
+                    )
+                else:
+                    logger.error("🌙 Moonshot API key is EMPTY!")
+
                 # Create Moonshot client with user's API key
                 moonshot_client = MoonshotClient(
-                    api_key=moonshot_config["api_key"],
+                    api_key=api_key,
                     base_url=moonshot_config.get("api_url") or MOONSHOT_BASE_URL,
                 )
 
@@ -2510,6 +2575,61 @@ async def chat(
             else:
                 logger.info(f"ℹ️ No reasoning tags found in response")
 
+            # ── 7.5 Artifact Detection ──────────────────────────────────────────────────────
+            artifact_info = None
+            try:
+                artifact_manifest = extract_artifact_manifest(final_answer)
+                if artifact_manifest:
+                    logger.info(f"📦 Artifact detected: {artifact_manifest.get('artifact_type')} - {artifact_manifest.get('title')}")
+                    yield f"data: {json.dumps({'status': 'processing', 'detail': 'Creating artifact...'})}\n\n"
+
+                    # Clean the final answer by removing the manifest
+                    final_answer = clean_response_content(final_answer)
+
+                    # Create artifact in database
+                    pool = getattr(request.app.state, "pg_pool", None)
+                    if pool:
+                        try:
+                            manifest = ArtifactManifest(**artifact_manifest)
+                            artifact_id = await artifact_storage.create_artifact(
+                                pool=pool,
+                                user_id=current_user.id,
+                                manifest=manifest,
+                                session_id=session_id if session_id else None,
+                            )
+
+                            # For document types, generate in background
+                            artifact_type = manifest.artifact_type
+                            if hasattr(artifact_type, "value"):
+                                artifact_type = artifact_type.value
+
+                            if artifact_type not in ["website", "app", "code"]:
+                                # Generate document artifact in background
+                                import asyncio
+                                asyncio.create_task(artifact_storage.generate_artifact(pool, artifact_id))
+                                artifact_status = "generating"
+                            else:
+                                artifact_status = "ready"
+
+                            artifact_info = {
+                                "id": str(artifact_id),
+                                "type": artifact_type,
+                                "title": manifest.title,
+                                "status": artifact_status,
+                            }
+
+                            # Add download URL for ready artifacts
+                            if artifact_status == "ready" and artifact_type in ["website", "app", "code"]:
+                                artifact_info["preview_url"] = f"/api/artifacts/{artifact_id}/preview"
+                            elif artifact_status == "generating":
+                                artifact_info["download_url"] = f"/api/artifacts/{artifact_id}/download"
+
+                            logger.info(f"📦 Created artifact {artifact_id} ({artifact_status})")
+                        except Exception as e:
+                            logger.error(f"Failed to create artifact: {e}")
+            except Exception as e:
+                logger.warning(f"Artifact detection failed: {e}")
+
             # ── 8. Text-to-speech (with heartbeats) ─────────────────────────────────────────
             # Moved BEFORE persistence so we can save the audio path
             audio_path = None
@@ -2674,6 +2794,12 @@ async def chat(
                     f"🧠 Returning reasoning content ({len(reasoning_content)} chars)"
                 )
 
+            if artifact_info:
+                response_data["artifact"] = artifact_info
+                logger.info(
+                    f"📦 Returning artifact: {artifact_info['type']} - {artifact_info['title']} ({artifact_info['status']})"
+                )
+
             logger.info("✅ Chat streaming response complete")
             yield f"data: {json.dumps(response_data)}\n\n"
 
@@ -2816,7 +2942,7 @@ async def vision_chat(
                 yield f"data: {json.dumps({'status': 'error', 'error': 'No valid images provided'})}\n\n"
                 return
 
-            # Build messages array for Ollama vision
+            # Build messages array
             messages = []
             system_prompt = (
                 'You are "Harvis", an AI assistant with vision capabilities. '
@@ -2828,66 +2954,124 @@ async def vision_chat(
             for msg in req.history:
                 messages.append({"role": msg["role"], "content": msg["content"]})
 
-            user_message = {
-                "role": "user",
-                "content": req.message,
-                "images": processed_images,
-            }
-            messages.append(user_message)
+            # Check if this is a Moonshot vision model
+            if is_moonshot_model(req.model):
+                # Use Moonshot API for vision
+                pool = getattr(request.app.state, "pg_pool", None)
+                if not pool:
+                    yield f"data: {json.dumps({'status': 'error', 'error': 'Database not available'})}\n\n"
+                    return
 
-            payload = {"model": req.model, "messages": messages, "stream": False}
-
-            logger.info(
-                f"🖼️ VISION: Sending to Ollama model '{req.model}' with {len(processed_images)} image(s)"
-            )
-
-            # Send to Ollama with heartbeats
-            yield f"data: {json.dumps({'status': 'inference', 'detail': f'Analyzing with {req.model}...'})}\n\n"
-
-            ollama_response = None
-            async for event in run_ollama_with_heartbeats(
-                "/api/chat", payload, timeout=3600
-            ):
-                if event["type"] == "heartbeat":
-                    elapsed = event["elapsed"]
-                    yield f"data: {json.dumps({'status': 'heartbeat', 'count': event['count'], 'elapsed': elapsed, 'detail': f'Still analyzing... ({elapsed}s)'})}\n\n"
-                elif event["type"] == "result":
-                    ollama_response = event["data"]
-                    break
-
-            if ollama_response is None:
-                yield f"data: {json.dumps({'status': 'error', 'error': 'Ollama vision request failed'})}\n\n"
-                return
-
-            if ollama_response.status_code != 200:
-                logger.error(
-                    f"Ollama vision error {ollama_response.status_code}: {ollama_response.text}"
+                moonshot_config = await get_user_api_key(
+                    pool, current_user.id, "moonshot"
                 )
-                yield f"data: {json.dumps({'status': 'error', 'error': f'Ollama vision error: {ollama_response.status_code}'})}\n\n"
-                return
+                if not moonshot_config or not moonshot_config.get("api_key"):
+                    yield f"data: {json.dumps({'status': 'error', 'error': 'Moonshot API key not configured'})}\n\n"
+                    return
 
-            response_data = ollama_response.json()
-            logger.debug(f"🖼️ VISION: Raw Ollama response: {response_data}")
-
-            # Try multiple response formats (different models may return content differently)
-            response_text = response_data.get("message", {}).get("content", "").strip()
-
-            # If empty, try alternative formats
-            if not response_text:
-                response_text = response_data.get("response", "").strip()
-            if not response_text:
-                response_text = response_data.get("content", "").strip()
-            if not response_text:
-                response_text = response_data.get("text", "").strip()
-            if not response_text:
-                # Check if there's a choices array (OpenAI-style format)
-                choices = response_data.get("choices", [])
-                if choices and len(choices) > 0:
-                    response_text = (
-                        choices[0].get("message", {}).get("content", "").strip()
+                try:
+                    moonshot_client = MoonshotClient(
+                        api_key=moonshot_config["api_key"],
+                        base_url=moonshot_config.get("api_url") or MOONSHOT_BASE_URL,
                     )
-                    if not response_text:
-                        response_text = choices[0].get("text", "").strip()
+
+                    # Format messages for Moonshot vision (OpenAI-compatible format)
+                    content = [{"type": "text", "text": req.message}]
+                    for img_b64 in processed_images:
+                        content.append(
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{img_b64}"
+                                },
+                            }
+                        )
+
+                    messages.append({"role": "user", "content": content})
+
+                    moonshot_model_id = get_moonshot_model_id(req.model)
+                    logger.info(
+                        f"🖼️ VISION: Using Moonshot AI with model {moonshot_model_id} and {len(processed_images)} image(s)"
+                    )
+
+                    yield f"data: {json.dumps({'status': 'inference', 'detail': f'Analyzing with {moonshot_model_id}...'})}\n\n"
+
+                    response_text = await moonshot_client.chat_completion(
+                        model=moonshot_model_id, messages=messages
+                    )
+
+                    logger.info(
+                        f"🖼️ VISION: Got Moonshot response ({len(response_text)} chars)"
+                    )
+
+                except Exception as e:
+                    logger.error(f"🖼️ VISION: Moonshot request failed: {e}")
+                    yield f"data: {json.dumps({'status': 'error', 'error': f'Moonshot vision error: {str(e)}'})}\n\n"
+                    return
+            else:
+                # Use Ollama for vision
+                user_message = {
+                    "role": "user",
+                    "content": req.message,
+                    "images": processed_images,
+                }
+                messages.append(user_message)
+
+                payload = {"model": req.model, "messages": messages, "stream": False}
+
+                logger.info(
+                    f"🖼️ VISION: Sending to Ollama model '{req.model}' with {len(processed_images)} image(s)"
+                )
+
+                # Send to Ollama with heartbeats
+                yield f"data: {json.dumps({'status': 'inference', 'detail': f'Analyzing with {req.model}...'})}\n\n"
+
+                ollama_response = None
+                async for event in run_ollama_with_heartbeats(
+                    "/api/chat", payload, timeout=3600
+                ):
+                    if event["type"] == "heartbeat":
+                        elapsed = event["elapsed"]
+                        yield f"data: {json.dumps({'status': 'heartbeat', 'count': event['count'], 'elapsed': elapsed, 'detail': f'Still analyzing... ({elapsed}s)'})}\n\n"
+                    elif event["type"] == "result":
+                        ollama_response = event["data"]
+                        break
+
+                if ollama_response is None:
+                    yield f"data: {json.dumps({'status': 'error', 'error': 'Ollama vision request failed'})}\n\n"
+                    return
+
+                if ollama_response.status_code != 200:
+                    logger.error(
+                        f"Ollama vision error {ollama_response.status_code}: {ollama_response.text}"
+                    )
+                    yield f"data: {json.dumps({'status': 'error', 'error': f'Ollama vision error: {ollama_response.status_code}'})}\n\n"
+                    return
+
+                response_data = ollama_response.json()
+                logger.debug(f"🖼️ VISION: Raw Ollama response: {response_data}")
+
+                # Try multiple response formats (different models may return content differently)
+                response_text = (
+                    response_data.get("message", {}).get("content", "").strip()
+                )
+
+                # If empty, try alternative formats
+                if not response_text:
+                    response_text = response_data.get("response", "").strip()
+                if not response_text:
+                    response_text = response_data.get("content", "").strip()
+                if not response_text:
+                    response_text = response_data.get("text", "").strip()
+                if not response_text:
+                    # Check if there's a choices array (OpenAI-style format)
+                    choices = response_data.get("choices", [])
+                    if choices and len(choices) > 0:
+                        response_text = (
+                            choices[0].get("message", {}).get("content", "").strip()
+                        )
+                        if not response_text:
+                            response_text = choices[0].get("text", "").strip()
 
             # Debug: Log the actual structure if content is empty
             if not response_text:
@@ -3635,6 +3819,71 @@ async def mic_chat(
             else:
                 if model == "gemini-1.5-flash":
                     response_text = query_gemini(text, history[:-1])
+                elif is_moonshot_model(model):
+                    # Use Moonshot/Kimi for voice chat
+                    pool = getattr(request.app.state, "pg_pool", None)
+                    if not pool:
+                        return JSONResponse(
+                            status_code=500,
+                            content={
+                                "status": "error",
+                                "error": "Database not available",
+                            },
+                        )
+
+                    moonshot_config = await get_user_api_key(
+                        pool, current_user.id, "moonshot"
+                    )
+                    if not moonshot_config or not moonshot_config.get("api_key"):
+                        return JSONResponse(
+                            status_code=400,
+                            content={
+                                "status": "error",
+                                "error": "Moonshot API key not configured",
+                            },
+                        )
+
+                    try:
+                        moonshot_client = MoonshotClient(
+                            api_key=moonshot_config["api_key"],
+                            base_url=moonshot_config.get("api_url")
+                            or MOONSHOT_BASE_URL,
+                        )
+
+                        sys_prompt_path = os.path.join(
+                            os.path.dirname(__file__), "system_prompt.txt"
+                        )
+                        try:
+                            with open(sys_prompt_path, "r", encoding="utf-8") as f:
+                                sys_prompt = f.read().strip()
+                        except FileNotFoundError:
+                            sys_prompt = 'You are "Jarves", a voice-first local assistant. Reply in ≤25 spoken-style words, sprinkling brief Spanish when natural.'
+
+                        messages = [{"role": "system", "content": sys_prompt}]
+                        for msg in history[:-1]:
+                            messages.append(
+                                {"role": msg["role"], "content": msg["content"]}
+                            )
+                        messages.append({"role": "user", "content": text})
+
+                        moonshot_model_id = get_moonshot_model_id(model)
+                        logger.info(
+                            f"🎤 MIC-CHAT: Using Moonshot AI with model {moonshot_model_id}"
+                        )
+
+                        response_text = await moonshot_client.chat_completion(
+                            model=moonshot_model_id, messages=messages
+                        )
+
+                    except Exception as e:
+                        logger.error(f"🎤 MIC-CHAT: Moonshot request failed: {e}")
+                        return JSONResponse(
+                            status_code=500,
+                            content={
+                                "status": "error",
+                                "error": f"Moonshot error: {str(e)}",
+                            },
+                        )
                 else:
                     sys_prompt_path = os.path.join(
                         os.path.dirname(__file__), "system_prompt.txt"
@@ -3903,12 +4152,24 @@ class AdvancedResearchRequest(BaseModel):
 @app.post("/api/research-chat", tags=["research"])
 async def research_chat(
     req: Union[ResearchChatRequest, AdvancedResearchRequest],
+    request: Request,
     current_user: UserResponse = Depends(get_current_user),
 ):
     """
     Enhanced research chat endpoint with SSE streaming to prevent Nginx 499 timeouts.
     Streams progress updates during web searches and LLM inference.
     """
+
+    # Check if using Moonshot model and set API key for research (before stream_research)
+    if is_moonshot_model(req.model):
+        pool = getattr(request.app.state, "pg_pool", None)
+        if pool:
+            moonshot_config = await get_user_api_key(pool, current_user.id, "moonshot")
+            if moonshot_config and moonshot_config.get("api_key"):
+                from agent_research import set_research_agent_moonshot_key
+
+                set_research_agent_moonshot_key(moonshot_config["api_key"])
+                logger.info(f"🌙 Moonshot API key set for research agent")
 
     async def stream_research():
         try:
