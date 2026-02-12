@@ -157,6 +157,7 @@ export default function ChatPage() {
   const videosMapRef = useRef<Map<string, any[]>>(new Map())
   const reasoningMapRef = useRef<Map<string, string>>(new Map())
   const researchChainMapRef = useRef<Map<string, any>>(new Map())
+  const artifactMapRef = useRef<Map<string, any>>(new Map())
   const processedDataLengthRef = useRef(0)
 
   // Track previous aiData length to detect new data
@@ -423,6 +424,7 @@ export default function ChatPage() {
         audioUrl: audioUrlMapRef.current.get(m.id),
         searchResults: searchResultsMapRef.current.get(m.id),
         videos: videosMapRef.current.get(m.id),
+        artifact: artifactMapRef.current.get(m.id),
         metadata: m.metadata,
         inputType: m.inputType,
       }
@@ -464,6 +466,7 @@ export default function ChatPage() {
       audioUrlMapRef.current.clear()
       reasoningMapRef.current.clear()
       researchChainMapRef.current.clear()
+      artifactMapRef.current.clear()
       processedDataLengthRef.current = 0
       prevAiDataLengthRef.current = 0
 
@@ -473,12 +476,16 @@ export default function ChatPage() {
         if (msg.metadata) {
           const sources = msg.metadata.sources || msg.metadata.searchResults
           const videos = msg.metadata.videos
+          const artifact = msg.metadata.artifact
 
           if (sources && sources.length > 0) {
             searchResultsMapRef.current.set(msgId, sources)
           }
           if (videos && videos.length > 0) {
             videosMapRef.current.set(msgId, videos)
+          }
+          if (artifact) {
+            artifactMapRef.current.set(msgId, artifact)
           }
         }
 

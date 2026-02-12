@@ -402,3 +402,88 @@ map_results, reduce_result = await quick_map_reduce(
 - `python_back_end/main.py` - Add `/health` endpoint
 - `k8s-manifests/services/merged-ollama-backend.yaml` - Fix probe configuration
 - `python_back_end/agent_research.py` - Fix pipeline integration
+
+---
+
+## 2026-02-12: Fixed Document Generation - UI Not Showing Downloads
+
+### Problem
+Documents were being generated via Python code but:
+1. **Not showing in UI** - No download button visible after generation
+2. **Lost on refresh** - Documents disappeared when refreshing the page
+3. **Raw code visible** - Users saw raw Python code instead of clean response
+4. **Download not working** - Download button didn't fetch files properly
+
+### Root Cause Analysis
+1. **Missing API Routes**: Frontend had no routes to proxy artifact requests to backend
+2. **No Persistence**: Generated artifact info wasn't saved with chat messages
+3. **No Loading**: Artifacts weren't extracted from message metadata when loading history
+4. **Proxy Issues**: `/api/artifacts/*` endpoints weren't configured in Next.js
+
+### Solution Applied
+
+#### 1. Created Frontend API Routes for Artifacts
+**File**: `front_end/newjfrontend/app/api/artifacts/[id]/route.ts`
+- GET endpoint to fetch artifact metadata from backend
+- DELETE endpoint to remove artifacts
+- Proper auth header forwarding
+
+**File**: `front_end/newjfrontend/app/api/artifacts/[id]/download/route.ts`
+- GET endpoint to download artifact files
+- Streams file data from backend to browser
+- Preserves content-type and content-disposition headers
+
+#### 2. Fixed Artifact Persistence in Backend
+**File**: `python_back_end/main.py` (around line 2899)
+- Added artifact info to message metadata before saving:
+```python
+# Add artifact info to metadata so it persists with the message
+if artifact_info:
+    msg_metadata["artifact"] = artifact_info
+    logger.info(f"💾 Added artifact to message metadata: {artifact_info['id']}")
+```
+
+#### 3. Fixed Frontend Artifact Loading from History
+**File**: `front_end/newjfrontend/app/page.tsx`
+- Added `artifactMapRef` to track artifacts by message ID (line 160)
+- Updated history loading to extract artifact from metadata (lines 476-478):
+```typescript
+const artifact = msg.metadata.artifact
+if (artifact) {
+  artifactMapRef.current.set(msgId, artifact)
+}
+```
+- Added artifact to `convertedMessages` (line 427):
+```typescript
+artifact: artifactMapRef.current.get(m.id),
+```
+- Clear artifact map when loading new history (line 467)
+
+#### 4. Verified Code Cleaning Doesn't Affect Saved Documents
+**Verified**: Code cleaning happens AFTER document generation:
+1. Generate document from Python code
+2. Save document file to `/data/artifacts/`
+3. Save artifact record to database
+4. THEN clean response by removing code blocks
+
+This ensures the document is safely stored before cleaning the response text.
+
+### Files Modified
+- `front_end/newjfrontend/app/api/artifacts/[id]/route.ts` - **NEW** - Artifact metadata endpoint
+- `front_end/newjfrontend/app/api/artifacts/[id]/download/route.ts` - **NEW** - Artifact download endpoint
+- `python_back_end/main.py` - Save artifact info to message metadata
+- `front_end/newjfrontend/app/page.tsx` - Load artifacts from metadata when fetching history
+
+### Result
+- ✅ Documents now show download button in chat UI
+- ✅ Documents persist after page refresh (loaded from message metadata)
+- ✅ Raw Python code is cleaned from response (shown after document is saved)
+- ✅ Download button properly fetches files via frontend API routes
+- ✅ Works for all document types: .xlsx, .docx, .pdf, .pptx
+
+### Testing
+1. Ask AI: "Create an Excel spreadsheet with sample data"
+2. Verify document generates and shows download button
+3. Refresh page - verify document still shows in chat history
+4. Click download - verify file downloads correctly
+
