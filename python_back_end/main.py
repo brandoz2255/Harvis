@@ -2897,6 +2897,13 @@ async def chat(
                 msg_metadata["audio_path"] = audio_path
                 msg_metadata["videos"] = []  # Placeholder
 
+            # Add artifact info to metadata so it persists with the message
+            if artifact_info:
+                msg_metadata["artifact"] = artifact_info
+                logger.info(
+                    f"💾 Added artifact to message metadata: {artifact_info['id']}"
+                )
+
             if session_id:
                 try:
                     session = await chat_history_manager.get_session(
