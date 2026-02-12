@@ -16,6 +16,7 @@ bcrypt==4.0.1
 requests
 pydantic
 Pillow
+cryptography
 
 # Audio processing - install torch first to avoid conflicts
 torch==2.6.0
@@ -61,3 +62,12 @@ yt-dlp>=2024.0.0
 pypdf>=3.0.0
 python-magic>=0.4.27
 python-docx
+
+# Open Notebook integration dependencies
+langgraph>=0.2.0
+jinja2>=3.1.0
+pydub>=0.25.1
+
+# Optional: Multi-provider AI support
+openai>=1.0.0
+anthropic>=0.18.0

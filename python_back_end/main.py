@@ -54,6 +54,33 @@ from vibecoding import (
 from vibecoding.core import initialize_vibe_agent
 from file_processing import extract_text_from_file
 
+# Import TTS engine manager (from open-notebook/vibecode merge)
+try:
+    from tts_engine_manager import (
+        TTSMode, set_mode, get_mode, generate_speech as tts_generate,
+        generate_podcast_segment, get_engine_status, unload_all_engines
+    )
+    TTS_ENGINE_AVAILABLE = True
+except ImportError:
+    TTS_ENGINE_AVAILABLE = False
+    logger_init = logging.getLogger(__name__)
+    logger_init.warning("tts_engine_manager not available, TTS engine endpoints disabled")
+
+# Import voice model manager (from open-notebook/vibecode merge)
+try:
+    from voice_model_manager import (
+        VoiceModelManager, download_popular_model, POPULAR_MODELS
+    )
+    VOICE_MODEL_AVAILABLE = True
+except ImportError:
+    VOICE_MODEL_AVAILABLE = False
+
+# Import generate_speech_smart if available
+try:
+    from model_manager import generate_speech_smart
+except ImportError:
+    pass
+
 from pydantic import BaseModel
 import torch, soundfile as sf
 import whisper  # Import Whisper
@@ -534,6 +561,38 @@ app.include_router(containers_router)
 # Include RAG corpus router
 if RAG_CORPUS_AVAILABLE:
     app.include_router(rag_router)
+
+# Include notebooks router (from open-notebook merge)
+try:
+    from notebooks.router import router as notebooks_router
+    app.include_router(notebooks_router)
+    logger.info("Notebooks router loaded")
+except Exception as e:
+    logger.warning(f"Could not load notebooks router: {e}")
+
+# Include TTS proxy router (from open-notebook merge)
+try:
+    from api.tts_routes import router as tts_proxy_router
+    app.include_router(tts_proxy_router)
+    logger.info("TTS proxy router loaded")
+except Exception as e:
+    logger.warning(f"Could not load TTS proxy router: {e}")
+
+# Include local podcast router (from open-notebook merge)
+try:
+    from api.local_podcast_routes import router as local_podcast_router
+    app.include_router(local_podcast_router)
+    logger.info("Local podcast router loaded")
+except Exception as e:
+    logger.warning(f"Could not load local podcast router: {e}")
+
+# Include vibe models router (from open-notebook merge)
+try:
+    from vibecoding.models import router as vibe_models_router
+    app.include_router(vibe_models_router)
+    logger.info("Vibe models router loaded")
+except Exception as e:
+    logger.warning(f"Could not load vibe models router: {e}")
 
 # ─── Device & models -----------------------------------------------------------
 device = 0 if torch.cuda.is_available() else -1
@@ -4211,3 +4270,114 @@ async def research_health_check():
 # Save file endpoint moved to vibecoding.commands
 
 # ─── Vibe Agent Helper Functions moved to vibecoding.core ─────────────────────
+
+
+# ─── TTS Engine & Voice Model Endpoints (from open-notebook merge) ───────────
+
+if TTS_ENGINE_AVAILABLE:
+    voice_manager = VoiceModelManager() if VOICE_MODEL_AVAILABLE else None
+
+    class PodcastSegmentRequest(BaseModel):
+        text: str
+        character_voice: str
+
+    class VoiceModelDownloadRequest(BaseModel):
+        url: str
+        name: Optional[str] = None
+        tags: Optional[List[str]] = None
+
+    class TTSModeRequest(BaseModel):
+        mode: str  # "interactive", "podcast", "lightweight"
+
+    @app.post("/api/tts/set-mode", tags=["tts-engine"])
+    async def api_set_tts_mode(req: TTSModeRequest):
+        """Set the TTS generation mode"""
+        mode_map = {
+            "interactive": TTSMode.INTERACTIVE,
+            "podcast": TTSMode.PODCAST,
+            "lightweight": TTSMode.LIGHTWEIGHT
+        }
+        if req.mode not in mode_map:
+            raise HTTPException(400, f"Invalid mode. Use: {list(mode_map.keys())}")
+        set_mode(mode_map[req.mode])
+        return {"status": "ok", "mode": req.mode}
+
+    @app.get("/api/tts/status", tags=["tts-engine"])
+    async def api_get_tts_status():
+        """Get status of all TTS engines"""
+        return get_engine_status()
+
+    @app.post("/api/podcast/generate-segment", tags=["podcast"])
+    async def api_generate_podcast_segment(req: PodcastSegmentRequest):
+        """Generate a podcast segment with character voice"""
+        try:
+            sr, audio = generate_podcast_segment(
+                req.text,
+                req.character_voice,
+                voice_models_dir=str(voice_manager.models_dir) if voice_manager else "/app/voice_models"
+            )
+            import soundfile as sf_seg
+            output_path = f"/tmp/podcast_segment_{uuid.uuid4()}.wav"
+            sf_seg.write(output_path, audio, sr)
+            return FileResponse(
+                output_path,
+                media_type="audio/wav",
+                filename=f"segment_{req.character_voice}.wav"
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, f"Voice model not found: {req.character_voice}")
+        except Exception as e:
+            logger.error(f"Podcast generation failed: {e}")
+            raise HTTPException(500, str(e))
+
+if VOICE_MODEL_AVAILABLE and TTS_ENGINE_AVAILABLE:
+    @app.get("/api/voice-models/list", tags=["voice-models"])
+    async def api_list_voice_models(tag: Optional[str] = None):
+        """List available voice models"""
+        models = voice_manager.list_models(tag=tag)
+        return {
+            "count": len(models),
+            "models": [
+                {
+                    "name": m.name,
+                    "epochs": m.epochs,
+                    "size_mb": m.file_size_mb,
+                    "tags": m.tags,
+                    "has_index": m.index_path is not None
+                }
+                for m in models
+            ]
+        }
+
+    @app.get("/api/voice-models/popular", tags=["voice-models"])
+    async def api_list_popular_models():
+        """List pre-configured popular voice models"""
+        return {
+            "models": list(POPULAR_MODELS.keys()),
+            "note": "Use POST /api/voice-models/download-popular/{name} to download"
+        }
+
+    @app.post("/api/voice-models/download", tags=["voice-models"])
+    async def api_download_voice_model(req: VoiceModelDownloadRequest):
+        """Download a voice model from HuggingFace URL"""
+        info = voice_manager.download_model(req.url, name=req.name, tags=req.tags)
+        if info is None:
+            raise HTTPException(500, "Download failed")
+        return {"status": "ok", "name": info.name, "size_mb": info.file_size_mb, "epochs": info.epochs}
+
+    @app.post("/api/voice-models/download-popular/{name}", tags=["voice-models"])
+    async def api_download_popular_model(name: str):
+        """Download a pre-configured popular voice model"""
+        if name not in POPULAR_MODELS:
+            raise HTTPException(404, f"Unknown model. Available: {list(POPULAR_MODELS.keys())}")
+        info = download_popular_model(name, voice_manager)
+        if info is None:
+            raise HTTPException(500, "Download failed")
+        return {"status": "ok", "name": info.name, "size_mb": info.file_size_mb}
+
+    @app.delete("/api/voice-models/{name}", tags=["voice-models"])
+    async def api_delete_voice_model(name: str):
+        """Delete a voice model"""
+        if voice_manager.delete_model(name):
+            return {"status": "ok", "deleted": name}
+        raise HTTPException(404, f"Model not found: {name}")

@@ -1,0 +1,6 @@
+2026-02-04 11:55:12,844 - INFO - Starting Lightweight Pipeline Verification...
+2026-02-04 11:55:12,846 - INFO - ✅ Status Check Passed: {'mode': 'interactive', 'piper_loaded': False, 'chatterbox_loaded': False, 'rvc_loaded': False, 'device': 'cuda'}
+2026-02-04 11:55:12,847 - INFO - ✅ Set Mode (Lightweight) Passed: {'status': 'ok', 'mode': 'lightweight'}
+2026-02-04 11:55:12,848 - INFO - Generating lightweight segment...
+2026-02-04 11:55:12,859 - INFO - ✅ Lightweight Generation Passed. Saved to test_segment_lightweight_85420b9b-d6ee-47fd-af36-0b3b409ee353.wav
+2026-02-04 11:55:12,859 - INFO - ✅ Audio file seems valid (size > 1KB)

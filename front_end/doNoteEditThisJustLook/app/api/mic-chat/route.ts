@@ -41,11 +41,14 @@ export async function POST(request: NextRequest) {
 
     console.log(`Mic-chat proxying to backend: session_id=${sessionId}, research_mode=${researchMode}, model=${model}`)
 
+    const headers: Record<string, string> = {}
+    if (authHeader) {
+      headers["Authorization"] = authHeader
+    }
+
     const response = await fetch(url, {
       method: "POST",
-      headers: {
-        "Authorization": authHeader, // Forward the auth header to backend
-      },
+      headers,
       body: backendFormData,
     })
 

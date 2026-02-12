@@ -2,6 +2,8 @@ import { type NextRequest, NextResponse } from "next/server"
 
 const BACKEND_API = process.env.BACKEND_URL || "http://backend:8000"
 
+export const dynamic = 'force-dynamic'
+
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url)

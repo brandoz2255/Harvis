@@ -75,7 +75,7 @@ COPY --from=builder /app/public ./public
 # Copy package.json for start script
 COPY --from=builder /app/package.json ./package.json
 
-# Set permissions for .next directory (already exists from standalone build)
+# Set permissions on .next directory
 RUN chown -R nextjs:nodejs .next
 
 # Switch to non-root user
