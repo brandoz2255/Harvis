@@ -48,6 +48,15 @@ RUN pip install --no-cache-dir --no-index --find-links=/wheels /wheels/* \
   && rm -rf /wheels \
   && pip cache purge
 
+# Install document generation libraries for code-based artifact generation
+RUN pip install --no-cache-dir \
+  openpyxl==3.1.2 \
+  python-docx==1.1.0 \
+  reportlab==4.0.4 \
+  python-pptx==0.6.23 \
+  pandas==2.1.4 \
+  fpdf2==2.7.6
+
 # App user
 RUN useradd -m -u 1001 -s /bin/bash appuser
 

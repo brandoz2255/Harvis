@@ -30,6 +30,9 @@ USE_K8S_EXECUTION = os.environ.get("USE_K8S_EXECUTION", "false").lower() == "tru
 CODE_EXECUTOR_NAMESPACE = os.environ.get("CODE_EXECUTOR_NAMESPACE", "artifact-executor")
 CODE_EXECUTOR_POD = os.environ.get("CODE_EXECUTOR_POD", "harvis-code-executor")
 
+# Local execution mode (for Docker Compose - avoids Docker socket dependency)
+CODE_EXECUTOR_LOCAL = os.environ.get("CODE_EXECUTOR_LOCAL", "false").lower() == "true"
+
 # Resource limits for code execution
 MAX_EXECUTION_TIME = int(os.environ.get("CODE_MAX_EXECUTION_TIME", "60"))  # seconds
 MAX_MEMORY = os.environ.get("CODE_MAX_MEMORY", "512m")
@@ -277,6 +280,29 @@ def execute_document_code(
 
     logger.info(f"Executing document generation code for {artifact_id}")
     logger.info(f"Output will be written to: {output_path}")
+    logger.info(f"Script saved to: {script_path}")
+
+    # Verify script file exists
+    if not os.path.exists(script_path):
+        logger.error(f"Script file does not exist: {script_path}")
+        return {
+            "success": False,
+            "error": f"Script file not found: {script_path}",
+            "output_path": None,
+            "file_size": 0,
+        }
+
+    # Verify output directory exists (create if needed)
+    output_dir = os.path.dirname(output_path)
+    if not os.path.exists(output_dir):
+        logger.info(f"Creating output directory: {output_dir}")
+        os.makedirs(output_dir, exist_ok=True)
+
+    # Determine execution mode
+    if CODE_EXECUTOR_LOCAL:
+        logger.info("Using local execution mode (CODE_EXECUTOR_LOCAL=true)")
+        use_docker = False
+        USE_K8S_EXECUTION = False
 
     try:
         if USE_K8S_EXECUTION:
@@ -314,12 +340,46 @@ def _execute_in_docker(
 ) -> Dict[str, Any]:
     """Execute code in isolated Docker container."""
 
+    # Check if Docker is available
+    try:
+        docker_check = subprocess.run(
+            ["docker", "--version"], capture_output=True, text=True
+        )
+        if docker_check.returncode != 0:
+            logger.error("Docker is not available")
+            return {
+                "success": False,
+                "error": "Docker is not available in this environment",
+                "stdout": "",
+                "stderr": "",
+                "returncode": -1,
+            }
+    except FileNotFoundError:
+        logger.error("Docker command not found")
+        return {
+            "success": False,
+            "error": "Docker command not found. Is Docker installed?",
+            "stdout": "",
+            "stderr": "",
+            "returncode": -1,
+        }
+
     script_dir = os.path.dirname(script_path)
     output_dir = os.path.dirname(output_path)
+    script_name = os.path.basename(script_path)
 
     # Container paths (inside Docker)
-    container_script_path = f"/workspace/code/{os.path.basename(script_path)}"
-    container_output_path = f"/data/artifacts/{os.path.basename(output_dir)}/{os.path.basename(output_path)}"
+    # The script is mounted at /workspace/code/generate.py
+    container_script_path = f"/workspace/code/{script_name}"
+
+    logger.info(f"Docker execution:")
+    logger.info(f"  Host script path: {script_path}")
+    logger.info(f"  Host script dir: {script_dir}")
+    logger.info(f"  Script exists: {os.path.exists(script_path)}")
+    logger.info(f"  Container script path: {container_script_path}")
+    logger.info(f"  Host output path: {output_path}")
+    logger.info(f"  Host output dir: {output_dir}")
+    logger.info(f"  Output dir exists: {os.path.exists(output_dir)}")
 
     # Build Docker command - mount entire artifact directory to allow writing anywhere
     # Run as UID 1001 (appuser) to match volume permissions
@@ -338,7 +398,7 @@ def _execute_in_docker(
         "-v",
         f"{ARTIFACT_DIR}:/data/artifacts:rw",  # Mount entire artifact directory
         "-v",
-        f"{script_dir}:/workspace/code:ro",  # Read-only code
+        f"{script_dir}:/workspace/code:ro",  # Read-only code mount
         "-w",
         "/workspace",
         CODE_EXECUTOR_IMAGE,
@@ -347,8 +407,6 @@ def _execute_in_docker(
     ]
 
     logger.info(f"Docker command: {' '.join(cmd)}")
-    logger.info(f"Host output path: {output_path}")
-    logger.info(f"Container output path: {container_output_path}")
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
