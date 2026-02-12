@@ -299,15 +299,18 @@ def execute_document_code(
         os.makedirs(output_dir, exist_ok=True)
 
     # Determine execution mode
+    use_k8s = USE_K8S_EXECUTION
+    use_docker_local = use_docker
+
     if CODE_EXECUTOR_LOCAL:
         logger.info("Using local execution mode (CODE_EXECUTOR_LOCAL=true)")
-        use_docker = False
-        USE_K8S_EXECUTION = False
+        use_docker_local = False
+        use_k8s = False
 
     try:
-        if USE_K8S_EXECUTION:
+        if use_k8s:
             result = _execute_in_k8s(script_path, output_path, timeout)
-        elif use_docker:
+        elif use_docker_local:
             result = _execute_in_docker(script_path, output_path, timeout, memory_limit)
         else:
             result = _execute_locally(script_path, timeout)
