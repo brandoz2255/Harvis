@@ -931,7 +931,7 @@ export default function ChatPage() {
               }
               // Handle artifact from response
               if (chunk.artifact) {
-                updates.artifact = {
+                const artifactData = {
                   id: chunk.artifact.id,
                   type: chunk.artifact.type,
                   title: chunk.artifact.title,
@@ -939,6 +939,9 @@ export default function ChatPage() {
                   downloadUrl: chunk.artifact.download_url || chunk.artifact.downloadUrl,
                   previewUrl: chunk.artifact.preview_url || chunk.artifact.previewUrl,
                 }
+                updates.artifact = artifactData
+                // Also update artifactMapRef so it persists during re-renders
+                artifactMapRef.current.set(assistantId, artifactData)
                 hasUpdates = true
               }
             }

@@ -487,3 +487,73 @@ This ensures the document is safely stored before cleaning the response text.
 3. Refresh page - verify document still shows in chat history
 4. Click download - verify file downloads correctly
 
+
+## 2026-02-12: Fixed Artifact Rendering and Code Display Issues
+
+### Problem
+1. **Artifact not showing immediately** - Users had to refresh the page to see the download button
+2. **Code not saved for viewing** - After refresh, couldn't see the Python code used to generate the document
+3. **Authentication error** - "credentials.credentials request object has no attribute creds" when downloading
+
+### Solution Applied
+
+#### 1. Fixed Authentication in Artifact Routes
+**File**: `python_back_end/artifacts/routes.py`
+- Replaced broken auth function call with proper JWT token extraction:
+```python
+async def get_current_user_from_request(request: Request):
+    # Extract JWT token from Authorization header and validate it
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    token = auth_header.replace("Bearer ", "")
+    # Decode and validate JWT...
+```
+
+#### 2. Fixed Artifact Not Rendering Immediately
+**File**: `front_end/newjfrontend/app/page.tsx` (line ~942)
+- Added artifact to artifactMapRef during streaming so it persists across re-renders:
+```typescript
+if (chunk.artifact) {
+  const artifactData = { ... }
+  updates.artifact = artifactData
+  // Also update artifactMapRef so it persists during re-renders
+  artifactMapRef.current.set(assistantId, artifactData)
+  hasUpdates = true
+}
+```
+
+#### 3. Added Code Viewing Feature
+**File**: `python_back_end/main.py` (line ~2731)
+- Include code in artifact_info sent to frontend:
+```python
+artifact_info = {
+    ...
+    "code": doc_code,  # Include the code so users can view it later
+}
+```
+
+**File**: `front_end/newjfrontend/types/message.ts`
+- Added `code?: string` field to Artifact interface
+
+**File**: `front_end/newjfrontend/components/artifacts/ArtifactBlock.tsx`
+- Added "View Code" button for document artifacts
+- Added code display with syntax highlighting
+- Added copy code functionality
+- Users can now toggle between download view and code view
+
+### Files Modified
+- `python_back_end/artifacts/routes.py` - Fixed authentication
+- `python_back_end/main.py` - Include code in artifact_info
+- `front_end/newjfrontend/app/page.tsx` - Update artifactMapRef during streaming
+- `front_end/newjfrontend/types/message.ts` - Added code field to Artifact type
+- `front_end/newjfrontend/components/artifacts/ArtifactBlock.tsx` - Added code viewing UI
+
+### Result
+- ✅ Artifact appears immediately without refreshing
+- ✅ Download button works without authentication errors
+- ✅ Users can view the Python code used to generate documents
+- ✅ Code persists in chat history after refresh
+- ✅ Toggle between "View Code" and "Download" views
+

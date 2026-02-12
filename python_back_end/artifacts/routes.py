@@ -39,26 +39,29 @@ def init_artifact_storage(storage: ArtifactStorage):
 async def get_current_user_from_request(request: Request):
     """
     Get current user from request.
-    This should be replaced with your actual auth dependency.
+    Extracts JWT token from Authorization header and validates it.
     """
-    # Try to get from app state first (if set by main.py)
-    if hasattr(request.app.state, "get_current_user"):
-        return await request.app.state.get_current_user(request)
+    from jose import JWTError, jwt
+    import os
 
-    # Fallback: try to import from main module
+    # Get token from Authorization header
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    token = auth_header.replace("Bearer ", "")
+
     try:
-        from main import get_current_user_optimized
+        # Decode JWT token
+        SECRET_KEY = os.getenv("JWT_SECRET", "key")
+        ALGORITHM = "HS256"
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id = int(payload.get("sub"))
 
-        return await get_current_user_optimized(request)
-    except ImportError:
-        pass
-
-    # For development, allow unauthenticated access with user_id from header
-    user_id = request.headers.get("X-User-Id")
-    if user_id:
-        return type("User", (), {"id": int(user_id)})()
-
-    raise HTTPException(status_code=401, detail="Not authenticated")
+        # Create a simple user object
+        return type("User", (), {"id": user_id})()
+    except (JWTError, ValueError, TypeError) as e:
+        raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
 
 
 @artifact_router.post("/generate", response_model=dict)
