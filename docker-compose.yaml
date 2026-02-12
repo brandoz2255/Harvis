@@ -85,6 +85,9 @@ services:
       LOG_LEVEL: "INFO"
       PYTHONUNBUFFERED: "1"
       ARTIFACT_STORAGE_DIR: "/data/artifacts"
+      # For Docker Compose, run code locally (not in separate containers)
+      # This avoids needing Docker socket access
+      CODE_EXECUTOR_LOCAL: "true"
     user: "1001:1001"  # Run as appuser for consistent permissions
     volumes:
       - ml-models-cache:/models-cache
