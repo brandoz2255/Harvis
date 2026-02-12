@@ -46,6 +46,22 @@ services:
     networks:
       - ollama-n8n-network
 
+  # Artifact Volume Permission Setup (runs as root to set proper permissions)
+  artifact-init:
+    image: busybox:latest
+    container_name: harvis-artifact-init
+    user: root
+    command: >
+      sh -c "mkdir -p /data/artifacts && 
+             chown -R 1001:1001 /data/artifacts && 
+             chmod 750 /data/artifacts &&
+             echo 'Artifact permissions initialized'"
+    volumes:
+      - artifact_data:/data/artifacts
+    networks:
+      - ollama-n8n-network
+    restart: "no"
+
   # Python FastAPI Backend
   backend:
     runtime: nvidia
@@ -69,6 +85,7 @@ services:
       LOG_LEVEL: "INFO"
       PYTHONUNBUFFERED: "1"
       ARTIFACT_STORAGE_DIR: "/data/artifacts"
+    user: "1001:1001"  # Run as appuser for consistent permissions
     volumes:
       - ml-models-cache:/models-cache
       - embedding-data:/app/embedding
@@ -80,6 +97,8 @@ services:
       pgsql:
         condition: service_healthy
       model-downloader:
+        condition: service_completed_successfully
+      artifact-init:
         condition: service_completed_successfully
     deploy:
       resources:
