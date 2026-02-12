@@ -19,7 +19,7 @@ WORKDIR /app
 
 # Copy requirements and install Python dependencies
 COPY requirements-executor.txt .
-RUN pip3 install --no-cache-dir -r requirements-executor.txt
+RUN pip3 install --no-cache-dir --break-system-packages -r requirements-executor.txt
 
 # Copy executor service code
 COPY executor_service/ ./executor_service/
