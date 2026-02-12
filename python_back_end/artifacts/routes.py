@@ -108,6 +108,30 @@ async def generate_artifact(
     }
 
 
+@artifact_router.get("/", response_model=dict)
+async def list_user_artifacts(
+    request: Request,
+    limit: int = 50,
+    offset: int = 0,
+):
+    """List all artifacts for the current user"""
+    current_user = await get_current_user_from_request(request)
+    pool = getattr(request.app.state, "pg_pool", None)
+
+    if not pool:
+        raise HTTPException(status_code=500, detail="Database not available")
+
+    storage = get_artifact_storage()
+    artifacts = await storage.get_user_artifacts(pool, current_user.id, limit, offset)
+
+    return {
+        "artifacts": artifacts,
+        "count": len(artifacts),
+        "limit": limit,
+        "offset": offset,
+    }
+
+
 @artifact_router.get("/{artifact_id}", response_model=ArtifactResponse)
 async def get_artifact(
     artifact_id: UUID,

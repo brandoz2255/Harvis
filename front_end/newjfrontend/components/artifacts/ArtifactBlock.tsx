@@ -20,8 +20,9 @@ import {
 import { Button } from "@/components/ui/button"
 import type { Artifact, ArtifactContent } from "@/types/message"
 
-// Lazy load SandpackPreview to reduce initial bundle
+// Lazy load preview components to reduce initial bundle
 const SandpackPreview = React.lazy(() => import("./SandpackPreview"))
+const DocxPreview = React.lazy(() => import("./DocxPreview"))
 
 // Artifact type icons mapping
 const ARTIFACT_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
@@ -51,16 +52,6 @@ interface ArtifactBlockProps {
 }
 
 export function ArtifactBlock({ artifact: initialArtifact, className = "" }: ArtifactBlockProps) {
-  // Debug logging
-  console.log('🔍 ArtifactBlock rendered:', {
-    id: initialArtifact?.id,
-    type: initialArtifact?.type,
-    hasCode: !!initialArtifact?.code,
-    codeLength: initialArtifact?.code?.length,
-    status: initialArtifact?.status,
-    title: initialArtifact?.title
-  })
-  
   const [artifact, setArtifact] = useState(initialArtifact)
   const [showPreview, setShowPreview] = useState(false)
   const [showEditor, setShowEditor] = useState(false)
@@ -68,19 +59,11 @@ export function ArtifactBlock({ artifact: initialArtifact, className = "" }: Art
   const [copied, setCopied] = useState(false)
   const [isPolling, setIsPolling] = useState(artifact.status === "generating" || artifact.status === "pending")
   const [previewContent, setPreviewContent] = useState<ArtifactContent | null>(artifact.content || null)
-  
-  // Log when artifact state updates
-  useEffect(() => {
-    console.log('📝 Artifact state updated:', {
-      id: artifact.id,
-      hasCode: !!artifact.code,
-      codeLength: artifact.code?.length,
-      status: artifact.status
-    })
-  }, [artifact])
 
   const Icon = ARTIFACT_ICONS[artifact.type] || Code
   const isCodeType = ["website", "app", "code"].includes(artifact.type)
+  const isDocumentType = ["document", "spreadsheet", "pdf", "presentation"].includes(artifact.type)
+  const canPreview = isCodeType || artifact.type === "document" // Only DOCX for now
   const typeColor = TYPE_COLORS[artifact.type] || "bg-slate-500/20 text-slate-400"
 
   // Poll for status updates when artifact is generating
@@ -222,7 +205,7 @@ export function ArtifactBlock({ artifact: initialArtifact, className = "" }: Art
         </div>
 
         <div className="flex items-center gap-1">
-          {/* Status indicators */}
+          {/* Status indicators - only show when generating/pending */}
           {(artifact.status === "generating" || artifact.status === "pending") && (
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-amber-500/10 text-amber-400 text-xs">
               <Loader2 className="h-3 w-3 animate-spin" />
@@ -240,83 +223,85 @@ export function ArtifactBlock({ artifact: initialArtifact, className = "" }: Art
             </div>
           )}
 
+          {/* Only show action buttons when status is ready */}
           {artifact.status === "ready" && (
             <>
-              {isCodeType && (
-                <>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => setShowPreview(!showPreview)}
-                    className="h-8 text-xs text-violet-300/70 hover:text-violet-200 hover:bg-violet-500/10"
-                  >
-                    {showPreview ? (
-                      <>
-                        <EyeOff className="mr-1.5 h-3 w-3" /> Hide Preview
-                      </>
-                    ) : (
-                      <>
-                        <Eye className="mr-1.5 h-3 w-3" /> Preview
-                      </>
-                    )}
-                  </Button>
-
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={handleCopy}
-                    disabled={!previewContent?.files}
-                    className="h-8 text-xs text-violet-300/70 hover:text-violet-200 hover:bg-violet-500/10"
-                  >
-                    {copied ? (
-                      <>
-                        <Check className="mr-1.5 h-3 w-3 text-green-400" /> Copied!
-                      </>
-                    ) : (
-                      <>
-                        <Copy className="mr-1.5 h-3 w-3" /> Copy
-                      </>
-                    )}
-                  </Button>
-                </>
-              )}
-
-              {!isCodeType && (
-                <>
-                  {artifact.code && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => setShowCode(!showCode)}
-                      className="h-8 text-xs text-violet-300/70 hover:text-violet-200 hover:bg-violet-500/10"
-                    >
-                      {showCode ? (
-                        <>
-                          <EyeOff className="mr-1.5 h-3 w-3" /> Hide Code
-                        </>
-                      ) : (
-                        <>
-                          <Code className="mr-1.5 h-3 w-3" /> View Code
-                        </>
-                      )}
-                    </Button>
+              {/* Preview button for code types and documents that support preview */}
+              {canPreview && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setShowPreview(!showPreview)}
+                  className="h-8 text-xs text-violet-300/70 hover:text-violet-200 hover:bg-violet-500/10"
+                >
+                  {showPreview ? (
+                    <>
+                      <EyeOff className="mr-1.5 h-3 w-3" /> Hide Preview
+                    </>
+                  ) : (
+                    <>
+                      <Eye className="mr-1.5 h-3 w-3" /> Preview
+                    </>
                   )}
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={handleDownload}
-                    className="h-8 text-xs text-violet-300/70 hover:text-violet-200 hover:bg-violet-500/10"
-                  >
-                    <Download className="mr-1.5 h-3 w-3" /> Download
-                  </Button>
-                </>
+                </Button>
               )}
+
+              {/* Copy button for code types only */}
+              {isCodeType && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={handleCopy}
+                  disabled={!previewContent?.files}
+                  className="h-8 text-xs text-violet-300/70 hover:text-violet-200 hover:bg-violet-500/10"
+                >
+                  {copied ? (
+                    <>
+                      <Check className="mr-1.5 h-3 w-3 text-green-400" /> Copied!
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="mr-1.5 h-3 w-3" /> Copy
+                    </>
+                  )}
+                </Button>
+              )}
+
+              {/* View Code button for document types */}
+              {!isCodeType && artifact.code && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setShowCode(!showCode)}
+                  className="h-8 text-xs text-violet-300/70 hover:text-violet-200 hover:bg-violet-500/10"
+                >
+                  {showCode ? (
+                    <>
+                      <EyeOff className="mr-1.5 h-3 w-3" /> Hide Code
+                    </>
+                  ) : (
+                    <>
+                      <Code className="mr-1.5 h-3 w-3" /> View Code
+                    </>
+                  )}
+                </Button>
+              )}
+
+              {/* Download button - always available when ready */}
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={handleDownload}
+                className="h-8 text-xs text-violet-300/70 hover:text-violet-200 hover:bg-violet-500/10"
+              >
+                <Download className="mr-1.5 h-3 w-3" /> Download
+              </Button>
             </>
           )}
         </div>
       </div>
 
-      {/* Content/Preview Area */}
+      {/* Content/Preview Area - only show when ready */}
       {artifact.status === "ready" && (
         <div className="p-4">
           {isCodeType ? (
@@ -380,8 +365,23 @@ export function ArtifactBlock({ artifact: initialArtifact, className = "" }: Art
               </div>
             )
           ) : (
-            <div className="text-center py-8">
-              {showCode && artifact.code ? (
+            /* Document types */
+            <div className="text-center">
+              {showPreview && artifact.type === "document" ? (
+                /* DOCX Preview */
+                <React.Suspense
+                  fallback={
+                    <div className="flex items-center justify-center h-[400px] bg-slate-900/50 rounded-lg">
+                      <Loader2 className="h-6 w-6 animate-spin text-violet-400" />
+                    </div>
+                  }
+                >
+                  <DocxPreview 
+                    downloadUrl={artifact.downloadUrl || `/api/artifacts/${artifact.id}/download`} 
+                  />
+                </React.Suspense>
+              ) : showCode && artifact.code ? (
+                /* Code View */
                 <div className="text-left">
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-xs text-muted-foreground">Generation Code</span>
@@ -407,16 +407,29 @@ export function ArtifactBlock({ artifact: initialArtifact, className = "" }: Art
                   </pre>
                 </div>
               ) : (
-                <>
+                /* Default download view */
+                <div className="py-8">
                   <Icon className="h-12 w-12 mx-auto text-muted-foreground mb-3" />
                   <p className="text-sm text-muted-foreground mb-4">
-                    Your {artifact.type} is ready to download
+                    Your {artifact.type} is ready
                   </p>
-                  <Button onClick={handleDownload} className="bg-violet-600 hover:bg-violet-700 text-white">
-                    <Download className="mr-2 h-4 w-4" />
-                    Download {artifact.title}
-                  </Button>
-                </>
+                  <div className="flex items-center justify-center gap-2">
+                    {canPreview && (
+                      <Button 
+                        onClick={() => setShowPreview(true)} 
+                        variant="outline"
+                        className="border-violet-500/30 text-violet-300 hover:bg-violet-500/10"
+                      >
+                        <Eye className="mr-2 h-4 w-4" />
+                        Preview
+                      </Button>
+                    )}
+                    <Button onClick={handleDownload} className="bg-violet-600 hover:bg-violet-700 text-white">
+                      <Download className="mr-2 h-4 w-4" />
+                      Download
+                    </Button>
+                  </div>
+                </div>
               )}
             </div>
           )}

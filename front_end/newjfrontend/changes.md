@@ -640,3 +640,72 @@ Open browser console and look for:
 - `🔍 ArtifactBlock rendered:` - Shows what data component receives
 - `📝 Artifact state updated:` - Shows state changes
 
+
+## 2026-02-12: Added Document Preview and Artifacts Sidebar
+
+### Features Added
+
+#### 1. DOCX Preview Component
+**File**: `front_end/newjfrontend/components/artifacts/DocxPreview.tsx`
+- Renders Word documents (.docx) directly in the browser
+- Converts DOCX to HTML using `mammoth` library
+- XSS protection with `dompurify` sanitization
+- Clean, document-like styling with proper typography
+- Loading states and error handling
+
+#### 2. Updated ArtifactBlock with Preview
+**File**: `front_end/newjfrontend/components/artifacts/ArtifactBlock.tsx`
+- Added Preview button for document types (starting with DOCX)
+- Lazy-loaded preview components to reduce bundle size
+- Preview/Download toggle for document artifacts
+- Only shows download button when artifact status is "ready"
+- Shows "Generating..." status while document is being created
+
+#### 3. Artifacts Sidebar Section
+**File**: `front_end/newjfrontend/components/chat-sidebar.tsx`
+- Renamed "Code Blocks" to "Artifacts"
+- New API integration: fetches all user artifacts from `/api/artifacts/`
+- Real-time artifact count badge
+- Shows artifact type icons with color coding
+- Displays file size for each artifact
+- Auto-refreshes every 30 seconds
+- Type icons: Excel (green), Word (blue), PDF (red), PowerPoint (orange), etc.
+
+#### 4. Backend API for Listing Artifacts
+**File**: `python_back_end/artifacts/routes.py`
+- New endpoint: `GET /api/artifacts/`
+- Returns all artifacts for the authenticated user
+- Supports pagination (limit/offset)
+
+**File**: `python_back_end/artifacts/storage.py`
+- New method: `get_user_artifacts()`
+- Queries database for all user artifacts
+- Returns artifact metadata (id, type, title, status, file_size, timestamps)
+
+### Dependencies Added
+```bash
+npm install mammoth dompurify @types/dompurify
+```
+
+### Files Modified
+- `front_end/newjfrontend/components/artifacts/DocxPreview.tsx` - **NEW**
+- `front_end/newjfrontend/components/artifacts/ArtifactBlock.tsx` - Added preview functionality
+- `front_end/newjfrontend/components/chat-sidebar.tsx` - Renamed to Artifacts, added real data
+- `python_back_end/artifacts/routes.py` - Added list endpoint
+- `python_back_end/artifacts/storage.py` - Added get_user_artifacts method
+- `front_end/newjfrontend/app/page.tsx` - Removed codeBlocks prop
+
+### Usage
+1. **Generate a document**: Ask AI to create a Word document
+2. **Preview**: Click "Preview" button to see document rendered in browser
+3. **Download**: Click "Download" button to save the file
+4. **View Code**: Click "View Code" to see the Python code used to generate it
+5. **Find artifacts**: Look in the sidebar under "Artifacts" section
+
+### Next Steps (Future)
+- Add Excel (XLSX) preview with interactive tables
+- Add PDF preview with page navigation
+- Add PowerPoint preview (requires server-side conversion to images)
+- Add click-to-navigate from sidebar artifact to its chat message
+- Add artifact search/filter in sidebar
+
