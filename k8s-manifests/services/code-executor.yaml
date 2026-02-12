@@ -1,0 +1,109 @@
+# Code Executor for Document Generation
+# Runs Python code to generate documents (Excel, Word, PDF, PowerPoint)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: harvis-code-executor
+  namespace: artifact-executor
+  labels:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: code-executor
+    app.kubernetes.io/part-of: harvis-ai
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: harvis-ai
+      app.kubernetes.io/component: code-executor
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: harvis-ai
+        app.kubernetes.io/component: code-executor
+    spec:
+      # Can run on any node (not GPU dependent)
+      # For isolation, can restrict to rockyvm3 if needed
+      # nodeSelector:
+      #   kubernetes.io/hostname: rockyvm3
+      
+      # Security context
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      
+      containers:
+        - name: code-executor
+          image: dulc3/harvis-code-executor:latest
+          imagePullPolicy: Always
+          
+          # No ports needed - runs on-demand via backend API calls
+          # Backend mounts code files and executes them
+          
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: OUTPUT_DIR
+              value: "/data/artifacts"
+          
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+          
+          volumeMounts:
+            - name: artifact-storage
+              mountPath: /data/artifacts
+            - name: tmp
+              mountPath: /tmp
+          
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+          
+          # Health check
+          livenessProbe:
+            exec:
+              command:
+                - python3
+                - -c
+                - "import openpyxl; import docx; import pptx; print('OK')"
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+      
+      volumes:
+        - name: artifact-storage
+          persistentVolumeClaim:
+            claimName: harvis-artifacts-pvc
+        - name: tmp
+          emptyDir:
+            sizeLimit: 500Mi
+      
+      restartPolicy: Always
+---
+# Service for code executor (for health checks)
+apiVersion: v1
+kind: Service
+metadata:
+  name: harvis-code-executor
+  namespace: artifact-executor
+  labels:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: code-executor
+spec:
+  type: ClusterIP
+  ports:
+    - name: dummy
+      port: 8080
+      targetPort: 8080
+  selector:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: code-executor

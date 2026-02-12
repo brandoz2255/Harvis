@@ -68,6 +68,11 @@ from artifacts import (
     ArtifactManifest,
     ArtifactStorage,
 )
+from artifacts.code_generator import (
+    generate_document_from_code,
+    extract_document_code,
+    get_output_filename,
+)
 
 # Initialize artifact storage
 artifact_storage = ArtifactStorage()
@@ -2275,15 +2280,19 @@ async def chat(
                         "Reply in ≤25 spoken-style words, sprinkling brief Spanish when natural."
                     )
 
-                # Load artifact instructions
+                # Load artifact instructions (CODE-BASED approach)
                 artifact_instructions_path = os.path.join(
-                    os.path.dirname(__file__), "prompts", "artifact_instructions.txt"
+                    os.path.dirname(__file__),
+                    "prompts",
+                    "artifact_instructions_code.txt",
                 )
                 try:
                     with open(artifact_instructions_path, "r", encoding="utf-8") as f:
                         artifact_instructions = f.read().strip()
                     system_prompt += f"\n\n{artifact_instructions}"
-                    logger.info("📦 Added artifact instructions to system prompt")
+                    logger.info(
+                        "📦 Added CODE-BASED artifact instructions to system prompt"
+                    )
                 except FileNotFoundError:
                     logger.warning("Artifact instructions file not found, skipping")
                 except Exception as e:
@@ -2345,15 +2354,19 @@ async def chat(
                         'Begin each answer with a short verbal acknowledgment (e.g., "Claro,", "¡Por supuesto!", "Right away").'
                     )
 
-                # Load artifact instructions
+                # Load artifact instructions (CODE-BASED approach)
                 artifact_instructions_path = os.path.join(
-                    os.path.dirname(__file__), "prompts", "artifact_instructions.txt"
+                    os.path.dirname(__file__),
+                    "prompts",
+                    "artifact_instructions_code.txt",
                 )
                 try:
                     with open(artifact_instructions_path, "r", encoding="utf-8") as f:
                         artifact_instructions = f.read().strip()
                     system_prompt += f"\n\n{artifact_instructions}"
-                    logger.info("📦 Added artifact instructions to system prompt")
+                    logger.info(
+                        "📦 Added CODE-BASED artifact instructions to system prompt"
+                    )
                 except FileNotFoundError:
                     logger.warning("Artifact instructions file not found, skipping")
                 except Exception as e:
@@ -2607,72 +2620,125 @@ async def chat(
             # ── 7.5 Artifact Detection ──────────────────────────────────────────────────────
             artifact_info = None
             try:
-                artifact_manifest = extract_artifact_manifest(final_answer)
-                if artifact_manifest:
+                # First, try CODE-BASED document generation (new approach)
+                pool = getattr(request.app.state, "pg_pool", None)
+
+                # Check for document generation code (Excel, Word, PDF, PowerPoint)
+                document_types = ["spreadsheet", "document", "pdf", "presentation"]
+                code_artifact_type = None
+                code_title = None
+
+                for doc_type in document_types:
+                    doc_code = extract_document_code(final_answer, doc_type)
+                    if doc_code:
+                        code_artifact_type = doc_type
+                        # Try to extract title from code comments or default
+                        code_title = f"Generated {doc_type.capitalize()}"
+                        break
+
+                if code_artifact_type and pool:
+                    # CODE-BASED GENERATION
                     logger.info(
-                        f"📦 Artifact detected: {artifact_manifest.get('artifact_type')} - {artifact_manifest.get('title')}"
+                        f"📦 Code-based {code_artifact_type} generation detected"
                     )
-                    yield f"data: {json.dumps({'status': 'processing', 'detail': 'Creating artifact...'})}\n\n"
+                    yield f"data: {json.dumps({'status': 'processing', 'detail': f'Creating {code_artifact_type} from code...'})}\n\n"
 
-                    # Clean the final answer by removing the manifest
-                    final_answer = clean_response_content(final_answer)
+                    # Generate document from code
+                    doc_result = generate_document_from_code(
+                        llm_response=final_answer,
+                        artifact_type=code_artifact_type,
+                        title=code_title,
+                        artifact_id=str(uuid.uuid4()),
+                        use_docker=True,
+                    )
 
-                    # Create artifact in database
-                    pool = getattr(request.app.state, "pg_pool", None)
-                    if pool:
-                        try:
-                            manifest = ArtifactManifest(**artifact_manifest)
-                            artifact_id = await artifact_storage.create_artifact(
-                                pool=pool,
-                                user_id=current_user.id,
-                                manifest=manifest,
-                                session_id=session_id if session_id else None,
-                            )
+                    if doc_result["success"]:
+                        artifact_info = {
+                            "id": doc_result.get("artifact_id", str(uuid.uuid4())),
+                            "type": code_artifact_type,
+                            "title": code_title,
+                            "status": "ready",
+                            "download_url": f"/api/artifacts/{doc_result.get('artifact_id')}/download",
+                            "file_size": doc_result.get("file_size", 0),
+                        }
+                        logger.info(
+                            f"✅ Generated {code_artifact_type} document from code"
+                        )
 
-                            # For document types, generate in background
-                            artifact_type = manifest.artifact_type
-                            if hasattr(artifact_type, "value"):
-                                artifact_type = artifact_type.value
+                        # Clean response by removing the code block
+                        final_answer = clean_response_content(final_answer)
+                    else:
+                        logger.error(
+                            f"❌ Code-based generation failed: {doc_result.get('error')}"
+                        )
 
-                            if artifact_type not in ["website", "app", "code"]:
-                                # Generate document artifact in background
-                                import asyncio
+                # Fallback: Try JSON manifest approach (for websites/apps and backward compatibility)
+                if not artifact_info:
+                    artifact_manifest = extract_artifact_manifest(final_answer)
+                    if artifact_manifest:
+                        logger.info(
+                            f"📦 Artifact detected: {artifact_manifest.get('artifact_type')} - {artifact_manifest.get('title')}"
+                        )
+                        yield f"data: {json.dumps({'status': 'processing', 'detail': 'Creating artifact...'})}\n\n"
 
-                                asyncio.create_task(
-                                    artifact_storage.generate_artifact(
-                                        pool, artifact_id
+                        # Clean the final answer by removing the manifest
+                        final_answer = clean_response_content(final_answer)
+
+                        # Create artifact in database
+                        if pool:
+                            try:
+                                manifest = ArtifactManifest(**artifact_manifest)
+                                artifact_id = await artifact_storage.create_artifact(
+                                    pool=pool,
+                                    user_id=current_user.id,
+                                    manifest=manifest,
+                                    session_id=session_id if session_id else None,
+                                )
+
+                                # For document types, generate in background
+                                artifact_type = manifest.artifact_type
+                                if hasattr(artifact_type, "value"):
+                                    artifact_type = artifact_type.value
+
+                                if artifact_type not in ["website", "app", "code"]:
+                                    # Generate document artifact in background
+                                    import asyncio
+
+                                    asyncio.create_task(
+                                        artifact_storage.generate_artifact(
+                                            pool, artifact_id
+                                        )
                                     )
-                                )
-                                artifact_status = "generating"
-                            else:
-                                artifact_status = "ready"
+                                    artifact_status = "generating"
+                                else:
+                                    artifact_status = "ready"
 
-                            artifact_info = {
-                                "id": str(artifact_id),
-                                "type": artifact_type,
-                                "title": manifest.title,
-                                "status": artifact_status,
-                            }
+                                artifact_info = {
+                                    "id": str(artifact_id),
+                                    "type": artifact_type,
+                                    "title": manifest.title,
+                                    "status": artifact_status,
+                                }
 
-                            # Add download URL for ready artifacts
-                            if artifact_status == "ready" and artifact_type in [
-                                "website",
-                                "app",
-                                "code",
-                            ]:
-                                artifact_info["preview_url"] = (
-                                    f"/api/artifacts/{artifact_id}/preview"
-                                )
-                            elif artifact_status == "generating":
-                                artifact_info["download_url"] = (
-                                    f"/api/artifacts/{artifact_id}/download"
-                                )
+                                # Add download URL for ready artifacts
+                                if artifact_status == "ready" and artifact_type in [
+                                    "website",
+                                    "app",
+                                    "code",
+                                ]:
+                                    artifact_info["preview_url"] = (
+                                        f"/api/artifacts/{artifact_id}/preview"
+                                    )
+                                elif artifact_status == "generating":
+                                    artifact_info["download_url"] = (
+                                        f"/api/artifacts/{artifact_id}/download"
+                                    )
 
-                            logger.info(
-                                f"📦 Created artifact {artifact_id} ({artifact_status})"
-                            )
-                        except Exception as e:
-                            logger.error(f"Failed to create artifact: {e}")
+                                logger.info(
+                                    f"📦 Created artifact {artifact_id} ({artifact_status})"
+                                )
+                            except Exception as e:
+                                logger.error(f"Failed to create artifact: {e}")
             except Exception as e:
                 logger.warning(f"Artifact detection failed: {e}")
 

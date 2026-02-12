@@ -87,6 +87,13 @@ spec:
               value: "30000"
             - name: ARTIFACT_PORT_END
               value: "31000"
+            # Code executor for document generation
+            - name: CODE_EXECUTOR_IMAGE
+              value: "dulc3/harvis-code-executor:latest"
+            - name: CODE_EXECUTOR_NAMESPACE
+              value: "artifact-executor"
+            - name: USE_K8S_EXECUTION
+              value: "true"
             
             # Uvicorn settings
             - name: UVICORN_WORKERS

@@ -97,10 +97,54 @@ else
   exit 1
 fi
 
+# 4. Build Artifact Executor (Node.js based)
+log_info "Starting Artifact Executor Build..."
+BACKEND_DIR="python_back_end"
+
+if [ -d "$BACKEND_DIR" ]; then
+  pushd "$BACKEND_DIR" >/dev/null
+
+  if docker build -f Dockerfile.executor -t dulc3/harvis-artifact-executor:$BACKEND_VERSION .; then
+    log_success "Artifact Executor built successfully with tag: artifact-executor:$BACKEND_VERSION"
+  else
+    log_error "Artifact Executor build failed!"
+    popd >/dev/null
+    exit 1
+  fi
+
+  popd >/dev/null
+else
+  log_error "Backend directory not found: $BACKEND_DIR"
+  exit 1
+fi
+
+# 5. Build Code Executor (Python based for document generation)
+log_info "Starting Code Executor Build..."
+BACKEND_DIR="python_back_end"
+
+if [ -d "$BACKEND_DIR" ]; then
+  pushd "$BACKEND_DIR" >/dev/null
+
+  if docker build -f Dockerfile.code-executor -t dulc3/harvis-code-executor:$BACKEND_VERSION .; then
+    log_success "Code Executor built successfully with tag: code-executor:$BACKEND_VERSION"
+  else
+    log_error "Code Executor build failed!"
+    popd >/dev/null
+    exit 1
+  fi
+
+  popd >/dev/null
+else
+  log_error "Backend directory not found: $BACKEND_DIR"
+  exit 1
+fi
+
 # Summary
 echo ""
 echo "=========================================="
 log_success "CI Pipeline Completed Successfully!"
 echo "Frontend: dulc3/jarvis-frontend:$FRONTEND_VERSION"
 echo "Backend:  dulc3/jarvis-backend:$BACKEND_VERSION"
+echo "Artifact Executor: dulc3/harvis-artifact-executor:$BACKEND_VERSION"
+echo "Code Executor: dulc3/harvis-code-executor:$BACKEND_VERSION"
 echo "=========================================="
