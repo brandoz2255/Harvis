@@ -2667,17 +2667,72 @@ async def chat(
                         )
 
                         if doc_result["success"]:
+                            # Generate artifact_id and save to database
+                            artifact_id = str(uuid.uuid4())
+                            output_path = doc_result.get("output_path")
+                            file_size = doc_result.get("file_size", 0)
+
+                            # Save to database
+                            if pool:
+                                try:
+                                    from artifacts.models import ArtifactType
+
+                                    # Determine mime type based on artifact type
+                                    mime_types = {
+                                        "spreadsheet": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                        "document": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                        "pdf": "application/pdf",
+                                        "presentation": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                                    }
+
+                                    await pool.execute(
+                                        """
+                                        INSERT INTO artifacts (
+                                            id, user_id, artifact_type, title, description,
+                                            status, file_path, mime_type, file_size, content
+                                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                                        """,
+                                        artifact_id,
+                                        current_user.id,
+                                        code_artifact_type,
+                                        code_title,
+                                        f"Generated {code_artifact_type} from Python code",
+                                        "ready",
+                                        output_path,
+                                        mime_types.get(
+                                            code_artifact_type,
+                                            "application/octet-stream",
+                                        ),
+                                        file_size,
+                                        json.dumps(
+                                            {
+                                                "code": doc_code,
+                                                "output_path": output_path,
+                                                "generated_at": datetime.now().isoformat(),
+                                            }
+                                        ),
+                                    )
+                                    logger.info(
+                                        f"💾 Saved artifact {artifact_id} to database"
+                                    )
+                                except Exception as db_error:
+                                    logger.error(
+                                        f"❌ Failed to save artifact to database: {db_error}"
+                                    )
+
+                            # Build artifact_info
                             artifact_info = {
-                                "id": doc_result.get("artifact_id", str(uuid.uuid4())),
+                                "id": artifact_id,
                                 "type": code_artifact_type,
                                 "title": code_title,
                                 "status": "ready",
-                                "download_url": f"/api/artifacts/{doc_result.get('artifact_id')}/download",
-                                "file_size": doc_result.get("file_size", 0),
+                                "download_url": f"/api/artifacts/{artifact_id}/download",
+                                "file_size": file_size,
                             }
                             logger.info(
                                 f"✅ Generated {code_artifact_type} document from code"
                             )
+                            logger.info(f"📦 artifact_info created: {artifact_info}")
 
                             # Clean response by removing the code block
                             final_answer = clean_response_content(final_answer)
@@ -2936,8 +2991,9 @@ async def chat(
             if artifact_info:
                 response_data["artifact"] = artifact_info
                 logger.info(
-                    f"📦 Returning artifact: {artifact_info['type']} - {artifact_info['title']} ({artifact_info['status']})"
+                    f"📦 Returning artifact in response: {artifact_info['type']} - {artifact_info['title']} ({artifact_info['status']})"
                 )
+                logger.info(f"📦 Artifact data: {json.dumps(artifact_info)}")
 
             logger.info("✅ Chat streaming response complete")
             yield f"data: {json.dumps(response_data)}\n\n"
