@@ -709,3 +709,44 @@ npm install mammoth dompurify @types/dompurify
 - Add click-to-navigate from sidebar artifact to its chat message
 - Add artifact search/filter in sidebar
 
+
+## 2026-02-12: Fixed CPU Fallback Bug in TTS Model Loading
+
+### Problem
+Chatterbox TTS was failing with: `'NoneType' object is not callable` during CPU fallback.
+
+This happened because:
+1. `ChatterboxTTS` was initialized as `None` at module level
+2. The lazy import function `_lazy_import_chatterbox()` was defined but never called
+3. When CUDA failed and CPU fallback tried to load, `ChatterboxTTS` was still `None`
+
+### Solution
+Added `_lazy_import_chatterbox()` calls before ALL usages of `ChatterboxTTS`:
+
+**File**: `python_back_end/model_manager.py`
+
+Added calls at:
+1. **Line 317** - Before initial TTS loading attempt
+2. **Line 454** - Before OOM recovery retry  
+3. **Line 477** - Before CPU fallback after CUDA failure
+4. **Line 492** - Before direct CPU loading (when CUDA unavailable)
+5. **Line 497** - Before CPU fallback in outer exception handler
+
+### Code Changes
+```python
+# Before (broken):
+if ChatterboxTTS is None:
+    raise ImportError("ChatterboxTTS module not available")
+
+# After (fixed):
+_lazy_import_chatterbox()  # <-- ADDED
+if ChatterboxTTS is None:
+    raise ImportError("ChatterboxTTS module not available")
+```
+
+### Result
+- ✅ TTS now properly falls back to CPU when CUDA fails
+- ✅ OOM recovery retry works correctly
+- ✅ No more "NoneType object is not callable" errors
+- ✅ Graceful degradation when TTS unavailable
+
