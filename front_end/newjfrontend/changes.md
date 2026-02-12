@@ -837,3 +837,37 @@ npm install react-pdf xlsx
 ✅ Comprehensive logging for debugging generation issues
 ✅ Consistent UI across all document types
 
+
+## 2026-02-12: Fixed PDF Worker (Local) and Artifact Display
+
+### Fixes Applied
+
+#### 1. PDF Worker - Local Mode (No Cloudflare CDN)
+**File**: `front_end/newjfrontend/components/artifacts/PdfPreview.tsx`
+**Problem**: Using Cloudflare CDN for PDF.js worker, won't work offline/air-gapped
+**Solution**: Import pdfjs-dist worker entry directly:
+```typescript
+import "pdfjs-dist/build/pdf.worker.entry"
+```
+This uses the local worker from node_modules instead of CDN.
+
+#### 2. Artifact Immediate Display - Force Re-render
+**File**: `front_end/newjfrontend/app/page.tsx`
+**Problem**: Artifacts saved to artifactMapRef but UI wasn't re-rendering
+**Root Cause**: `convertedMessages` useMemo doesn't watch artifactMapRef changes
+**Solution**: Added `artifactUpdateTrigger` state variable:
+- Added state: `const [artifactUpdateTrigger, setArtifactUpdateTrigger] = useState(0)`
+- Added to dependency array: `[..., artifactUpdateTrigger]`
+- Increment trigger when artifact received (2 locations):
+  1. During streaming chunk processing (line ~964)
+  2. During final message processing (line ~1043)
+
+Now when artifact is received, it forces immediate re-render!
+
+### Dependencies
+- Already installed: `pdfjs-dist` (comes with react-pdf)
+
+### Files Modified
+- `front_end/newjfrontend/app/page.tsx` - Added artifactUpdateTrigger
+- `front_end/newjfrontend/components/artifacts/PdfPreview.tsx` - Local worker
+

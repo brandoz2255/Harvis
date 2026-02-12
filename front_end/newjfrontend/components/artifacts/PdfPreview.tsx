@@ -6,8 +6,10 @@ import { Loader2, ChevronLeft, ChevronRight, AlertCircle } from "lucide-react"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 
-// Set PDF.js worker
-pdfjs.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`
+// Set PDF.js worker - use local worker for offline/air-gapped environments
+// This imports the worker source as a blob URL
+import "pdfjs-dist/build/pdf.worker.entry"
+// pdfjs will automatically use the imported worker
 
 interface PdfPreviewProps {
   downloadUrl: string

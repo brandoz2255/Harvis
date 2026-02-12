@@ -58,6 +58,7 @@
     "mammoth": "^1.11.0",
     "next": "^16.1.6",
     "next-themes": "^0.4.6",
+    "pdfjs-dist": "^5.4.624",
     "prism-react-renderer": "^2.4.1",
     "react": "^19.2.4",
     "react-day-picker": "9.8.0",
