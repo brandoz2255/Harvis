@@ -2275,6 +2275,20 @@ async def chat(
                         "Reply in ≤25 spoken-style words, sprinkling brief Spanish when natural."
                     )
 
+                # Load artifact instructions
+                artifact_instructions_path = os.path.join(
+                    os.path.dirname(__file__), "prompts", "artifact_instructions.txt"
+                )
+                try:
+                    with open(artifact_instructions_path, "r", encoding="utf-8") as f:
+                        artifact_instructions = f.read().strip()
+                    system_prompt += f"\n\n{artifact_instructions}"
+                    logger.info("📦 Added artifact instructions to system prompt")
+                except FileNotFoundError:
+                    logger.warning("Artifact instructions file not found, skipping")
+                except Exception as e:
+                    logger.warning(f"Failed to load artifact instructions: {e}")
+
                 # Check if it's a reasoning model
                 is_reasoning_model = (
                     "k2.5" in req.model.lower() or "k2" in req.model.lower()
@@ -2330,6 +2344,21 @@ async def chat(
                         "Reply in ≤25 spoken-style words, sprinkling brief Spanish when natural, Be bilangual about 80 percent english and 20 percent spanish"
                         'Begin each answer with a short verbal acknowledgment (e.g., "Claro,", "¡Por supuesto!", "Right away").'
                     )
+
+                # Load artifact instructions
+                artifact_instructions_path = os.path.join(
+                    os.path.dirname(__file__), "prompts", "artifact_instructions.txt"
+                )
+                try:
+                    with open(artifact_instructions_path, "r", encoding="utf-8") as f:
+                        artifact_instructions = f.read().strip()
+                    system_prompt += f"\n\n{artifact_instructions}"
+                    logger.info("📦 Added artifact instructions to system prompt")
+                except FileNotFoundError:
+                    logger.warning("Artifact instructions file not found, skipping")
+                except Exception as e:
+                    logger.warning(f"Failed to load artifact instructions: {e}")
+
                 OLLAMA_ENDPOINT = "/api/chat"
 
                 is_reasoning_model = any(
@@ -2580,7 +2609,9 @@ async def chat(
             try:
                 artifact_manifest = extract_artifact_manifest(final_answer)
                 if artifact_manifest:
-                    logger.info(f"📦 Artifact detected: {artifact_manifest.get('artifact_type')} - {artifact_manifest.get('title')}")
+                    logger.info(
+                        f"📦 Artifact detected: {artifact_manifest.get('artifact_type')} - {artifact_manifest.get('title')}"
+                    )
                     yield f"data: {json.dumps({'status': 'processing', 'detail': 'Creating artifact...'})}\n\n"
 
                     # Clean the final answer by removing the manifest
@@ -2606,7 +2637,12 @@ async def chat(
                             if artifact_type not in ["website", "app", "code"]:
                                 # Generate document artifact in background
                                 import asyncio
-                                asyncio.create_task(artifact_storage.generate_artifact(pool, artifact_id))
+
+                                asyncio.create_task(
+                                    artifact_storage.generate_artifact(
+                                        pool, artifact_id
+                                    )
+                                )
                                 artifact_status = "generating"
                             else:
                                 artifact_status = "ready"
@@ -2619,12 +2655,22 @@ async def chat(
                             }
 
                             # Add download URL for ready artifacts
-                            if artifact_status == "ready" and artifact_type in ["website", "app", "code"]:
-                                artifact_info["preview_url"] = f"/api/artifacts/{artifact_id}/preview"
+                            if artifact_status == "ready" and artifact_type in [
+                                "website",
+                                "app",
+                                "code",
+                            ]:
+                                artifact_info["preview_url"] = (
+                                    f"/api/artifacts/{artifact_id}/preview"
+                                )
                             elif artifact_status == "generating":
-                                artifact_info["download_url"] = f"/api/artifacts/{artifact_id}/download"
+                                artifact_info["download_url"] = (
+                                    f"/api/artifacts/{artifact_id}/download"
+                                )
 
-                            logger.info(f"📦 Created artifact {artifact_id} ({artifact_status})")
+                            logger.info(
+                                f"📦 Created artifact {artifact_id} ({artifact_status})"
+                            )
                         except Exception as e:
                             logger.error(f"Failed to create artifact: {e}")
             except Exception as e:
