@@ -2638,8 +2638,13 @@ async def chat(
                     f"🔍 Checking for document code in response (length: {len(final_answer)} chars)"
                 )
 
+                logger.info(
+                    f"🔍 Checking for document generation code in response ({len(final_answer)} chars)"
+                )
+                logger.info(f"🔍 Looking for code blocks: {document_types}")
+
                 for doc_type in document_types:
-                    logger.debug(f"🔍 Checking for {doc_type} code...")
+                    logger.info(f"🔍 Checking for {doc_type} code...")
                     doc_code = extract_document_code(final_answer, doc_type)
                     if doc_code:
                         code_artifact_type = doc_type
@@ -2647,7 +2652,11 @@ async def chat(
                         logger.info(
                             f"✅ Found {doc_type} generation code ({len(doc_code)} chars)"
                         )
+                        # Log first 200 chars of code for debugging
+                        logger.info(f"📝 Code preview: {doc_code[:200]}...")
                         break
+                    else:
+                        logger.info(f"❌ No {doc_type} code found")
 
                 if code_artifact_type:
                     # CODE-BASED GENERATION

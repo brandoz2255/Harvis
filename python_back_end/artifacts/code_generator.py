@@ -129,6 +129,9 @@ def _validate_document_code(code: str, artifact_type: str) -> bool:
         "presentation": ["pptx"],
     }
 
+    # Log validation attempt
+    logger.info(f"🔍 Validating {artifact_type} code ({len(code)} chars)")
+
     if artifact_type in required_imports:
         imports = required_imports[artifact_type]
         if not any(imp in code for imp in imports):

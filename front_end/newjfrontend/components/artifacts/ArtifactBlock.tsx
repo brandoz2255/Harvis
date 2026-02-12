@@ -23,6 +23,8 @@ import type { Artifact, ArtifactContent } from "@/types/message"
 // Lazy load preview components to reduce initial bundle
 const SandpackPreview = React.lazy(() => import("./SandpackPreview"))
 const DocxPreview = React.lazy(() => import("./DocxPreview"))
+const PdfPreview = React.lazy(() => import("./PdfPreview"))
+const XlsxPreview = React.lazy(() => import("./XlsxPreview"))
 
 // Artifact type icons mapping
 const ARTIFACT_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
@@ -63,7 +65,7 @@ export function ArtifactBlock({ artifact: initialArtifact, className = "" }: Art
   const Icon = ARTIFACT_ICONS[artifact.type] || Code
   const isCodeType = ["website", "app", "code"].includes(artifact.type)
   const isDocumentType = ["document", "spreadsheet", "pdf", "presentation"].includes(artifact.type)
-  const canPreview = isCodeType || artifact.type === "document" // Only DOCX for now
+  const canPreview = isCodeType || ["document", "pdf", "spreadsheet"].includes(artifact.type)
   const typeColor = TYPE_COLORS[artifact.type] || "bg-slate-500/20 text-slate-400"
 
   // Poll for status updates when artifact is generating
@@ -367,8 +369,8 @@ export function ArtifactBlock({ artifact: initialArtifact, className = "" }: Art
           ) : (
             /* Document types */
             <div className="text-center">
-              {showPreview && artifact.type === "document" ? (
-                /* DOCX Preview */
+              {showPreview ? (
+                /* Document Preview based on type */
                 <React.Suspense
                   fallback={
                     <div className="flex items-center justify-center h-[400px] bg-slate-900/50 rounded-lg">
@@ -376,9 +378,21 @@ export function ArtifactBlock({ artifact: initialArtifact, className = "" }: Art
                     </div>
                   }
                 >
-                  <DocxPreview 
-                    downloadUrl={artifact.downloadUrl || `/api/artifacts/${artifact.id}/download`} 
-                  />
+                  {artifact.type === "document" && (
+                    <DocxPreview 
+                      downloadUrl={artifact.downloadUrl || `/api/artifacts/${artifact.id}/download`} 
+                    />
+                  )}
+                  {artifact.type === "pdf" && (
+                    <PdfPreview 
+                      downloadUrl={artifact.downloadUrl || `/api/artifacts/${artifact.id}/download`} 
+                    />
+                  )}
+                  {artifact.type === "spreadsheet" && (
+                    <XlsxPreview 
+                      downloadUrl={artifact.downloadUrl || `/api/artifacts/${artifact.id}/download`} 
+                    />
+                  )}
                 </React.Suspense>
               ) : showCode && artifact.code ? (
                 /* Code View */
