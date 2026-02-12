@@ -440,9 +440,9 @@ export default function ChatPage() {
     // Start with AI SDK messages (converted from aiMessages)
     const merged = [...convertedMessages]
 
-    // Add localMessages that aren't already in merged
+    // Merge localMessages - replace if exists and local has more data
     localMessages.forEach(localMsg => {
-      const exists = merged.some(m =>
+      const existingIndex = merged.findIndex(m =>
         // Check by ID
         (m.id && m.id === localMsg.id) ||
         (m.tempId && m.tempId === localMsg.tempId) ||
@@ -451,8 +451,24 @@ export default function ChatPage() {
           m.content === localMsg.content &&
           Math.abs(m.timestamp.getTime() - localMsg.timestamp.getTime()) < 2000)
       )
-      if (!exists) {
+      
+      if (existingIndex === -1) {
+        // Message doesn't exist, add it
         merged.push(localMsg)
+      } else if (localMsg.artifact || localMsg.audioUrl || localMsg.searchResults || localMsg.reasoning) {
+        // Message exists but local version has additional data (artifact, audio, etc.)
+        // Merge the data: keep local data, fall back to merged data if local doesn't have it
+        merged[existingIndex] = {
+          ...merged[existingIndex],
+          ...localMsg,
+          // Ensure these fields are taken from local if they exist
+          artifact: localMsg.artifact || merged[existingIndex].artifact,
+          audioUrl: localMsg.audioUrl || merged[existingIndex].audioUrl,
+          searchResults: localMsg.searchResults || merged[existingIndex].searchResults,
+          videos: localMsg.videos || merged[existingIndex].videos,
+          reasoning: localMsg.reasoning || merged[existingIndex].reasoning,
+          researchChain: localMsg.researchChain || merged[existingIndex].researchChain,
+        }
       }
     })
 
