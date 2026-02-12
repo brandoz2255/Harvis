@@ -871,3 +871,59 @@ Now when artifact is received, it forces immediate re-render!
 - `front_end/newjfrontend/app/page.tsx` - Added artifactUpdateTrigger
 - `front_end/newjfrontend/components/artifacts/PdfPreview.tsx` - Local worker
 
+
+## 2026-02-12: Fixed PDF Version Mismatch & Artifact Display
+
+### Fixes Applied
+
+#### 1. PDF Version Mismatch - FIXED
+**Problem**: react-pdf bundles pdfjs-dist 5.4.296 but we used worker 5.4.624
+**Solution**: Let react-pdf handle PDF.js worker internally
+
+**File**: `front_end/newjfrontend/components/artifacts/PdfPreview.tsx`
+**Changes**:
+- Removed manual workerSrc configuration
+- react-pdf now uses its internal bundled worker automatically
+- No version mismatch issues
+
+#### 2. Artifact Not Displaying Immediately - FIXED
+**Root Cause**: Message merge logic in page.tsx was skipping localMessages when message already existed in convertedMessages
+
+**Problem Code**:
+```typescript
+if (!exists) {
+  merged.push(localMsg)  // Skipped because message already exists!
+}
+```
+
+**Solution**: Merge data from localMessages when it has additional fields (artifact, audio, etc.)
+
+**File**: `front_end/newjfrontend/app/page.tsx` (lines 439-476)
+**New Logic**:
+```typescript
+localMessages.forEach(localMsg => {
+  const existingIndex = merged.findIndex(m => ...)
+  
+  if (existingIndex === -1) {
+    merged.push(localMsg)  // New message, add it
+  } else if (localMsg.artifact || localMsg.audioUrl || ...) {
+    // Message exists but local has additional data - MERGE IT
+    merged[existingIndex] = {
+      ...merged[existingIndex],
+      ...localMsg,
+      artifact: localMsg.artifact || merged[existingIndex].artifact,
+      // ... other fields
+    }
+  }
+})
+```
+
+### Result
+✅ PDF preview works without version mismatch
+✅ Artifacts display immediately when generated (no refresh needed)
+✅ All message data (artifact, audio, search results) properly merged
+
+### Files Modified
+- `front_end/newjfrontend/components/artifacts/PdfPreview.tsx`
+- `front_end/newjfrontend/app/page.tsx`
+

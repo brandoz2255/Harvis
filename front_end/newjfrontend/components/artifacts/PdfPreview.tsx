@@ -1,13 +1,12 @@
 "use client"
 
 import React, { useState } from "react"
-import { Document, Page, pdfjs } from "react-pdf"
+import { Document, Page } from "react-pdf"
 import { Loader2, ChevronLeft, ChevronRight, AlertCircle } from "lucide-react"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 
-// Set PDF.js worker - use local worker for offline/air-gapped environments
-pdfjs.GlobalWorkerOptions.workerSrc = "/pdfjs/pdf.worker.min.mjs"
+// react-pdf handles the PDF.js worker internally - no manual setup needed
 
 interface PdfPreviewProps {
   downloadUrl: string
