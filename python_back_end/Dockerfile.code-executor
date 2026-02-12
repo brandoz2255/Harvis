@@ -18,17 +18,19 @@ RUN pip install --no-cache-dir \
     pandas==2.1.4 \
     fpdf2==2.7.6
 
-# Create non-root user
-RUN useradd -m -u 1000 executor
+# Create the same user as the backend (appuser, UID 1001) for shared permissions
+RUN groupadd -r appuser && useradd -r -g appuser -u 1001 appuser
 
-# Create directories
-RUN mkdir -p /code /output && chown -R executor:executor /code /output
+# Create directories with proper ownership
+RUN mkdir -p /data/artifacts /workspace && \
+    chown -R appuser:appuser /data/artifacts /workspace && \
+    chmod 750 /data/artifacts /workspace
 
-# Switch to non-root user
-USER executor
+# Switch to dedicated user
+USER appuser
 
 # Set working directory
-WORKDIR /code
+WORKDIR /workspace
 
 # Default command (can be overridden)
 CMD ["python3"]

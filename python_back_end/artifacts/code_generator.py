@@ -165,7 +165,11 @@ def _validate_document_code(code: str, artifact_type: str) -> bool:
 
 
 def prepare_code_for_execution(
-    code: str, artifact_id: str, output_filename: str, output_dir: str = None
+    code: str,
+    artifact_id: str,
+    output_filename: str,
+    output_dir: str = None,
+    container_output_path: str = None,
 ) -> Tuple[str, str]:
     """
     Prepare Python code for execution by adding boilerplate and output handling.
@@ -175,6 +179,7 @@ def prepare_code_for_execution(
         artifact_id: Unique artifact ID
         output_filename: Name of output file
         output_dir: Directory for output (default: ARTIFACT_DIR)
+        container_output_path: Path to use inside container (for Docker/K8s execution)
 
     Returns:
         Tuple of (prepared_code, output_path)
@@ -184,6 +189,9 @@ def prepare_code_for_execution(
 
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, output_filename)
+
+    # Use container path if provided (for Docker/K8s), otherwise use host path
+    actual_output_path = container_output_path if container_output_path else output_path
 
     # Prepare the code with boilerplate
     prepared_code = f'''#!/usr/bin/env python3
@@ -197,7 +205,7 @@ import os
 import sys
 
 # Set output path
-OUTPUT_PATH = "{output_path}"
+OUTPUT_PATH = "{actual_output_path}"
 
 # Ensure output directory exists
 os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
@@ -242,10 +250,22 @@ def execute_document_code(
     timeout = timeout or MAX_EXECUTION_TIME
     memory_limit = memory_limit or MAX_MEMORY
 
-    # Prepare code
-    prepared_code, output_path = prepare_code_for_execution(
-        code, artifact_id, output_filename
-    )
+    # Calculate paths
+    output_dir = os.path.join(ARTIFACT_DIR, artifact_id)
+    output_path = os.path.join(output_dir, output_filename)
+
+    # Container path for Docker execution
+    container_output_path = f"/data/artifacts/{artifact_id}/{output_filename}"
+
+    # Prepare code with appropriate output path
+    if USE_K8S_EXECUTION or use_docker:
+        prepared_code, output_path = prepare_code_for_execution(
+            code, artifact_id, output_filename, output_dir, container_output_path
+        )
+    else:
+        prepared_code, output_path = prepare_code_for_execution(
+            code, artifact_id, output_filename, output_dir
+        )
 
     # Save code to temporary file
     work_dir = os.path.join(ARTIFACT_DIR, "code", artifact_id)
@@ -256,6 +276,7 @@ def execute_document_code(
         f.write(prepared_code)
 
     logger.info(f"Executing document generation code for {artifact_id}")
+    logger.info(f"Output will be written to: {output_path}")
 
     try:
         if USE_K8S_EXECUTION:
@@ -296,7 +317,12 @@ def _execute_in_docker(
     script_dir = os.path.dirname(script_path)
     output_dir = os.path.dirname(output_path)
 
-    # Build Docker command
+    # Container paths (inside Docker)
+    container_script_path = f"/workspace/code/{os.path.basename(script_path)}"
+    container_output_path = f"/data/artifacts/{os.path.basename(output_dir)}/{os.path.basename(output_path)}"
+
+    # Build Docker command - mount entire artifact directory to allow writing anywhere
+    # Run as UID 1001 (appuser) to match volume permissions
     cmd = [
         "docker",
         "run",
@@ -307,21 +333,22 @@ def _execute_in_docker(
         memory_limit,
         "--cpus",
         MAX_CPUS,
-        "--read-only",  # Read-only root filesystem
-        "--tmpfs",
-        "/tmp:noexec,nosuid,size=100m",
+        "--user",
+        "1001:1001",  # Run as appuser for proper permissions
         "-v",
-        f"{script_dir}:/code:ro",  # Read-only code
+        f"{ARTIFACT_DIR}:/data/artifacts:rw",  # Mount entire artifact directory
         "-v",
-        f"{output_dir}:/output:rw",  # Writeable output
+        f"{script_dir}:/workspace/code:ro",  # Read-only code
         "-w",
-        "/code",
+        "/workspace",
         CODE_EXECUTOR_IMAGE,
         "python3",
-        "/code/generate.py",
+        container_script_path,
     ]
 
-    logger.debug(f"Docker command: {' '.join(cmd)}")
+    logger.info(f"Docker command: {' '.join(cmd)}")
+    logger.info(f"Host output path: {output_path}")
+    logger.info(f"Container output path: {container_output_path}")
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
