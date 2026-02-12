@@ -1030,6 +1030,12 @@ export default function ChatPage() {
         } : undefined,
       }
 
+      // CRITICAL: Update artifactMapRef so UI shows artifact immediately without refresh
+      if (data.artifact) {
+        artifactMapRef.current.set(assistantId, data.artifact)
+        console.log('📦 Updated artifactMapRef for immediate display:', data.artifact.id)
+      }
+
       setLocalMessages((prev) =>
         prev.map(msg => msg.id === assistantId ? assistantMessage : msg)
       )

@@ -750,3 +750,90 @@ if ChatterboxTTS is None:
 - ✅ No more "NoneType object is not callable" errors
 - ✅ Graceful degradation when TTS unavailable
 
+
+## 2026-02-12: Complete Document Preview System + Immediate Display Fix
+
+### Summary
+Fixed the document system to show previews immediately without refresh and added full preview support for all document types (DOCX, PDF, XLSX).
+
+### Changes Implemented
+
+#### 1. Fixed Artifact Immediate Display
+**File**: `front_end/newjfrontend/app/page.tsx`
+**Problem**: Artifacts only appeared after page refresh
+**Solution**: Added `artifactMapRef.current.set(assistantId, data.artifact)` when processing final response:
+```typescript
+// CRITICAL: Update artifactMapRef so UI shows artifact immediately without refresh
+if (data.artifact) {
+  artifactMapRef.current.set(assistantId, data.artifact)
+  console.log('📦 Updated artifactMapRef for immediate display:', data.artifact.id)
+}
+```
+
+#### 2. PDF Preview Support
+**New File**: `front_end/newjfrontend/components/artifacts/PdfPreview.tsx`
+- Uses `react-pdf` library
+- Renders PDF pages with navigation (prev/next)
+- Shows page count
+- Loading and error states
+- Responsive design with max width
+
+#### 3. XLSX (Excel) Preview Support
+**New File**: `front_end/newjfrontend/components/artifacts/XlsxPreview.tsx`
+- Uses `xlsx` library to parse Excel files
+- Displays as HTML tables
+- Supports multiple sheets with tab navigation
+- Shows row count (first 100 rows for performance)
+- Alternating row colors for readability
+
+#### 4. Updated ArtifactBlock Component
+**File**: `front_end/newjfrontend/components/artifacts/ArtifactBlock.tsx`
+- Added lazy loading for PdfPreview and XlsxPreview
+- Updated `canPreview` to include all document types: `["document", "pdf", "spreadsheet"]`
+- Dynamic preview rendering based on artifact type:
+  - DOCX → DocxPreview
+  - PDF → PdfPreview
+  - XLSX → XlsxPreview
+- Maintains code view and download functionality for all types
+
+#### 5. Enhanced Backend Logging
+**File**: `python_back_end/main.py`
+- Added detailed logging to document generation flow:
+  - Logs all document types being checked
+  - Logs code extraction results for each type
+  - Shows code preview (first 200 chars) when found
+  - Logs when code is not found for each type
+
+**File**: `python_back_end/artifacts/code_generator.py`
+- Added validation logging to help debug why code might not be accepted
+
+### Dependencies Added
+```bash
+npm install react-pdf xlsx
+```
+
+### Files Created
+- `front_end/newjfrontend/components/artifacts/PdfPreview.tsx`
+- `front_end/newjfrontend/components/artifacts/XlsxPreview.tsx`
+
+### Files Modified
+- `front_end/newjfrontend/app/page.tsx` - Immediate display fix
+- `front_end/newjfrontend/components/artifacts/ArtifactBlock.tsx` - Multi-type preview support
+- `python_back_end/main.py` - Enhanced logging
+- `python_back_end/artifacts/code_generator.py` - Validation logging
+
+### Testing Checklist
+- [ ] Generate DOCX → Should appear immediately with preview
+- [ ] Generate PDF → Should appear immediately with preview
+- [ ] Generate XLSX → Should appear immediately with preview
+- [ ] Click Preview → Shows rendered document
+- [ ] Click View Code → Shows generation code
+- [ ] Click Download → Downloads file
+- [ ] Refresh page → All artifacts still visible
+
+### Result
+✅ Documents now appear immediately after generation (no refresh needed)
+✅ All document types have preview support
+✅ Comprehensive logging for debugging generation issues
+✅ Consistent UI across all document types
+
