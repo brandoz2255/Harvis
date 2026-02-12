@@ -26,48 +26,56 @@ def extract_artifact_manifest(llm_response: str) -> Optional[Dict[str, Any]]:
         return None
 
     # Pattern 1: Code block with artifact-manifest
-    pattern1 = r'```artifact-manifest\s*([\s\S]*?)```'
+    pattern1 = r"```artifact-manifest\s*([\s\S]*?)```"
     match = re.search(pattern1, llm_response, re.IGNORECASE)
     if match:
         try:
             manifest = json.loads(match.group(1).strip())
             if _validate_manifest(manifest):
-                logger.info(f"Extracted artifact manifest (pattern 1): {manifest.get('artifact_type')}")
+                logger.info(
+                    f"Extracted artifact manifest (pattern 1): {manifest.get('artifact_type')}"
+                )
                 return manifest
         except json.JSONDecodeError as e:
             logger.warning(f"Failed to parse artifact-manifest code block: {e}")
 
     # Pattern 2: Code block with artifact
-    pattern2 = r'```artifact\s*([\s\S]*?)```'
+    pattern2 = r"```artifact\s*([\s\S]*?)```"
     match = re.search(pattern2, llm_response, re.IGNORECASE)
     if match:
         try:
             manifest = json.loads(match.group(1).strip())
             if _validate_manifest(manifest):
-                logger.info(f"Extracted artifact manifest (pattern 2): {manifest.get('artifact_type')}")
+                logger.info(
+                    f"Extracted artifact manifest (pattern 2): {manifest.get('artifact_type')}"
+                )
                 return manifest
         except json.JSONDecodeError as e:
             logger.warning(f"Failed to parse artifact code block: {e}")
 
     # Pattern 3: XML-style tags
-    pattern3 = r'<artifact(?:-manifest)?>([\s\S]*?)</artifact(?:-manifest)?>'
+    pattern3 = r"<artifact(?:-manifest)?>([\s\S]*?)</artifact(?:-manifest)?>"
     match = re.search(pattern3, llm_response, re.IGNORECASE)
     if match:
         try:
             manifest = json.loads(match.group(1).strip())
             if _validate_manifest(manifest):
-                logger.info(f"Extracted artifact manifest (pattern 3): {manifest.get('artifact_type')}")
+                logger.info(
+                    f"Extracted artifact manifest (pattern 3): {manifest.get('artifact_type')}"
+                )
                 return manifest
         except json.JSONDecodeError as e:
             logger.warning(f"Failed to parse artifact XML tags: {e}")
 
     # Pattern 4: JSON code block containing artifact_type
-    pattern4 = r'```json\s*([\s\S]*?)```'
+    pattern4 = r"```json\s*([\s\S]*?)```"
     for match in re.finditer(pattern4, llm_response, re.IGNORECASE):
         try:
             data = json.loads(match.group(1).strip())
             if isinstance(data, dict) and _validate_manifest(data):
-                logger.info(f"Extracted artifact manifest (pattern 4): {data.get('artifact_type')}")
+                logger.info(
+                    f"Extracted artifact manifest (pattern 4): {data.get('artifact_type')}"
+                )
                 return data
         except json.JSONDecodeError:
             continue
@@ -81,7 +89,9 @@ def extract_artifact_manifest(llm_response: str) -> Optional[Dict[str, Any]]:
             try:
                 data = json.loads(candidate)
                 if isinstance(data, dict) and _validate_manifest(data):
-                    logger.info(f"Extracted artifact manifest (pattern 5): {data.get('artifact_type')}")
+                    logger.info(
+                        f"Extracted artifact manifest (pattern 5): {data.get('artifact_type')}"
+                    )
                     return data
             except json.JSONDecodeError:
                 continue
@@ -99,7 +109,15 @@ def _validate_manifest(manifest: Dict[str, Any]) -> bool:
         return False
 
     # Must have valid artifact_type
-    valid_types = {"spreadsheet", "document", "pdf", "presentation", "website", "app", "code"}
+    valid_types = {
+        "spreadsheet",
+        "document",
+        "pdf",
+        "presentation",
+        "website",
+        "app",
+        "code",
+    }
     if manifest.get("artifact_type") not in valid_types:
         return False
 
@@ -121,14 +139,14 @@ def _find_json_objects(text: str) -> list:
     start = -1
 
     for i, char in enumerate(text):
-        if char == '{':
+        if char == "{":
             if depth == 0:
                 start = i
             depth += 1
-        elif char == '}':
+        elif char == "}":
             depth -= 1
             if depth == 0 and start != -1:
-                candidates.append(text[start:i + 1])
+                candidates.append(text[start : i + 1])
                 start = -1
 
     return candidates
@@ -145,20 +163,42 @@ def clean_response_content(llm_response: str) -> str:
     cleaned = llm_response
 
     # Remove artifact-manifest code blocks
-    cleaned = re.sub(r'```artifact-manifest\s*[\s\S]*?```', '', cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r'```artifact\s*[\s\S]*?```', '', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r"```artifact-manifest\s*[\s\S]*?```", "", cleaned, flags=re.IGNORECASE
+    )
+    cleaned = re.sub(r"```artifact\s*[\s\S]*?```", "", cleaned, flags=re.IGNORECASE)
+
+    # Remove python-doc code blocks (for code-based document generation)
+    cleaned = re.sub(r"```python-doc\s*[\s\S]*?```", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r"```python-spreadsheet\s*[\s\S]*?```", "", cleaned, flags=re.IGNORECASE
+    )
+    cleaned = re.sub(
+        r"```python-document\s*[\s\S]*?```", "", cleaned, flags=re.IGNORECASE
+    )
+    cleaned = re.sub(r"```python-pdf\s*[\s\S]*?```", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r"```python-presentation\s*[\s\S]*?```", "", cleaned, flags=re.IGNORECASE
+    )
 
     # Remove XML-style artifact tags
-    cleaned = re.sub(r'<artifact(?:-manifest)?>\s*[\s\S]*?</artifact(?:-manifest)?>', '', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r"<artifact(?:-manifest)?>\s*[\s\S]*?</artifact(?:-manifest)?>",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
 
     # Clean up extra whitespace
-    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     cleaned = cleaned.strip()
 
     return cleaned
 
 
-def extract_manifest_and_clean(llm_response: str) -> Tuple[Optional[Dict[str, Any]], str]:
+def extract_manifest_and_clean(
+    llm_response: str,
+) -> Tuple[Optional[Dict[str, Any]], str]:
     """
     Extract manifest and return both the manifest and cleaned response.
     Convenience function that combines extract_artifact_manifest and clean_response_content.
