@@ -485,6 +485,13 @@ export default function ChatPage() {
             videosMapRef.current.set(msgId, videos)
           }
           if (artifact) {
+            console.log('📦 Loading artifact from history:', {
+              msgId,
+              artifactId: artifact.id,
+              type: artifact.type,
+              hasCode: !!artifact.code,
+              codeLength: artifact.code?.length
+            })
             artifactMapRef.current.set(msgId, artifact)
           }
         }
@@ -931,6 +938,12 @@ export default function ChatPage() {
               }
               // Handle artifact from response
               if (chunk.artifact) {
+                console.log('📦 Received artifact in stream:', {
+                  id: chunk.artifact.id,
+                  type: chunk.artifact.type,
+                  hasCode: !!chunk.artifact.code,
+                  codeLength: chunk.artifact.code?.length
+                })
                 const artifactData = {
                   id: chunk.artifact.id,
                   type: chunk.artifact.type,
@@ -938,6 +951,7 @@ export default function ChatPage() {
                   status: chunk.artifact.status,
                   downloadUrl: chunk.artifact.download_url || chunk.artifact.downloadUrl,
                   previewUrl: chunk.artifact.preview_url || chunk.artifact.previewUrl,
+                  code: chunk.artifact.code,  // Include the code!
                 }
                 updates.artifact = artifactData
                 // Also update artifactMapRef so it persists during re-renders
@@ -1012,6 +1026,7 @@ export default function ChatPage() {
           status: data.artifact.status,
           downloadUrl: data.artifact.download_url || data.artifact.downloadUrl,
           previewUrl: data.artifact.preview_url || data.artifact.previewUrl,
+          code: data.artifact.code,  // Include the code!
         } : undefined,
       }
 

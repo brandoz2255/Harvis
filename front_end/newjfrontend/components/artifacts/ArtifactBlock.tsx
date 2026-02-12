@@ -51,6 +51,16 @@ interface ArtifactBlockProps {
 }
 
 export function ArtifactBlock({ artifact: initialArtifact, className = "" }: ArtifactBlockProps) {
+  // Debug logging
+  console.log('🔍 ArtifactBlock rendered:', {
+    id: initialArtifact?.id,
+    type: initialArtifact?.type,
+    hasCode: !!initialArtifact?.code,
+    codeLength: initialArtifact?.code?.length,
+    status: initialArtifact?.status,
+    title: initialArtifact?.title
+  })
+  
   const [artifact, setArtifact] = useState(initialArtifact)
   const [showPreview, setShowPreview] = useState(false)
   const [showEditor, setShowEditor] = useState(false)
@@ -58,6 +68,16 @@ export function ArtifactBlock({ artifact: initialArtifact, className = "" }: Art
   const [copied, setCopied] = useState(false)
   const [isPolling, setIsPolling] = useState(artifact.status === "generating" || artifact.status === "pending")
   const [previewContent, setPreviewContent] = useState<ArtifactContent | null>(artifact.content || null)
+  
+  // Log when artifact state updates
+  useEffect(() => {
+    console.log('📝 Artifact state updated:', {
+      id: artifact.id,
+      hasCode: !!artifact.code,
+      codeLength: artifact.code?.length,
+      status: artifact.status
+    })
+  }, [artifact])
 
   const Icon = ARTIFACT_ICONS[artifact.type] || Code
   const isCodeType = ["website", "app", "code"].includes(artifact.type)

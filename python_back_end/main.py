@@ -2904,6 +2904,9 @@ async def chat(
                 logger.info(
                     f"💾 Added artifact to message metadata: {artifact_info['id']}"
                 )
+                logger.info(
+                    f"📝 Artifact has code: {bool(artifact_info.get('code'))}, code length: {len(artifact_info.get('code', ''))}"
+                )
 
             if session_id:
                 try:

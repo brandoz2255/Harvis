@@ -520,6 +520,18 @@ export const useChatHistoryStore = create<ChatHistoryState>((set, get) => ({
           sessionTitle: data.session?.title,
           totalCount: data.total_count
         })
+        
+        // Debug: Check for artifacts in messages
+        const messagesWithArtifacts = data.messages?.filter((m: any) => m.metadata?.artifact)
+        if (messagesWithArtifacts?.length > 0) {
+          console.log('📦 Messages with artifacts:', messagesWithArtifacts.map((m: any) => ({
+            messageId: m.id,
+            artifactId: m.metadata.artifact.id,
+            type: m.metadata.artifact.type,
+            hasCode: !!m.metadata.artifact.code,
+            codeLength: m.metadata.artifact.code?.length
+          })))
+        }
 
         // Always update if we got a successful response
         const state = get()

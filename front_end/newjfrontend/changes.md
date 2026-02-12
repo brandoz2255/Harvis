@@ -557,3 +557,86 @@ artifact_info = {
 - ✅ Code persists in chat history after refresh
 - ✅ Toggle between "View Code" and "Download" views
 
+
+## 2026-02-12: Fixed Code Block Not Persisting & Added Debug Logging
+
+### Problem
+1. **Code block not persisting** - Code wasn't being saved with the artifact
+2. **"No content received" on refresh** - Artifacts not loading from history properly
+3. **No debug visibility** - Couldn't see what data was flowing through the system
+
+### Root Cause
+1. **Code not included in streaming handler** - When processing streaming response, `code` field wasn't extracted from chunk.artifact
+2. **Code not included in final message** - When constructing final assistant message, `code` field was omitted
+3. **No logging** - Unable to trace data flow from backend → API → frontend → component
+
+### Solution Applied
+
+#### 1. Fixed Streaming Handler (page.tsx:935-948)
+```typescript
+if (chunk.artifact) {
+  console.log('📦 Received artifact in stream:', {...})  // Debug log
+  const artifactData = {
+    ...,
+    code: chunk.artifact.code,  // Added missing code field!
+  }
+  updates.artifact = artifactData
+  artifactMapRef.current.set(assistantId, artifactData)
+}
+```
+
+#### 2. Fixed Final Message Construction (page.tsx:1015-1023)
+```typescript
+artifact: data.artifact ? {
+  ...,
+  code: data.artifact.code,  // Added missing code field!
+} : undefined,
+```
+
+#### 3. Added Comprehensive Debug Logging
+
+**Backend (main.py:2904-2909)**:
+```python
+logger.info(f"💾 Added artifact to message metadata: {artifact_info['id']}")
+logger.info(f"📝 Artifact has code: {bool(artifact_info.get('code'))}, code length: {...}")
+```
+
+**Frontend - Page.tsx (line ~482)**:
+```typescript
+console.log('📦 Loading artifact from history:', {
+  msgId, artifactId: artifact.id, hasCode: !!artifact.code, codeLength: artifact.code?.length
+})
+```
+
+**Frontend - Store (line ~519)**:
+```typescript
+console.log('📦 Messages with artifacts:', messagesWithArtifacts.map(...))
+```
+
+**Frontend - ArtifactBlock (lines ~53-80)**:
+```typescript
+console.log('🔍 ArtifactBlock rendered:', {...})
+useEffect(() => {
+  console.log('📝 Artifact state updated:', {...})
+}, [artifact])
+```
+
+### Files Modified
+- `python_back_end/main.py` - Added debug logging for artifact metadata
+- `front_end/newjfrontend/app/page.tsx` - Fixed code field in streaming handler and final message
+- `front_end/newjfrontend/stores/chatHistoryStore.ts` - Added artifact detection logging
+- `front_end/newjfrontend/components/artifacts/ArtifactBlock.tsx` - Added render/state logging
+
+### Result
+- ✅ Code field now properly flows through entire data pipeline
+- ✅ Comprehensive logging at every stage for debugging
+- ✅ Can now trace artifact data from generation → database → API → frontend → UI
+
+### Debugging with New Logs
+Open browser console and look for:
+- `📦 Received artifact in stream:` - Shows artifact data during streaming
+- `📦 Loading artifact from history:` - Shows artifact loaded from DB on refresh
+- `📦 Messages with artifacts:` - Shows all messages containing artifacts
+- `🔍 ArtifactBlock rendered:` - Shows what data component receives
+- `📝 Artifact state updated:` - Shows state changes
+
