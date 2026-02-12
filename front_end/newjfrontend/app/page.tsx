@@ -168,6 +168,9 @@ export default function ChatPage() {
 
   // State trigger to force re-render when research chain updates
   const [researchChainUpdateTrigger, setResearchChainUpdateTrigger] = useState(0)
+  
+  // State trigger to force re-render when artifacts are received
+  const [artifactUpdateTrigger, setArtifactUpdateTrigger] = useState(0)
 
   // Helper function to process a single research event and update the chain
   // Uses immutable updates to ensure React detects changes
@@ -429,7 +432,7 @@ export default function ChatPage() {
         inputType: m.inputType,
       }
     })
-  }, [aiMessages, selectedModel, isAiLoading, researchChainUpdateTrigger])
+  }, [aiMessages, selectedModel, isAiLoading, researchChainUpdateTrigger, artifactUpdateTrigger])
 
   // Unified message merging - combines AI SDK messages with local messages
   // This ensures text, vision, voice, and all modes appear together seamlessly
@@ -956,6 +959,8 @@ export default function ChatPage() {
                 updates.artifact = artifactData
                 // Also update artifactMapRef so it persists during re-renders
                 artifactMapRef.current.set(assistantId, artifactData)
+                // Force re-render to show artifact immediately
+                setArtifactUpdateTrigger(prev => prev + 1)
                 hasUpdates = true
               }
             }
@@ -1033,6 +1038,8 @@ export default function ChatPage() {
       // CRITICAL: Update artifactMapRef so UI shows artifact immediately without refresh
       if (data.artifact) {
         artifactMapRef.current.set(assistantId, data.artifact)
+        // Force re-render to show artifact immediately
+        setArtifactUpdateTrigger(prev => prev + 1)
         console.log('📦 Updated artifactMapRef for immediate display:', data.artifact.id)
       }
 
