@@ -28,6 +28,13 @@ enhanced_research_agent_instance = get_enhanced_research_agent(
 )
 
 
+def set_research_agent_moonshot_key(api_key: str):
+    """Set the Moonshot API key for research agents"""
+    research_agent_instance.moonshot_api_key = api_key
+    enhanced_research_agent_instance.moonshot_api_key = api_key
+    logger.info("Moonshot API key set for research agents")
+
+
 def research_agent(query: str, model: str = "mistral", use_advanced: bool = False):
     """
     Enhanced research agent that performs comprehensive web research

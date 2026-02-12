@@ -10,7 +10,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 # Moonshot API configuration
-MOONSHOT_BASE_URL = "https://api.moonshot.cn/v1"
+MOONSHOT_BASE_URL = "https://api.moonshot.ai/v1"
 
 
 class MoonshotClient:
@@ -45,10 +45,11 @@ class MoonshotClient:
         Returns:
             The model's response text
         """
+        # Kimi models only support temperature=1.0
         payload = {
             "model": model,
             "messages": messages,
-            "temperature": temperature,
+            "temperature": 1.0,
             "stream": stream,
         }
 
@@ -102,10 +103,11 @@ class MoonshotClient:
         Yields:
             Chunks of the response text
         """
+        # Kimi K2.5 only supports temperature=1.0
         payload = {
             "model": model,
             "messages": messages,
-            "temperature": temperature,
+            "temperature": 1.0,
             "stream": True,
         }
 
@@ -113,6 +115,15 @@ class MoonshotClient:
             payload["max_tokens"] = max_tokens
 
         try:
+            # Log the actual Authorization header (with full key for debugging)
+            logger.info(f"Moonshot API: Using API key length={len(self.api_key)}")
+            logger.info(
+                f"Moonshot API: API key repr={repr(self.api_key[:20])}...{repr(self.api_key[-5:])}"
+            )
+            logger.info(f"Moonshot API: Full headers={self.headers}")
+            logger.info(f"Moonshot API: Request URL={self.base_url}/chat/completions")
+            logger.info(f"Moonshot API: Request payload={payload}")
+
             async with httpx.AsyncClient(
                 timeout=httpx.Timeout(120.0, connect=30.0)
             ) as client:
@@ -127,9 +138,12 @@ class MoonshotClient:
                         logger.error(
                             f"Moonshot API streaming error: {response.status_code}"
                         )
+                        logger.error(
+                            f"Moonshot API error response: {error_text.decode()}"
+                        )
                         raise HTTPException(
                             status_code=500,
-                            detail=f"Moonshot API error: {response.status_code}",
+                            detail=f"Moonshot API error: {response.status_code} - {error_text.decode()}",
                         )
 
                     async for line in response.aiter_lines():

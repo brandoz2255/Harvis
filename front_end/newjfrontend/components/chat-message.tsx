@@ -18,7 +18,8 @@ import { VoicePlayer } from "@/components/voice-player"
 import { AudioWaveform } from "@/components/ui/audio-waveform"
 import { ReasoningPanel } from "@/components/reasoning-panel"
 import { ResearchChain } from "@/components/research-chain"
-import type { Message, VideoResult, ResearchChainData, ResearchStep } from "@/types/message"
+import { ArtifactBlock } from "@/components/artifacts"
+import type { Message, VideoResult, ResearchChainData, ResearchStep, Artifact } from "@/types/message"
 import { VideoCarousel } from "@/components/video-carousel"
 import { YouTubeEmbed } from "@/components/youtube-embed"
 import ReactMarkdown from "react-markdown"
@@ -111,6 +112,8 @@ interface ChatMessageProps {
   }
   /** Research chain steps for visualizing AI research process */
   researchChain?: ResearchChainData
+  /** AI-generated artifact (document, spreadsheet, website, etc.) */
+  artifact?: Artifact
 }
 
 // Language mapping for prism-react-renderer
@@ -201,6 +204,7 @@ export const ChatMessage = React.memo(function ChatMessage({
   status,
   metadata,
   researchChain,
+  artifact,
 }: ChatMessageProps) {
   const [copied, setCopied] = useState(false)
   const [showVoice, setShowVoice] = useState(false)
@@ -516,6 +520,13 @@ export const ChatMessage = React.memo(function ChatMessage({
             <CodeBlock code={block.code} language={block.language} />
           </div>
         ))}
+
+        {/* AI-Generated Artifact */}
+        {role === "assistant" && artifact && (
+          <div className="w-full mt-4">
+            <ArtifactBlock artifact={artifact} />
+          </div>
+        )}
 
         {/* Audio Waveform */}
         {role === "assistant" && audioUrl && (

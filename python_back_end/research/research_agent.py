@@ -11,6 +11,12 @@ import json
 import httpx
 import asyncio
 
+# Import Moonshot support
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from moonshot_api import MoonshotClient, is_moonshot_model, get_moonshot_model_id
+
 logger = logging.getLogger(__name__)
 
 # ─── Ollama Configuration with Cloud/Local Fallback ──────────────────────────
@@ -148,6 +154,7 @@ class ResearchAgent:
         ollama_url: str = "http://ollama:11434",
         default_model: str = "mistral",
         max_search_results: int = 5,
+        moonshot_api_key: str = None,
     ):
         """
         Initialize the research agent
@@ -157,11 +164,13 @@ class ResearchAgent:
             ollama_url: Ollama server URL
             default_model: Default LLM model to use
             max_search_results: Maximum number of search results to process
+            moonshot_api_key: Optional Moonshot API key for Kimi models
         """
         self.search_engine = search_engine
         self.ollama_url = ollama_url
         self.default_model = default_model
         self.max_search_results = max_search_results
+        self.moonshot_api_key = moonshot_api_key
 
         # Initialize search agent
         if search_engine == "tavily":
@@ -185,6 +194,31 @@ class ResearchAgent:
         """
         model = model or self.default_model
 
+        # Check if this is a Moonshot model
+        if is_moonshot_model(model):
+            if not self.moonshot_api_key:
+                return "Error: Moonshot API key not configured"
+
+            try:
+                client = MoonshotClient(self.moonshot_api_key)
+                moonshot_model = get_moonshot_model_id(model)
+
+                messages = []
+                if system_prompt:
+                    messages.append({"role": "system", "content": system_prompt})
+                messages.append({"role": "user", "content": prompt})
+
+                # Use async method synchronously
+                import asyncio
+
+                response = asyncio.get_event_loop().run_until_complete(
+                    client.chat_completion(model=moonshot_model, messages=messages)
+                )
+                return response
+            except Exception as e:
+                logger.error(f"Moonshot query failed: {e}")
+                return f"Error querying Moonshot: {str(e)}"
+
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -197,7 +231,9 @@ class ResearchAgent:
         }
 
         try:
-            response = make_ollama_request("/api/chat", payload, timeout=600)  # 10 min for large models
+            response = make_ollama_request(
+                "/api/chat", payload, timeout=600
+            )  # 10 min for large models
 
             result = response.json()
             return result.get("message", {}).get("content", "").strip()
@@ -225,6 +261,28 @@ class ResearchAgent:
         """
         model = model or self.default_model
 
+        # Check if this is a Moonshot model
+        if is_moonshot_model(model):
+            if not self.moonshot_api_key:
+                return "Error: Moonshot API key not configured"
+
+            try:
+                client = MoonshotClient(self.moonshot_api_key)
+                moonshot_model = get_moonshot_model_id(model)
+
+                messages = []
+                if system_prompt:
+                    messages.append({"role": "system", "content": system_prompt})
+                messages.append({"role": "user", "content": prompt})
+
+                response = await client.chat_completion(
+                    model=moonshot_model, messages=messages
+                )
+                return response
+            except Exception as e:
+                logger.error(f"Moonshot async query failed: {e}")
+                return f"Error querying Moonshot: {str(e)}"
+
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -237,7 +295,9 @@ class ResearchAgent:
         }
 
         try:
-            result = await async_make_ollama_request("/api/chat", payload, timeout=600)  # 10 min for large models
+            result = await async_make_ollama_request(
+                "/api/chat", payload, timeout=600
+            )  # 10 min for large models
             return result.get("message", {}).get("content", "").strip()
 
         except Exception as e:

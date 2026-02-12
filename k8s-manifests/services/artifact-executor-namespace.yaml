@@ -1,0 +1,14 @@
+# Artifact Executor Namespace
+# Isolated namespace for running AI-generated code
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: artifact-executor
+  labels:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: artifact-executor
+    app.kubernetes.io/part-of: harvis-ai
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+  annotations:
+    description: "Isolated namespace for AI-generated code execution"

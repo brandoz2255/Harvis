@@ -68,10 +68,12 @@ services:
       ENVIRONMENT: "production"
       LOG_LEVEL: "INFO"
       PYTHONUNBUFFERED: "1"
+      ARTIFACT_STORAGE_DIR: "/data/artifacts"
     volumes:
       - ml-models-cache:/models-cache
       - embedding-data:/app/embedding
       - /tmp:/tmp
+      - artifact_data:/data/artifacts
     depends_on:
       ollama:
         condition: service_started
@@ -181,3 +183,4 @@ volumes:
   pgsql_data:
   ml-models-cache:
   embedding-data:
+  artifact_data:

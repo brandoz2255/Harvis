@@ -922,6 +922,18 @@ export default function ChatPage() {
                 researchChainMapRef.current.set(assistantId, updates.researchChain)
                 hasUpdates = true
               }
+              // Handle artifact from response
+              if (chunk.artifact) {
+                updates.artifact = {
+                  id: chunk.artifact.id,
+                  type: chunk.artifact.type,
+                  title: chunk.artifact.title,
+                  status: chunk.artifact.status,
+                  downloadUrl: chunk.artifact.download_url || chunk.artifact.downloadUrl,
+                  previewUrl: chunk.artifact.preview_url || chunk.artifact.previewUrl,
+                }
+                hasUpdates = true
+              }
             }
 
             if (chunk.sources || chunk.search_results) {
@@ -983,6 +995,14 @@ export default function ChatPage() {
         videos: data.videos,
         researchChain: data.research_chain || (existingResearchChain ? { ...existingResearchChain, isLoading: false } : undefined),
         autoResearched: data.auto_researched,
+        artifact: data.artifact ? {
+          id: data.artifact.id,
+          type: data.artifact.type,
+          title: data.artifact.title,
+          status: data.artifact.status,
+          downloadUrl: data.artifact.download_url || data.artifact.downloadUrl,
+          previewUrl: data.artifact.preview_url || data.artifact.previewUrl,
+        } : undefined,
       }
 
       setLocalMessages((prev) =>
@@ -1152,6 +1172,7 @@ export default function ChatPage() {
         status={message.status}
         metadata={message.metadata}
         researchChain={message.researchChain}
+        artifact={message.artifact}
       />
     ))
   }, [messages])

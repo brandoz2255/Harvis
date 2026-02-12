@@ -122,6 +122,13 @@ export default function ProfilePage() {
     setApiKeyLoading(true)
     setApiKeyMessage(null)
     
+    // DEBUG: Log what we're about to send
+    const keyToSend = apiKeys[provider].apiKey
+    console.log(`[DEBUG] Saving ${provider} API key:`, {
+      length: keyToSend?.length || 0,
+      preview: keyToSend ? `${keyToSend.substring(0, 8)}...${keyToSend.substring(keyToSend.length - 4)}` : 'EMPTY'
+    })
+    
     try {
       const token = localStorage.getItem('token')
       const response = await fetch('/api/user/api-keys', {
