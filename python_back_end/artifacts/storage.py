@@ -57,7 +57,9 @@ class ArtifactStorage:
         # Website/app/code artifacts are stored immediately as ready
         # Document artifacts start as pending
         is_code_type = artifact_type in ["website", "app", "code"]
-        initial_status = ArtifactStatus.READY.value if is_code_type else ArtifactStatus.PENDING.value
+        initial_status = (
+            ArtifactStatus.READY.value if is_code_type else ArtifactStatus.PENDING.value
+        )
 
         # For code artifacts, store content directly
         content = manifest.content
@@ -132,8 +134,7 @@ class ArtifactStorage:
 
             # Get MIME type
             mime_type = ARTIFACT_MIME_TYPES.get(
-                ArtifactType(artifact_type),
-                "application/octet-stream"
+                ArtifactType(artifact_type), "application/octet-stream"
             )
 
             # Update artifact with file info
@@ -235,6 +236,28 @@ class ArtifactStorage:
                 """,
                 session_id,
                 user_id,
+            )
+
+            return [dict(row) for row in rows]
+
+    async def get_user_artifacts(
+        self, pool, user_id: int, limit: int = 50, offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """Get all artifacts for a user"""
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    id, artifact_type, title, description, status,
+                    file_size, created_at, updated_at
+                FROM artifacts
+                WHERE user_id = $1
+                ORDER BY created_at DESC
+                LIMIT $2 OFFSET $3
+                """,
+                user_id,
+                limit,
+                offset,
             )
 
             return [dict(row) for row in rows]
@@ -343,7 +366,9 @@ class ArtifactStorage:
             status=artifact["status"],
             download_url=download_url,
             preview_url=preview_url,
-            content=artifact.get("content") if artifact_type in ["website", "app", "code"] else None,
+            content=artifact.get("content")
+            if artifact_type in ["website", "app", "code"]
+            else None,
             framework=artifact.get("framework"),
             dependencies=artifact.get("dependencies"),
             file_size=artifact.get("file_size"),

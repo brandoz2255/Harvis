@@ -19,6 +19,12 @@ import {
   Database,
   PanelLeftClose,
   PanelLeftOpen,
+  FileText,
+  FileSpreadsheet,
+  FileType,
+  Presentation,
+  Globe,
+  Box,
 } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
@@ -30,16 +36,19 @@ interface Chat {
   starred?: boolean
 }
 
-interface CodeBlock {
+interface Artifact {
   id: string
+  artifact_type: string
   title: string
-  language: string
-  timestamp: string
+  description?: string
+  status: string
+  file_size?: number
+  created_at: string
+  updated_at: string
 }
 
 interface ChatSidebarProps {
   chats: Chat[]
-  codeBlocks: CodeBlock[]
   activeChat: string | null
   onSelectChat: (id: string) => void
   onNewChat: () => void
@@ -47,9 +56,30 @@ interface ChatSidebarProps {
   className?: string
 }
 
+// Artifact type icons mapping
+const ARTIFACT_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
+  spreadsheet: FileSpreadsheet,
+  document: FileText,
+  pdf: FileType,
+  presentation: Presentation,
+  website: Globe,
+  app: Globe,
+  code: Code2,
+}
+
+// Type colors for badges
+const TYPE_COLORS: Record<string, string> = {
+  spreadsheet: "bg-green-500/10 text-green-500",
+  document: "bg-blue-500/10 text-blue-500",
+  pdf: "bg-red-500/10 text-red-500",
+  presentation: "bg-orange-500/10 text-orange-500",
+  website: "bg-purple-500/10 text-purple-500",
+  app: "bg-purple-500/10 text-purple-500",
+  code: "bg-cyan-500/10 text-cyan-500",
+}
+
 export function ChatSidebar({
   chats,
-  codeBlocks,
   activeChat,
   onSelectChat,
   onNewChat,
@@ -61,8 +91,10 @@ export function ChatSidebar({
   const [expandedSections, setExpandedSections] = useState({
     starred: true,
     recents: true,
-    codeBlocks: true,
+    artifacts: true,
   })
+  const [artifacts, setArtifacts] = useState<Artifact[]>([])
+  const [isLoadingArtifacts, setIsLoadingArtifacts] = useState(false)
   const [isClearing, setIsClearing] = useState(false)
   const [memoryStats, setMemoryStats] = useState<{
     usage_percent?: number
@@ -91,6 +123,33 @@ export function ChatSidebar({
   const toggleMinimize = () => {
     setIsMinimized(!isMinimized)
   }
+
+  // Fetch artifacts
+  const fetchArtifacts = async () => {
+    try {
+      setIsLoadingArtifacts(true)
+      const token = localStorage.getItem('token')
+      const res = await fetch('/api/artifacts/', {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      })
+      
+      if (res.ok) {
+        const data = await res.json()
+        setArtifacts(data.artifacts || [])
+      }
+    } catch (error) {
+      console.error('Failed to fetch artifacts:', error)
+    } finally {
+      setIsLoadingArtifacts(false)
+    }
+  }
+
+  useEffect(() => {
+    fetchArtifacts()
+    // Refresh artifacts every 30 seconds
+    const interval = setInterval(fetchArtifacts, 30000)
+    return () => clearInterval(interval)
+  }, [])
 
   const fetchMemoryStats = async () => {
     if (isFetchingStats.current) {
@@ -181,6 +240,20 @@ export function ChatSidebar({
 
   // Get recent chats for minimized view (last 5)
   const recentChatsMinimized = recentChats.slice(0, 5)
+
+  const handleArtifactClick = (artifact: Artifact) => {
+    // Navigate to the artifact's chat session or show it
+    // For now, we can just log it or navigate
+    console.log('Clicked artifact:', artifact)
+    // TODO: Implement navigation to artifact's chat or preview
+  }
+
+  const formatFileSize = (bytes?: number) => {
+    if (!bytes) return ''
+    if (bytes < 1024) return `${bytes} B`
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  }
 
   return (
     <>
@@ -352,35 +425,46 @@ export function ChatSidebar({
                 )}
               </div>
 
-              {/* Code Blocks Section */}
+              {/* Artifacts Section */}
               <div className="mb-2">
                 <button
                   type="button"
-                  onClick={() => toggleSection("codeBlocks")}
+                  onClick={() => toggleSection("artifacts")}
                   className="flex w-full items-center gap-2 px-2 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground"
                 >
                   <ChevronDown
                     className={cn(
                       "h-3 w-3 transition-transform",
-                      !expandedSections.codeBlocks && "-rotate-90"
+                      !expandedSections.artifacts && "-rotate-90"
                     )}
                   />
-                  <Code2 className="h-3 w-3" />
-                  Code Blocks
+                  <Box className="h-3 w-3" />
+                  Artifacts
+                  {artifacts.length > 0 && (
+                    <span className="ml-auto text-[10px] bg-primary/20 text-primary px-1.5 py-0.5 rounded-full">
+                      {artifacts.length}
+                    </span>
+                  )}
                 </button>
-                {expandedSections.codeBlocks && (
+                {expandedSections.artifacts && (
                   <div className="space-y-0.5">
-                    {codeBlocks.map((block) => (
-                      <div
-                        key={block.id}
-                        className="group flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-muted-foreground hover:bg-sidebar-accent hover:text-foreground cursor-pointer"
-                      >
-                        <div className="flex h-6 w-6 items-center justify-center rounded bg-primary/10 text-[10px] font-mono text-primary">
-                          {block.language.slice(0, 2).toUpperCase()}
-                        </div>
-                        <span className="truncate flex-1">{block.title}</span>
+                    {isLoadingArtifacts ? (
+                      <div className="flex items-center justify-center py-4">
+                        <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
                       </div>
-                    ))}
+                    ) : artifacts.length === 0 ? (
+                      <div className="px-3 py-2 text-xs text-muted-foreground">
+                        No artifacts yet
+                      </div>
+                    ) : (
+                      artifacts.map((artifact) => (
+                        <ArtifactItem
+                          key={artifact.id}
+                          artifact={artifact}
+                          onClick={() => handleArtifactClick(artifact)}
+                        />
+                      ))
+                    )}
                   </div>
                 )}
               </div>
@@ -495,3 +579,47 @@ function ChatItem({
     </button>
   )
 }
+
+function ArtifactItem({
+  artifact,
+  onClick,
+}: {
+  artifact: Artifact
+  onClick: () => void
+}) {
+  const Icon = ARTIFACT_ICONS[artifact.artifact_type] || Box
+  const typeColor = TYPE_COLORS[artifact.artifact_type] || "bg-slate-500/10 text-slate-500"
+
+  const formatFileSize = (bytes?: number) => {
+    if (!bytes) return ''
+    if (bytes < 1024) return `${bytes} B`
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="group flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-muted-foreground hover:bg-sidebar-accent hover:text-foreground cursor-pointer transition-colors"
+    >
+      <div className={cn("flex h-6 w-6 items-center justify-center rounded", typeColor)}>
+        <Icon className="h-3.5 w-3.5" />
+      </div>
+      <div className="flex-1 min-w-0 text-left">
+        <div className="truncate">{artifact.title}</div>
+        <div className="flex items-center gap-1 text-[10px] text-muted-foreground">
+          <span className="uppercase">{artifact.artifact_type}</span>
+          {artifact.file_size && (
+            <>
+              <span>•</span>
+              <span>{formatFileSize(artifact.file_size)}</span>
+            </>
+          )}
+        </div>
+      </div>
+    </button>
+  )
+}
+
+export default ChatSidebar

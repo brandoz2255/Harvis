@@ -1228,7 +1228,6 @@ export default function ChatPage() {
             timestamp: new Date(s.updated_at).toLocaleDateString(),
             starred: false,
           }))}
-          codeBlocks={[]}
           activeChat={currentSession?.id || ""}
           onSelectChat={handleSelectChat}
           onNewChat={handleNewChat}
