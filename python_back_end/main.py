@@ -2620,57 +2620,84 @@ async def chat(
             # ── 7.5 Artifact Detection ──────────────────────────────────────────────────────
             artifact_info = None
             try:
+                logger.info("🔍 Starting artifact detection...")
+
                 # First, try CODE-BASED document generation (new approach)
                 pool = getattr(request.app.state, "pg_pool", None)
+                if not pool:
+                    logger.warning(
+                        "⚠️ Database pool not available for artifact creation"
+                    )
 
                 # Check for document generation code (Excel, Word, PDF, PowerPoint)
                 document_types = ["spreadsheet", "document", "pdf", "presentation"]
                 code_artifact_type = None
                 code_title = None
 
+                logger.info(
+                    f"🔍 Checking for document code in response (length: {len(final_answer)} chars)"
+                )
+
                 for doc_type in document_types:
+                    logger.debug(f"🔍 Checking for {doc_type} code...")
                     doc_code = extract_document_code(final_answer, doc_type)
                     if doc_code:
                         code_artifact_type = doc_type
-                        # Try to extract title from code comments or default
                         code_title = f"Generated {doc_type.capitalize()}"
+                        logger.info(
+                            f"✅ Found {doc_type} generation code ({len(doc_code)} chars)"
+                        )
                         break
 
-                if code_artifact_type and pool:
+                if code_artifact_type:
                     # CODE-BASED GENERATION
                     logger.info(
                         f"📦 Code-based {code_artifact_type} generation detected"
                     )
                     yield f"data: {json.dumps({'status': 'processing', 'detail': f'Creating {code_artifact_type} from code...'})}\n\n"
 
-                    # Generate document from code
-                    doc_result = generate_document_from_code(
-                        llm_response=final_answer,
-                        artifact_type=code_artifact_type,
-                        title=code_title,
-                        artifact_id=str(uuid.uuid4()),
-                        use_docker=True,
-                    )
-
-                    if doc_result["success"]:
-                        artifact_info = {
-                            "id": doc_result.get("artifact_id", str(uuid.uuid4())),
-                            "type": code_artifact_type,
-                            "title": code_title,
-                            "status": "ready",
-                            "download_url": f"/api/artifacts/{doc_result.get('artifact_id')}/download",
-                            "file_size": doc_result.get("file_size", 0),
-                        }
-                        logger.info(
-                            f"✅ Generated {code_artifact_type} document from code"
+                    try:
+                        # Generate document from code
+                        doc_result = generate_document_from_code(
+                            llm_response=final_answer,
+                            artifact_type=code_artifact_type,
+                            title=code_title,
+                            artifact_id=str(uuid.uuid4()),
+                            use_docker=True,
                         )
 
-                        # Clean response by removing the code block
-                        final_answer = clean_response_content(final_answer)
-                    else:
-                        logger.error(
-                            f"❌ Code-based generation failed: {doc_result.get('error')}"
+                        if doc_result["success"]:
+                            artifact_info = {
+                                "id": doc_result.get("artifact_id", str(uuid.uuid4())),
+                                "type": code_artifact_type,
+                                "title": code_title,
+                                "status": "ready",
+                                "download_url": f"/api/artifacts/{doc_result.get('artifact_id')}/download",
+                                "file_size": doc_result.get("file_size", 0),
+                            }
+                            logger.info(
+                                f"✅ Generated {code_artifact_type} document from code"
+                            )
+
+                            # Clean response by removing the code block
+                            final_answer = clean_response_content(final_answer)
+                            logger.info(f"🧹 Cleaned response, removed code block")
+                        else:
+                            logger.error(
+                                f"❌ Code-based generation failed: {doc_result.get('error')}"
+                            )
+                            logger.error(
+                                f"❌ stdout: {doc_result.get('stdout', 'N/A')}"
+                            )
+                            logger.error(
+                                f"❌ stderr: {doc_result.get('stderr', 'N/A')}"
+                            )
+                    except Exception as exec_error:
+                        logger.exception(
+                            f"💥 Exception during code generation: {exec_error}"
                         )
+                else:
+                    logger.info("🔍 No document generation code found in response")
 
                 # Fallback: Try JSON manifest approach (for websites/apps and backward compatibility)
                 if not artifact_info:
