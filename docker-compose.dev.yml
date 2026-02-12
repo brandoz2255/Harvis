@@ -136,7 +136,9 @@ services:
       POSTGRES_INITDB_ARGS: "-E UTF8 --locale=C"
     volumes:
       - pgsql_data_dev:/var/lib/postgresql/data
-      - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh
+      - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
+      - ./python_back_end/artifacts_schema.sql:/docker-entrypoint-initdb.d/artifacts_schema.sql:ro
+      - ./python_back_end/artifacts_build_jobs_schema.sql:/docker-entrypoint-initdb.d/artifacts_build_jobs_schema.sql:ro
     ports:
       - "5432:5432"
     networks:
