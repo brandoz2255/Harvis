@@ -7,9 +7,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 
 // Set PDF.js worker - use local worker for offline/air-gapped environments
-// This imports the worker source as a blob URL
-import "pdfjs-dist/build/pdf.worker.entry"
-// pdfjs will automatically use the imported worker
+pdfjs.GlobalWorkerOptions.workerSrc = "/pdfjs/pdf.worker.min.mjs"
 
 interface PdfPreviewProps {
   downloadUrl: string
