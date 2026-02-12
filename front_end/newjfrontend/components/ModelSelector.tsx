@@ -46,7 +46,7 @@ export default function ModelSelector({
         const timeoutId = setTimeout(() => controller.abort(), 10000) // 10s timeout for model list
 
         try {
-            const response = await fetch('/api/ollama-models', {
+            const response = await fetch('/api/models', {
                 signal: controller.signal,
                 headers: {
                     ...getAuthHeaders(),

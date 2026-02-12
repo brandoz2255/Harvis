@@ -23,6 +23,12 @@ import {
   LogOut,
   ChevronRight,
   Check,
+  Cloud,
+  Eye,
+  EyeOff,
+  Save,
+  AlertCircle,
+  Zap,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -30,6 +36,7 @@ import { Switch } from "@/components/ui/switch"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Separator } from "@/components/ui/separator"
+import { Alert, AlertDescription } from "@/components/ui/alert"
 
 export default function ProfilePage() {
   const router = useRouter()
@@ -63,6 +70,117 @@ export default function ProfilePage() {
     notifications: true,
     emailUpdates: false,
   })
+
+  // API Keys State
+  const [apiKeys, setApiKeys] = useState<{[key: string]: {apiKey: string; apiUrl: string; isActive: boolean}}>({
+    moonshot: { apiKey: "", apiUrl: "", isActive: false }
+  })
+  const [showApiKey, setShowApiKey] = useState<{[key: string]: boolean}>({
+    moonshot: false
+  })
+  const [apiKeyLoading, setApiKeyLoading] = useState(false)
+  const [apiKeyMessage, setApiKeyMessage] = useState<{type: "success" | "error"; text: string} | null>(null)
+
+  // Load API keys on mount
+  useEffect(() => {
+    if (user) {
+      loadApiKeys()
+    }
+  }, [user])
+
+  const loadApiKeys = async () => {
+    try {
+      const token = localStorage.getItem('token')
+      const response = await fetch('/api/user/api-keys', {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      })
+      
+      if (response.ok) {
+        const data = await response.json()
+        const keysMap: {[key: string]: {apiKey: string; apiUrl: string; isActive: boolean}} = {
+          moonshot: { apiKey: "", apiUrl: "", isActive: false }
+        }
+        
+        data.forEach((key: any) => {
+          keysMap[key.provider_name] = {
+            apiKey: "••••••••••••••••", // Don't show actual key
+            apiUrl: key.api_url || "",
+            isActive: key.is_active
+          }
+        })
+        
+        setApiKeys(keysMap)
+      }
+    } catch (error) {
+      console.error('Error loading API keys:', error)
+    }
+  }
+
+  const saveApiKey = async (provider: string) => {
+    setApiKeyLoading(true)
+    setApiKeyMessage(null)
+    
+    try {
+      const token = localStorage.getItem('token')
+      const response = await fetch('/api/user/api-keys', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          provider_name: provider,
+          api_key: apiKeys[provider].apiKey,
+          api_url: apiKeys[provider].apiUrl || undefined,
+          is_active: true
+        })
+      })
+      
+      if (response.ok) {
+        setApiKeyMessage({ type: "success", text: `${provider} API key saved successfully!` })
+        // Reload to get updated status
+        loadApiKeys()
+        // Clear the input
+        setApiKeys(prev => ({
+          ...prev,
+          [provider]: { ...prev[provider], apiKey: "" }
+        }))
+      } else {
+        const error = await response.json()
+        setApiKeyMessage({ type: "error", text: error.detail || 'Failed to save API key' })
+      }
+    } catch (error) {
+      setApiKeyMessage({ type: "error", text: 'Network error while saving API key' })
+    } finally {
+      setApiKeyLoading(false)
+    }
+  }
+
+  const deleteApiKey = async (provider: string) => {
+    if (!confirm(`Are you sure you want to remove your ${provider} API key?`)) return
+    
+    try {
+      const token = localStorage.getItem('token')
+      const response = await fetch(`/api/user/api-keys/${provider}`, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      })
+      
+      if (response.ok) {
+        setApiKeyMessage({ type: "success", text: `${provider} API key removed` })
+        setApiKeys(prev => ({
+          ...prev,
+          [provider]: { apiKey: "", apiUrl: "", isActive: false }
+        }))
+      }
+    } catch (error) {
+      setApiKeyMessage({ type: "error", text: 'Failed to remove API key' })
+    }
+  }
 
   const toggleSetting = (key: keyof typeof settings) => {
     setSettings((prev) => ({ ...prev, [key]: !prev[key] }))
@@ -209,6 +327,128 @@ export default function ProfilePage() {
                 checked={settings.emailUpdates}
                 onToggle={() => toggleSetting("emailUpdates")}
               />
+            </CardContent>
+          </Card>
+
+          {/* API Keys Card */}
+          <Card className="border-border bg-card">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-foreground">
+                <Zap className="h-5 w-5 text-yellow-500" />
+                API Keys
+              </CardTitle>
+              <CardDescription>Configure external AI provider API keys</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              {apiKeyMessage && (
+                <Alert className={apiKeyMessage.type === "success" ? "bg-green-500/10 border-green-500/20" : "bg-red-500/10 border-red-500/20"}>
+                  <AlertCircle className={`h-4 w-4 ${apiKeyMessage.type === "success" ? "text-green-500" : "text-red-500"}`} />
+                  <AlertDescription className={apiKeyMessage.type === "success" ? "text-green-400" : "text-red-400"}>
+                    {apiKeyMessage.text}
+                  </AlertDescription>
+                </Alert>
+              )}
+
+              {/* Moonshot API Key Section */}
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-purple-500/10 text-purple-500">
+                      <Cloud className="h-5 w-5" />
+                    </div>
+                    <div>
+                      <p className="font-medium text-foreground">Moonshot AI (Kimi)</p>
+                      <p className="text-sm text-muted-foreground">
+                        Access Kimi K2.5 and other Moonshot models
+                      </p>
+                    </div>
+                  </div>
+                  {apiKeys.moonshot.isActive && (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-green-500/10 px-2.5 py-0.5 text-xs font-medium text-green-400">
+                      <Check className="h-3 w-3" />
+                      Active
+                    </span>
+                  )}
+                </div>
+
+                <div className="space-y-3 rounded-lg border border-border bg-input/30 p-4">
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium text-foreground">API Key</label>
+                    <div className="relative">
+                      <Key className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                      <Input
+                        type={showApiKey.moonshot ? "text" : "password"}
+                        placeholder={apiKeys.moonshot.isActive ? "••••••••••••••••" : "Enter your Moonshot API key"}
+                        value={apiKeys.moonshot.apiKey}
+                        onChange={(e) => setApiKeys(prev => ({
+                          ...prev,
+                          moonshot: { ...prev.moonshot, apiKey: e.target.value }
+                        }))}
+                        className="pl-9 pr-10 bg-input border-border"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowApiKey(prev => ({ ...prev, moonshot: !prev.moonshot }))}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                      >
+                        {showApiKey.moonshot ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium text-foreground">API URL (Optional)</label>
+                    <div className="relative">
+                      <Globe className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                      <Input
+                        placeholder="https://api.moonshot.cn/v1"
+                        value={apiKeys.moonshot.apiUrl}
+                        onChange={(e) => setApiKeys(prev => ({
+                          ...prev,
+                          moonshot: { ...prev.moonshot, apiUrl: e.target.value }
+                        }))}
+                        className="pl-9 bg-input border-border"
+                      />
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      Leave empty to use the default Moonshot API endpoint
+                    </p>
+                  </div>
+
+                  <div className="flex gap-2">
+                    <Button
+                      onClick={() => saveApiKey('moonshot')}
+                      disabled={apiKeyLoading || !apiKeys.moonshot.apiKey}
+                      className="bg-primary text-primary-foreground hover:bg-primary/90"
+                    >
+                      <Save className="mr-2 h-4 w-4" />
+                      {apiKeyLoading ? 'Saving...' : 'Save Key'}
+                    </Button>
+                    {apiKeys.moonshot.isActive && (
+                      <Button
+                        variant="outline"
+                        onClick={() => deleteApiKey('moonshot')}
+                        className="border-destructive text-destructive hover:bg-destructive/10"
+                      >
+                        <Trash2 className="mr-2 h-4 w-4" />
+                        Remove
+                      </Button>
+                    )}
+                  </div>
+                </div>
+
+                <p className="text-xs text-muted-foreground">
+                  Your API key is encrypted and stored securely. Get your API key from{' '}
+                  <a
+                    href="https://platform.moonshot.cn/"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-primary hover:underline"
+                  >
+                    Moonshot Platform
+                  </a>
+                </p>
+              </div>
             </CardContent>
           </Card>
 

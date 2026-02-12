@@ -33,6 +33,12 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 import asyncpg
 from gemini_api import query_gemini, is_gemini_configured
+from moonshot_api import (
+    MoonshotClient,
+    is_moonshot_model,
+    get_moonshot_model_id,
+    MOONSHOT_BASE_URL,
+)
 from typing import List, Optional, Dict, Any, Union
 from vison_models.llm_connector import (
     query_qwen,
@@ -67,6 +73,68 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 60
 print(f"Backend JWT_SECRET loaded: {SECRET_KEY[:10]}... Length: {len(SECRET_KEY)}")
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# ─── API Key Encryption Setup ──────────────────────────────────────────────────
+from cryptography.fernet import Fernet
+import hashlib
+
+# Generate or load encryption key for API keys
+# Use JWT_SECRET as base to derive encryption key (ensures it's consistent across restarts)
+API_KEY_ENCRYPTION_SECRET = os.getenv("API_KEY_ENCRYPTION_SECRET", SECRET_KEY)
+# Derive a 32-byte key using SHA-256
+_api_key_encryption_key = hashlib.sha256(API_KEY_ENCRYPTION_SECRET.encode()).digest()
+# Create Fernet key (base64 encoded 32-byte key)
+_api_key_fernet_key = base64.urlsafe_b64encode(_api_key_encryption_key)
+_api_key_cipher = Fernet(_api_key_fernet_key)
+
+
+def encrypt_api_key(api_key: str) -> str:
+    """Encrypt an API key using Fernet symmetric encryption."""
+    if not api_key:
+        return ""
+    encrypted = _api_key_cipher.encrypt(api_key.encode())
+    return base64.urlsafe_b64encode(encrypted).decode()
+
+
+def decrypt_api_key(encrypted_key: str) -> str:
+    """Decrypt an API key that was encrypted with encrypt_api_key."""
+    if not encrypted_key:
+        return ""
+    try:
+        encrypted_bytes = base64.urlsafe_b64decode(encrypted_key.encode())
+        decrypted = _api_key_cipher.decrypt(encrypted_bytes)
+        return decrypted.decode()
+    except Exception as e:
+        logger.error(f"Failed to decrypt API key: {e}")
+        return ""
+
+
+async def get_user_api_key(
+    pool, user_id: int, provider_name: str
+) -> Optional[Dict[str, Any]]:
+    """Get a user's API key for a specific provider."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT id, provider_name, api_key_encrypted, api_url, is_active, created_at, updated_at
+            FROM user_api_keys
+            WHERE user_id = $1 AND provider_name = $2 AND is_active = TRUE
+            """,
+            user_id,
+            provider_name,
+        )
+        if row:
+            return {
+                "id": row["id"],
+                "provider_name": row["provider_name"],
+                "api_key": decrypt_api_key(row["api_key_encrypted"]),
+                "api_url": row["api_url"],
+                "is_active": row["is_active"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            }
+        return None
+
 
 # Images storage directory (mounted via PVC in K8s)
 IMAGES_DIR = os.getenv("IMAGES_DIR", "/app/images")
@@ -444,10 +512,15 @@ app = FastAPI(lifespan=lifespan)
 
 # ─── Models Endpoint ──────────────────────────────────────────────────────────
 @app.get("/api/models", tags=["models"])
-async def list_models(current_user: UserResponse = Depends(get_current_user)):
+async def list_models(
+    request: Request, current_user: UserResponse = Depends(get_current_user)
+):
     """
     Fetch available models from Ollama and return them for the frontend selector.
+    Also includes Moonshot models if user has API key configured.
     """
+    formatted_models = []
+
     try:
         # Define Ollama Tags URL
         ollama_url = os.getenv("OLLAMA_URL", "http://ollama:11434")
@@ -458,53 +531,140 @@ async def list_models(current_user: UserResponse = Depends(get_current_user)):
         async with httpx.AsyncClient() as client:
             resp = await client.get(tags_url, timeout=5.0)
 
-        if resp.status_code != 200:
+        if resp.status_code == 200:
+            data = resp.json()
+            models = data.get("models", [])
+
+            # Format Ollama models for frontend
+            for m in models:
+                # Parse size (bytes -> GB)
+                size_gb = m.get("size", 0) / (1024**3)
+                size_str = f"{size_gb:.1f}GB"
+
+                formatted_models.append(
+                    {
+                        "name": m.get("name"),
+                        "displayName": m.get("name").split(":")[0],
+                        "size": size_str,
+                        "status": "available",
+                        "provider": "ollama",
+                    }
+                )
+        else:
             logger.error(f"Ollama returned status {resp.status_code}")
-            raise HTTPException(
-                status_code=502, detail="Failed to fetch models from Ollama"
-            )
-
-        data = resp.json()
-        models = data.get("models", [])
-
-        # Format for frontend
-        formatted_models = []
-        for m in models:
-            # Parse size (bytes -> GB)
-            size_gb = m.get("size", 0) / (1024**3)
-            size_str = f"{size_gb:.1f}GB"
-
-            formatted_models.append(
-                {
-                    "name": m.get("name"),
-                    "displayName": m.get("name").split(":")[0],  # Simple display name
-                    "size": size_str,
-                    "status": "available",
-                }
-            )
-
-        # Sort by name
-        formatted_models.sort(key=lambda x: x["name"])
-
-        return {"models": formatted_models}
-
     except Exception as e:
-        logger.error(f"Error fetching models: {e}")
-        # Return fallback models if Ollama is down, so UI implies offline but doesn't crash
-        return {
-            "models": [
-                {
-                    "name": "mistral",
-                    "displayName": "Mistral (Offline)",
-                    "status": "offline",
-                },
-                {
-                    "name": "llama3",
-                    "displayName": "Llama 3 (Offline)",
-                    "status": "offline",
-                },
-            ]
-        }
+        logger.error(f"Error fetching Ollama models: {e}")
+
+    # Fetch from external Ollama (if configured)
+    if EXTERNAL_OLLAMA_URL and EXTERNAL_OLLAMA_API_KEY:
+        try:
+            ext_url = f"{EXTERNAL_OLLAMA_URL}/api/tags"
+            ext_headers = {
+                "Authorization": f"Bearer {EXTERNAL_OLLAMA_API_KEY}",
+                "ngrok-skip-browser-warning": "true",
+                "User-Agent": "Harvis-Backend",
+            }
+            logger.info(f"Querying external Ollama models at: {ext_url}")
+            async with httpx.AsyncClient() as client:
+                ext_resp = await client.get(ext_url, headers=ext_headers, timeout=10.0)
+
+            if ext_resp.status_code == 200:
+                ext_data = ext_resp.json()
+                ext_models = ext_data.get("models", [])
+
+                for m in ext_models:
+                    size_gb = m.get("size", 0) / (1024**3)
+                    size_str = f"{size_gb:.1f}GB"
+                    model_name = m.get("name")
+
+                    # Avoid duplicates
+                    if not any(
+                        existing["name"] == model_name for existing in formatted_models
+                    ):
+                        formatted_models.append(
+                            {
+                                "name": model_name,
+                                "displayName": f"{model_name.split(':')[0]} (Cloud)",
+                                "size": size_str,
+                                "status": "available",
+                                "provider": "ollama-cloud",
+                            }
+                        )
+                        # Add to cache for routing
+                        EXTERNAL_MODELS_CACHE.add(model_name)
+
+                logger.info(f"Added {len(ext_models)} external Ollama models")
+            else:
+                logger.warning(
+                    f"External Ollama returned status {ext_resp.status_code}"
+                )
+        except Exception as e:
+            logger.warning(f"Could not connect to external Ollama: {e}")
+
+    # Check if user has Moonshot API key configured
+    try:
+        pool = getattr(request.app.state, "pg_pool", None)
+        if pool:
+            moonshot_config = await get_user_api_key(pool, current_user.id, "moonshot")
+            if moonshot_config and moonshot_config.get("api_key"):
+                # Add Moonshot models
+                formatted_models.extend(
+                    [
+                        {
+                            "name": "kimi-k2.5",
+                            "displayName": "Kimi K2.5 (Moonshot)",
+                            "size": "Cloud",
+                            "status": "available",
+                            "provider": "moonshot",
+                            "description": "Long-context reasoning model via Moonshot AI",
+                        },
+                        {
+                            "name": "kimi-k2",
+                            "displayName": "Kimi K2 (Moonshot)",
+                            "size": "Cloud",
+                            "status": "available",
+                            "provider": "moonshot",
+                            "description": "Advanced reasoning model via Moonshot AI",
+                        },
+                        {
+                            "name": "kimi-latest",
+                            "displayName": "Kimi Latest (Moonshot)",
+                            "size": "Cloud",
+                            "status": "available",
+                            "provider": "moonshot",
+                            "description": "Latest Kimi model via Moonshot AI",
+                        },
+                    ]
+                )
+                logger.info("Added Moonshot models for user with API key")
+    except Exception as e:
+        logger.error(f"Error checking Moonshot API key: {e}")
+
+    # Sort by name
+    formatted_models.sort(key=lambda x: x["name"])
+
+    return {"models": formatted_models}
+
+
+# ─── Fallback Models Function ─────────────────────────────────────────────────
+def get_fallback_models():
+    """Return fallback models when Ollama is down"""
+    return {
+        "models": [
+            {
+                "name": "mistral",
+                "displayName": "Mistral (Offline)",
+                "status": "offline",
+                "provider": "ollama",
+            },
+            {
+                "name": "llama3",
+                "displayName": "Llama 3 (Offline)",
+                "status": "offline",
+                "provider": "ollama",
+            },
+        ]
+    }
 
 
 # ─── Middleware ────────────────────────────────────────────────────────────────
@@ -1006,6 +1166,29 @@ class SaveFileRequest(BaseModel):
     content: str
 
 
+# ─── API Key Management Models ------------------------------------------------
+class ApiKeyRequest(BaseModel):
+    provider_name: str
+    api_key: str
+    api_url: Optional[str] = None
+    is_active: bool = True
+
+
+class ApiKeyResponse(BaseModel):
+    id: int
+    provider_name: str
+    api_url: Optional[str] = None
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class ApiKeyUpdateRequest(BaseModel):
+    api_key: Optional[str] = None
+    api_url: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
 # ─── Reasoning Model Helpers --------------------------------------------------
 def separate_thinking_from_final_output(text: str) -> tuple[str, str]:
     """
@@ -1412,7 +1595,169 @@ async def get_authentication_stats():
     return get_auth_stats()
 
 
-# Import new modules
+# ─── API Key Management Endpoints ─────────────────────────────────────────────
+@app.get("/api/user/api-keys", response_model=List[ApiKeyResponse], tags=["api-keys"])
+async def get_user_api_keys(
+    request: Request, current_user: UserResponse = Depends(get_current_user)
+):
+    """Get all API keys for the current user (without the actual key values)"""
+    pool = getattr(request.app.state, "pg_pool", None)
+    if not pool:
+        raise HTTPException(status_code=500, detail="Database not available")
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, provider_name, api_url, is_active, created_at, updated_at
+            FROM user_api_keys
+            WHERE user_id = $1
+            ORDER BY provider_name
+            """,
+            current_user.id,
+        )
+
+        return [
+            ApiKeyResponse(
+                id=row["id"],
+                provider_name=row["provider_name"],
+                api_url=row["api_url"],
+                is_active=row["is_active"],
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+            )
+            for row in rows
+        ]
+
+
+@app.post("/api/user/api-keys", response_model=ApiKeyResponse, tags=["api-keys"])
+async def create_or_update_api_key(
+    request: Request,
+    api_key_data: ApiKeyRequest,
+    current_user: UserResponse = Depends(get_current_user),
+):
+    """Create or update an API key for a provider"""
+    pool = getattr(request.app.state, "pg_pool", None)
+    if not pool:
+        raise HTTPException(status_code=500, detail="Database not available")
+
+    # Encrypt the API key
+    encrypted_key = encrypt_api_key(api_key_data.api_key)
+
+    async with pool.acquire() as conn:
+        # Check if there's already an entry for this provider
+        existing = await conn.fetchrow(
+            """
+            SELECT id FROM user_api_keys
+            WHERE user_id = $1 AND provider_name = $2
+            """,
+            current_user.id,
+            api_key_data.provider_name,
+        )
+
+        if existing:
+            # Update existing entry
+            row = await conn.fetchrow(
+                """
+                UPDATE user_api_keys
+                SET api_key_encrypted = $3, api_url = $4, is_active = $5, updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = $1 AND provider_name = $2
+                RETURNING id, provider_name, api_url, is_active, created_at, updated_at
+                """,
+                current_user.id,
+                api_key_data.provider_name,
+                encrypted_key,
+                api_key_data.api_url,
+                api_key_data.is_active,
+            )
+        else:
+            # Create new entry
+            row = await conn.fetchrow(
+                """
+                INSERT INTO user_api_keys (user_id, provider_name, api_key_encrypted, api_url, is_active)
+                VALUES ($1, $2, $3, $4, $5)
+                RETURNING id, provider_name, api_url, is_active, created_at, updated_at
+                """,
+                current_user.id,
+                api_key_data.provider_name,
+                encrypted_key,
+                api_key_data.api_url,
+                api_key_data.is_active,
+            )
+
+        return ApiKeyResponse(
+            id=row["id"],
+            provider_name=row["provider_name"],
+            api_url=row["api_url"],
+            is_active=row["is_active"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+
+@app.delete("/api/user/api-keys/{provider_name}", tags=["api-keys"])
+async def delete_api_key(
+    provider_name: str,
+    request: Request,
+    current_user: UserResponse = Depends(get_current_user),
+):
+    """Delete an API key for a provider"""
+    pool = getattr(request.app.state, "pg_pool", None)
+    if not pool:
+        raise HTTPException(status_code=500, detail="Database not available")
+
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            """
+            DELETE FROM user_api_keys
+            WHERE user_id = $1 AND provider_name = $2
+            """,
+            current_user.id,
+            provider_name,
+        )
+
+        if result == "DELETE 0":
+            raise HTTPException(status_code=404, detail="API key not found")
+
+        return {"message": f"API key for {provider_name} deleted successfully"}
+
+
+@app.get(
+    "/api/user/api-keys/{provider_name}",
+    response_model=ApiKeyResponse,
+    tags=["api-keys"],
+)
+async def get_api_key_by_provider(
+    provider_name: str,
+    request: Request,
+    current_user: UserResponse = Depends(get_current_user),
+):
+    """Get a specific API key by provider name (without the actual key value)"""
+    pool = getattr(request.app.state, "pg_pool", None)
+    if not pool:
+        raise HTTPException(status_code=500, detail="Database not available")
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT id, provider_name, api_url, is_active, created_at, updated_at
+            FROM user_api_keys
+            WHERE user_id = $1 AND provider_name = $2
+            """,
+            current_user.id,
+            provider_name,
+        )
+
+        if not row:
+            raise HTTPException(status_code=404, detail="API key not found")
+
+        return ApiKeyResponse(
+            id=row["id"],
+            provider_name=row["provider_name"],
+            api_url=row["api_url"],
+            is_active=row["is_active"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
 
 
 # ── Auto-Research Detection for Perplexity-style behavior ──────────────────────
@@ -1825,7 +2170,87 @@ async def chat(
                 yield f"data: {json.dumps({'status': 'processing', 'detail': 'Querying Gemini...'})}\n\n"
                 response_text = query_gemini(req.message, req.history)
 
-            # ── 6. Ollama LLM generation branch (with heartbeats) ────────────────────────────
+            # ── 6. Moonshot/Kimi model branch ────────────────────────────────────────────────
+            elif is_moonshot_model(req.model):
+                yield f"data: {json.dumps({'status': 'processing', 'detail': 'Querying Moonshot AI...'})}\n\n"
+
+                # Get user's Moonshot API key
+                pool = getattr(request.app.state, "pg_pool", None)
+                if not pool:
+                    yield f"data: {json.dumps({'status': 'error', 'error': 'Database not available'})}\n\n"
+                    return
+
+                moonshot_config = await get_user_api_key(
+                    pool, current_user.id, "moonshot"
+                )
+
+                if not moonshot_config or not moonshot_config.get("api_key"):
+                    yield f"data: {json.dumps({'status': 'error', 'error': 'Moonshot API key not configured. Please add your API key in Profile settings.'})}\n\n"
+                    return
+
+                # Create Moonshot client with user's API key
+                moonshot_client = MoonshotClient(
+                    api_key=moonshot_config["api_key"],
+                    base_url=moonshot_config.get("api_url") or MOONSHOT_BASE_URL,
+                )
+
+                # Get the correct model ID
+                moonshot_model_id = get_moonshot_model_id(req.model)
+
+                # Build messages
+                system_prompt_path = os.path.join(
+                    os.path.dirname(__file__), "system_prompt.txt"
+                )
+                try:
+                    with open(system_prompt_path, "r", encoding="utf-8") as f:
+                        system_prompt = f.read().strip()
+                except FileNotFoundError:
+                    system_prompt = (
+                        'You are "Jarves", a voice-first local assistant. '
+                        "Reply in ≤25 spoken-style words, sprinkling brief Spanish when natural."
+                    )
+
+                # Check if it's a reasoning model
+                is_reasoning_model = (
+                    "k2.5" in req.model.lower() or "k2" in req.model.lower()
+                )
+
+                if is_reasoning_model:
+                    system_prompt += (
+                        "\n\nIMPORTANT: When reasoning through problems, wrap your thinking process in <think>...</think> tags. "
+                        "This allows your reasoning to be shown separately from your final answer."
+                    )
+
+                # Add RAG context if available
+                local_rag_context = await get_local_rag_context(current_message_content)
+                if local_rag_context:
+                    system_prompt += (
+                        f"\n\n--- RELEVANT DOCUMENTATION FROM LOCAL CORPUS ---\n"
+                        f"{local_rag_context}\n"
+                        "--- END OF DOCUMENTATION CONTEXT ---"
+                    )
+
+                messages = [{"role": "system", "content": system_prompt}]
+                for msg in history[:-1]:
+                    messages.append({"role": msg["role"], "content": msg["content"]})
+                messages.append({"role": "user", "content": current_message_content})
+
+                logger.info(f"🌙 Using Moonshot AI with model: {moonshot_model_id}")
+
+                # Stream response from Moonshot
+                response_text = ""
+                try:
+                    async for chunk in moonshot_client.chat_completion_stream(
+                        model=moonshot_model_id, messages=messages
+                    ):
+                        response_text += chunk
+                        yield f"data: {json.dumps({'status': 'streaming', 'content': chunk})}\n\n"
+                except Exception as e:
+                    logger.error(f"Moonshot API error: {e}")
+                    yield f"data: {json.dumps({'status': 'error', 'error': str(e)})}\n\n"
+                    return
+
+            # ── 7. Ollama LLM generation branch (with heartbeats) ────────────────────────────
             else:
                 system_prompt_path = os.path.join(
                     os.path.dirname(__file__), "system_prompt.txt"
@@ -2441,10 +2866,50 @@ async def vision_chat(
                 yield f"data: {json.dumps({'status': 'error', 'error': f'Ollama vision error: {ollama_response.status_code}'})}\n\n"
                 return
 
-            response_text = (
-                ollama_response.json().get("message", {}).get("content", "").strip()
-            )
+            response_data = ollama_response.json()
+            logger.debug(f"🖼️ VISION: Raw Ollama response: {response_data}")
+
+            # Try multiple response formats (different models may return content differently)
+            response_text = response_data.get("message", {}).get("content", "").strip()
+
+            # If empty, try alternative formats
+            if not response_text:
+                response_text = response_data.get("response", "").strip()
+            if not response_text:
+                response_text = response_data.get("content", "").strip()
+            if not response_text:
+                response_text = response_data.get("text", "").strip()
+            if not response_text:
+                # Check if there's a choices array (OpenAI-style format)
+                choices = response_data.get("choices", [])
+                if choices and len(choices) > 0:
+                    response_text = (
+                        choices[0].get("message", {}).get("content", "").strip()
+                    )
+                    if not response_text:
+                        response_text = choices[0].get("text", "").strip()
+
+            # Debug: Log the actual structure if content is empty
+            if not response_text:
+                logger.error(
+                    f"🖼️ VISION: Empty content! Response structure: {json.dumps(response_data, indent=2)[:1000]}"
+                )
+                # Also log if there's a done_reason or error
+                if "done_reason" in response_data:
+                    logger.error(
+                        f"🖼️ VISION: done_reason = {response_data.get('done_reason')}"
+                    )
+                if "error" in response_data:
+                    logger.error(f"🖼️ VISION: error = {response_data.get('error')}")
+
             logger.info(f"🖼️ VISION: Got response ({len(response_text)} chars)")
+
+            # Check if response is empty and return error instead of saving empty content
+            if not response_text:
+                error_msg = "The vision model returned an empty response. This may be due to: (1) The model failed to process the image, (2) The image format is not supported, or (3) The model is not properly loaded. Please try again or check the model logs."
+                logger.error(f"🖼️ VISION: {error_msg}")
+                yield f"data: {json.dumps({'status': 'error', 'error': error_msg})}\n\n"
+                return
 
             if req.low_vram:
                 logger.info(f"🧹 [Low VRAM Mode] Unloading vision model {req.model}")
