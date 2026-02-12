@@ -2728,6 +2728,7 @@ async def chat(
                                 "status": "ready",
                                 "download_url": f"/api/artifacts/{artifact_id}/download",
                                 "file_size": file_size,
+                                "code": doc_code,  # Include the code so users can view it later
                             }
                             logger.info(
                                 f"✅ Generated {code_artifact_type} document from code"

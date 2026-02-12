@@ -143,6 +143,7 @@ export interface Artifact {
   mimeType?: string
   errorMessage?: string
   createdAt?: Date
+  code?: string  // Source code used to generate the document
 }
 
 export interface MessageObject {

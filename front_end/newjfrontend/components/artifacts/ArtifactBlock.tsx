@@ -54,6 +54,7 @@ export function ArtifactBlock({ artifact: initialArtifact, className = "" }: Art
   const [artifact, setArtifact] = useState(initialArtifact)
   const [showPreview, setShowPreview] = useState(false)
   const [showEditor, setShowEditor] = useState(false)
+  const [showCode, setShowCode] = useState(false)
   const [copied, setCopied] = useState(false)
   const [isPolling, setIsPolling] = useState(artifact.status === "generating" || artifact.status === "pending")
   const [previewContent, setPreviewContent] = useState<ArtifactContent | null>(artifact.content || null)
@@ -165,6 +166,14 @@ export function ArtifactBlock({ artifact: initialArtifact, className = "" }: Art
     }
   }
 
+  const handleCopyCode = async () => {
+    if (!artifact.code) return
+
+    await navigator.clipboard.writeText(artifact.code)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
+
   const handleRefresh = () => {
     setIsPolling(true)
   }
@@ -253,14 +262,34 @@ export function ArtifactBlock({ artifact: initialArtifact, className = "" }: Art
               )}
 
               {!isCodeType && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={handleDownload}
-                  className="h-8 text-xs text-violet-300/70 hover:text-violet-200 hover:bg-violet-500/10"
-                >
-                  <Download className="mr-1.5 h-3 w-3" /> Download
-                </Button>
+                <>
+                  {artifact.code && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setShowCode(!showCode)}
+                      className="h-8 text-xs text-violet-300/70 hover:text-violet-200 hover:bg-violet-500/10"
+                    >
+                      {showCode ? (
+                        <>
+                          <EyeOff className="mr-1.5 h-3 w-3" /> Hide Code
+                        </>
+                      ) : (
+                        <>
+                          <Code className="mr-1.5 h-3 w-3" /> View Code
+                        </>
+                      )}
+                    </Button>
+                  )}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={handleDownload}
+                    className="h-8 text-xs text-violet-300/70 hover:text-violet-200 hover:bg-violet-500/10"
+                  >
+                    <Download className="mr-1.5 h-3 w-3" /> Download
+                  </Button>
+                </>
               )}
             </>
           )}
@@ -332,14 +361,43 @@ export function ArtifactBlock({ artifact: initialArtifact, className = "" }: Art
             )
           ) : (
             <div className="text-center py-8">
-              <Icon className="h-12 w-12 mx-auto text-muted-foreground mb-3" />
-              <p className="text-sm text-muted-foreground mb-4">
-                Your {artifact.type} is ready to download
-              </p>
-              <Button onClick={handleDownload} className="bg-violet-600 hover:bg-violet-700 text-white">
-                <Download className="mr-2 h-4 w-4" />
-                Download {artifact.title}
-              </Button>
+              {showCode && artifact.code ? (
+                <div className="text-left">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs text-muted-foreground">Generation Code</span>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={handleCopyCode}
+                      className="h-6 text-xs text-violet-300/70 hover:text-violet-200"
+                    >
+                      {copied ? (
+                        <>
+                          <Check className="mr-1.5 h-3 w-3 text-green-400" /> Copied!
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="mr-1.5 h-3 w-3" /> Copy Code
+                        </>
+                      )}
+                    </Button>
+                  </div>
+                  <pre className="overflow-x-auto p-4 bg-[#011627] rounded-lg text-sm font-mono max-h-[400px] overflow-y-auto text-left">
+                    <code className="text-gray-300">{artifact.code}</code>
+                  </pre>
+                </div>
+              ) : (
+                <>
+                  <Icon className="h-12 w-12 mx-auto text-muted-foreground mb-3" />
+                  <p className="text-sm text-muted-foreground mb-4">
+                    Your {artifact.type} is ready to download
+                  </p>
+                  <Button onClick={handleDownload} className="bg-violet-600 hover:bg-violet-700 text-white">
+                    <Download className="mr-2 h-4 w-4" />
+                    Download {artifact.title}
+                  </Button>
+                </>
+              )}
             </div>
           )}
         </div>
