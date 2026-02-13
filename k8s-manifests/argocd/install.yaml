@@ -1,0 +1,26 @@
+---
+# ArgoCD Installation
+# This file downloads and applies the official ArgoCD manifests
+# with customizations for running on rocky2vm.local
+#
+# To install ArgoCD, run:
+#   kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+#
+# Then apply the patches in this directory
+
+# Patch to pin ArgoCD components to rocky2vm.local
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-node-selector-patch
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd
+data:
+  patch.yaml: |
+    # This is a reference - actual patches are applied via kustomize or kubectl patch
+    spec:
+      template:
+        spec:
+          nodeSelector:
+            kubernetes.io/hostname: rocky2vm.local

@@ -203,6 +203,52 @@ data:
                 proxy_read_timeout 3600s;
             }
 
+            # Artifact Executor - AI-generated code execution (isolated on rocky3vm.local)
+            location /api/artifact-executor/ {
+                if ($request_method = 'OPTIONS') {
+                    add_header 'Access-Control-Allow-Origin' $cors_origin always;
+                    add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS, PUT, DELETE' always;
+                    add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization' always;
+                    add_header 'Access-Control-Allow-Credentials' 'true' always;
+                    return 204;
+                }
+
+                add_header 'Access-Control-Allow-Origin' $cors_origin always;
+                add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS, PUT, DELETE' always;
+                add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization' always;
+                add_header 'Access-Control-Allow-Credentials' 'true' always;
+
+                proxy_pass http://artifact_executor_api/;
+                proxy_http_version 1.1;
+                proxy_set_header Connection "";
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_set_header Authorization $http_authorization;
+
+                # Longer timeouts for code execution
+                proxy_connect_timeout 300s;
+                proxy_send_timeout 600s;
+                proxy_read_timeout 600s;
+            }
+
+            # Artifact Preview - proxy to running AI-generated apps (WebSocket support)
+            location /artifact-preview/ {
+                proxy_pass http://artifact_executor_api/preview/;
+                proxy_http_version 1.1;
+                proxy_set_header Upgrade $http_upgrade;
+                proxy_set_header Connection "upgrade";
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+
+                # Keep connections alive for live preview
+                proxy_read_timeout 86400;
+                proxy_buffering off;
+            }
+
             # Catch-all for other /api/ calls to backend
             location /api/ {
                 if ($request_method = 'OPTIONS') {

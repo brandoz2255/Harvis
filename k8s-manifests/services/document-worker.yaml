@@ -20,13 +20,22 @@ spec:
         app.kubernetes.io/name: harvis-ai
         app.kubernetes.io/component: document-worker
     spec:
-      # Can run on any node with or without GPU (document generation is CPU-bound)
-      # nodeSelector:
-      #   kubernetes.io/hostname: pop-os  # Optional: pin to specific node
-      
+      # Run on rocky VMs only - NOT on Pi (CI runner) or dulc3-os (GPU workloads)
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - rocky3vm.local
+                      - rocky1vm.local
+                      - rocky2vm.local
+
       containers:
         - name: document-worker
-          image: "localhost:5000/jarvis-backend:latest"
+          image: "dulc3/jarvis-backend:v2.28.4"
           imagePullPolicy: Always
           command: ["python", "workers/document_worker.py"]
           
@@ -45,18 +54,14 @@ spec:
                 secretKeyRef:
                   name: harvis-ai-backend-secret
                   key: database-url
-            
+
             - name: OLLAMA_URL
-              value: "http://harvis-ai-ollama:11434"
-            
-            # Model cache configuration
-            - name: HF_HOME
-              value: "/models-cache/huggingface"
-            - name: TRANSFORMERS_CACHE
-              value: "/models-cache/huggingface"
-            - name: WHISPER_CACHE
-              value: "/models-cache/whisper"
-            
+              value: "http://harvis-ai-merged-backend:11434"
+
+            # Output directory for generated documents
+            - name: ARTIFACTS_DIR
+              value: "/data/artifacts"
+
             # Worker-specific settings
             - name: WORKER_NAME
               valueFrom:
@@ -80,8 +85,6 @@ spec:
           volumeMounts:
             - name: artifacts-storage
               mountPath: /data/artifacts
-            - name: ml-models-cache
-              mountPath: /models-cache
           
           # Health checks
           livenessProbe:
@@ -106,9 +109,6 @@ spec:
         - name: artifacts-storage
           persistentVolumeClaim:
             claimName: harvis-artifacts-pvc
-        - name: ml-models-cache
-          persistentVolumeClaim:
-            claimName: ml-models-cache-pvc
       
       # Restart policy
       restartPolicy: Always
