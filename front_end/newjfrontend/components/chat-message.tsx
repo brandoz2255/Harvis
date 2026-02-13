@@ -522,6 +522,16 @@ export const ChatMessage = React.memo(function ChatMessage({
         ))}
 
         {/* AI-Generated Artifact */}
+        {(() => {
+          console.log('🔍 DEBUG - ChatMessage artifact check:', {
+            role,
+            hasArtifact: !!artifact,
+            artifactId: artifact?.id,
+            artifactType: artifact?.type,
+            artifactStatus: artifact?.status,
+          })
+          return null
+        })()}
         {role === "assistant" && artifact && (
           <div className="w-full mt-4">
             <ArtifactBlock artifact={artifact} />

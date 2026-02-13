@@ -2659,108 +2659,127 @@ async def chat(
                         logger.info(f"❌ No {doc_type} code found")
 
                 if code_artifact_type:
-                    # CODE-BASED GENERATION
+                    # ASYNC JOB-BASED GENERATION
                     logger.info(
-                        f"📦 Code-based {code_artifact_type} generation detected"
+                        f"📦 Async job-based {code_artifact_type} generation detected"
                     )
-                    yield f"data: {json.dumps({'status': 'processing', 'detail': f'Creating {code_artifact_type} from code...'})}\n\n"
+                    yield f"data: {json.dumps({'status': 'processing', 'detail': f'Queuing {code_artifact_type} generation...'})}\n\n"
 
                     try:
-                        # Generate document from code
-                        doc_result = generate_document_from_code(
-                            llm_response=final_answer,
-                            artifact_type=code_artifact_type,
-                            title=code_title,
-                            artifact_id=str(uuid.uuid4()),
-                            use_docker=True,
-                        )
+                        # Create async job for document generation
+                        import asyncpg
 
-                        if doc_result["success"]:
-                            # Generate artifact_id and save to database
-                            artifact_id = str(uuid.uuid4())
-                            output_path = doc_result.get("output_path")
-                            file_size = doc_result.get("file_size", 0)
+                        # Generate IDs
+                        job_id = str(uuid.uuid4())
+                        artifact_id = str(uuid.uuid4())
 
-                            # Save to database
-                            if pool:
-                                try:
-                                    from artifacts.models import ArtifactType
-
-                                    # Determine mime type based on artifact type
-                                    mime_types = {
-                                        "spreadsheet": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                        "document": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                                        "pdf": "application/pdf",
-                                        "presentation": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                        if pool:
+                            # Insert job into document_jobs table
+                            await pool.execute(
+                                """
+                                INSERT INTO document_jobs (
+                                    id, user_id, session_id, message_id, job_type,
+                                    status, payload, priority, created_at
+                                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+                                """,
+                                job_id,
+                                current_user.id,
+                                session_id if session_id else None,
+                                message_id if message_id else None,
+                                code_artifact_type,
+                                "pending",
+                                json.dumps(
+                                    {
+                                        "code": doc_code,
+                                        "title": code_title,
+                                        "artifact_id": artifact_id,
                                     }
+                                ),
+                                0,
+                            )
+                            logger.info(f"💾 Created document job {job_id} in database")
 
-                                    await pool.execute(
-                                        """
-                                        INSERT INTO artifacts (
-                                            id, user_id, artifact_type, title, description,
-                                            status, file_path, mime_type, file_size, content
-                                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                                        """,
-                                        artifact_id,
-                                        current_user.id,
-                                        code_artifact_type,
-                                        code_title,
-                                        f"Generated {code_artifact_type} from Python code",
-                                        "ready",
-                                        output_path,
-                                        mime_types.get(
-                                            code_artifact_type,
-                                            "application/octet-stream",
-                                        ),
-                                        file_size,
-                                        json.dumps(
-                                            {
-                                                "code": doc_code,
-                                                "output_path": output_path,
-                                                "generated_at": datetime.now().isoformat(),
-                                            }
-                                        ),
-                                    )
-                                    logger.info(
-                                        f"💾 Saved artifact {artifact_id} to database"
-                                    )
-                                except Exception as db_error:
-                                    logger.error(
-                                        f"❌ Failed to save artifact to database: {db_error}"
-                                    )
+                            # Enqueue job in job queue
+                            queue = await get_job_queue()
+                            await queue.send(
+                                name="generate-document",
+                                data={
+                                    "document_job_id": job_id,
+                                    "code": doc_code,
+                                    "document_type": code_artifact_type,
+                                    "title": code_title,
+                                    "user_id": current_user.id,
+                                    "session_id": str(session_id)
+                                    if session_id
+                                    else None,
+                                    "artifact_id": artifact_id,
+                                },
+                                retry_limit=3,
+                                priority=0,
+                            )
+                            logger.info(f"📨 Enqueued job {job_id} for processing")
 
-                            # Build artifact_info
+                            # Build artifact_info with job reference (frontend will poll via SSE)
                             artifact_info = {
                                 "id": artifact_id,
                                 "type": code_artifact_type,
                                 "title": code_title,
-                                "status": "ready",
+                                "status": "generating",
                                 "download_url": f"/api/artifacts/{artifact_id}/download",
-                                "file_size": file_size,
+                                "job_id": job_id,
                                 "code": doc_code,  # Include the code so users can view it later
                             }
                             logger.info(
-                                f"✅ Generated {code_artifact_type} document from code"
+                                f"📦 Created async job: {job_id} for artifact {artifact_id}"
                             )
-                            logger.info(f"📦 artifact_info created: {artifact_info}")
+
+                            # Notify frontend that job is queued
+                            yield f"data: {
+                                json.dumps(
+                                    {
+                                        'status': 'processing',
+                                        'detail': f'{code_artifact_type.capitalize()} generation queued',
+                                        'job_id': job_id,
+                                        'artifact_id': artifact_id,
+                                    }
+                                )
+                            }\n\n"
 
                             # Clean response by removing the code block
                             final_answer = clean_response_content(final_answer)
                             logger.info(f"🧹 Cleaned response, removed code block")
                         else:
-                            logger.error(
-                                f"❌ Code-based generation failed: {doc_result.get('error')}"
-                            )
-                            logger.error(
-                                f"❌ stdout: {doc_result.get('stdout', 'N/A')}"
-                            )
-                            logger.error(
-                                f"❌ stderr: {doc_result.get('stderr', 'N/A')}"
-                            )
-                    except Exception as exec_error:
+                            logger.error("❌ No database pool available to create job")
+
+                    except Exception as job_error:
                         logger.exception(
-                            f"💥 Exception during code generation: {exec_error}"
+                            f"💥 Exception creating async job: {job_error}"
                         )
+                        # Fallback: try synchronous generation
+                        logger.warning("⚠️ Falling back to synchronous generation")
+                        try:
+                            doc_result = generate_document_from_code(
+                                llm_response=final_answer,
+                                artifact_type=code_artifact_type,
+                                title=code_title,
+                                artifact_id=str(uuid.uuid4()),
+                                use_docker=True,
+                            )
+                            if doc_result.get("success"):
+                                artifact_id = str(uuid.uuid4())
+                                artifact_info = {
+                                    "id": artifact_id,
+                                    "type": code_artifact_type,
+                                    "title": code_title,
+                                    "status": "ready",
+                                    "download_url": f"/api/artifacts/{artifact_id}/download",
+                                    "code": doc_code,
+                                }
+                                final_answer = clean_response_content(final_answer)
+                        except Exception as fallback_error:
+                            logger.error(
+                                f"❌ Fallback generation also failed: {fallback_error}"
+                            )
                 else:
                     logger.info("🔍 No document generation code found in response")
 
@@ -5236,6 +5255,100 @@ async def research_health_check():
             "error": str(e),
             "timestamp": datetime.now().isoformat(),
         }
+
+
+# ─── Job Queue Endpoints ─────────────────────────────────────────────────────
+# These endpoints allow the frontend to enqueue jobs for async processing
+
+from pydantic import BaseModel
+from typing import Dict, Any
+
+
+class EnqueueJobRequest(BaseModel):
+    name: str
+    data: Dict[str, Any]
+    retry_limit: int = 3
+    priority: int = 0
+
+
+@app.post("/api/jobs/enqueue", tags=["jobs"])
+async def enqueue_job(request: EnqueueJobRequest):
+    """
+    Enqueue a job for async processing
+    This is called by the frontend to create a background job
+    """
+    try:
+        from job_queue import get_job_queue
+
+        queue = await get_job_queue()
+        job_id = await queue.send(
+            name=request.name,
+            data=request.data,
+            retry_limit=request.retry_limit,
+            priority=request.priority,
+        )
+
+        logger.info(f"📨 Job enqueued via API: {request.name} (id: {job_id})")
+
+        return {"job_id": job_id, "status": "queued", "queue": request.name}
+
+    except Exception as e:
+        logger.error(f"Error enqueuing job: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to enqueue job: {str(e)}")
+
+
+@app.get("/api/jobs/{job_id}/status", tags=["jobs"])
+async def get_job_status(job_id: str):
+    """
+    Get the status of a job
+    """
+    try:
+        from job_queue import get_job_queue
+
+        queue = await get_job_queue()
+        status = await queue.get_job_status(job_id)
+
+        if not status:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        return status
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting job status: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to get job status: {str(e)}"
+        )
+
+
+# ─── Startup and Shutdown Events ─────────────────────────────────────────────
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize services on startup"""
+    try:
+        # Initialize job queue
+        from job_queue import init_job_queue
+
+        await init_job_queue()
+        logger.info("✅ Job queue initialized on startup")
+    except Exception as e:
+        logger.error(f"Failed to initialize job queue: {e}")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup on shutdown"""
+    try:
+        # Shutdown job queue
+        from job_queue import shutdown_job_queue
+
+        await shutdown_job_queue()
+        logger.info("🛑 Job queue shutdown")
+    except Exception as e:
+        logger.error(f"Error during shutdown: {e}")
 
 
 # ─── Vibe Coding Endpoints ─────────────────────────────────────────────────────

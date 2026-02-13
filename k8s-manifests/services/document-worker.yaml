@@ -1,0 +1,190 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: harvis-document-worker
+  namespace: ai-agents
+  labels:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: document-worker
+  annotations:
+    description: "Async document generation worker"
+spec:
+  replicas: 2  # Scale based on load - each worker processes one job at a time
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: harvis-ai
+      app.kubernetes.io/component: document-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: harvis-ai
+        app.kubernetes.io/component: document-worker
+    spec:
+      # Can run on any node with or without GPU (document generation is CPU-bound)
+      # nodeSelector:
+      #   kubernetes.io/hostname: pop-os  # Optional: pin to specific node
+      
+      containers:
+        - name: document-worker
+          image: "localhost:5000/jarvis-backend:latest"
+          imagePullPolicy: Always
+          command: ["python", "workers/document_worker.py"]
+          
+          resources:
+            requests:
+              memory: 1Gi
+              cpu: 500m
+            limits:
+              memory: 4Gi
+              cpu: 2000m
+              # No GPU needed for document generation
+          
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-backend-secret
+                  key: database-url
+            
+            - name: OLLAMA_URL
+              value: "http://harvis-ai-ollama:11434"
+            
+            # Model cache configuration
+            - name: HF_HOME
+              value: "/models-cache/huggingface"
+            - name: TRANSFORMERS_CACHE
+              value: "/models-cache/huggingface"
+            - name: WHISPER_CACHE
+              value: "/models-cache/whisper"
+            
+            # Worker-specific settings
+            - name: WORKER_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: WORKER_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: WORKER_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          
+          envFrom:
+            - configMapRef:
+                name: harvis-ai-backend-config
+            - secretRef:
+                name: harvis-ai-backend-secret
+          
+          volumeMounts:
+            - name: artifacts-storage
+              mountPath: /data/artifacts
+            - name: ml-models-cache
+              mountPath: /models-cache
+          
+          # Health checks
+          livenessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - "import sys; sys.exit(0)"  # Simple check - worker is running
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          
+          readinessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - "import asyncpg; import sys; sys.exit(0)"  # Check imports work
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      
+      volumes:
+        - name: artifacts-storage
+          persistentVolumeClaim:
+            claimName: harvis-artifacts-pvc
+        - name: ml-models-cache
+          persistentVolumeClaim:
+            claimName: ml-models-cache-pvc
+      
+      # Restart policy
+      restartPolicy: Always
+      
+      # Graceful shutdown
+      terminationGracePeriodSeconds: 30
+
+---
+# HorizontalPodAutoscaler for automatic scaling based on queue depth
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: harvis-document-worker-hpa
+  namespace: ai-agents
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: harvis-document-worker
+  minReplicas: 1
+  maxReplicas: 10
+  metrics:
+    - type: External
+      external:
+        metric:
+          name: document_jobs_pending
+          selector:
+            matchLabels:
+              queue: generate-document
+        target:
+          type: AverageValue
+          averageValue: "5"  # Scale up when 5+ pending jobs per worker
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 60
+
+---
+# PodDisruptionBudget to ensure minimum availability during updates
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: harvis-document-worker-pdb
+  namespace: ai-agents
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: harvis-ai
+      app.kubernetes.io/component: document-worker
+
+---
+# ServiceMonitor for Prometheus metrics (optional)
+apiVersion: v1
+kind: Service
+metadata:
+  name: harvis-document-worker-metrics
+  namespace: ai-agents
+  labels:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: document-worker
+spec:
+  selector:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: document-worker
+  ports:
+    - name: metrics
+      port: 8000
+      targetPort: 8000
+  clusterIP: None  # Headless service for direct pod access

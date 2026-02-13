@@ -22,6 +22,12 @@ data:
             keepalive 32;
         }
 
+        # Artifact Executor - runs AI-generated code in isolation on rocky3vm.local
+        upstream artifact_executor_api {
+            server artifact-executor.artifact-executor.svc.cluster.local:8080;
+            keepalive 16;
+        }
+
         # Global proxy timeout settings
         proxy_connect_timeout 3600s;
         proxy_send_timeout 3600s;

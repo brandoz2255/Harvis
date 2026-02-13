@@ -21,9 +21,9 @@ spec:
         app.kubernetes.io/name: harvis-ai
         app.kubernetes.io/component: artifact-executor
     spec:
-      # Run on rockyvm3 node for isolation
+      # Run on rocky3vm.local node for isolation
       nodeSelector:
-        kubernetes.io/hostname: rockyvm3
+        kubernetes.io/hostname: rocky3vm.local
       
       # Security context
       securityContext:
