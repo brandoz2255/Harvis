@@ -1,0 +1,9 @@
+---
+# GitLab Runner Namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gitlab-runner
+  labels:
+    app.kubernetes.io/name: gitlab-runner
+    app.kubernetes.io/component: ci-cd

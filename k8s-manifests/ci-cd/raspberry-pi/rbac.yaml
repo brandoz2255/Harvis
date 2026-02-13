@@ -1,0 +1,51 @@
+---
+# ServiceAccount for GitLab Runner
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gitlab-runner
+  namespace: gitlab-runner
+  labels:
+    app.kubernetes.io/name: gitlab-runner
+    app.kubernetes.io/component: ci-cd
+---
+# ClusterRole for GitLab Runner
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gitlab-runner
+  labels:
+    app.kubernetes.io/name: gitlab-runner
+rules:
+  # Required for Kubernetes executor
+  - apiGroups: [""]
+    resources: ["pods", "pods/exec", "pods/attach", "pods/log", "secrets", "configmaps"]
+    verbs: ["get", "list", "watch", "create", "delete", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list", "watch"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list"]
+---
+# ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gitlab-runner
+  labels:
+    app.kubernetes.io/name: gitlab-runner
+subjects:
+  - kind: ServiceAccount
+    name: gitlab-runner
+    namespace: gitlab-runner
+roleRef:
+  kind: ClusterRole
+  name: gitlab-runner
+  apiGroup: rbac.authorization.k8s.io

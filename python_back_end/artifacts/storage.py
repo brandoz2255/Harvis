@@ -376,3 +376,15 @@ class ArtifactStorage:
             error_message=artifact.get("error_message"),
             created_at=artifact["created_at"],
         )
+
+
+# Singleton instance
+_artifact_storage: ArtifactStorage = None
+
+
+def get_artifact_storage(artifact_dir: str = None) -> ArtifactStorage:
+    """Get or create the singleton ArtifactStorage instance"""
+    global _artifact_storage
+    if _artifact_storage is None:
+        _artifact_storage = ArtifactStorage(artifact_dir)
+    return _artifact_storage

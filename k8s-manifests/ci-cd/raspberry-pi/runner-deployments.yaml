@@ -1,0 +1,267 @@
+---
+# GitLab Runner Deployment - Raspberry Pi 1 (Backend builds)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gitlab-runner-pi1
+  namespace: gitlab-runner
+  labels:
+    app.kubernetes.io/name: gitlab-runner
+    app.kubernetes.io/component: ci-cd
+    app.kubernetes.io/instance: pi1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gitlab-runner
+      app.kubernetes.io/instance: pi1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gitlab-runner
+        app.kubernetes.io/instance: pi1
+    spec:
+      serviceAccountName: gitlab-runner
+      # Force scheduling on Raspberry Pi 1
+      nodeSelector:
+        kubernetes.io/hostname: raspberrypi
+
+      # Tolerate Pi node conditions
+      tolerations:
+        - key: "arm64"
+          operator: "Exists"
+          effect: "NoSchedule"
+
+      containers:
+        - name: gitlab-runner
+          # Use ARM64 compatible image
+          image: gitlab/gitlab-runner:alpine
+          imagePullPolicy: IfNotPresent
+
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              # Register runner if not already registered
+              if ! grep -q "token" /etc/gitlab-runner/config.toml 2>/dev/null; then
+                gitlab-runner register \
+                  --non-interactive \
+                  --url "${GITLAB_URL}" \
+                  --token "${RUNNER_TOKEN}" \
+                  --executor "docker" \
+                  --docker-image "docker:24-dind" \
+                  --description "${RUNNER_NAME}" \
+                  --tag-list "${RUNNER_TAGS}" \
+                  --docker-privileged=true \
+                  --docker-volumes "/var/run/docker.sock:/var/run/docker.sock" \
+                  --docker-volumes "/cache:/cache" \
+                  --docker-pull-policy "if-not-present"
+              fi
+              # Run the runner
+              exec gitlab-runner run --user=gitlab-runner --working-directory=/home/gitlab-runner
+
+          env:
+            - name: RUNNER_NAME
+              value: "harvis-pi1-backend"
+            - name: RUNNER_TAGS
+              value: "pi,pi1,backend,docker,arm64"
+            - name: GITLAB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: gitlab-runner-secret
+                  key: gitlab-url
+            - name: RUNNER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: gitlab-runner-secret
+                  key: runner-token
+            - name: DOCKER_HOST
+              value: "unix:///var/run/docker.sock"
+
+          volumeMounts:
+            - name: docker-socket
+              mountPath: /var/run/docker.sock
+            - name: runner-config
+              mountPath: /etc/gitlab-runner
+            - name: docker-cache
+              mountPath: /var/lib/docker
+            - name: build-cache
+              mountPath: /cache
+
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 500m
+            limits:
+              memory: 4Gi  # Pi has 8GB, leave room for system
+              cpu: 3000m   # 3 cores for builds
+
+          livenessProbe:
+            exec:
+              command: ["gitlab-runner", "verify"]
+            initialDelaySeconds: 60
+            periodSeconds: 60
+            timeoutSeconds: 10
+            failureThreshold: 3
+
+          readinessProbe:
+            exec:
+              command: ["gitlab-runner", "verify"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+
+      volumes:
+        - name: docker-socket
+          hostPath:
+            path: /var/run/docker.sock
+            type: Socket
+        - name: runner-config
+          emptyDir: {}
+        - name: docker-cache
+          persistentVolumeClaim:
+            claimName: docker-cache-pi1-pvc
+        - name: build-cache
+          persistentVolumeClaim:
+            claimName: runner-build-cache-pvc
+
+---
+# GitLab Runner Deployment - Raspberry Pi 2 (Frontend builds)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gitlab-runner-pi2
+  namespace: gitlab-runner
+  labels:
+    app.kubernetes.io/name: gitlab-runner
+    app.kubernetes.io/component: ci-cd
+    app.kubernetes.io/instance: pi2
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gitlab-runner
+      app.kubernetes.io/instance: pi2
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gitlab-runner
+        app.kubernetes.io/instance: pi2
+    spec:
+      serviceAccountName: gitlab-runner
+      # Force scheduling on Raspberry Pi 2
+      nodeSelector:
+        kubernetes.io/hostname: raspberrypi2
+
+      tolerations:
+        - key: "arm64"
+          operator: "Exists"
+          effect: "NoSchedule"
+
+      containers:
+        - name: gitlab-runner
+          image: gitlab/gitlab-runner:alpine
+          imagePullPolicy: IfNotPresent
+
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              if ! grep -q "token" /etc/gitlab-runner/config.toml 2>/dev/null; then
+                gitlab-runner register \
+                  --non-interactive \
+                  --url "${GITLAB_URL}" \
+                  --token "${RUNNER_TOKEN}" \
+                  --executor "docker" \
+                  --docker-image "docker:24-dind" \
+                  --description "${RUNNER_NAME}" \
+                  --tag-list "${RUNNER_TAGS}" \
+                  --docker-privileged=true \
+                  --docker-volumes "/var/run/docker.sock:/var/run/docker.sock" \
+                  --docker-volumes "/cache:/cache" \
+                  --docker-pull-policy "if-not-present"
+              fi
+              exec gitlab-runner run --user=gitlab-runner --working-directory=/home/gitlab-runner
+
+          env:
+            - name: RUNNER_NAME
+              value: "harvis-pi2-frontend"
+            - name: RUNNER_TAGS
+              value: "pi,pi2,frontend,docker,arm64"
+            - name: GITLAB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: gitlab-runner-secret
+                  key: gitlab-url
+            - name: RUNNER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: gitlab-runner-secret
+                  key: runner-token
+            - name: DOCKER_HOST
+              value: "unix:///var/run/docker.sock"
+
+          volumeMounts:
+            - name: docker-socket
+              mountPath: /var/run/docker.sock
+            - name: runner-config
+              mountPath: /etc/gitlab-runner
+            - name: docker-cache
+              mountPath: /var/lib/docker
+            - name: build-cache
+              mountPath: /cache
+
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 500m
+            limits:
+              memory: 4Gi
+              cpu: 3000m
+
+          livenessProbe:
+            exec:
+              command: ["gitlab-runner", "verify"]
+            initialDelaySeconds: 60
+            periodSeconds: 60
+            timeoutSeconds: 10
+            failureThreshold: 3
+
+          readinessProbe:
+            exec:
+              command: ["gitlab-runner", "verify"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+
+      volumes:
+        - name: docker-socket
+          hostPath:
+            path: /var/run/docker.sock
+            type: Socket
+        - name: runner-config
+          emptyDir: {}
+        - name: docker-cache
+          persistentVolumeClaim:
+            claimName: docker-cache-pi2-pvc
+        - name: build-cache
+          persistentVolumeClaim:
+            claimName: runner-build-cache-pvc
+
+---
+# Service for GitLab Runner metrics
+apiVersion: v1
+kind: Service
+metadata:
+  name: gitlab-runner-metrics
+  namespace: gitlab-runner
+  labels:
+    app.kubernetes.io/name: gitlab-runner
+    app.kubernetes.io/component: ci-cd
+spec:
+  type: ClusterIP
+  ports:
+    - name: metrics
+      port: 9252
+      targetPort: 9252
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: gitlab-runner

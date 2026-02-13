@@ -1,0 +1,66 @@
+---
+# GitLab Runner Configuration ConfigMap
+# Optimized for Raspberry Pi with Docker caching
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gitlab-runner-config
+  namespace: gitlab-runner
+  labels:
+    app.kubernetes.io/name: gitlab-runner
+    app.kubernetes.io/component: ci-cd
+data:
+  config.toml: |
+    # Global settings
+    concurrent = 2
+    check_interval = 3
+    log_level = "info"
+    log_format = "text"
+
+    # Metrics endpoint
+    listen_address = ":9252"
+
+    [session_server]
+      session_timeout = 1800
+
+    # Runners are registered dynamically, but we set defaults here
+    # The entrypoint script will register runners on startup
+
+  # Entrypoint script for runner registration
+  entrypoint.sh: |
+    #!/bin/bash
+    set -e
+
+    echo "Starting GitLab Runner registration..."
+
+    # Check if already registered
+    if [ -f /etc/gitlab-runner/config.toml ] && grep -q "token" /etc/gitlab-runner/config.toml; then
+      echo "Runner already registered, starting..."
+      exec gitlab-runner run --user=gitlab-runner --working-directory=/home/gitlab-runner
+    fi
+
+    # Register the runner
+    gitlab-runner register \
+      --non-interactive \
+      --url "${GITLAB_URL}" \
+      --token "${RUNNER_TOKEN}" \
+      --executor "docker" \
+      --docker-image "docker:24-dind" \
+      --description "${RUNNER_NAME}" \
+      --tag-list "${RUNNER_TAGS}" \
+      --docker-privileged=true \
+      --docker-volumes "/var/run/docker.sock:/var/run/docker.sock" \
+      --docker-volumes "/cache:/cache" \
+      --docker-volumes "${DOCKER_CACHE_DIR}:/var/lib/docker:rw" \
+      --docker-shm-size "256m" \
+      --docker-pull-policy "if-not-present" \
+      --cache-type "s3" \
+      --cache-shared=true \
+      --cache-s3-server-address "" \
+      --cache-s3-bucket-name "" \
+      --cache-s3-insecure=true
+
+    echo "Runner registered successfully!"
+
+    # Start the runner
+    exec gitlab-runner run --user=gitlab-runner --working-directory=/home/gitlab-runner

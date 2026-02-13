@@ -2734,16 +2734,10 @@ async def chat(
                             )
 
                             # Notify frontend that job is queued
-                            yield f"data: {
-                                json.dumps(
-                                    {
-                                        'status': 'processing',
-                                        'detail': f'{code_artifact_type.capitalize()} generation queued',
-                                        'job_id': job_id,
-                                        'artifact_id': artifact_id,
-                                    }
-                                )
-                            }\n\n"
+                            detail_msg = (
+                                f"{code_artifact_type.capitalize()} generation queued"
+                            )
+                            yield f"data: {json.dumps({'status': 'processing', 'detail': detail_msg, 'job_id': job_id, 'artifact_id': artifact_id})}\n\n"
 
                             # Clean response by removing the code block
                             final_answer = clean_response_content(final_answer)

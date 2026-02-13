@@ -1,0 +1,110 @@
+---
+# Docker Build Cache Storage for Raspberry Pi Nodes
+# Enables faster builds by caching Docker layers locally on each Pi
+
+# PV for raspberrypi (node 1)
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: docker-cache-pi1-pv
+  labels:
+    app.kubernetes.io/name: gitlab-runner
+    app.kubernetes.io/component: docker-cache
+    node: raspberrypi
+spec:
+  capacity:
+    storage: 15Gi  # Reserve space on Pi's SD card/storage
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-docker-cache
+  local:
+    path: /var/lib/docker-cache
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - raspberrypi
+---
+# PVC for raspberrypi
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: docker-cache-pi1-pvc
+  namespace: gitlab-runner
+  labels:
+    app.kubernetes.io/name: gitlab-runner
+    app.kubernetes.io/component: docker-cache
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-docker-cache
+  resources:
+    requests:
+      storage: 15Gi
+  volumeName: docker-cache-pi1-pv
+---
+# PV for raspberrypi2 (node 2)
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: docker-cache-pi2-pv
+  labels:
+    app.kubernetes.io/name: gitlab-runner
+    app.kubernetes.io/component: docker-cache
+    node: raspberrypi2
+spec:
+  capacity:
+    storage: 15Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-docker-cache
+  local:
+    path: /var/lib/docker-cache
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - raspberrypi2
+---
+# PVC for raspberrypi2
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: docker-cache-pi2-pvc
+  namespace: gitlab-runner
+  labels:
+    app.kubernetes.io/name: gitlab-runner
+    app.kubernetes.io/component: docker-cache
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-docker-cache
+  resources:
+    requests:
+      storage: 15Gi
+  volumeName: docker-cache-pi2-pv
+---
+# Runner build cache (shared via NFS for artifact caching)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: runner-build-cache-pvc
+  namespace: gitlab-runner
+  labels:
+    app.kubernetes.io/name: gitlab-runner
+    app.kubernetes.io/component: build-cache
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: nfs-shared
+  resources:
+    requests:
+      storage: 10Gi

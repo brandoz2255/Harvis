@@ -177,6 +177,7 @@ services:
       dockerfile: Dockerfile
     container_name: harvis-document-worker
     restart: unless-stopped
+    entrypoint: []
     command: ["python", "workers/document_worker.py"]
     environment:
       DATABASE_URL: "postgresql://pguser:pgpassword@pgsql:5432/database"
