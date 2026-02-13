@@ -169,6 +169,58 @@ services:
     networks:
       - ollama-n8n-network
 
+  # Document Generation Worker (Async Job Processor)
+  # Handles PDF, DOCX, XLSX, PPTX generation in background
+  document-worker:
+    build:
+      context: ./python_back_end
+      dockerfile: Dockerfile
+    container_name: harvis-document-worker
+    restart: unless-stopped
+    command: ["python", "workers/document_worker.py"]
+    environment:
+      DATABASE_URL: "postgresql://pguser:pgpassword@pgsql:5432/database"
+      OLLAMA_URL: "http://ollama:11434"
+      BACKEND_URL: "http://backend:8000"
+      HF_HOME: "/models-cache/huggingface"
+      TRANSFORMERS_CACHE: "/models-cache/huggingface"
+      WHISPER_CACHE: "/models-cache/whisper"
+      ENVIRONMENT: "production"
+      LOG_LEVEL: "INFO"
+      PYTHONUNBUFFERED: "1"
+      ARTIFACT_STORAGE_DIR: "/data/artifacts"
+      WORKER_NAME: "document-worker-docker"
+      # Use local code execution for Docker (no separate containers needed)
+      CODE_EXECUTOR_LOCAL: "true"
+    user: "1001:1001"
+    volumes:
+      - ml-models-cache:/models-cache
+      - artifact_data:/data/artifacts
+      - /tmp:/tmp
+    depends_on:
+      ollama:
+        condition: service_started
+      pgsql:
+        condition: service_healthy
+      backend:
+        condition: service_started
+      artifact-init:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2.0'
+        reservations:
+          cpus: '0.5'
+    networks:
+      - ollama-n8n-network
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import sys; sys.exit(0)'"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
   # PostgreSQL Database with pgvector
   pgsql:
     image: pgvector/pgvector:pg15
@@ -184,6 +236,7 @@ services:
       - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
       - ./python_back_end/artifacts_schema.sql:/docker-entrypoint-initdb.d/artifacts_schema.sql:ro
       - ./python_back_end/artifacts_build_jobs_schema.sql:/docker-entrypoint-initdb.d/artifacts_build_jobs_schema.sql:ro
+      - ./front_end/newjfrontend/db/migrations/001_add_document_jobs.sql:/docker-entrypoint-initdb.d/001_add_document_jobs.sql:ro
     ports:
       - "5432:5432"
     deploy:

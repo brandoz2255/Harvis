@@ -456,6 +456,14 @@ export default function ChatPage() {
         // Message doesn't exist, add it
         merged.push(localMsg)
       } else if (localMsg.artifact || localMsg.audioUrl || localMsg.searchResults || localMsg.reasoning) {
+        // DEBUG: Log artifact merge
+        if (localMsg.artifact) {
+          console.log('🔍 DEBUG - Merging artifact into message:', {
+            messageId: localMsg.id,
+            artifactId: localMsg.artifact.id,
+            artifactType: localMsg.artifact.type,
+          })
+        }
         // Message exists but local version has additional data (artifact, audio, etc.)
         // Merge the data: keep local data, fall back to merged data if local doesn't have it
         merged[existingIndex] = {
@@ -471,6 +479,16 @@ export default function ChatPage() {
         }
       }
     })
+
+    // DEBUG: Log final messages with artifacts
+    const messagesWithArtifacts = merged.filter(m => m.artifact)
+    if (messagesWithArtifacts.length > 0) {
+      console.log('🔍 DEBUG - Final messages with artifacts:', messagesWithArtifacts.map(m => ({
+        id: m.id,
+        artifactId: m.artifact?.id,
+        artifactType: m.artifact?.type,
+      })))
+    }
 
     // Sort by timestamp to maintain chronological order
     return merged.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())
@@ -1022,6 +1040,15 @@ export default function ChatPage() {
           ? data.history[data.history.length - 1]?.content
           : '')
 
+      // DEBUG: Log what we received from backend
+      console.log('🔍 DEBUG - Response data:', {
+        hasArtifact: !!data.artifact,
+        artifactId: data.artifact?.id,
+        artifactType: data.artifact?.type,
+        artifactStatus: data.artifact?.status,
+        assistantId: assistantId,
+      })
+
       // CRITICAL: Use the SAME assistantId we created at the start, not a new one
       // Also preserve the research chain we built during streaming if backend didn't send one
       const existingResearchChain = researchChainMapRef.current.get(assistantId)
@@ -1058,6 +1085,13 @@ export default function ChatPage() {
         setArtifactUpdateTrigger(prev => prev + 1)
         console.log('📦 Updated artifactMapRef for immediate display:', data.artifact.id)
       }
+
+      // DEBUG: Log before setting localMessages
+      console.log('🔍 DEBUG - Setting localMessages with artifact:', {
+        assistantId: assistantId,
+        hasArtifact: !!assistantMessage.artifact,
+        artifactId: assistantMessage.artifact?.id,
+      })
 
       setLocalMessages((prev) =>
         prev.map(msg => msg.id === assistantId ? assistantMessage : msg)
