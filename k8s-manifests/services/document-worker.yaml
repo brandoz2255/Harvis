@@ -7,7 +7,7 @@ metadata:
     app.kubernetes.io/name: harvis-ai
     app.kubernetes.io/component: document-worker
   annotations:
-    description: "Async document generation worker"
+    description: "Async document generation worker - lightweight image (~200MB)"
 spec:
   replicas: 2  # Scale based on load - each worker processes one job at a time
   selector:
@@ -35,19 +35,21 @@ spec:
 
       containers:
         - name: document-worker
-          image: "dulc3/jarvis-backend:v2.28.4"
+          # Lightweight document worker image (~200MB vs 8GB+ backend)
+          # Built from Dockerfile.document-worker
+          image: "dulc3/harvis-document-worker:v2.28.4"
           imagePullPolicy: Always
-          command: ["python", "workers/document_worker.py"]
-          
+          # No command needed - Dockerfile CMD handles it
+
           resources:
             requests:
-              memory: 1Gi
-              cpu: 500m
+              memory: 256Mi
+              cpu: 250m
             limits:
-              memory: 4Gi
+              memory: 2Gi
               cpu: 2000m
               # No GPU needed for document generation
-          
+
           env:
             - name: DATABASE_URL
               valueFrom:
@@ -58,9 +60,18 @@ spec:
             - name: OLLAMA_URL
               value: "http://harvis-ai-merged-backend:11434"
 
+            - name: BACKEND_URL
+              value: "http://harvis-ai-backend.ai-agents.svc.cluster.local:8000"
+
             # Output directory for generated documents
-            - name: ARTIFACTS_DIR
+            - name: ARTIFACT_STORAGE_DIR
               value: "/data/artifacts"
+
+            - name: ENVIRONMENT
+              value: "production"
+
+            - name: LOG_LEVEL
+              value: "INFO"
 
             # Worker-specific settings
             - name: WORKER_NAME
@@ -75,44 +86,38 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-          
-          envFrom:
-            - configMapRef:
-                name: harvis-ai-backend-config
-            - secretRef:
-                name: harvis-ai-backend-secret
-          
+
           volumeMounts:
             - name: artifacts-storage
               mountPath: /data/artifacts
-          
+
           # Health checks
           livenessProbe:
             exec:
               command:
                 - python
                 - -c
-                - "import sys; sys.exit(0)"  # Simple check - worker is running
-            initialDelaySeconds: 30
+                - "import asyncpg; import openpyxl; print('healthy')"
+            initialDelaySeconds: 15
             periodSeconds: 30
-          
+
           readinessProbe:
             exec:
               command:
                 - python
                 - -c
-                - "import asyncpg; import sys; sys.exit(0)"  # Check imports work
-            initialDelaySeconds: 10
+                - "import asyncpg; import openpyxl; print('ready')"
+            initialDelaySeconds: 5
             periodSeconds: 10
-      
+
       volumes:
         - name: artifacts-storage
           persistentVolumeClaim:
             claimName: harvis-artifacts-pvc
-      
+
       # Restart policy
       restartPolicy: Always
-      
+
       # Graceful shutdown
       terminationGracePeriodSeconds: 30
 

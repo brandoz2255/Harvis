@@ -1,0 +1,61 @@
+---
+# ArgoCD Application for Harvis AI
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: harvis-ai
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: gitops
+spec:
+  project: default
+  
+  # Source configuration
+  source:
+    repoURL: https://github.com/dulc3/harvis-aidev.git
+    targetRevision: HEAD
+    path: k8s-manifests/overlays/prod
+    
+    # Use Kustomize for image management
+    kustomize:
+      namePrefix: prod-
+      commonLabels:
+        environment: production
+  
+  # Destination configuration
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: ai-agents
+  
+  # Sync policy - auto-sync enabled for CD
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+      - PruneLast=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+  
+  # Ignore differences for fields that change often
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas
+        - /spec/template/spec/containers/0/image
+    - group: ""
+      kind: Service
+      jsonPointers:
+        - /spec/clusterIP
+  
+  # Revision history limit
+  revisionHistoryLimit: 10

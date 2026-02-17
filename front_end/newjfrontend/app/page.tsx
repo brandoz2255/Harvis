@@ -1136,6 +1136,23 @@ export default function ChatPage() {
         .filter(a => a.type === 'image')
         .map(a => a.data)
 
+      // Include document files (PDF, DOCX) for vision processing
+      const documentFiles = attachments
+        .filter(a => {
+          const mimeType = (a.mimeType || '').toLowerCase()
+          const name = (a.name || '').toLowerCase()
+          return mimeType.includes('pdf') ||
+                 mimeType.includes('word') ||
+                 mimeType.includes('docx') ||
+                 name.endsWith('.pdf') ||
+                 name.endsWith('.docx')
+        })
+        .map(a => ({
+          name: a.name,
+          data: a.data,
+          mimeType: a.mimeType
+        }))
+
       let sessionId = currentSession?.id
       if (!sessionId) {
         const newSession = await createNewChat()
@@ -1149,8 +1166,9 @@ export default function ChatPage() {
           'Authorization': `Bearer ${token}`
         },
         body: JSON.stringify({
-          message: prompt || 'What do you see in this image?',
+          message: prompt || (documentFiles.length > 0 ? 'Please analyze this document.' : 'What do you see in this image?'),
           images: images,
+          files: documentFiles.length > 0 ? documentFiles : undefined,
           history: messages.map(m => ({
             role: m.role,
             content: m.content

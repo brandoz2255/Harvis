@@ -171,36 +171,26 @@ services:
 
   # Document Generation Worker (Async Job Processor)
   # Handles PDF, DOCX, XLSX, PPTX generation in background
+  # Uses lightweight image (~200MB) - no GPU/ML dependencies needed
   document-worker:
     build:
       context: ./python_back_end
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.document-worker
     container_name: harvis-document-worker
     restart: unless-stopped
-    entrypoint: []
-    command: ["python", "workers/document_worker.py"]
     environment:
       DATABASE_URL: "postgresql://pguser:pgpassword@pgsql:5432/database"
       OLLAMA_URL: "http://ollama:11434"
       BACKEND_URL: "http://backend:8000"
-      HF_HOME: "/models-cache/huggingface"
-      TRANSFORMERS_CACHE: "/models-cache/huggingface"
-      WHISPER_CACHE: "/models-cache/whisper"
       ENVIRONMENT: "production"
       LOG_LEVEL: "INFO"
       PYTHONUNBUFFERED: "1"
       ARTIFACT_STORAGE_DIR: "/data/artifacts"
       WORKER_NAME: "document-worker-docker"
-      # Use local code execution for Docker (no separate containers needed)
-      CODE_EXECUTOR_LOCAL: "true"
     user: "1001:1001"
     volumes:
-      - ml-models-cache:/models-cache
       - artifact_data:/data/artifacts
-      - /tmp:/tmp
     depends_on:
-      ollama:
-        condition: service_started
       pgsql:
         condition: service_healthy
       backend:
@@ -210,14 +200,14 @@ services:
     deploy:
       resources:
         limits:
-          memory: 4G
+          memory: 2G
           cpus: '2.0'
         reservations:
-          cpus: '0.5'
+          cpus: '0.25'
     networks:
       - ollama-n8n-network
     healthcheck:
-      test: ["CMD-SHELL", "python -c 'import sys; sys.exit(0)'"]
+      test: ["CMD-SHELL", "python -c 'import asyncpg; import openpyxl; print(\"healthy\")'"]
       interval: 30s
       timeout: 10s
       retries: 3

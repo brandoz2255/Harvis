@@ -341,7 +341,7 @@ export const ChatMessage = React.memo(function ChatMessage({
 
       <div
         className={cn(
-          "flex max-w-3xl flex-col gap-3",
+          "flex max-w-4xl flex-col gap-3",  // 30% wider: was max-w-3xl (48rem), now max-w-4xl (56rem)
           role === "user" && "items-end"
         )}
       >

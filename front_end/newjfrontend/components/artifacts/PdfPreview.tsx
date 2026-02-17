@@ -1,12 +1,18 @@
 "use client"
 
-import React, { useState } from "react"
-import { Document, Page } from "react-pdf"
+import React, { useState, useEffect } from "react"
+import { Document, Page, pdfjs } from "react-pdf"
 import { Loader2, ChevronLeft, ChevronRight, AlertCircle } from "lucide-react"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 
-// react-pdf handles the PDF.js worker internally - no manual setup needed
+// Import react-pdf styles for proper rendering
+import "react-pdf/dist/Page/AnnotationLayer.css"
+import "react-pdf/dist/Page/TextLayer.css"
+
+// Configure PDF.js worker - REQUIRED for react-pdf to work
+// Use CDN worker that matches the pdfjs-dist version in package.json
+pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`
 
 interface PdfPreviewProps {
   downloadUrl: string

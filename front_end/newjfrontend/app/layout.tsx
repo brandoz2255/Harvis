@@ -5,8 +5,17 @@ import { Analytics } from '@vercel/analytics/next'
 import { UserProvider } from '@/lib/auth/UserProvider'
 import './globals.css'
 
-const _geist = Geist({ subsets: ["latin"] });
-const _geistMono = Geist_Mono({ subsets: ["latin"] });
+const geistSans = Geist({
+  subsets: ["latin"],
+  display: 'swap',
+  variable: '--font-geist-sans',
+})
+
+const geistMono = Geist_Mono({
+  subsets: ["latin"],
+  display: 'swap',
+  variable: '--font-geist-mono',
+})
 
 export const metadata: Metadata = {
   title: 'Harvis - AI Assistant',
@@ -37,7 +46,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body className={`font-sans antialiased`}>
+      <body className={`${geistSans.variable} ${geistMono.variable} font-sans antialiased`}>
         <UserProvider>
           {children}
         </UserProvider>

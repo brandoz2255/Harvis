@@ -107,6 +107,45 @@ def extract_document_code(llm_response: str, artifact_type: str) -> Optional[str
     return None
 
 
+def auto_detect_document_type(llm_response: str) -> Optional[Tuple[str, str]]:
+    """
+    Auto-detect document type from Python code in LLM response.
+
+    Returns:
+        Tuple of (artifact_type, code) or None if not detected
+    """
+    if not llm_response:
+        return None
+
+    # Find all Python code blocks
+    pattern = r"```(?:python(?:-\w+)?)\s*([\s\S]*?)```"
+    matches = list(re.finditer(pattern, llm_response, re.IGNORECASE))
+
+    # Import patterns to detect document type
+    type_imports = {
+        "spreadsheet": ["openpyxl", "xlsxwriter", "pandas"],
+        "document": ["docx", "python-docx"],
+        "pdf": ["reportlab", "fpdf", "weasyprint", "PyPDF"],
+        "presentation": ["pptx", "python-pptx"],
+    }
+
+    for match in matches:
+        code = match.group(1).strip()
+        if len(code) < 50:
+            continue
+
+        # Check which type this code matches
+        for doc_type, imports in type_imports.items():
+            if any(imp.lower() in code.lower() for imp in imports):
+                # Additional validation - check for save operation
+                save_patterns = [r"\.save\s*\(", r"OUTPUT_PATH", r"output_path"]
+                if any(re.search(pat, code, re.IGNORECASE) for pat in save_patterns):
+                    logger.info(f"Auto-detected {doc_type} from imports in code")
+                    return (doc_type, code)
+
+    return None
+
+
 def _validate_document_code(code: str, artifact_type: str) -> bool:
     """
     Validate that the code looks like document generation code.

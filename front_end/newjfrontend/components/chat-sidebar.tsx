@@ -28,6 +28,7 @@ import {
 } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
+import { ArtifactViewer } from "./artifacts/ArtifactViewer"
 
 interface Chat {
   id: string
@@ -45,6 +46,7 @@ interface Artifact {
   file_size?: number
   created_at: string
   updated_at: string
+  session_id?: string
 }
 
 interface ChatSidebarProps {
@@ -103,6 +105,10 @@ export function ChatSidebar({
   } | null>(null)
   const [clearMessage, setClearMessage] = useState<string | null>(null)
   const isFetchingStats = useRef(false)
+  
+  // Artifact viewer state
+  const [selectedArtifact, setSelectedArtifact] = useState<Artifact | null>(null)
+  const [isViewerOpen, setIsViewerOpen] = useState(false)
   
   // Minimized state with localStorage persistence
   const [isMinimized, setIsMinimized] = useState(() => {
@@ -242,10 +248,17 @@ export function ChatSidebar({
   const recentChatsMinimized = recentChats.slice(0, 5)
 
   const handleArtifactClick = (artifact: Artifact) => {
-    // Navigate to the artifact's chat session or show it
-    // For now, we can just log it or navigate
-    console.log('Clicked artifact:', artifact)
-    // TODO: Implement navigation to artifact's chat or preview
+    setSelectedArtifact(artifact)
+    setIsViewerOpen(true)
+  }
+
+  const handleCloseViewer = () => {
+    setIsViewerOpen(false)
+    setSelectedArtifact(null)
+  }
+
+  const handleArtifactDeleted = () => {
+    fetchArtifacts()
   }
 
   const formatFileSize = (bytes?: number) => {
@@ -547,6 +560,15 @@ export function ChatSidebar({
           </button>
         </div>
       </div>
+
+      {/* Artifact Viewer */}
+      <ArtifactViewer
+        artifact={selectedArtifact}
+        isOpen={isViewerOpen}
+        onClose={handleCloseViewer}
+        chatSessions={chats.map(chat => ({ id: chat.id, title: chat.title }))}
+        onArtifactDeleted={handleArtifactDeleted}
+      />
     </>
   )
 }

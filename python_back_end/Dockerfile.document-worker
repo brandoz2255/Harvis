@@ -1,0 +1,59 @@
+# Document Generation Worker - Lightweight Image
+# Processes async document generation jobs (PDF, DOCX, XLSX, PPTX)
+# Much smaller than main backend (~200MB vs ~8GB)
+
+FROM python:3.11-slim
+
+# Install system dependencies for document generation
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    libpq-dev \
+    libreoffice-writer \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python packages for document generation and job queue
+RUN pip install --no-cache-dir \
+    # Document generation
+    openpyxl==3.1.2 \
+    python-docx==1.1.0 \
+    reportlab==4.0.4 \
+    python-pptx==0.6.23 \
+    pandas==2.1.4 \
+    fpdf2==2.7.6 \
+    # Database/Job Queue
+    asyncpg==0.29.0 \
+    # HTTP client for callbacks
+    aiohttp==3.9.1 \
+    # Pydantic for models
+    pydantic==2.5.2
+
+# Create app user with same UID as backend for shared volume permissions
+RUN groupadd -r appuser && useradd -r -g appuser -u 1001 appuser
+
+# Create directories with proper ownership
+RUN mkdir -p /data/artifacts /app && \
+    chown -R appuser:appuser /data/artifacts /app && \
+    chmod 750 /data/artifacts
+
+# Set working directory
+WORKDIR /app
+
+# Copy only the files needed for the worker
+# This keeps the image small and focused
+COPY --chown=appuser:appuser job_queue.py ./
+COPY --chown=appuser:appuser workers/ ./workers/
+COPY --chown=appuser:appuser artifacts/ ./artifacts/
+
+# Switch to non-root user
+USER appuser
+
+# Environment variables
+ENV PYTHONPATH=/app \
+    PYTHONUNBUFFERED=1
+
+# Health check - verify Python and imports work
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
+    CMD python -c "import asyncpg; import openpyxl; print('healthy')"
+
+# Run the document worker
+CMD ["python", "workers/document_worker.py"]

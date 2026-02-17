@@ -25,6 +25,7 @@ const SandpackPreview = React.lazy(() => import("./SandpackPreview"))
 const DocxPreview = React.lazy(() => import("./DocxPreview"))
 const PdfPreview = React.lazy(() => import("./PdfPreview"))
 const XlsxPreview = React.lazy(() => import("./XlsxPreview"))
+const PptxPreview = React.lazy(() => import("./PptxPreview"))
 
 // Artifact type icons mapping
 const ARTIFACT_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
@@ -65,7 +66,7 @@ export function ArtifactBlock({ artifact: initialArtifact, className = "" }: Art
   const Icon = ARTIFACT_ICONS[artifact.type] || Code
   const isCodeType = ["website", "app", "code"].includes(artifact.type)
   const isDocumentType = ["document", "spreadsheet", "pdf", "presentation"].includes(artifact.type)
-  const canPreview = isCodeType || ["document", "pdf", "spreadsheet"].includes(artifact.type)
+  const canPreview = isCodeType || ["document", "pdf", "spreadsheet", "presentation"].includes(artifact.type)
   const typeColor = TYPE_COLORS[artifact.type] || "bg-slate-500/20 text-slate-400"
 
   // Poll for status updates when artifact is generating
@@ -379,18 +380,23 @@ export function ArtifactBlock({ artifact: initialArtifact, className = "" }: Art
                   }
                 >
                   {artifact.type === "document" && (
-                    <DocxPreview 
-                      downloadUrl={artifact.downloadUrl || `/api/artifacts/${artifact.id}/download`} 
+                    <DocxPreview
+                      downloadUrl={artifact.downloadUrl || `/api/artifacts/${artifact.id}/download`}
                     />
                   )}
                   {artifact.type === "pdf" && (
-                    <PdfPreview 
-                      downloadUrl={artifact.downloadUrl || `/api/artifacts/${artifact.id}/download`} 
+                    <PdfPreview
+                      downloadUrl={artifact.downloadUrl || `/api/artifacts/${artifact.id}/download`}
                     />
                   )}
                   {artifact.type === "spreadsheet" && (
-                    <XlsxPreview 
-                      downloadUrl={artifact.downloadUrl || `/api/artifacts/${artifact.id}/download`} 
+                    <XlsxPreview
+                      downloadUrl={artifact.downloadUrl || `/api/artifacts/${artifact.id}/download`}
+                    />
+                  )}
+                  {artifact.type === "presentation" && (
+                    <PptxPreview
+                      downloadUrl={artifact.downloadUrl || `/api/artifacts/${artifact.id}/download`}
                     />
                   )}
                 </React.Suspense>
