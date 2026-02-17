@@ -156,6 +156,8 @@ spec:
               mountPath: /models-cache
             - name: images
               mountPath: /app/images
+            - name: artifacts
+              mountPath: /data/artifacts
           command: ["uvicorn"]
           args:
             - "main:app"
@@ -201,6 +203,9 @@ spec:
         - name: images
           persistentVolumeClaim:
             claimName: harvis-images-pvc
+        - name: artifacts
+          persistentVolumeClaim:
+            claimName: harvis-artifacts-pvc
 ---
 apiVersion: v1
 kind: Service
