@@ -19,7 +19,6 @@ spec:
     
     # Use Kustomize for image management
     kustomize:
-      namePrefix: prod-
       commonLabels:
         environment: production
   
