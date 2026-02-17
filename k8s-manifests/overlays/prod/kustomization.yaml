@@ -18,9 +18,11 @@ commonLabels:
 
 # Image updates - these get updated by ArgoCD Image Updater or manually
 images:
+  # Backend is in the merged deployment as second container
   - name: harvis-backend
     newName: dulc3/jarvis-backend
     newTag: v2.28.10
+  # Frontend is its own deployment
   - name: harvis-frontend
     newName: dulc3/jarvis-frontend
     newTag: v2.28.10
@@ -29,8 +31,18 @@ images:
 patches:
   - target:
       kind: Deployment
-      name: harvis-ai-backend
+      name: harvis-ai-merged-ollama-backend
     patch: |
       - op: replace
         path: /spec/replicas
         value: 2
+      - op: replace
+        path: /spec/template/spec/containers/1/image
+        value: dulc3/jarvis-backend:v2.28.10
+  - target:
+      kind: Deployment
+      name: harvis-ai-frontend
+    patch: |
+      - op: replace
+        path: /spec/template/spec/containers/0/image
+        value: dulc3/jarvis-frontend:v2.28.10

@@ -143,6 +143,14 @@ const SOURCE_CONFIG = {
         color: "text-green-400",
         group: "local",
     },
+    // DevOps/IaC sources
+    ansible_playbooks: {
+        label: "Ansible Playbooks",
+        description: "Ansible playbooks, roles, and inventories (YAML with Jinja2)",
+        icon: FileText,
+        color: "text-red-400",
+        group: "devops",
+    },
 }
 
 type SourceKey = keyof typeof SOURCE_CONFIG
@@ -168,6 +176,10 @@ export default function SettingsPage() {
     // Kubernetes topics state
     const [kubernetesTopics, setKubernetesTopics] = useState<string[]>([])
     const [newKubernetesTopic, setNewKubernetesTopic] = useState("")
+
+    // Ansible paths state
+    const [ansiblePaths, setAnsiblePaths] = useState<string[]>([])
+    const [newAnsiblePath, setNewAnsiblePath] = useState("")
 
     // Job state
     const [currentJob, setCurrentJob] = useState<RagJob | null>(null)
@@ -318,6 +330,20 @@ export default function SettingsPage() {
         setKubernetesTopics(prev => prev.filter(t => t !== topic))
     }
 
+    // Add Ansible path
+    const addAnsiblePath = () => {
+        const path = newAnsiblePath.trim()
+        if (path && !ansiblePaths.includes(path)) {
+            setAnsiblePaths(prev => [...prev, path])
+            setNewAnsiblePath("")
+        }
+    }
+
+    // Remove Ansible path
+    const removeAnsiblePath = (path: string) => {
+        setAnsiblePaths(prev => prev.filter(p => p !== path))
+    }
+
     // Start update
     const handleStartUpdate = async () => {
         if (selectedSources.size === 0) return
@@ -331,6 +357,7 @@ export default function SettingsPage() {
                 python_libraries: pythonLibraries.length > 0 ? pythonLibraries : undefined,
                 docker_topics: dockerTopics.length > 0 ? dockerTopics : undefined,
                 kubernetes_topics: kubernetesTopics.length > 0 ? kubernetesTopics : undefined,
+                ansible_paths: ansiblePaths.length > 0 ? ansiblePaths : undefined,
             })
 
             // Get initial job status
@@ -696,6 +723,46 @@ export default function SettingsPage() {
                                         >
                                             {topic}
                                             <button onClick={() => removeKubernetesTopic(topic)} className="hover:text-red-400">
+                                                <X className="h-3 w-3" />
+                                            </button>
+                                        </span>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {/* Ansible Paths Input (shown when ansible_playbooks is selected) */}
+                    {selectedSources.has("ansible_playbooks") && (
+                        <div className="space-y-3 p-4 rounded-lg border border-red-400/30 bg-red-400/5">
+                            <label className="text-sm font-medium flex items-center gap-2">
+                                <FileText className="h-4 w-4 text-red-400" />
+                                Ansible Playbook Directories
+                            </label>
+                            <p className="text-xs text-muted-foreground">
+                                Enter local paths to directories containing Ansible playbooks, roles, or inventories. Supports YAML files with Jinja2 templates.
+                            </p>
+                            <div className="flex gap-2">
+                                <Input
+                                    placeholder="Enter path (e.g., /home/user/ansible/playbooks)..."
+                                    value={newAnsiblePath}
+                                    onChange={(e) => setNewAnsiblePath(e.target.value)}
+                                    onKeyDown={(e) => e.key === "Enter" && addAnsiblePath()}
+                                    className="flex-1"
+                                />
+                                <Button onClick={addAnsiblePath} variant="secondary" size="icon">
+                                    <Plus className="h-4 w-4" />
+                                </Button>
+                            </div>
+                            {ansiblePaths.length > 0 && (
+                                <div className="flex flex-wrap gap-2">
+                                    {ansiblePaths.map((path) => (
+                                        <span
+                                            key={path}
+                                            className="flex items-center gap-1 rounded-full bg-red-400/20 px-3 py-1 text-sm font-mono"
+                                        >
+                                            {path}
+                                            <button onClick={() => removeAnsiblePath(path)} className="hover:text-red-400">
                                                 <X className="h-3 w-3" />
                                             </button>
                                         </span>
