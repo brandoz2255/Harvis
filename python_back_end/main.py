@@ -2699,6 +2699,7 @@ async def chat(
                     try:
                         # Create async job for document generation
                         import asyncpg
+                        from job_queue import get_job_queue
 
                         # Generate IDs
                         job_id = str(uuid.uuid4())
