@@ -166,31 +166,35 @@ log_info "Updating Kustomization for ArgoCD..."
 KUSTOMIZE_FILE="k8s-manifests/overlays/prod/kustomization.yaml"
 
 if [ -f "$KUSTOMIZE_FILE" ]; then
-  # Update image versions
-  sed -i "s/newTag: .*/newTag: $BACKEND_VERSION/g"
-  
-  # Also update document-worker
-  sed -i "s/harvis-document-worker:.*/harvis-document-worker:$BACKEND_VERSION/g" "$KUSTOMIZE_FILE" "$KUSTOMIZE_FILE"
-  
-  # Update patch image references
-  sed -i "s/dulc3\/jarvis-backend:.*/dulc3\/jarvis-backend:$BACKEND_VERSION/g" "$KUSTOMIZE_FILE"
-  sed -i "s/dulc3\/jarvis-frontend:.*/dulc3\/jarvis-frontend:$FRONTEND_VERSION/g" "$KUSTOMIZE_FILE"
-  
+  log_info "Updating image tags in kustomization..."
+
+  # Update all newTag values in images section
+  sed -i "s/newTag: .*/newTag: $BACKEND_VERSION/g" "$KUSTOMIZE_FILE"
+
+  # Update patch image references for backend
+  sed -i "s|dulc3/jarvis-backend:[^ ]*|dulc3/jarvis-backend:$BACKEND_VERSION|g" "$KUSTOMIZE_FILE"
+
+  # Update patch image references for frontend
+  sed -i "s|dulc3/jarvis-frontend:[^ ]*|dulc3/jarvis-frontend:$FRONTEND_VERSION|g" "$KUSTOMIZE_FILE"
+
+  # Update patch image references for document-worker
+  sed -i "s|dulc3/harvis-document-worker:[^ ]*|dulc3/harvis-document-worker:$BACKEND_VERSION|g" "$KUSTOMIZE_FILE"
+
   log_success "Kustomization updated with new image versions"
-  
+
   # Show the changes
   echo ""
   log_info "Changes to $KUSTOMIZE_FILE:"
-  grep -E "(newTag|image:)" "$KUSTOMIZE_FILE" | head -10
-  
+  grep -E "(newTag|value:.*dulc3)" "$KUSTOMIZE_FILE" | head -15
+
   # Commit and push changes
   echo ""
   log_info "Committing changes to Git..."
-  
+
   if git add "$KUSTOMIZE_FILE"; then
-    if git commit -m "chore: update images to v$BACKEND_VERSION [ci]"; then
+    if git commit -m "chore: update images to $BACKEND_VERSION [ci]"; then
       log_success "Changes committed"
-      
+
       log_info "Pushing to GitHub..."
       if git push origin main; then
         log_success "Changes pushed to GitHub - ArgoCD will auto-sync!"
