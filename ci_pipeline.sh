@@ -167,7 +167,10 @@ KUSTOMIZE_FILE="k8s-manifests/overlays/prod/kustomization.yaml"
 
 if [ -f "$KUSTOMIZE_FILE" ]; then
   # Update image versions
-  sed -i "s/newTag: .*/newTag: $BACKEND_VERSION/g" "$KUSTOMIZE_FILE"
+  sed -i "s/newTag: .*/newTag: $BACKEND_VERSION/g"
+  
+  # Also update document-worker
+  sed -i "s/harvis-document-worker:.*/harvis-document-worker:$BACKEND_VERSION/g" "$KUSTOMIZE_FILE" "$KUSTOMIZE_FILE"
   
   # Update patch image references
   sed -i "s/dulc3\/jarvis-backend:.*/dulc3\/jarvis-backend:$BACKEND_VERSION/g" "$KUSTOMIZE_FILE"
