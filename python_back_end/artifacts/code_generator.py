@@ -483,8 +483,27 @@ def _execute_in_docker(
         }
 
 
+def _is_kubectl_available() -> bool:
+    """Check if kubectl is available in the environment."""
+    try:
+        result = subprocess.run(
+            ["kubectl", "version", "--client", "--short"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
 def _execute_in_k8s(script_path: str, output_path: str, timeout: int) -> Dict[str, Any]:
     """Execute code in Kubernetes pod."""
+
+    # Check if kubectl is available
+    if not _is_kubectl_available():
+        logger.warning("kubectl not available, falling back to local execution")
+        return _execute_locally(script_path, timeout)
 
     script_dir = os.path.dirname(script_path)
     output_dir = os.path.dirname(output_path)
