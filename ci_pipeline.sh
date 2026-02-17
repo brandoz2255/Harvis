@@ -160,6 +160,53 @@ else
   exit 1
 fi
 
+# 7. Update Kustomization for ArgoCD
+echo ""
+log_info "Updating Kustomization for ArgoCD..."
+KUSTOMIZE_FILE="k8s-manifests/overlays/prod/kustomization.yaml"
+
+if [ -f "$KUSTOMIZE_FILE" ]; then
+  # Update image versions
+  sed -i "s/newTag: .*/newTag: $BACKEND_VERSION/g" "$KUSTOMIZE_FILE"
+  
+  # Update patch image references
+  sed -i "s/dulc3\/jarvis-backend:.*/dulc3\/jarvis-backend:$BACKEND_VERSION/g" "$KUSTOMIZE_FILE"
+  sed -i "s/dulc3\/jarvis-frontend:.*/dulc3\/jarvis-frontend:$FRONTEND_VERSION/g" "$KUSTOMIZE_FILE"
+  
+  log_success "Kustomization updated with new image versions"
+  
+  # Show the changes
+  echo ""
+  log_info "Changes to $KUSTOMIZE_FILE:"
+  grep -E "(newTag|image:)" "$KUSTOMIZE_FILE" | head -10
+  
+  # Commit and push changes
+  echo ""
+  log_info "Committing changes to Git..."
+  
+  if git add "$KUSTOMIZE_FILE"; then
+    if git commit -m "chore: update images to v$BACKEND_VERSION [ci]"; then
+      log_success "Changes committed"
+      
+      log_info "Pushing to GitHub..."
+      if git push origin main; then
+        log_success "Changes pushed to GitHub - ArgoCD will auto-sync!"
+      else
+        log_error "Push failed - you may need to push manually:"
+        echo "  cd $(pwd)"
+        echo "  git push origin main"
+      fi
+    else
+      log_info "No changes to commit (images already at this version)"
+    fi
+  else
+    log_error "Failed to stage changes"
+  fi
+else
+  log_error "Kustomization file not found: $KUSTOMIZE_FILE"
+  log_info "You may need to update it manually"
+fi
+
 # Summary
 echo ""
 echo "=========================================="
@@ -169,4 +216,6 @@ echo "Backend:  dulc3/jarvis-backend:$BACKEND_VERSION"
 echo "Artifact Executor: dulc3/harvis-artifact-executor:$BACKEND_VERSION"
 echo "Code Executor: dulc3/harvis-code-executor:$BACKEND_VERSION"
 echo "Document Worker: dulc3/harvis-document-worker:$BACKEND_VERSION"
+echo ""
+echo "ArgoCD will auto-deploy the new images within 3 minutes!"
 echo "=========================================="
