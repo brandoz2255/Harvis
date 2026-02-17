@@ -24,19 +24,31 @@ class MoonshotClient:
             "Content-Type": "application/json",
         }
 
-    def _filter_empty_messages(self, messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    def _filter_empty_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         Filter out empty messages that would cause API errors.
         Moonshot API requires all messages to have non-empty content.
+        Handles both string content and multimodal list content (for vision).
         """
         filtered = []
         for msg in messages:
             content = msg.get("content", "")
-            # Skip messages with empty or whitespace-only content
-            if content and content.strip():
-                filtered.append(msg)
+            # Handle multimodal content (list format for vision)
+            if isinstance(content, list):
+                # Keep message if it has any content items
+                if content:
+                    filtered.append(msg)
+                else:
+                    logger.warning(f"Filtering out empty multimodal {msg.get('role', 'unknown')} message")
+            # Handle string content
+            elif isinstance(content, str):
+                if content and content.strip():
+                    filtered.append(msg)
+                else:
+                    logger.warning(f"Filtering out empty {msg.get('role', 'unknown')} message")
             else:
-                logger.warning(f"Filtering out empty {msg.get('role', 'unknown')} message")
+                # Unknown content type, keep it
+                filtered.append(msg)
         return filtered
 
     async def chat_completion(
