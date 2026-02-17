@@ -6,6 +6,7 @@ resources:
   - frontend.yaml
   - nginx.yaml
   - merged-ollama-backend.yaml
+  - document-worker.yaml
 
 # Namespace
 namespace: ai-agents
@@ -17,6 +18,9 @@ images:
     newTag: v2.28.11
   - name: harvis-frontend
     newName: dulc3/jarvis-frontend
+    newTag: v2.28.11
+  - name: harvis-document-worker
+    newName: dulc3/harvis-document-worker
     newTag: v2.28.11
 
 # Patches for production
@@ -38,3 +42,10 @@ patches:
       - op: replace
         path: /spec/template/spec/containers/0/image
         value: dulc3/jarvis-frontend:v2.28.11
+  - target:
+      kind: Deployment
+      name: harvis-document-worker
+    patch: |
+      - op: replace
+        path: /spec/template/spec/containers/0/image
+        value: dulc3/harvis-document-worker:v2.28.11
