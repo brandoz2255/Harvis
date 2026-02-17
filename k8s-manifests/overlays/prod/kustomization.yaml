@@ -3,10 +3,9 @@ kind: Kustomization
 
 # Base resources
 resources:
-  - ../../services/backend-rockyvms.yaml
   - ../../services/frontend.yaml
   - ../../services/nginx.yaml
-  - ../../services/ollama-dedicated.yaml
+  - ../../services/merged-ollama-backend.yaml
 
 # Namespace
 namespace: ai-agents
