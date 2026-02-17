@@ -1,11 +1,11 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-# Base resources
+# Base resources (now local)
 resources:
-  - ../../services/frontend.yaml
-  - ../../services/nginx.yaml
-  - ../../services/merged-ollama-backend.yaml
+  - frontend.yaml
+  - nginx.yaml
+  - merged-ollama-backend.yaml
 
 # Namespace
 namespace: ai-agents
@@ -15,13 +15,11 @@ commonLabels:
   app.kubernetes.io/part-of: harvis-ai
   app.kubernetes.io/managed-by: argocd
 
-# Image updates - these get updated by ArgoCD Image Updater or manually
+# Image updates
 images:
-  # Backend is in the merged deployment as second container
   - name: harvis-backend
     newName: dulc3/jarvis-backend
     newTag: v2.28.10
-  # Frontend is its own deployment
   - name: harvis-frontend
     newName: dulc3/jarvis-frontend
     newTag: v2.28.10
