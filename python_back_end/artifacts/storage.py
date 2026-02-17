@@ -249,7 +249,7 @@ class ArtifactStorage:
                 """
                 SELECT
                     id, artifact_type, title, description, status,
-                    file_size, created_at, updated_at
+                    file_size, created_at, updated_at, session_id
                 FROM artifacts
                 WHERE user_id = $1
                 ORDER BY created_at DESC

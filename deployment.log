@@ -1,0 +1,105 @@
+[0;34m[INFO][0m Starting K8s Deployment Script
+[0;34m[INFO][0m ================================
+[0;34m[INFO][0m Checking prerequisites...
+[0;32m[SUCCESS][0m Prerequisites check passed
+[0;34m[INFO][0m Verifying cluster state...
+=== Node Status ===
+NAME             STATUS   ROLES                  AGE    VERSION        INTERNAL-IP       EXTERNAL-IP   OS-IMAGE                         KERNEL-VERSION                 CONTAINER-RUNTIME
+dulc3-os         Ready    control-plane,master   207d   v1.33.5+k3s1   192.168.4.47      <none>        Arch Linux                       6.18.5-arch1-1                 containerd://2.1.4-k3s1
+raspberrypi      Ready    <none>                 92d    v1.33.5+k3s1   192.168.4.115     <none>        Debian GNU/Linux 12 (bookworm)   6.12.47+rpt-rpi-2712           containerd://2.1.4-k3s1
+raspberrypi2     Ready    <none>                 91d    v1.33.5+k3s1   192.168.4.117     <none>        Debian GNU/Linux 13 (trixie)     6.12.47+rpt-rpi-2712           containerd://2.1.4-k3s1
+rocky1vm.local   Ready    <none>                 114d   v1.33.5+k3s1   192.168.122.194   <none>        Rocky Linux 9.6 (Blue Onyx)      5.14.0-570.52.1.el9_6.x86_64   containerd://2.1.4-k3s1
+rocky2vm.local   Ready    <none>                 114d   v1.33.5+k3s1   192.168.122.40    <none>        Rocky Linux 9.6 (Blue Onyx)      5.14.0-570.52.1.el9_6.x86_64   containerd://2.1.4-k3s1
+rocky3vm.local   Ready    <none>                 114d   v1.33.5+k3s1   192.168.122.50    <none>        Rocky Linux 9.6 (Blue Onyx)      5.14.0-570.52.1.el9_6.x86_64   containerd://2.1.4-k3s1
+
+=== Checking existing deployments ===
+No existing pods found
+[0;32m[SUCCESS][0m Cluster verification complete
+[0;34m[INFO][0m Phase 1: Deploying GitLab Runners to Raspberry Pis...
+[0;34m[INFO][0m Creating gitlab-runner namespace...
+namespace/gitlab-runner created
+[0;34m[INFO][0m Creating GitLab runner RBAC...
+serviceaccount/gitlab-runner created
+clusterrole.rbac.authorization.k8s.io/gitlab-runner created
+clusterrolebinding.rbac.authorization.k8s.io/gitlab-runner created
+role.rbac.authorization.k8s.io/gitlab-runner created
+rolebinding.rbac.authorization.k8s.io/gitlab-runner created
+[0;34m[INFO][0m Creating GitLab runner config...
+configmap/gitlab-runner-config created
+[0;34m[INFO][0m Deploying GitLab runners to Raspberry Pi nodes...
+deployment.apps/gitlab-runner-pi1 created
+deployment.apps/gitlab-runner-pi2 created
+[0;34m[INFO][0m Waiting for GitLab runner pods to be ready...
+timed out waiting for the condition on pods/gitlab-runner-pi1-5b9766b79f-mzxq2
+timed out waiting for the condition on pods/gitlab-runner-pi2-85ffcfc8cc-bxl5z
+[0;32m[SUCCESS][0m GitLab Runners deployed successfully!
+
+NAME                                 READY   STATUS                       RESTARTS   AGE   IP           NODE           NOMINATED NODE   READINESS GATES
+gitlab-runner-pi1-5b9766b79f-mzxq2   0/1     CreateContainerConfigError   0          2m    10.42.2.28   raspberrypi    <none>           <none>
+gitlab-runner-pi2-85ffcfc8cc-bxl5z   0/1     CreateContainerConfigError   0          2m    10.42.5.17   raspberrypi2   <none>           <none>
+
+[1;33m[WARN][0m NOTE: Runners need to be registered with GitLab. Check pod logs for registration instructions.
+[0;34m[INFO][0m Phase 2: Deploying ArgoCD...
+[0;34m[INFO][0m Creating argocd namespace...
+Warning: resource namespaces/argocd is missing the kubectl.kubernetes.io/last-applied-configuration annotation which is required by kubectl apply. kubectl apply should only be used on resources created declaratively by either kubectl create --save-config or kubectl apply. The missing annotation will be patched automatically.
+namespace/argocd configured
+[0;34m[INFO][0m Installing ArgoCD core components...
+customresourcedefinition.apiextensions.k8s.io/applications.argoproj.io created
+customresourcedefinition.apiextensions.k8s.io/appprojects.argoproj.io created
+serviceaccount/argocd-application-controller created
+serviceaccount/argocd-applicationset-controller created
+serviceaccount/argocd-dex-server created
+serviceaccount/argocd-notifications-controller created
+serviceaccount/argocd-redis created
+serviceaccount/argocd-repo-server created
+serviceaccount/argocd-server created
+role.rbac.authorization.k8s.io/argocd-application-controller created
+role.rbac.authorization.k8s.io/argocd-applicationset-controller created
+role.rbac.authorization.k8s.io/argocd-dex-server created
+role.rbac.authorization.k8s.io/argocd-notifications-controller created
+role.rbac.authorization.k8s.io/argocd-redis created
+role.rbac.authorization.k8s.io/argocd-server created
+clusterrole.rbac.authorization.k8s.io/argocd-application-controller created
+clusterrole.rbac.authorization.k8s.io/argocd-applicationset-controller created
+clusterrole.rbac.authorization.k8s.io/argocd-server created
+rolebinding.rbac.authorization.k8s.io/argocd-application-controller created
+rolebinding.rbac.authorization.k8s.io/argocd-applicationset-controller created
+rolebinding.rbac.authorization.k8s.io/argocd-dex-server created
+rolebinding.rbac.authorization.k8s.io/argocd-notifications-controller created
+rolebinding.rbac.authorization.k8s.io/argocd-redis created
+rolebinding.rbac.authorization.k8s.io/argocd-server created
+clusterrolebinding.rbac.authorization.k8s.io/argocd-application-controller created
+clusterrolebinding.rbac.authorization.k8s.io/argocd-applicationset-controller created
+clusterrolebinding.rbac.authorization.k8s.io/argocd-server created
+configmap/argocd-cm created
+configmap/argocd-cmd-params-cm created
+configmap/argocd-gpg-keys-cm created
+configmap/argocd-notifications-cm created
+configmap/argocd-rbac-cm created
+configmap/argocd-ssh-known-hosts-cm created
+configmap/argocd-tls-certs-cm created
+secret/argocd-notifications-secret created
+secret/argocd-secret created
+service/argocd-applicationset-controller created
+service/argocd-dex-server created
+service/argocd-metrics created
+service/argocd-notifications-controller-metrics created
+service/argocd-redis created
+service/argocd-repo-server created
+service/argocd-server created
+service/argocd-server-metrics created
+deployment.apps/argocd-applicationset-controller created
+deployment.apps/argocd-dex-server created
+deployment.apps/argocd-notifications-controller created
+deployment.apps/argocd-redis created
+deployment.apps/argocd-repo-server created
+deployment.apps/argocd-server created
+statefulset.apps/argocd-application-controller created
+networkpolicy.networking.k8s.io/argocd-application-controller-network-policy created
+networkpolicy.networking.k8s.io/argocd-applicationset-controller-network-policy created
+networkpolicy.networking.k8s.io/argocd-dex-server-network-policy created
+networkpolicy.networking.k8s.io/argocd-notifications-controller-network-policy created
+networkpolicy.networking.k8s.io/argocd-redis-network-policy created
+networkpolicy.networking.k8s.io/argocd-repo-server-network-policy created
+networkpolicy.networking.k8s.io/argocd-server-network-policy created
+The CustomResourceDefinition "applicationsets.argoproj.io" is invalid: metadata.annotations: Too long: may not be more than 262144 bytes

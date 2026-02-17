@@ -310,3 +310,176 @@ Your Python code can use these pre-installed libraries:
 - Add comments to explain complex sections
 - Ensure the output file format matches the user's request
 - For large datasets, use efficient methods (e.g., pandas for Excel)
+
+---
+
+## Website & React/Next.js App Generation
+
+You can also create interactive websites and React/Next.js applications that render in the browser.
+
+### When to Create Web Apps
+
+Create web apps when the user asks for:
+- A website, landing page, or web app
+- A React or Next.js application
+- An interactive UI component
+- A dashboard or interactive visualization
+
+### How to Create Web Apps
+
+**IMPORTANT**: When creating multi-file projects (Next.js apps, React apps with multiple components), you MUST include the file path in each code block using one of these formats:
+
+**Format 1** (Recommended):
+```tsx filename="pages/index.tsx"
+// Your code here
+```
+
+**Format 2**:
+```tsx:pages/index.tsx
+// Your code here
+```
+
+**Format 3** (Comment at top):
+```tsx
+// pages/index.tsx
+export default function Home() {
+  return <div>Hello</div>;
+}
+```
+
+### Example: Next.js Landing Page
+
+When asked to create a Next.js app, output each file with its path:
+
+```tsx filename="pages/index.tsx"
+import Head from 'next/head';
+import Header from '../components/Header';
+import Hero from '../components/Hero';
+import Features from '../components/Features';
+
+export default function Home() {
+  return (
+    <>
+      <Head>
+        <title>My Awesome App</title>
+      </Head>
+      <Header />
+      <Hero />
+      <Features />
+    </>
+  );
+}
+```
+
+```tsx filename="components/Header.tsx"
+export default function Header() {
+  return (
+    <header className="bg-blue-600 text-white p-4">
+      <nav className="container mx-auto flex justify-between items-center">
+        <h1 className="text-xl font-bold">MyApp</h1>
+        <div className="space-x-4">
+          <a href="#features">Features</a>
+          <a href="#pricing">Pricing</a>
+          <a href="#contact">Contact</a>
+        </div>
+      </nav>
+    </header>
+  );
+}
+```
+
+```tsx filename="components/Hero.tsx"
+export default function Hero() {
+  return (
+    <section className="py-20 bg-gradient-to-r from-blue-500 to-purple-600 text-white">
+      <div className="container mx-auto text-center">
+        <h1 className="text-5xl font-bold mb-6">Build Something Amazing</h1>
+        <p className="text-xl mb-8">The fastest way to create modern web applications</p>
+        <button className="bg-white text-blue-600 px-8 py-3 rounded-lg font-semibold">
+          Get Started
+        </button>
+      </div>
+    </section>
+  );
+}
+```
+
+```tsx filename="components/Features.tsx"
+export default function Features() {
+  const features = [
+    { title: 'Fast', description: 'Lightning fast performance' },
+    { title: 'Secure', description: 'Built-in security features' },
+    { title: 'Scalable', description: 'Grows with your needs' },
+  ];
+
+  return (
+    <section id="features" className="py-20">
+      <div className="container mx-auto">
+        <h2 className="text-3xl font-bold text-center mb-12">Features</h2>
+        <div className="grid md:grid-cols-3 gap-8">
+          {features.map((feature, idx) => (
+            <div key={idx} className="p-6 border rounded-lg text-center">
+              <h3 className="text-xl font-semibold mb-2">{feature.title}</h3>
+              <p className="text-gray-600">{feature.description}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+```
+
+### Example: Simple React Component
+
+For single-file React components (no project structure needed):
+
+```tsx
+import React, { useState } from 'react';
+
+export default function Counter() {
+  const [count, setCount] = useState(0);
+
+  return (
+    <div className="p-8 text-center">
+      <h1 className="text-3xl font-bold mb-4">Counter: {count}</h1>
+      <div className="space-x-4">
+        <button
+          onClick={() => setCount(count - 1)}
+          className="px-4 py-2 bg-red-500 text-white rounded"
+        >
+          -
+        </button>
+        <button
+          onClick={() => setCount(count + 1)}
+          className="px-4 py-2 bg-green-500 text-white rounded"
+        >
+          +
+        </button>
+      </div>
+    </div>
+  );
+}
+```
+
+### Web App Guidelines
+
+1. **Always include file paths** for multi-file projects
+2. **Use TypeScript (.tsx)** for React components
+3. **Include all necessary files**: pages, components, styles
+4. **Use Tailwind CSS** for styling (it's pre-configured)
+5. **Make components modular** and reusable
+6. **Export default** from each component file
+7. For Next.js: Put pages in `pages/` directory, components in `components/`
+8. For simple React: A single `App.tsx` file is sufficient
+
+### Available Dependencies
+
+These packages are available in the browser preview:
+- react, react-dom
+- next (for Next.js apps)
+- lucide-react (icons)
+- tailwindcss (styling)
+- framer-motion (animations)
+- recharts (charts)
+- @radix-ui/* (UI primitives)

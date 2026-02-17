@@ -47,6 +47,7 @@ interface SandpackPreviewProps {
   dependencies?: Record<string, string>
   showEditor?: boolean
   className?: string
+  framework?: string // 'react' | 'nextjs' | 'vue' etc.
 }
 
 export function SandpackPreview({
@@ -55,7 +56,18 @@ export function SandpackPreview({
   dependencies = {},
   showEditor = false,
   className = "",
+  framework,
 }: SandpackPreviewProps) {
+  // Detect if this is a Next.js app based on file structure
+  const isNextJs = useMemo(() => {
+    if (framework === "nextjs") return true
+    const fileKeys = Object.keys(files).map(k => k.toLowerCase())
+    return (
+      fileKeys.some(k => k.includes("/pages/") || k.includes("/app/") || k === "next.config") ||
+      dependencies?.["next"] !== undefined
+    )
+  }, [files, dependencies, framework])
+
   // Normalize file paths to have leading slashes
   const normalizedFiles = useMemo(() => {
     const result: Record<string, string> = {}
@@ -71,8 +83,44 @@ export function SandpackPreview({
   // Determine the entry file path
   const normalizedEntryFile = entryFile.startsWith("/") ? entryFile : `/${entryFile}`
 
-  // Default index file that imports the entry component
-  const indexFile = `
+  // Build final files object based on framework
+  const sandpackFiles = useMemo(() => {
+    if (isNextJs) {
+      // For Next.js, just use the files as-is (Sandpack handles the setup)
+      const result: Record<string, string> = { ...normalizedFiles }
+
+      // Ensure we have a page file
+      const hasPageFile =
+        result["/pages/index.tsx"] ||
+        result["/pages/index.js"] ||
+        result["/app/page.tsx"] ||
+        result["/app/page.js"]
+
+      if (!hasPageFile) {
+        // Check if there's an App component we can use as the index page
+        if (result["/App.tsx"] || result[normalizedEntryFile]) {
+          const appContent = result["/App.tsx"] || result[normalizedEntryFile]
+          result["/pages/index.tsx"] = appContent
+        } else {
+          // Create a default page
+          result["/pages/index.tsx"] = `
+export default function Home() {
+  return (
+    <div style={{ padding: "20px", fontFamily: "system-ui, sans-serif" }}>
+      <h1>Next.js App</h1>
+      <p>Add your pages to /pages or /app directory.</p>
+    </div>
+  );
+}
+`.trim()
+        }
+      }
+
+      return result
+    }
+
+    // For React apps, create the bootstrap index file
+    const indexFile = `
 import React from "react";
 import { createRoot } from "react-dom/client";
 import App from "${normalizedEntryFile.replace(/\.(tsx|ts|jsx|js)$/, "")}";
@@ -85,8 +133,6 @@ root.render(
 );
 `.trim()
 
-  // Build final files object
-  const sandpackFiles = useMemo(() => {
     const result: Record<string, string> = {
       "/index.tsx": indexFile,
       ...normalizedFiles,
@@ -107,12 +153,31 @@ export default function App() {
     }
 
     return result
-  }, [normalizedFiles, normalizedEntryFile, indexFile])
+  }, [normalizedFiles, normalizedEntryFile, isNextJs])
 
   // Visible files for the editor
   const visibleFiles = useMemo(() => {
-    return Object.keys(normalizedFiles)
-  }, [normalizedFiles])
+    return Object.keys(sandpackFiles).filter(
+      (f) => !f.includes("node_modules") && f !== "/index.tsx"
+    )
+  }, [sandpackFiles])
+
+  // Determine the active file based on framework
+  const activeFile = useMemo(() => {
+    if (isNextJs) {
+      // Prefer pages/index or app/page for Next.js
+      const pageFiles = [
+        "/pages/index.tsx",
+        "/pages/index.js",
+        "/app/page.tsx",
+        "/app/page.js",
+      ]
+      for (const pf of pageFiles) {
+        if (sandpackFiles[pf]) return pf
+      }
+    }
+    return normalizedEntryFile
+  }, [isNextJs, sandpackFiles, normalizedEntryFile])
 
   // Default safe dependencies
   const safeDependencies = useMemo(() => {
@@ -120,6 +185,7 @@ export default function App() {
     const allowedPackages = new Set([
       "react",
       "react-dom",
+      "next",
       "lucide-react",
       "tailwindcss",
       "clsx",
@@ -133,12 +199,21 @@ export default function App() {
       "@radix-ui/react-select",
       "@radix-ui/react-tabs",
       "@radix-ui/react-tooltip",
+      "@radix-ui/react-slot",
+      "tailwind-merge",
     ])
 
-    const filtered: Record<string, string> = {
-      react: "^18.2.0",
-      "react-dom": "^18.2.0",
-    }
+    // Base dependencies based on framework
+    const filtered: Record<string, string> = isNextJs
+      ? {
+          next: "^14.0.0",
+          react: "^18.2.0",
+          "react-dom": "^18.2.0",
+        }
+      : {
+          react: "^18.2.0",
+          "react-dom": "^18.2.0",
+        }
 
     Object.entries(dependencies).forEach(([pkg, version]) => {
       if (allowedPackages.has(pkg)) {
@@ -147,18 +222,21 @@ export default function App() {
     })
 
     return filtered
-  }, [dependencies])
+  }, [dependencies, isNextJs])
+
+  // Select template based on framework
+  const template = isNextJs ? "nextjs" : "react-ts"
 
   return (
     <div className={`rounded-lg overflow-hidden border border-violet-500/20 ${className}`}>
       <SandpackProvider
-        template="react-ts"
+        template={template as "react-ts" | "nextjs"}
         files={sandpackFiles}
         customSetup={{
           dependencies: safeDependencies,
         }}
         options={{
-          activeFile: normalizedEntryFile,
+          activeFile: activeFile,
           visibleFiles: visibleFiles.length > 0 ? visibleFiles : undefined,
           recompileMode: "delayed",
           recompileDelay: 500,

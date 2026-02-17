@@ -43,6 +43,7 @@ SOURCE_EMBEDDING_MODELS = {
     "docker_docs": "qwen3-embedding",  # Dockerfile DSL, Compose YAML, orchestration
     "python_docs": "qwen3-embedding",  # API signatures, type hints, decorators, async patterns
     "nextjs_docs": "qwen3-embedding",  # React patterns, TypeScript APIs, App Router concepts
+    "ansible_playbooks": "qwen3-embedding",  # Complex YAML, Jinja2 templates, role hierarchies
     # Process/General docs → nomic-embed-text (768 dims)
     "local_docs": "nomic-embed-text",  # Playbooks, guidelines, best practices (less code density)
     # Security/Cyber sources → nomic-embed-text (768 dims) - procedural docs
@@ -101,7 +102,7 @@ class UpdateRagRequest(BaseModel):
 
     sources: List[
         str
-    ]  # ["nextjs_docs", "stack_overflow", "github", "python_docs", "docker_docs", "kubernetes_docs"]
+    ]  # ["nextjs_docs", "stack_overflow", "github", "python_docs", "docker_docs", "kubernetes_docs", "ansible_playbooks"]
     keywords: Optional[List[str]] = None
     extra_urls: Optional[List[str]] = None
     python_libraries: Optional[List[str]] = None  # For python_docs source
@@ -110,6 +111,9 @@ class UpdateRagRequest(BaseModel):
     )
     kubernetes_topics: Optional[List[str]] = (
         None  # For kubernetes_docs source (concepts, tasks, networking, etc.)
+    )
+    ansible_paths: Optional[List[str]] = (
+        None  # For ansible_playbooks source (local directories with playbooks/roles)
     )
 
 
@@ -332,6 +336,7 @@ async def start_rag_update(request: UpdateRagRequest):
             python_libraries=request.python_libraries,
             docker_topics=request.docker_topics,
             kubernetes_topics=request.kubernetes_topics,
+            ansible_paths=request.ansible_paths,
         )
 
         # Start background execution

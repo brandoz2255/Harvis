@@ -1,0 +1,33 @@
+---
+# ArgoCD Server LoadBalancer Service
+# Exposes ArgoCD Web UI via MetalLB
+apiVersion: v1
+kind: Service
+metadata:
+  name: argocd-server-lb
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-server
+    app.kubernetes.io/component: server
+  annotations:
+    # Use MetalLB local-pool for external access via nginx proxy
+    metallb.universe.tf/address-pool: local-pool
+spec:
+  type: LoadBalancer
+  # Request specific IP from local-pool (192.168.4.x range)
+  loadBalancerIP: 192.168.4.243
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP
+    - name: https
+      port: 443
+      targetPort: 8080
+      protocol: TCP
+    - name: grpc
+      port: 8443
+      targetPort: 8080
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: argocd-server

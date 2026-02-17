@@ -137,6 +137,80 @@ export function ChatInput({ onSend, isLoading, isResearchMode, selectedModel, se
     }
   }
 
+  // ============== PASTE HANDLING ==============
+  const handlePaste = (e: React.ClipboardEvent) => {
+    const items = e.clipboardData.items
+    const files = e.clipboardData.files
+
+    // Check for image files in clipboard items (includes screenshots)
+    const imageItems: DataTransferItem[] = []
+    
+    if (items) {
+      for (let i = 0; i < items.length; i++) {
+        if (items[i].type.indexOf('image') !== -1) {
+          imageItems.push(items[i])
+        }
+      }
+    }
+
+    // Also check files (for when copying from file manager)
+    const imageFiles: File[] = []
+    if (files) {
+      for (let i = 0; i < files.length; i++) {
+        if (files[i].type.indexOf('image') !== -1) {
+          imageFiles.push(files[i])
+        }
+      }
+    }
+
+    // If we found images, process them
+    if (imageItems.length > 0 || imageFiles.length > 0) {
+      e.preventDefault() // Prevent pasting the image data into the textarea
+      
+      if (!requireVLModel('Image paste')) {
+        return
+      }
+
+      // Process items (screenshots, copied from browser)
+      imageItems.forEach((item) => {
+        const blob = item.getAsFile()
+        if (blob) {
+          processImageBlob(blob, 'pasted-image')
+        }
+      })
+
+      // Process files (copied from file manager)
+      imageFiles.forEach((file) => {
+        if (SUPPORTED_IMAGE_TYPES.includes(file.type)) {
+          processImageBlob(file, file.name)
+        }
+      })
+    }
+    // Text paste will continue normally
+  }
+
+  const processImageBlob = (blob: File, name: string) => {
+    const reader = new FileReader()
+    reader.onload = (event) => {
+      const base64 = event.target?.result as string
+      const img = new Image()
+      img.onload = () => {
+        const attachment: ImageAttachment = {
+          id: Date.now().toString() + Math.random().toString(36).slice(2),
+          type: 'image',
+          data: base64,
+          mimeType: blob.type,
+          name: name,
+          width: img.width,
+          height: img.height
+        }
+        setAttachments(prev => [...prev, attachment])
+      }
+      img.src = base64
+    }
+    reader.readAsDataURL(blob)
+  }
+
   // Check if VL model is required and show error
   const requireVLModel = useCallback((action: string): boolean => {
     if (!isVL) {
@@ -771,12 +845,13 @@ export function ChatInput({ onSend, isLoading, isResearchMode, selectedModel, se
               value={message}
               onChange={(e) => setMessage(e.target.value)}
               onKeyDown={handleKeyDown}
+              onPaste={handlePaste}
               placeholder={
                 isScreensharing
                   ? "Ask about what's on your screen..."
                   : attachments.length > 0
                     ? "Describe what you want to know about this..."
-                    : "Ask anything..."
+                    : "Ask anything... (paste images to analyze)"
               }
               className="min-h-[44px] max-h-[200px] flex-1 resize-none border-0 bg-transparent p-2 text-foreground placeholder:text-muted-foreground focus-visible:ring-0 focus-visible:ring-offset-0"
               rows={1}

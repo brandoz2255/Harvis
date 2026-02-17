@@ -24,6 +24,21 @@ class MoonshotClient:
             "Content-Type": "application/json",
         }
 
+    def _filter_empty_messages(self, messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
+        """
+        Filter out empty messages that would cause API errors.
+        Moonshot API requires all messages to have non-empty content.
+        """
+        filtered = []
+        for msg in messages:
+            content = msg.get("content", "")
+            # Skip messages with empty or whitespace-only content
+            if content and content.strip():
+                filtered.append(msg)
+            else:
+                logger.warning(f"Filtering out empty {msg.get('role', 'unknown')} message")
+        return filtered
+
     async def chat_completion(
         self,
         model: str,
@@ -45,10 +60,13 @@ class MoonshotClient:
         Returns:
             The model's response text
         """
+        # Filter out empty messages (Moonshot API rejects them)
+        filtered_messages = self._filter_empty_messages(messages)
+
         # Kimi models only support temperature=1.0
         payload = {
             "model": model,
-            "messages": messages,
+            "messages": filtered_messages,
             "temperature": 1.0,
             "stream": stream,
         }
@@ -103,10 +121,13 @@ class MoonshotClient:
         Yields:
             Chunks of the response text
         """
+        # Filter out empty messages (Moonshot API rejects them)
+        filtered_messages = self._filter_empty_messages(messages)
+
         # Kimi K2.5 only supports temperature=1.0
         payload = {
             "model": model,
-            "messages": messages,
+            "messages": filtered_messages,
             "temperature": 1.0,
             "stream": True,
         }

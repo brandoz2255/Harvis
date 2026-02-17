@@ -1,0 +1,156 @@
+---
+# ArgoCD Nginx Proxy Configuration
+# Proxies external traffic (192.168.4.242) to ArgoCD server via VPN (10.0.0.x)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-nginx-config
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-nginx
+    app.kubernetes.io/component: proxy
+data:
+  nginx.conf: |
+    events {
+        worker_connections 1024;
+    }
+    
+    http {
+        # Upstream to ArgoCD server via VPN (rocky3 at 10.0.0.7)
+        upstream argocd_server {
+            server 10.0.0.7:31179;
+            keepalive 32;
+        }
+        
+        # Timeout settings for long-running operations
+        proxy_connect_timeout 300s;
+        proxy_send_timeout 300s;
+        proxy_read_timeout 300s;
+        send_timeout 300s;
+        
+        # Allow large file uploads for Helm charts
+        client_max_body_size 100m;
+        
+        server {
+            listen 80;
+            server_name _;
+            
+            # Health check endpoint
+            location /health {
+                access_log off;
+                return 200 "healthy\n";
+                add_header Content-Type text/plain;
+            }
+            
+            # Proxy all traffic to ArgoCD server
+            location / {
+                proxy_pass http://argocd_server;
+                proxy_http_version 1.1;
+                
+                # WebSocket support for ArgoCD streaming
+                proxy_set_header Upgrade $http_upgrade;
+                proxy_set_header Connection "upgrade";
+                
+                # Standard proxy headers
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                
+                # Buffer settings
+                proxy_buffering off;
+                proxy_request_buffering off;
+            }
+        }
+    }
+---
+# ArgoCD Nginx Proxy Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: argocd-nginx-proxy
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-nginx
+    app.kubernetes.io/component: proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: argocd-nginx
+      app.kubernetes.io/component: proxy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: argocd-nginx
+        app.kubernetes.io/component: proxy
+    spec:
+      # Run on dulc3-os (master node with external access)
+      nodeSelector:
+        kubernetes.io/hostname: dulc3-os
+      
+      containers:
+        - name: nginx
+          image: nginx:alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: argocd-nginx-config
+---
+# ArgoCD Nginx Proxy Service (LoadBalancer via MetalLB)
+apiVersion: v1
+kind: Service
+metadata:
+  name: argocd-nginx-proxy
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-nginx
+    app.kubernetes.io/component: proxy
+  annotations:
+    metallb.universe.tf/address-pool: local-pool
+spec:
+  type: LoadBalancer
+  loadBalancerIP: 192.168.4.242
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+    - name: https
+      port: 443
+      targetPort: http
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: argocd-nginx
+    app.kubernetes.io/component: proxy

@@ -139,6 +139,27 @@ else
   exit 1
 fi
 
+# 6. Build Document Worker (Lightweight async job processor)
+log_info "Starting Document Worker Build..."
+BACKEND_DIR="python_back_end"
+
+if [ -d "$BACKEND_DIR" ]; then
+  pushd "$BACKEND_DIR" >/dev/null
+
+  if docker build -f Dockerfile.document-worker -t dulc3/harvis-document-worker:$BACKEND_VERSION .; then
+    log_success "Document Worker built successfully with tag: document-worker:$BACKEND_VERSION"
+  else
+    log_error "Document Worker build failed!"
+    popd >/dev/null
+    exit 1
+  fi
+
+  popd >/dev/null
+else
+  log_error "Backend directory not found: $BACKEND_DIR"
+  exit 1
+fi
+
 # Summary
 echo ""
 echo "=========================================="
@@ -147,4 +168,5 @@ echo "Frontend: dulc3/jarvis-frontend:$FRONTEND_VERSION"
 echo "Backend:  dulc3/jarvis-backend:$BACKEND_VERSION"
 echo "Artifact Executor: dulc3/harvis-artifact-executor:$BACKEND_VERSION"
 echo "Code Executor: dulc3/harvis-code-executor:$BACKEND_VERSION"
+echo "Document Worker: dulc3/harvis-document-worker:$BACKEND_VERSION"
 echo "=========================================="

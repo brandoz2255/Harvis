@@ -2041,6 +2041,414 @@ class GenericDocsFetcher(BaseFetcher):
         return "".join(lines)
 
 
+class AnsiblePlaybookFetcher(BaseFetcher):
+    """
+    Fetcher for Ansible playbooks and roles.
+
+    Handles complex YAML structures with Jinja2 templating,
+    role hierarchies, and variable files. Uses qwen3-embedding
+    for high-dimensional vectors to capture nuanced relationships.
+    """
+
+    SOURCE_NAME = "ansible_playbooks"
+
+    # Default directories to scan for playbooks
+    DEFAULT_PLAYBOOK_DIRS = [
+        "/app/ansible",
+        "/app/playbooks",
+        "/workspaces/aidev/ansible",
+        "./ansible",
+        "./playbooks",
+    ]
+
+    # File patterns to include
+    INCLUDE_PATTERNS = [
+        r"\.ya?ml$",
+    ]
+
+    # Files/directories to exclude
+    EXCLUDE_PATTERNS = [
+        r"node_modules",
+        r"\.git",
+        r"__pycache__",
+        r"\.pyc$",
+        r"\.env",
+        r"\.venv",
+        r"venv/",
+        r"\.tox",
+        r"molecule/",  # Molecule test configs can be noisy
+    ]
+
+    # Ansible-specific file types for metadata
+    ANSIBLE_FILE_TYPES = {
+        "tasks/main": "tasks",
+        "handlers/main": "handlers",
+        "vars/main": "variables",
+        "defaults/main": "defaults",
+        "meta/main": "role_metadata",
+        "playbook": "playbook",
+        "inventory": "inventory",
+        "group_vars": "group_variables",
+        "host_vars": "host_variables",
+    }
+
+    def __init__(self, playbook_dirs: Optional[List[str]] = None):
+        super().__init__()
+        self.playbook_dirs = playbook_dirs or self.DEFAULT_PLAYBOOK_DIRS
+
+    async def fetch(
+        self, keywords: List[str], extra_urls: List[str]
+    ) -> List[RawDocument]:
+        """Fetch Ansible playbooks and roles from local directories."""
+        import os
+        import yaml
+
+        documents = []
+
+        # Find valid playbook directories
+        valid_dirs = []
+        for playbook_dir in self.playbook_dirs:
+            expanded = os.path.expanduser(playbook_dir)
+            if os.path.isdir(expanded):
+                valid_dirs.append(expanded)
+
+        # Also check extra_urls for local paths
+        for path in extra_urls:
+            if os.path.isdir(path):
+                valid_dirs.append(path)
+            elif os.path.isfile(path) and path.endswith(('.yml', '.yaml')):
+                doc = self._read_playbook_file(path, keywords)
+                if doc:
+                    documents.append(doc)
+
+        if not valid_dirs:
+            logger.warning(
+                f"No valid Ansible directories found. Checked: {self.playbook_dirs}"
+            )
+            return documents
+
+        logger.info(f"Scanning Ansible playbook directories: {valid_dirs}")
+
+        for playbook_dir in valid_dirs:
+            # Walk through directory
+            for root, dirs, files in os.walk(playbook_dir):
+                # Filter out excluded directories
+                dirs[:] = [
+                    d
+                    for d in dirs
+                    if not any(
+                        re.search(pattern, d) for pattern in self.EXCLUDE_PATTERNS
+                    )
+                ]
+
+                for filename in files:
+                    filepath = os.path.join(root, filename)
+
+                    # Check if file matches YAML patterns
+                    if not any(
+                        re.search(pattern, filename)
+                        for pattern in self.INCLUDE_PATTERNS
+                    ):
+                        continue
+
+                    # Check exclude patterns
+                    if any(
+                        re.search(pattern, filepath)
+                        for pattern in self.EXCLUDE_PATTERNS
+                    ):
+                        continue
+
+                    # Read and parse playbook file
+                    doc = self._read_playbook_file(filepath, keywords)
+                    if doc:
+                        documents.append(doc)
+
+        logger.info(f"Fetched {len(documents)} Ansible playbook documents")
+        return documents
+
+    def _read_playbook_file(
+        self, filepath: str, keywords: Optional[List[str]] = None
+    ) -> Optional[RawDocument]:
+        """Read and parse an Ansible playbook/role file."""
+        import os
+        import yaml
+
+        try:
+            with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+                raw_content = f.read()
+
+            # Skip empty files
+            if len(raw_content.strip()) < 20:
+                return None
+
+            # Skip very large files
+            if len(raw_content) > 500000:  # 500KB
+                logger.warning(f"Skipping large Ansible file: {filepath}")
+                return None
+
+            # Filter by keywords if provided
+            if keywords:
+                content_lower = raw_content.lower()
+                if not any(kw.lower() in content_lower for kw in keywords):
+                    return None
+
+            # Parse YAML to extract structure (for metadata)
+            parsed_content = None
+            try:
+                parsed_content = yaml.safe_load(raw_content)
+            except yaml.YAMLError:
+                # File may have Jinja2 templates that break YAML parsing
+                # Still include it as raw content
+                pass
+
+            # Determine file type
+            file_type = self._detect_ansible_file_type(filepath, parsed_content)
+
+            # Extract title from filename or content
+            title = self._extract_title(filepath, parsed_content, file_type)
+
+            # Build enriched content with context
+            enriched_content = self._enrich_content(
+                filepath, raw_content, parsed_content, file_type
+            )
+
+            # Create file URL (file:// protocol)
+            file_url = f"file://{os.path.abspath(filepath)}"
+
+            # Determine relative path for metadata
+            rel_path = filepath
+            for playbook_dir in self.playbook_dirs:
+                if filepath.startswith(playbook_dir):
+                    rel_path = filepath[len(playbook_dir):].lstrip("/")
+                    break
+
+            # Extract role name if applicable
+            role_name = self._extract_role_name(filepath)
+
+            return RawDocument(
+                id=self._generate_doc_id(file_url, enriched_content),
+                url=file_url,
+                title=title,
+                content=enriched_content,
+                source=self.SOURCE_NAME,
+                metadata={
+                    "filepath": filepath,
+                    "relative_path": rel_path,
+                    "file_type": file_type,
+                    "role_name": role_name,
+                    "size_bytes": len(raw_content),
+                    "has_jinja2": "{{" in raw_content or "{%" in raw_content,
+                    "modules_used": self._extract_modules(parsed_content) if parsed_content else [],
+                },
+            )
+
+        except Exception as e:
+            logger.error(f"Error reading Ansible file {filepath}: {e}")
+            return None
+
+    def _detect_ansible_file_type(
+        self, filepath: str, parsed_content: Any
+    ) -> str:
+        """Detect the type of Ansible file."""
+        path_lower = filepath.lower()
+
+        # Check path patterns
+        if "/tasks/" in path_lower:
+            return "tasks"
+        elif "/handlers/" in path_lower:
+            return "handlers"
+        elif "/vars/" in path_lower or "/defaults/" in path_lower:
+            return "variables"
+        elif "/meta/" in path_lower:
+            return "role_metadata"
+        elif "/templates/" in path_lower:
+            return "template"
+        elif "/files/" in path_lower:
+            return "static_file"
+        elif "/group_vars/" in path_lower:
+            return "group_variables"
+        elif "/host_vars/" in path_lower:
+            return "host_variables"
+        elif "/inventory" in path_lower or "hosts" in path_lower:
+            return "inventory"
+        elif "/roles/" in path_lower:
+            return "role"
+
+        # Check content structure
+        if parsed_content:
+            if isinstance(parsed_content, list):
+                # Check if it looks like a playbook
+                if parsed_content and isinstance(parsed_content[0], dict):
+                    first_item = parsed_content[0]
+                    if "hosts" in first_item or "tasks" in first_item or "roles" in first_item:
+                        return "playbook"
+                    elif "name" in first_item and any(
+                        k in first_item for k in ["copy", "template", "file", "apt", "yum", "service", "command", "shell"]
+                    ):
+                        return "tasks"
+
+        return "playbook"  # Default
+
+    def _extract_title(
+        self, filepath: str, parsed_content: Any, file_type: str
+    ) -> str:
+        """Extract a meaningful title for the document."""
+        import os
+
+        filename = os.path.basename(filepath)
+        dirname = os.path.basename(os.path.dirname(filepath))
+
+        # For role files, include role name
+        role_name = self._extract_role_name(filepath)
+        if role_name:
+            if file_type == "tasks":
+                return f"Ansible Role: {role_name} - Tasks"
+            elif file_type == "handlers":
+                return f"Ansible Role: {role_name} - Handlers"
+            elif file_type == "variables":
+                return f"Ansible Role: {role_name} - Variables"
+            elif file_type == "role_metadata":
+                return f"Ansible Role: {role_name} - Metadata"
+            else:
+                return f"Ansible Role: {role_name} - {filename}"
+
+        # For playbooks, try to extract name from content
+        if parsed_content and isinstance(parsed_content, list):
+            for item in parsed_content:
+                if isinstance(item, dict) and "name" in item:
+                    return f"Ansible Playbook: {item['name']}"
+
+        # Default to filename
+        return f"Ansible: {dirname}/{filename}"
+
+    def _extract_role_name(self, filepath: str) -> Optional[str]:
+        """Extract role name from filepath."""
+        # Look for /roles/<role_name>/ pattern
+        match = re.search(r"/roles/([^/]+)/", filepath)
+        if match:
+            return match.group(1)
+        return None
+
+    def _enrich_content(
+        self, filepath: str, raw_content: str, parsed_content: Any, file_type: str
+    ) -> str:
+        """Enrich content with context for better embedding."""
+        lines = []
+
+        # Add header with context
+        role_name = self._extract_role_name(filepath)
+        if role_name:
+            lines.append(f"# Ansible Role: {role_name}\n")
+            lines.append(f"## File Type: {file_type}\n")
+        else:
+            lines.append(f"# Ansible {file_type.replace('_', ' ').title()}\n")
+
+        lines.append(f"## Source: {filepath}\n\n")
+
+        # Add structural analysis if parsed
+        if parsed_content:
+            if file_type == "playbook" and isinstance(parsed_content, list):
+                lines.append("### Playbook Structure:\n")
+                for i, play in enumerate(parsed_content):
+                    if isinstance(play, dict):
+                        name = play.get("name", f"Play {i+1}")
+                        hosts = play.get("hosts", "unknown")
+                        lines.append(f"- Play: {name} (hosts: {hosts})\n")
+
+                        # List roles used
+                        roles = play.get("roles", [])
+                        if roles:
+                            lines.append("  Roles:\n")
+                            for role in roles:
+                                role_name = role if isinstance(role, str) else role.get("role", role.get("name", str(role)))
+                                lines.append(f"    - {role_name}\n")
+
+                        # Count tasks
+                        tasks = play.get("tasks", [])
+                        if tasks:
+                            lines.append(f"  Tasks: {len(tasks)}\n")
+
+            elif file_type == "tasks" and isinstance(parsed_content, list):
+                lines.append("### Tasks:\n")
+                modules = set()
+                for task in parsed_content:
+                    if isinstance(task, dict):
+                        name = task.get("name", "Unnamed task")
+                        lines.append(f"- {name}\n")
+                        # Collect module names
+                        for key in task.keys():
+                            if key not in ["name", "when", "register", "tags", "vars", "loop", "with_items", "notify", "become", "become_user", "block", "rescue", "always"]:
+                                modules.add(key)
+                if modules:
+                    lines.append(f"\n### Modules Used: {', '.join(sorted(modules))}\n")
+
+            elif file_type == "variables":
+                if isinstance(parsed_content, dict):
+                    lines.append(f"### Variables Defined: {len(parsed_content)}\n")
+                    for var_name in list(parsed_content.keys())[:20]:  # First 20
+                        lines.append(f"- {var_name}\n")
+                    if len(parsed_content) > 20:
+                        lines.append(f"- ... and {len(parsed_content) - 20} more\n")
+
+        lines.append("\n### Raw Content:\n```yaml\n")
+        lines.append(raw_content)
+        lines.append("\n```\n")
+
+        return "".join(lines)
+
+    def _extract_modules(self, parsed_content: Any) -> List[str]:
+        """Extract Ansible module names used in the content."""
+        modules = set()
+
+        # Known Ansible module names (common ones)
+        known_modules = {
+            "copy", "template", "file", "lineinfile", "blockinfile",
+            "apt", "yum", "dnf", "package", "pip",
+            "service", "systemd", "command", "shell", "raw",
+            "user", "group", "authorized_key",
+            "git", "get_url", "uri", "fetch", "unarchive",
+            "docker_container", "docker_image", "docker_network",
+            "k8s", "kubernetes",
+            "debug", "fail", "assert", "set_fact", "include_vars",
+            "include_tasks", "import_tasks", "include_role", "import_role",
+            "wait_for", "pause", "meta",
+            "firewalld", "ufw", "iptables",
+            "cron", "at", "mount",
+            "mysql_db", "mysql_user", "postgresql_db", "postgresql_user",
+            "aws_s3", "ec2", "ec2_instance", "cloudformation",
+            "azure_rm_virtualmachine", "gcp_compute_instance",
+        }
+
+        def extract_from_tasks(tasks):
+            if not isinstance(tasks, list):
+                return
+            for task in tasks:
+                if isinstance(task, dict):
+                    for key in task.keys():
+                        if key in known_modules or key.startswith(("ansible.", "community.", "amazon.", "azure.", "google.")):
+                            modules.add(key)
+                    # Check block/rescue/always
+                    for sub_key in ["block", "rescue", "always"]:
+                        if sub_key in task:
+                            extract_from_tasks(task[sub_key])
+
+        if isinstance(parsed_content, list):
+            for item in parsed_content:
+                if isinstance(item, dict):
+                    # Playbook with plays
+                    if "tasks" in item:
+                        extract_from_tasks(item["tasks"])
+                    if "pre_tasks" in item:
+                        extract_from_tasks(item["pre_tasks"])
+                    if "post_tasks" in item:
+                        extract_from_tasks(item["post_tasks"])
+                    # Task file directly
+                    else:
+                        extract_from_tasks([item])
+
+        return sorted(list(modules))
+
+
 def get_fetcher_for_config(config) -> BaseFetcher:
     """
     Get fetcher instance based on SourceConfig.
@@ -2077,6 +2485,10 @@ def get_fetcher_for_config(config) -> BaseFetcher:
         return LocalDocsFetcher(
             docs_dirs=config.options.get("docs_dirs", [])
         )
+    elif fetcher_type == "ansible":
+        return AnsiblePlaybookFetcher(
+            playbook_dirs=config.options.get("playbook_dirs", [])
+        )
     else:
         # Use generic fetcher
         return GenericDocsFetcher(
@@ -2112,6 +2524,7 @@ def get_fetcher(source: str, **kwargs) -> BaseFetcher:
         "local_docs": LocalDocsFetcher,
         "docker_docs": DockerDocsFetcher,
         "kubernetes_docs": KubernetesDocsFetcher,
+        "ansible_playbooks": AnsiblePlaybookFetcher,
     }
 
     if source not in fetchers:
@@ -2130,5 +2543,8 @@ def get_fetcher(source: str, **kwargs) -> BaseFetcher:
 
     if source == "kubernetes_docs":
         return KubernetesDocsFetcher(kubernetes_topics=kwargs.get("kubernetes_topics"))
+
+    if source == "ansible_playbooks":
+        return AnsiblePlaybookFetcher(playbook_dirs=kwargs.get("ansible_paths"))
 
     return fetchers[source]()

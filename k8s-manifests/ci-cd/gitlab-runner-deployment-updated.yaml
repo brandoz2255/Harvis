@@ -1,0 +1,193 @@
+---
+# GitLab Runner Deployment - Raspberry Pi 1 (ARM64)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gitlab-runner-pi1
+  namespace: gitlab-runner
+  labels:
+    app.kubernetes.io/name: gitlab-runner
+    app.kubernetes.io/component: ci-cd
+    app.kubernetes.io/instance: pi1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gitlab-runner
+      app.kubernetes.io/instance: pi1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gitlab-runner
+        app.kubernetes.io/instance: pi1
+    spec:
+      serviceAccountName: gitlab-runner
+      # Force scheduling on Raspberry Pi 1
+      nodeSelector:
+        kubernetes.io/hostname: raspberrypi
+
+      containers:
+        - name: gitlab-runner
+          image: gitlab/gitlab-runner:latest
+          imagePullPolicy: Always
+
+          env:
+            # Runner configuration
+            - name: RUNNER_NAME
+              value: "harvis-k8s-pi1-arm64"
+            - name: RUNNER_EXECUTOR
+              value: "kubernetes"
+            - name: RUNNER_TAG_LIST
+              value: "raspberrypi,arm64,ci-cd"
+            - name: REGISTER_NON_INTERACTIVE
+              value: "true"
+
+            # GitLab instance config (from secret)
+            - name: CI_SERVER_URL
+              valueFrom:
+                secretKeyRef:
+                  name: gitlab-runner-secret
+                  key: gitlab-url
+            - name: REGISTRATION_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: gitlab-runner-secret
+                  key: registration-token
+
+          # Mount Docker socket for Docker executor
+          volumeMounts:
+            - name: gitlab-runner-config
+              mountPath: /etc/gitlab-runner
+            - name: runner-cache
+              mountPath: /cache
+
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 250m
+            limits:
+              memory: 1Gi
+              cpu: 1000m
+
+          livenessProbe:
+            exec:
+              command:
+                - /usr/bin/pgrep
+                - gitlab-runner
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+
+          readinessProbe:
+            exec:
+              command:
+                - /usr/bin/pgrep
+                - gitlab-runner
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+
+      volumes:
+        # GitLab Runner configuration
+        - name: gitlab-runner-config
+          configMap:
+            name: gitlab-runner-config
+
+        # Cache for build artifacts
+        - name: runner-cache
+          emptyDir: {}
+
+---
+# GitLab Runner Deployment - Raspberry Pi 2 (ARM64)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gitlab-runner-pi2
+  namespace: gitlab-runner
+  labels:
+    app.kubernetes.io/name: gitlab-runner
+    app.kubernetes.io/component: ci-cd
+    app.kubernetes.io/instance: pi2
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gitlab-runner
+      app.kubernetes.io/instance: pi2
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gitlab-runner
+        app.kubernetes.io/instance: pi2
+    spec:
+      serviceAccountName: gitlab-runner
+      # Force scheduling on Raspberry Pi 2
+      nodeSelector:
+        kubernetes.io/hostname: raspberrypi2
+
+      containers:
+        - name: gitlab-runner
+          image: gitlab/gitlab-runner:latest
+          imagePullPolicy: Always
+
+          env:
+            # Runner configuration
+            - name: RUNNER_NAME
+              value: "harvis-k8s-pi2-arm64"
+            - name: RUNNER_EXECUTOR
+              value: "kubernetes"
+            - name: RUNNER_TAG_LIST
+              value: "raspberrypi2,arm64,ci-cd"
+            - name: REGISTER_NON_INTERACTIVE
+              value: "true"
+
+            # GitLab instance config (from secret)
+            - name: CI_SERVER_URL
+              valueFrom:
+                secretKeyRef:
+                  name: gitlab-runner-secret
+                  key: gitlab-url
+            - name: REGISTRATION_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: gitlab-runner-secret
+                  key: registration-token
+
+          volumeMounts:
+            - name: gitlab-runner-config
+              mountPath: /etc/gitlab-runner
+            - name: runner-cache
+              mountPath: /cache
+
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 250m
+            limits:
+              memory: 1Gi
+              cpu: 1000m
+
+          livenessProbe:
+            exec:
+              command:
+                - /usr/bin/pgrep
+                - gitlab-runner
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+
+          readinessProbe:
+            exec:
+              command:
+                - /usr/bin/pgrep
+                - gitlab-runner
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+
+      volumes:
+        - name: gitlab-runner-config
+          configMap:
+            name: gitlab-runner-config
+        - name: runner-cache
+          emptyDir: {}

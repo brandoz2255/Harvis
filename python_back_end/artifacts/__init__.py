@@ -16,7 +16,22 @@ from .models import (
 )
 from .manifest_parser import extract_artifact_manifest, clean_response_content
 from .storage import ArtifactStorage
-from .routes import artifact_router
+
+# Lazy import for routes - only loaded when accessed
+# This allows workers to import artifacts module without requiring FastAPI
+_artifact_router = None
+
+
+def __getattr__(name):
+    """Lazy import for artifact_router to avoid FastAPI dependency in workers"""
+    global _artifact_router
+    if name == "artifact_router":
+        if _artifact_router is None:
+            from .routes import artifact_router as _router
+            _artifact_router = _router
+        return _artifact_router
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     # Models
@@ -34,6 +49,6 @@ __all__ = [
     "clean_response_content",
     # Storage
     "ArtifactStorage",
-    # Routes
+    # Routes (lazy loaded)
     "artifact_router",
 ]

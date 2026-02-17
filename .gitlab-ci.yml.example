@@ -1,0 +1,278 @@
+# GitLab CI Pipeline for Harvis AI
+# This pipeline builds images and updates ArgoCD manifests automatically
+# Integrates with ArgoCD for GitOps-based deployments
+
+stages:
+  - build
+  - test
+  - push
+  - gitops
+
+variables:
+  # Registry settings
+  DOCKER_REGISTRY: docker.io
+  DOCKER_USER: dulc3
+  FRONTEND_IMAGE: $DOCKER_USER/jarvis-frontend
+  BACKEND_IMAGE: $DOCKER_USER/jarvis-backend
+  ARTIFACT_EXECUTOR_IMAGE: $DOCKER_USER/harvis-artifact-executor
+  CODE_EXECUTOR_IMAGE: $DOCKER_USER/harvis-code-executor
+  DOCUMENT_WORKER_IMAGE: $DOCKER_USER/harvis-document-worker
+  
+  # Git settings
+  GIT_DEPTH: 10
+  
+  # K8s settings
+  KUBE_NAMESPACE: ai-agents
+
+# Cache Docker layers between jobs
+cache:
+  key: ${CI_COMMIT_REF_SLUG}
+  paths:
+    - .docker-cache/
+
+# Build stage - build all Docker images
+build-frontend:
+  stage: build
+  image: docker:24-dind
+  services:
+    - docker:24-dind
+  before_script:
+    - echo $DOCKER_PASSWORD | docker login -u $DOCKER_USER --password-stdin
+  script:
+    - echo "Building frontend image..."
+    - docker build 
+        --cache-from $FRONTEND_IMAGE:latest
+        --build-arg BUILDKIT_INLINE_CACHE=1
+        -t $FRONTEND_IMAGE:$CI_COMMIT_SHA
+        -t $FRONTEND_IMAGE:$CI_COMMIT_REF_SLUG
+        -t $FRONTEND_IMAGE:latest
+        ./front_end/jfrontend
+    - docker save $FRONTEND_IMAGE:$CI_COMMIT_SHA > frontend-image.tar
+  artifacts:
+    paths:
+      - frontend-image.tar
+    expire_in: 1 hour
+
+build-backend:
+  stage: build
+  image: docker:24-dind
+  services:
+    - docker:24-dind
+  before_script:
+    - echo $DOCKER_PASSWORD | docker login -u $DOCKER_USER --password-stdin
+  script:
+    - echo "Building backend image..."
+    - docker build 
+        --cache-from $BACKEND_IMAGE:latest
+        --build-arg BUILDKIT_INLINE_CACHE=1
+        -t $BACKEND_IMAGE:$CI_COMMIT_SHA
+        -t $BACKEND_IMAGE:$CI_COMMIT_REF_SLUG
+        -t $BACKEND_IMAGE:latest
+        ./python_back_end
+    - docker save $BACKEND_IMAGE:$CI_COMMIT_SHA > backend-image.tar
+  artifacts:
+    paths:
+      - backend-image.tar
+    expire_in: 1 hour
+
+build-artifact-executor:
+  stage: build
+  image: docker:24-dind
+  services:
+    - docker:24-dind
+  before_script:
+    - echo $DOCKER_PASSWORD | docker login -u $DOCKER_USER --password-stdin
+  script:
+    - echo "Building artifact executor image..."
+    - docker build 
+        -t $ARTIFACT_EXECUTOR_IMAGE:$CI_COMMIT_SHA
+        -t $ARTIFACT_EXECUTOR_IMAGE:$CI_COMMIT_REF_SLUG
+        -t $ARTIFACT_EXECUTOR_IMAGE:latest
+        ./python_back_end/artifact_executor
+    - docker save $ARTIFACT_EXECUTOR_IMAGE:$CI_COMMIT_SHA > artifact-executor-image.tar
+  artifacts:
+    paths:
+      - artifact-executor-image.tar
+    expire_in: 1 hour
+  only:
+    - main
+    - develop
+
+# Test stage - run tests
+test-frontend:
+  stage: test
+  image: node:20-alpine
+  script:
+    - cd front_end/jfrontend
+    - npm ci
+    - npm run lint
+    - npm run type-check
+    # - npm run test  # Uncomment when tests are ready
+  allow_failure: true
+
+test-backend:
+  stage: test
+  image: python:3.11-slim
+  script:
+    - cd python_back_end
+    - pip install -r requirements.txt
+    - pip install pytest flake8 black
+    - flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+    - black --check . || true
+    # - pytest  # Uncomment when tests are ready
+  allow_failure: true
+
+# Push stage - push images to registry
+push-images:
+  stage: push
+  image: docker:24-dind
+  services:
+    - docker:24-dind
+  before_script:
+    - echo $DOCKER_PASSWORD | docker login -u $DOCKER_USER --password-stdin
+  script:
+    - echo "Loading and pushing images..."
+    # Load images
+    - docker load < frontend-image.tar
+    - docker load < backend-image.tar
+    - docker load < artifact-executor-image.tar || true
+    
+    # Push with commit SHA tag
+    - docker push $FRONTEND_IMAGE:$CI_COMMIT_SHA
+    - docker push $BACKEND_IMAGE:$CI_COMMIT_SHA
+    - docker push $ARTIFACT_EXECUTOR_IMAGE:$CI_COMMIT_SHA || true
+    
+    # Push with branch tag
+    - docker push $FRONTEND_IMAGE:$CI_COMMIT_REF_SLUG
+    - docker push $BACKEND_IMAGE:$CI_COMMIT_REF_SLUG
+    - docker push $ARTIFACT_EXECUTOR_IMAGE:$CI_COMMIT_REF_SLUG || true
+    
+    # Push latest tag only for main branch
+    - |
+      if [ "$CI_COMMIT_BRANCH" == "main" ]; then
+        echo "Pushing latest tags..."
+        docker push $FRONTEND_IMAGE:latest
+        docker push $BACKEND_IMAGE:latest
+        docker push $ARTIFACT_EXECUTOR_IMAGE:latest || true
+      fi
+  dependencies:
+    - build-frontend
+    - build-backend
+    - build-artifact-executor
+  only:
+    - main
+    - develop
+
+# GitOps stage - update ArgoCD manifests
+gitops-update:
+  stage: gitops
+  image: alpine/git:latest
+  before_script:
+    - apk add --no-cache curl jq
+    # Configure git
+    - git config --global user.email "gitlab-ci@harvis.local"
+    - git config --global user.name "GitLab CI"
+    - git remote set-url origin https://oauth2:$GITHUB_TOKEN@github.com/$CI_PROJECT_PATH.git
+  script:
+    - echo "Updating ArgoCD manifests..."
+    
+    # Create version tag (e.g., v2.28.10-14-gabcdef)
+    - VERSION_TAG=$(echo $CI_COMMIT_REF_NAME | sed 's/\//-/g')-$(echo $CI_COMMIT_SHA | cut -c1-7)
+    - echo "Version tag: $VERSION_TAG"
+    
+    # Update kustomization.yaml with new image tags
+    - |
+      cat > k8s-manifests/overlays/prod/kustomization.yaml << 'KUSTOMIZE'
+      apiVersion: kustomize.config.k8s.io/v1beta1
+      kind: Kustomization
+      
+      resources:
+        - ../../services/backend-rockyvms.yaml
+        - ../../services/frontend.yaml
+        - ../../services/nginx.yaml
+        - ../../services/ollama-dedicated.yaml
+      
+      namespace: ai-agents
+      
+      commonLabels:
+        app.kubernetes.io/part-of: harvis-ai
+        app.kubernetes.io/managed-by: argocd
+        ci-commit: $CI_COMMIT_SHA
+      
+      images:
+        - name: harvis-backend
+          newName: $BACKEND_IMAGE
+          newTag: $CI_COMMIT_SHA
+        - name: harvis-frontend
+          newName: $FRONTEND_IMAGE
+          newTag: $CI_COMMIT_SHA
+        - name: harvis-artifact-executor
+          newName: $ARTIFACT_EXECUTOR_IMAGE
+          newTag: $CI_COMMIT_SHA
+      KUSTOMIZE
+    
+    # Also create a version file for tracking
+    - echo $VERSION_TAG > VERSION
+    - echo $CI_COMMIT_SHA > .ci-commit
+    
+    # Commit and push changes back to repo
+    - git add k8s-manifests/overlays/prod/kustomization.yaml VERSION .ci-commit
+    - git commit -m "chore: update images to $VERSION_TAG [ci skip]" || echo "No changes to commit"
+    - git push origin HEAD:$CI_COMMIT_REF_NAME || echo "Nothing to push"
+    
+    - echo "✅ ArgoCD manifests updated!"
+    - echo "ArgoCD will auto-sync within 3 minutes"
+  only:
+    - main
+    - develop
+
+# Optional: Direct K8s deployment (if not using ArgoCD auto-sync)
+deploy:
+  stage: gitops
+  image: bitnami/kubectl:latest
+  script:
+    - echo "Deploying to Kubernetes..."
+    - kubectl config use-context default
+    - kubectl apply -k k8s-manifests/overlays/prod
+    - kubectl rollout status deployment/harvis-ai-backend -n ai-agents --timeout=5m
+    - kubectl rollout status deployment/harvis-ai-frontend -n ai-agents --timeout=5m
+  environment:
+    name: production
+    url: http://192.168.4.241
+  when: manual  # Only run manually for now
+  only:
+    - main
+
+# Cleanup job
+cleanup:
+  stage: gitops
+  image: docker:24-dind
+  when: always
+  script:
+    - rm -f frontend-image.tar backend-image.tar artifact-executor-image.tar
+  dependencies: []
+
+# Pipeline notifications (optional)
+notify-success:
+  stage: gitops
+  image: curlimages/curl:latest
+  script:
+    - |
+      curl -X POST -H 'Content-type: application/json' \
+      --data '{"text":"✅ Harvis AI deployed successfully!\nVersion: '$CI_COMMIT_SHA'\nBranch: '$CI_COMMIT_REF_NAME'"}' \
+      $SLACK_WEBHOOK_URL || true
+  when: on_success
+  only:
+    - main
+
+notify-failure:
+  stage: gitops
+  image: curlimages/curl:latest
+  script:
+    - |
+      curl -X POST -H 'Content-type: application/json' \
+      --data '{"text":"❌ Harvis AI deployment failed!\nPipeline: '$CI_PIPELINE_URL'"}' \
+      $SLACK_WEBHOOK_URL || true
+  when: on_failure
+  only:
+    - main

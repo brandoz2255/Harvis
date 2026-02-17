@@ -58,7 +58,7 @@ from vibecoding import (
     containers_router,
 )
 from vibecoding.core import initialize_vibe_agent
-from file_processing import extract_text_from_file
+from file_processing import extract_text_from_file, convert_file_to_images, is_vision_compatible_file
 
 # Import artifacts module for document/website generation
 from artifacts import (
@@ -68,14 +68,20 @@ from artifacts import (
     ArtifactManifest,
     ArtifactStorage,
 )
+from artifacts.manifest_parser import extract_nextjs_project_from_codeblocks
 from artifacts.code_generator import (
     generate_document_from_code,
     extract_document_code,
     get_output_filename,
+    auto_detect_document_type,
 )
+from artifacts.build_manager import ArtifactBuildManager
 
 # Initialize artifact storage
 artifact_storage = ArtifactStorage()
+
+# Build manager will be initialized in lifespan with db pool
+artifact_build_manager = None
 
 from pydantic import BaseModel
 import torch, soundfile as sf
@@ -473,6 +479,20 @@ async def lifespan(app: FastAPI):
         db_pool = app.state.pg_pool
         chat_history_manager = ChatHistoryManager(db_pool)
         logger.info("✅ ChatHistoryManager initialized")
+
+        # Initialize ArtifactBuildManager for website/app builds
+        global artifact_build_manager
+        try:
+            artifact_build_manager = ArtifactBuildManager(db_pool)
+            app.state.artifact_build_manager = artifact_build_manager
+            # Start the build queue processor (for K8s deployments)
+            if os.environ.get("ENABLE_ARTIFACT_EXECUTOR", "false").lower() == "true":
+                await artifact_build_manager.start_queue_processor()
+                logger.info("✅ ArtifactBuildManager initialized with queue processor")
+            else:
+                logger.info("✅ ArtifactBuildManager initialized (executor disabled - using Sandpack)")
+        except Exception as e:
+            logger.warning(f"⚠️ ArtifactBuildManager initialization failed: {e}")
 
         # Initialize global RAG retriever if available
         if RAG_CORPUS_AVAILABLE:
@@ -1189,12 +1209,14 @@ class VisionChatRequest(BaseModel):
     """Request model for Ollama vision chat (llava, moondream, etc.)"""
 
     message: str
-    images: List[str]  # List of base64 images (data-URI or raw)
+    images: List[str] = []  # List of base64 images (data-URI or raw)
     history: List[Dict[str, Any]] = []
     model: str = "llava"  # Default to llava, user can select any VL model
     session_id: Optional[str] = None
     low_vram: bool = False
     text_only: bool = False
+    # NEW: Support for document files (PDF, DOCX) that will be converted to images
+    files: Optional[List[Dict[str, Any]]] = None  # [{name, data, mimeType}]
 
 
 # VibeCodingRequest moved to vibecoding.commands
@@ -2658,6 +2680,15 @@ async def chat(
                     else:
                         logger.info(f"❌ No {doc_type} code found")
 
+                # Fallback: Auto-detect document type from imports
+                if not code_artifact_type:
+                    logger.info("🔍 Trying auto-detection from imports...")
+                    auto_result = auto_detect_document_type(final_answer)
+                    if auto_result:
+                        code_artifact_type, doc_code = auto_result
+                        code_title = f"Generated {code_artifact_type.capitalize()}"
+                        logger.info(f"✅ Auto-detected {code_artifact_type} from imports")
+
                 if code_artifact_type:
                     # ASYNC JOB-BASED GENERATION
                     logger.info(
@@ -2675,6 +2706,7 @@ async def chat(
 
                         if pool:
                             # Insert job into document_jobs table
+                            # Note: message_id is not available in streaming context, using NULL
                             await pool.execute(
                                 """
                                 INSERT INTO document_jobs (
@@ -2685,7 +2717,7 @@ async def chat(
                                 job_id,
                                 current_user.id,
                                 session_id if session_id else None,
-                                message_id if message_id else None,
+                                None,  # message_id not available in streaming context
                                 code_artifact_type,
                                 "pending",
                                 json.dumps(
@@ -2752,24 +2784,60 @@ async def chat(
                         # Fallback: try synchronous generation
                         logger.warning("⚠️ Falling back to synchronous generation")
                         try:
+                            # Use single artifact_id for both generation AND database record
+                            sync_artifact_id = str(uuid.uuid4())
                             doc_result = generate_document_from_code(
                                 llm_response=final_answer,
                                 artifact_type=code_artifact_type,
                                 title=code_title,
-                                artifact_id=str(uuid.uuid4()),
+                                artifact_id=sync_artifact_id,
                                 use_docker=True,
                             )
-                            if doc_result.get("success"):
-                                artifact_id = str(uuid.uuid4())
+                            if doc_result.get("success") and pool:
+                                # Get mime type based on artifact type
+                                mime_types = {
+                                    "spreadsheet": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                    "document": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                    "pdf": "application/pdf",
+                                    "presentation": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                                }
+                                mime_type = mime_types.get(code_artifact_type, "application/octet-stream")
+
+                                # Save artifact record to database
+                                await pool.execute(
+                                    """
+                                    INSERT INTO artifacts (
+                                        id, user_id, artifact_type, title,
+                                        file_path, file_size, mime_type, status, created_at
+                                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'ready', NOW())
+                                    ON CONFLICT (id) DO UPDATE SET
+                                        status = 'ready',
+                                        file_path = EXCLUDED.file_path,
+                                        file_size = EXCLUDED.file_size
+                                    """,
+                                    sync_artifact_id,
+                                    current_user.id,
+                                    code_artifact_type,
+                                    code_title,
+                                    doc_result.get("output_path"),
+                                    doc_result.get("file_size", 0),
+                                    mime_type,
+                                )
+                                logger.info(f"💾 Saved artifact {sync_artifact_id} to database")
+
                                 artifact_info = {
-                                    "id": artifact_id,
+                                    "id": sync_artifact_id,
                                     "type": code_artifact_type,
                                     "title": code_title,
                                     "status": "ready",
-                                    "download_url": f"/api/artifacts/{artifact_id}/download",
+                                    "download_url": f"/api/artifacts/{sync_artifact_id}/download",
                                     "code": doc_code,
                                 }
                                 final_answer = clean_response_content(final_answer)
+                            elif doc_result.get("success"):
+                                logger.error("❌ Document generated but no database pool to save record")
+                            else:
+                                logger.error(f"❌ Document generation failed: {doc_result.get('error')}")
                         except Exception as fallback_error:
                             logger.error(
                                 f"❌ Fallback generation also failed: {fallback_error}"
@@ -2779,7 +2847,22 @@ async def chat(
 
                 # Fallback: Try JSON manifest approach (for websites/apps and backward compatibility)
                 if not artifact_info:
+                    logger.info("🔍 Attempting artifact detection from response...")
+                    logger.debug(f"Response preview (first 500 chars): {final_answer[:500] if final_answer else 'empty'}")
+
                     artifact_manifest = extract_artifact_manifest(final_answer)
+                    if artifact_manifest:
+                        logger.info(f"✅ JSON manifest found: {artifact_manifest.get('artifact_type')}")
+
+                    # If no manifest found, try to auto-detect Next.js/React project from code blocks
+                    if not artifact_manifest:
+                        logger.info("🔍 No JSON manifest, trying auto-detection from code blocks...")
+                        artifact_manifest = extract_nextjs_project_from_codeblocks(final_answer)
+                        if artifact_manifest:
+                            logger.info(f"✅ Auto-detected Next.js/React project: {len(artifact_manifest.get('content', {}).get('files', {}))} files")
+                        else:
+                            logger.info("❌ No project structure detected in code blocks")
+
                     if artifact_manifest:
                         logger.info(
                             f"📦 Artifact detected: {artifact_manifest.get('artifact_type')} - {artifact_manifest.get('title')}"
@@ -2842,8 +2925,11 @@ async def chat(
                                 logger.info(
                                     f"📦 Created artifact {artifact_id} ({artifact_status})"
                                 )
+                                logger.info(f"📦 Artifact info: {json.dumps(artifact_info)}")
                             except Exception as e:
                                 logger.error(f"Failed to create artifact: {e}")
+                                import traceback
+                                logger.error(f"Traceback: {traceback.format_exc()}")
             except Exception as e:
                 logger.warning(f"Artifact detection failed: {e}")
 
@@ -3166,8 +3252,43 @@ async def vision_chat(
                     logger.error(f"🖼️ Error processing image {idx + 1}: {img_err}")
                     continue
 
+            # NEW: Process document files (PDF, DOCX) and convert to images
+            if req.files:
+                yield f"data: {json.dumps({'status': 'processing', 'detail': f'Converting {len(req.files)} document(s) to images...'})}\n\n"
+
+                for file_idx, file_info in enumerate(req.files):
+                    try:
+                        file_name = file_info.get("name", f"file_{file_idx}")
+                        file_data = file_info.get("data", "")
+                        file_type = file_info.get("mimeType", "") or file_name
+
+                        if not file_data:
+                            logger.warning(f"📄 File {file_name}: No data provided")
+                            continue
+
+                        if not is_vision_compatible_file(file_type):
+                            logger.warning(f"📄 File {file_name}: Type {file_type} not compatible with vision")
+                            continue
+
+                        logger.info(f"📄 Converting {file_name} ({file_type}) to images...")
+                        yield f"data: {json.dumps({'status': 'processing', 'detail': f'Converting {file_name}...'})}\n\n"
+
+                        # Convert file to images
+                        file_images = convert_file_to_images(file_data, file_type)
+
+                        if file_images:
+                            logger.info(f"📄 {file_name}: Converted to {len(file_images)} images")
+                            for img_base64, mime_type in file_images:
+                                processed_images.append(img_base64)
+                        else:
+                            logger.warning(f"📄 {file_name}: No images generated from conversion")
+
+                    except Exception as file_err:
+                        logger.error(f"📄 Error converting file {file_idx}: {file_err}")
+                        continue
+
             if not processed_images:
-                yield f"data: {json.dumps({'status': 'error', 'error': 'No valid images provided'})}\n\n"
+                yield f"data: {json.dumps({'status': 'error', 'error': 'No valid images provided. Please upload images or supported documents (PDF, DOCX).'})}\n\n"
                 return
 
             # Build messages array
