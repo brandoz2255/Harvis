@@ -15,37 +15,40 @@ namespace: ai-agents
 images:
   - name: harvis-backend
     newName: dulc3/jarvis-backend
-    newTag: v2.28.18dbe
+    newTag: v2.29.0
   - name: harvis-frontend
     newName: dulc3/jarvis-frontend
-    newTag: v2.28.18dbe
+    newTag: v2.29.0
   - name: harvis-document-worker
     newName: dulc3/harvis-document-worker
-    newTag: v2.28.18dbe
+    newTag: v2.29.0
 
 # Patches for production
 patches:
   - target:
       kind: Deployment
       name: harvis-ai-merged-ollama-backend
-    patch: |
+    patch: |-
       - op: replace
         path: /spec/replicas
         value: 2
       - op: replace
         path: /spec/template/spec/containers/1/image
-        value: dulc3/jarvis-backend:v2.28.18dbe
+        value: dulc3/jarvis-backend:v2.29.0
+      - op: replace
+        path: /spec/template/spec/initContainers/0/image
+        value: dulc3/jarvis-backend:v2.29.0
   - target:
       kind: Deployment
       name: harvis-ai-frontend
     patch: |
       - op: replace
         path: /spec/template/spec/containers/0/image
-        value: dulc3/jarvis-frontend:v2.28.18dbe
+        value: dulc3/jarvis-frontend:v2.29.0
   - target:
       kind: Deployment
       name: harvis-document-worker
     patch: |
       - op: replace
         path: /spec/template/spec/containers/0/image
-        value: dulc3/harvis-document-worker:v2.28.18dbe
+        value: dulc3/harvis-document-worker:v2.29.0
