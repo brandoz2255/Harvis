@@ -71,6 +71,10 @@ spec:
             - name: LOG_LEVEL
               value: "INFO"
 
+            # Run document generation locally in pod (Docker not available in K8s)
+            - name: CODE_EXECUTOR_LOCAL
+              value: "true"
+
             # Worker-specific settings
             - name: WORKER_NAME
               valueFrom:
