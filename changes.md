@@ -1,5 +1,102 @@
 # Recent Changes and Fixes Documentation
 
+## Date: 2026-02-18 (Part 2)
+
+### Fixed Document Worker Code Extraction Error
+
+#### Problem:
+- Document generation jobs were failing with "No valid document generation code found in response"
+- Error occurred in document worker after job was successfully queued
+- Code was extracted successfully in main.py but failed when worker tried to re-extract it
+- Jobs retried 3 times then failed permanently
+
+#### Root Cause Analysis:
+1. **main.py extracts code**: When LLM generates document code, main.py calls `extract_document_code()` to extract it from markdown code blocks (e.g., ```python-doc)
+2. **Job stores extracted code**: The extracted Python code (without markdown) is stored in the job queue
+3. **Worker re-extracts**: Document worker receives the code and calls `extract_document_code()` again
+4. **Extraction fails**: The function looks for markdown code blocks but the code is already plain Python
+5. **Result**: Worker fails to find "valid" code even though valid code was provided
+
+**Code Flow**:
+```
+main.py: extract_document_code("```python-doc\ncode...\n```") -> "code..."
+        ↓
+Job Queue: stores "code..." (plain Python)
+        ↓
+Worker: extract_document_code("code...") -> None (no markdown blocks found!)
+```
+
+#### Solution Applied:
+**Modified `extract_document_code` in `python_back_end/artifacts/code_generator.py`**:
+- Added check at the beginning of function to validate if input is already valid Python code
+- If `_validate_document_code()` returns True on the raw input, use it directly
+- This handles cases where code was already extracted before being passed to the worker
+
+```python
+# First, check if this is already valid Python code (no markdown blocks)
+if _validate_document_code(llm_response, artifact_type):
+    logger.info(f"Using provided code directly (already extracted)")
+    return llm_response
+```
+
+#### Files Modified:
+- `python_back_end/artifacts/code_generator.py`:
+  - Lines 61-66: Added early return for already-extracted code
+  - Updated docstring to document the new behavior
+
+#### Result/Status:
+- ✅ Document worker now accepts both raw Python code and markdown-wrapped code
+- ✅ Jobs that were failing now process successfully
+- ✅ Backward compatible - still extracts code from markdown when needed
+- ✅ No more "No valid document generation code found" errors for valid code
+
+---
+
+## Date: 2026-02-18 (Part 1)
+
+### Fixed Artifact Dependencies Pydantic Validation Error
+
+#### Problem:
+- Backend was throwing `ValidationError: 1 validation error for ArtifactResponse` when retrieving artifacts
+- Error: `dependencies: Input should be a valid dictionary [type=dict_type, input_value='{}', input_type=str]`
+- Database stored `dependencies` as JSON string but Pydantic model expected dict type
+- Artifacts with dependencies couldn't be retrieved via `/api/artifacts/{artifact_id}` endpoint
+
+#### Root Cause Analysis:
+1. **Database Schema**: PostgreSQL stored `dependencies` column as JSONB
+2. **Pydantic Model**: `ArtifactResponse.dependencies: Optional[Dict[str, str]] = None` expected dict
+3. **Type Mismatch**: asyncpg returned JSON string `'{}'` instead of parsed dict
+4. **Location**: `storage.py:373` passed `artifact.get("dependencies")` directly to Pydantic model
+
+#### Solution Applied:
+**Modified `to_response` method in `python_back_end/artifacts/storage.py`**:
+1. Added `json` import at top of file
+2. Added logic to parse JSON string if dependencies is a string:
+   ```python
+   # Handle dependencies - parse JSON string if needed
+   dependencies = artifact.get("dependencies")
+   if isinstance(dependencies, str):
+       try:
+           dependencies = json.loads(dependencies)
+       except (json.JSONDecodeError, TypeError):
+           dependencies = None
+   ```
+3. Pass parsed `dependencies` to `ArtifactResponse` constructor
+
+#### Files Modified:
+- `python_back_end/artifacts/storage.py`:
+  - Line 4: Added `import json`
+  - Lines 362-368: Added JSON string parsing logic for dependencies field
+  - Line 382: Changed to use parsed `dependencies` variable
+
+#### Result/Status:
+- ✅ Pydantic validation errors resolved for artifacts with dependencies
+- ✅ Artifacts can now be retrieved successfully via API
+- ✅ Backward compatible - handles both dict and string formats
+- ✅ Graceful fallback to None for invalid JSON
+
+---
+
 ## Date: 2026-02-03 (Part 4)
 
 ### Fixed qwen3-embedding Dimension Mismatch - Updated from 2560 to 4096

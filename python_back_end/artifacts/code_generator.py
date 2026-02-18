@@ -50,6 +50,7 @@ def extract_document_code(llm_response: str, artifact_type: str) -> Optional[str
     - ```python-pdf
     - ```python-presentation
     - ```python
+    - Raw Python code (already extracted)
 
     Args:
         llm_response: The LLM's response text
@@ -60,6 +61,14 @@ def extract_document_code(llm_response: str, artifact_type: str) -> Optional[str
     """
     if not llm_response:
         return None
+
+    # First, check if this is already valid Python code (no markdown blocks)
+    # This happens when code was already extracted before being passed to worker
+    if _validate_document_code(llm_response, artifact_type):
+        logger.info(
+            f"Using provided code directly (already extracted, {len(llm_response)} chars)"
+        )
+        return llm_response
 
     # Try type-specific code blocks first
     type_patterns = {
