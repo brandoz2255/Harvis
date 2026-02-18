@@ -1,5 +1,108 @@
 # Recent Changes and Fixes Documentation
 
+## Date: 2026-02-18 (Part 4)
+
+### Fixed Document Worker - Added CODE_EXECUTOR_LOCAL Environment Variable
+
+#### Problem:
+- Document generation jobs were failing with "Docker command not found" error
+- The document worker was trying to spawn Docker containers to execute Python code
+- Docker is not available inside Kubernetes pods (would require mounting host Docker socket)
+- Error: `Docker command not found. Is Docker installed?`
+
+#### Root Cause:
+- Missing `CODE_EXECUTOR_LOCAL` environment variable in ArgoCD overlay manifest
+- When the node affinity was changed to dulc3-os, the environment variable wasn't preserved
+- The code defaults to Docker mode when `CODE_EXECUTOR_LOCAL` is not set
+
+#### Solution Applied:
+**Added `CODE_EXECUTOR_LOCAL=true` environment variable to document worker manifests**:
+
+1. **Base manifest** (`k8s-manifests/services/document-worker.yaml`):
+   - Added `CODE_EXECUTOR_LOCAL: "true"` env var
+   - Document generation now runs locally inside the pod
+
+2. **Overlay manifest** (`k8s-manifests/overlays/prod/document-worker.yaml`):
+   - Added `CODE_EXECUTOR_LOCAL: "true"` env var
+   - ArgoCD deployment now uses local execution mode
+
+**How it works**:
+- When `CODE_EXECUTOR_LOCAL=true`, the code executes Python directly using subprocess
+- Uses libraries already installed in the document-worker image (openpyxl, python-pptx, etc.)
+- No Docker required - runs securely inside the pod container
+- Output files are written directly to the mounted PVC at `/data/artifacts`
+
+#### Files Modified:
+- `k8s-manifests/services/document-worker.yaml`:
+  - Lines 73-75: Added `CODE_EXECUTOR_LOCAL: "true"` environment variable
+  
+- `k8s-manifests/overlays/prod/document-worker.yaml`:
+  - Lines 73-75: Added `CODE_EXECUTOR_LOCAL: "true"` environment variable
+
+#### Deployment Instructions:
+1. Changes are already committed and pushed
+2. Argo CD will automatically sync the changes
+3. Document worker pods will restart with new environment variable
+4. Document generation will now work without Docker
+
+#### Result/Status:
+- ✅ Document worker runs code locally inside pod
+- ✅ No Docker socket mounting required
+- ✅ Libraries already present in image (openpyxl, python-docx, python-pptx, reportlab)
+- ✅ Secure execution within pod boundaries
+- ✅ Files written directly to PVC
+- ✅ Argo CD will auto-deploy changes
+
+---
+
+## Date: 2026-02-18 (Part 3)
+
+### Fixed Document Worker Node Affinity for Artifacts PVC
+
+#### Problem:
+- Document worker pods were being scheduled on rocky VMs (rocky1vm.local, rocky2vm.local, rocky3vm.local)
+- The artifacts PVC is located on `dulc3-os` node only
+- Pods scheduled on other nodes couldn't access the artifacts storage
+- Document generation jobs were failing due to PVC access issues
+
+#### Root Cause:
+- Node affinity was configured to avoid dulc3-os (comment said "NOT on dulc3-os")
+- The artifacts PVC is bound to dulc3-os node specifically
+- ReadWriteOnce (RWO) PVCs can only be mounted on one node at a time
+
+#### Solution Applied:
+**Updated node affinity in document worker manifests**:
+
+1. **Base manifest** (`k8s-manifests/services/document-worker.yaml`):
+   - Changed node affinity to ONLY allow `dulc3-os` node
+   - Removed rocky VMs from allowed nodes list
+   - Updated comment to explain the requirement
+
+2. **Overlay manifest** (`k8s-manifests/overlays/prod/document-worker.yaml`):
+   - Applied same change for production overlay
+   - Ensures production deployment also targets dulc3-os only
+
+#### Files Modified:
+- `k8s-manifests/services/document-worker.yaml`:
+  - Lines 23-34: Updated node affinity to only target `dulc3-os`
+  
+- `k8s-manifests/overlays/prod/document-worker.yaml`:
+  - Lines 23-35: Updated node affinity to only target `dulc3-os`
+
+#### Deployment Instructions:
+1. Commit and push changes to git
+2. Argo CD will automatically detect the changes
+3. Document worker pods will be rescheduled to dulc3-os
+4. Pods will now have access to the artifacts PVC
+
+#### Result/Status:
+- ✅ Document worker will only schedule on dulc3-os node
+- ✅ Pods will have access to artifacts PVC on that node
+- ✅ Document generation can write files to shared storage
+- ✅ Argo CD will auto-sync the changes
+
+---
+
 ## Date: 2026-02-18 (Part 2)
 
 ### Fixed Document Worker Code Extraction Error
