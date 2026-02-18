@@ -1,6 +1,6 @@
 """
 Model Downloader for init container
-Downloads Whisper and ChatterboxTTS models to shared cache directory
+Downloads Whisper, ChatterboxTTS, and Qwen3-TTS models to shared cache directory
 """
 
 import os
@@ -15,6 +15,11 @@ logger = logging.getLogger(__name__)
 
 WHISPER_CACHE_DIR = "/models-cache/whisper"
 HUGGINGFACE_CACHE_DIR = "/models-cache/huggingface"
+
+# Qwen3-TTS model IDs (from Alibaba) - Base models for voice cloning
+QWEN_TTS_MODEL_1_7B = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
+QWEN_TTS_MODEL_0_6B = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
+QWEN_TTS_TOKENIZER = "Qwen/Qwen3-TTS-Tokenizer-12Hz"
 
 
 def setup_cache_directories():
@@ -175,31 +180,191 @@ def download_chatterbox_model():
         return False
 
 
+def check_qwen_tts_model_exists(use_1_7b=True):
+    """Check if Qwen3-TTS model is already downloaded and complete"""
+    model_id = QWEN_TTS_MODEL_1_7B if use_1_7b else QWEN_TTS_MODEL_0_6B
+    model_dir_name = f"models--{model_id.replace('/', '--')}"
+    tokenizer_dir_name = f"models--{QWEN_TTS_TOKENIZER.replace('/', '--')}"
+
+    # Check both direct path and hub subdirectory (HF cache structure)
+    cache_paths = [HUGGINGFACE_CACHE_DIR, os.path.join(HUGGINGFACE_CACHE_DIR, "hub")]
+
+    model_found = False
+    tokenizer_found = False
+
+    for cache_path in cache_paths:
+        model_path = os.path.join(cache_path, model_dir_name)
+        if os.path.exists(model_path):
+            snapshots_dir = os.path.join(model_path, "snapshots")
+            if os.path.exists(snapshots_dir) and os.listdir(snapshots_dir):
+                # Deep validation: check that speech_tokenizer has preprocessor_config.json
+                snapshot_dirs = os.listdir(snapshots_dir)
+                for snap in snapshot_dirs:
+                    snap_path = os.path.join(snapshots_dir, snap)
+                    speech_tok = os.path.join(
+                        snap_path, "speech_tokenizer", "preprocessor_config.json"
+                    )
+                    if os.path.isdir(snap_path) and os.path.exists(speech_tok):
+                        logger.info(
+                            f"✅ Found complete Qwen3-TTS model cache at {model_path}"
+                        )
+                        model_found = True
+                        break
+                if not model_found:
+                    logger.warning(
+                        f"⚠️ Qwen3-TTS model cache at {model_path} is incomplete (missing speech_tokenizer)"
+                    )
+                    # Remove the incomplete cache so it gets re-downloaded
+                    import shutil
+
+                    try:
+                        shutil.rmtree(model_path)
+                        logger.info(f"🗑️ Removed incomplete model cache: {model_path}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Could not remove incomplete cache: {e}")
+
+        tokenizer_path = os.path.join(cache_path, tokenizer_dir_name)
+        if os.path.exists(tokenizer_path):
+            snapshots_dir = os.path.join(tokenizer_path, "snapshots")
+            if os.path.exists(snapshots_dir) and os.listdir(snapshots_dir):
+                logger.info(f"✅ Found Qwen3-TTS tokenizer cache at {tokenizer_path}")
+                tokenizer_found = True
+
+    return model_found and tokenizer_found
+
+
+def download_qwen_tts_model(use_1_7b=True):
+    """Download Qwen3-TTS model and tokenizer if not already present"""
+    model_id = QWEN_TTS_MODEL_1_7B if use_1_7b else QWEN_TTS_MODEL_0_6B
+
+    # First check if model is already cached
+    if check_qwen_tts_model_exists(use_1_7b):
+        logger.info(
+            f"✅ Qwen3-TTS model ({model_id}) already cached - skipping download"
+        )
+        return True
+
+    try:
+        from huggingface_hub import snapshot_download
+
+        # Download the tokenizer first (required by all Qwen3-TTS models)
+        logger.info(f"📥 Downloading Qwen3-TTS tokenizer: {QWEN_TTS_TOKENIZER}...")
+        start_time = time.time()
+        tokenizer_path = snapshot_download(
+            repo_id=QWEN_TTS_TOKENIZER,
+            cache_dir=HUGGINGFACE_CACHE_DIR,
+            local_files_only=False,
+            resume_download=True,
+        )
+        elapsed = time.time() - start_time
+        logger.info(f"✅ Qwen3-TTS tokenizer downloaded in {elapsed:.1f}s")
+        logger.info(f"   Path: {tokenizer_path}")
+
+        # Download the main model
+        logger.info(f"📥 Downloading Qwen3-TTS model: {model_id}...")
+        start_time = time.time()
+
+        # Download with explicit settings to ensure all files including subdirectories are downloaded
+        model_path = snapshot_download(
+            repo_id=model_id,
+            cache_dir=HUGGINGFACE_CACHE_DIR,
+            local_files_only=False,
+            resume_download=True,
+            local_dir_use_symlinks=False,  # Ensure actual files, not symlinks
+        )
+        elapsed = time.time() - start_time
+        logger.info(f"✅ Qwen3-TTS model downloaded in {elapsed:.1f}s")
+        logger.info(f"   Path: {model_path}")
+
+        # Verify speech_tokenizer subdirectory exists and has required files
+        import glob
+
+        speech_tokenizer_paths = glob.glob(
+            os.path.join(model_path, "**/speech_tokenizer"), recursive=True
+        )
+        if speech_tokenizer_paths:
+            for st_path in speech_tokenizer_paths:
+                preprocessor_config = os.path.join(st_path, "preprocessor_config.json")
+                if os.path.exists(preprocessor_config):
+                    logger.info(f"✅ Verified speech_tokenizer at: {st_path}")
+                else:
+                    logger.warning(
+                        f"⚠️ speech_tokenizer missing preprocessor_config.json at: {st_path}"
+                    )
+        else:
+            logger.warning("⚠️ No speech_tokenizer directory found in downloaded model")
+
+        # Verify the download by checking if qwen-tts can import
+        try:
+            from qwen_tts import Qwen3TTSModel
+
+            logger.info("✅ qwen-tts library verified")
+        except ImportError:
+            logger.warning(
+                "⚠️ qwen-tts library not installed - will be needed at runtime"
+            )
+            logger.info("   Install with: pip install qwen-tts")
+
+        return True
+
+    except Exception as e:
+        logger.error(f"❌ Failed to download Qwen3-TTS model: {e}")
+        import traceback
+
+        logger.error(traceback.format_exc())
+        return False
+
+
 def verify_downloads():
     """Verify that all required models are present"""
     logger.info("🔍 Verifying model downloads....")
 
+    # Check environment variables for which models should be verified
+    verify_qwen_tts = os.environ.get("DOWNLOAD_QWEN_TTS", "true").lower() == "true"
+    verify_chatterbox = (
+        os.environ.get("DOWNLOAD_CHATTERBOX_TTS", "true").lower() == "true"
+    )
+
     success = True
 
+    # Verify Whisper
     if not check_whisper_model_exists("base"):
         logger.error("❌ Whisper 'base' model not found after download attempt")
         success = False
+    else:
+        logger.info("✅ Whisper 'base' model verified")
 
     # Check if HuggingFace cache directory has any content
     if os.path.exists(HUGGINGFACE_CACHE_DIR):
         hf_contents = os.listdir(HUGGINGFACE_CACHE_DIR)
         if len(hf_contents) > 0:
             logger.info(f"✅ HuggingFace cache populated with {len(hf_contents)} items")
+
+            # Verify Chatterbox if enabled
+            if verify_chatterbox:
+                if check_chatterbox_model_exists():
+                    logger.info("✅ ChatterboxTTS model verified")
+                else:
+                    logger.warning("⚠️ ChatterboxTTS model not found in cache")
+                    # Don't fail - might be optional
+
+            # Verify Qwen3-TTS if enabled
+            if verify_qwen_tts:
+                if check_qwen_tts_model_exists(
+                    use_1_7b=True
+                ) or check_qwen_tts_model_exists(use_1_7b=False):
+                    logger.info("✅ Qwen3-TTS model verified")
+                else:
+                    logger.warning("⚠️ Qwen3-TTS model not found in cache")
+                    # Don't fail - Qwen3-TTS is optional
         else:
-            logger.error(
-                "❌ ChatterboxTTS model not found - HuggingFace cache is empty"
-            )
-            success = False
+            if verify_chatterbox or verify_qwen_tts:
+                logger.warning(
+                    "⚠️ HuggingFace cache is empty - TTS models may not be available"
+                )
     else:
-        logger.error(
-            "❌ ChatterboxTTS model not found - HuggingFace cache directory doesn't exist"
-        )
-        success = False
+        if verify_chatterbox or verify_qwen_tts:
+            logger.warning("⚠️ HuggingFace cache directory doesn't exist")
 
     return success
 
@@ -257,14 +422,30 @@ def main():
     logger.info("🚀 Starting model download process...")
     logger.info(f"👤 Process running as UID: {os.getuid()}, GID: {os.getgid()}")
 
+    # Check environment variable to determine which TTS models to download
+    download_qwen_tts = os.environ.get("DOWNLOAD_QWEN_TTS", "true").lower() == "true"
+    download_chatterbox = (
+        os.environ.get("DOWNLOAD_CHATTERBOX_TTS", "true").lower() == "true"
+    )
+
     try:
         setup_cache_directories()
 
         # Check if models are already cached - if so, skip everything
         whisper_cached = check_whisper_model_exists("base")
-        chatterbox_cached = check_chatterbox_model_exists()
+        chatterbox_cached = (
+            check_chatterbox_model_exists() if download_chatterbox else True
+        )
+        # Check BOTH 1.7B (GPU) and 0.6B (CPU fallback) models
+        qwen_1_7b_cached = (
+            check_qwen_tts_model_exists(use_1_7b=True) if download_qwen_tts else True
+        )
+        qwen_0_6b_cached = (
+            check_qwen_tts_model_exists(use_1_7b=False) if download_qwen_tts else True
+        )
+        qwen_tts_cached = qwen_1_7b_cached and qwen_0_6b_cached
 
-        if whisper_cached and chatterbox_cached:
+        if whisper_cached and chatterbox_cached and qwen_tts_cached:
             logger.info("✅ All models already cached - skipping download")
             logger.info("✅ Init container completed successfully")
             sys.exit(0)
@@ -277,13 +458,37 @@ def main():
         else:
             logger.info("✅ Whisper model already cached")
 
-        # Download Chatterbox if needed
-        if not chatterbox_cached:
-            if not download_chatterbox_model():
-                logger.error("❌ ChatterboxTTS model download failed")
-                sys.exit(1)
+        # Download Chatterbox if needed and enabled
+        if download_chatterbox:
+            if not chatterbox_cached:
+                if not download_chatterbox_model():
+                    logger.error("❌ ChatterboxTTS model download failed")
+                    sys.exit(1)
+            else:
+                logger.info("✅ ChatterboxTTS model already cached")
         else:
-            logger.info("✅ ChatterboxTTS model already cached")
+            logger.info(
+                "ℹ️ ChatterboxTTS download disabled via DOWNLOAD_CHATTERBOX_TTS=false"
+            )
+
+        # Download Qwen TTS if needed and enabled
+        if download_qwen_tts:
+            if not qwen_tts_cached:
+                # Download 1.7B (primary GPU model)
+                if not download_qwen_tts_model(use_1_7b=True):
+                    logger.warning("⚠️ Qwen3-TTS 1.7B download failed")
+                    logger.warning("⚠️ Continuing without Qwen3-TTS 1.7B")
+
+                # Also download 0.6B (used for CPU fallback when GPU OOM)
+                if not check_qwen_tts_model_exists(use_1_7b=False):
+                    logger.info("📥 Downloading Qwen3-TTS 0.6B (CPU fallback model)...")
+                    if not download_qwen_tts_model(use_1_7b=False):
+                        logger.warning("⚠️ Qwen3-TTS 0.6B download failed")
+                        logger.warning("⚠️ CPU fallback TTS will not be available")
+            else:
+                logger.info("✅ Qwen TTS model already cached")
+        else:
+            logger.info("ℹ️ Qwen TTS download disabled via DOWNLOAD_QWEN_TTS=false")
 
         if not verify_downloads():
             logger.error("❌ Model verification failed")
@@ -300,7 +505,6 @@ def main():
             )
 
         logger.info("✅ All models downloaded and verified successfully")
-        logger.info("✅ Init container completed successfully")
         logger.info("✅ Init container completed successfully")
 
         sys.exit(0)

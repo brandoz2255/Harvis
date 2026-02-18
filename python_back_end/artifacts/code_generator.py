@@ -169,6 +169,20 @@ def _validate_document_code(code: str, artifact_type: str) -> bool:
     if not code or len(code) < 50:
         return False
 
+    # Check for markdown code block markers - code should NOT have these
+    markdown_markers = [
+        "```",
+        "```python",
+        "```python-doc",
+        "```python-spreadsheet",
+        "```python-pdf",
+        "```python-presentation",
+    ]
+    for marker in markdown_markers:
+        if marker in code:
+            logger.warning(f"Code contains markdown marker: {marker}")
+            return False
+
     # Check for required imports based on type
     required_imports = {
         "spreadsheet": ["openpyxl"],
@@ -369,7 +383,7 @@ def execute_document_code(
         # Check if output was created
         if result["success"] and os.path.exists(output_path):
             file_size = os.path.getsize(output_path)
-            result["output_path"] = output_path
+            result["file_path"] = output_path
             result["file_size"] = file_size
             logger.info(f"Successfully generated {output_filename} ({file_size} bytes)")
         elif result["success"]:
@@ -384,7 +398,7 @@ def execute_document_code(
         return {
             "success": False,
             "error": str(e),
-            "output_path": None,
+            "file_path": None,
             "file_size": 0,
         }
 
@@ -673,6 +687,17 @@ def get_output_filename(artifact_type: str, title: str) -> str:
     return f"{safe_title}{ext}"
 
 
+def get_mime_type(artifact_type: str) -> str:
+    """Get proper MIME type for artifact type."""
+    mime_types = {
+        "spreadsheet": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "document": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "pdf": "application/pdf",
+        "presentation": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    }
+    return mime_types.get(artifact_type, "application/octet-stream")
+
+
 # Convenience function for main.py
 def generate_document_from_code(
     llm_response: str,
@@ -709,9 +734,15 @@ def generate_document_from_code(
     output_filename = get_output_filename(artifact_type, title)
 
     # Execute code
-    return execute_document_code(
+    result = execute_document_code(
         code=code,
         artifact_id=artifact_id,
         output_filename=output_filename,
         use_docker=use_docker,
     )
+
+    # Include artifact_id and mime_type in result for worker to use
+    result["artifact_id"] = artifact_id
+    result["mime_type"] = get_mime_type(artifact_type)
+
+    return result

@@ -82,8 +82,10 @@ async def process_document_job(job: Job):
         doc_type = job_data.get("document_type")
         title = job_data.get("title")
         user_id = job_data.get("user_id")
+        # Use artifact_id from job data (created by main.py) - DO NOT create new UUID!
+        artifact_id = job_data.get("artifact_id") or str(uuid.uuid4())
 
-        logger.info(f"📄 Processing document job: {document_job_id} ({doc_type})")
+        logger.info(f"📄 Processing document job: {document_job_id} ({doc_type}) for artifact {artifact_id}")
 
         # Update job status to processing
         await update_document_job(pool, document_job_id, "processing")
@@ -93,7 +95,7 @@ async def process_document_job(job: Job):
             llm_response=code,
             artifact_type=doc_type,
             title=title,
-            artifact_id=str(uuid.uuid4()),
+            artifact_id=artifact_id,
             use_docker=True,
         )
 

@@ -231,17 +231,32 @@ class JobQueue:
         return None
 
     async def _complete_job(self, job_id: str, result: Dict[str, Any] = None):
-        """Mark job as completed"""
+        """Mark job as completed and store result in data field"""
         async with self.pool.acquire() as conn:
+            if result:
+                # Update job data with result before archiving
+                await conn.execute(
+                    f"""
+                    UPDATE {self.schema}.job
+                    SET data = data || $2::jsonb,
+                        state = 'completed',
+                        completed_at = NOW(),
+                        updated_at = NOW()
+                    WHERE id = $1
+                    """,
+                    job_id,
+                    json.dumps(result),
+                )
+
             # Move to archive
             await conn.execute(
                 f"""
                 WITH archived AS (
-                    DELETE FROM {self.schema}.job 
+                    DELETE FROM {self.schema}.job
                     WHERE id = $1
                     RETURNING *
                 )
-                INSERT INTO {self.schema}.archive 
+                INSERT INTO {self.schema}.archive
                 SELECT *, NOW() as archived_at FROM archived
             """,
                 job_id,
@@ -403,3 +418,176 @@ async def shutdown_job_queue():
     if _job_queue:
         await _job_queue.stop()
         _job_queue = None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TTS and Whisper Job Handlers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+async def process_tts_job(job: Job):
+    """
+    Process TTS generation job
+    """
+    import tempfile
+    import soundfile as sf
+    from model_manager import generate_speech_unified
+
+    data = job.data
+    text = data.get("text", "")
+    voice_id = data.get("voice_id")
+    tts_engine = data.get("tts_engine", "qwen")
+    user_id = data.get("user_id")
+
+    logger.info(f"🎙️ Processing TTS job {job.id} for user {user_id}")
+
+    try:
+        # Generate speech using unified TTS
+        audio_prompt = voice_id if voice_id and os.path.exists(voice_id) else None
+
+        sr, wav = generate_speech_unified(
+            text=text,
+            engine=tts_engine,
+            audio_prompt=audio_prompt,
+            temperature=0.5,
+            auto_unload=True,  # Unload after generation to free memory
+        )
+
+        if sr is None or wav is None:
+            raise Exception("TTS generation failed - no audio produced")
+
+        # Save audio file
+        filename = f"tts_{job.id}_{uuid.uuid4().hex[:8]}.wav"
+        filepath = os.path.join(tempfile.gettempdir(), filename)
+        sf.write(filepath, wav, sr)
+
+        audio_path = f"/api/audio/{filename}"
+
+        # Calculate processing time (handle timezone-aware vs naive datetimes)
+        processing_time = None
+        if job.created_at:
+            try:
+                from datetime import timezone
+
+                now = datetime.now(timezone.utc)
+                created = job.created_at
+                if created.tzinfo is None:
+                    # Make naive datetime timezone-aware
+                    created = created.replace(tzinfo=timezone.utc)
+                processing_time = (now - created).total_seconds()
+            except Exception:
+                processing_time = None
+
+        result = {
+            "status": "completed",
+            "audio_path": audio_path,
+            "tts_engine": tts_engine,
+            "text_length": len(text),
+            "processing_time": processing_time,
+        }
+
+        logger.info(f"✅ TTS job {job.id} completed. Audio: {audio_path}")
+        await job.done(result)
+
+    except Exception as e:
+        logger.error(f"❌ TTS job {job.id} failed: {e}")
+        await job.fail(str(e))
+
+
+async def process_whisper_job(job: Job):
+    """
+    Process Whisper transcription job
+    """
+    from model_manager import transcribe_with_whisper_optimized
+
+    data = job.data
+    audio_path = data.get("audio_path")
+    user_id = data.get("user_id")
+
+    logger.info(f"🎤 Processing Whisper job {job.id} for user {user_id}")
+
+    try:
+        if not audio_path or not os.path.exists(audio_path):
+            raise Exception(f"Audio file not found: {audio_path}")
+
+        text = transcribe_with_whisper_optimized(audio_path)
+
+        result = {
+            "status": "completed",
+            "text": text,
+            "audio_path": audio_path,
+            "processing_time": (datetime.utcnow() - job.created_at).total_seconds()
+            if job.created_at
+            else None,
+        }
+
+        logger.info(f"✅ Whisper job {job.id} completed. Text length: {len(text)}")
+        await job.done(result)
+
+    except Exception as e:
+        logger.error(f"❌ Whisper job {job.id} failed: {e}")
+        await job.fail(str(e))
+
+
+async def enqueue_tts_job(
+    text: str,
+    voice_id: Optional[str] = None,
+    tts_engine: str = "qwen",
+    user_id: Optional[int] = None,
+) -> str:
+    """
+    Enqueue a TTS job for background processing
+
+    Returns:
+        job_id: Unique identifier for tracking the job
+    """
+    queue = await get_job_queue()
+
+    job_id = await queue.send(
+        name="tts-generation",
+        data={
+            "text": text,
+            "voice_id": voice_id,
+            "tts_engine": tts_engine,
+            "user_id": user_id,
+        },
+        retry_limit=2,  # Retry up to 2 times on failure
+        priority=10,  # Higher priority for TTS
+    )
+
+    logger.info(f"📥 Enqueued TTS job {job_id}")
+    return job_id
+
+
+async def enqueue_whisper_job(audio_path: str, user_id: Optional[int] = None) -> str:
+    """
+    Enqueue a Whisper transcription job
+
+    Returns:
+        job_id: Unique identifier for tracking the job
+    """
+    queue = await get_job_queue()
+
+    job_id = await queue.send(
+        name="whisper-transcription",
+        data={"audio_path": audio_path, "user_id": user_id},
+        retry_limit=2,
+        priority=5,
+    )
+
+    logger.info(f"📥 Enqueued Whisper job {job_id}")
+    return job_id
+
+
+async def start_tts_worker():
+    """Start the TTS worker"""
+    queue = await get_job_queue()
+    queue.work("tts-generation", process_tts_job)
+    logger.info("👷 TTS worker started")
+
+
+async def start_whisper_worker():
+    """Start the Whisper worker"""
+    queue = await get_job_queue()
+    queue.work("whisper-transcription", process_whisper_job)
+    logger.info("👷 Whisper worker started")

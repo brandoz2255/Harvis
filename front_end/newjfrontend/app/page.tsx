@@ -22,6 +22,7 @@ import { useChat } from "@ai-sdk/react"
 import { Message as AiMessage } from "ai"
 
 import { useApiWithRetry } from "@/hooks/useApiWithRetry"
+import { useAsyncTTS } from "@/hooks/useAsyncTTS"
 
 // Auto-research detection (mirrors backend logic)
 // Returns true for queries that need fresh/current information
@@ -83,8 +84,9 @@ export default function ChatPage() {
   const router = useRouter()
   const { user, isLoading: isAuthLoading } = useUser()
   const [selectedModel, setSelectedModel] = useState<string>("")
-  const [lowVram, setLowVram] = useState(false)
-  const [textOnly, setTextOnly] = useState(false)
+  const [lowVram, setLowVram] = useState(true)   // Default to low VRAM (safer)
+  const [textOnly, setTextOnly] = useState(true)  // Default to text only (no TTS)
+  const [ttsEngine, setTtsEngine] = useState<"qwen" | "chatterbox">("qwen")  // TTS engine selection (qwen is primary)
   const [isResearchMode, setIsResearchMode] = useState(false)
   const [localMessages, setLocalMessages] = useState<Message[]>([])
   const [isLoading, setIsLoading] = useState(false)
@@ -94,6 +96,12 @@ export default function ChatPage() {
 
   // Use a ref to track if we should skip the next scroll (to prevent scroll jank during streaming)
   const skipNextScrollRef = useRef(false)
+
+  // Async TTS hook for voice mode
+  const { submitTTS, cancelTTS, status: ttsStatus, audioUrl: ttsAudioUrl, error: ttsError } = useAsyncTTS()
+  
+  // Track active TTS jobs per message
+  const activeTTSJobsRef = useRef<Map<string, { jobId: string; messageId: string }>>(new Map())
 
   // Auth protection
   useEffect(() => {
@@ -130,6 +138,7 @@ export default function ChatPage() {
       sessionId: currentSession?.id || null,
       textOnly: textOnly,
       lowVram: lowVram,
+      ttsEngine: ttsEngine,
     },
     onError: (e: any) => {
       console.error("AI SDK Error:", e)
@@ -740,7 +749,10 @@ export default function ChatPage() {
         model: selectedModel,
         session_id: sessionId || null,
         low_vram: lowVram,
-        text_only: textOnly,
+        // When voice mode is enabled (!textOnly), request text-only response to avoid timeout
+        // Then we'll generate TTS asynchronously after receiving the text
+        text_only: !textOnly ? true : textOnly,
+        tts_engine: ttsEngine,
         attachments: messageAttachments.length > 0 ? messageAttachments : undefined
       }
 
@@ -1096,6 +1108,45 @@ export default function ChatPage() {
       setLocalMessages((prev) =>
         prev.map(msg => msg.id === assistantId ? assistantMessage : msg)
       )
+
+      // If voice mode is enabled, generate TTS asynchronously to avoid timeout
+      if (!textOnly && assistantContent) {
+        console.log('🎙️ Voice mode enabled - submitting async TTS job for:', assistantContent.slice(0, 50) + '...')
+        
+        submitTTS(assistantContent, {
+          ttsEngine,
+          onComplete: (audioUrl) => {
+            console.log('✅ TTS completed, updating message with audio:', audioUrl)
+            // Update the message with the audio URL
+            setLocalMessages((prev) =>
+              prev.map(msg => 
+                msg.id === assistantId 
+                  ? { ...msg, audioUrl, status: 'sent' } 
+                  : msg
+              )
+            )
+          },
+          onError: (error) => {
+            console.error('❌ TTS failed:', error)
+            // Mark the message as having failed TTS but keep the text
+            setLocalMessages((prev) =>
+              prev.map(msg => 
+                msg.id === assistantId 
+                  ? { ...msg, ttsError: error, status: 'sent' } 
+                  : msg
+              )
+            )
+          }
+        }).then(jobId => {
+          if (jobId) {
+            console.log('📥 TTS job submitted:', jobId)
+            // Track the job
+            activeTTSJobsRef.current.set(assistantId, { jobId, messageId: assistantId })
+          }
+        }).catch(err => {
+          console.error('Failed to submit TTS job:', err)
+        })
+      }
     } catch (error) {
       console.error("Chat error:", error)
       if (typeof input === 'string') {
@@ -1108,7 +1159,7 @@ export default function ChatPage() {
     } finally {
       setIsLoading(false)
     }
-  }, [messages, isLoading, selectedModel, isResearchMode, currentSession, lowVram, textOnly, isDuplicateMessage, fetchWithRetry, append, createNewChat])
+  }, [messages, isLoading, selectedModel, isResearchMode, currentSession, lowVram, textOnly, ttsEngine, submitTTS, isDuplicateMessage, fetchWithRetry, append, createNewChat])
 
   // Handle vision messages
   const handleVisionMessage = useCallback(async (prompt: string, imageData: string, attachments: Attachment[], userTempId?: string) => {
@@ -1176,7 +1227,8 @@ export default function ChatPage() {
           model: selectedModel,
           session_id: sessionId,
           low_vram: lowVram,
-          text_only: textOnly
+          text_only: textOnly,
+          tts_engine: ttsEngine
         }),
         credentials: 'include'
       }, {
@@ -1356,10 +1408,6 @@ export default function ChatPage() {
             <ModelSelector
               selectedModel={selectedModel}
               onModelChange={setSelectedModel}
-              lowVram={lowVram}
-              onLowVramChange={setLowVram}
-              textOnly={textOnly}
-              onTextOnlyChange={setTextOnly}
             />
           </div>
         </header>
@@ -1423,6 +1471,12 @@ export default function ChatPage() {
             isResearchMode={isResearchMode}
             selectedModel={selectedModel}
             sessionId={currentSession?.id}
+            voiceMode={!textOnly}
+            onVoiceModeChange={(enabled) => setTextOnly(!enabled)}
+            extraVram={!lowVram}
+            onExtraVramChange={(enabled) => setLowVram(!enabled)}
+            ttsEngine={ttsEngine}
+            onTtsEngineChange={setTtsEngine}
           />
         </div>
       </div>
