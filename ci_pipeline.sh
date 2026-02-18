@@ -214,6 +214,43 @@ else
   log_info "You may need to update it manually"
 fi
 
+# 8. Push Images (Optional)
+echo ""
+log_info "Docker images built successfully!"
+
+if command -v whiptail &>/dev/null; then
+  if whiptail --yesno "Push all images to Docker Hub?" 10 60 --title "Push Images"; then
+    PUSH_IMAGES=true
+  else
+    PUSH_IMAGES=false
+  fi
+else
+  read -p "Push all images to Docker Hub? (y/N): " push_choice
+  if [[ $push_choice =~ ^[Yy]$ ]]; then
+    PUSH_IMAGES=true
+  else
+    PUSH_IMAGES=false
+  fi
+fi
+
+if [ "$PUSH_IMAGES" = true ]; then
+  log_info "Pushing images to Docker Hub..."
+  
+  docker push dulc3/jarvis-frontend:$FRONTEND_VERSION && \
+  docker push dulc3/jarvis-backend:$BACKEND_VERSION && \
+  docker push dulc3/harvis-artifact-executor:$BACKEND_VERSION && \
+  docker push dulc3/harvis-code-executor:$BACKEND_VERSION && \
+  docker push dulc3/harvis-document-worker:$BACKEND_VERSION && \
+  log_success "All images pushed successfully!"
+else
+  log_info "Skipping push. To push manually, run:"
+  echo "  docker push dulc3/jarvis-frontend:$FRONTEND_VERSION"
+  echo "  docker push dulc3/jarvis-backend:$BACKEND_VERSION"
+  echo "  docker push dulc3/harvis-artifact-executor:$BACKEND_VERSION"
+  echo "  docker push dulc3/harvis-code-executor:$BACKEND_VERSION"
+  echo "  docker push dulc3/harvis-document-worker:$BACKEND_VERSION"
+fi
+
 # Summary
 echo ""
 echo "=========================================="

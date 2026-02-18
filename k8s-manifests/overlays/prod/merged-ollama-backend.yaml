@@ -22,19 +22,49 @@ spec:
       nodeSelector:
         kubernetes.io/hostname: dulc3-os
       initContainers:
+        # Init container to wait for PostgreSQL database to be ready
+        - name: wait-for-db
+          image: busybox:1.36
+          command: ['sh', '-c']
+          args:
+            - |
+              echo "Waiting for PostgreSQL at harvis-ai-pgsql:5432..."
+              until nc -z harvis-ai-pgsql 5432; do
+                echo "Database not ready yet, retrying in 2s..."
+                sleep 2
+              done
+              echo "✅ PostgreSQL is ready!"
+          resources:
+            requests:
+              memory: 16Mi
+              cpu: 10m
+            limits:
+              memory: 32Mi
+              cpu: 50m
         # Init container to pre-download TTS and Whisper models
         - name: download-models
           image: "dulc3/jarvis-backend:v2.28.4"
           imagePullPolicy: Always
-          command: ["/app/entrypoint.sh", "download-models"]
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              python3 /app/download_models.py
+              echo '🔧 Fixing model cache permissions for appuser...'
+              chown -R 1001:1001 /models-cache
+              echo '✅ Model cache permissions fixed'
           env:
             # Ensure init container uses same cache paths
             - name: HF_HOME
               value: "/models-cache/huggingface"
             - name: TRANSFORMERS_CACHE
-              value: "/models-cache/huggingf                                                                                                                                                                                      ace"
+              value: "/models-cache/huggingface"
             - name: WHISPER_CACHE
               value: "/models-cache/whisper"
+            # TTS Model Download Configuration
+            - name: DOWNLOAD_QWEN_TTS
+              value: "true"
+            - name: DOWNLOAD_CHATTERBOX_TTS
+              value: "false"
           volumeMounts:
             - name: ml-models-cache
               mountPath: /models-cache

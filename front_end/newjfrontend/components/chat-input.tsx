@@ -19,12 +19,19 @@ import {
   Plus,
   File,
   AlertCircle,
+  Settings,
+  Volume2,
+  VolumeX,
+  Zap,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { Input } from "@/components/ui/input"
 import type { MessageObject, Attachment, ImageAttachment, FileAttachment, MCPPlugin } from "@/types/message"
 import { isVisionModel } from "@/types/message"
+
+// TTS Engine types
+type TTSEngine = "qwen" | "chatterbox"
 
 interface ChatInputProps {
   onSend: (message: string | MessageObject) => void
@@ -33,6 +40,13 @@ interface ChatInputProps {
   selectedModel?: string
   sessionId?: string | null  // Current chat session ID for voice history
   className?: string
+  // Settings
+  voiceMode?: boolean  // When true, TTS is enabled
+  onVoiceModeChange?: (enabled: boolean) => void
+  extraVram?: boolean  // When true, high VRAM mode (don't unload LLM for TTS)
+  onExtraVramChange?: (enabled: boolean) => void
+  ttsEngine?: TTSEngine  // "chatterbox" or "qwen" TTS engine selection
+  onTtsEngineChange?: (engine: TTSEngine) => void
 }
 
 // Supported file types for file upload
@@ -55,13 +69,27 @@ const SUPPORTED_FILE_TYPES = {
 
 const SUPPORTED_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp']
 
-export function ChatInput({ onSend, isLoading, isResearchMode, selectedModel, sessionId, className }: ChatInputProps) {
+export function ChatInput({
+  onSend,
+  isLoading,
+  isResearchMode,
+  selectedModel,
+  sessionId,
+  className,
+  voiceMode = false,
+  onVoiceModeChange,
+  extraVram = false,
+  onExtraVramChange,
+  ttsEngine = "qwen",
+  onTtsEngineChange,
+}: ChatInputProps) {
   const [message, setMessage] = useState("")
   const [isRecording, setIsRecording] = useState(false)
   const [isProcessingVoice, setIsProcessingVoice] = useState(false)
   const [isScreensharing, setIsScreensharing] = useState(false)
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [showPaperclipMenu, setShowPaperclipMenu] = useState(false)
+  const [showSettingsMenu, setShowSettingsMenu] = useState(false)
   const [showMCPModal, setShowMCPModal] = useState(false)
   const [mcpPlugins, setMcpPlugins] = useState<MCPPlugin[]>([])
   const [newMCPHost, setNewMCPHost] = useState("")
@@ -858,6 +886,141 @@ export function ChatInput({ onSend, isLoading, isResearchMode, selectedModel, se
             />
 
             <div className="flex gap-1">
+              {/* Settings Menu */}
+              <div className="relative">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => setShowSettingsMenu(!showSettingsMenu)}
+                  className="h-9 w-9 shrink-0 text-muted-foreground hover:text-foreground"
+                  title="Chat settings"
+                >
+                  <Settings className="h-5 w-5" />
+                </Button>
+
+                {showSettingsMenu && (
+                  <div className="absolute bottom-full right-0 mb-2 w-56 rounded-lg border border-border bg-card shadow-lg z-50">
+                    <div className="p-2">
+                      <div className="px-2 py-1.5 text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                        Response Settings
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => onVoiceModeChange?.(!voiceMode)}
+                        className="flex w-full items-center justify-between gap-2 rounded-md px-3 py-2 text-sm hover:bg-accent"
+                      >
+                        <div className="flex items-center gap-2">
+                          {voiceMode ? (
+                            <Volume2 className="h-4 w-4 text-green-400" />
+                          ) : (
+                            <VolumeX className="h-4 w-4 text-muted-foreground" />
+                          )}
+                          <span>Voice Mode</span>
+                        </div>
+                        <div className={cn(
+                          "w-8 h-4 rounded-full transition-colors relative",
+                          voiceMode ? "bg-green-500" : "bg-muted"
+                        )}>
+                          <div className={cn(
+                            "absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform",
+                            voiceMode ? "translate-x-4" : "translate-x-0.5"
+                          )} />
+                        </div>
+                      </button>
+                      <p className="px-3 py-1 text-xs text-muted-foreground">
+                        Enable text-to-speech for AI responses
+                      </p>
+
+                      <div className="my-2 border-t border-border" />
+
+                      <button
+                        type="button"
+                        onClick={() => onExtraVramChange?.(!extraVram)}
+                        className="flex w-full items-center justify-between gap-2 rounded-md px-3 py-2 text-sm hover:bg-accent"
+                      >
+                        <div className="flex items-center gap-2">
+                          <Zap className={cn(
+                            "h-4 w-4",
+                            extraVram ? "text-yellow-400" : "text-muted-foreground"
+                          )} />
+                          <span>Extra VRAM</span>
+                        </div>
+                        <div className={cn(
+                          "w-8 h-4 rounded-full transition-colors relative",
+                          extraVram ? "bg-yellow-500" : "bg-muted"
+                        )}>
+                          <div className={cn(
+                            "absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform",
+                            extraVram ? "translate-x-4" : "translate-x-0.5"
+                          )} />
+                        </div>
+                      </button>
+                      <p className="px-3 py-1 text-xs text-muted-foreground">
+                        Keep LLM loaded during TTS (uses more memory)
+                      </p>
+
+                      {/* TTS Engine Selector - only show when voice mode is enabled */}
+                      {voiceMode && (
+                        <>
+                          <div className="my-2 border-t border-border" />
+                          <div className="px-2 py-1.5 text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                            TTS Engine
+                          </div>
+                          <div className="px-3 py-2 space-y-1">
+                            <button
+                              type="button"
+                              onClick={() => onTtsEngineChange?.("chatterbox")}
+                              className={cn(
+                                "flex w-full items-center justify-between gap-2 rounded-md px-3 py-2 text-sm hover:bg-accent",
+                                ttsEngine === "chatterbox" && "bg-accent"
+                              )}
+                            >
+                              <div className="flex items-center gap-2">
+                                <Volume2 className={cn(
+                                  "h-4 w-4",
+                                  ttsEngine === "chatterbox" ? "text-green-400" : "text-muted-foreground"
+                                )} />
+                                <span>Chatterbox TTS</span>
+                              </div>
+                              {ttsEngine === "chatterbox" && (
+                                <div className="h-2 w-2 rounded-full bg-green-500" />
+                              )}
+                            </button>
+                            <p className="px-3 text-xs text-muted-foreground">
+                              Voice cloning, ~4-6 GB VRAM
+                            </p>
+
+                            <button
+                              type="button"
+                              onClick={() => onTtsEngineChange?.("qwen")}
+                              className={cn(
+                                "flex w-full items-center justify-between gap-2 rounded-md px-3 py-2 text-sm hover:bg-accent",
+                                ttsEngine === "qwen" && "bg-accent"
+                              )}
+                            >
+                              <div className="flex items-center gap-2">
+                                <Sparkles className={cn(
+                                  "h-4 w-4",
+                                  ttsEngine === "qwen" ? "text-purple-400" : "text-muted-foreground"
+                                )} />
+                                <span>Qwen3 TTS</span>
+                              </div>
+                              {ttsEngine === "qwen" && (
+                                <div className="h-2 w-2 rounded-full bg-purple-500" />
+                              )}
+                            </button>
+                            <p className="px-3 text-xs text-muted-foreground">
+                              Fast & natural, ~6-8 GB VRAM
+                            </p>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+
               <Button
                 type="button"
                 variant="ghost"
@@ -985,11 +1148,17 @@ export function ChatInput({ onSend, isLoading, isResearchMode, selectedModel, se
         </div>
       )}
 
-      {/* Click outside to close paperclip menu */}
+      {/* Click outside to close menus */}
       {showPaperclipMenu && (
         <div
           className="fixed inset-0 z-40"
           onClick={() => setShowPaperclipMenu(false)}
+        />
+      )}
+      {showSettingsMenu && (
+        <div
+          className="fixed inset-0 z-40"
+          onClick={() => setShowSettingsMenu(false)}
         />
       )}
     </div>

@@ -1,5 +1,108 @@
 # Recent Changes and Fixes Documentation
 
+## Date: 2026-02-18 (Part 7)
+
+### Fixed Markdown Code Block Markers in Document Generation
+
+#### Problem:
+- Document generation was failing with `SyntaxError: invalid syntax`
+- Error showed: ```python-doc` in the executed code
+- Markdown code block markers were being included in the generated Python script
+- Validation was passing code that still contained markdown syntax
+
+#### Root Cause:
+- The `_validate_document_code()` function was not checking for markdown markers
+- When code passed other validation checks (imports, save patterns), it was accepted even with markdown markers
+- The generated script contained invalid Python syntax like:
+  ```python
+  ```python-doc
+  from pptx import Presentation
+  # ... code ...
+  ```
+
+#### Solution Applied:
+**Added markdown marker detection to `_validate_document_code()` in `python_back_end/artifacts/code_generator.py`**:
+
+```python
+# Check for markdown code block markers - code should NOT have these
+markdown_markers = ["```", "```python", "```python-doc", "```python-spreadsheet", 
+                    "```python-pdf", "```python-presentation"]
+for marker in markdown_markers:
+    if marker in code:
+        logger.warning(f"Code contains markdown marker: {marker}")
+        return False
+```
+
+**How it works**:
+1. Validation now rejects any code containing markdown markers
+2. This forces the extraction logic to properly strip markdown syntax
+3. Code is validated as clean Python before being executed
+4. Prevents syntax errors from markdown contamination
+
+#### Files Modified:
+- `python_back_end/artifacts/code_generator.py`:
+  - Lines 169-175: Added markdown marker detection in `_validate_document_code()`
+
+#### Result/Status:
+- ✅ Markdown markers are now detected and rejected
+- ✅ Validation fails early when code is not properly extracted
+- ✅ Clean Python code is executed, not markdown-wrapped code
+- ✅ No more `SyntaxError: invalid syntax` from markdown markers
+
+---
+
+## Date: 2026-02-18 (Part 6)
+
+### Updated CI Pipeline to Include Docker Push
+
+#### Problem:
+- CI pipeline only built images but didn't push them to Docker Hub
+- Had to manually run separate push commands after building
+- Document worker image wasn't automatically pushed with other images
+- Inconsistent with TUI workflow where user expects built images to be available
+
+#### Solution Applied:
+**Added Docker push functionality to `ci_pipeline.sh`**:
+
+1. **Added push step** after all images are built:
+   - Asks user if they want to push images (using whiptail GUI or CLI fallback)
+   - Pushes all 5 images in sequence if confirmed
+   - Shows manual push commands if user declines
+
+2. **All images included**:
+   - `dulc3/jarvis-frontend:$FRONTEND_VERSION`
+   - `dulc3/jarvis-backend:$BACKEND_VERSION`
+   - `dulc3/harvis-artifact-executor:$BACKEND_VERSION`
+   - `dulc3/harvis-code-executor:$BACKEND_VERSION`
+   - `dulc3/harvis-document-worker:$BACKEND_VERSION`
+
+3. **User-friendly prompts**:
+   - Uses whiptail for GUI confirmation if available
+   - Falls back to CLI read prompt if whiptail not available
+   - Shows helpful manual push commands if push is skipped
+
+#### Files Modified:
+- `ci_pipeline.sh`:
+  - Lines 217-249: Added push step with user confirmation
+  - Updated summary to show push status
+
+#### Usage:
+```bash
+./ci_pipeline.sh
+# Builds all images
+# Asks: "Push all images to Docker Hub?"
+# If yes: automatically pushes all 5 images
+# If no: shows manual push commands
+```
+
+#### Result/Status:
+- ✅ All images built and pushed in one command
+- ✅ Document worker included in push workflow
+- ✅ Interactive confirmation prevents accidental pushes
+- ✅ Consistent with TUI experience
+
+---
+
 ## Date: 2026-02-18 (Part 5)
 
 ### Enhanced Document Worker Error Logging

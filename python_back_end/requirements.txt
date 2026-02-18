@@ -25,12 +25,19 @@ soundfile
 openai-whisper
 tavily-python
 
-# TTS - our bread and butter!
-chatterbox-tts
+# TTS - Qwen3 is our primary engine
+# chatterbox-tts  # REMOVED: conflicts with transformers>=0.27.0 required by qwen3
+qwen-tts
+
+# Job queue for background processing (TTS, Whisper, etc.)
+# Using arq for Python async job queue (similar to pg-boss but for Python)
+arq>=0.26.0
+redis>=5.0.0
 langchain
 langchain-community
 langchain-openai
 langchain-postgres
+langchain-text-splitters
 sentence-transformers
 ddgs
 beautifulsoup4

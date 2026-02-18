@@ -58,7 +58,11 @@ from vibecoding import (
     containers_router,
 )
 from vibecoding.core import initialize_vibe_agent
-from file_processing import extract_text_from_file, convert_file_to_images, is_vision_compatible_file
+from file_processing import (
+    extract_text_from_file,
+    convert_file_to_images,
+    is_vision_compatible_file,
+)
 
 # Import artifacts module for document/website generation
 from artifacts import (
@@ -324,11 +328,16 @@ from model_manager import (
     wait_for_vram,
     transcribe_with_whisper_optimized,
     generate_speech_optimized,
+    generate_speech_unified,
     unload_tts_model,
     unload_whisper_model,
+    unload_qwen_tts_model,
     get_gpu_memory_stats,
     check_memory_pressure,
     auto_cleanup_if_needed,
+    set_active_tts_engine,
+    get_active_tts_engine,
+    get_available_tts_engines,
 )
 
 
@@ -340,23 +349,38 @@ def safe_generate_speech_optimized(
     temperature=0.3,
     cfg_weight=0.7,
     auto_unload=True,
+    tts_engine="qwen",
 ):
-    """Generate speech with graceful error handling - never crashes the app"""
+    """Generate speech with graceful error handling - never crashes the app.
+
+    Args:
+        text: Text to synthesize
+        audio_prompt: Voice prompt for cloning (Chatterbox only)
+        exaggeration: Voice expressiveness (Chatterbox only)
+        temperature: Generation temperature
+        cfg_weight: CFG weight (Chatterbox only)
+        auto_unload: Unload TTS after generation
+        tts_engine: "qwen" or "chatterbox" TTS engine selection
+    """
     try:
-        result = generate_speech_optimized(
-            text,
-            audio_prompt,
-            exaggeration,
-            temperature,
-            cfg_weight,
+        # Use unified TTS generation that supports both engines
+        result = generate_speech_unified(
+            text=text,
+            engine=tts_engine,
+            audio_prompt=audio_prompt,
+            exaggeration=exaggeration,
+            temperature=temperature,
+            cfg_weight=cfg_weight,
             auto_unload=auto_unload,
         )
         if result is None or result == (None, None):
-            logger.warning("⚠️ TTS unavailable - skipping audio generation")
+            logger.warning(
+                f"⚠️ TTS ({tts_engine}) unavailable - skipping audio generation"
+            )
             return None, None
         return result
     except Exception as tts_e:
-        logger.error(f"❌ TTS generation failed gracefully: {tts_e}")
+        logger.error(f"❌ TTS ({tts_engine}) generation failed gracefully: {tts_e}")
         logger.warning("⚠️ Continuing without TTS - chat will work without audio")
         return None, None
 
@@ -490,7 +514,9 @@ async def lifespan(app: FastAPI):
                 await artifact_build_manager.start_queue_processor()
                 logger.info("✅ ArtifactBuildManager initialized with queue processor")
             else:
-                logger.info("✅ ArtifactBuildManager initialized (executor disabled - using Sandpack)")
+                logger.info(
+                    "✅ ArtifactBuildManager initialized (executor disabled - using Sandpack)"
+                )
         except Exception as e:
             logger.warning(f"⚠️ ArtifactBuildManager initialization failed: {e}")
 
@@ -563,12 +589,38 @@ async def lifespan(app: FastAPI):
         logger.error(f"❌ Database connection failed: {e}")
         # Don't exit, allow app to start even if DB fails (will retry)
 
+    # Initialize job queue workers for background TTS/Whisper processing
+    try:
+        from job_queue import init_job_queue, start_tts_worker, start_whisper_worker
+
+        job_queue = await init_job_queue()
+        app.state.job_queue = job_queue
+        logger.info("✅ Job queue initialized")
+
+        # Start background workers
+        await start_tts_worker()
+        await start_whisper_worker()
+        logger.info("✅ Job queue workers started (TTS & Whisper)")
+
+    except Exception as e:
+        logger.warning(f"⚠️ Job queue initialization failed: {e}")
+        # Don't fail startup if job queue doesn't work
+
     yield
 
     # Shutdown: close connection pool
     if hasattr(app.state, "pg_pool"):
         await app.state.pg_pool.close()
         logger.info("✅ Database connection pool closed")
+
+    # Shutdown job queue
+    try:
+        from job_queue import shutdown_job_queue
+
+        await shutdown_job_queue()
+        logger.info("✅ Job queue shut down")
+    except Exception as e:
+        logger.warning(f"⚠️ Job queue shutdown error: {e}")
 
 
 app = FastAPI(lifespan=lifespan)
@@ -1048,9 +1100,19 @@ async def run_tts_with_heartbeats(
     temperature: float,
     cfg_weight: float,
     auto_unload: bool,
+    tts_engine: str = "qwen",
 ):
     """
     Run TTS in a background thread with heartbeats.
+
+    Args:
+        text: Text to synthesize
+        audio_prompt: Voice prompt for cloning (Chatterbox only)
+        exaggeration: Voice expressiveness (Chatterbox only)
+        temperature: Generation temperature
+        cfg_weight: CFG weight (Chatterbox only)
+        auto_unload: Unload TTS after generation
+        tts_engine: "qwen" or "chatterbox" TTS engine selection
     """
     import asyncio
     import concurrent.futures
@@ -1069,6 +1131,7 @@ async def run_tts_with_heartbeats(
             temperature=temperature,
             cfg_weight=cfg_weight,
             auto_unload=auto_unload,
+            tts_engine=tts_engine,
         )
 
     future = loop.run_in_executor(executor, tts_task)
@@ -1160,6 +1223,7 @@ class ChatRequest(BaseModel):
     cfg_weight: float = 2.0  # Higher cfg = follows text more closely
     low_vram: bool = False
     text_only: bool = False
+    tts_engine: str = "qwen"  # "qwen" or "chatterbox" TTS engine selection
 
 
 class ResearchChatRequest(BaseModel):
@@ -1172,6 +1236,7 @@ class ResearchChatRequest(BaseModel):
     exaggeration: float = 0.5
     temperature: float = 0.5  # Lower temp = more stable TTS output
     cfg_weight: float = 2.0  # Higher cfg = follows text more closely
+    tts_engine: str = "qwen"  # "qwen" or "chatterbox" TTS engine selection
 
 
 class ScreenAnalysisRequest(BaseModel):
@@ -1184,6 +1249,7 @@ class SynthesizeSpeechRequest(BaseModel):
     exaggeration: float = 0.5
     temperature: float = 0.8
     cfg_weight: float = 0.5
+    tts_engine: str = "qwen"  # "qwen" or "chatterbox" TTS engine selection
 
 
 # VibeCommandRequest moved to vibecoding.commands
@@ -2687,7 +2753,9 @@ async def chat(
                     if auto_result:
                         code_artifact_type, doc_code = auto_result
                         code_title = f"Generated {code_artifact_type.capitalize()}"
-                        logger.info(f"✅ Auto-detected {code_artifact_type} from imports")
+                        logger.info(
+                            f"✅ Auto-detected {code_artifact_type} from imports"
+                        )
 
                 if code_artifact_type:
                     # ASYNC JOB-BASED GENERATION
@@ -2802,7 +2870,9 @@ async def chat(
                                     "pdf": "application/pdf",
                                     "presentation": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
                                 }
-                                mime_type = mime_types.get(code_artifact_type, "application/octet-stream")
+                                mime_type = mime_types.get(
+                                    code_artifact_type, "application/octet-stream"
+                                )
 
                                 # Save artifact record to database
                                 await pool.execute(
@@ -2820,11 +2890,13 @@ async def chat(
                                     current_user.id,
                                     code_artifact_type,
                                     code_title,
-                                    doc_result.get("output_path"),
+                                    doc_result.get("file_path"),
                                     doc_result.get("file_size", 0),
                                     mime_type,
                                 )
-                                logger.info(f"💾 Saved artifact {sync_artifact_id} to database")
+                                logger.info(
+                                    f"💾 Saved artifact {sync_artifact_id} to database"
+                                )
 
                                 artifact_info = {
                                     "id": sync_artifact_id,
@@ -2836,9 +2908,13 @@ async def chat(
                                 }
                                 final_answer = clean_response_content(final_answer)
                             elif doc_result.get("success"):
-                                logger.error("❌ Document generated but no database pool to save record")
+                                logger.error(
+                                    "❌ Document generated but no database pool to save record"
+                                )
                             else:
-                                logger.error(f"❌ Document generation failed: {doc_result.get('error')}")
+                                logger.error(
+                                    f"❌ Document generation failed: {doc_result.get('error')}"
+                                )
                         except Exception as fallback_error:
                             logger.error(
                                 f"❌ Fallback generation also failed: {fallback_error}"
@@ -2849,20 +2925,32 @@ async def chat(
                 # Fallback: Try JSON manifest approach (for websites/apps and backward compatibility)
                 if not artifact_info:
                     logger.info("🔍 Attempting artifact detection from response...")
-                    logger.debug(f"Response preview (first 500 chars): {final_answer[:500] if final_answer else 'empty'}")
+                    logger.debug(
+                        f"Response preview (first 500 chars): {final_answer[:500] if final_answer else 'empty'}"
+                    )
 
                     artifact_manifest = extract_artifact_manifest(final_answer)
                     if artifact_manifest:
-                        logger.info(f"✅ JSON manifest found: {artifact_manifest.get('artifact_type')}")
+                        logger.info(
+                            f"✅ JSON manifest found: {artifact_manifest.get('artifact_type')}"
+                        )
 
                     # If no manifest found, try to auto-detect Next.js/React project from code blocks
                     if not artifact_manifest:
-                        logger.info("🔍 No JSON manifest, trying auto-detection from code blocks...")
-                        artifact_manifest = extract_nextjs_project_from_codeblocks(final_answer)
+                        logger.info(
+                            "🔍 No JSON manifest, trying auto-detection from code blocks..."
+                        )
+                        artifact_manifest = extract_nextjs_project_from_codeblocks(
+                            final_answer
+                        )
                         if artifact_manifest:
-                            logger.info(f"✅ Auto-detected Next.js/React project: {len(artifact_manifest.get('content', {}).get('files', {}))} files")
+                            logger.info(
+                                f"✅ Auto-detected Next.js/React project: {len(artifact_manifest.get('content', {}).get('files', {}))} files"
+                            )
                         else:
-                            logger.info("❌ No project structure detected in code blocks")
+                            logger.info(
+                                "❌ No project structure detected in code blocks"
+                            )
 
                     if artifact_manifest:
                         logger.info(
@@ -2926,10 +3014,13 @@ async def chat(
                                 logger.info(
                                     f"📦 Created artifact {artifact_id} ({artifact_status})"
                                 )
-                                logger.info(f"📦 Artifact info: {json.dumps(artifact_info)}")
+                                logger.info(
+                                    f"📦 Artifact info: {json.dumps(artifact_info)}"
+                                )
                             except Exception as e:
                                 logger.error(f"Failed to create artifact: {e}")
                                 import traceback
+
                                 logger.error(f"Traceback: {traceback.format_exc()}")
             except Exception as e:
                 logger.warning(f"Artifact detection failed: {e}")
@@ -2974,6 +3065,7 @@ async def chat(
                         temperature=req.temperature,
                         cfg_weight=req.cfg_weight,
                         auto_unload=req.low_vram,
+                        tts_engine=req.tts_engine,
                     ):
                         if event["type"] == "heartbeat":
                             yield f"data: {json.dumps({'status': 'processing', 'detail': 'Generating audio...'})}\n\n"
@@ -3268,21 +3360,29 @@ async def vision_chat(
                             continue
 
                         if not is_vision_compatible_file(file_type):
-                            logger.warning(f"📄 File {file_name}: Type {file_type} not compatible with vision")
+                            logger.warning(
+                                f"📄 File {file_name}: Type {file_type} not compatible with vision"
+                            )
                             continue
 
-                        logger.info(f"📄 Converting {file_name} ({file_type}) to images...")
+                        logger.info(
+                            f"📄 Converting {file_name} ({file_type}) to images..."
+                        )
                         yield f"data: {json.dumps({'status': 'processing', 'detail': f'Converting {file_name}...'})}\n\n"
 
                         # Convert file to images
                         file_images = convert_file_to_images(file_data, file_type)
 
                         if file_images:
-                            logger.info(f"📄 {file_name}: Converted to {len(file_images)} images")
+                            logger.info(
+                                f"📄 {file_name}: Converted to {len(file_images)} images"
+                            )
                             for img_base64, mime_type in file_images:
                                 processed_images.append(img_base64)
                         else:
-                            logger.warning(f"📄 {file_name}: No images generated from conversion")
+                            logger.warning(
+                                f"📄 {file_name}: No images generated from conversion"
+                            )
 
                     except Exception as file_err:
                         logger.error(f"📄 Error converting file {file_idx}: {file_err}")
@@ -3541,6 +3641,8 @@ async def vision_chat(
                     )
                     try:
                         sr, wav = None, None
+                        # Use tts_engine from request if available, default to qwen
+                        tts_engine = getattr(req, "tts_engine", "qwen")
                         async for event in run_tts_with_heartbeats(
                             text=final_answer,
                             audio_prompt=HARVIS_VOICE_PATH,
@@ -3548,6 +3650,7 @@ async def vision_chat(
                             temperature=0.5,
                             cfg_weight=2.0,
                             auto_unload=req.low_vram,
+                            tts_engine=tts_engine,
                         ):
                             if event["type"] == "heartbeat":
                                 yield f"data: {json.dumps({'status': 'processing', 'detail': 'Generating audio...'})}\n\n"
@@ -4008,12 +4111,15 @@ async def analyze_screen_with_tts(req: ScreenAnalysisWithTTSRequest):
             )
             audio_prompt_path = None
 
+        # Use tts_engine from request if available, default to qwen
+        tts_engine = getattr(req, "tts_engine", "qwen")
         sr, wav = safe_generate_speech_optimized(
             text=llm_response,
             audio_prompt=audio_prompt_path,
             exaggeration=req.exaggeration,
             temperature=req.temperature,
             cfg_weight=req.cfg_weight,
+            tts_engine=tts_engine,
         )
 
         # Save audio file
@@ -4171,7 +4277,7 @@ async def mic_chat(
                     response_text = query_gemini(text, history[:-1])
                 elif is_moonshot_model(model):
                     # Use Moonshot/Kimi for voice chat
-                    pool = getattr(request.app.state, "pg_pool", None)
+                    pool = getattr(app.state, "pg_pool", None)
                     if not pool:
                         return JSONResponse(
                             status_code=500,
@@ -5169,135 +5275,183 @@ async def synthesize_speech(req: SynthesizeSpeechRequest):
             exaggeration=req.exaggeration,
             temperature=req.temperature,
             cfg_weight=req.cfg_weight,
+            tts_engine=req.tts_engine,
         )
+
+        if sr is None or wav is None:
+            raise HTTPException(500, f"TTS ({req.tts_engine}) generation failed")
 
         filename = f"response_{uuid.uuid4()}.wav"
         filepath = os.path.join(tempfile.gettempdir(), filename)
         sf.write(filepath, wav, sr)
         logger.info("Audio written to %s", filepath)
 
-        return {"audio_path": f"/api/audio/{filename}"}
+        return {"audio_path": f"/api/audio/{filename}", "tts_engine": req.tts_engine}
 
     except Exception as e:
         logger.exception("TTS synthesis endpoint crashed")
         raise HTTPException(500, str(e)) from e
 
 
-# ─── Advanced Research Endpoints ─────────────────────────────────────────────
+@app.get("/api/tts-engines", tags=["tts"])
+async def get_tts_engines():
+    """
+    Get list of available TTS engines.
+    Returns information about each engine including VRAM requirements.
+    """
+    try:
+        engines = get_available_tts_engines()
+        active = get_active_tts_engine()
+        return {
+            "engines": engines,
+            "active_engine": active,
+            "default_engine": "qwen",
+        }
+    except Exception as e:
+        logger.exception("Failed to get TTS engines")
+        raise HTTPException(500, str(e)) from e
 
 
-class StreamingResearchRequest(BaseModel):
-    """Request for streaming research"""
+class SetTTSEngineRequest(BaseModel):
+    engine: str  # "qwen" or "chatterbox"
 
-    query: str
-    model: str = "mistral"
-    enable_verification: bool = True
+
+@app.post("/api/tts-engine", tags=["tts"])
+async def set_tts_engine(req: SetTTSEngineRequest):
+    """
+    Set the active TTS engine.
+    """
+    try:
+        if req.engine not in ["chatterbox", "qwen"]:
+            raise HTTPException(
+                400, f"Invalid TTS engine: {req.engine}. Must be 'chatterbox' or 'qwen'"
+            )
+
+        set_active_tts_engine(req.engine)
+        return {
+            "success": True,
+            "active_engine": req.engine,
+            "message": f"TTS engine set to {req.engine}",
+        }
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    except Exception as e:
+        logger.exception("Failed to set TTS engine")
+        raise HTTPException(500, str(e)) from e
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Background Job Queue Endpoints (Async TTS/Whisper)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TTSJobRequest(BaseModel):
+    """Request for async TTS job"""
+
+    text: str
+    voice_id: Optional[str] = None
+    tts_engine: str = "qwen"
+
+
+class WhisperJobRequest(BaseModel):
+    """Request for async Whisper transcription job"""
+
+    audio_path: str
+
+
+@app.post("/api/jobs/tts", tags=["jobs"])
+async def create_tts_job(
+    req: TTSJobRequest, current_user: UserResponse = Depends(get_current_user)
+):
+    """
+    Create an async TTS generation job.
+
+    Returns immediately with job_id. Use /api/jobs/{job_id} to check status.
+    This avoids HTTP timeouts for long-running TTS generation.
+    """
+    try:
+        from job_queue import enqueue_tts_job
+
+        job_id = await enqueue_tts_job(
+            text=req.text,
+            voice_id=req.voice_id,
+            tts_engine=req.tts_engine,
+            user_id=current_user.id if current_user else None,
+        )
+
+        return {
+            "job_id": job_id,
+            "status": "queued",
+            "message": "TTS job queued successfully. Check /api/jobs/{job_id} for status.",
+        }
+
+    except Exception as e:
+        logger.exception("Failed to create TTS job")
+        raise HTTPException(500, f"Failed to create TTS job: {str(e)}") from e
+
+
+@app.post("/api/jobs/whisper", tags=["jobs"])
+async def create_whisper_job(
+    req: WhisperJobRequest, current_user: UserResponse = Depends(get_current_user)
+):
+    """
+    Create an async Whisper transcription job.
+
+    Returns immediately with job_id. Use /api/jobs/{job_id} to check status.
+    This avoids HTTP timeouts for long-running transcription.
+    """
+    try:
+        from job_queue import enqueue_whisper_job
+
+        job_id = await enqueue_whisper_job(
+            audio_path=req.audio_path, user_id=current_user.id if current_user else None
+        )
+
+        return {
+            "job_id": job_id,
+            "status": "queued",
+            "message": "Whisper job queued successfully. Check /api/jobs/{job_id} for status.",
+        }
+
+    except Exception as e:
+        logger.exception("Failed to create Whisper job")
+        raise HTTPException(500, f"Failed to create Whisper job: {str(e)}") from e
+
+
+@app.get("/api/jobs/{job_id}", tags=["jobs"])
+async def get_job_status(
+    job_id: str, current_user: UserResponse = Depends(get_current_user)
+):
+    """
+    Get the status of a background job.
+
+    Returns job state: 'created', 'active', 'completed', 'failed', etc.
+    For completed jobs, includes result data (audio_path, text, etc.)
+    """
+    try:
+        from job_queue import get_job_queue
+
+        queue = await get_job_queue()
+        status = await queue.get_job_status(job_id)
+
+        if not status:
+            raise HTTPException(404, f"Job {job_id} not found")
+
+        return status
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Failed to get job status for {job_id}")
+        raise HTTPException(500, f"Failed to get job status: {str(e)}") from e
 
 
 class ResearchStatsResponse(BaseModel):
-    """Research system statistics"""
+    """Response model for research stats endpoint"""
 
     pipeline_stats: dict
     cache_stats: dict
     system_info: dict
-
-
-@app.post("/api/research/stream", tags=["research"])
-async def streaming_research(req: StreamingResearchRequest):
-    """
-    Streaming research endpoint with real-time progress events
-    """
-    try:
-        logger.info(f"🌊 Starting streaming research for: {req.query}")
-
-        response = await async_research_agent(
-            query=req.query, model=req.model, enable_streaming=True
-        )
-
-        if hasattr(response, "__aiter__"):
-            # Return streaming response
-            from fastapi.responses import StreamingResponse
-            import json
-
-            async def generate_stream():
-                async for chunk in response:
-                    # Format as server-sent events
-                    if isinstance(chunk, str):
-                        yield f"data: {json.dumps({'type': 'content', 'data': chunk})}\n\n"
-                    else:
-                        yield f"data: {json.dumps({'type': 'event', 'data': str(chunk)})}\n\n"
-
-                # Send completion event
-                yield f"data: {json.dumps({'type': 'complete'})}\n\n"
-
-            return StreamingResponse(
-                generate_stream(),
-                media_type="text/plain",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "Connection": "keep-alive",
-                    "Content-Type": "text/event-stream",
-                },
-            )
-        else:
-            # Fallback to regular response
-            return {"content": response, "streaming": False}
-
-    except Exception as e:
-        logger.error(f"Streaming research error: {e}")
-        return {"error": f"Streaming research failed: {str(e)}"}
-
-
-@app.post("/api/research/advanced-fact-check", tags=["research"])
-async def advanced_fact_check(claim: str, model: str = "mistral"):
-    """
-    Advanced fact-checking with authority scoring and evidence analysis
-    """
-    try:
-        logger.info(f"🔍 Advanced fact-check for: {claim}")
-
-        result = await async_fact_check_agent(claim, model)
-
-        return {
-            "claim": claim,
-            "analysis": result,
-            "model_used": model,
-            "advanced": True,
-            "timestamp": datetime.now().isoformat(),
-        }
-
-    except Exception as e:
-        logger.error(f"Advanced fact-check error: {e}")
-        return {"error": f"Advanced fact-check failed: {str(e)}"}
-
-
-@app.post("/api/research/advanced-compare", tags=["research"])
-async def advanced_compare(
-    topics: List[str], context: str = None, model: str = "mistral"
-):
-    """
-    Advanced comparison with structured analysis
-    """
-    try:
-        if len(topics) < 2:
-            return {"error": "At least 2 topics required for comparison"}
-
-        logger.info(f"🔄 Advanced comparison of: {topics}")
-
-        result = await async_comparative_research_agent(topics, model, context)
-
-        return {
-            "topics": topics,
-            "context": context,
-            "analysis": result,
-            "model_used": model,
-            "advanced": True,
-            "timestamp": datetime.now().isoformat(),
-        }
-
-    except Exception as e:
-        logger.error(f"Advanced comparison error: {e}")
-        return {"error": f"Advanced comparison failed: {str(e)}"}
 
 
 @app.get("/api/research/stats", response_model=ResearchStatsResponse, tags=["research"])

@@ -17,13 +17,13 @@ services:
           devices:
             - driver: nvidia
               count: 1
-              capabilities: [gpu]
+              capabilities: [ gpu ]
         limits:
           memory: 30G
     networks:
       - ollama-n8n-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      test: [ "CMD", "curl", "-f", "http://localhost:11434/api/tags" ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -35,12 +35,23 @@ services:
       dockerfile: Dockerfile
     container_name: harvis-model-downloader
     user: root
-    command: ["download-models"]
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        python3 /app/download_models.py &&
+        echo '🔧 Fixing model cache permissions for appuser...' &&
+        chown -R 1001:1001 /models-cache &&
+        echo '✅ Model cache permissions fixed'
     environment:
       HF_HOME: "/models-cache/huggingface"
       TRANSFORMERS_CACHE: "/models-cache/huggingface"
       WHISPER_CACHE: "/models-cache/whisper"
       PYTHONUNBUFFERED: "1"
+      # TTS Model Download Configuration
+      # Set to "false" to skip downloading that model (saves disk space)
+      DOWNLOAD_QWEN_TTS: "true"
+      DOWNLOAD_CHATTERBOX_TTS: "false"
     volumes:
       - ml-models-cache:/models-cache
     networks:
@@ -88,7 +99,7 @@ services:
       # For Docker Compose, run code locally (not in separate containers)
       # This avoids needing Docker socket access
       CODE_EXECUTOR_LOCAL: "true"
-    user: "1001:1001"  # Run as appuser for consistent permissions
+    user: "1001:1001" # Run as appuser for consistent permissions
     volumes:
       - ml-models-cache:/models-cache
       - embedding-data:/app/embedding
@@ -109,7 +120,7 @@ services:
           devices:
             - driver: nvidia
               count: 1
-              capabilities: [gpu]
+              capabilities: [ gpu ]
         limits:
           memory: 15G
     networks:
@@ -207,7 +218,7 @@ services:
     networks:
       - ollama-n8n-network
     healthcheck:
-      test: ["CMD-SHELL", "python -c 'import asyncpg; import openpyxl; print(\"healthy\")'"]
+      test: [ "CMD-SHELL", "python -c 'import asyncpg; import openpyxl; print(\"healthy\")'" ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -237,7 +248,7 @@ services:
     networks:
       - ollama-n8n-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U pguser -d database"]
+      test: [ "CMD-SHELL", "pg_isready -U pguser -d database" ]
       interval: 10s
       timeout: 5s
       retries: 5

@@ -29,7 +29,7 @@ export async function POST(req: NextRequest) {
 
   try {
     const body = await req.json();
-    const { messages, model, sessionId, textOnly = true, lowVram = false } = body;
+    const { messages, model, sessionId, textOnly = true, lowVram = false, ttsEngine = "qwen" } = body;
 
     if (!messages || !Array.isArray(messages) || messages.length === 0) {
       return new Response(JSON.stringify({ error: 'No messages provided' }), {
@@ -60,7 +60,7 @@ export async function POST(req: NextRequest) {
       ? sessionId
       : null;
 
-    console.log(`[AI-Chat] Calling backend at ${BACKEND_URL} - model: ${model || 'mistral'}, session: ${validSessionId || 'new'}, message: ${messageContent.slice(0, 50)}...`);
+    console.log(`[AI-Chat] Calling backend at ${BACKEND_URL} - model: ${model || 'mistral'}, session: ${validSessionId || 'new'}, ttsEngine: ${ttsEngine}, message: ${messageContent.slice(0, 50)}...`);
 
     // Helper to return a stream with an error message
     const createErrorStreamResponse = (errorMessage: string, status: number = 500) => {
@@ -87,14 +87,14 @@ export async function POST(req: NextRequest) {
     // Helper function to fetch with timeout and retry logic
     const fetchWithRetry = async (retries = MAX_RETRIES): Promise<Response> => {
       let lastError: Error | null = null;
-      
+
       for (let attempt = 1; attempt <= retries; attempt++) {
         try {
           console.log(`[AI-Chat] Fetch attempt ${attempt}/${retries} to ${BACKEND_URL}/api/chat`);
-          
+
           const controller = new AbortController();
           const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
-          
+
           const response = await fetch(`${BACKEND_URL}/api/chat`, {
             method: 'POST',
             headers: {
@@ -109,31 +109,32 @@ export async function POST(req: NextRequest) {
               text_only: textOnly,
               low_vram: lowVram,
               session_id: validSessionId,
+              tts_engine: ttsEngine,
             }),
             signal: controller.signal,
           });
-          
+
           clearTimeout(timeoutId);
-          
+
           if (response.ok || response.status >= 400) {
             // Return response if successful OR if we got a valid HTTP error (not network error)
             return response;
           }
-          
+
           // If response is not ok, throw to trigger retry
           throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-          
+
         } catch (error) {
           lastError = error as Error;
           console.warn(`[AI-Chat] Fetch attempt ${attempt} failed:`, error);
-          
+
           if (attempt < retries) {
             console.log(`[AI-Chat] Retrying in ${RETRY_DELAY}ms...`);
             await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
           }
         }
       }
-      
+
       throw lastError || new Error('All retry attempts failed');
     };
 
@@ -221,7 +222,7 @@ export async function POST(req: NextRequest) {
             }
             return;
           }
-          
+
           const timeSinceLastActivity = Date.now() - lastActivity;
           if (timeSinceLastActivity >= KEEPALIVE_INTERVAL) {
             // Send empty text chunk as keepalive (0: prefix for AI SDK data protocol)
@@ -250,13 +251,13 @@ export async function POST(req: NextRequest) {
 
             for (const line of lines) {
               if (isClosed) break;
-              
+
               // Skip empty lines, comments (keepalive), and malformed lines
               const trimmedLine = line.trim();
               if (!trimmedLine || trimmedLine.startsWith(':')) {
                 continue;
               }
-              
+
               // Only process valid SSE data lines
               if (!trimmedLine.startsWith('data: ')) {
                 // Log any non-data lines that aren't keepalive comments for debugging
@@ -301,14 +302,14 @@ export async function POST(req: NextRequest) {
                   // Don't send through AI SDK stream to avoid parsing errors
                   // The research chain UI will be updated separately via the complete event
                   console.log('[AI-Chat] Auto-research progress (buffered):', data.detail || data.type);
-                  
+
                   // Create assistant message on first research event if needed
                   if (!assistantMessageCreated) {
                     console.log('[AI-Chat] Creating assistant message placeholder for auto-research');
                     if (!safeEnqueue(encoder.encode(`0:" "\n`))) break;
                     assistantMessageCreated = true;
                   }
-                  
+
                   // NOTE: Research chain events are NOT sent through AI SDK stream
                   // They will be included in the final response with the complete event
                 }
@@ -407,11 +408,11 @@ export async function POST(req: NextRequest) {
           // If no complete message was received but we have text, send content and finish
           if (fullText && !finalAnswer && !isClosed) {
             console.log('[AI-Chat] Sending content and finish for incomplete stream');
-            
+
             // Send the content we collected
             const encodedContent = JSON.stringify(fullText);
             safeEnqueue(encoder.encode(`0:${encodedContent}\n`));
-            
+
             const finishEvent = {
               finishReason: 'stop',
               usage: { promptTokens: 0, completionTokens: 0 },

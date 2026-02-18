@@ -1,61 +1,25 @@
-# ---------- Builder: compile any source wheels ----------
-# Use PyTorch base image with CUDA 12.4 pre-installed (eliminates ~8GB PyTorch installation)
-FROM docker.io/pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime AS builder
-
-# Install build tools for compiling source wheels
-RUN apt-get update && apt-get install -y --no-install-recommends \
-  build-essential curl \
-  && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /w
-COPY requirements.txt .
-
-# Pre-reqs for pkuseg build
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel Cython
-
-# Build wheels for the rest (excluding torch/torchvision/torchaudio and numpy to prevent conflicts)
-# PyTorch is already installed in base image, so skip it
-RUN grep -v "^torch" requirements.txt | grep -v "^numpy" > requirements_no_torch_numpy.txt \
-  && pip wheel --no-cache-dir -r requirements_no_torch_numpy.txt -w /wheels
-
-# Also build a wheel for pkuseg if it comes from source
-RUN pip wheel --no-cache-dir pkuseg==0.0.25 --no-build-isolation -w /wheels
-
-# Remove any numpy wheels that got built as dependencies (keep only one version)
-RUN rm -f /wheels/numpy-*.whl
-
-# ---------- Runtime: PyTorch pre-installed, minimal OS deps ----------
-# Use same PyTorch base image for runtime (PyTorch 2.6.0 + CUDA 12.4 + cuDNN 9)
+# ---------- Runtime: PyTorch pre-installed, install deps directly ----------
+# Use PyTorch base image with CUDA 12.4 pre-installed
 FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
 
-# Install system dependencies for AI services
+# Install system dependencies for AI services (including build tools and sox for TTS)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-  libgl1 ffmpeg tesseract-ocr tesseract-ocr-eng curl \
+  build-essential libgl1 ffmpeg tesseract-ocr tesseract-ocr-eng curl sox libsox-dev \
   && rm -rf /var/lib/apt/lists/*
 
-# Install dependencies in controlled order to avoid conflicts
+# Upgrade pip
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# Install numpy first with constraint compatible with chatterbox-tts (<1.26.0)
-RUN pip install --no-cache-dir "numpy>=1.24.0,<1.26.0"
+# Copy and install Python dependencies
+WORKDIR /app
+COPY requirements.txt .
 
-# NOTE: PyTorch (torch, torchvision, torchaudio) already installed in base image
-# No need to install PyTorch separately - saves ~8GB and eliminates CI/CD layer size issues
-
-# Install all other prebuilt wheels (numpy already installed, wheels removed from builder)
-COPY --from=builder /wheels /wheels
-RUN pip install --no-cache-dir --no-index --find-links=/wheels /wheels/* \
-  && rm -rf /wheels \
+# Install all Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt \
   && pip cache purge
 
-# Install document generation libraries for code-based artifact generation
-RUN pip install --no-cache-dir \
-  openpyxl==3.1.2 \
-  python-docx==1.1.0 \
-  reportlab==4.0.4 \
-  python-pptx==0.6.23 \
-  pandas==2.1.4 \
-  fpdf2==2.7.6
+# Note: Chatterbox TTS has been removed due to dependency conflicts with transformers>=0.27.0
+# Qwen3 TTS is now the primary and recommended TTS engine
 
 # App user
 RUN useradd -m -u 1001 -s /bin/bash appuser
