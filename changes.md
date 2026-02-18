@@ -1,5 +1,41 @@
 # Recent Changes and Fixes Documentation
 
+## Date: 2026-02-18 (Part 5)
+
+### Enhanced Document Worker Error Logging
+
+#### Problem:
+- Document generation jobs were failing with generic error: "Document generation failed"
+- No visibility into what actually went wrong (stdout/stderr from failed script execution)
+- Could not debug why Python code execution was failing in local mode
+
+#### Solution Applied:
+**Enhanced error logging in `python_back_end/workers/document_worker.py`**:
+- Added logging of return code, stdout, and stderr when document generation fails
+- Captures full error details including Python traceback from failed scripts
+- Stores stderr in database job record for better debugging
+- Limits stderr to 500 chars to prevent database field overflow
+
+```python
+logger.error(f"❌ Document generation failed: {error_msg}")
+logger.error(f"   Return code: {returncode}")
+if stdout:
+    logger.error(f"   STDOUT: {stdout}")
+if stderr:
+    logger.error(f"   STDERR: {stderr}")
+```
+
+#### Files Modified:
+- `python_back_end/workers/document_worker.py`:
+  - Lines 157-172: Enhanced error logging with stdout/stderr capture
+
+#### Result/Status:
+- ✅ Full error details now visible in logs
+- ✅ Can see Python traceback from failed scripts
+- ✅ Better visibility into document generation failures
+
+---
+
 ## Date: 2026-02-18 (Part 4)
 
 ### Fixed Document Worker - Added CODE_EXECUTOR_LOCAL Environment Variable
