@@ -20,7 +20,7 @@ spec:
         app.kubernetes.io/name: harvis-ai
         app.kubernetes.io/component: document-worker
     spec:
-      # Run on rocky VMs only - NOT on Pi (CI runner) or dulc3-os (GPU workloads)
+      # Run on dulc3-os node where artifacts PVC is located
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -29,9 +29,7 @@ spec:
                   - key: kubernetes.io/hostname
                     operator: In
                     values:
-                      - rocky3vm.local
-                      - rocky1vm.local
-                      - rocky2vm.local
+                      - dulc3-os
 
       containers:
         - name: document-worker

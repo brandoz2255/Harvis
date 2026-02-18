@@ -2,33 +2,9 @@
 # Stores generated documents (Excel, DOCX, PDF, PPTX) and website code
 #
 # Usage:
-# 1. Create NFS directory on control plane: sudo mkdir -p /srv/nfs/harvis-artifacts
-# 2. Apply this manifest: kubectl apply -f artifact-storage.yaml
-# 3. Mount in backend deployment at /data/artifacts
+# This PVC uses the default storage class (ReadWriteOnce)
+# Mounted in backend deployment at /data/artifacts
 
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: nfs-harvis-artifacts-pv
-  labels:
-    app.kubernetes.io/name: harvis-ai
-    app.kubernetes.io/component: artifact-storage
-spec:
-  capacity:
-    storage: 20Gi
-  accessModes:
-    - ReadWriteMany
-  persistentVolumeReclaimPolicy: Retain
-  storageClassName: nfs-shared
-  mountOptions:
-    - hard
-    - nfsvers=4.1
-    - noatime
-    - nodiratime
-  nfs:
-    server: 139.182.180.198  # Control plane node public IP
-    path: /srv/nfs/harvis-artifacts
----
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -39,9 +15,7 @@ metadata:
     app.kubernetes.io/component: artifact-storage
 spec:
   accessModes:
-    - ReadWriteMany
-  storageClassName: nfs-shared
+    - ReadWriteOnce
   resources:
     requests:
       storage: 20Gi
-  volumeName: nfs-harvis-artifacts-pv

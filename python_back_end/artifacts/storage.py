@@ -3,6 +3,7 @@ Artifact storage manager - handles database operations and file management
 """
 
 import os
+import json
 import asyncio
 import logging
 from typing import Optional, Dict, Any, List
@@ -358,6 +359,14 @@ class ArtifactStorage:
             else:
                 download_url = f"/api/artifacts/{artifact_id}/download"
 
+        # Handle dependencies - parse JSON string if needed
+        dependencies = artifact.get("dependencies")
+        if isinstance(dependencies, str):
+            try:
+                dependencies = json.loads(dependencies)
+            except (json.JSONDecodeError, TypeError):
+                dependencies = None
+
         return ArtifactResponse(
             id=artifact_id,
             artifact_type=artifact_type,
@@ -370,7 +379,7 @@ class ArtifactStorage:
             if artifact_type in ["website", "app", "code"]
             else None,
             framework=artifact.get("framework"),
-            dependencies=artifact.get("dependencies"),
+            dependencies=dependencies,
             file_size=artifact.get("file_size"),
             mime_type=artifact.get("mime_type"),
             error_message=artifact.get("error_message"),

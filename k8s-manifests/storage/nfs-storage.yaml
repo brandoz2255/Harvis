@@ -1,5 +1,7 @@
 ---
-# NFS StorageClass for ReadWriteMany (RWX) shared storage
+# NFS StorageClass - kept for reference but not actively used
+# The artifact and audio PVCs have been converted to use local-path storage
+# instead of NFS to avoid NFS server dependencies.
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
@@ -9,87 +11,12 @@ metadata:
 provisioner: kubernetes.io/no-provisioner  # Manual provisioning
 volumeBindingMode: WaitForFirstConsumer
 reclaimPolicy: Retain
----
-# NFS PersistentVolume for ML Models Cache
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: nfs-ml-models-cache-pv
-  labels:
-    app.kubernetes.io/name: harvis-ai
-    app.kubernetes.io/component: shared-storage
-spec:
-  capacity:
-    storage: 100Gi  # Large capacity for ML models
-  accessModes:
-    - ReadWriteMany  # RWX - can be mounted by multiple nodes simultaneously
-  persistentVolumeReclaimPolicy: Retain
-  storageClassName: nfs-shared
-  mountOptions:
-    - hard
-    - nfsvers=4.1
-    - noatime
-    - nodiratime
-  nfs:
-    server: 139.182.180.198  # Control plane node public IP (accessible from both nodes)
-    path: /srv/nfs/ml-models-cache
----
-# NFS PersistentVolumeClaim for ML Models Cache
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: nfs-ml-models-cache
-  namespace: ai-agents
-  labels:
-    app.kubernetes.io/name: harvis-ai
-    app.kubernetes.io/component: shared-storage
-spec:
-  accessModes:
-    - ReadWriteMany  # RWX - multiple pods can read/write simultaneously
-  storageClassName: nfs-shared
-  resources:
-    requests:
-      storage: 100Gi
-  volumeName: nfs-ml-models-cache-pv  # Bind to specific PV
----
-# NFS PersistentVolume for Ollama Models Cache (also shared for potential future scaling)
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: nfs-ollama-models-pv
-  labels:
-    app.kubernetes.io/name: harvis-ai
-    app.kubernetes.io/component: shared-storage
-spec:
-  capacity:
-    storage: 100Gi
-  accessModes:
-    - ReadWriteMany
-  persistentVolumeReclaimPolicy: Retain
-  storageClassName: nfs-shared
-  mountOptions:
-    - hard
-    - nfsvers=4.1
-    - noatime
-    - nodiratime
-  nfs:
-    server: 139.182.180.198  # Control plane node public IP (accessible from both nodes)
-    path: /srv/nfs/ollama-models
----
-# NFS PersistentVolumeClaim for Ollama Models
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: nfs-ollama-models
-  namespace: ai-agents
-  labels:
-    app.kubernetes.io/name: harvis-ai
-    app.kubernetes.io/component: shared-storage
-spec:
-  accessModes:
-    - ReadWriteMany
-  storageClassName: nfs-shared
-  resources:
-    requests:
-      storage: 100Gi
-  volumeName: nfs-ollama-models-pv
+
+# NOTE: All NFS PVs have been removed.
+# The following PVCs now use standard ReadWriteOnce storage:
+# - harvis-artifacts-pvc (in artifact-storage.yaml)
+# - harvis-audio-pvc (in audio-storage.yaml)
+# - ml-models-cache (in pvcs.yaml)
+# - ollama-model-cache (in pvcs.yaml)
+# 
+# This StorageClass is kept for backward compatibility only.
