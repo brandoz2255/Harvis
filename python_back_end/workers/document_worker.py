@@ -155,10 +155,24 @@ async def process_document_job(job: Job):
 
         else:
             error_msg = result.get("error", "Document generation failed")
-            logger.error(f"❌ Document generation failed: {error_msg}")
+            stdout = result.get("stdout", "")
+            stderr = result.get("stderr", "")
+            returncode = result.get("returncode", -1)
 
-            await update_document_job(pool, document_job_id, "failed", error=error_msg)
-            await job.fail(error_msg)
+            logger.error(f"❌ Document generation failed: {error_msg}")
+            logger.error(f"   Return code: {returncode}")
+            if stdout:
+                logger.error(f"   STDOUT: {stdout}")
+            if stderr:
+                logger.error(f"   STDERR: {stderr}")
+
+            # Include stderr in error message for better debugging
+            full_error = error_msg
+            if stderr:
+                full_error = f"{error_msg} | STDERR: {stderr[:500]}"
+
+            await update_document_job(pool, document_job_id, "failed", error=full_error)
+            await job.fail(full_error)
 
     except Exception as e:
         logger.exception(f"💥 Document job error: {e}")
