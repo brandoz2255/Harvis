@@ -15,7 +15,7 @@ metadata:
 spec:
   type: LoadBalancer
   # Request specific IP from local-pool (192.168.4.x range)
-  loadBalancerIP: 192.168.4.243
+  loadBalancerIP: 192.168.4.244
   ports:
     - name: http
       port: 80
