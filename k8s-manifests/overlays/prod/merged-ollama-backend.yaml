@@ -160,6 +160,11 @@ spec:
               value: "/models-cache/huggingface"
             - name: WHISPER_CACHE
               value: "/models-cache/whisper"
+            # Audio temp directory - CRITICAL: must match volumeMount path
+            # Python's tempfile.gettempdir() defaults to /var/tmp on Linux
+            # Setting TMPDIR ensures audio files go to the mounted /tmp volume
+            - name: TMPDIR
+              value: "/tmp"
             # Production uvicorn settings
             - name: UVICORN_WORKERS
               value: "1"
