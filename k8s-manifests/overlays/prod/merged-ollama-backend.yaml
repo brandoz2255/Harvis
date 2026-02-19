@@ -24,12 +24,12 @@ spec:
       initContainers:
         # Init container to wait for PostgreSQL database to be ready
         - name: wait-for-db
-          image: busybox:1.36
+          image: postgres:15-alpine
           command: ['sh', '-c']
           args:
             - |
               echo "Waiting for PostgreSQL at harvis-ai-pgsql:5432..."
-              until nc -z harvis-ai-pgsql 5432; do
+              until pg_isready -h harvis-ai-pgsql -p 5432; do
                 echo "Database not ready yet, retrying in 2s..."
                 sleep 2
               done
