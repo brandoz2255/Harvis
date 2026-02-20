@@ -450,7 +450,7 @@ async def process_tts_job(job: Job):
             engine=tts_engine,
             audio_prompt=audio_prompt,
             temperature=0.5,
-            auto_unload=True,  # Unload after generation to free memory
+            auto_unload=False,  # Keep model loaded for worker - unloading/reloading causes memory leaks
         )
 
         if sr is None or wav is None:
