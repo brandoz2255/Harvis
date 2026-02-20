@@ -15,13 +15,13 @@ namespace: ai-agents
 images:
   - name: harvis-backend
     newName: dulc3/jarvis-backend
-    newTag: audiofix
+    newTag: fix1
   - name: harvis-frontend
     newName: dulc3/jarvis-frontend
-    newTag: audiofix
+    newTag: fix1
   - name: harvis-document-worker
     newName: dulc3/harvis-document-worker
-    newTag: audiofix
+    newTag: fix1
 
 # Patches for production
 patches:
@@ -34,21 +34,21 @@ patches:
         value: 2
       - op: replace
         path: /spec/template/spec/containers/1/image
-        value: dulc3/jarvis-backend:audiofix
+        value: dulc3/jarvis-backend:fix1
       - op: replace
         path: /spec/template/spec/initContainers/1/image
-        value: dulc3/jarvis-backend:audiofix
+        value: dulc3/jarvis-backend:fix1
   - target:
       kind: Deployment
       name: harvis-ai-frontend
     patch: |
       - op: replace
         path: /spec/template/spec/containers/0/image
-        value: dulc3/jarvis-frontend:audiofix
+        value: dulc3/jarvis-frontend:fix1
   - target:
       kind: Deployment
       name: harvis-document-worker
     patch: |
       - op: replace
         path: /spec/template/spec/containers/0/image
-        value: dulc3/harvis-document-worker:audiofix
+        value: dulc3/harvis-document-worker:fix1
