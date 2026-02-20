@@ -225,9 +225,8 @@ spec:
           persistentVolumeClaim:
             claimName: ml-models-cache
         - name: tmp
-          hostPath:
-            path: /var/lib/harvis/audio
-            type: DirectoryOrCreate
+          persistentVolumeClaim:
+            claimName: harvis-audio-pvc
         - name: images
           persistentVolumeClaim:
             claimName: harvis-images-pvc

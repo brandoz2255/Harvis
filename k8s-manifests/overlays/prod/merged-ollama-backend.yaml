@@ -24,12 +24,12 @@ spec:
       initContainers:
         # Init container to wait for PostgreSQL database to be ready
         - name: wait-for-db
-          image: postgres:15-alpine
+          image: busybox:1.36
           command: ['sh', '-c']
           args:
             - |
               echo "Waiting for PostgreSQL at harvis-ai-pgsql:5432..."
-              until pg_isready -h harvis-ai-pgsql -p 5432; do
+              until nc -z harvis-ai-pgsql 5432; do
                 echo "Database not ready yet, retrying in 2s..."
                 sleep 2
               done
@@ -232,9 +232,8 @@ spec:
           persistentVolumeClaim:
             claimName: ml-models-cache
         - name: tmp
-          hostPath:
-            path: /var/lib/harvis/audio
-            type: DirectoryOrCreate
+          persistentVolumeClaim:
+            claimName: harvis-audio-pvc
         - name: images
           persistentVolumeClaim:
             claimName: harvis-images-pvc
