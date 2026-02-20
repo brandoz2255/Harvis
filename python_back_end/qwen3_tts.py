@@ -22,6 +22,8 @@ import logging
 import time
 import gc
 import numpy as np
+import threading
+import atexit
 from typing import Optional, Tuple
 
 # Set up logging
@@ -34,6 +36,13 @@ qwen_tts_model = None
 # Cached voice clone prompt (reused across generations to avoid recomputing)
 _voice_clone_prompt = None
 _voice_clone_ref_audio = None
+
+# Auto-unload configuration
+_last_tts_use_time: float = 0.0
+_auto_unload_timeout: float = float(os.getenv("TTS_IDLE_TIMEOUT", "30"))  # seconds
+_auto_unload_thread: Optional[threading.Thread] = None
+_auto_unload_stop_event = threading.Event()
+_auto_unload_lock = threading.Lock()
 
 # Model configuration - Qwen3-TTS Base models (voice clone capable)
 QWEN_TTS_MODEL_1_7B = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
@@ -52,6 +61,83 @@ def get_vram_threshold():
         return float("inf")
     total_mem = torch.cuda.get_device_properties(0).total_memory
     return max(int(total_mem * 0.8), 10 * 1024**3)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Auto-Unload System - Frees RAM after idle timeout
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _touch_tts_usage():
+    """Update last TTS usage timestamp"""
+    global _last_tts_use_time
+    _last_tts_use_time = time.time()
+
+
+def _auto_unload_worker():
+    """Background thread that unloads TTS model after idle timeout"""
+    global qwen_tts_model, _last_tts_use_time
+
+    logger.info(f"🕐 TTS auto-unload worker started (timeout: {_auto_unload_timeout}s)")
+
+    while not _auto_unload_stop_event.is_set():
+        # Check every 5 seconds
+        _auto_unload_stop_event.wait(5)
+
+        if _auto_unload_stop_event.is_set():
+            break
+
+        with _auto_unload_lock:
+            if qwen_tts_model is None:
+                continue
+
+            idle_time = time.time() - _last_tts_use_time
+
+            if idle_time >= _auto_unload_timeout:
+                logger.info(f"🗑️ TTS idle for {idle_time:.1f}s, auto-unloading to free RAM...")
+                unload_qwen_tts_model()
+                logger.info("✅ TTS auto-unloaded successfully")
+
+
+def _start_auto_unload_thread():
+    """Start the auto-unload background thread if not running"""
+    global _auto_unload_thread
+
+    if _auto_unload_thread is not None and _auto_unload_thread.is_alive():
+        return  # Already running
+
+    _auto_unload_stop_event.clear()
+    _auto_unload_thread = threading.Thread(
+        target=_auto_unload_worker,
+        daemon=True,
+        name="tts-auto-unload"
+    )
+    _auto_unload_thread.start()
+
+
+def _stop_auto_unload_thread():
+    """Stop the auto-unload background thread"""
+    global _auto_unload_thread
+
+    if _auto_unload_thread is not None:
+        _auto_unload_stop_event.set()
+        _auto_unload_thread.join(timeout=2)
+        _auto_unload_thread = None
+
+
+def set_tts_idle_timeout(seconds: float):
+    """Set the TTS idle timeout (how long before auto-unload)"""
+    global _auto_unload_timeout
+    _auto_unload_timeout = max(5.0, seconds)  # Minimum 5 seconds
+    logger.info(f"🕐 TTS idle timeout set to {_auto_unload_timeout}s")
+
+
+def get_tts_idle_timeout() -> float:
+    """Get the current TTS idle timeout"""
+    return _auto_unload_timeout
+
+
+# Register cleanup on process exit
+atexit.register(_stop_auto_unload_thread)
 
 
 def check_qwen_tts_available() -> bool:
@@ -79,111 +165,123 @@ def load_qwen_tts_model(force_cpu: bool = False, use_1_7b: bool = False):
     """
     global qwen_tts_model
 
-    if qwen_tts_model is not None:
-        logger.info("Qwen3-TTS model already loaded")
-        return qwen_tts_model
+    # Use lock for thread-safe loading
+    with _auto_unload_lock:
+        if qwen_tts_model is not None:
+            logger.info("Qwen3-TTS model already loaded")
+            _touch_tts_usage()  # Reset idle timer
+            return qwen_tts_model
 
-    if not check_qwen_tts_available():
-        raise ImportError("qwen-tts is not installed")
+        if not check_qwen_tts_available():
+            raise ImportError("qwen-tts is not installed")
 
-    # Always use 0.6B model for better VRAM compatibility (~3-4GB instead of ~7GB)
-    device = "cuda:0" if torch.cuda.is_available() and not force_cpu else "cpu"
-    model_id = QWEN_TTS_MODEL_0_6B  # Always use 0.6B model
+        # Always use 0.6B model for better VRAM compatibility (~3-4GB instead of ~7GB)
+        device = "cuda:0" if torch.cuda.is_available() and not force_cpu else "cpu"
+        model_id = QWEN_TTS_MODEL_0_6B  # Always use 0.6B model
 
-    if use_1_7b:
-        logger.warning("1.7B model requested but using 0.6B for VRAM compatibility")
+        if use_1_7b:
+            logger.warning("1.7B model requested but using 0.6B for VRAM compatibility")
 
-    logger.info(f"Loading Qwen3-TTS model '{model_id}' on {device}...")
+        logger.info(f"Loading Qwen3-TTS model '{model_id}' on {device}...")
 
-    try:
-        from qwen_tts import Qwen3TTSModel
-
-        # GPU cleanup before loading
-        if "cuda" in device and torch.cuda.is_available():
-            logger.info("Performing GPU cleanup before loading Qwen3-TTS...")
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
-            gc.collect()
-            time.sleep(0.5)
-
-        # Use sdpa attention (flash_attention_2 requires flash-attn package)
-        attn_impl = "sdpa"
         try:
-            import flash_attn
+            from qwen_tts import Qwen3TTSModel
 
-            attn_impl = "flash_attention_2"
-            logger.info("Using FlashAttention 2 for Qwen3-TTS")
-        except ImportError:
-            logger.info("Using SDPA attention for Qwen3-TTS (flash-attn not installed)")
-
-        dtype = torch.bfloat16 if "cuda" in device else torch.float32
-
-        qwen_tts_model = Qwen3TTSModel.from_pretrained(
-            model_id,
-            device_map=device,
-            dtype=dtype,
-            attn_implementation=attn_impl,
-        )
-
-        logger.info(f"Qwen3-TTS model loaded successfully on {device.upper()}")
-
-        # Log memory usage
-        if "cuda" in device and torch.cuda.is_available():
-            allocated = torch.cuda.memory_allocated() / 1024**3
-            logger.info(f"GPU memory allocated: {allocated:.2f} GB")
-
-        return qwen_tts_model
-
-    except RuntimeError as e:
-        error_str = str(e).lower()
-        if "out of memory" in error_str or "cuda" in error_str:
-            logger.warning(f"CUDA OOM during Qwen3-TTS load: {e}")
-            logger.info("Attempting CPU fallback for Qwen3-TTS (0.6B model)...")
-            if torch.cuda.is_available():
+            # GPU cleanup before loading
+            if "cuda" in device and torch.cuda.is_available():
+                logger.info("Performing GPU cleanup before loading Qwen3-TTS...")
                 torch.cuda.empty_cache()
+                torch.cuda.synchronize()
                 gc.collect()
-            return load_qwen_tts_model(force_cpu=True, use_1_7b=False)
-        raise
-    except Exception as e:
-        logger.error(f"Failed to load Qwen3-TTS model: {e}")
-        raise
+                time.sleep(0.5)
+
+            # Use sdpa attention (flash_attention_2 requires flash-attn package)
+            attn_impl = "sdpa"
+            try:
+                import flash_attn
+
+                attn_impl = "flash_attention_2"
+                logger.info("Using FlashAttention 2 for Qwen3-TTS")
+            except ImportError:
+                logger.info("Using SDPA attention for Qwen3-TTS (flash-attn not installed)")
+
+            dtype = torch.bfloat16 if "cuda" in device else torch.float32
+
+            qwen_tts_model = Qwen3TTSModel.from_pretrained(
+                model_id,
+                device_map=device,
+                dtype=dtype,
+                attn_implementation=attn_impl,
+            )
+
+            logger.info(f"Qwen3-TTS model loaded successfully on {device.upper()}")
+
+            # Log memory usage
+            if "cuda" in device and torch.cuda.is_available():
+                allocated = torch.cuda.memory_allocated() / 1024**3
+                logger.info(f"GPU memory allocated: {allocated:.2f} GB")
+
+            # Start auto-unload thread and mark usage
+            _touch_tts_usage()
+            _start_auto_unload_thread()
+
+            return qwen_tts_model
+
+        except RuntimeError as e:
+            error_str = str(e).lower()
+            if "out of memory" in error_str or "cuda" in error_str:
+                logger.warning(f"CUDA OOM during Qwen3-TTS load: {e}")
+                logger.info("Attempting CPU fallback for Qwen3-TTS (0.6B model)...")
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    gc.collect()
+                # Release lock before recursive call
+                # (lock is released when 'with' block exits)
+
+        except Exception as e:
+            logger.error(f"Failed to load Qwen3-TTS model: {e}")
+            raise
+
+    # CPU fallback (outside lock to avoid deadlock on recursive call)
+    return load_qwen_tts_model(force_cpu=True, use_1_7b=False)
 
 
 def unload_qwen_tts_model():
     """Unload Qwen3-TTS model to free GPU VRAM and CPU RAM"""
     global qwen_tts_model, _voice_clone_prompt, _voice_clone_ref_audio
 
-    if qwen_tts_model is not None:
-        logger.info("Unloading Qwen3-TTS model...")
+    with _auto_unload_lock:
+        if qwen_tts_model is not None:
+            logger.info("Unloading Qwen3-TTS model...")
 
-        try:
-            if hasattr(qwen_tts_model, "model") and hasattr(qwen_tts_model.model, "to"):
-                qwen_tts_model.model.to("cpu")
-        except Exception as e:
-            logger.debug(f"Could not move Qwen3-TTS model to CPU: {e}")
+            try:
+                if hasattr(qwen_tts_model, "model") and hasattr(qwen_tts_model.model, "to"):
+                    qwen_tts_model.model.to("cpu")
+            except Exception as e:
+                logger.debug(f"Could not move Qwen3-TTS model to CPU: {e}")
 
-        del qwen_tts_model
-        qwen_tts_model = None
-        _voice_clone_prompt = None
-        _voice_clone_ref_audio = None
+            del qwen_tts_model
+            qwen_tts_model = None
+            _voice_clone_prompt = None
+            _voice_clone_ref_audio = None
 
-        # Aggressive cleanup
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
+            # Aggressive cleanup
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
 
-        gc.collect()
-        gc.collect()
-        gc.collect()
+            gc.collect()
+            gc.collect()
+            gc.collect()
 
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
-        logger.info("Qwen3-TTS model unloaded successfully")
+            logger.info("Qwen3-TTS model unloaded successfully")
 
-        if torch.cuda.is_available():
-            allocated = torch.cuda.memory_allocated() / 1024**3
-            logger.info(f"GPU memory after unload: {allocated:.2f} GB")
+            if torch.cuda.is_available():
+                allocated = torch.cuda.memory_allocated() / 1024**3
+                logger.info(f"GPU memory after unload: {allocated:.2f} GB")
 
 
 def _get_or_create_voice_clone_prompt(model, ref_audio: str, ref_text: str = None):
@@ -260,6 +358,9 @@ def generate_qwen_speech(
     if language is None:
         language = DEFAULT_LANGUAGE
 
+    # Touch usage time for auto-unload tracking
+    _touch_tts_usage()
+
     logger.info(f"Generating speech for text (length: {len(text)} chars)")
     logger.info(
         f"TTS params: ref_audio={os.path.basename(ref_audio)}, language={language}, temp={temperature}"
@@ -298,6 +399,9 @@ def generate_qwen_speech(
             audio_np = np.array(audio_np).squeeze()
 
         logger.info(f"Audio generated: {len(audio_np)} samples at {sr}Hz")
+
+        # Touch usage time again after generation
+        _touch_tts_usage()
 
         return (sr, audio_np)
 
@@ -432,13 +536,12 @@ def generate_qwen_speech_chunked(
 
 # Convenience functions for model manager integration
 def is_qwen_tts_loaded() -> bool:
-    """Check if Qwen3-TTS model is currently loaded"""
-    return qwen_tts_model is not None
+    """Check if Qwen3-TTS model is currently loaded (thread-safe)"""
+    with _auto_unload_lock:
+        return qwen_tts_model is not None
 
 
 def get_qwen_tts_model():
-    """Get Qwen3-TTS model, loading if necessary"""
-    global qwen_tts_model
-    if qwen_tts_model is None:
-        load_qwen_tts_model()
-    return qwen_tts_model
+    """Get Qwen3-TTS model, loading if necessary (thread-safe)"""
+    # load_qwen_tts_model handles locking and returns existing model if loaded
+    return load_qwen_tts_model()

@@ -1004,6 +1004,9 @@ def load_qwen_tts_model(force_cpu=False, use_1_7b=False):
     NOTE: Qwen TTS is lazily imported here to avoid allocating VRAM/RAM
     when not needed.
 
+    IMPORTANT: We delegate to qwen3_tts module and use its global state
+    to avoid duplicate model references that cause memory leaks.
+
     Args:
         force_cpu: Force CPU inference
         use_1_7b: Use 1.7B model (better quality) or 0.6B (lower VRAM)
@@ -1011,15 +1014,17 @@ def load_qwen_tts_model(force_cpu=False, use_1_7b=False):
     """
     global qwen_tts_model
 
-    if qwen_tts_model is not None:
-        logger.info("Qwen TTS model already loaded")
-        return qwen_tts_model
-
     # Lazy import Qwen TTS module
     qwen_tts = _lazy_import_qwen_tts()
     if qwen_tts is None:
         logger.error("❌ Qwen TTS module not available")
         return None
+
+    # Check the module's state (single source of truth)
+    if qwen_tts.is_qwen_tts_loaded():
+        logger.info("Qwen TTS model already loaded")
+        qwen_tts_model = qwen_tts.get_qwen_tts_model()
+        return qwen_tts_model
 
     try:
         logger.info(
@@ -1034,6 +1039,7 @@ def load_qwen_tts_model(force_cpu=False, use_1_7b=False):
             gc.collect()
             time.sleep(0.5)
 
+        # Load via module (which manages its own global)
         qwen_tts_model = qwen_tts.load_qwen_tts_model(
             force_cpu=force_cpu, use_1_7b=use_1_7b
         )
@@ -1054,34 +1060,42 @@ def unload_qwen_tts_model():
     """Unload Qwen TTS model to free GPU VRAM and CPU RAM"""
     global qwen_tts_model
 
-    if qwen_tts_model is not None:
-        logger.info("🗑️ Unloading Qwen TTS model to free GPU VRAM and CPU RAM")
+    # Check if model is loaded (via module's state - single source of truth)
+    qwen_tts = _lazy_import_qwen_tts()
 
-        # Use the module's unload function if available
-        qwen_tts = _lazy_import_qwen_tts()
-        if qwen_tts is not None:
-            try:
-                qwen_tts.unload_qwen_tts_model()
-            except Exception as e:
-                logger.warning(f"⚠️ Qwen TTS module unload error: {e}")
-
-        # Clear our reference
+    if qwen_tts is None:
         qwen_tts_model = None
+        return
 
-        # Aggressive GPU cleanup
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
+    if not qwen_tts.is_qwen_tts_loaded() and qwen_tts_model is None:
+        logger.info("Qwen TTS model not loaded, nothing to unload")
+        return
 
-        gc.collect()
-        gc.collect()
-        gc.collect()
+    logger.info("🗑️ Unloading Qwen TTS model to free GPU VRAM and CPU RAM")
 
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+    # Use the module's unload function (it manages the actual model)
+    try:
+        qwen_tts.unload_qwen_tts_model()
+    except Exception as e:
+        logger.warning(f"⚠️ Qwen TTS module unload error: {e}")
 
-        logger.info("✅ Qwen TTS model unloaded (VRAM + CPU RAM freed)")
-        log_gpu_memory("after Qwen TTS unload")
+    # Clear our reference (should already be cleared by module)
+    qwen_tts_model = None
+
+    # Aggressive GPU cleanup
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+
+    gc.collect()
+    gc.collect()
+    gc.collect()
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    logger.info("✅ Qwen TTS model unloaded (VRAM + CPU RAM freed)")
+    log_gpu_memory("after Qwen TTS unload")
 
 
 def unload_running_ollama_models():

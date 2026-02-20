@@ -191,7 +191,8 @@ if [ -f "$KUSTOMIZE_FILE" ]; then
   echo ""
   log_info "Committing changes to Git..."
 
-  if git add "$KUSTOMIZE_FILE"; then
+  # Add all k8s manifest changes, not just kustomization.yaml
+  if git add k8s-manifests/; then
     if git commit -m "chore: update images to $BACKEND_VERSION [ci]"; then
       log_success "Changes committed"
 
