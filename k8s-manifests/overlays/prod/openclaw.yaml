@@ -1,6 +1,36 @@
 ---
-# PersistentVolumeClaim for OpenClaw state directory
-# Stores session JSONL files, config audit log, agent workspaces
+# Static PersistentVolume pinned to rocky2vm.local.
+# Using a static local PV (not local-path provisioner) so we control exactly
+# which node OpenClaw's data lives on — critical for the security isolation model.
+# Retain policy: data survives PVC deletion and must be manually cleaned up.
+# Before applying: ensure /var/lib/openclaw-data exists on rocky2vm.local.
+#   kubectl debug node/rocky2vm.local -it --image=busybox -- mkdir -p /host/var/lib/openclaw-data
+#   (or ssh rocky2vm.local "sudo mkdir -p /var/lib/openclaw-data && sudo chown 1000:1000 /var/lib/openclaw-data")
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: openclaw-data-rocky2
+spec:
+  capacity:
+    storage: 5Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  local:
+    path: /var/lib/openclaw-data
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - rocky2vm.local
+
+---
+# PersistentVolumeClaim — bound explicitly to the static PV above.
+# storageClassName: "" + volumeName together force a 1:1 bind to openclaw-data-rocky2.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -9,6 +39,8 @@ metadata:
 spec:
   accessModes:
     - ReadWriteOnce
+  storageClassName: ""
+  volumeName: openclaw-data-rocky2
   resources:
     requests:
       storage: 5Gi
