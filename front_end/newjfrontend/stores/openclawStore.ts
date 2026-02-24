@@ -122,7 +122,7 @@ interface OpenClawState {
   // UI State
   isWorkspaceActive: boolean
   isChatMinimized: boolean
-  activeTab: 'progress' | 'preview' | 'logs' | 'artifacts'
+  activeTab: 'progress' | 'preview' | 'logs' | 'artifacts' | 'history'
 
   // Harvis Workspace session state
   suggestion: WorkspaceSuggestion | null
@@ -154,7 +154,7 @@ interface OpenClawState {
 
   setWorkspaceActive: (active: boolean) => void
   setChatMinimized: (minimized: boolean) => void
-  setActiveTab: (tab: 'progress' | 'preview' | 'logs' | 'artifacts') => void
+  setActiveTab: (tab: 'progress' | 'preview' | 'logs' | 'artifacts' | 'history') => void
 
   // Harvis Workspace actions
   setSuggestion: (suggestion: WorkspaceSuggestion | null) => void
