@@ -156,7 +156,7 @@ spec:
 
       # Run OpenClaw on its own dedicated node, isolated from the main Harvis workload
       nodeSelector:
-        kubernetes.io/hostname: Rockyvm2.local
+        kubernetes.io/hostname: rocky2vm.local
 
       initContainers:
         # 1. Wait for PostgreSQL before starting
