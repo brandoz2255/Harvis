@@ -1,0 +1,380 @@
+---
+# PersistentVolumeClaim for OpenClaw state directory
+# Stores session JSONL files, config audit log, agent workspaces
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: openclaw-data
+  namespace: ai-agents
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+
+---
+# ConfigMap: openclaw.json config file (mounted read-only)
+# Key security setting: models.mode = "replace" so NO cloud provider fallback exists.
+# channels is intentionally empty — Harvis backend is the only client via WebSocket.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openclaw-config
+  namespace: ai-agents
+data:
+  openclaw.json: |
+    {
+      gateway: {
+        // Must be "lan" so K8s health probes (from different pod IPs) can reach port 18789
+        bind: "lan",
+        port: 18789,
+        auth: {
+          mode: "token",
+        },
+      },
+      session: {
+        scope: "per-sender",
+        // Never auto-reset — Harvis manages session lifecycle
+        reset: { mode: "never" },
+        maintenance: {
+          pruneAfter: "90d",
+          maxEntries: 2000,
+        },
+      },
+      models: {
+        // CRITICAL: "replace" means ONLY Ollama exists. No OpenAI/Anthropic fallback.
+        // If Ollama is unreachable, the agent fails instead of silently calling the cloud.
+        mode: "replace",
+        providers: {
+          ollama: {
+            // Ollama is co-located in the backend pod, exposed via the backend Service
+            baseUrl: "http://harvis-ai-merged-backend:11434",
+            apiKey: "ollama-local",
+          },
+        },
+      },
+      agents: {
+        defaults: {
+          model: {
+            primary: "ollama/qwen2.5-coder:32b",
+            fallbacks: ["ollama/llama3.3"],
+          },
+          // Disable all built-in web/search skills globally
+          skills: [],
+        },
+      },
+      // No channels — OpenClaw is not connected to Telegram/Discord/etc.
+      // The Harvis Python backend is the sole WebSocket client.
+      channels: {},
+    }
+
+---
+# Secret: OpenClaw gateway token + Kimi K2.5 API key + DB URL
+# IMPORTANT: Replace placeholder values before applying to cluster.
+# The gateway token must match what the Harvis backend uses to authenticate with OpenClaw.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: harvis-ai-openclaw-secret
+  namespace: ai-agents
+type: Opaque
+stringData:
+  # Generate with: openssl rand -hex 32
+  openclaw-gateway-token: "REPLACE_WITH_REAL_TOKEN"
+  # Kimi K2.5 API key — used by Harvis backend orchestrator, not by OpenClaw itself.
+  # Stored here so the backend Secret can reference it via secretKeyRef.
+  moonshot-api-key: "REPLACE_WITH_REAL_MOONSHOT_KEY"
+  # OpenClaw DB URL — separate from backend secret for isolation
+  database-url: "postgresql://pguser:pgpassword@harvis-ai-pgsql:5432/database"
+
+---
+# NetworkPolicy: Enforce OpenClaw's isolation at the network level.
+#
+# INGRESS: Only the Harvis backend pod may connect (port 18789 WebSocket).
+# EGRESS:  Only to pgsql:5432 and backend:11434 (Ollama). Nothing else.
+#          DNS (port 53) is allowed so OpenClaw can resolve service names.
+#
+# This means even if OpenClaw is prompt-injected into calling a web tool,
+# the packet will be dropped at the kernel level before it leaves the node.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: openclaw-isolation
+  namespace: ai-agents
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: openclaw
+  policyTypes:
+    - Ingress
+    - Egress
+
+  ingress:
+    # Only allow connections from the Harvis backend
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: merged-ollama-backend
+      ports:
+        - protocol: TCP
+          port: 18789
+
+  egress:
+    # DNS resolution (CoreDNS runs in kube-system)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+    # PostgreSQL for session storage
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: postgresql
+      ports:
+        - protocol: TCP
+          port: 5432
+
+    # Ollama (co-located in the backend pod, exposed via backend Service)
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: merged-ollama-backend
+      ports:
+        - protocol: TCP
+          port: 11434
+
+---
+# Deployment: OpenClaw gateway
+# Single replica — OpenClaw writes session state to local JSONL files on the PVC.
+# Multiple replicas would cause split-brain session state.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: harvis-ai-openclaw
+  namespace: ai-agents
+  labels:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: openclaw
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: harvis-ai
+      app.kubernetes.io/component: openclaw
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: harvis-ai
+        app.kubernetes.io/component: openclaw
+    spec:
+      # Run as non-root (node user = uid 1000, matches the OpenClaw Docker image)
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        runAsNonRoot: true
+
+      # Pin to same node as the rest of Harvis
+      nodeSelector:
+        kubernetes.io/hostname: dulc3-os
+
+      initContainers:
+        # 1. Wait for PostgreSQL before starting
+        - name: wait-for-db
+          image: busybox:1.36
+          command: ["sh", "-c"]
+          args:
+            - |
+              echo "Waiting for PostgreSQL at harvis-ai-pgsql:5432..."
+              until nc -z harvis-ai-pgsql 5432; do
+                echo "PostgreSQL not ready, retrying in 2s..."
+                sleep 2
+              done
+              echo "PostgreSQL is ready!"
+          resources:
+            requests:
+              memory: 16Mi
+              cpu: 10m
+            limits:
+              memory: 32Mi
+              cpu: 50m
+
+        # 2. Create OpenClaw tables in the shared PostgreSQL (idempotent)
+        # Uses CREATE TABLE IF NOT EXISTS — safe to run on every pod start.
+        - name: db-schema-init
+          image: postgres:15-alpine
+          command: ["sh", "-c"]
+          args:
+            - |
+              echo "Creating OpenClaw tables in PostgreSQL..."
+              psql "$DATABASE_URL" <<'SQL'
+              CREATE TABLE IF NOT EXISTS openclaw_sessions (
+                  id           SERIAL PRIMARY KEY,
+                  session_key  TEXT UNIQUE NOT NULL,
+                  agent_id     TEXT NOT NULL,
+                  display_name TEXT,
+                  model_id     TEXT,
+                  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                  updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                  tokens_in    INTEGER DEFAULT 0,
+                  tokens_out   INTEGER DEFAULT 0,
+                  cost_usd     NUMERIC(12, 8) DEFAULT 0,
+                  metadata     JSONB DEFAULT '{}'
+              );
+              CREATE TABLE IF NOT EXISTS openclaw_messages (
+                  id           SERIAL PRIMARY KEY,
+                  session_key  TEXT NOT NULL REFERENCES openclaw_sessions(session_key),
+                  msg_id       TEXT NOT NULL,
+                  role         TEXT NOT NULL,
+                  content      JSONB NOT NULL,
+                  metadata     JSONB DEFAULT '{}',
+                  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+              );
+              CREATE INDEX IF NOT EXISTS idx_oc_sessions_agent
+                  ON openclaw_sessions(agent_id);
+              CREATE INDEX IF NOT EXISTS idx_oc_sessions_updated
+                  ON openclaw_sessions(updated_at);
+              CREATE INDEX IF NOT EXISTS idx_oc_messages_session
+                  ON openclaw_messages(session_key, created_at);
+              SQL
+              echo "Schema ready!"
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-openclaw-secret
+                  key: database-url
+          resources:
+            requests:
+              memory: 32Mi
+              cpu: 50m
+            limits:
+              memory: 64Mi
+              cpu: 100m
+
+      containers:
+        - name: openclaw
+          # Build from openclaw/openclaw/ and push to: dulc3/openclaw:latest
+          # docker build -t dulc3/openclaw:latest openclaw/openclaw/
+          # docker push dulc3/openclaw:latest
+          image: dulc3/openclaw:latest
+          imagePullPolicy: Always
+          command:
+            - node
+            - openclaw.mjs
+            - gateway
+            - --bind
+            - lan
+            - --port
+            - "18789"
+            - --allow-unconfigured
+
+          ports:
+            - name: gateway
+              containerPort: 18789
+              protocol: TCP
+
+          env:
+            # Required: HOME must point to where .openclaw state dir lives
+            - name: HOME
+              value: /home/node
+            - name: NODE_ENV
+              value: production
+            - name: TERM
+              value: xterm-256color
+
+            # Override state dir to use the PVC mount
+            - name: OPENCLAW_STATE_DIR
+              value: /home/node/.openclaw
+
+            # Gateway auth token — must match what Harvis backend sends
+            - name: OPENCLAW_GATEWAY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-openclaw-secret
+                  key: openclaw-gateway-token
+
+            # Ollama discovery — any non-empty value triggers auto-discovery
+            - name: OLLAMA_API_KEY
+              value: "ollama-local"
+
+            # Database URL for session storage
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-openclaw-secret
+                  key: database-url
+
+          volumeMounts:
+            # PVC for all OpenClaw runtime state (sessions, logs, agent workspaces)
+            - name: openclaw-data
+              mountPath: /home/node/.openclaw
+            # Config file overlaid on top of the state dir (read-only)
+            - name: openclaw-config
+              mountPath: /home/node/.openclaw/openclaw.json
+              subPath: openclaw.json
+              readOnly: true
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 18789
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 18789
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 250m
+            limits:
+              memory: 2Gi
+              cpu: 1000m
+
+      volumes:
+        - name: openclaw-data
+          persistentVolumeClaim:
+            claimName: openclaw-data
+        - name: openclaw-config
+          configMap:
+            name: openclaw-config
+
+---
+# Service: ClusterIP only — OpenClaw is never exposed to the host or LoadBalancer.
+# Only reachable within the cluster from the Harvis backend pod.
+apiVersion: v1
+kind: Service
+metadata:
+  name: harvis-ai-openclaw
+  namespace: ai-agents
+  labels:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: openclaw
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: openclaw
+  ports:
+    - name: gateway
+      port: 18789
+      targetPort: 18789
+      protocol: TCP
+  # No NodePort, no LoadBalancer — internal only
