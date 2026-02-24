@@ -1,3 +1,91 @@
+## 2026-02-24: Fix OpenClaw K8s Deployment — Full Debug Session
+
+### Problems Addressed
+
+1. **Pod back-off restart loop** — `harvis-ai-openclaw` was crash-looping in the `ai-agents` namespace
+2. **CI pipeline clobbering openclaw image tag** — `ci_pipeline.sh` overwrote the openclaw `newTag` every harvis build
+3. **CI pipeline ordering bug** — `ci_openclaw_pipeline.sh` pushed kustomize to git before pushing the image to Docker Hub, so ArgoCD would pull a tag that didn't exist yet
+4. **Wrong nodeSelector hostname** — Pod had `Rockyvm2.local` (AI-generated typo); actual node is `rocky2vm.local`
+5. **PVC on wrong node** — `local-path` StorageClass scheduled the PVC on `dulc3-os` (control plane); OpenClaw's nodeSelector pointed to `rocky2vm.local` — PV/pod node mismatch
+6. **openclaw.json used JSON5 syntax** — Unquoted keys and `//` comments; newer OpenClaw builds require strict `JSON.parse()`
+7. **Config schema validation failures** (Zod):
+   - `models.providers.ollama.models` was missing (required array of `{id, name}`)
+   - `agents.defaults` had unknown key `skills` (schema is `.strict()`)
+   - `session.reset.mode: "never"` is not a valid value (only `"daily"` or `"idle"`)
+8. **Control UI startup error** — Gateway binding to `lan` required `controlUi.allowedOrigins` or explicit disable
+9. **Wrong health probe type** — K8s probes used `httpGet: /health` but OpenClaw only exposes `health` as a WebSocket RPC method, not an HTTP route — always returned 404
+
+### Root Cause Analysis
+
+The crash loop was a cascade: wrong nodeSelector → wrong node for PVC → pod couldn't schedule → after nodeSelector fix, config schema errors → Zod validation failures prevented gateway start → after config fixes, Control UI error → after that fix, `httpGet /health` returned 404 → probes killed pod repeatedly.
+
+The kustomize clobbering was a global `sed "s/newTag: .*/..."` in `ci_pipeline.sh` line 172 that replaced ALL `newTag:` entries including openclaw's on every harvis build.
+
+The PVC issue: k3s `local-path` provisioner pins the PVC to whichever node the pod first schedules on. Since openclaw had the wrong nodeSelector initially, the PVC was bound to `dulc3-os` (control plane). After fixing the nodeSelector, the pod and PVC were on different nodes.
+
+### Solutions Applied
+
+#### 1. `ci_pipeline.sh` — Targeted per-image kustomize replacement
+Replaced the global `sed` with a Python regex that only updates harvis images, leaving the openclaw `newTag` untouched.
+
+#### 2. `ci_openclaw_pipeline.sh` — Fixed push ordering
+Reordered: Docker Hub push first → kustomize update → git commit → git push. ArgoCD now always finds the image before syncing.
+
+#### 3. `k8s-manifests/overlays/prod/openclaw.yaml` — Static PV on rocky2vm.local
+Deleted the `local-path` PVC. Created a static PersistentVolume (`openclaw-data-rocky2`) with explicit `nodeAffinity` for `rocky2vm.local`, `Retain` reclaim policy, and `local.path: /var/lib/openclaw-data`. Updated PVC to use `storageClassName: ""` + `volumeName: openclaw-data-rocky2` for a forced 1:1 bind. Fixed `nodeSelector` typo.
+
+#### 4. `openclaw.json` ConfigMap — Full schema-compliant strict JSON config
+```json
+{
+  "gateway": {
+    "bind": "lan", "port": 18789,
+    "auth": {"mode": "token"},
+    "controlUi": {"enabled": false}
+  },
+  "session": {
+    "scope": "per-sender",
+    "maintenance": {"pruneAfter": "90d", "maxEntries": 2000}
+  },
+  "models": {
+    "mode": "replace",
+    "providers": {
+      "ollama": {
+        "baseUrl": "http://harvis-ai-merged-backend:11434",
+        "apiKey": "ollama-local",
+        "models": [{"id": "gpt-oss:latest", "name": "GPT-OSS"}]
+      }
+    }
+  },
+  "agents": {"defaults": {"model": {"primary": "ollama/gpt-oss:latest"}}},
+  "skills": {"load": {"extraDirs": ["/skills"]}},
+  "channels": {}
+}
+```
+
+#### 5. Harvis Agent SKILL.md ConfigMap
+Created `harvis-agent-skill` ConfigMap with a full OpenClaw skill prompt (`/skills/harvis-agent/SKILL.md`). The skill defines the agent's identity, task routing table (`coder`/`researcher`/`writer`/`planner`), JSON response format, and security guardrails. Mounted via `subPath` into the OpenClaw pod at `/skills/harvis-agent/SKILL.md` (read-only).
+
+#### 6. Health probes — `tcpSocket` instead of `httpGet`
+OpenClaw's `health` is a WebSocket JSON-RPC method, not an HTTP GET route. The HTTP server returns 404 for `/health`. Switched both `livenessProbe` and `readinessProbe` to `tcpSocket: port: 18789`.
+
+### Files Modified
+
+- `ci_pipeline.sh` — Targeted Python regex for per-image kustomize update
+- `ci_openclaw_pipeline.sh` — Push ordering: Docker Hub first, then kustomize
+- `k8s-manifests/overlays/prod/openclaw.yaml` — Static PV, corrected nodeSelector, schema-compliant config, Harvis Agent SKILL.md ConfigMap, tcpSocket probes
+
+### Final State
+
+```
+harvis-ai-openclaw-56fc97f8d6-wt25k   1/1   Running   0   stable
+[gateway] agent model: ollama/gpt-oss:latest
+[gateway] listening on ws://0.0.0.0:18789 (PID 13)
+[heartbeat] started
+[health-monitor] started
+```
+
+---
+
 ## 2026-02-16: Add Ansible Playbooks to RAG VectorDB with Qwen3 Embedding
 
 ### Problem

@@ -78,6 +78,51 @@ class WorkspaceSuggestion:
         }
 
 
+WORKSPACE_KEYWORDS = {"workspace", "/workspace"}
+
+
+def _keyword_override(chat_history: list[dict]) -> Optional[WorkspaceSuggestion]:
+    """
+    If the last user message contains 'workspace' or starts with '/workspace',
+    skip Kimi detection and force a workspace suggestion immediately.
+    Returns a WorkspaceSuggestion or None if no keyword found.
+    """
+    last_user = next(
+        (m for m in reversed(chat_history) if m.get("role") == "user"),
+        None,
+    )
+    if not last_user:
+        return None
+
+    content = str(last_user.get("content", "")).strip()
+    lower = content.lower()
+
+    if not any(kw in lower for kw in WORKSPACE_KEYWORDS):
+        return None
+
+    # Strip the keyword prefix if the user typed it as a command
+    brief = content
+    for kw in ("/workspace ", "workspace "):
+        if lower.startswith(kw):
+            brief = content[len(kw):].strip()
+            break
+
+    if not brief:
+        brief = "Execute the task in a Harvis Workspace"
+
+    # Truncate to 150 chars as the UI expects
+    brief = brief[:150]
+
+    logger.info(f"Workspace keyword override triggered: brief={brief!r}")
+    return WorkspaceSuggestion({
+        "should_suggest": True,
+        "confidence": 1.0,
+        "task_type": "multi_step",
+        "task_brief": brief,
+        "reason": "Workspace explicitly requested by user.",
+    })
+
+
 async def detect_workspace_task(chat_history: list[dict]) -> WorkspaceSuggestion:
     """
     Analyze the chat history and return a WorkspaceSuggestion.
@@ -89,12 +134,17 @@ async def detect_workspace_task(chat_history: list[dict]) -> WorkspaceSuggestion
     Returns:
         WorkspaceSuggestion with should_suggest, task_type, task_brief, etc.
     """
+    if not chat_history:
+        return WorkspaceSuggestion({"should_suggest": False, "reason": "Empty chat history"})
+
+    # Keyword shortcut — bypass Kimi if user explicitly requested a workspace
+    override = _keyword_override(chat_history)
+    if override:
+        return override
+
     if not MOONSHOT_API_KEY:
         logger.warning("MOONSHOT_API_KEY not set — workspace detection disabled")
         return WorkspaceSuggestion({"should_suggest": False, "reason": "API key not configured"})
-
-    if not chat_history:
-        return WorkspaceSuggestion({"should_suggest": False, "reason": "Empty chat history"})
 
     # Build a compact representation of recent conversation for the classifier.
     # Cap at last 10 messages to keep the classifier call cheap and fast.

@@ -40,6 +40,8 @@ interface ChatInputProps {
   selectedModel?: string
   sessionId?: string | null  // Current chat session ID for voice history
   className?: string
+  // Workspace
+  onForceWorkspace?: (messageText: string) => void  // Force-launch workspace with current input
   // Settings
   voiceMode?: boolean  // When true, TTS is enabled
   onVoiceModeChange?: (enabled: boolean) => void
@@ -76,6 +78,7 @@ export function ChatInput({
   selectedModel,
   sessionId,
   className,
+  onForceWorkspace,
   voiceMode = false,
   onVoiceModeChange,
   extraVram = false,
@@ -1044,6 +1047,17 @@ export function ChatInput({
                   <span className="absolute -top-1 -right-1 w-2 h-2 bg-red-600 rounded-full animate-ping" />
                 )}
               </Button>
+              {onForceWorkspace && (
+                <Button
+                  type="button"
+                  onClick={() => onForceWorkspace(message.trim())}
+                  disabled={isLoading}
+                  title="Launch Workspace"
+                  className="h-9 w-9 shrink-0 rounded-xl bg-violet-600 text-white hover:bg-violet-500 disabled:opacity-50"
+                >
+                  <Zap className="h-5 w-5" />
+                </Button>
+              )}
               <Button
                 onClick={handleSend}
                 disabled={(!message.trim() && attachments.length === 0) || isLoading}

@@ -1518,6 +1518,16 @@ export default function ChatPage() {
             onExtraVramChange={(enabled) => setLowVram(!enabled)}
             ttsEngine={ttsEngine}
             onTtsEngineChange={setTtsEngine}
+            onForceWorkspace={(text) => {
+              setSuggestion({
+                should_suggest: true,
+                confidence: 1.0,
+                task_type: 'multi_step',
+                task_type_label: 'Multi-step task',
+                task_brief: text || 'Execute the task in a Harvis Workspace',
+                reason: 'Workspace manually triggered.',
+              })
+            }}
           />
         </div>
         </div>
