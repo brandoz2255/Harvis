@@ -139,26 +139,60 @@ if [ "$RUN_SMOKE" = true ]; then
   log_info "Smoke test container removed."
 fi
 
-# ─── Update kustomization.yaml ───────────────────────────────────────────────
+# ─── Push (BEFORE kustomize git-push so ArgoCD never sees a tag that isn't on Hub yet) ───
+
+echo ""
+if command -v whiptail &>/dev/null; then
+  if whiptail --yesno "Push $IMAGE_NAME to Docker Hub?" 10 60 --title "Push Image"; then
+    PUSH_IMAGE=true
+  else
+    PUSH_IMAGE=false
+  fi
+else
+  read -p "Push $IMAGE_NAME to Docker Hub? (Y/n): " push_choice
+  if [[ $push_choice =~ ^[Nn]$ ]]; then
+    PUSH_IMAGE=false
+  else
+    PUSH_IMAGE=true
+  fi
+fi
+
+if [ "$PUSH_IMAGE" = true ]; then
+  log_info "Pushing $IMAGE_NAME..."
+  if docker push "$IMAGE_NAME"; then
+    log_success "Pushed: $IMAGE_NAME"
+  else
+    log_error "Push failed for $IMAGE_NAME"
+    exit 1
+  fi
+
+  if [ "$OPENCLAW_VERSION" != "latest" ]; then
+    log_info "Pushing dulc3/openclaw:latest..."
+    docker push "dulc3/openclaw:latest"
+    log_success "Pushed: dulc3/openclaw:latest"
+  fi
+else
+  log_info "Skipping push. To push manually:"
+  echo "  docker push $IMAGE_NAME"
+  if [ "$OPENCLAW_VERSION" != "latest" ]; then
+    echo "  docker push dulc3/openclaw:latest"
+  fi
+fi
+
+# ─── Update kustomization.yaml (after Docker push so the image exists on Hub) ───
 
 echo ""
 log_info "Updating kustomization.yaml with new OpenClaw tag..."
 KUSTOMIZE_FILE="k8s-manifests/overlays/prod/kustomization.yaml"
 
 if [ -f "$KUSTOMIZE_FILE" ]; then
-  # Update only the openclaw image tag line — leave other image tags untouched.
-  # The openclaw image block looks like:
-  #   - name: dulc3/openclaw
-  #     newName: dulc3/openclaw
-  #     newTag: latest
-  # Use awk to update just the line after the dulc3/openclaw block.
   python3 - <<PYEOF
 import re
 
 with open("$KUSTOMIZE_FILE", "r") as f:
     content = f.read()
 
-# Replace the newTag on the line immediately after the openclaw image block
+# Update only the dulc3/openclaw entry — leave all harvis image tags untouched.
 updated = re.sub(
     r'(  - name: dulc3/openclaw\n    newName: dulc3/openclaw\n    newTag: )\S+',
     r'\g<1>$OPENCLAW_VERSION',
@@ -197,46 +231,6 @@ PYEOF
   fi
 else
   log_warn "Kustomization file not found — update manually: $KUSTOMIZE_FILE"
-fi
-
-# ─── Push ────────────────────────────────────────────────────────────────────
-
-echo ""
-if command -v whiptail &>/dev/null; then
-  if whiptail --yesno "Push $IMAGE_NAME to Docker Hub?" 10 60 --title "Push Image"; then
-    PUSH_IMAGE=true
-  else
-    PUSH_IMAGE=false
-  fi
-else
-  read -p "Push $IMAGE_NAME to Docker Hub? (Y/n): " push_choice
-  if [[ $push_choice =~ ^[Nn]$ ]]; then
-    PUSH_IMAGE=false
-  else
-    PUSH_IMAGE=true
-  fi
-fi
-
-if [ "$PUSH_IMAGE" = true ]; then
-  log_info "Pushing $IMAGE_NAME..."
-  if docker push "$IMAGE_NAME"; then
-    log_success "Pushed: $IMAGE_NAME"
-  else
-    log_error "Push failed for $IMAGE_NAME"
-    exit 1
-  fi
-
-  if [ "$OPENCLAW_VERSION" != "latest" ]; then
-    log_info "Pushing dulc3/openclaw:latest..."
-    docker push "dulc3/openclaw:latest"
-    log_success "Pushed: dulc3/openclaw:latest"
-  fi
-else
-  log_info "Skipping push. To push manually:"
-  echo "  docker push $IMAGE_NAME"
-  if [ "$OPENCLAW_VERSION" != "latest" ]; then
-    echo "  docker push dulc3/openclaw:latest"
-  fi
 fi
 
 # ─── Summary ─────────────────────────────────────────────────────────────────

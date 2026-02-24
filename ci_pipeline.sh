@@ -166,10 +166,31 @@ log_info "Updating Kustomization for ArgoCD..."
 KUSTOMIZE_FILE="k8s-manifests/overlays/prod/kustomization.yaml"
 
 if [ -f "$KUSTOMIZE_FILE" ]; then
-  log_info "Updating image tags in kustomization..."
+  log_info "Updating image tags in kustomization (harvis images only — openclaw tag is managed by ci_openclaw_pipeline.sh)..."
 
-  # Update all newTag values in images section
-  sed -i "s/newTag: .*/newTag: $BACKEND_VERSION/g" "$KUSTOMIZE_FILE"
+  # Use targeted per-image replacements so the openclaw newTag is never touched.
+  # The old broad  sed "s/newTag: .*/..."  was clobbering the openclaw entry every run.
+  python3 - <<PYEOF
+import re, sys
+
+with open("$KUSTOMIZE_FILE", "r") as f:
+    content = f.read()
+
+replacements = [
+    # images: section entries
+    (r'(  - name: harvis-backend\n    newName: dulc3/jarvis-backend\n    newTag: )\S+',      r'\g<1>$BACKEND_VERSION'),
+    (r'(  - name: harvis-frontend\n    newName: dulc3/jarvis-frontend\n    newTag: )\S+',     r'\g<1>$FRONTEND_VERSION'),
+    (r'(  - name: harvis-document-worker\n    newName: dulc3/harvis-document-worker\n    newTag: )\S+', r'\g<1>$BACKEND_VERSION'),
+]
+
+for pattern, repl in replacements:
+    content = re.sub(pattern, repl, content)
+
+with open("$KUSTOMIZE_FILE", "w") as f:
+    f.write(content)
+
+print("kustomization.yaml updated (harvis images only).")
+PYEOF
 
   # Update patch image references for backend
   sed -i "s|dulc3/jarvis-backend:[^ ]*|dulc3/jarvis-backend:$BACKEND_VERSION|g" "$KUSTOMIZE_FILE"

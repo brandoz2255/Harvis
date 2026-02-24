@@ -25,48 +25,40 @@ metadata:
 data:
   openclaw.json: |
     {
-      gateway: {
-        // Must be "lan" so K8s health probes (from different pod IPs) can reach port 18789
-        bind: "lan",
-        port: 18789,
-        auth: {
-          mode: "token",
-        },
+      "gateway": {
+        "bind": "lan",
+        "port": 18789,
+        "auth": {
+          "mode": "token"
+        }
       },
-      session: {
-        scope: "per-sender",
-        // Never auto-reset — Harvis manages session lifecycle
-        reset: { mode: "never" },
-        maintenance: {
-          pruneAfter: "90d",
-          maxEntries: 2000,
-        },
+      "session": {
+        "scope": "per-sender",
+        "reset": { "mode": "never" },
+        "maintenance": {
+          "pruneAfter": "90d",
+          "maxEntries": 2000
+        }
       },
-      models: {
-        // CRITICAL: "replace" means ONLY Ollama exists. No OpenAI/Anthropic fallback.
-        // If Ollama is unreachable, the agent fails instead of silently calling the cloud.
-        mode: "replace",
-        providers: {
-          ollama: {
-            // Ollama is co-located in the backend pod, exposed via the backend Service
-            baseUrl: "http://harvis-ai-merged-backend:11434",
-            apiKey: "ollama-local",
+      "models": {
+        "mode": "replace",
+        "providers": {
+          "ollama": {
+            "baseUrl": "http://harvis-ai-merged-backend:11434",
+            "apiKey": "ollama-local"
+          }
+        }
+      },
+      "agents": {
+        "defaults": {
+          "model": {
+            "primary": "ollama/qwen2.5-coder:32b",
+            "fallbacks": ["ollama/llama3.3"]
           },
-        },
+          "skills": []
+        }
       },
-      agents: {
-        defaults: {
-          model: {
-            primary: "ollama/qwen2.5-coder:32b",
-            fallbacks: ["ollama/llama3.3"],
-          },
-          // Disable all built-in web/search skills globally
-          skills: [],
-        },
-      },
-      // No channels — OpenClaw is not connected to Telegram/Discord/etc.
-      // The Harvis Python backend is the sole WebSocket client.
-      channels: {},
+      "channels": {}
     }
 
 ---
