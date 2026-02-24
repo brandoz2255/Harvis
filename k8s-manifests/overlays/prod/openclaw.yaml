@@ -83,6 +83,14 @@ data:
             "models": [
               { "id": "gpt-oss:latest", "name": "GPT-OSS" }
             ]
+          },
+          "harvis-proxy": {
+            "type": "openai",
+            "baseUrl": "http://harvis-ai-merged-backend:8000/v1",
+            "apiKey": "${OPENCLAW_GATEWAY_TOKEN}",
+            "models": [
+              { "id": "kimi-k2.5", "name": "Kimi K2.5 (via Harvis proxy)" }
+            ]
           }
         }
       },
@@ -91,7 +99,22 @@ data:
           "model": {
             "primary": "ollama/gpt-oss:latest"
           }
-        }
+        },
+        "list": [
+          {
+            "id": "main",
+            "default": true,
+            "model": {
+              "primary": "ollama/gpt-oss:latest"
+            }
+          },
+          {
+            "id": "kimi",
+            "model": {
+              "primary": "harvis-proxy/kimi-k2.5"
+            }
+          }
+        ]
       },
       "skills": {
         "load": {
@@ -271,6 +294,18 @@ spec:
       ports:
         - protocol: TCP
           port: 11434
+
+    # Harvis backend model proxy (port 8000) — for Kimi K2.5 forwarding.
+    # OpenClaw calls http://harvis-ai-merged-backend:8000/v1/chat/completions
+    # and the backend forwards to Moonshot with its own MOONSHOT_API_KEY.
+    # This keeps the Moonshot key out of OpenClaw entirely.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: merged-ollama-backend
+      ports:
+        - protocol: TCP
+          port: 8000
 
 ---
 # Deployment: OpenClaw gateway
