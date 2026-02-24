@@ -181,9 +181,9 @@ spec:
         fsGroup: 1000
         runAsNonRoot: true
 
-      # Pin to same node as the rest of Harvis
+      # Run OpenClaw on its own dedicated node, isolated from the main Harvis workload
       nodeSelector:
-        kubernetes.io/hostname: dulc3-os
+        kubernetes.io/hostname: Rockyvm2.local
 
       initContainers:
         # 1. Wait for PostgreSQL before starting
