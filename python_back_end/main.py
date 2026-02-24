@@ -48,6 +48,9 @@ from vison_models.llm_connector import (
     unload_ollama_model,
 )
 
+# Import workspace (Harvis Workspaces / OpenClaw integration)
+from workspace import workspace_router
+
 # Import vibecoding routers
 from vibecoding import (
     sessions_router,
@@ -825,6 +828,9 @@ if RAG_CORPUS_AVAILABLE:
 
 # Include artifacts router
 app.include_router(artifact_router)
+
+# Include workspace router (Harvis Workspaces — OpenClaw agent integration)
+app.include_router(workspace_router)
 
 # ─── Device & models -----------------------------------------------------------
 device = 0 if torch.cuda.is_available() else -1

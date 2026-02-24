@@ -86,16 +86,22 @@ def _auto_unload_worker():
         if _auto_unload_stop_event.is_set():
             break
 
+        # Check if we should unload (without holding the lock during unload)
+        should_unload = False
+        idle_time = 0
+
         with _auto_unload_lock:
             if qwen_tts_model is None:
                 continue
 
             idle_time = time.time() - _last_tts_use_time
+            should_unload = idle_time >= _auto_unload_timeout
 
-            if idle_time >= _auto_unload_timeout:
-                logger.info(f"🗑️ TTS idle for {idle_time:.1f}s, auto-unloading to free RAM...")
-                unload_qwen_tts_model()
-                logger.info("✅ TTS auto-unloaded successfully")
+        # Unload outside the lock check (unload_qwen_tts_model acquires its own lock)
+        if should_unload:
+            logger.info(f"🗑️ TTS idle for {idle_time:.1f}s, auto-unloading to free RAM...")
+            unload_qwen_tts_model()
+            logger.info("✅ TTS auto-unloaded successfully")
 
 
 def _start_auto_unload_thread():
@@ -321,6 +327,7 @@ def generate_qwen_speech(
     repetition_penalty: float = 1.1,
     max_length: int = 4096,
     _cpu_retry: bool = False,
+    timeout: float = 120.0,  # Max 2 minutes per chunk
 ) -> Tuple[int, np.ndarray]:
     """
     Generate speech using Qwen3-TTS voice cloning.
@@ -338,6 +345,7 @@ def generate_qwen_speech(
         repetition_penalty: Penalty for repeated tokens
         max_length: Maximum generation length
         _cpu_retry: Internal flag, True if this is a CPU fallback retry
+        timeout: Max seconds to wait for generation (default: 120)
 
     Returns:
         Tuple of (sample_rate, audio_numpy_array)
@@ -346,6 +354,7 @@ def generate_qwen_speech(
 
     model = interface
     if model is None:
+        logger.info("🔄 TTS: Loading model (not provided)...")
         model = load_qwen_tts_model()
 
     if model is None:
@@ -361,10 +370,20 @@ def generate_qwen_speech(
     # Touch usage time for auto-unload tracking
     _touch_tts_usage()
 
-    logger.info(f"Generating speech for text (length: {len(text)} chars)")
-    logger.info(
-        f"TTS params: ref_audio={os.path.basename(ref_audio)}, language={language}, temp={temperature}"
-    )
+    # Check device
+    device_info = "unknown"
+    if hasattr(model, 'device'):
+        device_info = str(model.device)
+    elif hasattr(model, 'model') and hasattr(model.model, 'device'):
+        device_info = str(model.model.device)
+
+    # Warn if running on CPU (will be VERY slow)
+    if "cpu" in device_info.lower():
+        logger.warning(f"⚠️ TTS: Running on CPU! This will be VERY SLOW (~10-60x slower than GPU)")
+        logger.warning(f"⚠️ TTS: Consider freeing GPU VRAM or text will take minutes to generate")
+
+    logger.info(f"🎙️ TTS: Generating speech for {len(text)} chars on {device_info}")
+    logger.info(f"🎙️ TTS: ref_audio={os.path.basename(ref_audio)}, temp={temperature}")
 
     # Verify reference audio exists
     if not os.path.exists(ref_audio):
@@ -374,31 +393,49 @@ def generate_qwen_speech(
         start_time = time.time()
 
         # Get or create the voice clone prompt (cached for reuse)
+        logger.info(f"🎙️ TTS: Creating/getting voice clone prompt...")
+        prompt_start = time.time()
         voice_clone_prompt = _get_or_create_voice_clone_prompt(
             model, ref_audio, ref_text
         )
+        logger.info(f"🎙️ TTS: Voice clone prompt ready in {time.time() - prompt_start:.2f}s")
 
         # Generate speech using voice cloning
+        logger.info(f"🎙️ TTS: Starting model.generate_voice_clone() for {len(text)} chars...")
+        gen_start = time.time()
         wavs, sr = model.generate_voice_clone(
             text=text,
             language=language,
             voice_clone_prompt=voice_clone_prompt,
         )
+        gen_elapsed = time.time() - gen_start
+        logger.info(f"🎙️ TTS: model.generate_voice_clone() returned in {gen_elapsed:.2f}s")
 
         elapsed = time.time() - start_time
-        logger.info(f"Speech generated in {elapsed:.2f}s")
+        logger.info(f"✅ TTS: Speech generated in {elapsed:.2f}s total")
 
         # wavs is a list of numpy arrays, take the first one
+        logger.info(f"🎙️ TTS: Processing output - wavs type: {type(wavs)}, sr: {sr}")
+
         audio_np = wavs[0] if isinstance(wavs, list) else wavs
 
+        if audio_np is None:
+            logger.error("❌ TTS: model.generate_voice_clone() returned None audio!")
+            return (None, None)
+
         if torch.is_tensor(audio_np):
+            logger.info(f"🎙️ TTS: Converting tensor to numpy (shape: {audio_np.shape})")
             audio_np = audio_np.squeeze().cpu().numpy()
         elif hasattr(audio_np, "numpy"):
             audio_np = audio_np.numpy().squeeze()
         else:
             audio_np = np.array(audio_np).squeeze()
 
-        logger.info(f"Audio generated: {len(audio_np)} samples at {sr}Hz")
+        if len(audio_np) == 0:
+            logger.error("❌ TTS: Generated audio is EMPTY (0 samples)!")
+            return (None, None)
+
+        logger.info(f"✅ TTS: Audio ready - {len(audio_np)} samples at {sr}Hz ({len(audio_np)/sr:.2f}s)")
 
         # Touch usage time again after generation
         _touch_tts_usage()
@@ -498,16 +535,21 @@ def generate_qwen_speech_chunked(
     Returns:
         Tuple of (sample_rate, concatenated_audio_numpy_array)
     """
+    total_start = time.time()
+    logger.info(f"🎙️ TTS CHUNKED: Starting for {len(text)} chars...")
+
     model = interface
     if model is None:
         model = load_qwen_tts_model()
 
     chunks = chunk_text_for_qwen_tts(text, max_chunk_chars)
+    logger.info(f"🎙️ TTS CHUNKED: Split into {len(chunks)} chunks")
     all_wavs = []
     sample_rate = 24000
 
     for i, chunk in enumerate(chunks):
-        logger.info(f"Generating chunk {i + 1}/{len(chunks)} ({len(chunk)} chars)")
+        chunk_start = time.time()
+        logger.info(f"🎙️ TTS CHUNK {i + 1}/{len(chunks)}: Starting ({len(chunk)} chars): '{chunk[:50]}...'")
 
         sr, wav = generate_qwen_speech(
             text=chunk,
@@ -519,6 +561,10 @@ def generate_qwen_speech_chunked(
             repetition_penalty=repetition_penalty,
         )
 
+        chunk_elapsed = time.time() - chunk_start
+        wav_size = len(wav) if wav is not None else 0
+        logger.info(f"✅ TTS CHUNK {i + 1}/{len(chunks)}: Done in {chunk_elapsed:.2f}s, {wav_size} samples")
+
         sample_rate = sr
         all_wavs.append(wav)
 
@@ -526,10 +572,18 @@ def generate_qwen_speech_chunked(
     if len(all_wavs) > 1:
         final_wav = np.concatenate(all_wavs)
         logger.info(
-            f"Concatenated {len(all_wavs)} chunks, total: {len(final_wav)} samples"
+            f"🎙️ TTS CHUNKED: Concatenated {len(all_wavs)} chunks, total: {len(final_wav)} samples"
         )
     else:
-        final_wav = all_wavs[0]
+        final_wav = all_wavs[0] if all_wavs else np.array([])
+
+    total_elapsed = time.time() - total_start
+    total_duration = len(final_wav) / sample_rate if len(final_wav) > 0 else 0
+    logger.info(f"✅ TTS CHUNKED: Complete! {total_duration:.2f}s audio in {total_elapsed:.2f}s")
+
+    if len(final_wav) == 0:
+        logger.error("❌ TTS CHUNKED: No audio generated!")
+        return (None, None)
 
     return (sample_rate, final_wav)
 

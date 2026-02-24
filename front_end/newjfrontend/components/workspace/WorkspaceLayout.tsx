@@ -14,20 +14,22 @@ interface WorkspaceLayoutProps {
   chatComponent: React.ReactNode
   workspaceComponent: React.ReactNode
   sidebarComponent?: React.ReactNode
+  className?: string
 }
 
 export function WorkspaceLayout({
   chatComponent,
   workspaceComponent,
   sidebarComponent,
+  className,
 }: WorkspaceLayoutProps) {
-  const { isWorkspaceActive, isChatMinimized } = useOpenClawStore()
+  const { isWorkspaceActive, isChatMinimized, setChatMinimized } = useOpenClawStore()
 
   if (!isWorkspaceActive) {
-    // Normal chat mode
+    // Normal chat mode — full width, no split
     return (
-      <div className="flex h-full">
-        <div className="flex-1 flex flex-col">{chatComponent}</div>
+      <div className={cn('flex h-full', className)}>
+        <div className="flex-1 flex flex-col overflow-hidden">{chatComponent}</div>
         {sidebarComponent && (
           <div className="w-80 border-l">{sidebarComponent}</div>
         )}
@@ -35,24 +37,14 @@ export function WorkspaceLayout({
     )
   }
 
-  // Workspace mode
+  // Workspace mode: chat LEFT (minimized), workspace panel RIGHT (larger)
   return (
-    <div className="flex h-full">
-      {/* Main workspace area */}
+    <div className={cn('flex h-full', className)}>
+      {/* Chat area LEFT — shrinks when workspace is active */}
       <div
         className={cn(
-          'flex flex-col transition-all duration-300',
-          isChatMinimized ? 'flex-1' : 'flex-[2]'
-        )}
-      >
-        {workspaceComponent}
-      </div>
-
-      {/* Chat area (collapsible) */}
-      <div
-        className={cn(
-          'border-l transition-all duration-300 overflow-hidden',
-          isChatMinimized ? 'w-12' : 'flex-1'
+          'flex flex-col transition-all duration-500 ease-in-out overflow-hidden',
+          isChatMinimized ? 'w-12' : 'flex-[3]'
         )}
       >
         {isChatMinimized ? (
@@ -62,8 +54,18 @@ export function WorkspaceLayout({
         )}
       </div>
 
-      {/* Sidebar */}
-      {sidebarComponent && !isChatMinimized && (
+      {/* Workspace panel RIGHT — takes the majority of space */}
+      <div
+        className={cn(
+          'flex flex-col transition-all duration-500 ease-in-out border-l border-border',
+          isChatMinimized ? 'flex-1' : 'flex-[5]'
+        )}
+      >
+        {workspaceComponent}
+      </div>
+
+      {/* Sidebar (hidden in workspace mode to save space) */}
+      {sidebarComponent && !isWorkspaceActive && (
         <div className="w-80 border-l">{sidebarComponent}</div>
       )}
     </div>

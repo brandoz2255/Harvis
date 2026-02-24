@@ -53,6 +53,44 @@ export interface OpenClawEvent {
   createdAt: string
 }
 
+// ─── Harvis Workspace (OpenClaw backend integration) ─────────────────────────
+
+export interface WorkspaceSuggestion {
+  should_suggest: boolean
+  confidence: number
+  task_type: string | null
+  task_type_label: string
+  task_brief: string
+  reason: string
+}
+
+export type WorkspaceLogEventType =
+  | 'token'
+  | 'tool_call'
+  | 'tool_result'
+  | 'log'
+  | 'done'
+  | 'cancelled'
+  | 'error'
+  | 'stream_end'
+
+export interface WorkspaceLogEvent {
+  id: string
+  type: WorkspaceLogEventType
+  // token
+  content?: string
+  // tool_call
+  tool?: string
+  args?: Record<string, unknown>
+  // tool_result
+  output?: string
+  success?: boolean
+  // log / done / cancelled / error
+  message?: string
+  summary?: string
+  timestamp: number
+}
+
 export interface Screenshot {
   id: string
   taskId: string
@@ -86,6 +124,14 @@ interface OpenClawState {
   isChatMinimized: boolean
   activeTab: 'progress' | 'preview' | 'logs' | 'artifacts'
 
+  // Harvis Workspace session state
+  suggestion: WorkspaceSuggestion | null
+  workspaceId: string | null
+  workspaceSessionId: string | null   // persists across launches for same user (resumable)
+  logEvents: WorkspaceLogEvent[]
+  finalSummary: string
+  sseAbortController: AbortController | null
+
   // Actions
   setInstances: (instances: OpenClawInstance[]) => void
   selectInstance: (id: string | null) => void
@@ -110,6 +156,16 @@ interface OpenClawState {
   setChatMinimized: (minimized: boolean) => void
   setActiveTab: (tab: 'progress' | 'preview' | 'logs' | 'artifacts') => void
 
+  // Harvis Workspace actions
+  setSuggestion: (suggestion: WorkspaceSuggestion | null) => void
+  setWorkspaceId: (id: string | null) => void
+  setWorkspaceSessionId: (id: string | null) => void
+  addLogEvent: (event: Omit<WorkspaceLogEvent, 'id' | 'timestamp'>) => void
+  clearLogEvents: () => void
+  setFinalSummary: (summary: string) => void
+  setSseAbortController: (controller: AbortController | null) => void
+  closeWorkspace: () => void
+
   // Computed
   getInstanceById: (id: string) => OpenClawInstance | undefined
   getTaskById: (id: string) => OpenClawTask | undefined
@@ -131,6 +187,14 @@ export const useOpenClawStore = create<OpenClawState>()(
     isWorkspaceActive: false,
     isChatMinimized: false,
     activeTab: 'progress',
+
+    // Harvis Workspace initial state
+    suggestion: null,
+    workspaceId: null,
+    workspaceSessionId: null,
+    logEvents: [],
+    finalSummary: '',
+    sseAbortController: null,
 
     // Instance actions
     setInstances: (instances) => set({ instances }),
@@ -235,6 +299,44 @@ export const useOpenClawStore = create<OpenClawState>()(
     setChatMinimized: (minimized) => set({ isChatMinimized: minimized }),
 
     setActiveTab: (tab) => set({ activeTab: tab }),
+
+    // Harvis Workspace actions
+    setSuggestion: (suggestion) => set({ suggestion }),
+
+    setWorkspaceId: (id) => set({ workspaceId: id }),
+
+    setWorkspaceSessionId: (id) => set({ workspaceSessionId: id }),
+
+    addLogEvent: (event) =>
+      set((state) => {
+        state.logEvents.push({
+          ...event,
+          id: `evt-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          timestamp: Date.now(),
+        })
+      }),
+
+    clearLogEvents: () => set({ logEvents: [] }),
+
+    setFinalSummary: (summary) => set({ finalSummary: summary }),
+
+    setSseAbortController: (controller) => set({ sseAbortController: controller }),
+
+    closeWorkspace: () =>
+      set((state) => {
+        // Abort any active SSE connection
+        if (state.sseAbortController) {
+          state.sseAbortController.abort()
+        }
+        state.isWorkspaceActive = false
+        state.isChatMinimized = false
+        state.suggestion = null
+        state.workspaceId = null
+        state.logEvents = []
+        state.finalSummary = ''
+        state.sseAbortController = null
+        state.activeTab = 'progress'
+      }),
 
     // Computed
     getInstanceById: (id) => get().instances.find((i) => i.id === id),

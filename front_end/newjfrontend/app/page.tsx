@@ -23,6 +23,10 @@ import { Message as AiMessage } from "ai"
 
 import { useApiWithRetry } from "@/hooks/useApiWithRetry"
 import { useAsyncTTS } from "@/hooks/useAsyncTTS"
+import { WorkspaceLayout } from "@/components/workspace/WorkspaceLayout"
+import { WorkspacePanel } from "@/components/workspace/WorkspacePanel"
+import { WorkspaceSuggestionBanner } from "@/components/workspace/WorkspaceSuggestionBanner"
+import { useOpenClawStore } from "@/stores/openclawStore"
 
 // Auto-research detection (mirrors backend logic)
 // Returns true for queries that need fresh/current information
@@ -93,6 +97,29 @@ export default function ChatPage() {
 
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const scrollRef = useRef<HTMLDivElement>(null)
+
+  // Harvis Workspaces
+  const { setSuggestion, isWorkspaceActive, suggestion } = useOpenClawStore()
+
+  const detectWorkspace = useCallback(async (history: Message[]) => {
+    try {
+      const token = localStorage.getItem('token')
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+      if (token) headers['Authorization'] = `Bearer ${token}`
+      const res = await fetch('/api/workspace/suggest', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          chat_history: history.map((m) => ({ role: m.role, content: m.content ?? '' })),
+        }),
+      })
+      if (!res.ok) return
+      const data = await res.json()
+      if (data.should_suggest) setSuggestion(data)
+    } catch {
+      // Non-critical — workspace suggestion is best-effort
+    }
+  }, [setSuggestion])
 
   // Use a ref to track if we should skip the next scroll (to prevent scroll jank during streaming)
   const skipNextScrollRef = useRef(false)
@@ -972,6 +999,10 @@ export default function ChatPage() {
                 updates.audioUrl = chunk.audio_path
                 hasUpdates = true
               }
+              // Workspace suggestion — fire after response completes (non-blocking)
+              if (!isWorkspaceActive) {
+                setTimeout(() => detectWorkspace(localMessages), 300)
+              }
               // Mark research chain as complete (check both message state AND ref for auto-research)
               const chainFromMsg = currentMsg.researchChain
               const chainFromRef = researchChainMapRef.current.get(assistantId)
@@ -1377,8 +1408,11 @@ export default function ChatPage() {
         />
       )}
 
-      {/* Main Content */}
-      <div className="flex flex-1 flex-col overflow-hidden">
+      {/* Main Content — wrapped in WorkspaceLayout for split-view when workspace is active */}
+      <WorkspaceLayout className="flex-1 overflow-hidden"
+        workspaceComponent={<WorkspacePanel />}
+        chatComponent={
+        <div className="flex flex-1 flex-col overflow-hidden h-full">
         {/* Header */}
         <header className="sticky top-0 z-10 shrink-0 flex items-center gap-4 border-b border-border bg-background px-4 py-3">
           <Button
@@ -1463,6 +1497,13 @@ export default function ChatPage() {
           </div>
         </div>
 
+        {/* Workspace suggestion banner — shown above input when a task is detected */}
+        {suggestion?.should_suggest && !isWorkspaceActive && (
+          <WorkspaceSuggestionBanner
+            chatHistory={localMessages.map((m) => ({ role: m.role, content: m.content ?? '' }))}
+          />
+        )}
+
         {/* Input Area */}
         <div className="sticky bottom-0 z-10 shrink-0 border-t border-border bg-background">
           <ChatInput
@@ -1479,7 +1520,9 @@ export default function ChatPage() {
             onTtsEngineChange={setTtsEngine}
           />
         </div>
-      </div>
+        </div>
+        }
+      />
     </div>
   )
 }

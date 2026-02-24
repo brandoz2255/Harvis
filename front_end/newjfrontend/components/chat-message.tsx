@@ -271,14 +271,14 @@ export const ChatMessage = React.memo(function ChatMessage({
     // Style lists
     ul({ children, ...props }: any) {
       return (
-        <ul className="list-disc list-inside space-y-1 mb-2" {...props}>
+        <ul className="list-disc list-outside space-y-1 mb-2 pl-5" {...props}>
           {children}
         </ul>
       )
     },
     ol({ children, ...props }: any) {
       return (
-        <ol className="list-decimal list-inside space-y-1 mb-2" {...props}>
+        <ol className="list-decimal list-outside space-y-1 mb-2 pl-5" {...props}>
           {children}
         </ol>
       )
@@ -358,7 +358,7 @@ export const ChatMessage = React.memo(function ChatMessage({
 
         <div
           className={cn(
-            "rounded-2xl px-4 py-3",
+            "rounded-2xl px-4 py-3 pr-8",
             role === "user"
               ? "bg-primary text-primary-foreground"
               : "bg-card text-foreground"
