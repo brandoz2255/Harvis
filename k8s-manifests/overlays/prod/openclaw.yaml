@@ -70,25 +70,6 @@ data:
     }
 
 ---
-# Secret: OpenClaw gateway token + Kimi K2.5 API key + DB URL
-# IMPORTANT: Replace placeholder values before applying to cluster.
-# The gateway token must match what the Harvis backend uses to authenticate with OpenClaw.
-apiVersion: v1
-kind: Secret
-metadata:
-  name: harvis-ai-openclaw-secret
-  namespace: ai-agents
-type: Opaque
-stringData:
-  # Generate with: openssl rand -hex 32
-  openclaw-gateway-token: "REPLACE_WITH_REAL_TOKEN"
-  # Kimi K2.5 API key — used by Harvis backend orchestrator, not by OpenClaw itself.
-  # Stored here so the backend Secret can reference it via secretKeyRef.
-  moonshot-api-key: "REPLACE_WITH_REAL_MOONSHOT_KEY"
-  # OpenClaw DB URL — separate from backend secret for isolation
-  database-url: "postgresql://pguser:pgpassword@harvis-ai-pgsql:5432/database"
-
----
 # NetworkPolicy: Enforce OpenClaw's isolation at the network level.
 #
 # INGRESS: Only the Harvis backend pod may connect (port 18789 WebSocket).

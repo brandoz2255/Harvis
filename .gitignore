@@ -118,3 +118,8 @@ python_back_end/whisper_models/
 
 # openclaw directory
 openclaw/
+
+# ==========================================
+# OpenClaw secrets — apply manually via kubectl, never commit
+# ==========================================
+k8s-manifests/overlays/prod/openclaw-secret.yaml
