@@ -15,6 +15,7 @@ import {
   Hash,
   Activity,
   History,
+  Cpu,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -494,6 +495,7 @@ function HistoryTab() {
 export function WorkspacePanel() {
   const {
     workspaceId,
+    workspaceModel,
     logEvents,
     finalSummary,
     currentTask,
@@ -595,6 +597,10 @@ export function WorkspacePanel() {
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <span className="text-sm font-semibold text-foreground">Workspace</span>
+              <span className="flex items-center gap-1 text-[10px] font-medium text-muted-foreground bg-muted px-1.5 py-0.5 rounded-full border border-border/50">
+                <Cpu className="h-2.5 w-2.5" />
+                {workspaceModel === 'kimi' ? 'Kimi K2.5' : 'Local'}
+              </span>
               {isRunning && (
                 <Loader2 className="h-3 w-3 animate-spin text-violet-400" />
               )}

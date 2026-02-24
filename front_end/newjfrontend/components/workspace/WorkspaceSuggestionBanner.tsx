@@ -1,10 +1,17 @@
 'use client'
 
 import { useState } from 'react'
-import { Zap, X, Loader2, ChevronRight } from 'lucide-react'
+import { Zap, X, Loader2, ChevronRight, Cpu } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { useOpenClawStore } from '@/stores/openclawStore'
 import { cn } from '@/lib/utils'
+
+type WorkspaceModel = 'local' | 'kimi'
+
+const MODEL_OPTIONS: { value: WorkspaceModel; label: string; description: string }[] = [
+  { value: 'local', label: 'Local (Qwen)', description: 'Runs code & shell via OpenClaw' },
+  { value: 'kimi',  label: 'Kimi K2.5',   description: 'Fast reasoning via Moonshot API' },
+]
 
 const TASK_TYPE_ICONS: Record<string, string> = {
   code: '⌨️',
@@ -27,6 +34,7 @@ export function WorkspaceSuggestionBanner({ chatHistory }: WorkspaceSuggestionBa
     workspaceSessionId,
     setWorkspaceId,
     setWorkspaceSessionId,
+    setWorkspaceModel,
     setWorkspaceActive,
     addLogEvent,
     clearLogEvents,
@@ -36,6 +44,7 @@ export function WorkspaceSuggestionBanner({ chatHistory }: WorkspaceSuggestionBa
   } = useOpenClawStore()
 
   const [launching, setLaunching] = useState(false)
+  const [selectedModel, setSelectedModel] = useState<WorkspaceModel>('local')
 
   if (!suggestion?.should_suggest) return null
 
@@ -58,6 +67,7 @@ export function WorkspaceSuggestionBanner({ chatHistory }: WorkspaceSuggestionBa
           task_brief: suggestion.task_brief,
           chat_history: chatHistory,
           session_id: workspaceSessionId ?? undefined,
+          model: selectedModel,
         }),
       })
 
@@ -67,7 +77,8 @@ export function WorkspaceSuggestionBanner({ chatHistory }: WorkspaceSuggestionBa
       const { workspace_id, session_id } = data
 
       setWorkspaceId(workspace_id)
-      setWorkspaceSessionId(session_id)   // persist for next launch (resumable)
+      setWorkspaceSessionId(session_id)
+      setWorkspaceModel(selectedModel)
       setSuggestion(null)
       clearLogEvents()
       setFinalSummary('')
@@ -156,6 +167,29 @@ export function WorkspaceSuggestionBanner({ chatHistory }: WorkspaceSuggestionBa
         <p className="text-xs text-muted-foreground mt-0.5">
           {suggestion.reason}
         </p>
+      </div>
+
+      {/* Model selector */}
+      <div className="flex items-center gap-1 shrink-0 self-center">
+        <Cpu className="h-3 w-3 text-muted-foreground/60 shrink-0" />
+        <div className="flex rounded-md border border-border overflow-hidden">
+          {MODEL_OPTIONS.map((opt) => (
+            <button
+              key={opt.value}
+              title={opt.description}
+              onClick={() => setSelectedModel(opt.value)}
+              disabled={launching}
+              className={cn(
+                'px-2 py-1 text-[10px] font-medium transition-colors',
+                selectedModel === opt.value
+                  ? 'bg-violet-600 text-white'
+                  : 'text-muted-foreground hover:text-foreground hover:bg-muted/60'
+              )}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Actions */}

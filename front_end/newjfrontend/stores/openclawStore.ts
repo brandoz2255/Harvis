@@ -128,6 +128,7 @@ interface OpenClawState {
   suggestion: WorkspaceSuggestion | null
   workspaceId: string | null
   workspaceSessionId: string | null   // persists across launches for same user (resumable)
+  workspaceModel: 'local' | 'kimi'    // which backend ran/is running
   logEvents: WorkspaceLogEvent[]
   finalSummary: string
   sseAbortController: AbortController | null
@@ -160,6 +161,7 @@ interface OpenClawState {
   setSuggestion: (suggestion: WorkspaceSuggestion | null) => void
   setWorkspaceId: (id: string | null) => void
   setWorkspaceSessionId: (id: string | null) => void
+  setWorkspaceModel: (model: 'local' | 'kimi') => void
   addLogEvent: (event: Omit<WorkspaceLogEvent, 'id' | 'timestamp'>) => void
   clearLogEvents: () => void
   setFinalSummary: (summary: string) => void
@@ -192,6 +194,7 @@ export const useOpenClawStore = create<OpenClawState>()(
     suggestion: null,
     workspaceId: null,
     workspaceSessionId: null,
+    workspaceModel: 'local',
     logEvents: [],
     finalSummary: '',
     sseAbortController: null,
@@ -307,6 +310,8 @@ export const useOpenClawStore = create<OpenClawState>()(
 
     setWorkspaceSessionId: (id) => set({ workspaceSessionId: id }),
 
+    setWorkspaceModel: (model) => set({ workspaceModel: model }),
+
     addLogEvent: (event) =>
       set((state) => {
         state.logEvents.push({
@@ -332,6 +337,7 @@ export const useOpenClawStore = create<OpenClawState>()(
         state.isChatMinimized = false
         state.suggestion = null
         state.workspaceId = null
+        state.workspaceModel = 'local'
         state.logEvents = []
         state.finalSummary = ''
         state.sseAbortController = null

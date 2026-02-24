@@ -30,6 +30,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from auth_optimized import get_current_user_optimized
+from .kimi_workspace import stream_kimi_workspace
 from .openclaw_client import OpenClawClient
 from .task_detector import detect_workspace_task
 
@@ -55,6 +56,7 @@ class LaunchRequest(BaseModel):
     task_brief: str                    # From the /suggest response
     chat_history: list[dict]           # Full chat history for context
     session_id: Optional[str] = None  # Pass the same session_id to resume
+    model: str = "local"              # "local" (OpenClaw/Ollama) | "kimi" (Kimi K2.5 direct)
 
 
 class WorkspaceStatus(BaseModel):
@@ -186,7 +188,10 @@ async def launch_workspace(
     # default, fall back to the last user message in the chat history.
     task_brief = _resolve_task_brief(req.task_brief, req.chat_history)
 
-    client = OpenClawClient(workspace_id=workspace_id, session_id=session_id)
+    model = req.model if req.model in ("local", "kimi") else "local"
+
+    # Only create an OpenClaw client for local model runs
+    client = OpenClawClient(workspace_id=workspace_id, session_id=session_id) if model == "local" else None
 
     started_epoch = time.monotonic()
 
@@ -195,6 +200,7 @@ async def launch_workspace(
         "status": "running",
         "task_brief": task_brief,
         "session_id": session_id,
+        "model": model,
         "chat_history": req.chat_history,
         "user_id": current_user["id"],
         "started_epoch": started_epoch,
@@ -217,6 +223,7 @@ async def launch_workspace(
         "session_id": session_id,
         "status": "running",
         "task_brief": task_brief,
+        "model": model,
     }
 
 
@@ -269,7 +276,8 @@ async def stream_workspace(
     if not ws:
         raise HTTPException(status_code=404, detail=f"Workspace {workspace_id} not found")
 
-    client: OpenClawClient = ws["client"]
+    client: Optional[OpenClawClient] = ws.get("client")
+    model: str = ws.get("model", "local")
     chat_history: list[dict] = ws["chat_history"]
     task_brief: str = ws["task_brief"]
     started_epoch: float = ws.get("started_epoch", time.monotonic())
@@ -283,8 +291,14 @@ async def stream_workspace(
         final_error: Optional[str] = None
         terminal_status = "done"
 
+        # Choose backend based on model selection
+        if model == "kimi":
+            event_stream = stream_kimi_workspace(task_brief, chat_history)
+        else:
+            event_stream = client.stream(task_brief, chat_history)
+
         try:
-            async for event in client.stream(task_brief, chat_history):
+            async for event in event_stream:
                 # Track tool calls
                 if event.type == "tool_call":
                     tool_call_count += 1
@@ -353,8 +367,9 @@ async def cancel_workspace(
     if not ws:
         raise HTTPException(status_code=404, detail=f"Workspace {workspace_id} not found")
 
-    client: OpenClawClient = ws["client"]
-    client.cancel()
+    client: Optional[OpenClawClient] = ws.get("client")
+    if client is not None:
+        client.cancel()
     _workspaces[workspace_id]["status"] = "cancelled"
 
     logger.info(f"Workspace cancelled: id={workspace_id} user={current_user['id']}")
