@@ -85,7 +85,7 @@ data:
             ]
           },
           "harvis-proxy": {
-            "type": "openai",
+            "api": "openai-completions",
             "baseUrl": "http://harvis-ai-merged-backend:8000/v1",
             "apiKey": "${OPENCLAW_GATEWAY_TOKEN}",
             "models": [
