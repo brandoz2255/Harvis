@@ -19,6 +19,8 @@ import {
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { useOpenClawStore, type WorkspaceLogEvent } from '@/stores/openclawStore'
 import { cn } from '@/lib/utils'
 

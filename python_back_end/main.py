@@ -50,6 +50,7 @@ from vison_models.llm_connector import (
 
 # Import workspace (Harvis Workspaces / OpenClaw integration)
 from workspace import workspace_router
+from workspace.model_proxy import model_proxy_router
 
 # Import vibecoding routers
 from vibecoding import (
@@ -831,6 +832,10 @@ app.include_router(artifact_router)
 
 # Include workspace router (Harvis Workspaces — OpenClaw agent integration)
 app.include_router(workspace_router)
+# Include model proxy (OpenAI-compat endpoint for OpenClaw → Moonshot forwarding)
+# OpenClaw calls http://harvis-ai-merged-backend:8000/v1/chat/completions
+# so that the Moonshot API key never leaves the backend pod.
+app.include_router(model_proxy_router)
 
 # ─── Device & models -----------------------------------------------------------
 device = 0 if torch.cuda.is_available() else -1

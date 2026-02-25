@@ -128,7 +128,7 @@ interface OpenClawState {
   suggestion: WorkspaceSuggestion | null
   workspaceId: string | null
   workspaceSessionId: string | null   // persists across launches for same user (resumable)
-  workspaceModel: 'local' | 'kimi'    // which backend ran/is running
+  workspaceModel: 'local' | 'kimi'
   logEvents: WorkspaceLogEvent[]
   finalSummary: string
   sseAbortController: AbortController | null
@@ -194,7 +194,7 @@ export const useOpenClawStore = create<OpenClawState>()(
     suggestion: null,
     workspaceId: null,
     workspaceSessionId: null,
-    workspaceModel: 'local',
+    workspaceModel: 'local' | 'kimi',
     logEvents: [],
     finalSummary: '',
     sseAbortController: null,
@@ -338,6 +338,7 @@ export const useOpenClawStore = create<OpenClawState>()(
         state.suggestion = null
         state.workspaceId = null
         state.workspaceModel = 'local'
+        state.workspaceSessionId = null   // always fresh session on next launch
         state.logEvents = []
         state.finalSummary = ''
         state.sseAbortController = null

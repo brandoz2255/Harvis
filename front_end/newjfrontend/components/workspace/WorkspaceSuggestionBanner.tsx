@@ -6,11 +6,9 @@ import { Button } from '@/components/ui/button'
 import { useOpenClawStore } from '@/stores/openclawStore'
 import { cn } from '@/lib/utils'
 
-type WorkspaceModel = 'local' | 'kimi'
-
-const MODEL_OPTIONS: { value: WorkspaceModel; label: string; description: string }[] = [
-  { value: 'local', label: 'Local (Qwen)', description: 'Runs code & shell via OpenClaw' },
-  { value: 'kimi',  label: 'Kimi K2.5',   description: 'Fast reasoning via Moonshot API' },
+const MODEL_OPTIONS = [
+  { value: 'local' as const, label: 'Local AI', description: 'Local Ollama model' },
+  { value: 'kimi'  as const, label: 'Kimi K2.5', description: 'Moonshot via proxy' },
 ]
 
 const TASK_TYPE_ICONS: Record<string, string> = {
@@ -30,11 +28,11 @@ interface WorkspaceSuggestionBannerProps {
 export function WorkspaceSuggestionBanner({ chatHistory }: WorkspaceSuggestionBannerProps) {
   const {
     suggestion,
+    workspaceModel,
+    setWorkspaceModel,
     setSuggestion,
-    workspaceSessionId,
     setWorkspaceId,
     setWorkspaceSessionId,
-    setWorkspaceModel,
     setWorkspaceActive,
     addLogEvent,
     clearLogEvents,
@@ -44,7 +42,7 @@ export function WorkspaceSuggestionBanner({ chatHistory }: WorkspaceSuggestionBa
   } = useOpenClawStore()
 
   const [launching, setLaunching] = useState(false)
-  const [selectedModel, setSelectedModel] = useState<WorkspaceModel>('local')
+  const [launchError, setLaunchError] = useState<string | null>(null)
 
   if (!suggestion?.should_suggest) return null
 
@@ -54,23 +52,36 @@ export function WorkspaceSuggestionBanner({ chatHistory }: WorkspaceSuggestionBa
 
   const handleLaunch = async () => {
     setLaunching(true)
+    setLaunchError(null)
     try {
       const token = localStorage.getItem('token')
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-      if (token) headers['Authorization'] = `Bearer ${token}`
+      if (!token) {
+        setLaunchError('Session expired — please log in again.')
+        return
+      }
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      }
 
-      // Launch the workspace — backend creates the OpenClaw session
+      // Workspace always uses OpenClaw (local) — it's an execution environment,
+      // not a chat interface. model is always "local".
       const res = await fetch('/api/workspace/launch', {
         method: 'POST',
         headers,
+        credentials: 'include',
         body: JSON.stringify({
           task_brief: suggestion.task_brief,
           chat_history: chatHistory,
-          session_id: workspaceSessionId ?? undefined,
-          model: selectedModel,
+          agent_id: workspaceModel === 'kimi' ? 'kimi' : 'main',
+          // session_id intentionally omitted — backend always creates a fresh one
         }),
       })
 
+      if (res.status === 401) {
+        setLaunchError('Session expired — please log in again.')
+        return
+      }
       if (!res.ok) throw new Error(`Launch failed: ${res.status}`)
 
       const data = await res.json()
@@ -78,12 +89,11 @@ export function WorkspaceSuggestionBanner({ chatHistory }: WorkspaceSuggestionBa
 
       setWorkspaceId(workspace_id)
       setWorkspaceSessionId(session_id)
-      setWorkspaceModel(selectedModel)
       setSuggestion(null)
       clearLogEvents()
       setFinalSummary('')
       setActiveTab('progress')
-      setWorkspaceActive(true)            // splits the layout
+      setWorkspaceActive(true)
 
       // Connect to SSE stream
       const controller = new AbortController()
@@ -100,7 +110,6 @@ export function WorkspaceSuggestionBanner({ chatHistory }: WorkspaceSuggestionBa
       const decoder = new TextDecoder()
       let buffer = ''
 
-      // Read SSE stream and push events into the store
       const readLoop = async () => {
         while (true) {
           const { done, value } = await reader.read()
@@ -127,12 +136,12 @@ export function WorkspaceSuggestionBanner({ chatHistory }: WorkspaceSuggestionBa
       }
 
       readLoop().catch(() => {
-        // Stream closed (cancel or error) — addLogEvent handles the terminal event
+        // Stream closed (cancel or error)
       })
 
     } catch (err) {
       console.error('Workspace launch error:', err)
-      setSuggestion(null)
+      setLaunchError('Launch failed — check console for details.')
     } finally {
       setLaunching(false)
     }
@@ -167,29 +176,30 @@ export function WorkspaceSuggestionBanner({ chatHistory }: WorkspaceSuggestionBa
         <p className="text-xs text-muted-foreground mt-0.5">
           {suggestion.reason}
         </p>
-      </div>
-
-      {/* Model selector */}
-      <div className="flex items-center gap-1 shrink-0 self-center">
-        <Cpu className="h-3 w-3 text-muted-foreground/60 shrink-0" />
-        <div className="flex rounded-md border border-border overflow-hidden">
+        {/* Model selector */}
+        <div className="flex items-center gap-1 mt-1.5">
+          <Cpu className="h-3 w-3 text-muted-foreground shrink-0" />
           {MODEL_OPTIONS.map((opt) => (
             <button
               key={opt.value}
-              title={opt.description}
-              onClick={() => setSelectedModel(opt.value)}
+              onClick={() => setWorkspaceModel(opt.value)}
               disabled={launching}
+              title={opt.description}
               className={cn(
-                'px-2 py-1 text-[10px] font-medium transition-colors',
-                selectedModel === opt.value
-                  ? 'bg-violet-600 text-white'
-                  : 'text-muted-foreground hover:text-foreground hover:bg-muted/60'
+                'rounded px-2 py-0.5 text-[10px] font-medium transition-colors',
+                workspaceModel === opt.value
+                  ? 'bg-violet-500/30 text-violet-200'
+                  : 'text-muted-foreground hover:text-foreground hover:bg-white/5',
               )}
             >
               {opt.label}
             </button>
           ))}
         </div>
+
+        {launchError && (
+          <p className="text-[11px] text-red-400 mt-1">{launchError}</p>
+        )}
       </div>
 
       {/* Actions */}

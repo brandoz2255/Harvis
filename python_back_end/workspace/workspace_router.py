@@ -21,6 +21,7 @@ Flow:
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from typing import Optional
@@ -30,7 +31,6 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from auth_optimized import get_current_user_optimized
-from .kimi_workspace import stream_kimi_workspace
 from .openclaw_client import OpenClawClient
 from .task_detector import detect_workspace_task
 
@@ -56,7 +56,7 @@ class LaunchRequest(BaseModel):
     task_brief: str                    # From the /suggest response
     chat_history: list[dict]           # Full chat history for context
     session_id: Optional[str] = None  # Pass the same session_id to resume
-    model: str = "local"              # "local" (OpenClaw/Ollama) | "kimi" (Kimi K2.5 direct)
+    agent_id: str = "main"            # OpenClaw agent: "main" (local Ollama) or "kimi"
 
 
 class WorkspaceStatus(BaseModel):
@@ -188,10 +188,15 @@ async def launch_workspace(
     # default, fall back to the last user message in the chat history.
     task_brief = _resolve_task_brief(req.task_brief, req.chat_history)
 
-    model = req.model if req.model in ("local", "kimi") else "local"
+    pool = getattr(request.app.state, "pg_pool", None)
 
-    # Only create an OpenClaw client for local model runs
-    client = OpenClawClient(workspace_id=workspace_id, session_id=session_id) if model == "local" else None
+    # Workspace always runs via OpenClaw — it's an execution environment with
+    # real tools (shell, code, file ops). Not a chat interface.
+    # agent_id selects which OpenClaw agent handles this session:
+    #   "main" → local Ollama (gpt-oss:latest)
+    #   "kimi" → Kimi K2.5 via the Harvis model proxy (stays inside cluster)
+    agent_id = req.agent_id if req.agent_id in ("main", "kimi") else "main"
+    client = OpenClawClient(workspace_id=workspace_id, session_id=session_id, agent_id=agent_id)
 
     started_epoch = time.monotonic()
 
@@ -200,7 +205,6 @@ async def launch_workspace(
         "status": "running",
         "task_brief": task_brief,
         "session_id": session_id,
-        "model": model,
         "chat_history": req.chat_history,
         "user_id": current_user["id"],
         "started_epoch": started_epoch,
@@ -212,7 +216,6 @@ async def launch_workspace(
     )
 
     # Persist to DB (non-blocking, failure safe)
-    pool = getattr(request.app.state, "pg_pool", None)
     try:
         await _db_create_run(pool, workspace_id, current_user["id"], session_id, task_brief)
     except Exception as exc:
@@ -223,7 +226,6 @@ async def launch_workspace(
         "session_id": session_id,
         "status": "running",
         "task_brief": task_brief,
-        "model": model,
     }
 
 
@@ -276,8 +278,7 @@ async def stream_workspace(
     if not ws:
         raise HTTPException(status_code=404, detail=f"Workspace {workspace_id} not found")
 
-    client: Optional[OpenClawClient] = ws.get("client")
-    model: str = ws.get("model", "local")
+    client: OpenClawClient = ws["client"]
     chat_history: list[dict] = ws["chat_history"]
     task_brief: str = ws["task_brief"]
     started_epoch: float = ws.get("started_epoch", time.monotonic())
@@ -291,14 +292,8 @@ async def stream_workspace(
         final_error: Optional[str] = None
         terminal_status = "done"
 
-        # Choose backend based on model selection
-        if model == "kimi":
-            event_stream = stream_kimi_workspace(task_brief, chat_history)
-        else:
-            event_stream = client.stream(task_brief, chat_history)
-
         try:
-            async for event in event_stream:
+            async for event in client.stream(task_brief, chat_history):
                 # Track tool calls
                 if event.type == "tool_call":
                     tool_call_count += 1
@@ -367,9 +362,7 @@ async def cancel_workspace(
     if not ws:
         raise HTTPException(status_code=404, detail=f"Workspace {workspace_id} not found")
 
-    client: Optional[OpenClawClient] = ws.get("client")
-    if client is not None:
-        client.cancel()
+    ws["client"].cancel()
     _workspaces[workspace_id]["status"] = "cancelled"
 
     logger.info(f"Workspace cancelled: id={workspace_id} user={current_user['id']}")
