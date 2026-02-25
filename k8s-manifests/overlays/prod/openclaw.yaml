@@ -91,6 +91,13 @@ data:
             "models": [
               { "id": "kimi-k2.5", "name": "Kimi K2.5 (via Harvis proxy)" }
             ]
+          },
+          "ollama-cloud": {
+            "baseUrl": "${EXTERNAL_OLLAMA_URL}",
+            "apiKey": "${EXTERNAL_OLLAMA_API_KEY}",
+            "models": [
+              { "id": "gpt-oss:120b", "name": "GPT-OSS 120B (Cloud)" }
+            ]
           }
         }
       },
@@ -112,6 +119,12 @@ data:
             "id": "kimi",
             "model": {
               "primary": "harvis-proxy/kimi-k2.5"
+            }
+          },
+          {
+            "id": "gpt-oss",
+            "model": {
+              "primary": "ollama-cloud/gpt-oss:120b"
             }
           }
         ]
@@ -413,6 +426,20 @@ spec:
                 secretKeyRef:
                   name: harvis-ai-openclaw-secret
                   key: database-url
+
+            # External/cloud Ollama URL for gpt-oss:120b agent
+            - name: EXTERNAL_OLLAMA_URL
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-openclaw-secret
+                  key: external-ollama-url
+                  optional: true
+            - name: EXTERNAL_OLLAMA_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-openclaw-secret
+                  key: external-ollama-api-key
+                  optional: true
 
           volumeMounts:
             # PVC for all OpenClaw runtime state (sessions, logs, agent workspaces)
