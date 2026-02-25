@@ -267,8 +267,17 @@ class OpenClawClient:
             return
 
         try:
-            # Build the full message with conversation context and a clear directive.
-            # Limit context to recent messages to avoid overwhelming the model.
+            # Build an imperative message that forces the agent to execute immediately.
+            # Lead with the task directive; context is only appended as reference.
+
+            # Extract the last user message — it's the most specific, actionable request.
+            last_user_msg = next(
+                (m["content"] for m in reversed(chat_history)
+                 if m.get("role") == "user" and isinstance(m.get("content"), str) and m["content"].strip()),
+                task_message,
+            )
+
+            # Build context block from recent history (only for reference).
             context_lines = [
                 f"{m['role'].upper()}: {m['content']}"
                 for m in chat_history[-20:]
@@ -276,19 +285,23 @@ class OpenClawClient:
             ]
             context_block = "\n".join(context_lines)
 
+            # Imperative directive — task first, context last, no asking back.
+            directive = (
+                f"EXECUTE THIS TASK NOW: {last_user_msg}\n\n"
+                "RULES:\n"
+                "- Do NOT ask for clarification or say \"what task\".\n"
+                "- Do NOT describe what you will do — just do it.\n"
+                "- Call your tools (exec, write, read) immediately to complete the task.\n"
+                "- Start with a tool call, not a text response.\n"
+            )
+
             if context_lines:
                 full_message = (
-                    f"[CONVERSATION CONTEXT]\n{context_block}\n\n"
-                    f"[TASK]\n{task_message}\n\n"
-                    "Use your tools to complete this task. "
-                    "Call exec, write, or read as needed — do not describe actions, perform them."
+                    f"{directive}\n"
+                    f"CHAT HISTORY (for reference only, do not reply to this):\n{context_block}"
                 )
             else:
-                full_message = (
-                    f"[TASK]\n{task_message}\n\n"
-                    "Use your tools to complete this task. "
-                    "Call exec, write, or read as needed — do not describe actions, perform them."
-                )
+                full_message = directive
 
             # Send the chat message via chat.send.
             req_id = self._next_id()
@@ -396,24 +409,108 @@ class OpenClawClient:
     def _handle_agent_event(self, payload: dict):
         """
         Yield OpenClawEvent(s) from an agent event payload.
-        Agent events carry tool calls, tool results, and log lines.
-        """
-        kind = payload.get("kind") or payload.get("type", "")
 
-        if kind in ("tool_call", "tool.call", "toolCall"):
-            yield OpenClawEvent("tool_call", {
-                "tool": payload.get("toolName") or payload.get("name", "unknown"),
-                "args": payload.get("args") or payload.get("input", {}),
-            })
-        elif kind in ("tool_result", "tool.result", "toolResult"):
-            yield OpenClawEvent("tool_result", {
-                "tool": payload.get("toolName") or payload.get("name", "unknown"),
-                "output": payload.get("output", ""),
-                "success": payload.get("success", True),
-            })
-        elif kind in ("log", "info", "debug"):
-            msg = payload.get("message") or str(payload)
-            yield OpenClawEvent("log", {"message": msg})
+        OpenClaw agent event format (from pi-embedded-subscribe.handlers.tools.ts):
+          {
+            "runId": "...",
+            "stream": "tool" | "assistant" | "lifecycle" | ...,
+            "data": { "phase": "start"|"update"|"result", "name": "exec", ... },
+            "seq": 0,
+            "ts": 1234567890
+          }
+
+        Tool stream phases:
+          start  → {name, toolCallId, args}
+          update → {name, toolCallId, partialResult}
+          result → {name, toolCallId, isError, result, meta}
+
+        Assistant stream:
+          {text: "..."}
+
+        Lifecycle stream:
+          {phase: "start"|"end"|"error", ...}
+        """
+        stream = payload.get("stream", "")
+        data = payload.get("data") or {}
+
+        if stream == "tool":
+            phase = data.get("phase", "")
+            tool_name = data.get("name", "unknown")
+
+            if phase == "start":
+                # Tool is being called — emit as tool_call
+                yield OpenClawEvent("tool_call", {
+                    "tool": tool_name,
+                    "args": data.get("args") or {},
+                })
+            elif phase == "result":
+                # Tool finished — emit as tool_result
+                result_data = data.get("result")
+                output = ""
+                if isinstance(result_data, str):
+                    output = result_data
+                elif isinstance(result_data, dict):
+                    # Extract text from result dict (OpenClaw often wraps output)
+                    output = (
+                        result_data.get("output")
+                        or result_data.get("text")
+                        or result_data.get("stdout")
+                        or str(result_data)
+                    )
+                elif result_data is not None:
+                    output = str(result_data)
+
+                yield OpenClawEvent("tool_result", {
+                    "tool": tool_name,
+                    "output": output[:2000],  # cap output length
+                    "success": not data.get("isError", False),
+                })
+            elif phase == "update":
+                # Partial tool output — emit as log so it shows in the UI
+                partial = data.get("partialResult")
+                if partial:
+                    yield OpenClawEvent("log", {
+                        "message": f"[{tool_name}] {str(partial)[:500]}",
+                    })
+
+        elif stream == "assistant":
+            text = data.get("text", "")
+            if text:
+                yield OpenClawEvent("token", {"content": text})
+
+        elif stream == "lifecycle":
+            phase = data.get("phase", "")
+            if phase == "error":
+                yield OpenClawEvent("log", {
+                    "message": f"Agent error: {data.get('error', 'unknown')}",
+                })
+            elif phase in ("start", "end"):
+                yield OpenClawEvent("log", {
+                    "message": f"Agent {phase}",
+                })
+
+        else:
+            # Catch-all: emit any other event as a log so nothing is silently dropped
+            kind = payload.get("kind") or payload.get("type", "")
+            if kind in ("tool_call", "tool.call", "toolCall"):
+                yield OpenClawEvent("tool_call", {
+                    "tool": payload.get("toolName") or payload.get("name", "unknown"),
+                    "args": payload.get("args") or payload.get("input", {}),
+                })
+            elif kind in ("tool_result", "tool.result", "toolResult"):
+                yield OpenClawEvent("tool_result", {
+                    "tool": payload.get("toolName") or payload.get("name", "unknown"),
+                    "output": payload.get("output", ""),
+                    "success": payload.get("success", True),
+                })
+            elif kind in ("log", "info", "debug"):
+                msg = payload.get("message") or str(payload)
+                yield OpenClawEvent("log", {"message": msg})
+            else:
+                # Unknown event — emit as log with raw data
+                msg = payload.get("message") or payload.get("text") or ""
+                if msg:
+                    yield OpenClawEvent("log", {"message": str(msg)[:500]})
 
     def cancel(self):
         """Signal the stream loop to stop after the current event."""

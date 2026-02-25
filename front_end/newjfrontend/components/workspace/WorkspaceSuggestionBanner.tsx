@@ -8,7 +8,8 @@ import { cn } from '@/lib/utils'
 
 const MODEL_OPTIONS = [
   { value: 'local' as const, label: 'Local AI', description: 'Local Ollama model' },
-  { value: 'kimi'  as const, label: 'Kimi K2.5', description: 'Moonshot via proxy' },
+  { value: 'kimi' as const, label: 'Kimi K2.5', description: 'Moonshot via proxy' },
+  { value: 'gpt-oss' as const, label: 'GPT-OSS 120B', description: 'Cloud Ollama (gpt-oss:120b)' },
 ]
 
 const TASK_TYPE_ICONS: Record<string, string> = {
@@ -73,7 +74,7 @@ export function WorkspaceSuggestionBanner({ chatHistory }: WorkspaceSuggestionBa
         body: JSON.stringify({
           task_brief: suggestion.task_brief,
           chat_history: chatHistory,
-          agent_id: workspaceModel === 'kimi' ? 'kimi' : 'main',
+          agent_id: workspaceModel === 'kimi' ? 'kimi' : workspaceModel === 'gpt-oss' ? 'gpt-oss' : 'main',
           // session_id intentionally omitted — backend always creates a fresh one
         }),
       })

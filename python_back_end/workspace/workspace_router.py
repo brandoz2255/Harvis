@@ -33,6 +33,7 @@ from pydantic import BaseModel
 from auth_optimized import get_current_user_optimized
 from .openclaw_client import OpenClawClient
 from .task_detector import detect_workspace_task
+from .kimi_workspace import stream_ollama_cloud_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -194,9 +195,9 @@ async def launch_workspace(
     # real tools (shell, code, file ops). Not a chat interface.
     # agent_id selects which OpenClaw agent handles this session:
     #   "main" → local Ollama (gpt-oss:latest)
-    #   "kimi" → Kimi K2.5 via the Harvis model proxy (stays inside cluster)
-    agent_id = req.agent_id if req.agent_id in ("main", "kimi") else "main"
-    client = OpenClawClient(workspace_id=workspace_id, session_id=session_id, agent_id=agent_id)
+    #   "gpt-oss" → GPT-OSS 120B via external/cloud Ollama (bypasses OpenClaw)
+    agent_id = req.agent_id if req.agent_id in ("main", "kimi", "gpt-oss") else "main"
+    client = OpenClawClient(workspace_id=workspace_id, session_id=session_id, agent_id=agent_id) if agent_id != "gpt-oss" else None
 
     started_epoch = time.monotonic()
 
@@ -208,6 +209,7 @@ async def launch_workspace(
         "chat_history": req.chat_history,
         "user_id": current_user["id"],
         "started_epoch": started_epoch,
+        "agent_id": agent_id,
     }
 
     logger.info(
@@ -293,7 +295,14 @@ async def stream_workspace(
         terminal_status = "done"
 
         try:
-            async for event in client.stream(task_brief, chat_history):
+            # Route based on agent_id — gpt-oss bypasses OpenClaw entirely
+            agent_id = ws.get("agent_id", "main")
+            if agent_id == "gpt-oss":
+                event_source = stream_ollama_cloud_workspace(task_brief, chat_history)
+            else:
+                event_source = client.stream(task_brief, chat_history)
+
+            async for event in event_source:
                 # Track tool calls
                 if event.type == "tool_call":
                     tool_call_count += 1

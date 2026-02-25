@@ -128,7 +128,7 @@ interface OpenClawState {
   suggestion: WorkspaceSuggestion | null
   workspaceId: string | null
   workspaceSessionId: string | null   // persists across launches for same user (resumable)
-  workspaceModel: 'local' | 'kimi'
+  workspaceModel: 'local' | 'kimi' | 'gpt-oss'
   logEvents: WorkspaceLogEvent[]
   finalSummary: string
   sseAbortController: AbortController | null
@@ -161,7 +161,7 @@ interface OpenClawState {
   setSuggestion: (suggestion: WorkspaceSuggestion | null) => void
   setWorkspaceId: (id: string | null) => void
   setWorkspaceSessionId: (id: string | null) => void
-  setWorkspaceModel: (model: 'local' | 'kimi') => void
+  setWorkspaceModel: (model: 'local' | 'kimi' | 'gpt-oss') => void
   addLogEvent: (event: Omit<WorkspaceLogEvent, 'id' | 'timestamp'>) => void
   clearLogEvents: () => void
   setFinalSummary: (summary: string) => void
@@ -194,7 +194,7 @@ export const useOpenClawStore = create<OpenClawState>()(
     suggestion: null,
     workspaceId: null,
     workspaceSessionId: null,
-    workspaceModel: 'local' | 'kimi',
+    workspaceModel: 'local' as const,
     logEvents: [],
     finalSummary: '',
     sseAbortController: null,

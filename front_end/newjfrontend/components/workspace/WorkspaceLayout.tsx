@@ -44,7 +44,7 @@ export function WorkspaceLayout({
       <div
         className={cn(
           'flex flex-col transition-all duration-500 ease-in-out overflow-hidden',
-          isChatMinimized ? 'w-12' : 'flex-[3]'
+          isChatMinimized ? 'w-12' : 'flex-[4]'
         )}
       >
         {isChatMinimized ? (
@@ -54,11 +54,11 @@ export function WorkspaceLayout({
         )}
       </div>
 
-      {/* Workspace panel RIGHT — takes the majority of space */}
+      {/* Workspace panel RIGHT — compact activity log */}
       <div
         className={cn(
           'flex flex-col transition-all duration-500 ease-in-out border-l border-border',
-          isChatMinimized ? 'flex-1' : 'flex-[5]'
+          isChatMinimized ? 'flex-1' : 'flex-[3]'
         )}
       >
         {workspaceComponent}

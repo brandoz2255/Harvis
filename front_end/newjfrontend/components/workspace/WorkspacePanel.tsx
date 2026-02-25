@@ -212,14 +212,14 @@ function LogEvent({
   toolCallIndex: number
 }) {
   switch (event.type) {
-    case 'token':       return <TokenLine event={event} />
-    case 'tool_call':   return <ToolCallLine event={event} stepNumber={toolCallIndex} />
+    case 'token': return <TokenLine event={event} />
+    case 'tool_call': return <ToolCallLine event={event} stepNumber={toolCallIndex} />
     case 'tool_result': return <ToolResultLine event={event} />
-    case 'log':         return <LogLine event={event} />
-    case 'done':        return <DoneLine event={event} />
-    case 'cancelled':   return <CancelledLine />
-    case 'error':       return <ErrorLine event={event} />
-    default:            return null
+    case 'log': return <LogLine event={event} />
+    case 'done': return <DoneLine event={event} />
+    case 'cancelled': return <CancelledLine />
+    case 'error': return <ErrorLine event={event} />
+    default: return null
   }
 }
 
@@ -252,10 +252,10 @@ interface StoredEvent {
 
 function StatusBadge({ status }: { status: WorkspaceRun['status'] }) {
   const styles = {
-    running:   'text-violet-400 bg-violet-400/10 border-violet-400/30',
-    done:      'text-green-400 bg-green-400/10 border-green-400/30',
+    running: 'text-violet-400 bg-violet-400/10 border-violet-400/30',
+    done: 'text-green-400 bg-green-400/10 border-green-400/30',
     cancelled: 'text-orange-400 bg-orange-400/10 border-orange-400/30',
-    error:     'text-red-400 bg-red-400/10 border-red-400/30',
+    error: 'text-red-400 bg-red-400/10 border-red-400/30',
   }
   const labels = {
     running: 'Running', done: 'Done', cancelled: 'Cancelled', error: 'Error',
@@ -601,7 +601,7 @@ export function WorkspacePanel() {
               <span className="text-sm font-semibold text-foreground">Workspace</span>
               <span className="flex items-center gap-1 text-[10px] font-medium text-muted-foreground bg-muted px-1.5 py-0.5 rounded-full border border-border/50">
                 <Cpu className="h-2.5 w-2.5" />
-                {workspaceModel === 'kimi' ? 'Kimi K2.5' : 'Local'}
+                {workspaceModel === 'kimi' ? 'Kimi K2.5' : workspaceModel === 'gpt-oss' ? 'GPT-OSS 120B' : 'Local'}
               </span>
               {isRunning && (
                 <Loader2 className="h-3 w-3 animate-spin text-violet-400" />
