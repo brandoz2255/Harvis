@@ -25,7 +25,7 @@ images:
     newTag: v2.29.6
   - name: dulc3/openclaw
     newName: dulc3/openclaw
-    newTag: fix
+    newTag: v2.29.6
 
 # Patches for production
 patches:
