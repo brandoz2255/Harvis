@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Zap, X, Loader2, ChevronRight, Cpu } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { useOpenClawStore } from '@/stores/openclawStore'
@@ -21,6 +21,8 @@ const TASK_TYPE_ICONS: Record<string, string> = {
   shell: '💻',
   multi_step: '🔗',
 }
+
+const COUNTDOWN_SECONDS = 3
 
 interface WorkspaceSuggestionBannerProps {
   chatHistory: Array<{ role: string; content: string }>
@@ -44,14 +46,74 @@ export function WorkspaceSuggestionBanner({ chatHistory }: WorkspaceSuggestionBa
 
   const [launching, setLaunching] = useState(false)
   const [launchError, setLaunchError] = useState<string | null>(null)
+  const [countdown, setCountdown] = useState<number | null>(null)
+  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const hasSetModelRef = useRef(false)
+
+  // Pre-select model from LLM signal
+  useEffect(() => {
+    if (suggestion?.model && !hasSetModelRef.current) {
+      setWorkspaceModel(suggestion.model)
+      hasSetModelRef.current = true
+    }
+    if (!suggestion) hasSetModelRef.current = false
+  }, [suggestion, setWorkspaceModel])
+
+  const isAutoLaunch = suggestion?.auto_launch === true
+
+  // 3-2-1 countdown auto-launch
+  useEffect(() => {
+    if (!isAutoLaunch || !suggestion?.should_suggest) return
+
+    setCountdown(COUNTDOWN_SECONDS)
+    countdownRef.current = setInterval(() => {
+      setCountdown(prev => {
+        if (prev === null || prev <= 1) {
+          if (countdownRef.current) {
+            clearInterval(countdownRef.current)
+            countdownRef.current = null
+          }
+          return 0 // Will trigger launch via separate effect
+        }
+        return prev - 1
+      })
+    }, 1000)
+
+    return () => {
+      if (countdownRef.current) {
+        clearInterval(countdownRef.current)
+        countdownRef.current = null
+      }
+    }
+  }, [isAutoLaunch, suggestion?.should_suggest])
+
+  // Launch when countdown hits 0
+  useEffect(() => {
+    if (countdown === 0 && !launching) {
+      doLaunch()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [countdown])
 
   if (!suggestion?.should_suggest) return null
 
   const icon = TASK_TYPE_ICONS[suggestion.task_type ?? ''] ?? '⚡'
 
-  const handleDismiss = () => setSuggestion(null)
+  const handleDismiss = () => {
+    if (countdownRef.current) {
+      clearInterval(countdownRef.current)
+      countdownRef.current = null
+    }
+    setCountdown(null)
+    setSuggestion(null)
+  }
 
-  const handleLaunch = async () => {
+  const doLaunch = async () => {
+    if (countdownRef.current) {
+      clearInterval(countdownRef.current)
+      countdownRef.current = null
+    }
+    setCountdown(null)
     setLaunching(true)
     setLaunchError(null)
     try {
@@ -65,8 +127,6 @@ export function WorkspaceSuggestionBanner({ chatHistory }: WorkspaceSuggestionBa
         'Authorization': `Bearer ${token}`,
       }
 
-      // Workspace always uses OpenClaw (local) — it's an execution environment,
-      // not a chat interface. model is always "local".
       const res = await fetch('/api/workspace/launch', {
         method: 'POST',
         headers,
@@ -75,7 +135,6 @@ export function WorkspaceSuggestionBanner({ chatHistory }: WorkspaceSuggestionBa
           task_brief: suggestion.task_brief,
           chat_history: chatHistory,
           agent_id: workspaceModel === 'kimi' ? 'kimi' : workspaceModel === 'gpt-oss' ? 'gpt-oss' : 'main',
-          // session_id intentionally omitted — backend always creates a fresh one
         }),
       })
 
@@ -93,7 +152,7 @@ export function WorkspaceSuggestionBanner({ chatHistory }: WorkspaceSuggestionBa
       setSuggestion(null)
       clearLogEvents()
       setFinalSummary('')
-      setActiveTab('progress')
+      setActiveTab('dashboard')
       setWorkspaceActive(true)
 
       // Connect to SSE stream
@@ -137,7 +196,7 @@ export function WorkspaceSuggestionBanner({ chatHistory }: WorkspaceSuggestionBa
       }
 
       readLoop().catch(() => {
-        // Stream closed (cancel or error)
+        // Stream closed
       })
 
     } catch (err) {
@@ -165,7 +224,11 @@ export function WorkspaceSuggestionBanner({ chatHistory }: WorkspaceSuggestionBa
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 mb-0.5">
           <span className="text-xs font-semibold text-violet-300 uppercase tracking-wide">
-            Launch Workspace?
+            {countdown !== null && countdown > 0
+              ? `Launching in ${countdown}…`
+              : countdown === 0
+                ? 'Launching…'
+                : 'Launch Workspace?'}
           </span>
           <span className="rounded-full bg-violet-500/20 px-2 py-0.5 text-[10px] text-violet-400">
             {suggestion.task_type_label}
@@ -184,7 +247,7 @@ export function WorkspaceSuggestionBanner({ chatHistory }: WorkspaceSuggestionBa
             <button
               key={opt.value}
               onClick={() => setWorkspaceModel(opt.value)}
-              disabled={launching}
+              disabled={launching || countdown !== null}
               title={opt.description}
               className={cn(
                 'rounded px-2 py-0.5 text-[10px] font-medium transition-colors',
@@ -197,6 +260,16 @@ export function WorkspaceSuggestionBanner({ chatHistory }: WorkspaceSuggestionBa
             </button>
           ))}
         </div>
+
+        {/* Countdown progress bar */}
+        {countdown !== null && (
+          <div className="mt-2 h-1 w-full rounded-full bg-violet-950 overflow-hidden">
+            <div
+              className="h-full bg-violet-500 rounded-full transition-all duration-1000 ease-linear"
+              style={{ width: `${(countdown / COUNTDOWN_SECONDS) * 100}%` }}
+            />
+          </div>
+        )}
 
         {launchError && (
           <p className="text-[11px] text-red-400 mt-1">{launchError}</p>
@@ -212,22 +285,24 @@ export function WorkspaceSuggestionBanner({ chatHistory }: WorkspaceSuggestionBa
           disabled={launching}
           className="h-7 px-2 text-muted-foreground hover:text-foreground"
         >
-          <X className="h-3.5 w-3.5" />
+          {countdown !== null ? 'Cancel' : <X className="h-3.5 w-3.5" />}
         </Button>
-        <Button
-          size="sm"
-          onClick={handleLaunch}
-          disabled={launching}
-          className="h-7 gap-1.5 bg-violet-600 hover:bg-violet-500 text-white text-xs"
-        >
-          {launching ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : (
-            <Zap className="h-3.5 w-3.5" />
-          )}
-          {launching ? 'Launching…' : 'Launch'}
-          {!launching && <ChevronRight className="h-3 w-3" />}
-        </Button>
+        {countdown === null && (
+          <Button
+            size="sm"
+            onClick={doLaunch}
+            disabled={launching}
+            className="h-7 gap-1.5 bg-violet-600 hover:bg-violet-500 text-white text-xs"
+          >
+            {launching ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Zap className="h-3.5 w-3.5" />
+            )}
+            {launching ? 'Launching…' : 'Launch'}
+            {!launching && <ChevronRight className="h-3 w-3" />}
+          </Button>
+        )}
       </div>
     </div>
   )

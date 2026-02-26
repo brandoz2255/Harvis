@@ -285,8 +285,15 @@ class OpenClawClient:
             ]
             context_block = "\n".join(context_lines)
 
+            # Session-scoped workspace directory — isolates file ops per run.
+            safe_session = self.session_id.replace("/", "-").replace(" ", "-")
+            workdir = f"/home/node/workspaces/{safe_session}"
+
             # Imperative directive — task first, context last, no asking back.
             directive = (
+                f"WORKSPACE DIRECTORY: {workdir}\n"
+                f"Before doing anything, run: mkdir -p {workdir} && cd {workdir}\n"
+                f"All file operations (read, write, exec) MUST happen inside {workdir}.\n\n"
                 f"EXECUTE THIS TASK NOW: {last_user_msg}\n\n"
                 "RULES:\n"
                 "- Do NOT ask for clarification or say \"what task\".\n"

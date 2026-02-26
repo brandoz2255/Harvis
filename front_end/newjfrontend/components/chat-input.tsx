@@ -49,6 +49,8 @@ interface ChatInputProps {
   onExtraVramChange?: (enabled: boolean) => void
   ttsEngine?: TTSEngine  // "chatterbox" or "qwen" TTS engine selection
   onTtsEngineChange?: (engine: TTSEngine) => void
+  workspaceEnabled?: boolean  // Workspace auto-delegation toggle
+  onWorkspaceEnabledChange?: (enabled: boolean) => void
 }
 
 // Supported file types for file upload
@@ -85,6 +87,8 @@ export function ChatInput({
   onExtraVramChange,
   ttsEngine = "qwen",
   onTtsEngineChange,
+  workspaceEnabled = true,
+  onWorkspaceEnabledChange,
 }: ChatInputProps) {
   const [message, setMessage] = useState("")
   const [isRecording, setIsRecording] = useState(false)
@@ -175,7 +179,7 @@ export function ChatInput({
 
     // Check for image files in clipboard items (includes screenshots)
     const imageItems: DataTransferItem[] = []
-    
+
     if (items) {
       for (let i = 0; i < items.length; i++) {
         if (items[i].type.indexOf('image') !== -1) {
@@ -197,7 +201,7 @@ export function ChatInput({
     // If we found images, process them
     if (imageItems.length > 0 || imageFiles.length > 0) {
       e.preventDefault() // Prevent pasting the image data into the textarea
-      
+
       if (!requireVLModel('Image paste')) {
         return
       }
@@ -961,6 +965,34 @@ export function ChatInput({
                       </button>
                       <p className="px-3 py-1 text-xs text-muted-foreground">
                         Keep LLM loaded during TTS (uses more memory)
+                      </p>
+
+                      <div className="my-2 border-t border-border" />
+
+                      <button
+                        type="button"
+                        onClick={() => onWorkspaceEnabledChange?.(!workspaceEnabled)}
+                        className="flex w-full items-center justify-between gap-2 rounded-md px-3 py-2 text-sm hover:bg-accent"
+                      >
+                        <div className="flex items-center gap-2">
+                          <Zap className={cn(
+                            "h-4 w-4",
+                            workspaceEnabled ? "text-violet-400" : "text-muted-foreground"
+                          )} />
+                          <span>Workspace</span>
+                        </div>
+                        <div className={cn(
+                          "w-8 h-4 rounded-full transition-colors relative",
+                          workspaceEnabled ? "bg-violet-500" : "bg-muted"
+                        )}>
+                          <div className={cn(
+                            "absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform",
+                            workspaceEnabled ? "translate-x-4" : "translate-x-0.5"
+                          )} />
+                        </div>
+                      </button>
+                      <p className="px-3 py-1 text-xs text-muted-foreground">
+                        Auto-delegate tasks to Harvis Workspace
                       </p>
 
                       {/* TTS Engine Selector - only show when voice mode is enabled */}

@@ -33,7 +33,6 @@ from pydantic import BaseModel
 from auth_optimized import get_current_user_optimized
 from .openclaw_client import OpenClawClient
 from .task_detector import detect_workspace_task
-from .kimi_workspace import stream_ollama_cloud_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -195,9 +194,10 @@ async def launch_workspace(
     # real tools (shell, code, file ops). Not a chat interface.
     # agent_id selects which OpenClaw agent handles this session:
     #   "main" → local Ollama (gpt-oss:latest)
-    #   "gpt-oss" → GPT-OSS 120B via external/cloud Ollama (bypasses OpenClaw)
+    #   "kimi" → Kimi K2.5 via Harvis proxy
+    #   "gpt-oss" → GPT-OSS 120B via external/cloud Ollama (routed through OpenClaw)
     agent_id = req.agent_id if req.agent_id in ("main", "kimi", "gpt-oss") else "main"
-    client = OpenClawClient(workspace_id=workspace_id, session_id=session_id, agent_id=agent_id) if agent_id != "gpt-oss" else None
+    client = OpenClawClient(workspace_id=workspace_id, session_id=session_id, agent_id=agent_id)
 
     started_epoch = time.monotonic()
 
@@ -295,12 +295,9 @@ async def stream_workspace(
         terminal_status = "done"
 
         try:
-            # Route based on agent_id — gpt-oss bypasses OpenClaw entirely
-            agent_id = ws.get("agent_id", "main")
-            if agent_id == "gpt-oss":
-                event_source = stream_ollama_cloud_workspace(task_brief, chat_history)
-            else:
-                event_source = client.stream(task_brief, chat_history)
+            # All agents (main, kimi, gpt-oss) route through OpenClaw
+            # for full tool access (exec, read, write)
+            event_source = client.stream(task_brief, chat_history)
 
             async for event in event_source:
                 # Track tool calls
@@ -433,6 +430,79 @@ async def list_workspace_history(
     except Exception as exc:
         logger.error("DB: failed to fetch workspace history for user %s: %s", current_user["id"], exc)
         return {"runs": []}
+
+
+@workspace_router.post("/run/{source_id}/rerun")
+async def rerun_workspace(
+    source_id: str,
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """
+    Re-launch a previous workspace run using its stored task_brief.
+    Returns a new workspace_id + session_id. The caller connects to
+    /stream/{workspace_id} exactly as it would for a fresh launch.
+    """
+    pool = getattr(request.app.state, "pg_pool", None)
+
+    # Fetch task_brief from DB first (survives pod restarts)
+    task_brief: Optional[str] = None
+    agent_id = "main"
+
+    if pool:
+        try:
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT task_brief FROM workspace_runs WHERE id = $1 AND user_id = $2",
+                    source_id, current_user["id"],
+                )
+            if row:
+                task_brief = row["task_brief"]
+        except Exception as exc:
+            logger.error("DB: failed to fetch task_brief for rerun %s: %s", source_id, exc)
+
+    # Fall back to in-memory registry (works when pod hasn't restarted)
+    if not task_brief:
+        ws = _workspaces.get(source_id)
+        if ws and ws.get("user_id") == current_user["id"]:
+            task_brief = ws["task_brief"]
+            agent_id = ws.get("agent_id", "main")
+
+    if not task_brief:
+        raise HTTPException(status_code=404, detail="Workspace run not found")
+
+    workspace_id = str(uuid.uuid4())[:8]
+    session_id = f"ws-{workspace_id}"
+
+    client = OpenClawClient(workspace_id=workspace_id, session_id=session_id, agent_id=agent_id)
+    started_epoch = time.monotonic()
+
+    _workspaces[workspace_id] = {
+        "client": client,
+        "status": "running",
+        "task_brief": task_brief,
+        "session_id": session_id,
+        "chat_history": [],  # rerun uses task_brief directly; no prior context needed
+        "user_id": current_user["id"],
+        "started_epoch": started_epoch,
+        "agent_id": agent_id,
+    }
+
+    try:
+        await _db_create_run(pool, workspace_id, current_user["id"], session_id, task_brief)
+    except Exception as exc:
+        logger.error("DB: _db_create_run (rerun) raised unexpectedly: %s", exc)
+
+    logger.info(
+        "Workspace rerun: source=%s new=%s user=%s brief=%r",
+        source_id, workspace_id, current_user["id"], task_brief,
+    )
+    return {
+        "workspace_id": workspace_id,
+        "session_id": session_id,
+        "status": "running",
+        "task_brief": task_brief,
+    }
 
 
 @workspace_router.get("/run/{workspace_id}/events")

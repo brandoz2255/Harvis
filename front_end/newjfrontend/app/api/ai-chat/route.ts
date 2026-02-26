@@ -23,6 +23,9 @@ const MAX_RETRIES = 3;
 const RETRY_DELAY = 1000; // ms
 const FETCH_TIMEOUT = 30000; // 30 seconds for initial connection
 
+// Regex to detect <harvis_workspace> XML signals from the LLM
+const WORKSPACE_TAG_RE = /<harvis_workspace(?:\s+model="([^"]*)")?\s*>([\s\S]*?)<\/harvis_workspace>/;
+
 export async function POST(req: NextRequest) {
   // Default to K8s service name - works in both Docker Compose (with BACKEND_URL override) and K8s
   const BACKEND_URL = process.env['BACKEND_URL'] ?? 'http://harvis-ai-merged-backend:8000';
@@ -325,16 +328,30 @@ export async function POST(req: NextRequest) {
 
                   if ((!fullText || fullText.trim().length === 0) && contentToSend) {
                     console.log(`[AI-Chat] Streaming full content from COMPLETE event (${contentToSend.length} chars)`);
-
-                    // CRITICAL: Send entire content as a single chunk to avoid streaming issues
-                    // The AI SDK can handle the full content at once, and this prevents
-                    // issues with newline boundaries when chunking
                     const encodedContent = JSON.stringify(contentToSend);
                     console.log(`[AI-Chat] Sending content with 0: prefix, length: ${encodedContent.length}`);
                     if (!safeEnqueue(encoder.encode(`0:${encodedContent}\n`))) break;
                     fullText = contentToSend;
                     console.log(`[AI-Chat] Content sent successfully`);
                   }
+
+                  // ── Workspace XML signal detection ──────────────────────────
+                  // Check if the LLM emitted a <harvis_workspace> tag
+                  const wsMatch = WORKSPACE_TAG_RE.exec(fullText);
+                  if (wsMatch) {
+                    const wsModel = (wsMatch[1] || 'local').trim();
+                    const wsBrief = (wsMatch[2] || '').trim().slice(0, 200);
+                    console.log(`[AI-Chat] Workspace signal detected: model=${wsModel} brief=${wsBrief.slice(0, 60)}...`);
+
+                    // Emit workspace signal via data stream
+                    const wsSignal = {
+                      type: 'workspace_signal',
+                      task_brief: wsBrief,
+                      model: ['local', 'kimi', 'gpt-oss'].includes(wsModel) ? wsModel : 'local',
+                    };
+                    if (!safeEnqueue(encoder.encode(`2:${JSON.stringify([wsSignal])}\n`))) break;
+                  }
+                  // ──────────────────────────────────────────────────────────────
 
                   const audioPath = data.audio_path || null;
 

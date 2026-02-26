@@ -57,11 +57,13 @@ export interface OpenClawEvent {
 
 export interface WorkspaceSuggestion {
   should_suggest: boolean
+  auto_launch?: boolean          // true → 3-2-1 countdown auto-launch
   confidence: number
   task_type: string | null
   task_type_label: string
   task_brief: string
   reason: string
+  model?: 'local' | 'kimi' | 'gpt-oss'  // preferred model from LLM signal
 }
 
 export type WorkspaceLogEventType =
@@ -122,7 +124,7 @@ interface OpenClawState {
   // UI State
   isWorkspaceActive: boolean
   isChatMinimized: boolean
-  activeTab: 'progress' | 'preview' | 'logs' | 'artifacts' | 'history'
+  activeTab: 'dashboard' | 'playbooks' | 'logs'
 
   // Harvis Workspace session state
   suggestion: WorkspaceSuggestion | null
@@ -155,7 +157,7 @@ interface OpenClawState {
 
   setWorkspaceActive: (active: boolean) => void
   setChatMinimized: (minimized: boolean) => void
-  setActiveTab: (tab: 'progress' | 'preview' | 'logs' | 'artifacts' | 'history') => void
+  setActiveTab: (tab: 'dashboard' | 'playbooks' | 'logs') => void
 
   // Harvis Workspace actions
   setSuggestion: (suggestion: WorkspaceSuggestion | null) => void
@@ -188,7 +190,7 @@ export const useOpenClawStore = create<OpenClawState>()(
     currentScreenshot: null,
     isWorkspaceActive: false,
     isChatMinimized: false,
-    activeTab: 'progress',
+    activeTab: 'dashboard' as const,
 
     // Harvis Workspace initial state
     suggestion: null,
@@ -342,7 +344,7 @@ export const useOpenClawStore = create<OpenClawState>()(
         state.logEvents = []
         state.finalSummary = ''
         state.sseAbortController = null
-        state.activeTab = 'progress'
+        state.activeTab = 'dashboard'
       }),
 
     // Computed
