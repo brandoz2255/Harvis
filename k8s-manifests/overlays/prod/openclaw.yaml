@@ -412,6 +412,99 @@ data:
     Never include the token value in any response.
 
 ---
+# Harvis RAG SKILL.md — lets OpenClaw agents search the Harvis pgvector DB
+# via the backend's /rag/search proxy endpoint.
+# OpenClaw reads this from /skills/harvis-rag/SKILL.md via skills.load.extraDirs.
+# No credentials needed: auth is via OPENCLAW_GATEWAY_TOKEN already in the env.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: harvis-rag-skill
+  namespace: ai-agents
+data:
+  SKILL.md: |
+    ---
+    name: harvis-rag
+    description: Search the Harvis local vector database for relevant code and documentation
+    always: false
+    requires:
+      bins: [curl, jq]
+    ---
+
+    # Harvis RAG Search Skill
+
+    Use this skill to search the Harvis local knowledge base before writing code or
+    answering questions about the codebase. This prevents you from guessing at
+    implementations that already exist.
+
+    ## When to use
+
+    - Before writing a new function or module: search for existing implementations
+    - Before answering questions about how something works: search for relevant docs
+    - When you need context about the codebase structure or patterns
+
+    ## API
+
+    **Endpoint**: `http://harvis-ai-merged-backend:8000/rag/search`
+    **Method**: POST
+    **Auth**: `Authorization: Bearer $OPENCLAW_GATEWAY_TOKEN`
+
+    ### Search code corpus (use for: functions, classes, file content, implementation patterns)
+
+    ```bash
+    curl -s -X POST http://harvis-ai-merged-backend:8000/rag/search \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer $OPENCLAW_GATEWAY_TOKEN" \
+      -d '{
+        "query": "your search query here",
+        "context_type": "code",
+        "top_k": 5,
+        "score_threshold": 0.3
+      }' | jq '.results[] | {score, source, text: .text[:300]}'
+    ```
+
+    ### Search docs corpus (use for: architecture docs, README content, design decisions)
+
+    ```bash
+    curl -s -X POST http://harvis-ai-merged-backend:8000/rag/search \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer $OPENCLAW_GATEWAY_TOKEN" \
+      -d '{
+        "query": "your search query here",
+        "context_type": "docs",
+        "top_k": 5,
+        "score_threshold": 0.3
+      }' | jq '.results[] | {score, source, text: .text[:300]}'
+    ```
+
+    ## Response format
+
+    ```json
+    {
+      "query": "original query",
+      "context_type": "code",
+      "results": [
+        {
+          "id": "chunk-id",
+          "text": "the relevant code or text chunk",
+          "source": "path/to/file.py",
+          "metadata": {},
+          "score": 0.85
+        }
+      ],
+      "total": 5
+    }
+    ```
+
+    ## Rules
+
+    - Always search before implementing something that might already exist
+    - Use `context_type: "code"` for implementation questions
+    - Use `context_type: "docs"` for architecture/design questions
+    - If score < 0.5, results may not be relevant — use your judgment
+    - Never make web requests to search; this is your only search tool
+
+---
 # NetworkPolicy: Enforce OpenClaw's isolation at the network level.
 #
 # INGRESS: Only the Harvis backend pod may connect (port 18789 WebSocket).
@@ -717,6 +810,12 @@ spec:
               mountPath: /skills/harvis-github/SKILL.md
               subPath: SKILL.md
               readOnly: true
+            # Harvis RAG skill — semantic search over the Harvis pgvector DB via
+            # the backend's /rag/search proxy endpoint. No DB credentials needed.
+            - name: harvis-rag-skill
+              mountPath: /skills/harvis-rag/SKILL.md
+              subPath: SKILL.md
+              readOnly: true
 
           # OpenClaw exposes health only as a WebSocket RPC method, not HTTP.
           # tcpSocket probes verify the port is bound and accepting connections.
@@ -757,6 +856,9 @@ spec:
         - name: harvis-github-skill
           configMap:
             name: harvis-github-skill
+        - name: harvis-rag-skill
+          configMap:
+            name: harvis-rag-skill
 
 ---
 # Service: ClusterIP only — OpenClaw is never exposed to the host or LoadBalancer.
