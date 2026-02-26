@@ -1,0 +1,245 @@
+version: "3.9"
+
+services:
+  # Ollama LLM Service
+  ollama:
+    image: ollama/ollama:latest
+    runtime: nvidia
+    container_name: harvis-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [ gpu ]
+        limits:
+          memory: 30G
+    networks:
+      - ollama-n8n-network
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:11434/api/tags" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Model Downloader (Init Container equivalent)
+  model-downloader:
+    build:
+      context: ./python_back_end
+      dockerfile: Dockerfile
+    container_name: harvis-model-downloader
+    user: root
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        python3 /app/download_models.py &&
+        echo '🔧 Fixing model cache permissions for appuser...' &&
+        chown -R 1001:1001 /models-cache &&
+        echo '✅ Model cache permissions fixed'
+    environment:
+      HF_HOME: "/models-cache/huggingface"
+      TRANSFORMERS_CACHE: "/models-cache/huggingface"
+      WHISPER_CACHE: "/models-cache/whisper"
+      PYTHONUNBUFFERED: "1"
+      DOWNLOAD_QWEN_TTS: "true"
+      DOWNLOAD_CHATTERBOX_TTS: "false"
+    volumes:
+      - ml-models-cache:/models-cache
+    networks:
+      - ollama-n8n-network
+
+  # Artifact Volume Permission Setup
+  artifact-init:
+    image: busybox:latest
+    container_name: harvis-artifact-init
+    user: root
+    command: >
+      sh -c "mkdir -p /data/artifacts && 
+             chown -R 1001:1001 /data/artifacts && 
+             chmod 750 /data/artifacts &&
+             echo 'Artifact permissions initialized'"
+    volumes:
+      - artifact_data:/data/artifacts
+    networks:
+      - ollama-n8n-network
+    restart: "no"
+
+  # Python FastAPI Backend - Using pre-built image from Docker Hub
+  backend:
+    image: dulc3/jarvis-backend:v2.29.15
+    container_name: harvis-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: "postgresql://pguser:pgpassword@pgsql:5432/database"
+      JWT_SECRET: "***REMOVED***"
+      OLLAMA_URL: "http://ollama:11434"
+      BACKEND_URL: "http://backend:8000"
+      HF_HOME: "/models-cache/huggingface"
+      TRANSFORMERS_CACHE: "/models-cache/huggingface"
+      WHISPER_CACHE: "/models-cache/whisper"
+      UVICORN_WORKERS: "4"
+      ENVIRONMENT: "production"
+      LOG_LEVEL: "INFO"
+      PYTHONUNBUFFERED: "1"
+      ARTIFACT_STORAGE_DIR: "/data/artifacts"
+      CODE_EXECUTOR_LOCAL: "true"
+    user: "1001:1001"
+    volumes:
+      - ml-models-cache:/models-cache
+      - embedding-data:/app/embedding
+      - /tmp:/tmp
+      - artifact_data:/data/artifacts
+    depends_on:
+      ollama:
+        condition: service_started
+      pgsql:
+        condition: service_healthy
+      model-downloader:
+        condition: service_completed_successfully
+      artifact-init:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [ gpu ]
+        limits:
+          memory: 15G
+    networks:
+      - ollama-n8n-network
+
+  # Next.js Frontend - Using pre-built image from Docker Hub
+  frontend:
+    image: dulc3/jarvis-frontend:v2.29.15
+    container_name: harvis-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: "production"
+      NEXT_TELEMETRY_DISABLED: "1"
+      JWT_SECRET: "***REMOVED***"
+      BACKEND_URL: "http://backend:8000"
+      OLLAMA_URL: "http://ollama:11434"
+    depends_on:
+      - backend
+      - pgsql
+    deploy:
+      resources:
+        limits:
+          memory: 1512M
+    networks:
+      - ollama-n8n-network
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: nginx-proxy
+    restart: unless-stopped
+    ports:
+      - "9000:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - /tmp:/tmp:ro
+    depends_on:
+      - frontend
+      - backend
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+    networks:
+      - ollama-n8n-network
+
+  # Document Generation Worker
+  document-worker:
+    build:
+      context: ./python_back_end
+      dockerfile: Dockerfile.document-worker
+    container_name: harvis-document-worker
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: "postgresql://pguser:pgpassword@pgsql:5432/database"
+      OLLAMA_URL: "http://ollama:11434"
+      BACKEND_URL: "http://backend:8000"
+      ENVIRONMENT: "production"
+      LOG_LEVEL: "INFO"
+      PYTHONUNBUFFERED: "1"
+      ARTIFACT_STORAGE_DIR: "/data/artifacts"
+      WORKER_NAME: "document-worker-docker"
+    user: "1001:1001"
+    volumes:
+      - artifact_data:/data/artifacts
+    depends_on:
+      pgsql:
+        condition: service_healthy
+      backend:
+        condition: service_started
+      artifact-init:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '2.0'
+        reservations:
+          cpus: '0.25'
+    networks:
+      - ollama-n8n-network
+    healthcheck:
+      test: [ "CMD-SHELL", "python -c 'import asyncpg; import openpyxl; print(\"healthy\")'" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # PostgreSQL Database with pgvector
+  pgsql:
+    image: pgvector/pgvector:pg15
+    container_name: pgsql-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: pguser
+      POSTGRES_PASSWORD: pgpassword
+      POSTGRES_DB: database
+      POSTGRES_INITDB_ARGS: "-E UTF8 --locale=C"
+    volumes:
+      - pgsql_data:/var/lib/postgresql/data
+      - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
+      - ./python_back_end/artifacts_schema.sql:/docker-entrypoint-initdb.d/artifacts_schema.sql:ro
+      - ./python_back_end/artifacts_build_jobs_schema.sql:/docker-entrypoint-initdb.d/artifacts_build_jobs_schema.sql:ro
+      - ./front_end/newjfrontend/db/migrations/001_add_document_jobs.sql:/docker-entrypoint-initdb.d/001_add_document_jobs.sql:ro
+    ports:
+      - "5432:5432"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    networks:
+      - ollama-n8n-network
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U pguser -d database" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  ollama-n8n-network:
+    external: true
+
+volumes:
+  ollama-models:
+  pgsql_data:
+  ml-models-cache:
+  embedding-data:
+  artifact_data:
