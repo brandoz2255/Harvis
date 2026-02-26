@@ -81,7 +81,7 @@ data:
             "baseUrl": "http://harvis-ai-merged-backend:11434",
             "apiKey": "ollama-local",
             "models": [
-              { "id": "gpt-oss:latest", "name": "GPT-OSS" }
+              { "id": "qwen3:4b", "name": "Qwen3 4B (Local)" }
             ]
           },
           "harvis-proxy": {
@@ -90,7 +90,8 @@ data:
             "apiKey": "${OPENCLAW_GATEWAY_TOKEN}",
             "models": [
               { "id": "kimi-k2.5", "name": "Kimi K2.5 (via Harvis proxy)" },
-              { "id": "gpt-oss:120b", "name": "GPT-OSS 120B (via Harvis proxy)" }
+              { "id": "gpt-oss:120b", "name": "GPT-OSS 120B (via Harvis proxy)" },
+              { "id": "qwen3:235b-a22b-q8_0", "name": "Qwen3 235B (via Harvis proxy)" }
             ]
           }
         }
@@ -98,7 +99,7 @@ data:
       "agents": {
         "defaults": {
           "model": {
-            "primary": "ollama/gpt-oss:latest"
+            "primary": "ollama/qwen3:4b"
           }
         },
         "list": [
@@ -106,7 +107,7 @@ data:
             "id": "main",
             "default": true,
             "model": {
-              "primary": "ollama/gpt-oss:latest"
+              "primary": "ollama/qwen3:4b"
             }
           },
           {
@@ -119,6 +120,12 @@ data:
             "id": "gpt-oss",
             "model": {
               "primary": "harvis-proxy/gpt-oss:120b"
+            }
+          },
+          {
+            "id": "qwen3",
+            "model": {
+              "primary": "harvis-proxy/qwen3:235b-a22b-q8_0"
             }
           }
         ]
