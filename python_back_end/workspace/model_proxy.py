@@ -39,7 +39,7 @@ OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 _KIMI_MODELS = {"kimi-k2.5", "kimi-k2", "kimi-k1.5", "moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"}
 
 # Model prefixes routed to the external/cloud Ollama instance
-_OLLAMA_CLOUD_PREFIX = "gpt-oss"
+_OLLAMA_CLOUD_PREFIXES = ("gpt-oss", "qwen3")
 
 model_proxy_router = APIRouter(prefix="/v1", tags=["model-proxy"])
 
@@ -72,8 +72,8 @@ def _resolve_route(model_name: str) -> tuple[str, dict, bool]:
             True,
         )
 
-    # GPT-OSS cloud Ollama models
-    if model_name.startswith(_OLLAMA_CLOUD_PREFIX):
+    # Cloud Ollama models (gpt-oss, qwen3, etc.)
+    if model_name.startswith(_OLLAMA_CLOUD_PREFIXES):
         if not EXTERNAL_OLLAMA_URL:
             raise HTTPException(
                 status_code=503,
@@ -92,7 +92,7 @@ def _resolve_route(model_name: str) -> tuple[str, dict, bool]:
     raise HTTPException(
         status_code=400,
         detail=f"Model '{model_name}' not routable through this proxy. "
-               f"Supported: kimi-k2.5, gpt-oss:*",
+               f"Supported: kimi-k2.5, gpt-oss:*, qwen3:*",
     )
 
 

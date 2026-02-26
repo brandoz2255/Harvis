@@ -63,7 +63,7 @@ export interface WorkspaceSuggestion {
   task_type_label: string
   task_brief: string
   reason: string
-  model?: 'local' | 'kimi' | 'gpt-oss'  // preferred model from LLM signal
+  model?: 'local' | 'kimi' | 'qwen3'  // preferred model from LLM signal
 }
 
 export type WorkspaceLogEventType =
@@ -91,6 +91,9 @@ export interface WorkspaceLogEvent {
   message?: string
   summary?: string
   timestamp: number
+  // sub-agent tracking — populated by backend when OpenClaw emits agent events
+  run_id?: string
+  agent_label?: string  // "Agent" | "Sub-Agent 1" | "Sub-Agent 2" …
 }
 
 export interface Screenshot {
@@ -130,7 +133,7 @@ interface OpenClawState {
   suggestion: WorkspaceSuggestion | null
   workspaceId: string | null
   workspaceSessionId: string | null   // persists across launches for same user (resumable)
-  workspaceModel: 'local' | 'kimi' | 'gpt-oss'
+  workspaceModel: 'local' | 'kimi' | 'qwen3'
   logEvents: WorkspaceLogEvent[]
   finalSummary: string
   sseAbortController: AbortController | null
@@ -163,7 +166,7 @@ interface OpenClawState {
   setSuggestion: (suggestion: WorkspaceSuggestion | null) => void
   setWorkspaceId: (id: string | null) => void
   setWorkspaceSessionId: (id: string | null) => void
-  setWorkspaceModel: (model: 'local' | 'kimi' | 'gpt-oss') => void
+  setWorkspaceModel: (model: 'local' | 'kimi' | 'qwen3') => void
   addLogEvent: (event: Omit<WorkspaceLogEvent, 'id' | 'timestamp'>) => void
   clearLogEvents: () => void
   setFinalSummary: (summary: string) => void

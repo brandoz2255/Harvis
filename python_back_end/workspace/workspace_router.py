@@ -9,13 +9,20 @@ Endpoints:
   GET  /api/workspace/status/{ws_id}   — Get current workspace status
   GET  /api/workspace/history          — List last 20 workspace runs for current user
   GET  /api/workspace/run/{ws_id}/events — Get all stored events for a run
+  POST /api/workspace/run/{ws_id}/rerun  — Re-run a previous workspace task
 
-Flow:
-  1. After each chat response, frontend POSTs to /suggest with the chat history.
-  2. If should_suggest=true, frontend shows "Launch Workspace?" banner.
-  3. User confirms → frontend POSTs to /launch → gets workspace_id back.
-  4. Frontend connects to /stream/{workspace_id} (SSE) and renders the activity panel.
-  5. User can hit Cancel → frontend POSTs to /cancel/{workspace_id}.
+Architecture — Background Task + Queue + DB:
+  1. /launch  → inserts workspace_runs row + starts _run_workspace_bg() asyncio.Task
+  2. Background task drives client.stream():
+       • Saves every event to workspace_events (DB is the authoritative log)
+       • Pushes (seq, event) tuples to a per-workspace asyncio.Queue for live SSE
+       • Puts a None sentinel when done
+       • Keeps running even if the SSE client disconnects
+  3. /stream  → two-phase async generator:
+       Phase 1: replay all workspace_events from DB  (reconnection, history)
+       Phase 2: consume live events from asyncio.Queue (near-real-time streaming)
+       SSE disconnect does NOT cancel the background task — sub-agents finish.
+  4. /cancel  → signals client.cancel() and cancels the asyncio.Task
 """
 
 import asyncio
@@ -31,45 +38,49 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from auth_optimized import get_current_user_optimized
-from .openclaw_client import OpenClawClient
+from .openclaw_client import OpenClawClient, OpenClawEvent
 from .task_detector import detect_workspace_task
 
 logger = logging.getLogger(__name__)
 
 workspace_router = APIRouter(prefix="/api/workspace", tags=["workspace"])
 
-# ─── In-memory workspace registry ────────────────────────────────────────────
-# Maps workspace_id → {client, status, task_brief, session_id, started_epoch}
-# For production with multiple backend replicas, move this to Redis.
-# Currently safe because the backend Deployment has replicas=1 for the
-# Ollama co-location requirement.
+# ─── In-memory workspace registry ─────────────────────────────────────────────
+# Maps workspace_id → {client, status, task_brief, session_id, ...}
+# Safe for replicas=1 (Ollama co-location requirement keeps backend single-replica).
 _workspaces: dict[str, dict] = {}
 
+# Per-workspace asyncio.Queue for live SSE streaming.
+# Items: (seq: int, event: OpenClawEvent) while running, None when done.
+_workspace_queues: dict[str, asyncio.Queue] = {}
 
-# ─── Request / Response models ────────────────────────────────────────────────
+# asyncio.Task references so /cancel can cancel the background task.
+_workspace_tasks: dict[str, asyncio.Task] = {}
+
+
+# ─── Request / Response models ─────────────────────────────────────────────────
 
 class SuggestRequest(BaseModel):
-    chat_history: list[dict]           # [{role, content}, ...]
+    chat_history: list[dict]
 
 
 class LaunchRequest(BaseModel):
-    task_brief: str                    # From the /suggest response
-    chat_history: list[dict]           # Full chat history for context
-    session_id: Optional[str] = None  # Pass the same session_id to resume
-    agent_id: str = "main"            # OpenClaw agent: "main" (local Ollama) or "kimi"
+    task_brief: str
+    chat_history: list[dict]
+    session_id: Optional[str] = None
+    agent_id: str = "main"
 
 
 class WorkspaceStatus(BaseModel):
     workspace_id: str
-    status: str                        # "running" | "done" | "cancelled" | "error"
+    status: str
     task_brief: str
     session_id: str
 
 
-# ─── Database helpers (all wrapped in try/except so DB never breaks workspace) ─
+# ─── Database helpers ──────────────────────────────────────────────────────────
 
 async def _db_create_run(pool, workspace_id: str, user_id: int, session_id: str, task_brief: str) -> None:
-    """Insert a new workspace_run row. Silently ignores DB errors."""
     if pool is None:
         return
     try:
@@ -86,12 +97,10 @@ async def _db_create_run(pool, workspace_id: str, user_id: int, session_id: str,
         logger.error("DB: failed to create workspace_run %s: %s", workspace_id, exc)
 
 
-async def _db_save_event(pool, workspace_id: str, seq: int, event) -> None:
-    """Insert a workspace_event row. Silently ignores DB errors."""
+async def _db_save_event(pool, workspace_id: str, seq: int, event: OpenClawEvent) -> None:
     if pool is None:
         return
     try:
-        # Build a payload dict from the event attributes
         payload: dict = {}
         for attr in ("content", "tool", "args", "output", "success", "message", "summary"):
             val = getattr(event, attr, None)
@@ -107,7 +116,7 @@ async def _db_save_event(pool, workspace_id: str, seq: int, event) -> None:
                 workspace_id, seq, event.type, json.dumps(payload),
             )
     except Exception as exc:
-        logger.error("DB: failed to save event seq=%s for workspace %s: %s", seq, workspace_id, exc)
+        logger.error("DB: failed to save event seq=%s workspace=%s: %s", seq, workspace_id, exc)
 
 
 async def _db_complete_run(
@@ -120,7 +129,6 @@ async def _db_complete_run(
     event_count: int,
     started_epoch: float,
 ) -> None:
-    """Update workspace_run on completion. Silently ignores DB errors."""
     if pool is None:
         return
     try:
@@ -129,11 +137,11 @@ async def _db_complete_run(
             await conn.execute(
                 """
                 UPDATE workspace_runs
-                SET status       = $2,
-                    completed_at = NOW(),
-                    duration_ms  = $3,
-                    event_count  = $4,
-                    tool_calls   = $5,
+                SET status        = $2,
+                    completed_at  = NOW(),
+                    duration_ms   = $3,
+                    event_count   = $4,
+                    tool_calls    = $5,
                     final_summary = $6,
                     error_message = $7
                 WHERE id = $1
@@ -145,91 +153,93 @@ async def _db_complete_run(
         logger.error("DB: failed to complete workspace_run %s: %s", workspace_id, exc)
 
 
-# ─── Endpoints ────────────────────────────────────────────────────────────────
+# ─── Background task ────────────────────────────────────────────────────────────
 
-@workspace_router.post("/suggest")
-async def suggest_workspace(
-    req: SuggestRequest,
-    current_user: dict = Depends(get_current_user_optimized),
-):
+async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> None:
     """
-    Analyze the current chat history and return a workspace suggestion.
-    Called by the frontend after every AI response in chat.
-    If should_suggest=true, the frontend shows the "Launch Workspace?" banner.
+    Background asyncio.Task that drives the OpenClaw WebSocket stream to completion.
+
+    This task is independent of the SSE connection.  If the browser disconnects
+    (navigates away, Nginx timeout, pod event), the task keeps running so that
+    sub-agents can finish, long tool calls complete, and every event gets saved
+    to the DB.
+
+    Events are also pushed to the per-workspace asyncio.Queue so the currently
+    connected SSE client receives them in near-real-time without polling.
     """
-    suggestion = await detect_workspace_task(req.chat_history)
-    return suggestion.to_dict()
+    ws = _workspaces.get(workspace_id)
+    if not ws:
+        logger.warning("[workspace:%s] _run_workspace_bg: workspace not found", workspace_id)
+        return
 
+    client: OpenClawClient = ws["client"]
+    task_brief: str = ws["task_brief"]
+    chat_history: list[dict] = ws["chat_history"]
+    queue: asyncio.Queue = _workspace_queues[workspace_id]
 
-@workspace_router.post("/launch")
-async def launch_workspace(
-    request: Request,
-    req: LaunchRequest,
-    current_user: dict = Depends(get_current_user_optimized),
-):
-    """
-    Launch a new workspace. Returns workspace_id immediately.
-    The frontend uses workspace_id to connect to /stream/{workspace_id}.
+    seq = 0
+    tool_call_count = 0
+    terminal_status = "done"
+    final_summary: Optional[str] = None
+    final_error: Optional[str] = None
 
-    Session isolation: each launch gets a unique session by default.
-    Pass session_id explicitly only when the user intentionally resumes
-    a previous workspace run. This prevents contamination from failed/
-    confused previous sessions in OpenClaw's conversation history.
-    """
-    workspace_id = str(uuid.uuid4())[:8]
-
-    # Each workspace gets its own isolated OpenClaw session unless the caller
-    # explicitly requests a resume. Sharing session_id across launches would
-    # cause OpenClaw to inherit conversation history from previous (possibly
-    # failed or confused) runs.
-    session_id = req.session_id or f"ws-{workspace_id}"
-
-    # Resolve the actual task from the brief. If the brief is the generic
-    # default, fall back to the last user message in the chat history.
-    task_brief = _resolve_task_brief(req.task_brief, req.chat_history)
-
-    pool = getattr(request.app.state, "pg_pool", None)
-
-    # Workspace always runs via OpenClaw — it's an execution environment with
-    # real tools (shell, code, file ops). Not a chat interface.
-    # agent_id selects which OpenClaw agent handles this session:
-    #   "main" → local Ollama (gpt-oss:latest)
-    #   "kimi" → Kimi K2.5 via Harvis proxy
-    #   "gpt-oss" → GPT-OSS 120B via external/cloud Ollama (routed through OpenClaw)
-    agent_id = req.agent_id if req.agent_id in ("main", "kimi", "gpt-oss") else "main"
-    client = OpenClawClient(workspace_id=workspace_id, session_id=session_id, agent_id=agent_id)
-
-    started_epoch = time.monotonic()
-
-    _workspaces[workspace_id] = {
-        "client": client,
-        "status": "running",
-        "task_brief": task_brief,
-        "session_id": session_id,
-        "chat_history": req.chat_history,
-        "user_id": current_user["id"],
-        "started_epoch": started_epoch,
-        "agent_id": agent_id,
-    }
-
-    logger.info(
-        "Workspace launched: id=%s user=%s session=%s brief=%r",
-        workspace_id, current_user["id"], session_id, task_brief,
-    )
-
-    # Persist to DB (non-blocking, failure safe)
     try:
-        await _db_create_run(pool, workspace_id, current_user["id"], session_id, task_brief)
+        async for event in client.stream(task_brief, chat_history):
+            if event.type == "tool_call":
+                tool_call_count += 1
+
+            # Persist first — DB is the authoritative source for replays
+            await _db_save_event(pool, workspace_id, seq, event)
+
+            # Push to live queue for the active SSE connection
+            await queue.put((seq, event))
+            seq += 1
+
+            if event.type in ("done", "cancelled", "error"):
+                terminal_status = event.type
+                ws["status"] = event.type
+                if event.type == "done":
+                    final_summary = getattr(event, "summary", None)
+                elif event.type == "error":
+                    final_error = getattr(event, "message", None)
+                break
+
+        logger.info(
+            "[workspace:%s] Background task finished: status=%s events=%d tool_calls=%d",
+            workspace_id, terminal_status, seq, tool_call_count,
+        )
+
+    except asyncio.CancelledError:
+        # /cancel was called — save a terminal event so SSE sees it
+        terminal_status = "cancelled"
+        ws["status"] = "cancelled"
+        cancelled_event = OpenClawEvent("cancelled", {"message": "Workspace cancelled."})
+        await _db_save_event(pool, workspace_id, seq, cancelled_event)
+        await queue.put((seq, cancelled_event))
+        seq += 1
+
     except Exception as exc:
-        logger.error("DB: _db_create_run raised unexpectedly: %s", exc)
+        logger.error("[workspace:%s] Background task error: %s", workspace_id, exc)
+        terminal_status = "error"
+        final_error = str(exc)
+        ws["status"] = "error"
+        err_event = OpenClawEvent("error", {"message": str(exc)})
+        await _db_save_event(pool, workspace_id, seq, err_event)
+        await queue.put((seq, err_event))
+        seq += 1
 
-    return {
-        "workspace_id": workspace_id,
-        "session_id": session_id,
-        "status": "running",
-        "task_brief": task_brief,
-    }
+    finally:
+        # None sentinel signals SSE generator that the stream has ended
+        await queue.put(None)
 
+        await _db_complete_run(
+            pool, workspace_id, terminal_status,
+            final_summary, final_error, tool_call_count, seq, started_epoch,
+        )
+        _workspace_tasks.pop(workspace_id, None)
+
+
+# ─── Helpers ───────────────────────────────────────────────────────────────────
 
 _GENERIC_BRIEFS = {
     "execute the task in a harvis workspace",
@@ -241,10 +251,6 @@ _GENERIC_BRIEFS = {
 
 
 def _resolve_task_brief(brief: str, chat_history: list[dict]) -> str:
-    """
-    If the brief is a generic placeholder, extract the actual user intent
-    from the last user message in the chat history.
-    """
     if brief.strip().lower() in _GENERIC_BRIEFS:
         last_user = next(
             (m for m in reversed(chat_history) if m.get("role") == "user"),
@@ -253,8 +259,111 @@ def _resolve_task_brief(brief: str, chat_history: list[dict]) -> str:
         if last_user and isinstance(last_user.get("content"), str):
             extracted = last_user["content"].strip()
             if extracted:
-                return extracted[:500]  # keep it reasonable length
+                return extracted[:500]
     return brief
+
+
+def _start_workspace(
+    workspace_id: str,
+    session_id: str,
+    task_brief: str,
+    chat_history: list[dict],
+    agent_id: str,
+    user_id: int,
+    pool,
+    started_epoch: float,
+) -> OpenClawClient:
+    """
+    Register a workspace in memory, create its queue, and start the background task.
+    Returns the OpenClawClient for the /cancel endpoint.
+    """
+    client = OpenClawClient(
+        workspace_id=workspace_id,
+        session_id=session_id,
+        agent_id=agent_id,
+    )
+
+    _workspaces[workspace_id] = {
+        "client": client,
+        "status": "running",
+        "task_brief": task_brief,
+        "session_id": session_id,
+        "chat_history": chat_history,
+        "user_id": user_id,
+        "started_epoch": started_epoch,
+        "agent_id": agent_id,
+    }
+
+    queue: asyncio.Queue = asyncio.Queue()
+    _workspace_queues[workspace_id] = queue
+
+    task = asyncio.create_task(
+        _run_workspace_bg(workspace_id, pool, started_epoch),
+        name=f"workspace-{workspace_id}",
+    )
+    _workspace_tasks[workspace_id] = task
+
+    return client
+
+
+# ─── Endpoints ─────────────────────────────────────────────────────────────────
+
+@workspace_router.post("/suggest")
+async def suggest_workspace(
+    req: SuggestRequest,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    suggestion = await detect_workspace_task(req.chat_history)
+    return suggestion.to_dict()
+
+
+@workspace_router.post("/launch")
+async def launch_workspace(
+    request: Request,
+    req: LaunchRequest,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """
+    Launch a new workspace.  Returns workspace_id immediately.
+
+    The OpenClaw task starts as a background asyncio.Task — decoupled from the
+    SSE connection.  The frontend connects to /stream/{workspace_id} and receives
+    events regardless of when it connects (DB replay + live queue).
+    """
+    workspace_id = str(uuid.uuid4())[:8]
+    session_id = req.session_id or f"ws-{workspace_id}"
+    task_brief = _resolve_task_brief(req.task_brief, req.chat_history)
+    pool = getattr(request.app.state, "pg_pool", None)
+    agent_id = req.agent_id if req.agent_id in ("main", "kimi", "gpt-oss", "qwen3") else "main"
+    started_epoch = time.monotonic()
+
+    _start_workspace(
+        workspace_id=workspace_id,
+        session_id=session_id,
+        task_brief=task_brief,
+        chat_history=req.chat_history,
+        agent_id=agent_id,
+        user_id=current_user["id"],
+        pool=pool,
+        started_epoch=started_epoch,
+    )
+
+    try:
+        await _db_create_run(pool, workspace_id, current_user["id"], session_id, task_brief)
+    except Exception as exc:
+        logger.error("DB: _db_create_run raised unexpectedly: %s", exc)
+
+    logger.info(
+        "Workspace launched: id=%s user=%s session=%s agent=%s brief=%r",
+        workspace_id, current_user["id"], session_id, agent_id, task_brief,
+    )
+
+    return {
+        "workspace_id": workspace_id,
+        "session_id": session_id,
+        "status": "running",
+        "task_brief": task_brief,
+    }
 
 
 @workspace_router.get("/stream/{workspace_id}")
@@ -264,95 +373,117 @@ async def stream_workspace(
     current_user: dict = Depends(get_current_user_optimized),
 ):
     """
-    SSE stream of workspace activity.
-    The frontend connects here immediately after /launch and renders the
-    right-hand activity panel. Each event is a JSON object with a 'type' field:
+    SSE stream of workspace activity.  Two-phase generator:
 
-      {type: "token",       content: "..."}          — model output token
-      {type: "tool_call",  tool: "run_code", args: {}} — tool being called
-      {type: "tool_result", tool: "run_code", output: "...", success: true}
-      {type: "log",         message: "..."}           — info log line
-      {type: "done",        summary: "..."}           — workspace complete
-      {type: "cancelled",   message: "..."}           — user cancelled
-      {type: "error",       message: "..."}           — error occurred
+    Phase 1 — DB replay: All events stored in workspace_events are replayed in
+      order.  This handles reconnection (tab reload, Nginx timeout, etc.) — the
+      frontend always gets a complete picture regardless of when it connects.
+
+    Phase 2 — Live queue: New events are consumed from the per-workspace
+      asyncio.Queue as the background task pushes them.  The SSE client
+      receives them in near-real-time.
+
+    If the SSE client disconnects (asyncio.CancelledError), the background task
+    is NOT cancelled — sub-agents keep running and events keep accumulating in
+    the DB for the next reconnection.
     """
     ws = _workspaces.get(workspace_id)
     if not ws:
         raise HTTPException(status_code=404, detail=f"Workspace {workspace_id} not found")
 
-    client: OpenClawClient = ws["client"]
-    chat_history: list[dict] = ws["chat_history"]
-    task_brief: str = ws["task_brief"]
-    started_epoch: float = ws.get("started_epoch", time.monotonic())
-
     pool = getattr(request.app.state, "pg_pool", None)
 
     async def event_generator():
-        seq = 0
-        tool_call_count = 0
-        final_summary: Optional[str] = None
-        final_error: Optional[str] = None
-        terminal_status = "done"
+        last_seq = -1  # highest seq replayed from DB
 
         try:
-            # All agents (main, kimi, gpt-oss) route through OpenClaw
-            # for full tool access (exec, read, write)
-            event_source = client.stream(task_brief, chat_history)
-
-            async for event in event_source:
-                # Track tool calls
-                if event.type == "tool_call":
-                    tool_call_count += 1
-
-                # Persist event (non-blocking, failure safe)
+            # ── Phase 1: replay stored events from DB ─────────────────────────
+            if pool:
                 try:
-                    await _db_save_event(pool, workspace_id, seq, event)
+                    async with pool.acquire() as conn:
+                        rows = await conn.fetch(
+                            """
+                            SELECT seq, event_type, payload
+                            FROM workspace_events
+                            WHERE workspace_id = $1
+                            ORDER BY seq ASC
+                            """,
+                            workspace_id,
+                        )
+                    for row in rows:
+                        last_seq = row["seq"]
+                        payload = dict(row["payload"])
+                        event_data = {"type": row["event_type"], **payload}
+                        yield f"data: {json.dumps(event_data)}\n\n"
+                        if row["event_type"] in ("done", "cancelled", "error"):
+                            # Terminal event already in DB — we're fully replayed
+                            yield 'data: {"type": "stream_end"}\n\n'
+                            return
                 except Exception as exc:
-                    logger.error("DB: _db_save_event raised unexpectedly seq=%s: %s", seq, exc)
+                    logger.error("DB: replay workspace_events %s: %s", workspace_id, exc)
 
-                seq += 1
-                yield event.to_sse()
+            # If the workspace is already terminal (DB write may have raced ahead
+            # of the status update), close the stream now
+            current_status = ws.get("status", "running")
+            if current_status in ("done", "cancelled", "error"):
+                yield 'data: {"type": "stream_end"}\n\n'
+                return
 
-                # Update status and capture final details when terminal events arrive
-                if event.type in ("done", "cancelled", "error"):
-                    terminal_status = event.type
-                    _workspaces[workspace_id]["status"] = event.type
-                    if event.type == "done":
-                        final_summary = getattr(event, "summary", None)
-                    elif event.type == "error":
-                        final_error = getattr(event, "message", None)
+            # ── Phase 2: live events from background task queue ───────────────
+            queue = _workspace_queues.get(workspace_id)
+            if queue is None:
+                yield 'data: {"type": "stream_end"}\n\n'
+                return
+
+            while True:
+                # Check client disconnect (Nginx / browser navigation)
+                if await request.is_disconnected():
+                    logger.info(
+                        "[workspace:%s] SSE client disconnected — background task continues",
+                        workspace_id,
+                    )
+                    return
+
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=25)
+                except asyncio.TimeoutError:
+                    # Heartbeat SSE comment — keeps Nginx from closing a quiet stream
+                    yield ": ping\n\n"
+                    # Safety: if task ended without a sentinel, break
+                    task = _workspace_tasks.get(workspace_id)
+                    if task and task.done():
+                        break
+                    continue
+
+                if item is None:
+                    # Sentinel: background task has ended
                     break
 
-            # Persist completion (non-blocking, failure safe)
-            try:
-                await _db_complete_run(
-                    pool, workspace_id, terminal_status,
-                    final_summary, final_error, tool_call_count, seq, started_epoch,
-                )
-            except Exception as exc:
-                logger.error("DB: _db_complete_run raised unexpectedly: %s", exc)
+                seq_num, event = item
 
-            # Send a final keep-alive close signal
-            yield "data: {\"type\": \"stream_end\"}\n\n"
+                # Skip events we already replayed from DB (reconnection case)
+                if seq_num <= last_seq:
+                    continue
+
+                yield event.to_sse()
+
+                if event.type in ("done", "cancelled", "error"):
+                    break
 
         except asyncio.CancelledError:
-            # Client disconnected (navigated away, etc.)
-            client.cancel()
-            _workspaces[workspace_id]["status"] = "cancelled"
-            try:
-                await _db_complete_run(
-                    pool, workspace_id, "cancelled",
-                    None, "client disconnected", tool_call_count, seq, started_epoch,
-                )
-            except Exception as exc:
-                logger.error("DB: _db_complete_run (cancelled) raised unexpectedly: %s", exc)
+            # SSE stream cancelled by client — intentionally do NOT cancel the
+            # background task so sub-agents and long tool calls keep running.
+            logger.info("[workspace:%s] SSE stream cancelled by client", workspace_id)
+            return
+
+        yield 'data: {"type": "stream_end"}\n\n'
 
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",   # Tell Nginx not to buffer SSE
+            "X-Accel-Buffering": "no",
             "Connection": "keep-alive",
         },
     )
@@ -363,15 +494,22 @@ async def cancel_workspace(
     workspace_id: str,
     current_user: dict = Depends(get_current_user_optimized),
 ):
-    """Cancel a running workspace. The SSE stream will emit a 'cancelled' event."""
+    """Cancel a running workspace. Cancels both the OpenClaw client and the background task."""
     ws = _workspaces.get(workspace_id)
     if not ws:
         raise HTTPException(status_code=404, detail=f"Workspace {workspace_id} not found")
 
+    # Signal OpenClaw client to stop on its next event
     ws["client"].cancel()
+
+    # Cancel the background asyncio.Task (raises CancelledError inside _run_workspace_bg)
+    task = _workspace_tasks.get(workspace_id)
+    if task and not task.done():
+        task.cancel()
+
     _workspaces[workspace_id]["status"] = "cancelled"
 
-    logger.info(f"Workspace cancelled: id={workspace_id} user={current_user['id']}")
+    logger.info("Workspace cancelled: id=%s user=%s", workspace_id, current_user["id"])
     return {"workspace_id": workspace_id, "status": "cancelled"}
 
 
@@ -380,11 +518,9 @@ async def get_workspace_status(
     workspace_id: str,
     current_user: dict = Depends(get_current_user_optimized),
 ):
-    """Get the current status of a workspace (polling fallback if SSE drops)."""
     ws = _workspaces.get(workspace_id)
     if not ws:
         raise HTTPException(status_code=404, detail=f"Workspace {workspace_id} not found")
-
     return WorkspaceStatus(
         workspace_id=workspace_id,
         status=ws["status"],
@@ -398,14 +534,9 @@ async def list_workspace_history(
     request: Request,
     current_user: dict = Depends(get_current_user_optimized),
 ):
-    """
-    Return the last 20 workspace runs for the current user, newest first.
-    Used by the WorkspacePanel History tab.
-    """
     pool = getattr(request.app.state, "pg_pool", None)
     if pool is None:
         return {"runs": []}
-
     try:
         async with pool.acquire() as conn:
             rows = await conn.fetch(
@@ -421,7 +552,6 @@ async def list_workspace_history(
                 current_user["id"],
             )
         runs = [dict(r) for r in rows]
-        # Convert timestamps to ISO strings for JSON serialisation
         for run in runs:
             for key in ("started_at", "completed_at"):
                 if run.get(key) is not None:
@@ -440,12 +570,10 @@ async def rerun_workspace(
 ):
     """
     Re-launch a previous workspace run using its stored task_brief.
-    Returns a new workspace_id + session_id. The caller connects to
-    /stream/{workspace_id} exactly as it would for a fresh launch.
+    Creates a fresh workspace_id + session_id and starts a new background task.
     """
     pool = getattr(request.app.state, "pg_pool", None)
 
-    # Fetch task_brief from DB first (survives pod restarts)
     task_brief: Optional[str] = None
     agent_id = "main"
 
@@ -461,7 +589,6 @@ async def rerun_workspace(
         except Exception as exc:
             logger.error("DB: failed to fetch task_brief for rerun %s: %s", source_id, exc)
 
-    # Fall back to in-memory registry (works when pod hasn't restarted)
     if not task_brief:
         ws = _workspaces.get(source_id)
         if ws and ws.get("user_id") == current_user["id"]:
@@ -473,20 +600,18 @@ async def rerun_workspace(
 
     workspace_id = str(uuid.uuid4())[:8]
     session_id = f"ws-{workspace_id}"
-
-    client = OpenClawClient(workspace_id=workspace_id, session_id=session_id, agent_id=agent_id)
     started_epoch = time.monotonic()
 
-    _workspaces[workspace_id] = {
-        "client": client,
-        "status": "running",
-        "task_brief": task_brief,
-        "session_id": session_id,
-        "chat_history": [],  # rerun uses task_brief directly; no prior context needed
-        "user_id": current_user["id"],
-        "started_epoch": started_epoch,
-        "agent_id": agent_id,
-    }
+    _start_workspace(
+        workspace_id=workspace_id,
+        session_id=session_id,
+        task_brief=task_brief,
+        chat_history=[],
+        agent_id=agent_id,
+        user_id=current_user["id"],
+        pool=pool,
+        started_epoch=started_epoch,
+    )
 
     try:
         await _db_create_run(pool, workspace_id, current_user["id"], session_id, task_brief)
@@ -511,24 +636,17 @@ async def get_workspace_events(
     request: Request,
     current_user: dict = Depends(get_current_user_optimized),
 ):
-    """
-    Return all stored events for a given workspace_id, ordered by seq.
-    Used by the WorkspacePanel History tab for run replay/review.
-    """
     pool = getattr(request.app.state, "pg_pool", None)
     if pool is None:
         return {"events": []}
-
     try:
         async with pool.acquire() as conn:
-            # Verify the run belongs to this user first
             run = await conn.fetchrow(
                 "SELECT user_id FROM workspace_runs WHERE id = $1",
                 workspace_id,
             )
             if run is None or run["user_id"] != current_user["id"]:
                 raise HTTPException(status_code=404, detail="Run not found")
-
             rows = await conn.fetch(
                 """
                 SELECT id, workspace_id, seq, event_type, payload, ts
@@ -538,14 +656,11 @@ async def get_workspace_events(
                 """,
                 workspace_id,
             )
-
         events = []
         for r in rows:
             row_dict = dict(r)
             row_dict["ts"] = row_dict["ts"].isoformat() if row_dict.get("ts") else None
-            # payload is already a dict from asyncpg JSONB decoding
             events.append(row_dict)
-
         return {"events": events}
     except HTTPException:
         raise

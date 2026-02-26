@@ -58,6 +58,13 @@ logger = logging.getLogger(__name__)
 OPENCLAW_URL = os.getenv("OPENCLAW_URL", "ws://harvis-ai-openclaw:18789")
 OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 
+# GitHub credentials for Harvis's bot account (harvisai-dulc3-cmd).
+# Injected into workspace directives so the agent can push branches and open PRs.
+# Never hardcoded — must come from the environment / K8s secret.
+HARVIS_GITHUB_TOKEN = os.getenv("HARVIS_GITHUB_TOKEN", "")
+HARVIS_GITHUB_USER = os.getenv("HARVIS_GITHUB_USER", "harvisai-dulc3-cmd")
+HARVIS_GITHUB_EMAIL = os.getenv("HARVIS_GITHUB_EMAIL", "harvisai@users.noreply.github.com")
+
 # Must match the OpenClaw protocol version (frames.ts PROTOCOL_VERSION = 3)
 PROTOCOL_VERSION = 3
 
@@ -135,10 +142,20 @@ class OpenClawEvent:
     def __init__(self, event_type: str, data: dict):
         self.type = event_type   # "token" | "tool_call" | "tool_result" | "log" | "done" | "error"
         self.data = data
+        # Sub-agent tracking: populated by OpenClawClient._handle_agent_event.
+        # run_id  — OpenClaw's internal runId for this agent invocation.
+        # agent_label — human-readable label: "Agent" | "Sub-Agent 1" | "Sub-Agent 2" …
+        self.run_id: Optional[str] = None
+        self.agent_label: Optional[str] = None
 
     def to_sse(self) -> str:
         """Format as a Server-Sent Event string for streaming to the frontend."""
-        return f"data: {json.dumps({'type': self.type, **self.data})}\n\n"
+        payload: dict = {"type": self.type, **self.data}
+        if self.run_id:
+            payload["run_id"] = self.run_id
+        if self.agent_label:
+            payload["agent_label"] = self.agent_label
+        return f"data: {json.dumps(payload)}\n\n"
 
 
 class OpenClawClient:
@@ -149,6 +166,18 @@ class OpenClawClient:
     WebSocket connection open, streaming events until the task is done or
     the caller cancels.
     """
+
+    # Keywords that indicate the parent agent delegated work to a sub-agent and will
+    # "auto-announce" the result when the sub-agent finishes.  When we see these in a
+    # "final" chat event we must NOT break — we keep the connection open and wait for
+    # the sub-agent's result to arrive as a second "final" event on the same session.
+    _DELEGATION_SIGNALS = (
+        "sub-agent spawned",
+        "auto-announce",
+        "spawned agent",
+        "spawning agent",
+        "sub-agent is",
+    )
 
     def __init__(
         self,
@@ -167,6 +196,15 @@ class OpenClawClient:
         self._ws = None
         self._cancelled = asyncio.Event()
         self._request_id = 0
+        # Tracks the full accumulated text from the most recent "partial" chat event
+        # sequence so we can emit only the incremental delta, not the whole cumulative
+        # text each time (OpenClaw partial events contain full text-so-far, not a delta).
+        self._last_partial_text: str = ""
+        # Sub-agent run tracking.
+        # Maps runId → friendly label so frontend can attribute each event to an agent.
+        # First runId seen = "Agent" (parent); subsequent ones = "Sub-Agent 1", "Sub-Agent 2" …
+        self._run_labels: dict[str, str] = {}
+        self._sub_agent_counter: int = 0
 
     def _next_id(self) -> str:
         self._request_id += 1
@@ -259,6 +297,11 @@ class OpenClawClient:
         Yields:
             OpenClawEvent objects.
         """
+        # Reset per-stream state
+        self._last_partial_text = ""
+        self._run_labels = {}
+        self._sub_agent_counter = 0
+
         try:
             self._ws = await self._connect()
         except Exception as e:
@@ -289,12 +332,26 @@ class OpenClawClient:
             safe_session = self.session_id.replace("/", "-").replace(" ", "-")
             workdir = f"/home/node/workspaces/{safe_session}"
 
+            # GitHub availability hint — injected only when the token is configured.
+            # The actual token is in $GH_TOKEN env var inside the OpenClaw container.
+            # The harvis-github skill handles the full PR workflow procedure.
+            # Do NOT inject the raw token here — it would appear in session history.
+            github_hint = ""
+            if HARVIS_GITHUB_TOKEN:
+                github_hint = (
+                    "\nGITHUB: Pre-configured. $GH_TOKEN / $GH_USER / $GH_EMAIL are set in env.\n"
+                    "For PR creation use the harvis-github skill procedure "
+                    "(POST to http://harvis-ai-merged-backend:8000/github/pulls).\n"
+                    "Never print $GH_TOKEN. Never push to main.\n"
+                )
+
             # Imperative directive — task first, context last, no asking back.
             directive = (
                 f"WORKSPACE DIRECTORY: {workdir}\n"
                 f"Before doing anything, run: mkdir -p {workdir} && cd {workdir}\n"
-                f"All file operations (read, write, exec) MUST happen inside {workdir}.\n\n"
-                f"EXECUTE THIS TASK NOW: {last_user_msg}\n\n"
+                f"All file operations (read, write, exec) MUST happen inside {workdir}.\n"
+                f"{github_hint}"
+                f"\nEXECUTE THIS TASK NOW: {last_user_msg}\n\n"
                 "RULES:\n"
                 "- Do NOT ask for clarification or say \"what task\".\n"
                 "- Do NOT describe what you will do — just do it.\n"
@@ -375,6 +432,23 @@ class OpenClawClient:
                         message = payload.get("message") or {}
                         content = message.get("content", [])
                         text = self._extract_text(content)
+
+                        # Detect sub-agent delegation: the parent agent has handed off
+                        # work to a sub-agent and will "auto-announce" the result when
+                        # the sub-agent completes.  Don't treat this as task completion —
+                        # keep the WebSocket open so the sub-agent's result comes through
+                        # as a second "final" event on the same session.
+                        text_lower = text.lower()
+                        if any(sig in text_lower for sig in self._DELEGATION_SIGNALS):
+                            logger.info(
+                                "[workspace:%s] Sub-agent delegation detected — keeping connection open",
+                                self.workspace_id,
+                            )
+                            yield OpenClawEvent("log", {"message": "Sub-agent working — waiting for result…"})
+                            # Reset partial tracker for the sub-agent's upcoming stream
+                            self._last_partial_text = ""
+                            continue  # keep the async-for loop running
+
                         yield OpenClawEvent("done", {"summary": text})
                         break
 
@@ -383,13 +457,19 @@ class OpenClawClient:
                         yield OpenClawEvent("error", {"message": err})
                         break
 
-                    # "partial" state — streaming delta; yield as token
+                    # "partial" state — OpenClaw sends the FULL accumulated text each
+                    # time, not a delta.  Compute the new portion ourselves and emit
+                    # only that, so the frontend gets clean incremental tokens instead
+                    # of 30+ events each containing the entire growing response.
                     elif state == "partial":
                         message = payload.get("message") or {}
                         content = message.get("content", [])
                         text = self._extract_text(content)
                         if text:
-                            yield OpenClawEvent("token", {"content": text})
+                            delta = text[len(self._last_partial_text):]
+                            self._last_partial_text = text
+                            if delta:
+                                yield OpenClawEvent("token", {"content": delta})
 
         except ConnectionClosed as e:
             logger.warning("[workspace:%s] OpenClaw connection closed: %s", self.workspace_id, e)
@@ -412,6 +492,39 @@ class OpenClawClient:
                 elif "text" in block:
                     parts.append(str(block["text"]))
         return "".join(parts)
+
+    def _resolve_agent_label(self, run_id: Optional[str]) -> str:
+        """
+        Return a human-readable label for a given runId.
+
+        The first runId seen in a session is the parent agent ("Agent").
+        Each new runId after that is a sub-agent ("Sub-Agent 1", "Sub-Agent 2", …).
+        This lets the frontend clearly show which agent performed each action.
+        """
+        if not run_id:
+            return "Agent"
+        if run_id not in self._run_labels:
+            if not self._run_labels:
+                self._run_labels[run_id] = "Agent"
+                logger.info(
+                    "[workspace:%s] Parent agent run started: runId=%s",
+                    self.workspace_id, run_id[:12],
+                )
+            else:
+                self._sub_agent_counter += 1
+                label = f"Sub-Agent {self._sub_agent_counter}"
+                self._run_labels[run_id] = label
+                logger.info(
+                    "[workspace:%s] Sub-agent spawned: runId=%s → %s (total sub-agents: %d)",
+                    self.workspace_id, run_id[:12], label, self._sub_agent_counter,
+                )
+        return self._run_labels[run_id]
+
+    def _tag(self, event: OpenClawEvent, run_id: Optional[str]) -> OpenClawEvent:
+        """Attach run_id and agent_label to an event in-place and return it."""
+        event.run_id = run_id
+        event.agent_label = self._resolve_agent_label(run_id)
+        return event
 
     def _handle_agent_event(self, payload: dict):
         """
@@ -439,6 +552,13 @@ class OpenClawClient:
         """
         stream = payload.get("stream", "")
         data = payload.get("data") or {}
+        run_id: Optional[str] = payload.get("runId") or None
+
+        # Register this runId (creates label if first time seen).
+        # This must happen before we emit any events so lifecycle "start" events
+        # are already attributed to the correct agent.
+        if run_id:
+            self._resolve_agent_label(run_id)
 
         if stream == "tool":
             phase = data.get("phase", "")
@@ -446,10 +566,10 @@ class OpenClawClient:
 
             if phase == "start":
                 # Tool is being called — emit as tool_call
-                yield OpenClawEvent("tool_call", {
+                yield self._tag(OpenClawEvent("tool_call", {
                     "tool": tool_name,
                     "args": data.get("args") or {},
-                })
+                }), run_id)
             elif phase == "result":
                 # Tool finished — emit as tool_result
                 result_data = data.get("result")
@@ -467,57 +587,58 @@ class OpenClawClient:
                 elif result_data is not None:
                     output = str(result_data)
 
-                yield OpenClawEvent("tool_result", {
+                yield self._tag(OpenClawEvent("tool_result", {
                     "tool": tool_name,
                     "output": output[:2000],  # cap output length
                     "success": not data.get("isError", False),
-                })
+                }), run_id)
             elif phase == "update":
                 # Partial tool output — emit as log so it shows in the UI
                 partial = data.get("partialResult")
                 if partial:
-                    yield OpenClawEvent("log", {
+                    yield self._tag(OpenClawEvent("log", {
                         "message": f"[{tool_name}] {str(partial)[:500]}",
-                    })
+                    }), run_id)
 
         elif stream == "assistant":
             text = data.get("text", "")
             if text:
-                yield OpenClawEvent("token", {"content": text})
+                yield self._tag(OpenClawEvent("token", {"content": text}), run_id)
 
         elif stream == "lifecycle":
             phase = data.get("phase", "")
             if phase == "error":
-                yield OpenClawEvent("log", {
+                yield self._tag(OpenClawEvent("log", {
                     "message": f"Agent error: {data.get('error', 'unknown')}",
-                })
+                }), run_id)
             elif phase in ("start", "end"):
-                yield OpenClawEvent("log", {
-                    "message": f"Agent {phase}",
-                })
+                label = self._resolve_agent_label(run_id)
+                yield self._tag(OpenClawEvent("log", {
+                    "message": f"{label} {phase}",
+                }), run_id)
 
         else:
             # Catch-all: emit any other event as a log so nothing is silently dropped
             kind = payload.get("kind") or payload.get("type", "")
             if kind in ("tool_call", "tool.call", "toolCall"):
-                yield OpenClawEvent("tool_call", {
+                yield self._tag(OpenClawEvent("tool_call", {
                     "tool": payload.get("toolName") or payload.get("name", "unknown"),
                     "args": payload.get("args") or payload.get("input", {}),
-                })
+                }), run_id)
             elif kind in ("tool_result", "tool.result", "toolResult"):
-                yield OpenClawEvent("tool_result", {
+                yield self._tag(OpenClawEvent("tool_result", {
                     "tool": payload.get("toolName") or payload.get("name", "unknown"),
                     "output": payload.get("output", ""),
                     "success": payload.get("success", True),
-                })
+                }), run_id)
             elif kind in ("log", "info", "debug"):
                 msg = payload.get("message") or str(payload)
-                yield OpenClawEvent("log", {"message": msg})
+                yield self._tag(OpenClawEvent("log", {"message": msg}), run_id)
             else:
                 # Unknown event — emit as log with raw data
                 msg = payload.get("message") or payload.get("text") or ""
                 if msg:
-                    yield OpenClawEvent("log", {"message": str(msg)[:500]})
+                    yield self._tag(OpenClawEvent("log", {"message": str(msg)[:500]}), run_id)
 
     def cancel(self):
         """Signal the stream loop to stop after the current event."""

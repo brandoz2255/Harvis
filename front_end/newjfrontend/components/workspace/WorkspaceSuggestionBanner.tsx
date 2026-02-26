@@ -4,12 +4,13 @@ import { useState, useEffect, useRef } from 'react'
 import { Zap, X, Loader2, ChevronRight, Cpu } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { useOpenClawStore } from '@/stores/openclawStore'
+import { useChatHistoryStore } from '@/stores/chatHistoryStore'
 import { cn } from '@/lib/utils'
 
 const MODEL_OPTIONS = [
   { value: 'local' as const, label: 'Local AI', description: 'Local Ollama model' },
   { value: 'kimi' as const, label: 'Kimi K2.5', description: 'Moonshot via proxy' },
-  { value: 'gpt-oss' as const, label: 'GPT-OSS 120B', description: 'Cloud Ollama (gpt-oss:120b)' },
+  { value: 'qwen3' as const, label: 'Qwen3 235B', description: 'Cloud Ollama (qwen3:235b-a22b-q8_0)' },
 ]
 
 const TASK_TYPE_ICONS: Record<string, string> = {
@@ -43,6 +44,8 @@ export function WorkspaceSuggestionBanner({ chatHistory }: WorkspaceSuggestionBa
     setFinalSummary,
     setActiveTab,
   } = useOpenClawStore()
+
+  const { currentSession } = useChatHistoryStore()
 
   const [launching, setLaunching] = useState(false)
   const [launchError, setLaunchError] = useState<string | null>(null)
@@ -134,7 +137,10 @@ export function WorkspaceSuggestionBanner({ chatHistory }: WorkspaceSuggestionBa
         body: JSON.stringify({
           task_brief: suggestion.task_brief,
           chat_history: chatHistory,
-          agent_id: workspaceModel === 'kimi' ? 'kimi' : workspaceModel === 'gpt-oss' ? 'gpt-oss' : 'main',
+          // Pass the real chat session UUID so the workspace directory is
+          // deterministic and tied to this conversation (not a random ws-* id).
+          session_id: currentSession?.id ?? undefined,
+          agent_id: workspaceModel === 'kimi' ? 'kimi' : workspaceModel === 'qwen3' ? 'qwen3' : 'main',
         }),
       })
 

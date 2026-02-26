@@ -140,6 +140,9 @@ function ToolCallLine({ event, stepNumber }: ToolCallLineProps) {
     ? String(event.args.command).slice(0, 120)
     : null
 
+  // Sub-agent badge — shown only when an agent other than the parent is active
+  const isSubAgent = event.agent_label && event.agent_label !== 'Agent'
+
   return (
     <div className="my-2 rounded-lg border border-blue-500/30 bg-blue-500/5 overflow-hidden">
       <button
@@ -153,6 +156,12 @@ function ToolCallLine({ event, stepNumber }: ToolCallLineProps) {
           {config.icon}
           {config.label}
         </span>
+        {isSubAgent && (
+          <span className="inline-flex items-center gap-1 text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-violet-500/15 text-violet-300 border border-violet-500/30">
+            <Cpu className="h-2.5 w-2.5" />
+            {event.agent_label}
+          </span>
+        )}
         {cmdPreview && (
           <code className="text-[10px] text-blue-400/60 font-mono truncate max-w-[200px]">
             {cmdPreview}
@@ -238,10 +247,30 @@ function ToolResultLine({ event }: { event: WorkspaceLogEvent }) {
 }
 
 function LogLine({ event }: { event: WorkspaceLogEvent }) {
+  const isSubAgent = event.agent_label && event.agent_label !== 'Agent'
   return (
     <div className="flex items-start gap-2 py-0.5 text-muted-foreground">
       <ChevronRight className="h-3 w-3 shrink-0 mt-0.5 opacity-50" />
+      {isSubAgent && (
+        <span className="shrink-0 text-[9px] font-semibold text-violet-400/80 whitespace-nowrap">
+          [{event.agent_label}]
+        </span>
+      )}
       <span className="text-xs leading-relaxed">{event.message}</span>
+    </div>
+  )
+}
+
+// Banner shown when a new sub-agent starts (first lifecycle:start for a new runId)
+function SubAgentHeader({ label }: { label: string }) {
+  return (
+    <div className="flex items-center gap-2 my-2 px-1">
+      <div className="h-px flex-1 bg-violet-500/20" />
+      <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-violet-400 whitespace-nowrap">
+        <Cpu className="h-3 w-3" />
+        {label} spawned
+      </span>
+      <div className="h-px flex-1 bg-violet-500/20" />
     </div>
   )
 }
@@ -898,7 +927,7 @@ export function WorkspacePanel({ onContinueInChat }: { onContinueInChat?: (summa
               </span>
               <span className="flex items-center gap-1 text-[10px] font-medium text-muted-foreground bg-muted px-1.5 py-0.5 rounded-full border border-border/50">
                 <Cpu className="h-2.5 w-2.5" />
-                {workspaceModel === 'kimi' ? 'Kimi K2.5' : workspaceModel === 'gpt-oss' ? 'GPT-OSS 120B' : 'Local'}
+                {workspaceModel === 'kimi' ? 'Kimi K2.5' : workspaceModel === 'qwen3' ? 'Qwen3 235B' : 'Local'}
               </span>
             </div>
             {/* Prominent task title */}
@@ -961,13 +990,32 @@ export function WorkspacePanel({ onContinueInChat }: { onContinueInChat?: (summa
                       <div className="absolute left-[7px] top-2 bottom-2 w-px bg-border" />
 
                       <div className="space-y-1">
-                        {nonTokenEvents.map((event) => (
-                          <TimelineEvent
-                            key={event.id}
-                            event={event}
-                            toolCallIndex={toolCallIndexMap.get(event.id) ?? 0}
-                          />
-                        ))}
+                        {(() => {
+                          // Inject SubAgentHeader before the first event from each new sub-agent run.
+                          const seenRunIds = new Set<string>()
+                          const elements: React.ReactNode[] = []
+                          for (const event of nonTokenEvents) {
+                            if (
+                              event.run_id &&
+                              event.agent_label &&
+                              event.agent_label !== 'Agent' &&
+                              !seenRunIds.has(event.run_id)
+                            ) {
+                              seenRunIds.add(event.run_id)
+                              elements.push(
+                                <SubAgentHeader key={`header-${event.run_id}`} label={event.agent_label} />
+                              )
+                            }
+                            elements.push(
+                              <TimelineEvent
+                                key={event.id}
+                                event={event}
+                                toolCallIndex={toolCallIndexMap.get(event.id) ?? 0}
+                              />
+                            )
+                          }
+                          return elements
+                        })()}
                       </div>
                     </div>
                   )}
@@ -1015,6 +1063,11 @@ export function WorkspacePanel({ onContinueInChat }: { onContinueInChat?: (summa
                         <span className="uppercase text-violet-400/70 shrink-0 w-14">
                           {event.type}
                         </span>
+                        {event.agent_label && event.agent_label !== 'Agent' && (
+                          <span className="shrink-0 text-violet-300/80 font-semibold">
+                            [{event.agent_label}]
+                          </span>
+                        )}
                         <span className="break-all">
                           {event.content ??
                             event.message ??
