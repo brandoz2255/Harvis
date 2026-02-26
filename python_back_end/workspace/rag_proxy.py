@@ -1,0 +1,235 @@
+"""
+RAG search proxy for OpenClaw workspace agents.
+
+OpenClaw agents call this to search the Harvis vector database without
+needing direct database access.
+
+Security model:
+  - Verifies OPENCLAW_GATEWAY_TOKEN on every request (only OpenClaw can call this).
+  - Read-only: no writes to the vector database.
+  - Returns text chunks and metadata; no raw embeddings exposed.
+
+Endpoints:
+  POST /rag/search   — semantic search across code or docs corpus
+  GET  /rag/health   — check embedding models and DB connectivity
+
+Note on indexing:
+  local_rag_corpus_code uses halfvec(4096). pgvector 0.8.0 limits ANN indexes
+  (both hnsw and ivfflat) to 4000 dimensions, so that table falls back to a
+  sequential scan. At 2 241 rows this is fast enough (~10-30 ms).
+  local_rag_corpus_docs uses vector(768) and has an HNSW index already.
+"""
+
+import logging
+import os
+from typing import List, Optional
+
+import aiohttp
+from fastapi import APIRouter, Header, HTTPException, Request
+from pydantic import BaseModel, field_validator
+
+logger = logging.getLogger(__name__)
+
+OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
+
+# Model config keyed by context_type
+_CORPUS_CONFIG = {
+    "code": {
+        "table": "local_rag_corpus_code",
+        "model": "qwen3:embedding4b",
+        "cast": "halfvec",
+        "ops": "<=>",   # cosine distance
+    },
+    "docs": {
+        "table": "local_rag_corpus_docs",
+        "model": "nomic-embed-text",
+        "cast": "vector",
+        "ops": "<=>",
+    },
+}
+
+rag_proxy_router = APIRouter(prefix="/rag", tags=["rag-proxy"])
+
+
+def _verify_openclaw_token(authorization: Optional[str]) -> None:
+    if not OPENCLAW_GATEWAY_TOKEN:
+        return  # dev mode
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+    token = authorization[len("Bearer "):]
+    if token != OPENCLAW_GATEWAY_TOKEN:
+        raise HTTPException(status_code=401, detail="Invalid proxy token")
+
+
+async def _embed(query: str, model: str) -> List[float]:
+    """Call Ollama /api/embeddings and return the vector."""
+    # Truncate to ~8 000 chars to stay within model context
+    if len(query) > 8000:
+        query = query[:8000]
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
+        async with session.post(
+            f"{OLLAMA_URL}/api/embeddings",
+            json={"model": model, "prompt": query},
+        ) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Ollama embedding error ({resp.status}): {text[:200]}",
+                )
+            data = await resp.json()
+            vec = data.get("embedding")
+            if not vec:
+                raise HTTPException(status_code=502, detail="Ollama returned empty embedding")
+            return vec
+
+
+# ─── Request / response models ──────────────────────────────────────────────
+
+class SearchRequest(BaseModel):
+    query: str
+    context_type: str = "code"   # "code" | "docs"
+    top_k: int = 5
+    score_threshold: float = 0.3
+
+    @field_validator("context_type")
+    @classmethod
+    def valid_type(cls, v: str) -> str:
+        if v not in _CORPUS_CONFIG:
+            raise ValueError(f"context_type must be one of {list(_CORPUS_CONFIG)}")
+        return v
+
+    @field_validator("top_k")
+    @classmethod
+    def clamp_k(cls, v: int) -> int:
+        return max(1, min(v, 20))
+
+    @field_validator("query")
+    @classmethod
+    def non_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("query cannot be empty")
+        return v.strip()
+
+
+class SearchResult(BaseModel):
+    id: str
+    text: str
+    source: Optional[str]
+    metadata: dict
+    score: float
+
+
+class SearchResponse(BaseModel):
+    query: str
+    context_type: str
+    results: List[SearchResult]
+    total: int
+
+
+# ─── Endpoints ───────────────────────────────────────────────────────────────
+
+@rag_proxy_router.post("/search", response_model=SearchResponse)
+async def rag_search(
+    req: SearchRequest,
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+):
+    """
+    Semantic search over the Harvis vector database.
+
+    context_type "code"  → searches local_rag_corpus_code  (qwen3:embedding4b, halfvec 4096)
+    context_type "docs"  → searches local_rag_corpus_docs  (nomic-embed-text, vector 768)
+    """
+    _verify_openclaw_token(authorization)
+
+    cfg = _CORPUS_CONFIG[req.context_type]
+    pool = getattr(request.app.state, "pg_pool", None)
+    if pool is None:
+        raise HTTPException(status_code=503, detail="Database pool not available")
+
+    # Generate embedding
+    try:
+        vec = await _embed(req.query, cfg["model"])
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("rag_proxy: embedding failed: %s", exc)
+        raise HTTPException(status_code=502, detail=f"Embedding error: {exc}")
+
+    # Format as pgvector literal
+    vec_str = "[" + ",".join(str(x) for x in vec) + "]"
+    table = cfg["table"]
+    cast = cfg["cast"]
+
+    sql = f"""
+        SELECT
+            id,
+            text,
+            source,
+            metadata,
+            1 - (embedding <=> $1::{cast}) AS score
+        FROM {table}
+        WHERE 1 - (embedding <=> $1::{cast}) >= $2
+        ORDER BY embedding <=> $1::{cast}
+        LIMIT $3
+    """
+
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(sql, vec_str, req.score_threshold, req.top_k)
+    except Exception as exc:
+        logger.error("rag_proxy: db search failed: %s", exc)
+        raise HTTPException(status_code=502, detail=f"Database error: {exc}")
+
+    results = [
+        SearchResult(
+            id=row["id"],
+            text=row["text"],
+            source=row["source"],
+            metadata=dict(row["metadata"]) if row["metadata"] else {},
+            score=float(row["score"]),
+        )
+        for row in rows
+    ]
+
+    logger.info(
+        "rag_proxy: search context_type=%s query=%r top_k=%d returned=%d",
+        req.context_type, req.query[:60], req.top_k, len(results),
+    )
+
+    return SearchResponse(
+        query=req.query,
+        context_type=req.context_type,
+        results=results,
+        total=len(results),
+    )
+
+
+@rag_proxy_router.get("/health")
+async def rag_health(
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Check DB connectivity and embedding model availability."""
+    _verify_openclaw_token(authorization)
+
+    pool = getattr(request.app.state, "pg_pool", None)
+    db_ok = False
+    counts = {}
+    if pool:
+        try:
+            async with pool.acquire() as conn:
+                for ct, cfg in _CORPUS_CONFIG.items():
+                    n = await conn.fetchval(f"SELECT COUNT(*) FROM {cfg['table']}")
+                    counts[ct] = n
+            db_ok = True
+        except Exception as exc:
+            logger.warning("rag_proxy health: db error: %s", exc)
+
+    return {
+        "ok": db_ok,
+        "corpus_counts": counts,
+        "models": {ct: cfg["model"] for ct, cfg in _CORPUS_CONFIG.items()},
+    }
