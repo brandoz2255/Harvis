@@ -89,14 +89,8 @@ data:
             "baseUrl": "http://harvis-ai-merged-backend:8000/v1",
             "apiKey": "${OPENCLAW_GATEWAY_TOKEN}",
             "models": [
-              { "id": "kimi-k2.5", "name": "Kimi K2.5 (via Harvis proxy)" }
-            ]
-          },
-          "ollama-cloud": {
-            "baseUrl": "${EXTERNAL_OLLAMA_URL}",
-            "apiKey": "${EXTERNAL_OLLAMA_API_KEY}",
-            "models": [
-              { "id": "gpt-oss:120b", "name": "GPT-OSS 120B (Cloud)" }
+              { "id": "kimi-k2.5", "name": "Kimi K2.5 (via Harvis proxy)" },
+              { "id": "gpt-oss:120b", "name": "GPT-OSS 120B (via Harvis proxy)" }
             ]
           }
         }
@@ -124,7 +118,7 @@ data:
           {
             "id": "gpt-oss",
             "model": {
-              "primary": "ollama-cloud/gpt-oss:120b"
+              "primary": "harvis-proxy/gpt-oss:120b"
             }
           }
         ]
