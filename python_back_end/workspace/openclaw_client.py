@@ -309,6 +309,11 @@ class OpenClawClient:
             yield OpenClawEvent("error", {"message": f"Could not connect to workspace backend: {e}"})
             return
 
+        # ── Post-connect handshake log ────────────────────────────────────────
+        yield OpenClawEvent("log", {
+            "message": f"Connected to OpenClaw gateway (agent: {self.agent_id})",
+        })
+
         try:
             # Build an imperative message that forces the agent to execute immediately.
             # Lead with the task directive; context is only appended as reference.
@@ -337,11 +342,14 @@ class OpenClawClient:
             # The harvis-github skill handles the full PR workflow procedure.
             # Do NOT inject the raw token here — it would appear in session history.
             github_hint = ""
+            # Derive backend hostname from BACKEND_URL env so the same image
+            # works in both k8s (harvis-ai-merged-backend) and Docker Compose (backend).
+            _backend_host = os.getenv("BACKEND_URL", "http://backend:8000").rstrip("/")
             if HARVIS_GITHUB_TOKEN:
                 github_hint = (
                     "\nGITHUB: Pre-configured. $GH_TOKEN / $GH_USER / $GH_EMAIL are set in env.\n"
-                    "For PR creation use the harvis-github skill procedure "
-                    "(POST to http://harvis-ai-merged-backend:8000/github/pulls).\n"
+                    f"For PR creation use the harvis-github skill procedure "
+                    f"(POST to {_backend_host}/github/pulls).\n"
                     "Never print $GH_TOKEN. Never push to main.\n"
                 )
 
@@ -350,7 +358,7 @@ class OpenClawClient:
             rag_hint = (
                 "\nRAG SEARCH (REQUIRED before writing code):\n"
                 "Search the Harvis knowledge base FIRST using:\n"
-                "  curl -s -X POST http://harvis-ai-merged-backend:8000/rag/search \\\n"
+                f"  curl -s -X POST {_backend_host}/rag/search \\\n"
                 "    -H 'Content-Type: application/json' \\\n"
                 "    -H \"Authorization: Bearer $OPENCLAW_GATEWAY_TOKEN\" \\\n"
                 "    -d '{\"query\": \"<your search terms>\", \"context_type\": \"code\", \"top_k\": 5}'\n"
@@ -400,6 +408,16 @@ class OpenClawClient:
                 self.workspace_id, self._session_key,
             )
 
+            # ── Post-send status log ──────────────────────────────────────────
+            yield OpenClawEvent("log", {
+                "message": f"Task dispatched to agent — model loading, may take a moment…",
+            })
+
+            # Track whether we've emitted the "reasoning" hint yet.
+            # Injected once right before the first token so the timeline
+            # shows activity during the model warm-up gap.
+            _reasoning_logged = False
+
             # Consume events until the chat reaches a terminal state.
             # OpenClaw pushes:
             #   {"type":"res","id":"<req_id>","ok":true}          — send ack (ignore)
@@ -435,6 +453,14 @@ class OpenClawClient:
                 # Agent events — tool calls and progress log lines
                 if event_name == "agent":
                     for event in self._handle_agent_event(payload):
+                        # Inject a one-time "Agent generating response…" log just
+                        # before the first token so the timeline shows activity
+                        # during the model warm-up gap instead of a blank spinner.
+                        if event.type == "token" and not _reasoning_logged:
+                            _reasoning_logged = True
+                            yield OpenClawEvent("log", {
+                                "message": "Agent generating response…",
+                            })
                         yield event
 
                 # Chat events — partial streaming or final response
@@ -621,14 +647,21 @@ class OpenClawClient:
 
         elif stream == "lifecycle":
             phase = data.get("phase", "")
+            label = self._resolve_agent_label(run_id)
             if phase == "error":
+                err_detail = data.get("error") or data.get("message") or "unknown error"
                 yield self._tag(OpenClawEvent("log", {
-                    "message": f"Agent error: {data.get('error', 'unknown')}",
+                    "message": f"{label} error: {err_detail}",
                 }), run_id)
-            elif phase in ("start", "end"):
-                label = self._resolve_agent_label(run_id)
+            elif phase == "start":
+                model_hint = data.get("model") or data.get("modelId") or ""
+                model_str = f" ({model_hint})" if model_hint else ""
                 yield self._tag(OpenClawEvent("log", {
-                    "message": f"{label} {phase}",
+                    "message": f"{label} started{model_str} — waiting for first token…",
+                }), run_id)
+            elif phase == "end":
+                yield self._tag(OpenClawEvent("log", {
+                    "message": f"{label} finished",
                 }), run_id)
 
         else:
