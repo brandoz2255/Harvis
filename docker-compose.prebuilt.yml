@@ -20,13 +20,14 @@ services:
               capabilities: [ gpu ]
         limits:
           memory: 30G
-    networks:
-      - ollama-n8n-network
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:11434/api/tags" ]
       interval: 30s
       timeout: 10s
       retries: 3
+    networks:
+      - ollama-n8n-network
+      - openclaw-internal
 
   # Model Downloader (Init Container equivalent)
   model-downloader:
@@ -92,6 +93,13 @@ services:
       PYTHONUNBUFFERED: "1"
       ARTIFACT_STORAGE_DIR: "/data/artifacts"
       CODE_EXECUTOR_LOCAL: "true"
+      # OpenClaw workspace backend
+      OPENCLAW_URL: "ws://openclaw:18789"
+      OPENCLAW_GATEWAY_TOKEN: "${OPENCLAW_GATEWAY_TOKEN:-4db7787b4e17f58b2034eb704aa7d450a6e813a49fe67fda6a5257926eace615}"
+      # Harvis GitHub bot (harvisai-dulc3-cmd) — injected into workspace directives
+      HARVIS_GITHUB_TOKEN: "${HARVIS_GITHUB_TOKEN:-}"
+      HARVIS_GITHUB_USER: "${HARVIS_GITHUB_USER:-harvisai-dulc3-cmd}"
+      HARVIS_GITHUB_EMAIL: "${HARVIS_GITHUB_EMAIL:-264248399+harvisai-dulc3-cmd@users.noreply.github.com}"
     user: "1001:1001"
     volumes:
       - ml-models-cache:/models-cache
@@ -118,6 +126,7 @@ services:
           memory: 15G
     networks:
       - ollama-n8n-network
+      - openclaw-internal
 
   # Next.js Frontend - Using pre-built image from Docker Hub
   frontend:
@@ -203,6 +212,132 @@ services:
       timeout: 10s
       retries: 3
 
+  # OpenClaw DB schema init — runs once, creates openclaw_sessions + openclaw_messages tables.
+  # Uses CREATE TABLE IF NOT EXISTS so it is safe to re-run on every stack restart.
+  openclaw-db-init:
+    image: postgres:15-alpine
+    container_name: harvis-openclaw-db-init
+    restart: "no"
+    command: >
+      sh -c "
+        echo 'Waiting for PostgreSQL...' &&
+        until pg_isready -h pgsql -U pguser -d database; do
+          echo 'PostgreSQL not ready, retrying in 2s...'; sleep 2;
+        done &&
+        echo 'Creating OpenClaw tables...' &&
+        psql postgresql://pguser:pgpassword@pgsql:5432/database <<'SQL'
+          CREATE TABLE IF NOT EXISTS openclaw_sessions (
+            id           SERIAL PRIMARY KEY,
+            session_key  TEXT UNIQUE NOT NULL,
+            agent_id     TEXT NOT NULL,
+            display_name TEXT,
+            model_id     TEXT,
+            created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            tokens_in    INTEGER DEFAULT 0,
+            tokens_out   INTEGER DEFAULT 0,
+            cost_usd     NUMERIC(12, 8) DEFAULT 0,
+            metadata     JSONB DEFAULT '{}'
+          );
+          CREATE TABLE IF NOT EXISTS openclaw_messages (
+            id           SERIAL PRIMARY KEY,
+            session_key  TEXT NOT NULL REFERENCES openclaw_sessions(session_key),
+            msg_id       TEXT NOT NULL,
+            role         TEXT NOT NULL,
+            content      JSONB NOT NULL,
+            metadata     JSONB DEFAULT '{}',
+            created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+          );
+          CREATE INDEX IF NOT EXISTS idx_oc_sessions_agent
+            ON openclaw_sessions(agent_id);
+          CREATE INDEX IF NOT EXISTS idx_oc_sessions_updated
+            ON openclaw_sessions(updated_at);
+          CREATE INDEX IF NOT EXISTS idx_oc_messages_session
+            ON openclaw_messages(session_key, created_at);
+        SQL
+        echo 'OpenClaw schema ready!'
+      "
+    depends_on:
+      pgsql:
+        condition: service_healthy
+    networks:
+      - openclaw-internal
+
+  # OpenClaw Agent Gateway — isolated agent backend for Harvis Workspaces.
+  # Security hardening (mirrors k8s NetworkPolicy + pod securityContext):
+  #   - NO ports exposed to host — only reachable from backend via openclaw-internal
+  #   - openclaw-internal is internal: true — no outbound internet from this container
+  #   - Runs as non-root uid 1000 (node user in the OpenClaw image)
+  #   - Config mounted read-only; state on a named volume (no bind-mount to host paths)
+  #   - Skills mounted read-only from ./openclaw/skills/
+  #   - GH_TOKEN / OPENCLAW_GATEWAY_TOKEN come from host env / .env file — never hardcoded
+  openclaw:
+    image: dulc3/openclaw:v2.29.15
+    container_name: harvis-openclaw
+    restart: unless-stopped
+    # NO ports: section — openclaw must NOT be reachable from the host.
+    # Access is exclusively via ws://openclaw:18789 from the backend container.
+    user: "1000:1000"
+    environment:
+      HOME: /home/node
+      NODE_ENV: production
+      TERM: xterm-256color
+      # State dir on the persistent volume (sessions, logs, agent workspaces)
+      OPENCLAW_STATE_DIR: /home/node/.openclaw
+      # Gateway auth token — must match OPENCLAW_GATEWAY_TOKEN in the backend
+      OPENCLAW_GATEWAY_TOKEN: "${OPENCLAW_GATEWAY_TOKEN:-4db7787b4e17f58b2034eb704aa7d450a6e813a49fe67fda6a5257926eace615}"
+      # Ollama discovery key (any non-empty value enables local-model mode)
+      OLLAMA_API_KEY: "ollama-local"
+      # Session storage — shared DB, separate tables (openclaw_sessions/messages)
+      DATABASE_URL: "postgresql://pguser:pgpassword@pgsql:5432/database"
+      # Harvis GitHub bot — used by the harvis-github skill for PR creation.
+      # GH_TOKEN is the standard env var consumed by gh CLI and git credential helper.
+      GH_TOKEN: "${HARVIS_GITHUB_TOKEN:-}"
+      GH_USER: "${HARVIS_GITHUB_USER:-harvisai-dulc3-cmd}"
+      GH_EMAIL: "${HARVIS_GITHUB_EMAIL:-264248399+harvisai-dulc3-cmd@users.noreply.github.com}"
+    volumes:
+      # Persistent state: sessions, JSONL logs, agent workspaces
+      - openclaw-data:/home/node/.openclaw
+      # Config overlay — read-only on top of the state dir mount
+      - ./openclaw/config/openclaw.json:/home/node/.openclaw/openclaw.json:ro
+      # Skills — discovered by openclaw via skills.load.extraDirs: ["/skills"]
+      - ./openclaw/skills:/skills:ro
+    command:
+      - node
+      - openclaw.mjs
+      - gateway
+      - --bind
+      - lan
+      - --port
+      - "18789"
+      - --allow-unconfigured
+    depends_on:
+      pgsql:
+        condition: service_healthy
+      openclaw-db-init:
+        condition: service_completed_successfully
+      ollama:
+        condition: service_started
+    healthcheck:
+      # OpenClaw does not expose an HTTP health endpoint — probe the TCP port instead.
+      test: ["CMD-SHELL", "nc -z localhost 18789 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+        reservations:
+          memory: 512M
+          cpus: '0.25'
+    networks:
+      # openclaw-internal: internal: true — no default gateway, no internet egress.
+      # openclaw reaches ollama + pgsql + backend all through this network.
+      - openclaw-internal
+
   # PostgreSQL Database with pgvector
   pgsql:
     image: pgvector/pgvector:pg15
@@ -227,6 +362,7 @@ services:
           memory: 512M
     networks:
       - ollama-n8n-network
+      - openclaw-internal
     healthcheck:
       test: [ "CMD-SHELL", "pg_isready -U pguser -d database" ]
       interval: 10s
@@ -236,6 +372,14 @@ services:
 networks:
   ollama-n8n-network:
     external: true
+  # openclaw-internal: no default gateway — containers on this network cannot reach
+  # the internet. OpenClaw, pgsql, ollama, and backend are all members so openclaw
+  # can talk to its dependencies without needing any outbound internet access.
+  # This mirrors the k8s NetworkPolicy egress-deny-all-except model as closely as
+  # Docker Compose allows. For full packet-level enforcement use k8s + NetworkPolicy.
+  openclaw-internal:
+    driver: bridge
+    internal: true
 
 volumes:
   ollama-models:
@@ -243,3 +387,6 @@ volumes:
   ml-models-cache:
   embedding-data:
   artifact_data:
+  # OpenClaw persistent state: sessions, JSONL logs, agent workspaces.
+  # Mirrors the k8s PVC (openclaw-data-rocky2) with Retain policy.
+  openclaw-data:

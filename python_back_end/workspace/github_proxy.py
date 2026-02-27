@@ -38,7 +38,11 @@ HARVIS_GITHUB_USER = os.getenv("HARVIS_GITHUB_USER", "harvisai-dulc3-cmd")
 OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 
 # Only these repos may receive PRs from this proxy.
-_ALLOWED_REPOS = frozenset({"dulc3/harvis-aidev"})
+# To add more repos: append "owner/repo-name" to this set.
+_ALLOWED_REPOS = frozenset({
+    "dulc3/harvis-aidev",
+    "brandoz2255/Harvis",
+})
 
 # Only branches matching this prefix may be used as PR heads.
 # This prevents the agent from ever opening a PR from main/master.

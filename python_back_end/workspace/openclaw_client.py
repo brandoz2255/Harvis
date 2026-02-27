@@ -345,12 +345,26 @@ class OpenClawClient:
                     "Never print $GH_TOKEN. Never push to main.\n"
                 )
 
+            # RAG search hint — always injected so the agent uses local knowledge
+            # before writing code or answering questions about the codebase.
+            rag_hint = (
+                "\nRAG SEARCH (REQUIRED before writing code):\n"
+                "Search the Harvis knowledge base FIRST using:\n"
+                "  curl -s -X POST http://harvis-ai-merged-backend:8000/rag/search \\\n"
+                "    -H 'Content-Type: application/json' \\\n"
+                "    -H \"Authorization: Bearer $OPENCLAW_GATEWAY_TOKEN\" \\\n"
+                "    -d '{\"query\": \"<your search terms>\", \"context_type\": \"code\", \"top_k\": 5}'\n"
+                "Use context_type 'docs' for architecture/design questions.\n"
+                "Do NOT search the public web. Use this endpoint as your only search tool.\n"
+            )
+
             # Imperative directive — task first, context last, no asking back.
             directive = (
                 f"WORKSPACE DIRECTORY: {workdir}\n"
                 f"Before doing anything, run: mkdir -p {workdir} && cd {workdir}\n"
                 f"All file operations (read, write, exec) MUST happen inside {workdir}.\n"
                 f"{github_hint}"
+                f"{rag_hint}"
                 f"\nEXECUTE THIS TASK NOW: {last_user_msg}\n\n"
                 "RULES:\n"
                 "- Do NOT ask for clarification or say \"what task\".\n"
