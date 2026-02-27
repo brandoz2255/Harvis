@@ -81,7 +81,7 @@ data:
             "baseUrl": "http://harvis-ai-merged-backend:11434",
             "apiKey": "ollama-local",
             "models": [
-              { "id": "qwen3:4b", "name": "Qwen3 4B (Local)" }
+              { "id": "qwen3:4b-instruct-2507-q4_K_M", "name": "Qwen3 4B Instruct Q4 (Local)" }
             ]
           },
           "harvis-proxy": {
@@ -99,7 +99,7 @@ data:
       "agents": {
         "defaults": {
           "model": {
-            "primary": "ollama/qwen3:4b"
+            "primary": "ollama/qwen3:4b-instruct-2507-q4_K_M"
           }
         },
         "list": [
@@ -107,7 +107,7 @@ data:
             "id": "main",
             "default": true,
             "model": {
-              "primary": "ollama/qwen3:4b"
+              "primary": "ollama/qwen3:4b-instruct-2507-q4_K_M"
             }
           },
           {
@@ -242,6 +242,7 @@ data:
     | Repo | Description |
     |------|-------------|
     | `dulc3/harvis-aidev` | Main Harvis project (public) |
+    | `brandoz2255/Harvis` | Brandoz's Harvis fork (public) |
 
     Any other repo → refuse with: *"This repo is not on the Harvis allowed list."*
 
