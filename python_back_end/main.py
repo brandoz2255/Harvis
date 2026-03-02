@@ -54,6 +54,9 @@ from workspace.model_proxy import model_proxy_router
 from workspace.github_proxy import github_proxy_router
 from workspace.rag_proxy import rag_proxy_router
 
+# Import tools routers
+from tools import maps_router
+
 # Import vibecoding routers
 from vibecoding import (
     sessions_router,
@@ -845,6 +848,9 @@ app.include_router(github_proxy_router)
 # OpenClaw agents call /rag/search to retrieve relevant code/docs chunks
 # without needing direct database access or holding DB credentials.
 app.include_router(rag_proxy_router)
+
+# Include Maps proxy (Google Maps API endpoints without exposing API keys)
+app.include_router(maps_router)
 
 # ─── Device & models -----------------------------------------------------------
 device = 0 if torch.cuda.is_available() else -1
