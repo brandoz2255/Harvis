@@ -17,7 +17,6 @@ from typing import Optional, Dict, Any, List
 import httpx
 from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
 
 # Import auth utilities
 from auth_optimized import get_current_user_optimized
