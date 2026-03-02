@@ -54,7 +54,7 @@ class SimpleCache:
     def _make_key(self, prefix: str, params: Dict[str, Any]) -> str:
         """Create a cache key from prefix and params."""
         param_str = json.dumps(params, sort_keys=True)
-        return f"{prefix}:{hashlib.md5(param_str.encode()).hexdigest()}"
+        return f"{prefix}:{hashlib.sha256(param_str.encode()).hexdigest()}"
     
     def get(self, prefix: str, params: Dict[str, Any]) -> Optional[Any]:
         """Get cached value if it exists and hasn't expired."""
