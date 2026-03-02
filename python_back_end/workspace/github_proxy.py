@@ -37,6 +37,13 @@ HARVIS_GITHUB_TOKEN = os.getenv("HARVIS_GITHUB_TOKEN", "")
 HARVIS_GITHUB_USER = os.getenv("HARVIS_GITHUB_USER", "harvisai-dulc3-cmd")
 OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 
+# Co-author trailer appended to every PR so the human owner also gets contribution credit.
+# No personal token needed — GitHub reads the trailer and credits both accounts.
+HARVIS_COAUTHOR_TRAILER = os.getenv(
+    "HARVIS_COAUTHOR_TRAILER",
+    "Co-authored-by: brandoz2255 <124217011+brandoz2255@users.noreply.github.com>",
+)
+
 # Only these repos may receive PRs from this proxy.
 # To add more repos: append "owner/repo-name" to this set.
 _ALLOWED_REPOS = frozenset({
@@ -151,9 +158,15 @@ async def create_pull_request(
     _validate_repo(req.repo)
     _validate_head_branch(req.head)
 
+    # Append co-author trailer so both harvisai-dulc3-cmd and the human owner
+    # get GitHub contribution credit. No personal token required.
+    pr_body = req.body.rstrip()
+    if HARVIS_COAUTHOR_TRAILER and HARVIS_COAUTHOR_TRAILER not in pr_body:
+        pr_body = f"{pr_body}\n\n{HARVIS_COAUTHOR_TRAILER}"
+
     payload = {
         "title": req.title,
-        "body": req.body,
+        "body": pr_body,
         "head": req.head,
         "base": req.base,
         "draft": req.draft,

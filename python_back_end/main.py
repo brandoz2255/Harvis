@@ -1927,87 +1927,31 @@ async def get_api_key_by_provider(
         )
 
 
-# ── Auto-Research Detection for Perplexity-style behavior ──────────────────────
+# ── Web Search Tool Detection ───────────────────────────────────────────────────
 def should_auto_research(message: str) -> bool:
     """
-    Detect if a message should trigger automatic web research (Perplexity-style).
-    Returns True for freshness/recommendation queries, False for conceptual questions.
+    Only trigger web research when the user explicitly asks for a search.
+    Harvis can also trigger search by emitting <web_search>query</web_search> in its response.
+    Freshness/recommendation keywords no longer auto-trigger — avoids false positives
+    on messages like "update the repo" or "what's the best way to refactor this".
     """
     msg_lower = message.lower()
 
-    # Keywords that indicate need for current/fresh information
-    freshness_keywords = [
-        "new",
-        "latest",
-        "current",
-        "2026",
-        "2025",
-        "today",
-        "this week",
-        "recently",
-        "best",
-        "top",
-        "recommend",
-        "compare",
-        "vs",
-        "which should",
-        "roadmap",
-        "release",
-        "what changed",
-        "update",
-        "version",
-        "trending",
-        "popular",
-        "modern",
-        "state of the art",
-        "sota",
-    ]
-
-    # Keywords that indicate conceptual questions (don't need web search)
-    conceptual_keywords = [
-        "explain",
-        "what is",
-        "how does",
-        "define",
-        "tutorial",
-        "teach me",
-        "understand",
-        "concept",
-        "basics",
-        "fundamentals",
-    ]
-
-    # Explicit research requests always trigger
+    # Only trigger on unambiguous explicit search requests
     explicit_research = [
-        "search",
+        "search for",
         "look up",
         "find sources",
-        "research",
-        "browse",
-        "check online",
-        "google",
         "web search",
+        "check online",
+        "search the web",
+        "google that",
+        "search online",
     ]
 
-    # Check for explicit research request first
     for keyword in explicit_research:
         if keyword in msg_lower:
-            logger.info(f"🔍 Auto-research triggered by explicit keyword: '{keyword}'")
-            return True
-
-    # Check for conceptual questions (skip research)
-    for keyword in conceptual_keywords:
-        if keyword in msg_lower:
-            # But override if freshness is also present
-            has_freshness = any(fk in msg_lower for fk in freshness_keywords)
-            if not has_freshness:
-                logger.info(f"📚 Conceptual question detected, skipping auto-research")
-                return False
-
-    # Check for freshness keywords
-    for keyword in freshness_keywords:
-        if keyword in msg_lower:
-            logger.info(f"🔍 Auto-research triggered by freshness keyword: '{keyword}'")
+            logger.info(f"🔍 Search triggered by explicit keyword: '{keyword}'")
             return True
 
     return False
