@@ -99,7 +99,7 @@ data:
       "agents": {
         "defaults": {
           "model": {
-            "primary": "ollama/qwen3:4b-instruct-2507-q4_K_M"
+            "primary": "harvis-proxy/kimi-k2.5"
           }
         },
         "list": [
@@ -107,7 +107,7 @@ data:
             "id": "main",
             "default": true,
             "model": {
-              "primary": "ollama/qwen3:4b-instruct-2507-q4_K_M"
+              "primary": "harvis-proxy/kimi-k2.5"
             }
           },
           {
