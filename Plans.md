@@ -321,6 +321,14 @@ CREATE TABLE IF NOT EXISTS discord_sessions (
 
 ---
 
+## Maintenance / Pending Updates
+
+- **OpenClaw v2026.3.2 available** (current deploy: v2026.2.23) — update the image tag in
+  `k8s-manifests/overlays/prod/openclaw.yaml` (`image: dulc3/openclaw:latest`) and rebuild/push.
+  Run: `kubectl rollout restart deployment/harvis-ai-openclaw -n ai-agents` after image push.
+
+---
+
 ## Implementation Order (Suggested)
 
 1. **Co-authoring** — quick env var + commit message change, immediate value
