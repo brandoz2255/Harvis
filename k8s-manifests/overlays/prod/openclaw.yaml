@@ -138,8 +138,10 @@ data:
       "channels": {
         "discord": {
           "token": "${DISCORD_BOT_TOKEN}",
-          "defaultAgent": "main",
-          "allowedUserIds": ["783435788431261777"]
+          "dm": {
+            "policy": "allowlist",
+            "allowFrom": ["783435788431261777"]
+          }
         }
       }
     }
