@@ -137,6 +137,7 @@ data:
       },
       "channels": {
         "discord": {
+          "enabled": true,
           "token": "${DISCORD_BOT_TOKEN}",
           "dmPolicy": "allowlist",
           "allowFrom": ["783435788431261777"]
