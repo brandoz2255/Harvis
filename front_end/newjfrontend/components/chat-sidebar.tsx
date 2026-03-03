@@ -105,6 +105,11 @@ export function ChatSidebar({
   } | null>(null)
   const [clearMessage, setClearMessage] = useState<string | null>(null)
   const isFetchingStats = useRef(false)
+
+  // Usage tracking state (polls /api/workspace/usage/summary every 60s)
+  const [usage, setUsage] = useState<{
+    today: { tokens_in: number; tokens_out: number; cost_usd: number }
+  } | null>(null)
   
   // Artifact viewer state
   const [selectedArtifact, setSelectedArtifact] = useState<Artifact | null>(null)
@@ -129,6 +134,24 @@ export function ChatSidebar({
   const toggleMinimize = () => {
     setIsMinimized(!isMinimized)
   }
+
+  // Poll usage summary every 60s
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const token = localStorage.getItem("token")
+        const r = await fetch("/api/workspace/usage/summary", {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        })
+        if (r.ok) setUsage(await r.json())
+      } catch {
+        // silently fail — usage display is best-effort
+      }
+    }
+    load()
+    const id = setInterval(load, 60_000)
+    return () => clearInterval(id)
+  }, [])
 
   // Fetch artifacts
   const fetchArtifacts = async () => {
@@ -487,6 +510,20 @@ export function ChatSidebar({
 
         {/* Footer */}
         <div className={cn("border-t border-border space-y-1", isMinimized ? "p-2" : "p-3")}>
+          {/* Usage stats card */}
+          {!isMinimized && usage && (
+            <div className="px-1 py-1.5 border-b border-border/30 text-xs text-muted-foreground space-y-1 mb-1">
+              <div className="flex justify-between">
+                <span>Tokens today</span>
+                <span>{(usage.today.tokens_in + usage.today.tokens_out).toLocaleString()}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Cost today</span>
+                <span className="text-green-400">${Number(usage.today.cost_usd).toFixed(4)}</span>
+              </div>
+            </div>
+          )}
+
           {/* RAM Clear Button */}
           <button
             type="button"

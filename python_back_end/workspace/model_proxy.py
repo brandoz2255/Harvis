@@ -17,10 +17,12 @@ Security:
      port 8000, so there is no way for OpenClaw to call cloud APIs directly.
 """
 
+import asyncio
 import json
 import logging
 import os
 
+import asyncpg
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -34,6 +36,28 @@ EXTERNAL_OLLAMA_URL = os.getenv("EXTERNAL_OLLAMA_URL", "")
 EXTERNAL_OLLAMA_API_KEY = os.getenv("EXTERNAL_OLLAMA_API_KEY", "")
 
 OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+
+# Pricing constants (USD per million tokens)
+_KIMI_COST_IN_PER_M  = 0.14
+_KIMI_COST_OUT_PER_M = 0.14
+_OLLAMA_COST_PER_M   = 0.0   # self-hosted, no marginal cost
+
+
+async def _log_usage(model: str, tokens_in: int, tokens_out: int, cost: float) -> None:
+    """Write a usage record to proxy_usage_log. Failures are logged but never propagated."""
+    if not DATABASE_URL:
+        return
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+        await conn.execute(
+            "INSERT INTO proxy_usage_log(model, tokens_in, tokens_out, cost_usd) VALUES($1,$2,$3,$4)",
+            model, tokens_in, tokens_out, cost,
+        )
+        await conn.close()
+        logger.info("usage: model=%s in=%d out=%d cost=$%.6f", model, tokens_in, tokens_out, cost)
+    except Exception as e:
+        logger.warning("usage log failed: %s", e)
 
 # Model prefixes routed to Moonshot
 _KIMI_MODELS = {"kimi-k2.5", "kimi-k2", "kimi-k1.5", "moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"}
@@ -133,8 +157,11 @@ async def proxy_chat_completions(
     )
 
     if is_streaming:
+        # Ask Kimi to include usage in the final SSE chunk
+        if is_kimi:
+            body = {**body, "stream_options": {"include_usage": True}}
         return StreamingResponse(
-            _stream_from_upstream(target_url, headers, body),
+            _stream_from_upstream(target_url, headers, body, model_name=model_name, is_kimi=is_kimi),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -146,7 +173,16 @@ async def proxy_chat_completions(
             if resp.status_code != 200:
                 logger.error("model_proxy: upstream error %s: %s", resp.status_code, resp.text[:200])
                 raise HTTPException(status_code=502, detail=f"Upstream API error: {resp.status_code}")
-            return resp.json()
+            data = resp.json()
+            usage = data.get("usage", {})
+            if usage:
+                ti = usage.get("prompt_tokens", 0)
+                to_ = usage.get("completion_tokens", 0)
+                rate_in  = _KIMI_COST_IN_PER_M  if is_kimi else _OLLAMA_COST_PER_M
+                rate_out = _KIMI_COST_OUT_PER_M if is_kimi else _OLLAMA_COST_PER_M
+                cost = (ti * rate_in + to_ * rate_out) / 1_000_000
+                asyncio.create_task(_log_usage(model_name, ti, to_, cost))
+            return data
     except httpx.TimeoutException:
         raise HTTPException(status_code=504, detail="Upstream API request timed out")
     except HTTPException:
@@ -156,7 +192,13 @@ async def proxy_chat_completions(
         raise HTTPException(status_code=502, detail=str(exc))
 
 
-async def _stream_from_upstream(url: str, headers: dict, body: dict):
+async def _stream_from_upstream(
+    url: str,
+    headers: dict,
+    body: dict,
+    model_name: str = "",
+    is_kimi: bool = False,
+):
     """Async generator that forwards the SSE stream from any upstream to OpenClaw."""
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
@@ -172,6 +214,21 @@ async def _stream_from_upstream(url: str, headers: dict, body: dict):
                     return
 
                 async for line in resp.aiter_lines():
+                    # Parse usage chunks from the SSE stream and log them
+                    if line.startswith("data: ") and line != "data: [DONE]":
+                        try:
+                            chunk = json.loads(line[6:])
+                            usage = chunk.get("usage") or {}
+                            if usage.get("prompt_tokens"):
+                                ti = usage["prompt_tokens"]
+                                to_ = usage.get("completion_tokens", 0)
+                                rate_in  = _KIMI_COST_IN_PER_M  if is_kimi else _OLLAMA_COST_PER_M
+                                rate_out = _KIMI_COST_OUT_PER_M if is_kimi else _OLLAMA_COST_PER_M
+                                cost = (ti * rate_in + to_ * rate_out) / 1_000_000
+                                asyncio.create_task(_log_usage(model_name, ti, to_, cost))
+                        except Exception:
+                            pass
+
                     if line:
                         yield f"{line}\n"
                     else:

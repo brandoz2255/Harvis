@@ -68,12 +68,15 @@ interface StatsBarProps {
   eventCount: number
   isRunning: boolean
   phase: Phase
+  tokensIn?: number
+  tokensOut?: number
+  costUsd?: number
 }
 
-function StatsBar({ elapsedMs, toolCallCount, eventCount, isRunning, phase }: StatsBarProps) {
+function StatsBar({ elapsedMs, toolCallCount, eventCount, isRunning, phase, tokensIn, tokensOut, costUsd }: StatsBarProps) {
   const ps = PHASE_CONFIG[phase]
   return (
-    <div className="flex items-center gap-3 border-b border-border px-4 py-2 shrink-0 bg-muted/20">
+    <div className="flex items-center gap-3 border-b border-border px-4 py-2 shrink-0 bg-muted/20 flex-wrap">
       {/* Phase pill */}
       <div className={cn('flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full border', ps.bg, ps.color)}>
         {isRunning ? (
@@ -102,6 +105,19 @@ function StatsBar({ elapsedMs, toolCallCount, eventCount, isRunning, phase }: St
         <Activity className="h-3 w-3" />
         <span>{eventCount}</span>
       </div>
+
+      {/* Token / cost chips — shown after run completes */}
+      {((tokensIn ?? 0) + (tokensOut ?? 0)) > 0 && (
+        <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <Cpu className="h-3 w-3" />
+          <span>{((tokensIn ?? 0) + (tokensOut ?? 0)).toLocaleString()} tok</span>
+        </div>
+      )}
+      {(costUsd ?? 0) > 0 && (
+        <div className="flex items-center gap-1.5 text-[11px] text-green-400">
+          <span>${(costUsd ?? 0).toFixed(4)}</span>
+        </div>
+      )}
     </div>
   )
 }
@@ -806,6 +822,9 @@ export function WorkspacePanel({ onContinueInChat }: { onContinueInChat?: (summa
   const [elapsedMs, setElapsedMs] = useState(0)
   const startEpochRef = useRef<number>(Date.now())
 
+  // Usage stats fetched on run completion
+  const [runUsage, setRunUsage] = useState<{ tokens_in: number; tokens_out: number; cost_usd: number } | null>(null)
+
   // Infer status from last terminal event
   const lastEvent = logEvents[logEvents.length - 1]
   const isDone = lastEvent?.type === 'done'
@@ -844,6 +863,27 @@ export function WorkspacePanel({ onContinueInChat }: { onContinueInChat?: (summa
       setElapsedMs(Date.now() - startEpochRef.current)
     }
   }, [isRunning])
+
+  // Fetch usage summary when a run completes
+  useEffect(() => {
+    if (!isRunning && logEvents.length > 0) {
+      const load = async () => {
+        try {
+          const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
+          const r = await fetch('/api/workspace/usage/summary', {
+            headers: token ? { Authorization: `Bearer ${token}` } : {},
+          })
+          if (r.ok) {
+            const data = await r.json()
+            setRunUsage(data.today)
+          }
+        } catch {
+          // best-effort
+        }
+      }
+      load()
+    }
+  }, [isRunning, logEvents.length])
 
   // Compute stats
   const toolCallCount = logEvents.filter((e) => e.type === 'tool_call').length
@@ -967,6 +1007,9 @@ export function WorkspacePanel({ onContinueInChat }: { onContinueInChat?: (summa
             eventCount={eventCount}
             isRunning={isRunning}
             phase={phase}
+            tokensIn={runUsage?.tokens_in}
+            tokensOut={runUsage?.tokens_out}
+            costUsd={runUsage?.cost_usd}
           />
         )}
 

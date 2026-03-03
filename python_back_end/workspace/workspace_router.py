@@ -630,6 +630,53 @@ async def rerun_workspace(
     }
 
 
+@workspace_router.get("/usage/summary")
+async def usage_summary(
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """
+    Return token usage and cost aggregates from proxy_usage_log.
+
+    Response:
+      today    — totals for the current calendar day (UTC)
+      by_model — per-model totals for the last 30 days, ordered by cost desc
+    """
+    pool = getattr(request.app.state, "pg_pool", None)
+    if pool is None:
+        return {
+            "today": {"tokens_in": 0, "tokens_out": 0, "cost_usd": 0},
+            "by_model": [],
+        }
+    try:
+        async with pool.acquire() as conn:
+            by_model = await conn.fetch("""
+                SELECT model,
+                       SUM(tokens_in)::int  AS tokens_in,
+                       SUM(tokens_out)::int AS tokens_out,
+                       SUM(cost_usd)        AS cost_usd
+                FROM proxy_usage_log
+                WHERE ts >= NOW() - INTERVAL '30 days'
+                GROUP BY model ORDER BY cost_usd DESC
+            """)
+            today = await conn.fetchrow("""
+                SELECT COALESCE(SUM(tokens_in),0)::int  AS tokens_in,
+                       COALESCE(SUM(tokens_out),0)::int AS tokens_out,
+                       COALESCE(SUM(cost_usd),0)        AS cost_usd
+                FROM proxy_usage_log WHERE ts >= CURRENT_DATE
+            """)
+        return {
+            "today": dict(today),
+            "by_model": [dict(r) for r in by_model],
+        }
+    except Exception as exc:
+        logger.error("DB: failed to fetch usage summary: %s", exc)
+        return {
+            "today": {"tokens_in": 0, "tokens_out": 0, "cost_usd": 0},
+            "by_model": [],
+        }
+
+
 @workspace_router.get("/run/{workspace_id}/events")
 async def get_workspace_events(
     workspace_id: str,

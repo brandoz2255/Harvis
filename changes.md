@@ -1,5 +1,141 @@
 # Recent Changes and Fixes Documentation
 
+## Date: 2026-03-02 — OpenClaw Logging, Token Tracking & Billing Dashboard
+
+### Summary
+OpenClaw's activity was completely opaque — no visibility into what tools agents
+were calling, no token usage numbers, no cost tracking. This change adds structured
+agent logging, per-call token/cost capture at the model proxy layer, a usage summary
+API endpoint, and surfaces the data in the frontend sidebar and workspace stats bar.
+
+### Problem
+- `model_proxy.py` forwarded LLM calls but never recorded token counts or cost
+- `openclaw_client.py` logged tool_call / tool_result at DEBUG — invisible in prod
+- No way to see today's spend or total tokens consumed
+- Frontend workspace panel showed time + event count but nothing about token usage
+
+### Root Cause
+Interception point existed (every cloud LLM call passes through `model_proxy.py`)
+but was never wired to write usage records. OpenClaw calls the proxy from its own
+HTTP client so per-workspace attribution isn't possible at proxy time — global
+per-call records with timestamps are used instead, aggregated by day/month.
+
+### Solution
+
+#### New DB table — `proxy_usage_log`
+**`front_end/newjfrontend/db/migrations/003_proxy_usage_log.sql`** (new file)
+- `BIGSERIAL` id, `model TEXT`, `tokens_in INT`, `tokens_out INT`, `cost_usd NUMERIC(12,8)`, `ts TIMESTAMPTZ`
+- Indexes on `ts DESC` and `(model, ts DESC)` for fast daily/monthly aggregation
+- Apply: `kubectl exec harvis-ai-pgsql-<pod> -- psql -U pguser -d database -c "<SQL>"`
+
+#### `python_back_end/workspace/model_proxy.py`
+- Added `asyncpg` import + `DATABASE_URL` env var read
+- Pricing constants: `_KIMI_COST_IN_PER_M = 0.14`, `_KIMI_COST_OUT_PER_M = 0.14`, `_OLLAMA_COST_PER_M = 0.0`
+- New `async def _log_usage(model, tokens_in, tokens_out, cost)` — writes to `proxy_usage_log` via a short-lived asyncpg connection; errors are warned but never propagated
+- **Non-streaming path**: after `resp.json()`, reads `data["usage"]` and fires `asyncio.create_task(_log_usage(...))`
+- **Streaming path**: injects `stream_options: {include_usage: true}` into Kimi requests before forwarding; `_stream_from_upstream()` signature extended with `model_name` + `is_kimi` params; parses usage from final SSE chunk while still forwarding all lines unchanged to OpenClaw
+
+#### `python_back_end/workspace/workspace_router.py`
+- New endpoint: `GET /api/workspace/usage/summary` (auth-gated, uses `get_current_user_optimized`)
+- Returns `{"today": {tokens_in, tokens_out, cost_usd}, "by_model": [{model, tokens_in, tokens_out, cost_usd}]}`
+- `today` = aggregated since `CURRENT_DATE` (UTC midnight)
+- `by_model` = last 30 days grouped by model, ordered by cost desc
+- Returns zeros gracefully when DB pool is unavailable
+
+#### `python_back_end/workspace/openclaw_client.py`
+- `tool_call` phase "start": upgraded from implicit DEBUG to `logger.info("[openclaw] tool_call  session=%.12s tool=%s args=%.80s", ...)`
+- `tool_result` phase "result": upgraded to `logger.info("[openclaw] tool_result session=%.12s tool=%s success=%s output=%.80s", ...)`
+- Log lines are greppable in kubectl: `kubectl -n ai-agents logs -f deploy/harvis-ai-merged-backend | grep "\[openclaw\]"`
+
+#### `front_end/newjfrontend/components/chat-sidebar.tsx`
+- New state: `usage: { today: { tokens_in, tokens_out, cost_usd } } | null`
+- `useEffect` polls `/api/workspace/usage/summary` on mount and every 60 seconds
+- Usage card rendered in sidebar footer (hidden when minimized): "Tokens today" count + "Cost today" in green
+- Silently skipped if endpoint unavailable (best-effort display)
+
+#### `front_end/newjfrontend/components/workspace/WorkspacePanel.tsx`
+- `StatsBarProps` extended: optional `tokensIn?`, `tokensOut?`, `costUsd?`
+- `StatsBar` renders two extra chips when values are non-zero: `🖥 N tok` (Cpu icon) and `$0.0000` (green text)
+- New state in `WorkspacePanel`: `runUsage` — fetched once when `isRunning` transitions to false
+- `useEffect` on `[isRunning, logEvents.length]` fetches `/api/workspace/usage/summary` on completion and populates chips
+- `StatsBar` render passes `tokensIn/Out/costUsd` from `runUsage?.today`
+
+### Verification
+```bash
+# 1. Confirm table exists after migration
+kubectl exec harvis-ai-pgsql-<pod> -- psql -U pguser -d database -c "\d proxy_usage_log"
+
+# 2. Check token capture after a kimi agent run
+kubectl -n ai-agents logs deploy/harvis-ai-merged-backend | grep "usage:"
+
+# 3. Hit the API
+curl -H "Authorization: Bearer <token>" http://localhost:9000/api/workspace/usage/summary
+
+# 4. Check structured agent logs
+kubectl -n ai-agents logs -f deploy/harvis-ai-merged-backend | grep "\[openclaw\]"
+```
+
+### What's visible after this change
+- **Sidebar footer**: "Tokens today: 12,345 / Cost today: $0.0017" — refreshes every 60s
+- **Workspace stats bar**: after a run completes, shows token count + cost chips alongside time/tool/event counters
+- **kubectl logs**: every tool_call and tool_result has a structured one-liner with session ID, tool name, args preview, and success flag — grep-friendly
+
+---
+
+## Date: 2026-03-02 — Discord Phase 1 (OpenClaw native channel)
+
+### Summary
+Wired OpenClaw's built-in Discord channel driver so you can DM the Harvis bot
+on Discord and talk directly to the OpenClaw agent (Ollama qwen3:4b locally,
+or Kimi K2.5 / gpt-oss via model proxy) without going through the Harvis web UI.
+
+### Files Modified
+
+**`k8s-manifests/overlays/prod/openclaw-secret.yaml`** (gitignored)
+- Added `discord-bot-token` — the Discord bot token
+- Added `discord-allowed-user-id` — your Discord user ID (`783435788431261777`), restricts bot to owner only
+- Added OAuth2 URL as a comment for reference
+
+**`k8s-manifests/overlays/prod/openclaw.yaml`**
+1. **ConfigMap `openclaw-config`** (`openclaw.json`):
+   - Changed `"channels": {}` → `"channels": { "discord": { ... } }`
+   - `token` reads `${DISCORD_BOT_TOKEN}` from env at runtime
+   - `allowedUserIds` locked to `["783435788431261777"]` — only you can message it
+   - `defaultAgent` is `"main"` (qwen3:4b local)
+2. **Deployment `harvis-ai-openclaw`**:
+   - Added `DISCORD_BOT_TOKEN` env var pulled from `harvis-ai-openclaw-secret`
+3. **NetworkPolicy `openclaw-isolation`**:
+   - Added egress rule: outbound TCP 443 to `0.0.0.0/0` excluding RFC-1918 private ranges
+   - Required for OpenClaw to connect to Discord's gateway (Cloudflare-backed)
+   - Private subnets (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) excluded so
+     internal cluster services remain unreachable via this rule
+
+**`Plans.md`**
+- Discord Phase 1 marked ✅ DONE in Implementation Order
+- Phase section updated with exact files changed and activation/pairing commands
+
+### Activation Steps (run once)
+```bash
+# Apply secret + manifest
+kubectl apply -f k8s-manifests/overlays/prod/openclaw-secret.yaml
+kubectl apply -f k8s-manifests/overlays/prod/openclaw.yaml
+
+# Restart pod to pick up new env var + config
+kubectl rollout restart deployment/harvis-ai-openclaw -n ai-agents
+kubectl rollout status deployment/harvis-ai-openclaw -n ai-agents
+
+# Pairing (one-time): DM the bot, watch logs for code
+kubectl -n ai-agents logs -f deployment/harvis-ai-openclaw | grep -i "pairing\|discord"
+# Then: kubectl -n ai-agents exec deployment/harvis-ai-openclaw -- node openclaw.mjs pairing approve discord <code>
+```
+
+### What's Next (Phase 2 — do later)
+`discord_bridge.py` in the Harvis Python backend — forwards Discord DMs through
+`/api/chat` with full session history and Harvis persona. Phase 1 talks to OpenClaw
+directly; Phase 2 gives Discord the same conversational memory as the web UI.
+
+---
+
 ## Date: 2026-02-18 (Part 7)
 
 ### Fixed Markdown Code Block Markers in Document Generation

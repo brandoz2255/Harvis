@@ -136,6 +136,57 @@ def _build_device_params(nonce: str) -> dict:
     }
 
 
+def _build_context_brief(chat_history: list[dict], current_task: str = "") -> str:
+    """
+    Build a compact context string from Harvis chat history.
+
+    Instead of dumping raw messages (which can be thousands of tokens), this
+    produces a short paragraph covering:
+      - what the user has been working on (last 3 user turns, truncated)
+      - the most recent assistant reply (first 200 chars)
+
+    The current task itself is excluded — it's already in the directive.
+
+    Returns an empty string when there's nothing useful to include.
+    """
+    if not chat_history:
+        return ""
+
+    # Collect the last few user messages, excluding the current task
+    user_turns: list[str] = []
+    for m in reversed(chat_history):
+        if m.get("role") != "user":
+            continue
+        text = (m.get("content") or "").strip()
+        if not text or text == current_task:
+            continue
+        # Truncate each prior turn to 120 chars so the whole brief stays small
+        user_turns.append(text[:120] + ("…" if len(text) > 120 else ""))
+        if len(user_turns) == 3:
+            break
+    user_turns.reverse()
+
+    # Grab the last assistant reply for result context
+    last_assistant = ""
+    for m in reversed(chat_history):
+        if m.get("role") == "assistant":
+            text = (m.get("content") or "").strip()
+            if text:
+                last_assistant = text[:200] + ("…" if len(text) > 200 else "")
+                break
+
+    if not user_turns and not last_assistant:
+        return ""
+
+    parts: list[str] = []
+    if user_turns:
+        parts.append("Prior requests: " + " | ".join(user_turns))
+    if last_assistant:
+        parts.append("Last response: " + last_assistant)
+
+    return "\n".join(parts)
+
+
 class OpenClawEvent:
     """A single event streamed from the OpenClaw gateway."""
 
@@ -325,13 +376,9 @@ class OpenClawClient:
                 task_message,
             )
 
-            # Build context block from recent history (only for reference).
-            context_lines = [
-                f"{m['role'].upper()}: {m['content']}"
-                for m in chat_history[-20:]
-                if isinstance(m.get("content"), str) and m["content"].strip()
-            ]
-            context_block = "\n".join(context_lines)
+            # Build a compact context brief instead of dumping raw history.
+            # This keeps per-request token cost low regardless of conversation length.
+            context_block = _build_context_brief(chat_history, current_task=last_user_msg)
 
             # Session-scoped workspace directory — isolates file ops per run.
             safe_session = self.session_id.replace("/", "-").replace(" ", "-")
@@ -381,10 +428,10 @@ class OpenClawClient:
                 "- Start with a tool call, not a text response.\n"
             )
 
-            if context_lines:
+            if context_block:
                 full_message = (
                     f"{directive}\n"
-                    f"CHAT HISTORY (for reference only, do not reply to this):\n{context_block}"
+                    f"CONTEXT (brief summary of prior conversation — do not reply to this):\n{context_block}"
                 )
             else:
                 full_message = directive
@@ -606,9 +653,14 @@ class OpenClawClient:
 
             if phase == "start":
                 # Tool is being called — emit as tool_call
+                tool_args = data.get("args") or {}
+                logger.info(
+                    "[openclaw] tool_call  session=%.12s tool=%s args=%.80s",
+                    self._session_key, tool_name, str(tool_args),
+                )
                 yield self._tag(OpenClawEvent("tool_call", {
                     "tool": tool_name,
-                    "args": data.get("args") or {},
+                    "args": tool_args,
                 }), run_id)
             elif phase == "result":
                 # Tool finished — emit as tool_result
@@ -627,10 +679,15 @@ class OpenClawClient:
                 elif result_data is not None:
                     output = str(result_data)
 
+                success = not data.get("isError", False)
+                logger.info(
+                    "[openclaw] tool_result session=%.12s tool=%s success=%s output=%.80s",
+                    self._session_key, tool_name, success, output,
+                )
                 yield self._tag(OpenClawEvent("tool_result", {
                     "tool": tool_name,
                     "output": output[:2000],  # cap output length
-                    "success": not data.get("isError", False),
+                    "success": success,
                 }), run_id)
             elif phase == "update":
                 # Partial tool output — emit as log so it shows in the UI
