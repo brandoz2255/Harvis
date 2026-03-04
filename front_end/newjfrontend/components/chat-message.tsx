@@ -624,9 +624,7 @@ export const ChatMessage = React.memo(function ChatMessage({
           </div>
         )}
 
-        {timestamp && (
-          <span className="text-xs text-muted-foreground">{timestamp}</span>
-        )}
+        {/* timestamp removed - timestamp prop still passed but not rendered */}
       </div>
 
       {role === "user" && (
