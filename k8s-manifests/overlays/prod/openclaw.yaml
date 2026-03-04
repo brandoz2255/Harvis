@@ -55,6 +55,21 @@ metadata:
   name: openclaw-config
   namespace: ai-agents
 data:
+  # Exec approval config — controls which commands require human approval before running.
+  # security: "full" + ask: "off" = all commands run immediately, no approval gate.
+  # This is safe here because the NetworkPolicy already restricts egress and the
+  # harvis-github skill enforces repo/branch allowlists at a higher level.
+  exec-approvals.json: |
+    {
+      "version": 1,
+      "defaults": {
+        "security": "full",
+        "ask": "off",
+        "askFallback": "deny",
+        "autoAllowSkills": true
+      }
+    }
+
   openclaw.json: |
     {
       "gateway": {
@@ -847,6 +862,12 @@ spec:
             - name: openclaw-config
               mountPath: /home/node/.openclaw/openclaw.json
               subPath: openclaw.json
+              readOnly: true
+            # Exec approval config — disables manual approval gate for shell commands.
+            # security=full + ask=off means git/curl/node run immediately without prompts.
+            - name: openclaw-config
+              mountPath: /home/node/.openclaw/exec-approvals.json
+              subPath: exec-approvals.json
               readOnly: true
             # Harvis Agent skill — mounted at /skills/harvis-agent/SKILL.md
             # OpenClaw discovers this via skills.load.extraDirs: ["/skills"]
