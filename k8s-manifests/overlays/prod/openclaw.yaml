@@ -111,8 +111,17 @@ data:
           }
         }
       },
+      "tools": {
+        "elevated": {
+          "enabled": true,
+          "allowFrom": {
+            "discord": ["783435788431261777"]
+          }
+        }
+      },
       "agents": {
         "defaults": {
+          "elevatedDefault": "full",
           "model": {
             "primary": "harvis-proxy/kimi-k2.5"
           }
