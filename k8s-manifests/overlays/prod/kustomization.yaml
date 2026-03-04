@@ -89,27 +89,7 @@ patches:
         value:
           name: MOONSHOT_BASE_URL
           value: "https://api.moonshot.ai/v1"
-      - op: add
-        path: /spec/template/spec/containers/1/env/-
-        value:
-          name: HARVIS_GITHUB_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: harvis-ai-openclaw-secret
-              key: harvis-github-token
-      - op: add
-        path: /spec/template/spec/containers/1/env/-
-        value:
-          name: HARVIS_GITHUB_USER
-          valueFrom:
-            secretKeyRef:
-              name: harvis-ai-openclaw-secret
-              key: harvis-github-user
-      - op: add
-        path: /spec/template/spec/containers/1/env/-
-        value:
-          name: HARVIS_GITHUB_EMAIL
-          valueFrom:
-            secretKeyRef:
-              name: harvis-ai-openclaw-secret
-              key: harvis-github-email
+      # HARVIS_GITHUB_TOKEN / HARVIS_GITHUB_USER / HARVIS_GITHUB_EMAIL removed —
+      # GitHub auth is now handled by the HarvisAI GitHub App (App ID 2995570).
+      # The harvis-github skill mints short-lived installation tokens at runtime
+      # using GH_APP_ID + GH_INSTALLATION_ID + GH_PRIVATE_KEY in the openclaw pod.
