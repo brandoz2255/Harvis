@@ -29,6 +29,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from typing import Optional
@@ -191,18 +192,29 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
             # Persist first — DB is the authoritative source for replays
             await _db_save_event(pool, workspace_id, seq, event)
 
-            # Push to live queue for the active SSE connection
-            await queue.put((seq, event))
-            seq += 1
-
             if event.type in ("done", "cancelled", "error"):
                 terminal_status = event.type
                 ws["status"] = event.type
                 if event.type == "done":
-                    final_summary = getattr(event, "summary", None)
+                    raw_summary = event.data.get("summary") or ""
+                    final_summary = raw_summary
+                    # Parse structured result from research/document skills
+                    structured = _parse_structured_result(raw_summary)
+                    if structured is not None:
+                        # Inject structured data into the done event so the frontend
+                        # SSE client can render source cards + artifact download cards
+                        event.data.update(structured)
                 elif event.type == "error":
-                    final_error = getattr(event, "message", None)
+                    final_error = event.data.get("message")
+
+                # Push to live queue AFTER enriching event data
+                await queue.put((seq, event))
+                seq += 1
                 break
+
+            # Push to live queue for the active SSE connection
+            await queue.put((seq, event))
+            seq += 1
 
         logger.info(
             "[workspace:%s] Background task finished: status=%s events=%d tool_calls=%d",
@@ -240,6 +252,52 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
 
 
 # ─── Helpers ───────────────────────────────────────────────────────────────────
+
+def _parse_structured_result(summary: str) -> Optional[dict]:
+    """
+    If the agent's final summary contains a JSON block with type
+    "research_result" or "document_result", extract and return it so the
+    frontend can render source cards + artifact download cards.
+
+    Returns None if no structured result is found.
+    """
+    if not summary:
+        return None
+    # Look for a JSON code block or bare JSON object in the summary text
+    json_pattern = re.compile(r'```(?:json)?\s*(\{.*?\})\s*```', re.DOTALL)
+    match = json_pattern.search(summary)
+    raw_json = match.group(1) if match else None
+
+    if raw_json is None:
+        # Try bare JSON object (agent may not wrap in fences)
+        bare = re.search(r'(\{[^{}]*"type"\s*:\s*"(?:research|document)_result"[^{}]*\})', summary, re.DOTALL)
+        if bare:
+            raw_json = bare.group(1)
+
+    if raw_json is None:
+        return None
+
+    try:
+        data = json.loads(raw_json)
+    except json.JSONDecodeError:
+        return None
+
+    result_type = data.get("type")
+    if result_type == "research_result":
+        return {
+            "structured_type": "research_result",
+            "structured_summary": data.get("summary", ""),
+            "structured_sources": data.get("sources", []),
+            "structured_artifact_id": data.get("artifact_id"),
+        }
+    if result_type == "document_result":
+        return {
+            "structured_type": "document_result",
+            "structured_title": data.get("title", ""),
+            "structured_artifact_id": data.get("artifact_id"),
+        }
+    return None
+
 
 _GENERIC_BRIEFS = {
     "execute the task in a harvis workspace",

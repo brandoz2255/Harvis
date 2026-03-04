@@ -55,7 +55,7 @@ from workspace.github_proxy import github_proxy_router
 from workspace.rag_proxy import rag_proxy_router
 
 # Import tools routers
-from tools import maps_router
+from tools import maps_router, openclaw_proxy_router
 
 # Import vibecoding routers
 from vibecoding import (
@@ -851,6 +851,9 @@ app.include_router(rag_proxy_router)
 
 # Include Maps proxy (Google Maps API endpoints without exposing API keys)
 app.include_router(maps_router)
+
+# Include OpenClaw tool proxy (web-fetch + document-save — internal service auth)
+app.include_router(openclaw_proxy_router)
 
 # ─── Device & models -----------------------------------------------------------
 device = 0 if torch.cuda.is_available() else -1
@@ -3694,6 +3697,82 @@ async def serve_image(
     if not os.path.exists(full_path):
         raise HTTPException(404, f"Image file not found: {filename}")
     return FileResponse(full_path, media_type="image/png")
+
+
+@app.post("/api/uploads", tags=["uploads"])
+async def upload_file(
+    file: UploadFile = File(...),
+    current_user: UserResponse = Depends(get_current_user),
+):
+    """
+    Store an uploaded file (image, PDF, DOCX) and return a file_id that can
+    be passed to OpenClaw via a workspace task brief.
+
+    The file_id is then used with POST /api/tools/file-analyze so OpenClaw
+    can have Kimi vision analyze the document and recreate it as a DOCX.
+    """
+    ALLOWED_MIME_PREFIXES = (
+        "image/",
+        "application/pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml",
+        "application/msword",
+    )
+
+    mime_type = file.content_type or "application/octet-stream"
+    if not any(mime_type.startswith(p) for p in ALLOWED_MIME_PREFIXES):
+        raise HTTPException(
+            status_code=415,
+            detail=f"Unsupported file type: {mime_type}. "
+                   "Allowed: images, PDF, DOCX.",
+        )
+
+    # Derive safe extension from content_type
+    _EXT_MAP = {
+        "application/pdf": ".pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+        "application/msword": ".doc",
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/gif": ".gif",
+        "image/webp": ".webp",
+    }
+    ext = _EXT_MAP.get(mime_type, "")
+    if not ext and mime_type.startswith("image/"):
+        ext = f".{mime_type.split('/')[1]}"
+
+    file_id = str(uuid.uuid4())
+    stored_path = os.path.join(IMAGES_DIR, f"{file_id}{ext}")
+    meta_path = os.path.join(IMAGES_DIR, f"{file_id}.meta.json")
+
+    try:
+        contents = await file.read()
+        with open(stored_path, "wb") as f_out:
+            f_out.write(contents)
+        import json as _json
+        with open(meta_path, "w") as f_meta:
+            _json.dump({
+                "file_id": file_id,
+                "filename": file.filename or f"upload{ext}",
+                "mime_type": mime_type,
+                "stored_path": stored_path,
+                "user_id": current_user.id,
+                "size": len(contents),
+            }, f_meta)
+    except Exception as exc:
+        logger.error("upload_file: failed to store file: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Failed to store file: {exc}")
+
+    logger.info(
+        "upload_file: file_id=%s filename=%r mime=%s size=%d user=%d",
+        file_id, file.filename, mime_type, len(contents), current_user.id,
+    )
+
+    return {
+        "file_id": file_id,
+        "filename": file.filename,
+        "mime_type": mime_type,
+        "size": len(contents),
+    }
 
 
 @app.post("/api/analyze-screen", tags=["vision"])
