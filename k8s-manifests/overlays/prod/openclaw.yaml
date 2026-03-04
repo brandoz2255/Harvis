@@ -760,6 +760,33 @@ spec:
               memory: 64Mi
               cpu: 100m
 
+        # 3. Copy exec-approvals.json from ConfigMap to the writable PVC.
+        # OpenClaw needs to write to this file (lastUsedAt timestamps) so it cannot
+        # be a read-only ConfigMap subPath mount — EROFS.  Instead we seed it from
+        # the ConfigMap here on every pod start, overwriting any stale on-disk copy.
+        - name: config-init
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              cp /config/exec-approvals.json /data/exec-approvals.json
+              chmod 664 /data/exec-approvals.json
+              echo "exec-approvals.json seeded"
+          volumeMounts:
+            - name: openclaw-config
+              mountPath: /config
+              readOnly: true
+            - name: openclaw-data
+              mountPath: /data
+          resources:
+            requests:
+              memory: 8Mi
+              cpu: 10m
+            limits:
+              memory: 16Mi
+              cpu: 50m
+
       containers:
         - name: openclaw
           # Build from openclaw/openclaw/ and push to: dulc3/openclaw:latest
@@ -862,13 +889,12 @@ spec:
             - name: openclaw-config
               mountPath: /home/node/.openclaw/openclaw.json
               subPath: openclaw.json
-              readOnly: true
-            # Exec approval config — disables manual approval gate for shell commands.
-            # security=full + ask=off means git/curl/node run immediately without prompts.
-            - name: openclaw-config
-              mountPath: /home/node/.openclaw/exec-approvals.json
-              subPath: exec-approvals.json
-              readOnly: true
+              # readOnly intentionally omitted — Rocky Linux kernel propagates EROFS
+              # from read-only bind mounts to sibling files in the same directory,
+              # breaking exec-approvals.json writes. Config is stable so doctor
+              # won't try to rewrite it.
+            # exec-approvals.json is written by the config-init init container
+            # (copied from ConfigMap to the writable PVC so OpenClaw can update it)
             # Harvis Agent skill — mounted at /skills/harvis-agent/SKILL.md
             # OpenClaw discovers this via skills.load.extraDirs: ["/skills"]
             - name: harvis-agent-skill
