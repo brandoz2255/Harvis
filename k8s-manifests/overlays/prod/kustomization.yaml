@@ -35,7 +35,7 @@ patches:
     patch: |-
       - op: replace
         path: /spec/replicas
-        value: 2
+        value: 1
       - op: replace
         path: /spec/template/spec/containers/1/image
         value: dulc3/jarvis-backend:v2.30.9

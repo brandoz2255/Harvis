@@ -760,32 +760,6 @@ spec:
               memory: 64Mi
               cpu: 100m
 
-        # 3. Copy exec-approvals.json from ConfigMap to the writable PVC.
-        # OpenClaw needs to write to this file (lastUsedAt timestamps) so it cannot
-        # be a read-only ConfigMap subPath mount — EROFS.  Instead we seed it from
-        # the ConfigMap here on every pod start, overwriting any stale on-disk copy.
-        - name: config-init
-          image: busybox:1.36
-          command:
-            - sh
-            - -c
-            - |
-              cp /config/exec-approvals.json /data/exec-approvals.json
-              chmod 664 /data/exec-approvals.json
-              echo "exec-approvals.json seeded"
-          volumeMounts:
-            - name: openclaw-config
-              mountPath: /config
-              readOnly: true
-            - name: openclaw-data
-              mountPath: /data
-          resources:
-            requests:
-              memory: 8Mi
-              cpu: 10m
-            limits:
-              memory: 16Mi
-              cpu: 50m
 
       containers:
         - name: openclaw
@@ -794,15 +768,12 @@ spec:
           # docker push dulc3/openclaw:latest
           image: dulc3/openclaw:latest
           imagePullPolicy: Always
-          command:
-            - node
-            - openclaw.mjs
-            - gateway
-            - --bind
-            - lan
-            - --port
-            - "18789"
-            - --allow-unconfigured
+          command: ["sh", "-c"]
+          args:
+            - |
+              printf '{"version":1,"defaults":{"security":"full","ask":"off","askFallback":"deny","autoAllowSkills":true}}\n' \
+                > /home/node/.openclaw/exec-approvals.json
+              exec node openclaw.mjs gateway --bind lan --port 18789 --allow-unconfigured
 
           ports:
             - name: gateway
@@ -893,8 +864,8 @@ spec:
               # from read-only bind mounts to sibling files in the same directory,
               # breaking exec-approvals.json writes. Config is stable so doctor
               # won't try to rewrite it.
-            # exec-approvals.json is written by the config-init init container
-            # (copied from ConfigMap to the writable PVC so OpenClaw can update it)
+            # exec-approvals.json is written by the startup command (runs as node user,
+            # correct ownership + permissions for OpenClaw's ensureExecApprovals() writes)
             # Harvis Agent skill — mounted at /skills/harvis-agent/SKILL.md
             # OpenClaw discovers this via skills.load.extraDirs: ["/skills"]
             - name: harvis-agent-skill
