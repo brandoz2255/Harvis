@@ -31,11 +31,17 @@ import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, field_validator
 
+from .github_app_auth import get_installation_token
+
 logger = logging.getLogger(__name__)
 
+# Legacy PAT fallback — empty when GitHub App is configured
 HARVIS_GITHUB_TOKEN = os.getenv("HARVIS_GITHUB_TOKEN", "")
-HARVIS_GITHUB_USER = os.getenv("HARVIS_GITHUB_USER", "harvisai-dulc3-cmd")
+HARVIS_GITHUB_USER = os.getenv("HARVIS_GITHUB_USER", "HarvisAI[bot]")
 OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
+
+# GitHub App credentials (preferred over PAT when available)
+_GITHUB_APP_ID = os.getenv("HARVIS_GITHUB_APP_ID", "")
 
 # Co-author trailer appended to every PR so the human owner also gets contribution credit.
 # No personal token needed — GitHub reads the trailer and credits both accounts.
@@ -100,9 +106,16 @@ def _validate_head_branch(head: str) -> None:
         )
 
 
-def _gh_headers() -> dict:
+async def _gh_headers() -> dict:
+    """Return GitHub API headers, using App installation token when configured."""
+    if _GITHUB_APP_ID:
+        token = await get_installation_token()
+    elif HARVIS_GITHUB_TOKEN:
+        token = HARVIS_GITHUB_TOKEN
+    else:
+        raise HTTPException(status_code=503, detail="No GitHub credentials configured on backend")
     return {
-        "Authorization": f"Bearer {HARVIS_GITHUB_TOKEN}",
+        "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
         "Content-Type": "application/json",
@@ -151,14 +164,10 @@ async def create_pull_request(
     - HARVIS_GITHUB_TOKEN used server-side; caller never sees it
     """
     _verify_openclaw_token(authorization)
-
-    if not HARVIS_GITHUB_TOKEN:
-        raise HTTPException(status_code=503, detail="HARVIS_GITHUB_TOKEN not configured on backend")
-
     _validate_repo(req.repo)
     _validate_head_branch(req.head)
 
-    # Append co-author trailer so both harvisai-dulc3-cmd and the human owner
+    # Append co-author trailer so both HarvisAI[bot] and the human owner
     # get GitHub contribution credit. No personal token required.
     pr_body = req.body.rstrip()
     if HARVIS_COAUTHOR_TRAILER and HARVIS_COAUTHOR_TRAILER not in pr_body:
@@ -179,8 +188,9 @@ async def create_pull_request(
     )
 
     try:
+        headers = await _gh_headers()
         async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
-            resp = await client.post(url, json=payload, headers=_gh_headers())
+            resp = await client.post(url, json=payload, headers=headers)
 
         result = resp.json()
 
@@ -231,11 +241,12 @@ async def list_pull_requests(
 
     url = f"{_GITHUB_API_BASE}/repos/{repo}/pulls"
     try:
+        headers = await _gh_headers() if (_GITHUB_APP_ID or HARVIS_GITHUB_TOKEN) else {}
         async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
             resp = await client.get(
                 url,
                 params={"state": state, "per_page": 20},
-                headers=_gh_headers() if HARVIS_GITHUB_TOKEN else {},
+                headers=headers,
             )
         return resp.json()
     except Exception as exc:
@@ -254,8 +265,9 @@ async def get_pull_request(
 
     url = f"{_GITHUB_API_BASE}/repos/{repo}/pulls/{pr_number}"
     try:
+        headers = await _gh_headers() if (_GITHUB_APP_ID or HARVIS_GITHUB_TOKEN) else {}
         async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
-            resp = await client.get(url, headers=_gh_headers() if HARVIS_GITHUB_TOKEN else {})
+            resp = await client.get(url, headers=headers)
         return resp.json()
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))

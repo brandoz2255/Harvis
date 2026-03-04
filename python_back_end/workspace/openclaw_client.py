@@ -58,12 +58,16 @@ logger = logging.getLogger(__name__)
 OPENCLAW_URL = os.getenv("OPENCLAW_URL", "ws://harvis-ai-openclaw:18789")
 OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 
-# GitHub credentials for Harvis's bot account (harvisai-dulc3-cmd).
-# Injected into workspace directives so the agent can push branches and open PRs.
-# Never hardcoded — must come from the environment / K8s secret.
-HARVIS_GITHUB_TOKEN = os.getenv("HARVIS_GITHUB_TOKEN", "")
-HARVIS_GITHUB_USER = os.getenv("HARVIS_GITHUB_USER", "harvisai-dulc3-cmd")
-HARVIS_GITHUB_EMAIL = os.getenv("HARVIS_GITHUB_EMAIL", "harvisai@users.noreply.github.com")
+# GitHub credentials — either GitHub App (preferred) or legacy PAT.
+# The actual token is never injected into the directive; the skill mints it at runtime.
+# We only check whether GitHub is configured so we know to inject the hint.
+HARVIS_GITHUB_TOKEN = os.getenv("HARVIS_GITHUB_TOKEN", "")       # legacy PAT fallback
+HARVIS_GITHUB_APP_ID = os.getenv("HARVIS_GITHUB_APP_ID", "")     # GitHub App (preferred)
+HARVIS_GITHUB_USER = os.getenv("HARVIS_GITHUB_USER", "HarvisAI[bot]")
+HARVIS_GITHUB_EMAIL = os.getenv("HARVIS_GITHUB_EMAIL", "2995570+HarvisAI[bot]@users.noreply.github.com")
+
+# True when any GitHub auth method is configured
+_GITHUB_CONFIGURED = bool(HARVIS_GITHUB_APP_ID or HARVIS_GITHUB_TOKEN)
 
 # Must match the OpenClaw protocol version (frames.ts PROTOCOL_VERSION = 3)
 PROTOCOL_VERSION = 3
@@ -392,12 +396,13 @@ class OpenClawClient:
             # Derive backend hostname from BACKEND_URL env so the same image
             # works in both k8s (harvis-ai-merged-backend) and Docker Compose (backend).
             _backend_host = os.getenv("BACKEND_URL", "http://backend:8000").rstrip("/")
-            if HARVIS_GITHUB_TOKEN:
+            if _GITHUB_CONFIGURED:
                 github_hint = (
-                    "\nGITHUB: Pre-configured. $GH_TOKEN / $GH_USER / $GH_EMAIL are set in env.\n"
+                    "\nGITHUB: Pre-configured via GitHub App. "
+                    "$GH_APP_ID / $GH_INSTALLATION_ID / $GH_PRIVATE_KEY are set in env.\n"
                     f"For PR creation use the harvis-github skill procedure "
                     f"(POST to {_backend_host}/github/pulls).\n"
-                    "Never print $GH_TOKEN. Never push to main.\n"
+                    "Never print any credential values. Never push to main.\n"
                 )
 
             # RAG search hint — always injected so the agent uses local knowledge
