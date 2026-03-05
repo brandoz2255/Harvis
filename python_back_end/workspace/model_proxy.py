@@ -180,9 +180,13 @@ async def proxy_chat_completions(
     if is_kimi or is_nvidia:
         body = {**body, "temperature": 1.0}
 
-    # NVIDIA NIM Kimi: enable chain-of-thought thinking
+    # NVIDIA NIM Kimi: only inject thinking param if caller requested it.
+    # Sending {"thinking": False} (or True without care) can cause NVIDIA NIM to error.
+    # OpenClaw requests don't send thinking_mode, so default = off (omit entirely).
     if is_nvidia:
-        body = {**body, "chat_template_kwargs": {"thinking": True}}
+        caller_thinking = body.pop("thinking_mode", False)
+        if caller_thinking:
+            body = {**body, "chat_template_kwargs": {"thinking": True}}
 
     is_streaming = body.get("stream", False)
 
@@ -200,7 +204,7 @@ async def proxy_chat_completions(
         if is_kimi or is_nvidia:
             body = {**body, "stream_options": {"include_usage": True}}
         return StreamingResponse(
-            _stream_from_upstream(target_url, headers, body, model_name=model_name, is_kimi=is_kimi or is_nvidia),
+            _stream_from_upstream(target_url, headers, body, model_name=model_name, is_kimi=is_kimi or is_nvidia, is_nvidia=is_nvidia),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -241,8 +245,17 @@ async def _stream_from_upstream(
     body: dict,
     model_name: str = "",
     is_kimi: bool = False,
+    is_nvidia: bool = False,
 ):
-    """Async generator that forwards the SSE stream from any upstream to OpenClaw."""
+    """Async generator that forwards the SSE stream from any upstream to OpenClaw.
+
+    For NVIDIA NIM with thinking enabled, the model emits two delta fields:
+      - reasoning_content: chain-of-thought (empty content during this phase)
+      - content: final answer
+
+    OpenClaw's OpenAI SDK only reads delta.content, so we remap reasoning_content
+    → content in forwarded chunks so the Discord bot sees thinking output too.
+    """
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
             async with client.stream("POST", url, json=body, headers=headers) as resp:
@@ -257,19 +270,37 @@ async def _stream_from_upstream(
                     return
 
                 async for line in resp.aiter_lines():
-                    # Parse usage chunks from the SSE stream and log them
                     if line.startswith("data: ") and line != "data: [DONE]":
                         try:
                             chunk = json.loads(line[6:])
+
+                            # Log usage when available
                             usage = chunk.get("usage") or {}
                             if usage.get("prompt_tokens"):
                                 ti = usage["prompt_tokens"]
                                 to_ = usage.get("completion_tokens", 0)
                                 rate_in  = _KIMI_COST_IN_PER_M  if is_kimi else _OLLAMA_COST_PER_M
                                 rate_out = _KIMI_COST_OUT_PER_M if is_kimi else _OLLAMA_COST_PER_M
-                                # is_kimi flag is reused for nvidia (same cost tier)
                                 cost = (ti * rate_in + to_ * rate_out) / 1_000_000
                                 asyncio.create_task(_log_usage(model_name, ti, to_, cost))
+
+                            # NVIDIA NIM: remap reasoning_content → content so OpenClaw
+                            # (OpenAI SDK) sees text during the thinking phase instead of
+                            # empty deltas that look like a stalled stream.
+                            if is_nvidia:
+                                choices = chunk.get("choices", [])
+                                modified = False
+                                for choice in choices:
+                                    delta = choice.get("delta", {})
+                                    reasoning = delta.get("reasoning_content") or ""
+                                    content = delta.get("content") or ""
+                                    if reasoning and not content:
+                                        delta["content"] = reasoning
+                                        delta.pop("reasoning_content", None)
+                                        modified = True
+                                if modified:
+                                    line = f"data: {json.dumps(chunk)}"
+
                         except Exception:
                             pass
 

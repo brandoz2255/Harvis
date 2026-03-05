@@ -2367,7 +2367,9 @@ async def chat(
                                 "temperature": 1.0,
                                 "max_tokens": 16384,
                                 "stream": True,
-                                "chat_template_kwargs": {"thinking": req.thinking_mode},
+                                # Only inject thinking param when enabled — sending {"thinking": False}
+                                # causes NVIDIA NIM to error; omit entirely for standard responses
+                                **({"chat_template_kwargs": {"thinking": True}} if req.thinking_mode else {}),
                                 "stream_options": {"include_usage": True},
                             },
                         ) as resp:
