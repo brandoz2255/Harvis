@@ -93,6 +93,7 @@ export default function ChatPage() {
   const [ttsEngine, setTtsEngine] = useState<"qwen" | "chatterbox">("qwen")  // TTS engine selection (qwen is primary)
   const [isResearchMode, setIsResearchMode] = useState(false)
   const [workspaceEnabled, setWorkspaceEnabled] = useState(true) // Workspace auto-delegation toggle
+  const [thinkingMode, setThinkingMode] = useState(false) // Deep thinking (chain-of-thought) toggle
   const [localMessages, setLocalMessages] = useState<Message[]>([])
   const [isLoading, setIsLoading] = useState(false)
 
@@ -799,6 +800,7 @@ export default function ChatPage() {
         // Then we'll generate TTS asynchronously after receiving the text
         text_only: !textOnly ? true : textOnly,
         tts_engine: ttsEngine,
+        thinking_mode: thinkingMode,
         attachments: messageAttachments.length > 0 ? messageAttachments : undefined
       }
 
@@ -1563,6 +1565,8 @@ export default function ChatPage() {
                 }}
                 workspaceEnabled={workspaceEnabled}
                 onWorkspaceEnabledChange={setWorkspaceEnabled}
+                thinkingMode={thinkingMode}
+                onThinkingModeChange={setThinkingMode}
               />
             </div>
           </div>

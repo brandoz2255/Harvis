@@ -89,6 +89,15 @@ patches:
         value:
           name: MOONSHOT_BASE_URL
           value: "https://api.moonshot.ai/v1"
+      - op: add
+        path: /spec/template/spec/containers/1/env/-
+        value:
+          name: NVIDIA_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: harvis-ai-openclaw-secret
+              key: nvidia-api-key
+              optional: true
       # HARVIS_GITHUB_TOKEN / HARVIS_GITHUB_USER / HARVIS_GITHUB_EMAIL removed —
       # GitHub auth is now handled by the HarvisAI GitHub App (App ID 2995570).
       # The harvis-github skill mints short-lived installation tokens at runtime

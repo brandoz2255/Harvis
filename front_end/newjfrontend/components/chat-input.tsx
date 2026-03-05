@@ -23,6 +23,7 @@ import {
   Volume2,
   VolumeX,
   Zap,
+  Brain,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
@@ -51,6 +52,8 @@ interface ChatInputProps {
   onTtsEngineChange?: (engine: TTSEngine) => void
   workspaceEnabled?: boolean  // Workspace auto-delegation toggle
   onWorkspaceEnabledChange?: (enabled: boolean) => void
+  thinkingMode?: boolean  // When true, enable chain-of-thought reasoning (Kimi K2.5 / qwen3)
+  onThinkingModeChange?: (enabled: boolean) => void
 }
 
 // Supported file types for file upload
@@ -89,6 +92,8 @@ export function ChatInput({
   onTtsEngineChange,
   workspaceEnabled = true,
   onWorkspaceEnabledChange,
+  thinkingMode = false,
+  onThinkingModeChange,
 }: ChatInputProps) {
   const [message, setMessage] = useState("")
   const [isRecording, setIsRecording] = useState(false)
@@ -993,6 +998,32 @@ export function ChatInput({
                       </button>
                       <p className="px-3 py-1 text-xs text-muted-foreground">
                         Auto-delegate tasks to Harvis Workspace
+                      </p>
+
+                      <button
+                        type="button"
+                        onClick={() => onThinkingModeChange?.(!thinkingMode)}
+                        className="flex w-full items-center justify-between gap-2 rounded-md px-3 py-2 text-sm hover:bg-accent"
+                      >
+                        <div className="flex items-center gap-2">
+                          <Brain className={cn(
+                            "h-4 w-4",
+                            thinkingMode ? "text-purple-400" : "text-muted-foreground"
+                          )} />
+                          <span>Deep Thinking</span>
+                        </div>
+                        <div className={cn(
+                          "w-8 h-4 rounded-full transition-colors relative",
+                          thinkingMode ? "bg-purple-500" : "bg-muted"
+                        )}>
+                          <div className={cn(
+                            "absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform",
+                            thinkingMode ? "translate-x-4" : "translate-x-0.5"
+                          )} />
+                        </div>
+                      </button>
+                      <p className="px-3 py-1 text-xs text-muted-foreground">
+                        Chain-of-thought reasoning (slower but deeper) — Kimi K2.5 / qwen3
                       </p>
 
                       {/* TTS Engine Selector - only show when voice mode is enabled */}

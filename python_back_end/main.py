@@ -1267,6 +1267,7 @@ class ChatRequest(BaseModel):
     low_vram: bool = False
     text_only: bool = False
     tts_engine: str = "qwen"  # "qwen" or "chatterbox" TTS engine selection
+    thinking_mode: bool = False  # When True, use chain-of-thought reasoning (slower but deeper)
 
 
 class ResearchChatRequest(BaseModel):
@@ -2366,7 +2367,7 @@ async def chat(
                                 "temperature": 1.0,
                                 "max_tokens": 16384,
                                 "stream": True,
-                                "chat_template_kwargs": {"thinking": True},
+                                "chat_template_kwargs": {"thinking": req.thinking_mode},
                                 "stream_options": {"include_usage": True},
                             },
                         ) as resp:
@@ -2379,10 +2380,12 @@ async def chat(
                                     try:
                                         chunk = json.loads(line[6:])
                                         delta = chunk.get("choices", [{}])[0].get("delta", {})
-                                        # Thinking content — accumulate silently
+                                        # Thinking content — accumulate and optionally stream
                                         thinking_chunk = delta.get("reasoning_content") or ""
                                         if thinking_chunk:
                                             _thinking_buf += thinking_chunk
+                                            if req.thinking_mode:
+                                                yield f"data: {json.dumps({'status': 'thinking', 'content': thinking_chunk})}\n\n"
                                         # Final answer content — stream to frontend
                                         answer_chunk = delta.get("content") or ""
                                         if answer_chunk:

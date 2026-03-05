@@ -1,5 +1,46 @@
 # Recent Changes and Fixes Documentation
 
+## Date: 2026-03-04 — Thinking Mode Toggle + OpenClaw 503 Fix
+
+### Summary
+Two changes: (1) fix 503 errors from the Discord bot when calling nvidia-kimi by injecting `NVIDIA_API_KEY` into the backend K8s pod; (2) add a Deep Thinking toggle so users can enable/disable chain-of-thought reasoning on Kimi K2.5 (and future qwen3 models) per-request.
+
+### Fix 1: OpenClaw/Discord Bot 503 Error (NVIDIA_API_KEY missing in K8s)
+
+**Problem**: Discord bot → `/v1/chat/completions` with model `nvidia-kimi` returned 503. Backend pod lacked `NVIDIA_API_KEY` in its environment, so `model_proxy.py` raised HTTPException(503).
+
+**Root Cause**: `NVIDIA_API_KEY` was not declared in `kustomization.yaml` patches for the backend container.
+
+**Solution**: Added a JSON patch op to `k8s-manifests/overlays/prod/kustomization.yaml` that reads `nvidia-api-key` from `harvis-ai-openclaw-secret` (optional: true, so pod starts even if key is absent).
+
+**Note for operator**: Add the key to the secret:
+```bash
+kubectl patch secret harvis-ai-openclaw-secret -n ai-agents \
+  --type=json -p='[{"op":"add","path":"/data/nvidia-api-key","value":"<base64-key>"}]'
+```
+
+**Files Modified**: `k8s-manifests/overlays/prod/kustomization.yaml`
+
+### Fix 2: Thinking Mode Toggle
+
+**Problem**: When calling nvidia-kimi with `thinking: True`, the 30-60s thinking phase showed nothing in the frontend, and there was no way to toggle thinking off for faster responses.
+
+**Solution**:
+- Added `thinking_mode: bool = False` to `ChatRequest` in `python_back_end/main.py`
+- `chat_template_kwargs` now uses `req.thinking_mode` instead of hardcoded `True`
+- When `thinking_mode` is True, thinking chunks are streamed to frontend as `{"status": "thinking", "content": ...}` events
+- Added `thinkingMode` state to `front_end/newjfrontend/app/page.tsx`, passed as `thinking_mode` in request body
+- Added Deep Thinking toggle (Brain icon, purple) to settings menu in `front_end/newjfrontend/components/chat-input.tsx`
+
+**Files Modified**:
+- `python_back_end/main.py`
+- `front_end/newjfrontend/app/page.tsx`
+- `front_end/newjfrontend/components/chat-input.tsx`
+
+**Result**: Default is thinking off (fast streaming). User can enable Deep Thinking via ⚙ settings menu for slower but deeper responses.
+
+---
+
 ## Date: 2026-03-02 — OpenClaw Logging, Token Tracking & Billing Dashboard
 
 ### Summary
