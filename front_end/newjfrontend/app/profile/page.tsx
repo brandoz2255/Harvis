@@ -102,7 +102,8 @@ export default function ProfilePage() {
       if (response.ok) {
         const data = await response.json()
         const keysMap: {[key: string]: {apiKey: string; apiUrl: string; isActive: boolean}} = {
-          moonshot: { apiKey: "", apiUrl: "", isActive: false }
+          moonshot: { apiKey: "", apiUrl: "", isActive: false },
+          nvidia: { apiKey: "", apiUrl: "", isActive: false },
         }
         
         data.forEach((key: any) => {

@@ -751,14 +751,6 @@ async def list_models(
                             "provider": "moonshot",
                             "description": "Advanced reasoning model via Moonshot AI",
                         },
-                        {
-                            "name": "kimi-latest",
-                            "displayName": "Kimi Latest (Moonshot)",
-                            "size": "Cloud",
-                            "status": "available",
-                            "provider": "moonshot",
-                            "description": "Latest Kimi model via Moonshot AI",
-                        },
                     ]
                 )
                 logger.info("Added Moonshot models for user with API key")

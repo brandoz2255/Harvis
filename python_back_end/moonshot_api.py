@@ -217,6 +217,9 @@ MOONSHOT_MODELS = {
 def is_moonshot_model(model_name: str) -> bool:
     """Check if a model name corresponds to a Moonshot/Kimi model."""
     model_lower = model_name.lower()
+    # nvidia-kimi routes through the NVIDIA NIM proxy, not Moonshot
+    if model_lower.startswith("nvidia-"):
+        return False
     return any(x in model_lower for x in ["kimi", "moonshot"])
 
 
@@ -231,4 +234,4 @@ def get_moonshot_model_id(model_name: str) -> str:
     elif "k1.5" in model_lower or "k1-5" in model_lower:
         return "kimi-k1.5"
     else:
-        return "kimi-latest"
+        return "kimi-k2.5"  # safe fallback — kimi-latest doesn't exist on Moonshot API
