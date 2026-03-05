@@ -104,7 +104,8 @@ data:
             "baseUrl": "http://harvis-ai-merged-backend:8000/v1",
             "apiKey": "${OPENCLAW_GATEWAY_TOKEN}",
             "models": [
-              { "id": "kimi-k2.5", "name": "Kimi K2.5 (via Harvis proxy)" },
+              { "id": "nvidia-kimi", "name": "Kimi K2.5 (NVIDIA NIM)" },
+              { "id": "kimi-k2.5", "name": "Kimi K2.5 (Moonshot)" },
               { "id": "gpt-oss:120b", "name": "GPT-OSS 120B (via Harvis proxy)" },
               { "id": "qwen3:235b-a22b-q8_0", "name": "Qwen3 235B (via Harvis proxy)" }
             ]
@@ -123,7 +124,7 @@ data:
         "defaults": {
           "elevatedDefault": "full",
           "model": {
-            "primary": "harvis-proxy/kimi-k2.5"
+            "primary": "harvis-proxy/nvidia-kimi"
           }
         },
         "list": [
@@ -131,7 +132,7 @@ data:
             "id": "main",
             "default": true,
             "model": {
-              "primary": "harvis-proxy/kimi-k2.5"
+              "primary": "harvis-proxy/nvidia-kimi"
             }
           },
           {
@@ -216,14 +217,29 @@ data:
     - `exec` — run shell commands (bash, python, node, etc.)
     - `write` — create or overwrite a file with content
     - `read` — read a file's content
-    - `local_rag` — search the local knowledge base
+    - `local_rag` — search the local **codebase** knowledge base (NOT for web research)
+
+    ## Skill Routing
+
+    **Do not try to do everything yourself.** Delegate to the right skill:
+
+    | Task type | Use skill |
+    |-----------|-----------|
+    | Research a topic, look something up, write a report | `harvis-research` |
+    | Write/generate a document, proposal, changelog, README | `harvis-document` |
+    | GitHub operations (PRs, issues, commits) | `harvis-github` |
+    | Search the local codebase or docs | `local_rag` tool directly |
+
+    To invoke a skill, call `exec` with the skill name or follow the skill's workflow.
+    **Never use `local_rag` for web research** — it only searches the local vector DB.
 
     ## How to Handle a Task
 
-    1. Read relevant files if you need context (`read`)
-    2. Do the work using tools (`exec`, `write`)
-    3. Verify the result if possible (`exec` to run tests or check output)
-    4. Report what you actually did — tool calls will appear in the activity log
+    1. Identify task type and route to the right skill if applicable (see table above)
+    2. Read relevant files if you need context (`read`)
+    3. Do the work using tools (`exec`, `write`)
+    4. Verify the result if possible (`exec` to run tests or check output)
+    5. Report what you actually did — tool calls will appear in the activity log
 
     ## Security Rules
 
