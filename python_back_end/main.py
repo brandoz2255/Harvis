@@ -2298,7 +2298,111 @@ async def chat(
                 yield f"data: {json.dumps({'status': 'processing', 'detail': 'Querying Gemini...'})}\n\n"
                 response_text = query_gemini(req.message, req.history)
 
-            # ── 6. Moonshot/Kimi model branch ────────────────────────────────────────────────
+            # ── 6. NVIDIA NIM (Kimi K2.5) model branch ───────────────────────────────────────
+            elif req.model == "nvidia-kimi":
+                yield f"data: {json.dumps({'status': 'processing', 'detail': 'Querying NVIDIA NIM...'})}\n\n"
+
+                pool = getattr(request.app.state, "pg_pool", None)
+                if not pool:
+                    yield f"data: {json.dumps({'status': 'error', 'error': 'Database not available'})}\n\n"
+                    return
+
+                nvidia_config = await get_user_api_key(pool, current_user.id, "nvidia")
+                if not nvidia_config or not nvidia_config.get("api_key"):
+                    yield f"data: {json.dumps({'status': 'error', 'error': 'NVIDIA API key not configured. Please add your key in Profile settings.'})}\n\n"
+                    return
+
+                nvidia_api_key = nvidia_config["api_key"]
+
+                # Build messages (same system prompt logic as Moonshot branch)
+                system_prompt_path = os.path.join(os.path.dirname(__file__), "system_prompt.txt")
+                try:
+                    with open(system_prompt_path, "r", encoding="utf-8") as f:
+                        system_prompt = f.read().strip()
+                except FileNotFoundError:
+                    system_prompt = 'You are "Jarves", a voice-first local assistant.'
+
+                artifact_instructions_path = os.path.join(
+                    os.path.dirname(__file__), "prompts", "artifact_instructions_code.txt"
+                )
+                try:
+                    with open(artifact_instructions_path, "r", encoding="utf-8") as f:
+                        system_prompt += f"\n\n{f.read().strip()}"
+                except FileNotFoundError:
+                    pass
+
+                local_rag_context = await get_local_rag_context(current_message_content)
+                if local_rag_context:
+                    system_prompt += f"\n\n--- RELEVANT DOCUMENTATION ---\n{local_rag_context}\n--- END ---"
+
+                messages = [{"role": "system", "content": system_prompt}]
+                for msg in history[:-1]:
+                    messages.append({"role": msg["role"], "content": msg["content"]})
+                messages.append({"role": "user", "content": current_message_content})
+
+                logger.info("🟢 Using NVIDIA NIM: moonshotai/kimi-k2.5")
+
+                # NVIDIA NIM Kimi K2.5 with thinking returns TWO delta fields:
+                #   delta.reasoning_content — chain-of-thought (thinking phase)
+                #   delta.content           — final answer (response phase)
+                # We collect both: thinking wrapped in <think> tags so the existing
+                # reasoning extractor strips it out before TTS and history saving.
+                response_text = ""
+                _thinking_buf = ""
+                _answer_buf = ""
+                try:
+                    async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
+                        async with client.stream(
+                            "POST",
+                            "https://integrate.api.nvidia.com/v1/chat/completions",
+                            headers={
+                                "Authorization": f"Bearer {nvidia_api_key}",
+                                "Content-Type": "application/json",
+                                "Accept": "text/event-stream",
+                            },
+                            json={
+                                "model": "moonshotai/kimi-k2.5",
+                                "messages": messages,
+                                "temperature": 1.0,
+                                "max_tokens": 16384,
+                                "stream": True,
+                                "chat_template_kwargs": {"thinking": True},
+                                "stream_options": {"include_usage": True},
+                            },
+                        ) as resp:
+                            if resp.status_code != 200:
+                                err = await resp.aread()
+                                yield f"data: {json.dumps({'status': 'error', 'error': f'NVIDIA NIM error {resp.status_code}: {err.decode()[:200]}'})}\n\n"
+                                return
+                            async for line in resp.aiter_lines():
+                                if line.startswith("data: ") and line != "data: [DONE]":
+                                    try:
+                                        chunk = json.loads(line[6:])
+                                        delta = chunk.get("choices", [{}])[0].get("delta", {})
+                                        # Thinking content — accumulate silently
+                                        thinking_chunk = delta.get("reasoning_content") or ""
+                                        if thinking_chunk:
+                                            _thinking_buf += thinking_chunk
+                                        # Final answer content — stream to frontend
+                                        answer_chunk = delta.get("content") or ""
+                                        if answer_chunk:
+                                            _answer_buf += answer_chunk
+                                            yield f"data: {json.dumps({'status': 'streaming', 'content': answer_chunk})}\n\n"
+                                    except Exception:
+                                        pass
+                    # Build response_text: thinking in <think> tags + final answer
+                    # The shared reasoning extractor will separate them for TTS/display
+                    if _thinking_buf:
+                        response_text = f"<think>{_thinking_buf}</think>\n\n{_answer_buf}"
+                    else:
+                        response_text = _answer_buf
+                    logger.info(f"🟢 NVIDIA NIM complete: {len(_thinking_buf)} thinking chars, {len(_answer_buf)} answer chars")
+                except Exception as e:
+                    logger.error(f"NVIDIA NIM error: {e}")
+                    yield f"data: {json.dumps({'status': 'error', 'error': str(e)})}\n\n"
+                    return
+
+            # ── 7. Moonshot/Kimi model branch ────────────────────────────────────────────────
             elif is_moonshot_model(req.model):
                 yield f"data: {json.dumps({'status': 'processing', 'detail': 'Querying Moonshot AI...'})}\n\n"
 
