@@ -765,6 +765,28 @@ async def list_models(
     except Exception as e:
         logger.error(f"Error checking Moonshot API key: {e}")
 
+    # Check if user has NVIDIA API key configured
+    try:
+        pool = getattr(request.app.state, "pg_pool", None)
+        if pool:
+            nvidia_config = await get_user_api_key(pool, current_user.id, "nvidia")
+            if nvidia_config and nvidia_config.get("api_key"):
+                formatted_models.extend(
+                    [
+                        {
+                            "name": "nvidia-kimi",
+                            "displayName": "Kimi K2.5 (NVIDIA NIM)",
+                            "size": "Cloud",
+                            "status": "available",
+                            "provider": "nvidia",
+                            "description": "Kimi K2.5 with thinking mode via NVIDIA NIM",
+                        },
+                    ]
+                )
+                logger.info("Added NVIDIA NIM models for user with API key")
+    except Exception as e:
+        logger.error(f"Error checking NVIDIA API key: {e}")
+
     # Sort by name
     formatted_models.sort(key=lambda x: x["name"])
 

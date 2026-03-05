@@ -73,10 +73,12 @@ export default function ProfilePage() {
 
   // API Keys State
   const [apiKeys, setApiKeys] = useState<{[key: string]: {apiKey: string; apiUrl: string; isActive: boolean}}>({
-    moonshot: { apiKey: "", apiUrl: "", isActive: false }
+    moonshot: { apiKey: "", apiUrl: "", isActive: false },
+    nvidia: { apiKey: "", apiUrl: "", isActive: false },
   })
   const [showApiKey, setShowApiKey] = useState<{[key: string]: boolean}>({
-    moonshot: false
+    moonshot: false,
+    nvidia: false,
   })
   const [apiKeyLoading, setApiKeyLoading] = useState(false)
   const [apiKeyMessage, setApiKeyMessage] = useState<{type: "success" | "error"; text: string} | null>(null)
@@ -453,6 +455,88 @@ export default function ProfilePage() {
                     className="text-primary hover:underline"
                   >
                     Moonshot Platform
+                  </a>
+                </p>
+              </div>
+
+              {/* NVIDIA NIM API Key Section */}
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-green-500/10 text-green-500">
+                      <Sparkles className="h-5 w-5" />
+                    </div>
+                    <div>
+                      <p className="font-medium text-foreground">NVIDIA NIM (Kimi K2.5)</p>
+                      <p className="text-sm text-muted-foreground">
+                        Kimi K2.5 with chain-of-thought thinking via NVIDIA NIM
+                      </p>
+                    </div>
+                  </div>
+                  {apiKeys.nvidia.isActive && (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-green-500/10 px-2.5 py-0.5 text-xs font-medium text-green-400">
+                      <Check className="h-3 w-3" />
+                      Active
+                    </span>
+                  )}
+                </div>
+
+                <div className="space-y-3 rounded-lg border border-border bg-input/30 p-4">
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium text-foreground">API Key</label>
+                    <div className="relative">
+                      <Key className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                      <Input
+                        type={showApiKey.nvidia ? "text" : "password"}
+                        placeholder={apiKeys.nvidia.isActive ? "••••••••••••••••" : "Enter your NVIDIA API key (nvapi-...)"}
+                        value={apiKeys.nvidia.apiKey}
+                        onChange={(e) => setApiKeys(prev => ({
+                          ...prev,
+                          nvidia: { ...prev.nvidia, apiKey: e.target.value }
+                        }))}
+                        className="pl-9 pr-10 bg-input border-border"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowApiKey(prev => ({ ...prev, nvidia: !prev.nvidia }))}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                      >
+                        {showApiKey.nvidia ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="flex gap-2">
+                    <Button
+                      onClick={() => saveApiKey('nvidia')}
+                      disabled={apiKeyLoading || !apiKeys.nvidia.apiKey}
+                      className="bg-primary text-primary-foreground hover:bg-primary/90"
+                    >
+                      <Save className="mr-2 h-4 w-4" />
+                      {apiKeyLoading ? 'Saving...' : 'Save Key'}
+                    </Button>
+                    {apiKeys.nvidia.isActive && (
+                      <Button
+                        variant="outline"
+                        onClick={() => deleteApiKey('nvidia')}
+                        className="border-destructive text-destructive hover:bg-destructive/10"
+                      >
+                        <Trash2 className="mr-2 h-4 w-4" />
+                        Remove
+                      </Button>
+                    )}
+                  </div>
+                </div>
+
+                <p className="text-xs text-muted-foreground">
+                  Your API key is encrypted and stored securely. Get your free key from{' '}
+                  <a
+                    href="https://integrate.api.nvidia.com/"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-primary hover:underline"
+                  >
+                    NVIDIA NIM Platform
                   </a>
                 </p>
               </div>

@@ -32,6 +32,9 @@ logger = logging.getLogger(__name__)
 MOONSHOT_API_KEY = os.getenv("MOONSHOT_API_KEY", "")
 MOONSHOT_BASE_URL = os.getenv("MOONSHOT_BASE_URL", "https://api.moonshot.ai/v1")
 
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
+NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
+
 EXTERNAL_OLLAMA_URL = os.getenv("EXTERNAL_OLLAMA_URL", "")
 EXTERNAL_OLLAMA_API_KEY = os.getenv("EXTERNAL_OLLAMA_API_KEY", "")
 
@@ -39,9 +42,11 @@ OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 # Pricing constants (USD per million tokens)
-_KIMI_COST_IN_PER_M  = 0.14
-_KIMI_COST_OUT_PER_M = 0.14
-_OLLAMA_COST_PER_M   = 0.0   # self-hosted, no marginal cost
+_KIMI_COST_IN_PER_M   = 0.14
+_KIMI_COST_OUT_PER_M  = 0.14
+_NVIDIA_COST_IN_PER_M = 0.14
+_NVIDIA_COST_OUT_PER_M = 0.14
+_OLLAMA_COST_PER_M    = 0.0   # self-hosted, no marginal cost
 
 
 async def _log_usage(model: str, tokens_in: int, tokens_out: int, cost: float) -> None:
@@ -62,6 +67,9 @@ async def _log_usage(model: str, tokens_in: int, tokens_out: int, cost: float) -
 # Model prefixes routed to Moonshot
 _KIMI_MODELS = {"kimi-k2.5", "kimi-k2", "kimi-k1.5", "moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"}
 
+# Models routed to NVIDIA NIM (moonshotai/kimi-k2.5 hosted on NVIDIA infrastructure)
+_NVIDIA_MODELS = {"nvidia-kimi"}
+
 # Model prefixes routed to the external/cloud Ollama instance
 _OLLAMA_CLOUD_PREFIXES = ("gpt-oss", "qwen3")
 
@@ -79,11 +87,14 @@ def _verify_token(authorization: str | None) -> None:
         raise HTTPException(status_code=401, detail="Invalid proxy token")
 
 
-def _resolve_route(model_name: str) -> tuple[str, dict, bool]:
+def _resolve_route(model_name: str) -> tuple[str, dict, bool, bool, str | None]:
     """
     Determine the upstream URL and headers for a given model name.
 
-    Returns (target_url, headers, is_kimi).
+    Returns (target_url, headers, is_kimi, is_nvidia, upstream_model_override).
+    - is_kimi: True for Moonshot-hosted Kimi (forces temperature=1.0)
+    - is_nvidia: True for NVIDIA NIM Kimi (injects chat_template_kwargs thinking=true)
+    - upstream_model_override: if set, replace model name in the forwarded body
     Raises HTTP 400 if the model is not routable.
     """
     # Kimi / Moonshot models
@@ -94,6 +105,20 @@ def _resolve_route(model_name: str) -> tuple[str, dict, bool]:
             f"{MOONSHOT_BASE_URL}/chat/completions",
             {"Authorization": f"Bearer {MOONSHOT_API_KEY}", "Content-Type": "application/json"},
             True,
+            False,
+            None,
+        )
+
+    # NVIDIA NIM — Kimi K2.5 hosted on NVIDIA infrastructure
+    if model_name in _NVIDIA_MODELS:
+        if not NVIDIA_API_KEY:
+            raise HTTPException(status_code=503, detail="NVIDIA_API_KEY not configured on backend")
+        return (
+            f"{NVIDIA_BASE_URL}/chat/completions",
+            {"Authorization": f"Bearer {NVIDIA_API_KEY}", "Content-Type": "application/json"},
+            False,
+            True,
+            "moonshotai/kimi-k2.5",  # NVIDIA NIM expects the full model path
         )
 
     # Cloud Ollama models (gpt-oss, qwen3, etc.)
@@ -111,12 +136,14 @@ def _resolve_route(model_name: str) -> tuple[str, dict, bool]:
             f"{EXTERNAL_OLLAMA_URL.rstrip('/')}/v1/chat/completions",
             headers,
             False,
+            False,
+            None,
         )
 
     raise HTTPException(
         status_code=400,
         detail=f"Model '{model_name}' not routable through this proxy. "
-               f"Supported: kimi-k2.5, gpt-oss:*, qwen3:*",
+               f"Supported: kimi-k2.5, nvidia-kimi, gpt-oss:*, qwen3:*",
     )
 
 
@@ -143,13 +170,25 @@ async def proxy_chat_completions(
         model_name = model_name.split("/", 1)[1]
         body = {**body, "model": model_name}
 
-    target_url, headers, is_kimi = _resolve_route(model_name)
+    target_url, headers, is_kimi, is_nvidia, upstream_model = _resolve_route(model_name)
 
-    # Moonshot requires temperature=1.0; Ollama does not — only apply for Kimi
-    if is_kimi:
+    # Apply upstream model name override (e.g. nvidia-kimi → moonshotai/kimi-k2.5)
+    if upstream_model:
+        body = {**body, "model": upstream_model}
+
+    # Moonshot + NVIDIA Kimi both require temperature=1.0
+    if is_kimi or is_nvidia:
         body = {**body, "temperature": 1.0}
 
+    # NVIDIA NIM Kimi: enable chain-of-thought thinking
+    if is_nvidia:
+        body = {**body, "chat_template_kwargs": {"thinking": True}}
+
     is_streaming = body.get("stream", False)
+
+    # NVIDIA NIM requires Accept: text/event-stream for streaming requests
+    if is_nvidia and is_streaming:
+        headers = {**headers, "Accept": "text/event-stream"}
 
     logger.info(
         "model_proxy: model=%s stream=%s → %s",
@@ -157,11 +196,11 @@ async def proxy_chat_completions(
     )
 
     if is_streaming:
-        # Ask Kimi to include usage in the final SSE chunk
-        if is_kimi:
+        # Ask Kimi/NVIDIA to include usage in the final SSE chunk
+        if is_kimi or is_nvidia:
             body = {**body, "stream_options": {"include_usage": True}}
         return StreamingResponse(
-            _stream_from_upstream(target_url, headers, body, model_name=model_name, is_kimi=is_kimi),
+            _stream_from_upstream(target_url, headers, body, model_name=model_name, is_kimi=is_kimi or is_nvidia),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -178,8 +217,12 @@ async def proxy_chat_completions(
             if usage:
                 ti = usage.get("prompt_tokens", 0)
                 to_ = usage.get("completion_tokens", 0)
-                rate_in  = _KIMI_COST_IN_PER_M  if is_kimi else _OLLAMA_COST_PER_M
-                rate_out = _KIMI_COST_OUT_PER_M if is_kimi else _OLLAMA_COST_PER_M
+                if is_nvidia:
+                    rate_in, rate_out = _NVIDIA_COST_IN_PER_M, _NVIDIA_COST_OUT_PER_M
+                elif is_kimi:
+                    rate_in, rate_out = _KIMI_COST_IN_PER_M, _KIMI_COST_OUT_PER_M
+                else:
+                    rate_in, rate_out = _OLLAMA_COST_PER_M, _OLLAMA_COST_PER_M
                 cost = (ti * rate_in + to_ * rate_out) / 1_000_000
                 asyncio.create_task(_log_usage(model_name, ti, to_, cost))
             return data
@@ -224,6 +267,7 @@ async def _stream_from_upstream(
                                 to_ = usage.get("completion_tokens", 0)
                                 rate_in  = _KIMI_COST_IN_PER_M  if is_kimi else _OLLAMA_COST_PER_M
                                 rate_out = _KIMI_COST_OUT_PER_M if is_kimi else _OLLAMA_COST_PER_M
+                                # is_kimi flag is reused for nvidia (same cost tier)
                                 cost = (ti * rate_in + to_ * rate_out) / 1_000_000
                                 asyncio.create_task(_log_usage(model_name, ti, to_, cost))
                         except Exception:

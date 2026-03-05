@@ -99,6 +99,13 @@ services:
       # For Docker Compose, run code locally (not in separate containers)
       # This avoids needing Docker socket access
       CODE_EXECUTOR_LOCAL: "true"
+      # OpenClaw integration
+      OPENCLAW_URL: "ws://openclaw:18789"
+      OPENCLAW_GATEWAY_TOKEN: "${OPENCLAW_GATEWAY_TOKEN}"
+      # Cloud AI providers (loaded from .env — never hardcode here)
+      MOONSHOT_API_KEY: "${MOONSHOT_API_KEY:-}"
+      MOONSHOT_BASE_URL: "${MOONSHOT_BASE_URL:-https://api.moonshot.ai/v1}"
+      NVIDIA_API_KEY: "${NVIDIA_API_KEY:-}"
     user: "1001:1001" # Run as appuser for consistent permissions
     volumes:
       - ml-models-cache:/models-cache
