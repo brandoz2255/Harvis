@@ -241,7 +241,13 @@ data:
     | GitHub operations (PRs, issues, commits) | `harvis-github` |
     | Search the local codebase or docs | `local_rag` tool directly |
 
-    To invoke a skill, call `exec` with the skill name or follow the skill's workflow.
+    **To use a skill**: call `read /skills/<name>/SKILL.md` first, then follow the
+    exact workflow in that file. Do NOT try to `exec harvis-github` or similar —
+    skills are markdown files, not executables.
+
+    **GitHub specifically**: call `read /skills/harvis-github/SKILL.md` and follow
+    every step. GitHub credentials are `$GH_APP_ID`, `$GH_INSTALLATION_ID`,
+    `$GH_PRIVATE_KEY` — NOT `$GH_TOKEN` and NOT the `gh` CLI.
     **Never use `local_rag` for web research** — it only searches the local vector DB.
 
     ## How to Handle a Task
