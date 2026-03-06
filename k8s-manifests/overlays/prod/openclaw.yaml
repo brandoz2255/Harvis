@@ -134,6 +134,7 @@ data:
       "agents": {
         "defaults": {
           "elevatedDefault": "full",
+          "timeoutSeconds": 600,
           "model": {
             "primary": "harvis-proxy/nvidia-kimi"
           },
@@ -849,6 +850,127 @@ data:
 
 ---
 # Harvis Soul SKILL.md — always-on personality anchor + tool truth.
+---
+# Harvis Vibe Coding skill — exact tool usage guide so Harvis edits code correctly.
+# Covers read→edit workflow, apply_patch, exec, subagents, commit format.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: harvis-vibecoding-skill
+  namespace: ai-agents
+data:
+  SKILL.md: |
+    ---
+    name: harvis-vibecoding
+    description: >
+      Exact tool usage guide for coding tasks. Read before editing.
+      Covers read→edit workflow, apply_patch, exec, subagents, git commits.
+    metadata: {"openclaw": {"emoji": "💻"}}
+    ---
+
+    # harvis-vibecoding skill
+
+    You are Harvis, a powerful AI coding agent. This skill teaches you exactly how to
+    use your tools to write, edit, and ship code correctly every time.
+
+    ---
+
+    ## Your Coding Tools
+
+    ### 1. `read` — Read a file
+    Always read before you edit. Never guess at file contents.
+    Use `offset` + `limit` for large files to read just the section you need.
+
+    ### 2. `write` — Create or fully overwrite a file
+    Use for NEW files or complete rewrites only. Never for small changes.
+
+    ### 3. `edit` — Make precise in-place edits (USE THIS FOR CHANGES)
+    Works by exact string match. Whitespace, indentation, newlines must match exactly.
+
+    **The golden rule**: Always `exec: grep -n` or `read` the exact lines first,
+    copy them verbatim from the output, then paste as old_string.
+    NEVER write old_string from memory.
+
+    When edit fails with "Could not find the exact text":
+    1. Re-read those specific lines with offset/limit
+    2. Copy the text character-for-character from the read output
+    3. Retry the edit — do not give up after one failure
+
+    ### 4. `apply_patch` — Patch using unified diff format
+    Use when edit keeps failing on complex multi-location changes.
+    Context lines in the diff must also match exactly.
+
+    ### 5. `exec` — Run shell commands
+    Use for grep, git, tests, pip, checking file structure.
+
+    Your workspace root: `/home/node/.openclaw/workspace/Harvis/`
+    All paths are relative to there unless absolute.
+
+    Useful commands:
+      grep -n "keyword" python_back_end/main.py
+      grep -rn "function_name" python_back_end/ | head -20
+      find . -maxdepth 3 -name "*.py" | head -30
+      git diff <file>
+      git status
+      git log --oneline -5
+      python3 -m pytest python_back_end/tests/ -x -q
+
+    ### 6. `subagents` — Spawn parallel sub-agents
+    Use for independent parallel work only. Each sub-agent has 600s.
+    Do not spawn sub-agents for tasks that take less than 30s — do them inline.
+
+    ---
+
+    ## Coding Workflow — Every Time
+
+    1. Scan structure first: `exec: find . -maxdepth 3 -type f | head -40`
+    2. Grep for what you need: `exec: grep -rn "target" python_back_end/ | head -20`
+    3. Read the exact file section before editing
+    4. Edit with copied old_string
+    5. Read again to verify
+    6. Run sanity check: `exec: python3 -c "import main" 2>&1` or run tests
+
+    ## Committing
+
+    ```bash
+    exec: cd /home/node/.openclaw/workspace/Harvis && \
+      git add python_back_end/specific_file.py && \
+      git commit -m "fix: what you fixed
+
+    Co-authored-by: brandoz2255 <124217011+brandoz2255@users.noreply.github.com>"
+    ```
+
+    Conventional commits: fix: / feat: / chore: / docs:
+    Always include the Co-authored-by trailer.
+    Stage specific files — never `git add .`
+
+    ## Opening a PR
+
+    ```bash
+    exec: cd /home/node/.openclaw/workspace/Harvis && \
+      git push origin HEAD && \
+      gh pr create --title "fix: short description" \
+        --body "## What changed\n- bullet\n\n## Why\n- reason"
+    ```
+
+    ## Repo Structure
+
+    /home/node/.openclaw/workspace/Harvis/
+    ├── python_back_end/          ← Python FastAPI backend
+    │   ├── main.py               ← All routes registered here
+    │   ├── workspace/model_proxy.py  ← Kimi/NIM proxy
+    │   └── requirements.txt
+    ├── front_end/jfrontend/      ← Next.js 14 frontend
+    │   ├── app/                  ← App router + API routes
+    │   └── components/           ← React components
+    ├── k8s-manifests/overlays/prod/
+    │   ├── openclaw.yaml         ← Your pod config
+    │   └── skills/               ← Skill SKILL.md files
+    └── scripts/                  ← CI/CD scripts
+
+    K8s changes go in PRs only. Do NOT kubectl apply directly.
+
+---
 # Injected into every session via always: true metadata.
 # Prevents tool hallucination (web_fetch, sessions_spawn, wrong skill paths).
 apiVersion: v1
@@ -1286,6 +1408,11 @@ spec:
               mountPath: /skills/harvis-soul/SOUL.md
               subPath: SOUL.md
               readOnly: true
+            # Harvis Vibe Coding skill — exact tool usage guide for code edits.
+            - name: harvis-vibecoding-skill
+              mountPath: /skills/harvis-vibecoding/SKILL.md
+              subPath: SKILL.md
+              readOnly: true
 
           # OpenClaw exposes health only as a WebSocket RPC method, not HTTP.
           # tcpSocket probes verify the port is bound and accepting connections.
@@ -1338,6 +1465,9 @@ spec:
         - name: harvis-soul-skill
           configMap:
             name: harvis-soul-skill
+        - name: harvis-vibecoding-skill
+          configMap:
+            name: harvis-vibecoding-skill
 
 ---
 # Service: ClusterIP only — OpenClaw is never exposed to the host or LoadBalancer.
