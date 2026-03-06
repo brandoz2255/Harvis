@@ -136,6 +136,10 @@ data:
           "elevatedDefault": "full",
           "model": {
             "primary": "harvis-proxy/nvidia-kimi"
+          },
+          "runTimeoutSeconds": 600,
+          "subagents": {
+            "announceTimeoutMs": 180000
           }
         },
         "list": [
