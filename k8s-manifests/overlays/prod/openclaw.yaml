@@ -852,7 +852,7 @@ data:
 # Harvis Soul SKILL.md — always-on personality anchor + tool truth.
 ---
 # Harvis Vibe Coding skill — exact tool usage guide so Harvis edits code correctly.
-# Covers read→edit workflow, apply_patch, exec, subagents, commit format.
+# Covers all coding tools: read/edit/write/apply_patch/exec/process/memory/subagents/image/git/PR.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -863,112 +863,214 @@ data:
     ---
     name: harvis-vibecoding
     description: >
-      Exact tool usage guide for coding tasks. Read before editing.
-      Covers read→edit workflow, apply_patch, exec, subagents, git commits.
+      Coding agent skill. Activate for: writing code, editing files, fixing bugs,
+      adding features, refactoring, running tests, opening PRs, reading the repo,
+      vibe coding, any task that touches source files or the terminal.
     metadata: {"openclaw": {"emoji": "💻"}}
     ---
 
-    # harvis-vibecoding skill
+    # Harvis Vibe Coding Skill
 
-    You are Harvis, a powerful AI coding agent. This skill teaches you exactly how to
-    use your tools to write, edit, and ship code correctly every time.
-
-    ---
-
-    ## Your Coding Tools
-
-    ### 1. `read` — Read a file
-    Always read before you edit. Never guess at file contents.
-    Use `offset` + `limit` for large files to read just the section you need.
-
-    ### 2. `write` — Create or fully overwrite a file
-    Use for NEW files or complete rewrites only. Never for small changes.
-
-    ### 3. `edit` — Make precise in-place edits (USE THIS FOR CHANGES)
-    Works by exact string match. Whitespace, indentation, newlines must match exactly.
-
-    **The golden rule**: Always `exec: grep -n` or `read` the exact lines first,
-    copy them verbatim from the output, then paste as old_string.
-    NEVER write old_string from memory.
-
-    When edit fails with "Could not find the exact text":
-    1. Re-read those specific lines with offset/limit
-    2. Copy the text character-for-character from the read output
-    3. Retry the edit — do not give up after one failure
-
-    ### 4. `apply_patch` — Patch using unified diff format
-    Use when edit keeps failing on complex multi-location changes.
-    Context lines in the diff must also match exactly.
-
-    ### 5. `exec` — Run shell commands
-    Use for grep, git, tests, pip, checking file structure.
-
-    Your workspace root: `/home/node/.openclaw/workspace/Harvis/`
-    All paths are relative to there unless absolute.
-
-    Useful commands:
-      grep -n "keyword" python_back_end/main.py
-      grep -rn "function_name" python_back_end/ | head -20
-      find . -maxdepth 3 -name "*.py" | head -30
-      git diff <file>
-      git status
-      git log --oneline -5
-      python3 -m pytest python_back_end/tests/ -x -q
-
-    ### 6. `subagents` — Spawn parallel sub-agents
-    Use for independent parallel work only. Each sub-agent has 600s.
-    Do not spawn sub-agents for tasks that take less than 30s — do them inline.
+    You are a senior engineer. Read this whole skill before touching a single file.
 
     ---
 
-    ## Coding Workflow — Every Time
+    ## 0. Before You Do Anything — Memory + Scan First
 
-    1. Scan structure first: `exec: find . -maxdepth 3 -type f | head -40`
-    2. Grep for what you need: `exec: grep -rn "target" python_back_end/ | head -20`
-    3. Read the exact file section before editing
-    4. Edit with copied old_string
-    5. Read again to verify
-    6. Run sanity check: `exec: python3 -c "import main" 2>&1` or run tests
+    memory_search: "harvis repo patterns"
+    memory_search: "python_back_end main.py"
 
-    ## Committing
+    Then scan:
+    exec: find /home/node/.openclaw/workspace/Harvis -maxdepth 3 -type f \( -name "*.py" -o -name "*.ts" -o -name "*.tsx" \) | grep -v node_modules | grep -v __pycache__ | head -50
+    exec: grep -rn "target_keyword" /home/node/.openclaw/workspace/Harvis/python_back_end/ | head -20
 
-    ```bash
-    exec: cd /home/node/.openclaw/workspace/Harvis && \
-      git add python_back_end/specific_file.py && \
-      git commit -m "fix: what you fixed
+    Workspace root: /home/node/.openclaw/workspace/Harvis/
 
-    Co-authored-by: brandoz2255 <124217011+brandoz2255@users.noreply.github.com>"
-    ```
+    ---
 
-    Conventional commits: fix: / feat: / chore: / docs:
-    Always include the Co-authored-by trailer.
-    Stage specific files — never `git add .`
+    ## 1. read — Read files (ALWAYS before editing)
 
-    ## Opening a PR
+    read python_back_end/main.py
+    read python_back_end/main.py offset=140 limit=25
 
-    ```bash
-    exec: cd /home/node/.openclaw/workspace/Harvis && \
-      git push origin HEAD && \
-      gh pr create --title "fix: short description" \
-        --body "## What changed\n- bullet\n\n## Why\n- reason"
-    ```
+    Use offset+limit for large files. Read returns line numbers — copy exact text for edit.
+
+    ---
+
+    ## 2. write — New files or full rewrites ONLY
+
+    write python_back_end/new_module.py
+    <complete file content>
+
+    Never use write to modify existing files. Use edit instead.
+
+    ---
+
+    ## 3. edit — Modify existing files (PRIMARY TOOL)
+
+    Literal exact string replace. Whitespace, tabs, newlines must match exactly.
+
+    WORKFLOW — never skip step 1:
+      Step 1: Read exact lines
+        exec: grep -n "def target_function" python_back_end/main.py
+        read: python_back_end/main.py offset=<line> limit=15
+      Step 2: Copy text verbatim from read output → paste as old_string
+        edit python_back_end/main.py
+        old_string: <exact text from read output, character for character>
+        new_string: <your replacement>
+
+    When edit fails ("Could not find the exact text"):
+      1. File changed — re-read those lines
+      2. Wrong whitespace — copy again from read output
+      3. Try shorter unique old_string (just the key line + 1-2 context lines)
+      4. Fall back to apply_patch
+
+    NEVER write old_string from memory. Always copy from read output.
+
+    ---
+
+    ## 4. apply_patch — Unified diff edits (fallback when edit keeps failing)
+
+    apply_patch python_back_end/main.py
+    --- a/python_back_end/main.py
+    +++ b/python_back_end/main.py
+    @@ -142,6 +142,7 @@
+     def my_function(x):
+    -    return x
+    +    return x * 2
+
+    Rules: context lines (no +/-) must also match exactly. Include 2-3 context lines.
+
+    ---
+
+    ## 5. exec — Shell commands
+
+    # Find things
+    exec: grep -n "keyword" python_back_end/main.py
+    exec: grep -rn "function_name" python_back_end/ | head -20
+    exec: find . -name "*.py" | grep -v __pycache__ | head -30
+
+    # Git
+    exec: cd /home/node/.openclaw/workspace/Harvis && git status
+    exec: cd /home/node/.openclaw/workspace/Harvis && git diff python_back_end/main.py
+    exec: cd /home/node/.openclaw/workspace/Harvis && git log --oneline -5
+
+    # Test / verify
+    exec: cd /home/node/.openclaw/workspace/Harvis && python3 -m pytest python_back_end/tests/ -x -q
+    exec: cd /home/node/.openclaw/workspace/Harvis && python3 -c "import main; print('ok')"
+    exec: pip show python-docx
+
+    # GitHub
+    exec: cd /home/node/.openclaw/workspace/Harvis && gh pr list --state open
+    exec: cd /home/node/.openclaw/workspace/Harvis && gh pr create --title "fix: desc" --body "## What\n- change\n\n## Why\n- reason"
+
+    ---
+
+    ## 6. process — Background processes (non-blocking long tasks)
+
+    process action=start name="test-watch" command="cd /home/node/.openclaw/workspace/Harvis && python3 -m pytest -x -q -f"
+    process action=output name="test-watch"   ← check its output
+    process action=stop name="test-watch"     ← kill when done
+    process action=list                       ← see all running processes
+
+    Use for: running a dev server, watching tests, long pip installs.
+    Frees you to keep working while it runs.
+
+    ---
+
+    ## 7. memory_search + memory_get — Persistent knowledge across sessions
+
+    memory_search: "model proxy timeout"
+    memory_search: "how to add a route to main.py"
+    memory_get: "MEMORY.md"
+    memory_get: "project-notes"
+
+    Run memory_search BEFORE starting any task. Saves you from re-discovering patterns.
+    After solving something tricky, save it to memory.
+
+    ---
+
+    ## 8. sessions_spawn — Spawn a sub-agent for parallel work
+
+    sessions_spawn:
+      agentId: "main"
+      sessionKey: "harvis-scan-routes"
+      message: "Read python_back_end/main.py and list every @app.get and @app.post route"
+
+    Each spawned agent runs independently with 600s budget.
+    Spawn only for tasks that take >30s. Do short tasks inline.
+    After spawning, keep doing your own work. Check results with subagents.
+
+    ---
+
+    ## 9. subagents — Manage spawned sub-agents
+
+    subagents action=list                                      ← see all + status
+    subagents action=steer sessionKey="harvis-scan-routes" message="focus on POST only"
+    subagents action=kill sessionKey="harvis-scan-routes"
+
+    ---
+
+    ## 10. image — Vision (screenshots, UI mockups, error screenshots)
+
+    image path="/home/node/.openclaw/workspace/Harvis/screenshot.png"
+
+    Use when user shares a screenshot of a UI bug or design. Describe, then code it.
+
+    ---
 
     ## Repo Structure
 
     /home/node/.openclaw/workspace/Harvis/
-    ├── python_back_end/          ← Python FastAPI backend
-    │   ├── main.py               ← All routes registered here
-    │   ├── workspace/model_proxy.py  ← Kimi/NIM proxy
+    ├── python_back_end/
+    │   ├── main.py                        ALL routes registered here
+    │   ├── workspace/model_proxy.py       Kimi/NVIDIA NIM proxy (httpx timeouts)
+    │   ├── workspace/openclaw_client.py   OpenClaw WS client
     │   └── requirements.txt
-    ├── front_end/jfrontend/      ← Next.js 14 frontend
-    │   ├── app/                  ← App router + API routes
-    │   └── components/           ← React components
+    ├── front_end/jfrontend/
+    │   ├── app/                           Next.js 14 app router + API routes
+    │   ├── components/                    React components (chat, voice, UI)
+    │   └── lib/                           Auth, DB, utilities
     ├── k8s-manifests/overlays/prod/
-    │   ├── openclaw.yaml         ← Your pod config
-    │   └── skills/               ← Skill SKILL.md files
-    └── scripts/                  ← CI/CD scripts
+    │   ├── openclaw.yaml                  OpenClaw pod config (your home)
+    │   └── skills/                        Skill SKILL.md source files
+    └── scripts/                           CI/CD: build-push.sh, deploy.sh
 
-    K8s changes go in PRs only. Do NOT kubectl apply directly.
+    ---
+
+    ## Git + PR Workflow
+
+    Commit (specific files only, never git add .):
+      exec: cd /home/node/.openclaw/workspace/Harvis && \
+        git add python_back_end/specific_file.py && \
+        git commit -m "fix: what and why
+
+      Co-authored-by: brandoz2255 <124217011+brandoz2255@users.noreply.github.com>"
+
+    Prefixes: fix: feat: chore: docs: refactor:
+    Always include Co-authored-by trailer on every commit.
+
+    Open PR:
+      exec: cd /home/node/.openclaw/workspace/Harvis && \
+        git push origin HEAD && \
+        gh pr create \
+          --title "fix: short description under 70 chars" \
+          --body "## What changed\n- bullet\n\n## Why\n- reason"
+
+    K8s manifest changes: PR only. Never kubectl apply directly.
+
+    ---
+
+    ## Quick Rules
+
+    Always read before edit — never from memory
+    Copy old_string verbatim from read output
+    Re-read and retry on edit failure — do not give up
+    Use process for long background tasks
+    Run memory_search before starting any non-trivial task
+    Stage specific files — never git add .
+    Co-author trailer on every commit
+    PR only for K8s changes
 
 ---
 # Injected into every session via always: true metadata.
