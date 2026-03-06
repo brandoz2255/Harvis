@@ -329,18 +329,79 @@ CREATE TABLE IF NOT EXISTS discord_sessions (
 
 ---
 
+## OpenClaw Stability — Completed Fixes (March 2026)
+
+All of these landed in `k8s-manifests/overlays/prod/openclaw.yaml`:
+
+| Commit | Fix |
+|--------|-----|
+| `86f202b` | ✅ Raised sub-agent timeouts: `runTimeoutSeconds: 600`, `subagents.announceTimeoutMs: 180000` — Kimi K2.5 was hitting 120s cap during multi-step tool work |
+| `f9220e3` | ✅ Fixed skill invocation — OpenClaw now reads `/skills/<name>/SKILL.md`, not exec skill name directly |
+| `3e7fc91` | ✅ Removed invalid `systemPrompt` key from `agents.list` block (caused config parse error) |
+| `3da7960` | ✅ `commands.bash=true` + `bashForegroundMs: 2000` — unblocked exec tool |
+| `3da7960` | ✅ SSRF allowlist: added `harvis-ai-merged-backend` so OpenClaw can call internal backend URLs |
+| `3da7960` | ✅ `systemPrompt` anchored on main agent — Harvis identity guardrails |
+| `3da7960` | ✅ `harvis-soul` skill added as `always: true` ConfigMap — tool reference guide, correct skill paths, explicit NOT-a-tool table |
+
+---
+
+## What's Next — OpenClaw
+
+### 1. Discord Kubectl Access (DevOps via Discord DM) 🔜
+**Goal**: Message Harvis from Discord and get live cluster status — pod health, logs, events, describe — without touching a terminal.
+
+**Also**: After Harvis opens a PR and it's merged (or sitting waiting for your approval), it should be able to trigger the CI pipeline scripts automatically.
+
+**Scope**:
+- `kubectl get pods -A` / `kubectl get pods -n <namespace>`
+- `kubectl describe pod <name> -n <namespace>`
+- `kubectl logs <pod> -n <namespace> --tail=100`
+- `kubectl get events -n <namespace>`
+- `kubectl get services`, `kubectl get deployments`, `kubectl get nodes`
+- `kubectl rollout status deployment/<name> -n <namespace>`
+- Run CI pipeline scripts (e.g. `./scripts/build-push.sh`, `./scripts/deploy.sh`) — only after PR is merged OR explicitly confirmed by you
+
+**Security**:
+- Discord channel driver already restricted to your user ID (`DISCORD_ALLOWED_USER_IDS`)
+- kubectl access via a read-only `ServiceAccount` + ClusterRoleBinding in the `ai-agents` namespace
+- Write ops (rollout restart, scale) require you to reply "confirm" in Discord
+- CI scripts run only on your explicit trigger or after verified merge event from GitHub webhook
+- All kubectl output sanitized before returning to Discord (strip any tokens/secrets from env dumps)
+
+**Implementation** — see `Harvis.md` for the task breakdown Harvis should execute.
+
+### 2. Fix: Document Pod Missing `pio` (create_docx broken) 🐛
+The research agent and document agent both call the `create_docx` tool, but the pod environment
+is missing `python-docx` (installed via `pip` / the package is `python-docx`, binary is `docx`).
+The pod has no way to generate `.docx` output right now.
+
+**Bug**: `create_docx` tool call fails silently or errors because `python-docx` is not installed
+in the OpenClaw container or the backend pod that handles document generation.
+
+**Fix**: See `Harvis.md` — Harvis should diagnose which pod is missing the dep, add it to the
+correct `requirements.txt` or `Dockerfile`, and verify `create_docx` works end-to-end.
+
+### 3. Research Agent Web-Fetch Proxy
+Backend endpoint `POST /api/tools/web-fetch` — sanitizes content before it reaches OpenClaw LLM.
+See Web Research Security Model section below.
+
+---
+
 ## Implementation Order (Suggested)
 
 1. **Co-authoring** — quick env var + commit message change, immediate value
 2. ~~**Discord Phase 1**~~ ✅ DONE — secret, `openclaw.json` channel config, NetworkPolicy 443 egress, env var mount
 3. ~~**Exec approval wall**~~ ✅ FIXED — `elevatedDefault: "full"` + `tools.elevated.allowFrom.discord` in openclaw.json
-4. **Research Agent** — backend proxy web-fetch endpoint + SKILL.md update + frontend research card
-5. **Document Agent** — very similar to research, quick add-on, shares web-fetch proxy
-6. **Maps Agent** — backend maps proxy endpoint + frontend map embed card
-7. **Discord Phase 2** — Harvis backend bridge with full chat history and persona (do later)
-8. **Discord Phase 3** — rich responses, slash commands (do later)
-9. **File Agent** — needs sandboxed shell scope, slightly more security work
-10. **DevOps Agent** — needs K8s proxy service built first, most complex but coolest feature
+4. ~~**OpenClaw stability fixes**~~ ✅ DONE — timeouts, bash, SSRF allowlist, harvis-soul skill, skill path fix
+5. **Fix create_docx (pio/python-docx missing)** — diagnose + patch Dockerfile/requirements, verify tool works
+6. **Discord kubectl access** — ServiceAccount, read-only ClusterRole, CI script runner, Discord skill
+7. **Research Agent** — backend proxy web-fetch endpoint + SKILL.md update + frontend research card
+8. **Document Agent** — shares create_docx fix + web-fetch proxy
+9. **Maps Agent** — backend maps proxy endpoint + frontend map embed card
+10. **Discord Phase 2** — Harvis backend bridge with full chat history and persona (do later)
+11. **Discord Phase 3** — rich responses, slash commands (do later)
+12. **File Agent** — needs sandboxed shell scope, slightly more security work
+13. **DevOps Agent (full)** — K8s proxy service, full read/write ops, cluster health summaries
 
 ---
 
