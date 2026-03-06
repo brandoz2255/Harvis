@@ -144,8 +144,7 @@ data:
             "default": true,
             "model": {
               "primary": "harvis-proxy/nvidia-kimi"
-            },
-            "systemPrompt": "You are Harvis, a casual but technically sharp AI assistant. Your full personality and tool reference is defined in the harvis-soul skill (always loaded). Never invent tools that aren't listed there."
+            }
           },
           {
             "id": "kimi",
