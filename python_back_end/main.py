@@ -2301,6 +2301,8 @@ async def chat(
 
             # ── 6. NVIDIA NIM (Kimi K2.5) model branch ───────────────────────────────────────
             elif req.model == "nvidia-kimi":
+                import time as _time
+                _t0 = _time.monotonic()
                 yield f"data: {json.dumps({'status': 'processing', 'detail': 'Querying NVIDIA NIM...'})}\n\n"
 
                 pool = getattr(request.app.state, "pg_pool", None)
@@ -2314,8 +2316,10 @@ async def chat(
                     return
 
                 nvidia_api_key = nvidia_config["api_key"]
+                logger.info(f"⏱️ NVIDIA: key fetch took {_time.monotonic()-_t0:.2f}s")
 
                 # Build messages (same system prompt logic as Moonshot branch)
+                _t1 = _time.monotonic()
                 system_prompt_path = os.path.join(os.path.dirname(__file__), "system_prompt.txt")
                 try:
                     with open(system_prompt_path, "r", encoding="utf-8") as f:
@@ -2332,7 +2336,9 @@ async def chat(
                 except FileNotFoundError:
                     pass
 
+                _t2 = _time.monotonic()
                 local_rag_context = await get_local_rag_context(current_message_content)
+                logger.info(f"⏱️ NVIDIA: RAG lookup took {_time.monotonic()-_t2:.2f}s (prompt so far: {len(system_prompt)} chars)")
                 if local_rag_context:
                     system_prompt += f"\n\n--- RELEVANT DOCUMENTATION ---\n{local_rag_context}\n--- END ---"
 
@@ -2341,7 +2347,12 @@ async def chat(
                     messages.append({"role": msg["role"], "content": msg["content"]})
                 messages.append({"role": "user", "content": current_message_content})
 
-                logger.info(f"🟢 Using NVIDIA NIM: moonshotai/kimi-k2.5 | thinking_mode={req.thinking_mode}")
+                total_prompt_chars = sum(len(m["content"]) for m in messages)
+                logger.info(
+                    f"🟢 Using NVIDIA NIM: moonshotai/kimi-k2.5 | thinking_mode={req.thinking_mode} | "
+                    f"messages={len(messages)} total_prompt_chars={total_prompt_chars} | "
+                    f"pre-request setup took {_time.monotonic()-_t0:.2f}s"
+                )
 
                 # NVIDIA NIM Kimi K2.5 with thinking returns TWO delta fields:
                 #   delta.reasoning_content — chain-of-thought (thinking phase)
@@ -2354,6 +2365,8 @@ async def chat(
                 _chunk_count = 0
                 _thinking_chunk_count = 0
                 _answer_chunk_count = 0
+                _ttft = None  # time-to-first-token
+                _t_stream_start = _time.monotonic()
                 try:
                     logger.info(f"🔵 NVIDIA NIM: opening stream (thinking={req.thinking_mode})")
                     async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
@@ -2414,6 +2427,9 @@ async def chat(
 
                                         if answer_chunk:
                                             _answer_chunk_count += 1
+                                            if _ttft is None:
+                                                _ttft = _time.monotonic() - _t_stream_start
+                                                logger.info(f"⏱️ NVIDIA NIM: time-to-first-token = {_ttft:.2f}s")
                                             _answer_buf += answer_chunk
                                             yield f"data: {json.dumps({'status': 'streaming', 'content': answer_chunk})}\n\n"
 
@@ -2427,10 +2443,13 @@ async def chat(
                                     except Exception as ce:
                                         logger.warning(f"🟡 NVIDIA NIM: chunk parse error: {ce}")
 
+                    _total_time = _time.monotonic() - _t_stream_start
                     logger.info(
-                        f"🟢 NVIDIA NIM complete: total_lines={_chunk_count} "
+                        f"🟢 NVIDIA NIM complete: total_time={_total_time:.2f}s TTFT={_ttft:.2f}s "
+                        f"total_lines={_chunk_count} "
                         f"thinking_chunks={_thinking_chunk_count} ({len(_thinking_buf)} chars) "
-                        f"answer_chunks={_answer_chunk_count} ({len(_answer_buf)} chars)"
+                        f"answer_chunks={_answer_chunk_count} ({len(_answer_buf)} chars) "
+                        f"tokens/s≈{len(_answer_buf)/max(_total_time,0.1):.0f} chars/s"
                     )
                     if not _answer_buf and not _thinking_buf:
                         logger.error("🔴 NVIDIA NIM: both buffers empty — no content received from stream!")
