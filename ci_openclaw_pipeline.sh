@@ -217,11 +217,14 @@ PYEOF
   if git add "$KUSTOMIZE_FILE"; then
     if git commit -m "chore: update openclaw image to $OPENCLAW_VERSION [ci]"; then
       log_success "Committed."
-      log_info "Pushing to GitHub..."
+      log_info "Pushing to GitHub via SSH..."
+      eval "$(ssh-agent -s)" > /dev/null 2>&1
+      ssh-add ~/.ssh/id_ed25519 2>/dev/null
       if git push origin main; then
         log_success "Pushed — ArgoCD will auto-sync the new OpenClaw image."
       else
-        log_error "Push failed. Push manually: git push origin main"
+        log_error "Push failed. Push manually:"
+        echo "  eval \$(ssh-agent -s) && ssh-add ~/.ssh/id_ed25519 && git push origin main"
       fi
     else
       log_info "Nothing to commit (OpenClaw already at $OPENCLAW_VERSION)"

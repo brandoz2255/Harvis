@@ -217,13 +217,14 @@ PYEOF
     if git commit -m "chore: update images to $BACKEND_VERSION [ci]"; then
       log_success "Changes committed"
 
-      log_info "Pushing to GitHub..."
+      log_info "Pushing to GitHub via SSH..."
+      eval "$(ssh-agent -s)" > /dev/null 2>&1
+      ssh-add ~/.ssh/id_ed25519 2>/dev/null
       if git push origin main; then
         log_success "Changes pushed to GitHub - ArgoCD will auto-sync!"
       else
         log_error "Push failed - you may need to push manually:"
-        echo "  cd $(pwd)"
-        echo "  git push origin main"
+        echo "  eval \$(ssh-agent -s) && ssh-add ~/.ssh/id_ed25519 && git push origin main"
       fi
     else
       log_info "No changes to commit (images already at this version)"
