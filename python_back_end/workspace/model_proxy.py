@@ -211,7 +211,7 @@ async def proxy_chat_completions(
 
     # Non-streaming
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0)) as client:
             resp = await client.post(target_url, json=body, headers=headers)
             if resp.status_code != 200:
                 logger.error("model_proxy: upstream error %s: %s", resp.status_code, resp.text[:200])
@@ -257,7 +257,7 @@ async def _stream_from_upstream(
     → content in forwarded chunks so the Discord bot sees thinking output too.
     """
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0)) as client:
             async with client.stream("POST", url, json=body, headers=headers) as resp:
                 if resp.status_code != 200:
                     error_body = await resp.aread()
