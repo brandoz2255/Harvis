@@ -3562,8 +3562,64 @@ async def vision_chat(
             for msg in req.history:
                 messages.append({"role": msg["role"], "content": msg["content"]})
 
+            # Check if this is an NVIDIA NIM vision model (Kimi K2.5)
+            if req.model == "nvidia-kimi":
+                pool = getattr(request.app.state, "pg_pool", None)
+                if not pool:
+                    yield f"data: {json.dumps({'status': 'error', 'error': 'Database not available'})}\n\n"
+                    return
+
+                nvidia_config = await get_user_api_key(pool, current_user.id, "nvidia")
+                if not nvidia_config or not nvidia_config.get("api_key"):
+                    yield f"data: {json.dumps({'status': 'error', 'error': 'NVIDIA API key not configured. Add it in Profile settings.'})}\n\n"
+                    return
+
+                nvidia_api_key = nvidia_config["api_key"]
+
+                # Build multimodal content — text + images (OpenAI image_url format)
+                content = [{"type": "text", "text": req.message}]
+                for img_b64 in processed_images:
+                    content.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{img_b64}"},
+                    })
+                messages.append({"role": "user", "content": content})
+
+                logger.info(
+                    f"🖼️ VISION: Using NVIDIA NIM Kimi K2.5 with {len(processed_images)} image(s)"
+                )
+                yield f"data: {json.dumps({'status': 'inference', 'detail': f'Analyzing with NVIDIA Kimi K2.5...'})}\n\n"
+
+                try:
+                    async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
+                        resp = await client.post(
+                            "https://integrate.api.nvidia.com/v1/chat/completions",
+                            headers={
+                                "Authorization": f"Bearer {nvidia_api_key}",
+                                "Content-Type": "application/json",
+                            },
+                            json={
+                                "model": "moonshotai/kimi-k2.5",
+                                "messages": messages,
+                                "temperature": 1.0,
+                                "max_tokens": 4096,
+                            },
+                        )
+                    if resp.status_code != 200:
+                        err = resp.text[:300]
+                        logger.error(f"🖼️ VISION NVIDIA error {resp.status_code}: {err}")
+                        yield f"data: {json.dumps({'status': 'error', 'error': f'NVIDIA vision error {resp.status_code}: {err}'})}\n\n"
+                        return
+                    data = resp.json()
+                    response_text = data["choices"][0]["message"]["content"]
+                    logger.info(f"🖼️ VISION NVIDIA: got {len(response_text)} chars")
+                except Exception as e:
+                    logger.error(f"🖼️ VISION NVIDIA exception: {e}")
+                    yield f"data: {json.dumps({'status': 'error', 'error': f'NVIDIA vision error: {str(e)}'})}\n\n"
+                    return
+
             # Check if this is a Moonshot vision model
-            if is_moonshot_model(req.model):
+            elif is_moonshot_model(req.model):
                 # Use Moonshot API for vision
                 pool = getattr(request.app.state, "pg_pool", None)
                 if not pool:
