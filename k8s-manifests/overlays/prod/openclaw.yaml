@@ -1134,6 +1134,8 @@ spec:
           env:
             - name: DATABASE_URL
               valueFrom:
+    - name: PYTHONPATH
+      value: "/python-extra"
                 secretKeyRef:
                   name: harvis-ai-openclaw-secret
                   key: database-url
@@ -1144,24 +1146,27 @@ spec:
             limits:
               memory: 64Mi
               cpu: 100m
-      # 3. Install python-docx to shared volume for document creation tools
-      - name: install-python-docx
-        image: python:3.11-slim
-        command: ["sh", "-c"]
-        args:
-          - |
-            pip install --target /python-extra python-docx==1.1.2
-            echo "python-docx installed"
-        volumeMounts:
-          - name: python-extra
-            mountPath: /python-extra
-        resources:
-          requests:
-            memory: 64Mi
-            cpu: 50m
-          limits:
-            memory: 128Mi
-            cpu: 100m
+
+# 3. Install python-docx for document generation tools
+# Installs to shared python-extra volume for use by OpenClaw agents.
+- name: install-python-docx
+  image: python:3.11-slim
+  command: ["sh", "-c"]
+  args:
+    - |
+      echo "Installing python-docx..."
+      pip install --target /python-extra python-docx
+      echo "python-docx installed!"
+  volumeMounts:
+    - name: python-extra
+      mountPath: /python-extra
+  resources:
+    requests:
+      memory: 64Mi
+      cpu: 50m
+    limits:
+      memory: 128Mi
+      cpu: 200m
 
 
       containers:
@@ -1254,9 +1259,6 @@ spec:
                   name: harvis-ai-openclaw-secret
                   key: external-ollama-api-key
                   optional: true
-        # PYTHONPATH for python-docx from init container
-        - name: PYTHONPATH
-          value: "/python-extra"
 
           volumeMounts:
             # PVC for all OpenClaw runtime state (sessions, logs, agent workspaces)
@@ -1341,10 +1343,7 @@ spec:
         - name: openclaw-config
           configMap:
             name: openclaw-config
-        
-      - name: python-extra
-        emptyDir: {}
-- name: harvis-agent-skill
+        - name: harvis-agent-skill
           configMap:
             name: harvis-agent-skill
         - name: harvis-github-skill
@@ -1363,6 +1362,8 @@ spec:
           configMap:
             name: harvis-soul-skill
 
+    - name: python-extra
+      emptyDir: {}
 ---
 # Service: ClusterIP only — OpenClaw is never exposed to the host or LoadBalancer.
 # Only reachable within the cluster from the Harvis backend pod.
