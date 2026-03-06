@@ -2341,7 +2341,7 @@ async def chat(
                     messages.append({"role": msg["role"], "content": msg["content"]})
                 messages.append({"role": "user", "content": current_message_content})
 
-                logger.info("🟢 Using NVIDIA NIM: moonshotai/kimi-k2.5")
+                logger.info(f"🟢 Using NVIDIA NIM: moonshotai/kimi-k2.5 | thinking_mode={req.thinking_mode}")
 
                 # NVIDIA NIM Kimi K2.5 with thinking returns TWO delta fields:
                 #   delta.reasoning_content — chain-of-thought (thinking phase)
@@ -2351,7 +2351,11 @@ async def chat(
                 response_text = ""
                 _thinking_buf = ""
                 _answer_buf = ""
+                _chunk_count = 0
+                _thinking_chunk_count = 0
+                _answer_chunk_count = 0
                 try:
+                    logger.info(f"🔵 NVIDIA NIM: opening stream (thinking={req.thinking_mode})")
                     async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
                         async with client.stream(
                             "POST",
@@ -2367,43 +2371,82 @@ async def chat(
                                 "temperature": 1.0,
                                 "max_tokens": 16384,
                                 "stream": True,
-                                # Only inject thinking param when enabled — sending {"thinking": False}
-                                # causes NVIDIA NIM to error; omit entirely for standard responses
-                                **({"chat_template_kwargs": {"thinking": True}} if req.thinking_mode else {}),
+                                "chat_template_kwargs": {"thinking": req.thinking_mode},
                                 "stream_options": {"include_usage": True},
                             },
                         ) as resp:
+                            logger.info(f"🔵 NVIDIA NIM: response status={resp.status_code} headers={dict(resp.headers)}")
                             if resp.status_code != 200:
                                 err = await resp.aread()
-                                yield f"data: {json.dumps({'status': 'error', 'error': f'NVIDIA NIM error {resp.status_code}: {err.decode()[:200]}'})}\n\n"
+                                err_text = err.decode()[:500]
+                                logger.error(f"🔴 NVIDIA NIM: upstream error {resp.status_code}: {err_text}")
+                                yield f"data: {json.dumps({'status': 'error', 'error': f'NVIDIA NIM error {resp.status_code}: {err_text}'})}\n\n"
                                 return
+                            logger.info("🔵 NVIDIA NIM: stream opened, reading chunks...")
                             async for line in resp.aiter_lines():
-                                if line.startswith("data: ") and line != "data: [DONE]":
+                                _chunk_count += 1
+                                if line == "data: [DONE]":
+                                    logger.info(f"🔵 NVIDIA NIM: received [DONE] after {_chunk_count} lines")
+                                    continue
+                                if line.startswith("data: "):
                                     try:
                                         chunk = json.loads(line[6:])
-                                        delta = chunk.get("choices", [{}])[0].get("delta", {})
-                                        # Thinking content — accumulate and optionally stream
+                                        choices = chunk.get("choices", [])
+                                        if not choices:
+                                            # Could be a usage chunk
+                                            usage = chunk.get("usage")
+                                            if usage:
+                                                logger.info(f"🔵 NVIDIA NIM usage: {usage}")
+                                            continue
+                                        delta = choices[0].get("delta", {})
+                                        finish_reason = choices[0].get("finish_reason")
+                                        if finish_reason:
+                                            logger.info(f"🔵 NVIDIA NIM: finish_reason={finish_reason}")
+
                                         thinking_chunk = delta.get("reasoning_content") or ""
+                                        answer_chunk = delta.get("content") or ""
+
                                         if thinking_chunk:
+                                            _thinking_chunk_count += 1
                                             _thinking_buf += thinking_chunk
                                             if req.thinking_mode:
                                                 yield f"data: {json.dumps({'status': 'thinking', 'content': thinking_chunk})}\n\n"
-                                        # Final answer content — stream to frontend
-                                        answer_chunk = delta.get("content") or ""
+
                                         if answer_chunk:
+                                            _answer_chunk_count += 1
                                             _answer_buf += answer_chunk
                                             yield f"data: {json.dumps({'status': 'streaming', 'content': answer_chunk})}\n\n"
-                                    except Exception:
-                                        pass
+
+                                        # Log delta keys to catch unexpected fields
+                                        delta_keys = [k for k, v in delta.items() if v]
+                                        if delta_keys and _chunk_count % 50 == 1:
+                                            logger.debug(f"🔵 NVIDIA NIM delta keys at chunk {_chunk_count}: {delta_keys}")
+
+                                    except json.JSONDecodeError as je:
+                                        logger.warning(f"🟡 NVIDIA NIM: JSON decode error on line: {line[:100]} — {je}")
+                                    except Exception as ce:
+                                        logger.warning(f"🟡 NVIDIA NIM: chunk parse error: {ce}")
+
+                    logger.info(
+                        f"🟢 NVIDIA NIM complete: total_lines={_chunk_count} "
+                        f"thinking_chunks={_thinking_chunk_count} ({len(_thinking_buf)} chars) "
+                        f"answer_chunks={_answer_chunk_count} ({len(_answer_buf)} chars)"
+                    )
+                    if not _answer_buf and not _thinking_buf:
+                        logger.error("🔴 NVIDIA NIM: both buffers empty — no content received from stream!")
+                    elif not _answer_buf:
+                        logger.warning(
+                            f"🟡 NVIDIA NIM: answer_buf empty but thinking_buf has {len(_thinking_buf)} chars. "
+                            f"thinking_mode={req.thinking_mode}. Model may have responded only via reasoning_content."
+                        )
+
                     # Build response_text: thinking in <think> tags + final answer
-                    # The shared reasoning extractor will separate them for TTS/display
                     if _thinking_buf:
                         response_text = f"<think>{_thinking_buf}</think>\n\n{_answer_buf}"
                     else:
                         response_text = _answer_buf
-                    logger.info(f"🟢 NVIDIA NIM complete: {len(_thinking_buf)} thinking chars, {len(_answer_buf)} answer chars")
                 except Exception as e:
-                    logger.error(f"NVIDIA NIM error: {e}")
+                    logger.error(f"🔴 NVIDIA NIM stream exception: {type(e).__name__}: {e}")
                     yield f"data: {json.dumps({'status': 'error', 'error': str(e)})}\n\n"
                     return
 
