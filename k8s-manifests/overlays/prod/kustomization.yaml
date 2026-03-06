@@ -25,7 +25,7 @@ images:
     newTag: latest17
   - name: dulc3/openclaw
     newName: dulc3/openclaw
-    newTag: latest12
+    newTag: latest17
 
 # Patches for production
 patches:
