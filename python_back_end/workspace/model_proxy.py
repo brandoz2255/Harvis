@@ -284,22 +284,22 @@ async def _stream_from_upstream(
                                 cost = (ti * rate_in + to_ * rate_out) / 1_000_000
                                 asyncio.create_task(_log_usage(model_name, ti, to_, cost))
 
-                            # NVIDIA NIM: remap reasoning_content → content so OpenClaw
-                            # (OpenAI SDK) sees text during the thinking phase instead of
-                            # empty deltas that look like a stalled stream.
+                            # NVIDIA NIM: drop pure reasoning_content chunks entirely.
+                            # Discord/OpenClaw should only see the final answer (content),
+                            # not the chain-of-thought. If a chunk has reasoning_content
+                            # but empty content, skip it — don't forward to OpenClaw.
                             if is_nvidia:
                                 choices = chunk.get("choices", [])
-                                modified = False
+                                skip = False
                                 for choice in choices:
                                     delta = choice.get("delta", {})
                                     reasoning = delta.get("reasoning_content") or ""
                                     content = delta.get("content") or ""
                                     if reasoning and not content:
-                                        delta["content"] = reasoning
-                                        delta.pop("reasoning_content", None)
-                                        modified = True
-                                if modified:
-                                    line = f"data: {json.dumps(chunk)}"
+                                        skip = True
+                                        break
+                                if skip:
+                                    continue  # silently drop thinking chunk
 
                         except Exception:
                             pass
