@@ -137,8 +137,8 @@ data:
           "model": {
             "primary": "harvis-proxy/nvidia-kimi"
           },
-          "runTimeoutSeconds": 600,
           "subagents": {
+            "runTimeoutSeconds": 600,
             "announceTimeoutMs": 180000
           }
         },
