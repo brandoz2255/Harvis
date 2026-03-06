@@ -63,9 +63,13 @@ def get_embedding_model_for_source(source: str) -> str:
     if _config_manager:
         config = _config_manager.get(source)
         if config:
-            return config.get_embedding_model()
+            model = config.get_embedding_model()
+            logger.info(f"📐 embed model for '{source}': {model} (via dynamic config, tier={config.embedding_tier})")
+            return model
     # Fallback to static config
-    return SOURCE_EMBEDDING_MODELS.get(source, EMBEDDING_MODEL)
+    model = SOURCE_EMBEDDING_MODELS.get(source, EMBEDDING_MODEL)
+    logger.info(f"📐 embed model for '{source}': {model} (via static config)")
+    return model
 
 
 # Collection names based on embedding model (different dims need separate tables)
