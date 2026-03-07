@@ -21,12 +21,14 @@ import {
   Zap,
   RefreshCw,
   MessageSquare,
+  ShieldAlert,
+  Check,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { useOpenClawStore, type WorkspaceLogEvent } from '@/stores/openclawStore'
+import { useOpenClawStore, type WorkspaceLogEvent, type KubectlPendingCommand } from '@/stores/openclawStore'
 import { cn } from '@/lib/utils'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -801,6 +803,108 @@ function deduplicateText(raw: string): string {
   return unique.join('\n\n')
 }
 
+// ─── Kubectl Approval Widget ──────────────────────────────────────────────────
+
+function KubectlApprovalWidget() {
+  const { kubectlPending, setKubectlPending, removeKubectlPending } = useOpenClawStore()
+  const [loading, setLoading] = useState<Record<string, boolean>>({})
+
+  // Poll /kubectl/pending every 2 seconds while this component is mounted
+  useEffect(() => {
+    const poll = async () => {
+      try {
+        const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
+        const res = await fetch('/api/kubectl/pending', {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        })
+        if (res.ok) {
+          const data = await res.json()
+          setKubectlPending(data.pending ?? [])
+        }
+      } catch {
+        // best-effort
+      }
+    }
+    poll()
+    const interval = setInterval(poll, 2000)
+    return () => clearInterval(interval)
+  }, [setKubectlPending])
+
+  if (kubectlPending.length === 0) return null
+
+  const handleDecision = async (approvalId: string, action: 'approve' | 'reject') => {
+    setLoading((prev) => ({ ...prev, [approvalId]: true }))
+    try {
+      const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
+      await fetch(`/api/kubectl/${action}/${approvalId}`, {
+        method: 'POST',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      })
+      removeKubectlPending(approvalId)
+    } catch {
+      // best-effort
+    } finally {
+      setLoading((prev) => ({ ...prev, [approvalId]: false }))
+    }
+  }
+
+  return (
+    <div className="mx-4 my-3 rounded-lg border border-amber-500/40 bg-amber-500/5">
+      <div className="flex items-center gap-2 px-3 py-2 border-b border-amber-500/30">
+        <ShieldAlert className="h-3.5 w-3.5 text-amber-400 shrink-0" />
+        <span className="text-xs font-semibold text-amber-400 uppercase tracking-wider">
+          kubectl Approval Required
+        </span>
+        <span className="ml-auto text-[10px] bg-amber-500/20 text-amber-400 px-1.5 py-0.5 rounded-full font-mono">
+          {kubectlPending.length}
+        </span>
+      </div>
+      <div className="divide-y divide-amber-500/20">
+        {kubectlPending.map((cmd) => (
+          <div key={cmd.approval_id} className="px-3 py-2.5 space-y-2">
+            <div className="space-y-0.5">
+              <p className="text-[11px] text-muted-foreground">
+                Agent wants to run:
+              </p>
+              <code className="block text-xs font-mono text-amber-300 bg-black/30 rounded px-2 py-1.5 break-all">
+                kubectl{cmd.namespace ? ` -n ${cmd.namespace}` : ''} {cmd.command}
+              </code>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                disabled={loading[cmd.approval_id]}
+                onClick={() => handleDecision(cmd.approval_id, 'approve')}
+                className="h-6 px-2.5 text-[11px] bg-green-600 hover:bg-green-500 text-white border-0"
+              >
+                {loading[cmd.approval_id] ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <Check className="h-3 w-3 mr-1" />
+                )}
+                Approve
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={loading[cmd.approval_id]}
+                onClick={() => handleDecision(cmd.approval_id, 'reject')}
+                className="h-6 px-2.5 text-[11px] text-red-400 hover:text-red-300 hover:bg-red-500/10"
+              >
+                <X className="h-3 w-3 mr-1" />
+                Reject
+              </Button>
+              <span className="ml-auto text-[10px] text-muted-foreground font-mono">
+                #{cmd.approval_id}
+              </span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 // ─── Main panel ──────────────────────────────────────────────────────────────
 
 export function WorkspacePanel({ onContinueInChat }: { onContinueInChat?: (summary: string) => void }) {
@@ -814,6 +918,7 @@ export function WorkspacePanel({ onContinueInChat }: { onContinueInChat?: (summa
     activeTab,
     setActiveTab,
     setSuggestion,
+    kubectlPending,
   } = useOpenClawStore()
 
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -944,13 +1049,20 @@ export function WorkspacePanel({ onContinueInChat }: { onContinueInChat?: (summa
             onClick={() => setActiveTab(key)}
             title={label}
             className={cn(
-              'flex items-center justify-center w-9 h-9 rounded-lg transition-colors',
+              'relative flex items-center justify-center w-9 h-9 rounded-lg transition-colors',
               activeTab === key
                 ? 'bg-violet-500/20 text-violet-400'
                 : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
             )}
           >
             <Icon className="h-4 w-4" />
+            {/* Amber badge when kubectl approval is pending */}
+            {kubectlPending.length > 0 && key === 'dashboard' && (
+              <span className="absolute top-1 right-1 flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75" />
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-400" />
+              </span>
+            )}
           </button>
         ))}
       </div>
@@ -998,6 +1110,9 @@ export function WorkspacePanel({ onContinueInChat }: { onContinueInChat?: (summa
             )}
           </div>
         </div>
+
+        {/* Kubectl approval widget — shown whenever there are pending commands */}
+        <KubectlApprovalWidget />
 
         {/* Stats bar — shown on dashboard/logs while there is activity */}
         {activeTab !== 'playbooks' && (logEvents.length > 0 || !isRunning) && (

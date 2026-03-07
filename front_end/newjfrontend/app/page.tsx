@@ -9,7 +9,7 @@ import { ChatMessage } from "@/components/chat-message"
 import { ChatInput } from "@/components/chat-input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
-import { Menu, Sparkles } from "lucide-react"
+import { Menu, Sparkles, ArrowUpRight } from "lucide-react"
 import ModelSelector from "@/components/ModelSelector"
 import SearchToggle from "@/components/SearchToggle"
 import { useChatHistoryStore } from "@/stores/chatHistoryStore"
@@ -101,7 +101,86 @@ export default function ChatPage() {
   const scrollRef = useRef<HTMLDivElement>(null)
 
   // Harvis Workspaces
-  const { setSuggestion, isWorkspaceActive, suggestion } = useOpenClawStore()
+  const {
+    setSuggestion,
+    isWorkspaceActive,
+    suggestion,
+    setWorkspaceId,
+    setWorkspaceSessionId,
+    setWorkspaceActive,
+    setSseAbortController,
+    clearLogEvents,
+    addLogEvent,
+    setFinalSummary,
+    workspaceModel,
+  } = useOpenClawStore()
+
+  // Directly launch workspace with current chat context (skips suggestion banner)
+  const sendToWorkspace = useCallback(async () => {
+    if (localMessages.length === 0) return
+    const token = localStorage.getItem('token')
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (token) headers['Authorization'] = `Bearer ${token}`
+
+    // Use the last user message as the task brief (truncated to 150 chars)
+    const lastUserMsg = [...localMessages].reverse().find((m) => m.role === 'user')
+    const taskBrief = (lastUserMsg?.content ?? 'Continue this task').slice(0, 150)
+
+    try {
+      const res = await fetch('/api/workspace/launch', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          task_brief: taskBrief,
+          chat_history: localMessages.map((m) => ({ role: m.role, content: m.content ?? '' })),
+          agent_id: workspaceModel,
+        }),
+      })
+      if (!res.ok) return
+      const data = await res.json()
+      const { workspace_id, session_id } = data
+
+      clearLogEvents()
+      setFinalSummary('')
+      setWorkspaceId(workspace_id)
+      setWorkspaceSessionId(session_id ?? null)
+      setWorkspaceActive(true)
+
+      // Open SSE stream
+      const controller = new AbortController()
+      setSseAbortController(controller)
+      const streamRes = await fetch(`/api/workspace/stream/${workspace_id}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        signal: controller.signal,
+      })
+      const reader = streamRes.body?.getReader()
+      if (!reader) return
+      const decoder = new TextDecoder()
+      let buffer = ''
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          try {
+            const event = JSON.parse(line.slice(6))
+            if (event.type === 'stream_end') { reader.cancel(); return }
+            if (event.type === 'done') setFinalSummary(event.summary ?? '')
+            addLogEvent(event)
+          } catch { /* ignore */ }
+        }
+      }
+    } catch {
+      // Non-critical — workspace launch is best-effort
+    }
+  }, [
+    localMessages, workspaceModel, clearLogEvents, setFinalSummary,
+    setWorkspaceId, setWorkspaceSessionId, setWorkspaceActive,
+    setSseAbortController, addLogEvent,
+  ])
 
   const detectWorkspace = useCallback(async (history: Message[]) => {
     try {
@@ -1474,6 +1553,19 @@ export default function ChatPage() {
                   isResearchMode={isResearchMode}
                   onToggle={setIsResearchMode}
                 />
+                {/* Send current chat to OpenClaw workspace */}
+                {localMessages.length > 0 && !isWorkspaceActive && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={sendToWorkspace}
+                    title="Send chat context to Harvis Workspace (OpenClaw agent)"
+                    className="h-8 gap-1.5 text-xs text-muted-foreground hover:text-violet-400 hover:bg-violet-400/10 border border-transparent hover:border-violet-400/30"
+                  >
+                    <ArrowUpRight className="h-3.5 w-3.5" />
+                    Workspace
+                  </Button>
+                )}
                 <ModelSelector
                   selectedModel={selectedModel}
                   onModelChange={setSelectedModel}
