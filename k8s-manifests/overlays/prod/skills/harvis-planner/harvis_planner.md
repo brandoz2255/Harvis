@@ -61,16 +61,59 @@ Before executing any multi-step task, output your plan:
 Plan:
 1. Read harvis-vibecoding skill
 2. Scan repo for relevant files
-3. Read the exact lines I'll change in main.py (offset=X limit=Y)
+3. Read the exact lines I'll change (offset=X limit=Y)
 4. Edit with exact old_string copied from read output
-5. Verify with exec: python3 -c "import main"
-6. Commit with co-author trailer
-7. Open PR
+5. Run validation gate (type-check / py_compile / yaml check)
+6. Fix any errors, re-validate
+7. Commit with co-author trailer
+8. Open PR
 
 Starting step 1...
 ```
 
 This makes your work transparent and catchable before you do something wrong.
+
+---
+
+## Validation Gates (REQUIRED before every commit)
+
+Run the check matching the file types you changed. ALL must pass. No exceptions.
+
+### Frontend (.ts / .tsx / Next.js)
+
+```bash
+exec: cd /home/node/.openclaw/workspace/Harvis/front_end/jfrontend && \
+  npm run type-check 2>&1 | tail -30
+```
+Must show 0 errors. If TypeScript errors appear — fix them before committing.
+
+### Python backend (.py)
+
+```bash
+exec: python3 -m py_compile python_back_end/changed_file.py && echo "ok"
+```
+Run on every .py file you modified. Non-zero exit = syntax error. Fix first.
+
+### YAML / K8s manifests (.yaml / .yml)
+
+```bash
+exec: python3 -c "
+import yaml, sys
+for f in sys.argv[1:]:
+    docs = list(yaml.safe_load_all(open(f)))
+    print(f'OK {f}: {len([d for d in docs if d])} docs')
+" k8s-manifests/overlays/prod/changed.yaml
+```
+Must print "OK \<file\>: N docs". Any YAMLError = do not commit.
+
+### Decision table
+
+| Files changed           | Gate to run                         |
+|-------------------------|-------------------------------------|
+| Any .ts / .tsx          | npm run type-check                  |
+| Any .py                 | python3 -m py_compile \<file\>      |
+| Any .yaml / .yml        | python3 yaml.safe_load_all check    |
+| Mixed (py + yaml, etc.) | Run ALL applicable checks           |
 
 ---
 

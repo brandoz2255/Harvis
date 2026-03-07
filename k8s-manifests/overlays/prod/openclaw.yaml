@@ -1188,11 +1188,36 @@ data:
     2. Scan repo for relevant files
     3. Read exact lines to change (offset + limit)
     4. Edit with exact old_string from read output
-    5. Verify
-    6. Commit with co-author trailer
-    7. Open PR
+    5. Run validation gate (type-check / py_compile / yaml check — see below)
+    6. Fix any errors, re-validate
+    7. Commit with co-author trailer
+    8. Open PR
 
     Starting step 1...
+
+    ## Validation Gates (REQUIRED before every commit)
+
+    Run the check matching the file types you changed. ALL must pass.
+
+    Frontend (.ts/.tsx):
+      exec: cd /home/node/.openclaw/workspace/Harvis/front_end/jfrontend && \
+        npm run type-check 2>&1 | tail -30
+      → Must show 0 errors. Fix TypeScript before committing.
+
+    Python (.py):
+      exec: python3 -m py_compile python_back_end/changed_file.py && echo "ok"
+      → Run on every .py file changed. Non-zero exit = syntax error. Fix first.
+
+    YAML (.yaml/.yml):
+      exec: python3 -c "
+      import yaml, sys
+      for f in sys.argv[1:]:
+          docs = list(yaml.safe_load_all(open(f)))
+          print(f'OK {f}: {len([d for d in docs if d])} docs')
+      " k8s-manifests/overlays/prod/changed.yaml
+      → Must print OK. Any YAMLError = do not commit.
+
+    Mixed changes → run ALL applicable checks.
 
     ## Available Tools
 
