@@ -403,7 +403,7 @@ async def document_save(
 
 # ─── File analyze ──────────────────────────────────────────────────────────────
 
-_KIMI_BASE_URL = os.getenv("MOONSHOT_BASE_URL", "https://api.moonshot.cn/v1")
+_KIMI_BASE_URL = os.getenv("MOONSHOT_BASE_URL", "https://api.moonshot.ai/v1")
 _UPLOADS_DIR = os.getenv("IMAGES_DIR", "/app/images")
 
 _VISION_PROMPT = """You are analyzing a document image. Extract its complete structure and content.

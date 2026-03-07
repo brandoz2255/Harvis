@@ -35,6 +35,89 @@ def set_research_agent_moonshot_key(api_key: str):
     logger.info("Moonshot API key set for research agents")
 
 
+# Module-level NVIDIA API key (set before streaming research starts)
+_nvidia_api_key: str = ""
+
+
+def set_research_agent_nvidia_key(api_key: str):
+    """Set the NVIDIA NIM API key for research synthesis"""
+    global _nvidia_api_key
+    _nvidia_api_key = api_key
+    logger.info("NVIDIA NIM API key set for research agents")
+
+
+class _CloudLLMClient:
+    """
+    Drop-in replacement for OllamaClient that routes synthesis to a cloud LLM.
+
+    Implements the same `.generate()` interface as OllamaClient so it can be
+    passed to quick_map_reduce / MapReduceProcessor without changes.
+    """
+
+    def __init__(self, provider: str, api_key: str, model_id: str):
+        self.provider = provider   # "nvidia" | "moonshot"
+        self.api_key = api_key
+        self.model_id = model_id
+
+    async def generate(self, prompt: str, model: str = None, **kwargs):
+        import time
+        from research.llm.ollama_client import ModelResponse
+
+        start = time.time()
+        try:
+            import httpx
+            if self.provider == "nvidia":
+                url = "https://integrate.api.nvidia.com/v1/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                }
+                payload = {
+                    "model": self.model_id,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": kwargs.get("temperature", 0.7),
+                    "max_tokens": 8192,
+                    "stream": False,
+                }
+            else:  # moonshot
+                url = "https://api.moonshot.ai/v1/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                }
+                payload = {
+                    "model": self.model_id,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": kwargs.get("temperature", 0.7),
+                    "max_tokens": 8192,
+                    "stream": False,
+                }
+
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
+                resp = await client.post(url, headers=headers, json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+
+            content = data["choices"][0]["message"]["content"]
+            return ModelResponse(
+                content=content,
+                model=self.model_id,
+                success=True,
+                processing_time=time.time() - start,
+                token_count=len(content.split()),
+            )
+        except Exception as exc:
+            logger.error(f"_CloudLLMClient.generate failed ({self.provider}): {exc}")
+            from research.llm.ollama_client import ModelResponse
+            return ModelResponse(
+                content="",
+                model=self.model_id,
+                success=False,
+                processing_time=time.time() - start,
+                error=str(exc),
+            )
+
+
 def research_agent(query: str, model: str = "mistral", use_advanced: bool = False):
     """
     Enhanced research agent that performs comprehensive web research
@@ -430,15 +513,37 @@ async def async_research_agent_streaming(
                     from research.synth.map_reduce import quick_map_reduce
                     from research.llm.model_policy import TaskType, get_model_for_task
                     from research.llm.ollama_client import OllamaClient
+                    from moonshot_api import is_moonshot_model, get_moonshot_model_id
 
-                    # Get synthesis model
-                    synthesis_model = get_model_for_task(TaskType.SYNTHESIS)
+                    # Select the right LLM client based on the requested model
+                    if model == "nvidia-kimi":
+                        if not _nvidia_api_key:
+                            raise Exception("NVIDIA API key not set for research synthesis")
+                        llm_client = _CloudLLMClient(
+                            provider="nvidia",
+                            api_key=_nvidia_api_key,
+                            model_id="moonshotai/kimi-k2.5",
+                        )
+                        synthesis_model = "moonshotai/kimi-k2.5"
+                    elif is_moonshot_model(model):
+                        moonshot_key = getattr(enhanced_research_agent_instance, "moonshot_api_key", "")
+                        if not moonshot_key:
+                            raise Exception("Moonshot API key not set for research synthesis")
+                        llm_client = _CloudLLMClient(
+                            provider="moonshot",
+                            api_key=moonshot_key,
+                            model_id=get_moonshot_model_id(model),
+                        )
+                        synthesis_model = get_moonshot_model_id(model)
+                    else:
+                        llm_client = OllamaClient()
+                        synthesis_model = get_model_for_task(TaskType.SYNTHESIS)
 
                     # Run map/reduce synthesis
                     map_results, reduce_result = await quick_map_reduce(
                         query=query,
                         chunks=ranked_chunks[:15],  # Top 15 chunks
-                        llm_client=OllamaClient(),
+                        llm_client=llm_client,
                         model=synthesis_model,
                         max_concurrent=3,
                     )

@@ -37,13 +37,15 @@ OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
 _CORPUS_CONFIG = {
     "code": {
         "table": "local_rag_corpus_code",
-        "model": "qwen3:embedding4b",
+        "model": "qwen3-embedding:latest",  # was qwen3:embedding4b — wrong name caused 404 → HF fallback → dim mismatch
+        "dims": 4096,
         "cast": "halfvec",
         "ops": "<=>",   # cosine distance
     },
     "docs": {
         "table": "local_rag_corpus_docs",
-        "model": "nomic-embed-text",
+        "model": "nomic-embed-text:latest",
+        "dims": 768,
         "cast": "vector",
         "ops": "<=>",
     },
@@ -158,6 +160,20 @@ async def rag_search(
         logger.error("rag_proxy: embedding failed: %s", exc)
         raise HTTPException(status_code=502, detail=f"Embedding error: {exc}")
 
+    # Validate dimensions before hitting pgvector — wrong dims cause cryptic DB errors
+    expected_dim = cfg["dims"]
+    if len(vec) != expected_dim:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "embedding_dim_mismatch",
+                "expected": expected_dim,
+                "got": len(vec),
+                "model": cfg["model"],
+                "hint": "Ollama returned wrong dims — model may have fallen back to HuggingFace",
+            },
+        )
+
     # Format as pgvector literal
     vec_str = "[" + ",".join(str(x) for x in vec) + "]"
     table = cfg["table"]
@@ -215,6 +231,9 @@ async def rag_health(
     """Check DB connectivity and embedding model availability."""
     _verify_openclaw_token(authorization)
 
+    ollama_url = OLLAMA_URL
+
+    # Check DB and row counts
     pool = getattr(request.app.state, "pg_pool", None)
     db_ok = False
     counts = {}
@@ -228,8 +247,33 @@ async def rag_health(
         except Exception as exc:
             logger.warning("rag_proxy health: db error: %s", exc)
 
+    # Check Ollama model availability
+    models_status: dict = {}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{ollama_url}/api/tags",
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as r:
+                tags_data = await r.json()
+                pulled = {m["name"] for m in tags_data.get("models", [])}
+
+        for ctx, cfg in _CORPUS_CONFIG.items():
+            model = cfg["model"]
+            # Match exact name or prefix (e.g. "qwen3-embedding" in "qwen3-embedding:latest")
+            available = model in pulled or any(
+                model.split(":")[0] == t.split(":")[0] for t in pulled
+            )
+            models_status[ctx] = {"name": model, "available": available}
+    except Exception as exc:
+        logger.warning("rag_proxy health: ollama tags error: %s", exc)
+        for ctx, cfg in _CORPUS_CONFIG.items():
+            models_status[ctx] = {"name": cfg["model"], "available": False}
+
+    all_models_ok = all(v["available"] for v in models_status.values())
+
     return {
-        "ok": db_ok,
+        "ok": db_ok and all_models_ok,
         "corpus_counts": counts,
-        "models": {ct: cfg["model"] for ct, cfg in _CORPUS_CONFIG.items()},
+        "models": models_status,
     }

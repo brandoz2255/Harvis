@@ -537,6 +537,30 @@ data:
     answering questions about the codebase. This prevents you from guessing at
     implementations that already exist.
 
+    ## Step 0 — Health Check First (always run before searching)
+
+    ```bash
+    curl -s http://harvis-ai-merged-backend:8000/rag/health \
+      -H "Authorization: Bearer $OPENCLAW_GATEWAY_TOKEN" | jq .
+    ```
+
+    Healthy response looks like:
+    ```json
+    {
+      "ok": true,
+      "corpus_counts": {"code": 2241, "docs": 500},
+      "models": {
+        "code": {"name": "qwen3-embedding:latest", "available": true},
+        "docs": {"name": "nomic-embed-text:latest", "available": true}
+      }
+    }
+    ```
+
+    If `ok: false` or a model shows `"available": false`:
+    - Do NOT call /rag/search — it will fail
+    - Tell the user "RAG is temporarily unavailable" and proceed without it
+    - If only docs is available, you can still search `context_type: "docs"`
+
     ## When to use
 
     - Before writing a new function or module: search for existing implementations

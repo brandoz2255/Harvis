@@ -4919,6 +4919,17 @@ async def research_chat(
                 set_research_agent_moonshot_key(moonshot_config["api_key"])
                 logger.info(f"🌙 Moonshot API key set for research agent")
 
+    # Check if using NVIDIA NIM (Kimi K2.5) and set API key for research synthesis
+    if req.model == "nvidia-kimi":
+        pool = getattr(request.app.state, "pg_pool", None)
+        if pool:
+            nvidia_config = await get_user_api_key(pool, current_user.id, "nvidia")
+            if nvidia_config and nvidia_config.get("api_key"):
+                from agent_research import set_research_agent_nvidia_key
+
+                set_research_agent_nvidia_key(nvidia_config["api_key"])
+                logger.info(f"🟢 NVIDIA API key set for research agent")
+
     async def stream_research():
         try:
             if not req.message:
