@@ -66,6 +66,17 @@ export interface WorkspaceSuggestion {
   model?: 'local' | 'kimi' | 'qwen3'  // preferred model from LLM signal
 }
 
+// ─── Kubectl Approval ─────────────────────────────────────────────────────────
+
+export interface KubectlPendingCommand {
+  approval_id: string
+  command: string
+  namespace?: string
+  timeout: number
+  requested_at: string   // ISO-8601
+  status: 'pending'
+}
+
 export type WorkspaceLogEventType =
   | 'token'
   | 'tool_call'
@@ -138,6 +149,9 @@ interface OpenClawState {
   finalSummary: string
   sseAbortController: AbortController | null
 
+  // Kubectl approval state
+  kubectlPending: KubectlPendingCommand[]
+
   // Actions
   setInstances: (instances: OpenClawInstance[]) => void
   selectInstance: (id: string | null) => void
@@ -173,6 +187,10 @@ interface OpenClawState {
   setSseAbortController: (controller: AbortController | null) => void
   closeWorkspace: () => void
 
+  // Kubectl approval actions
+  setKubectlPending: (pending: KubectlPendingCommand[]) => void
+  removeKubectlPending: (approvalId: string) => void
+
   // Computed
   getInstanceById: (id: string) => OpenClawInstance | undefined
   getTaskById: (id: string) => OpenClawTask | undefined
@@ -203,6 +221,7 @@ export const useOpenClawStore = create<OpenClawState>()(
     logEvents: [],
     finalSummary: '',
     sseAbortController: null,
+    kubectlPending: [],
 
     // Instance actions
     setInstances: (instances) => set({ instances }),
@@ -348,6 +367,17 @@ export const useOpenClawStore = create<OpenClawState>()(
         state.finalSummary = ''
         state.sseAbortController = null
         state.activeTab = 'dashboard'
+        state.kubectlPending = []
+      }),
+
+    // Kubectl approval actions
+    setKubectlPending: (pending) => set({ kubectlPending: pending }),
+
+    removeKubectlPending: (approvalId) =>
+      set((state) => {
+        state.kubectlPending = state.kubectlPending.filter(
+          (c) => c.approval_id !== approvalId
+        )
       }),
 
     // Computed
