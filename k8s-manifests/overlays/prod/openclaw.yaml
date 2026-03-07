@@ -1045,6 +1045,51 @@ data:
 
     ---
 
+    ## REQUIRED: Validation Gates Before Every Commit
+
+    Run the check for EVERY file type you touched. ALL must pass. No exceptions.
+    If any check fails — fix it first, then re-run, then commit.
+
+    ### Frontend (.ts / .tsx / Next.js)
+
+    exec: cd /home/node/.openclaw/workspace/Harvis/front_end/jfrontend && \
+      npm run type-check 2>&1 | tail -30
+
+    Must output "Found 0 errors" (or similar clean exit). If it errors, fix the
+    TypeScript before committing. Never commit with type errors.
+
+    ### Python backend (.py)
+
+    exec: cd /home/node/.openclaw/workspace/Harvis && \
+      python3 -m py_compile python_back_end/changed_file.py && echo "ok"
+
+    Run py_compile on every .py file you modified. If it exits non-zero, there is
+    a syntax error — fix it before committing.
+
+    ### YAML / K8s manifests (.yaml / .yml)
+
+    exec: python3 -c "
+    import yaml, sys
+    for f in sys.argv[1:]:
+        docs = list(yaml.safe_load_all(open(f)))
+        valid = [d for d in docs if d is not None]
+        print(f'OK {f}: {len(valid)} docs')
+    " k8s-manifests/overlays/prod/openclaw.yaml
+
+    Must print "OK <file>: N docs" for each file. Any YAMLError = do not commit.
+    Run this on EVERY yaml file you touched.
+
+    ### Decision table
+
+    | Files changed              | Run this check                  |
+    |----------------------------|---------------------------------|
+    | Any .ts / .tsx             | npm run type-check              |
+    | Any .py                    | python3 -m py_compile <file>    |
+    | Any .yaml / .yml           | python3 yaml.safe_load_all check|
+    | Mixed (e.g. .py + .yaml)   | Run ALL applicable checks       |
+
+    ---
+
     ## Git + PR Workflow
 
     Commit (specific files only, never git add .):
@@ -1076,6 +1121,7 @@ data:
     Use process for long background tasks
     Run memory_search before starting any non-trivial task
     Stage specific files — never git add .
+    Run validation gates before EVERY commit (type-check / py_compile / yaml check)
     Co-author trailer on every commit
     PR only for K8s changes
 
@@ -1489,8 +1535,6 @@ spec:
           env:
             - name: DATABASE_URL
               valueFrom:
-    - name: PYTHONPATH
-      value: "/python-extra"
                 secretKeyRef:
                   name: harvis-ai-openclaw-secret
                   key: database-url
@@ -1502,26 +1546,26 @@ spec:
               memory: 64Mi
               cpu: 100m
 
-# 3. Install python-docx for document generation tools
-# Installs to shared python-extra volume for use by OpenClaw agents.
-- name: install-python-docx
-  image: python:3.11-slim
-  command: ["sh", "-c"]
-  args:
-    - |
-      echo "Installing python-docx..."
-      pip install --target /python-extra python-docx
-      echo "python-docx installed!"
-  volumeMounts:
-    - name: python-extra
-      mountPath: /python-extra
-  resources:
-    requests:
-      memory: 64Mi
-      cpu: 50m
-    limits:
-      memory: 128Mi
-      cpu: 200m
+        # 3. Install python-docx for document generation tools
+        # Installs to shared python-extra volume for use by OpenClaw agents.
+        - name: install-python-docx
+          image: python:3.11-slim
+          command: ["sh", "-c"]
+          args:
+            - |
+              echo "Installing python-docx..."
+              pip install --target /python-extra python-docx
+              echo "python-docx installed!"
+          volumeMounts:
+            - name: python-extra
+              mountPath: /python-extra
+          resources:
+            requests:
+              memory: 64Mi
+              cpu: 50m
+            limits:
+              memory: 128Mi
+              cpu: 200m
 
 
       containers:
@@ -1615,6 +1659,11 @@ spec:
                   key: external-ollama-api-key
                   optional: true
 
+            # python-extra: path where install-python-docx wrote python-docx
+            # so OpenClaw agents can import it when running Python scripts
+            - name: PYTHONPATH
+              value: "/python-extra"
+
           volumeMounts:
             # PVC for all OpenClaw runtime state (sessions, logs, agent workspaces)
             - name: openclaw-data
@@ -1674,6 +1723,10 @@ spec:
               mountPath: /skills/harvis-planner/harvis_planner.md
               subPath: harvis_planner.md
               readOnly: true
+            # python-extra: shared emptyDir where install-python-docx puts python-docx
+            - name: python-extra
+              mountPath: /python-extra
+              readOnly: true
 
           # OpenClaw exposes health only as a WebSocket RPC method, not HTTP.
           # tcpSocket probes verify the port is bound and accepting connections.
@@ -1732,9 +1785,8 @@ spec:
         - name: harvis-planner-skill
           configMap:
             name: harvis-planner-skill
-
-    - name: python-extra
-      emptyDir: {}
+        - name: python-extra
+          emptyDir: {}
 ---
 # Service: ClusterIP only — OpenClaw is never exposed to the host or LoadBalancer.
 # Only reachable within the cluster from the Harvis backend pod.
