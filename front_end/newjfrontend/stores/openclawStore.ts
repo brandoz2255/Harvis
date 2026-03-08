@@ -63,7 +63,7 @@ export interface WorkspaceSuggestion {
   task_type_label: string
   task_brief: string
   reason: string
-  model?: 'local' | 'kimi' | 'qwen3'  // preferred model from LLM signal
+  model?: 'local' | 'kimi' | 'nvidia-kimi' | 'qwen3'  // preferred model from LLM signal
 }
 
 // ─── Kubectl Approval ─────────────────────────────────────────────────────────
@@ -138,13 +138,14 @@ interface OpenClawState {
   // UI State
   isWorkspaceActive: boolean
   isChatMinimized: boolean
-  activeTab: 'dashboard' | 'playbooks' | 'logs'
+  activeTab: 'dashboard' | 'playbooks' | 'logs' | 'agents'
+  selectedAgentId: string | null
 
   // Harvis Workspace session state
   suggestion: WorkspaceSuggestion | null
   workspaceId: string | null
   workspaceSessionId: string | null   // persists across launches for same user (resumable)
-  workspaceModel: 'local' | 'kimi' | 'qwen3'
+  workspaceModel: 'local' | 'kimi' | 'nvidia-kimi' | 'qwen3'
   logEvents: WorkspaceLogEvent[]
   finalSummary: string
   sseAbortController: AbortController | null
@@ -174,13 +175,14 @@ interface OpenClawState {
 
   setWorkspaceActive: (active: boolean) => void
   setChatMinimized: (minimized: boolean) => void
-  setActiveTab: (tab: 'dashboard' | 'playbooks' | 'logs') => void
+  setActiveTab: (tab: 'dashboard' | 'playbooks' | 'logs' | 'agents') => void
+  setSelectedAgentId: (id: string | null) => void
 
   // Harvis Workspace actions
   setSuggestion: (suggestion: WorkspaceSuggestion | null) => void
   setWorkspaceId: (id: string | null) => void
   setWorkspaceSessionId: (id: string | null) => void
-  setWorkspaceModel: (model: 'local' | 'kimi' | 'qwen3') => void
+  setWorkspaceModel: (model: 'local' | 'kimi' | 'nvidia-kimi' | 'qwen3') => void
   addLogEvent: (event: Omit<WorkspaceLogEvent, 'id' | 'timestamp'>) => void
   clearLogEvents: () => void
   setFinalSummary: (summary: string) => void
@@ -212,12 +214,13 @@ export const useOpenClawStore = create<OpenClawState>()(
     isWorkspaceActive: false,
     isChatMinimized: false,
     activeTab: 'dashboard' as const,
+    selectedAgentId: null,
 
     // Harvis Workspace initial state
     suggestion: null,
     workspaceId: null,
     workspaceSessionId: null,
-    workspaceModel: 'local' as const,
+    workspaceModel: 'kimi' as const,
     logEvents: [],
     finalSummary: '',
     sseAbortController: null,
@@ -327,6 +330,8 @@ export const useOpenClawStore = create<OpenClawState>()(
 
     setActiveTab: (tab) => set({ activeTab: tab }),
 
+    setSelectedAgentId: (id) => set({ selectedAgentId: id }),
+
     // Harvis Workspace actions
     setSuggestion: (suggestion) => set({ suggestion }),
 
@@ -367,6 +372,7 @@ export const useOpenClawStore = create<OpenClawState>()(
         state.finalSummary = ''
         state.sseAbortController = null
         state.activeTab = 'dashboard'
+        state.selectedAgentId = null
         state.kubectlPending = []
       }),
 

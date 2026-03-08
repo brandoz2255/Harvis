@@ -392,7 +392,7 @@ async def launch_workspace(
     session_id = req.session_id or f"ws-{workspace_id}"
     task_brief = _resolve_task_brief(req.task_brief, req.chat_history)
     pool = getattr(request.app.state, "pg_pool", None)
-    agent_id = req.agent_id if req.agent_id in ("main", "kimi", "gpt-oss", "qwen3") else "main"
+    agent_id = req.agent_id if req.agent_id in ("main", "kimi", "nvidia-kimi", "gpt-oss", "qwen3") else "main"
     started_epoch = time.monotonic()
 
     _start_workspace(

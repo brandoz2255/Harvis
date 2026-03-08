@@ -775,12 +775,14 @@ function HistoryTab() {
 
 // ─── Sidebar nav items ──────────────────────────────────────────────────────
 
-import { LayoutDashboard, BookOpen, ScrollText } from 'lucide-react'
+import { LayoutDashboard, BookOpen, ScrollText, Network } from 'lucide-react'
+import { AgentGraphView, AgentDetailPanel } from './graph'
 
 const SIDEBAR_ITEMS = [
   { key: 'dashboard' as const, icon: LayoutDashboard, label: 'Dashboard' },
   { key: 'playbooks' as const, icon: BookOpen, label: 'Playbooks' },
   { key: 'logs' as const, icon: ScrollText, label: 'Logs' },
+  { key: 'agents' as const, icon: Network, label: 'Agents' },
 ]
 
 // ─── AI response text deduplication ──────────────────────────────────────────
@@ -919,6 +921,8 @@ export function WorkspacePanel({ onContinueInChat }: { onContinueInChat?: (summa
     setActiveTab,
     setSuggestion,
     kubectlPending,
+    selectedAgentId,
+    setSelectedAgentId,
   } = useOpenClawStore()
 
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -1114,8 +1118,8 @@ export function WorkspacePanel({ onContinueInChat }: { onContinueInChat?: (summa
         {/* Kubectl approval widget — shown whenever there are pending commands */}
         <KubectlApprovalWidget />
 
-        {/* Stats bar — shown on dashboard/logs while there is activity */}
-        {activeTab !== 'playbooks' && (logEvents.length > 0 || !isRunning) && (
+        {/* Stats bar — shown on dashboard/logs while there is activity (not on agents tab) */}
+        {activeTab !== 'playbooks' && activeTab !== 'agents' && (logEvents.length > 0 || !isRunning) && (
           <StatsBar
             elapsedMs={elapsedMs}
             toolCallCount={toolCallCount}
@@ -1128,8 +1132,29 @@ export function WorkspacePanel({ onContinueInChat }: { onContinueInChat?: (summa
           />
         )}
 
-        {/* Body */}
-        <div className="flex-1 overflow-hidden" ref={scrollRef}>
+        {/* Body — Agents tab gets its own flex-row layout */}
+        {activeTab === 'agents' && (
+          <div className="flex flex-1 overflow-hidden relative">
+            <div className="flex-1 overflow-hidden relative">
+              <AgentGraphView
+                mode="workspace-store"
+                darkMode
+                height="100%"
+                onAgentSelect={(agent) => setSelectedAgentId(agent?.id ?? null)}
+              />
+            </div>
+            {selectedAgentId && (
+              <AgentDetailPanel
+                agentId={selectedAgentId}
+                logEvents={logEvents}
+                onClose={() => setSelectedAgentId(null)}
+              />
+            )}
+          </div>
+        )}
+
+        {/* Body — all other tabs */}
+        <div className={cn('flex-1 overflow-hidden', activeTab === 'agents' && 'hidden')} ref={scrollRef}>
           <ScrollArea className="h-full">
             <div className="px-4 py-3 space-y-0.5">
 

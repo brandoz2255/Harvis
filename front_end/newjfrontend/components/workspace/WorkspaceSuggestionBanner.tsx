@@ -8,9 +8,10 @@ import { useChatHistoryStore } from '@/stores/chatHistoryStore'
 import { cn } from '@/lib/utils'
 
 const MODEL_OPTIONS = [
+  { value: 'kimi' as const, label: 'Kimi K2.5', description: 'Moonshot (fast)' },
+  { value: 'nvidia-kimi' as const, label: 'Kimi K2.5 NVIDIA', description: 'NVIDIA NIM (thinking mode)' },
   { value: 'local' as const, label: 'Local AI', description: 'Local Ollama model' },
-  { value: 'kimi' as const, label: 'Kimi K2.5', description: 'Moonshot via proxy' },
-  { value: 'qwen3' as const, label: 'Qwen3 235B', description: 'Cloud Ollama (qwen3:235b-a22b-q8_0)' },
+  { value: 'qwen3' as const, label: 'Qwen3 235B', description: 'Cloud Ollama' },
 ]
 
 const TASK_TYPE_ICONS: Record<string, string> = {
@@ -140,7 +141,10 @@ export function WorkspaceSuggestionBanner({ chatHistory }: WorkspaceSuggestionBa
           // Pass the real chat session UUID so the workspace directory is
           // deterministic and tied to this conversation (not a random ws-* id).
           session_id: currentSession?.id ?? undefined,
-          agent_id: workspaceModel === 'kimi' ? 'kimi' : workspaceModel === 'qwen3' ? 'qwen3' : 'main',
+          agent_id: workspaceModel === 'kimi' ? 'kimi'
+                  : workspaceModel === 'qwen3' ? 'qwen3'
+                  : workspaceModel === 'nvidia-kimi' ? 'nvidia-kimi'
+                  : 'main',
         }),
       })
 

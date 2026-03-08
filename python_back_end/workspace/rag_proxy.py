@@ -32,6 +32,8 @@ logger = logging.getLogger(__name__)
 
 OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
+NVIDIA_RERANK_URL = "https://ai.api.nvidia.com/v1/retrieval/nvidia/reranking"
 
 # Model config keyed by context_type
 _CORPUS_CONFIG = {
@@ -94,6 +96,7 @@ class SearchRequest(BaseModel):
     context_type: str = "code"   # "code" | "docs"
     top_k: int = 5
     score_threshold: float = 0.3
+    rerank: bool = False          # set True to apply NVIDIA reranker after vector search
 
     @field_validator("context_type")
     @classmethod
@@ -128,6 +131,39 @@ class SearchResponse(BaseModel):
     context_type: str
     results: List[SearchResult]
     total: int
+    reranked: bool = False
+
+
+# ─── Reranker ────────────────────────────────────────────────────────────────
+
+async def _rerank_results(query: str, results: List[SearchResult], api_key: str) -> List[SearchResult]:
+    """Re-score results using NVIDIA nv-rerank-qa-mistral-4b:1.
+
+    Falls back to original order (with a warning) if the API key is missing or the call fails.
+    """
+    payload = {
+        "model": "nv-rerank-qa-mistral-4b:1",
+        "query": {"text": query},
+        "passages": [{"text": r.text[:2000]} for r in results],
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+        async with session.post(NVIDIA_RERANK_URL, json=payload, headers=headers) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                raise RuntimeError(f"NVIDIA reranker error ({resp.status}): {text[:200]}")
+            data = await resp.json()
+    rankings = data.get("rankings", [])
+    if not rankings:
+        return results
+    # rankings is a list of {"index": int, "logit": float} sorted by score
+    # We re-sort our results list by the reranker's logit score (descending)
+    indexed = {r["index"]: r.get("logit", 0.0) for r in rankings}
+    return sorted(results, key=lambda r_: indexed.get(results.index(r_), 0.0), reverse=True)
 
 
 # ─── Endpoints ───────────────────────────────────────────────────────────────
@@ -215,11 +251,24 @@ async def rag_search(
         req.context_type, req.query[:60], req.top_k, len(results),
     )
 
+    reranked = False
+    if req.rerank and results:
+        if not NVIDIA_API_KEY:
+            logger.warning("rag_proxy: rerank requested but NVIDIA_API_KEY not set, skipping")
+        else:
+            try:
+                results = await _rerank_results(req.query, results, NVIDIA_API_KEY)
+                reranked = True
+                logger.info("rag_proxy: reranked %d results", len(results))
+            except Exception as exc:
+                logger.warning("rag_proxy: reranker failed, using original order: %s", exc)
+
     return SearchResponse(
         query=req.query,
         context_type=req.context_type,
         results=results,
         total=len(results),
+        reranked=reranked,
     )
 
 

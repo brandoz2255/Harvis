@@ -172,8 +172,11 @@ export function useAgentStream({
       };
 
       ws.onerror = () => {
-        setError(new Error('WebSocket error'));
+        const error = new Error('WebSocket connection error');
+        setError(error);
+        setIsConnected(false);
         setIsConnecting(false);
+        onError?.(error);
       };
 
       wsRef.current = ws;

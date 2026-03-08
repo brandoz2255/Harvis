@@ -211,6 +211,13 @@ export function getAgentDuration(agent: AgentNode): string {
   return `${seconds}s`;
 }
 
+/** AgentNodeData — used by ReactFlow node components and AgentGraphView */
+export interface AgentNodeData extends AgentNode {
+  connectionCount?: number;
+  isSelected?: boolean;
+  isDimmed?: boolean;
+}
+
 /** Format token count nicely */
 export function formatTokenCount(count: number): string {
   if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;

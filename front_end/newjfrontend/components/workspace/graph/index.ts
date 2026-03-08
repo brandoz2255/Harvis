@@ -8,3 +8,4 @@ export { GraphSidebar } from './GraphSidebar';
 // Live Agent Graph Components
 export { AgentGraphView } from './AgentGraphView';
 export { AgentNode } from './AgentNode';
+export { AgentDetailPanel } from './AgentDetailPanel';
