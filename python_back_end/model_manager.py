@@ -529,15 +529,24 @@ def load_whisper_model():
                             
                             logger.info(f"🎯 Loading cached Whisper '{model_name}' model ({file_size} bytes)...")
 
-                            # Load from cache (no signal timeout for thread-safety)
+                            # Load from cache - try GPU first, fall back to CPU
                             try:
                                 logger.info(f"📥 Loading from cache: {cache_dir}")
-                                whisper_model = whisper.load_model(model_name, device="cuda", download_root=cache_dir)
-                                logger.info(f"✅ Successfully loaded cached Whisper '{model_name}' model on GPU")
+                                if not _cuda_is_broken:
+                                    whisper_model = whisper.load_model(model_name, device="cuda", download_root=cache_dir)
+                                else:
+                                    whisper_model = whisper.load_model(model_name, device="cpu", download_root=cache_dir)
+                                logger.info(f"✅ Successfully loaded cached Whisper '{model_name}' model")
                                 return whisper_model
                             except Exception as load_e:
-                                logger.warning(f"⚠️ Failed to load cached {model_name}: {load_e}")
-                                continue
+                                logger.warning(f"⚠️ Failed to load cached {model_name} on GPU: {load_e}")
+                                try:
+                                    whisper_model = whisper.load_model(model_name, device="cpu", download_root=cache_dir)
+                                    logger.info(f"✅ Loaded cached Whisper '{model_name}' on CPU (GPU fallback)")
+                                    return whisper_model
+                                except Exception as cpu_e:
+                                    logger.warning(f"⚠️ CPU fallback also failed for {model_name}: {cpu_e}")
+                                    continue
             else:
                 logger.info("📁 Creating Whisper cache directory...")
                 os.makedirs(cache_dir, exist_ok=True)
@@ -607,22 +616,30 @@ def load_whisper_model():
                 if success:
                     logger.info(f"✅ Downloaded {model_name} model, now loading with GPU...")
                     
-                    # Load freshly downloaded model (no signal timeout for thread-safety)
+                    # Load freshly downloaded model - try GPU then CPU
                     try:
-                        whisper_model = whisper.load_model(model_name, device="cuda")
-                        logger.info(f"✅ Successfully loaded Whisper '{model_name}' model on GPU")
+                        if not _cuda_is_broken:
+                            whisper_model = whisper.load_model(model_name, device="cuda")
+                        else:
+                            whisper_model = whisper.load_model(model_name, device="cpu")
+                        logger.info(f"✅ Successfully loaded Whisper '{model_name}' model")
                         break
                     except Exception as load_e:
-                        logger.error(f"❌ Failed to load downloaded {model_name}: {load_e}")
-                        # Remove corrupted download
+                        logger.warning(f"⚠️ GPU load failed for {model_name}: {load_e}")
                         try:
-                            corrupted_path = os.path.join(cache_dir, f"{model_name}.pt")
-                            if os.path.exists(corrupted_path):
-                                os.remove(corrupted_path)
-                                logger.info(f"🗑️ Removed corrupted {model_name} model")
-                        except:
-                            pass
-                        continue
+                            whisper_model = whisper.load_model(model_name, device="cpu")
+                            logger.info(f"✅ Loaded Whisper '{model_name}' on CPU (GPU fallback)")
+                            break
+                        except Exception as cpu_e:
+                            logger.error(f"❌ Failed to load downloaded {model_name} on CPU: {cpu_e}")
+                            try:
+                                corrupted_path = os.path.join(cache_dir, f"{model_name}.pt")
+                                if os.path.exists(corrupted_path):
+                                    os.remove(corrupted_path)
+                                    logger.info(f"🗑️ Removed corrupted {model_name} model")
+                            except:
+                                pass
+                            continue
                 else:
                     logger.warning(f"{model_name} model download failed: {error}")
                     if model_name == 'small':  # Last attempt
@@ -1160,42 +1177,152 @@ def transcribe_with_whisper_optimized(audio_path, auto_unload=True):
             logger.info("ℹ️ Keeping Whisper model loaded (auto_unload=False)")
         # System whisper doesn't need unloading since it's not loaded in Python
 
-def generate_speech_optimized(text, audio_prompt=None, exaggeration=0.5, temperature=0.6, cfg_weight=2.5, auto_unload=True):
-    """
-    Generate speech with VRAM optimization and optional auto-unload.
+def _generate_via_tts_service(text):
+    """Fallback: generate speech via the tts-service container (SpeechT5)."""
+    import httpx
+    import numpy as np
+    import io
+    import wave
 
-    Parameters tuned to prevent hallucination:
-    - temperature=0.6 (lower = more stable, less random)
-    - cfg_weight=2.5 (higher = follows input text more closely)
-    """
-    logger.info(f"🔊 Starting VRAM-optimized TTS generation for: {text[:50]}...")
-    logger.info(f"🔧 TTS params: temp={temperature}, cfg={cfg_weight}, exag={exaggeration}")
+    tts_url = os.environ.get("TTS_URL", "http://tts-service:8001")
+    logger.info(f"🔄 TTS fallback: calling tts-service at {tts_url}/generate/speech")
 
-    # Load TTS with optimization
-    tts_model = use_tts_model_optimized()
+    resp = httpx.post(
+        f"{tts_url}/generate/speech",
+        json={"text": text, "voice_id": "__default__"},
+        timeout=120.0,
+    )
 
-    if tts_model is None:
-        logger.error("❌ TTS model is unavailable - cannot generate speech")
-        # Return a placeholder response instead of crashing
+    if resp.status_code != 200:
+        logger.error(f"❌ tts-service returned {resp.status_code}: {resp.text[:200]}")
         return None, None
 
+    data = resp.json()
+    if not data.get("success"):
+        logger.error(f"❌ tts-service generation failed: {data}")
+        return None, None
+
+    audio_url = data.get("audio_url", "")
+    filename = audio_url.split("/")[-1] if audio_url else ""
+    if not filename:
+        logger.error("❌ tts-service returned no audio filename")
+        return None, None
+
+    audio_resp = httpx.get(f"{tts_url}/audio/{filename}", timeout=30.0)
+    if audio_resp.status_code != 200:
+        logger.error(f"❌ Failed to fetch audio from tts-service: {audio_resp.status_code}")
+        return None, None
+
+    with io.BytesIO(audio_resp.content) as buf:
+        with wave.open(buf, "rb") as wf:
+            sr = wf.getframerate()
+            n_frames = wf.getnframes()
+            raw = wf.readframes(n_frames)
+            width = wf.getsampwidth()
+
+    dtype = {1: np.int8, 2: np.int16, 4: np.int32}.get(width, np.int16)
+    wav = np.frombuffer(raw, dtype=dtype).astype(np.float32)
+    if dtype == np.int16:
+        wav /= 32768.0
+    elif dtype == np.int32:
+        wav /= 2147483648.0
+
+    logger.info(f"✅ tts-service fallback: got {len(wav)} samples at {sr}Hz")
+    return sr, wav
+
+
+def generate_speech_optimized(text, audio_prompt=None, exaggeration=0.5, temperature=0.6, cfg_weight=2.5, auto_unload=True):
+    """
+    Generate speech using Qwen3-TTS (primary) with tts-service fallback.
+
+    Qwen3-TTS clones the Harvis voice from harvis_voice.mp3 and caches the
+    speaker embedding so subsequent calls are fast.
+    """
+    logger.info(f"🔊 Starting TTS generation for: {text[:50]}...")
+
+    # Primary: Qwen3-TTS with voice cloning
     try:
-        # Generate speech
-        result = generate_speech(text, tts_model, audio_prompt, exaggeration, temperature, cfg_weight)
-
-        logger.info("✅ TTS generation completed")
-        return result
-
+        from qwen3_tts import load_qwen_tts_model, generate_qwen_speech_chunked
+        ref_path = audio_prompt or os.path.abspath("harvis_voice.mp3")
+        qwen_interface = load_qwen_tts_model()
+        sr, wav = generate_qwen_speech_chunked(
+            text=text,
+            interface=qwen_interface,
+            ref_audio=ref_path,
+            temperature=0.3,
+            repetition_penalty=1.1,
+        )
+        logger.info(f"✅ TTS engine=qwen3: {len(wav)} samples at {sr}Hz")
+        return sr, wav, "qwen3"
     except Exception as e:
-        logger.error(f"❌ TTS generation failed: {e}")
-        raise
+        logger.warning(f"⚠️ Qwen3-TTS failed: {e}, trying Chatterbox fallback")
+
+    # Backup: Chatterbox (if installed/healthy)
+    tts_model = None
+    try:
+        tts_model = use_tts_model_optimized()
+        if tts_model is not None:
+            sr, wav = generate_speech(
+                text=text,
+                model=tts_model,
+                audio_prompt=audio_prompt,
+                exaggeration=exaggeration,
+                temperature=temperature,
+                cfg_weight=cfg_weight,
+            )
+            logger.info(f"✅ TTS engine=chatterbox: {len(wav)} samples at {sr}Hz")
+            return sr, wav, "chatterbox"
+    except Exception as chatterbox_e:
+        logger.warning(f"⚠️ Chatterbox fallback failed: {chatterbox_e}, trying tts-service")
     finally:
-        # Automatically unload TTS to free VRAM (configurable)
-        if auto_unload:
-            logger.info("🗑️ Auto-unloading TTS after generation")
-            unload_tts_model()
-        else:
-            logger.info("ℹ️ Keeping TTS model loaded (auto_unload=False)")
+        if tts_model is not None and auto_unload:
+            try:
+                unload_tts_model()
+            except Exception as unload_e:
+                logger.warning(
+                    "⚠️ Failed to unload TTS model cleanly: %s",
+                    unload_e,
+                    exc_info=True,
+                )
+
+    # Fallback: tts-service container (SpeechT5)
+    try:
+        sr, wav = _generate_via_tts_service(text)
+        if sr is not None and wav is not None:
+            logger.info(f"✅ TTS engine=tts-service: {len(wav)} samples at {sr}Hz")
+        return sr, wav, "tts-service"
+    except Exception as fallback_e:
+        logger.error(f"❌ tts-service fallback also failed: {fallback_e}")
+        return None, None, "none"
+
+
+def generate_speech_unified(
+    text,
+    mode: str = "interactive",
+    voice_model: Optional[str] = None,
+    audio_prompt: Optional[str] = None,
+    **kwargs,
+):
+    """
+    Backward-compatible unified entrypoint expected by main.py.
+    Routes interactive generation to the optimized Harvis voice path.
+    """
+    if mode == "interactive":
+        return generate_speech_optimized(
+            text=text,
+            audio_prompt=audio_prompt,
+            exaggeration=kwargs.get("exaggeration", 0.5),
+            temperature=kwargs.get("temperature", 0.6),
+            cfg_weight=kwargs.get("cfg_weight", 2.5),
+            auto_unload=kwargs.get("auto_unload", True),
+        )
+    return generate_speech_smart(
+        text=text,
+        mode=mode,
+        voice_model=voice_model,
+        audio_prompt=audio_prompt,
+        **kwargs,
+    )
 
 # ─── Model Access Functions ─────────────────────────────────────────────────
 def get_tts_model():

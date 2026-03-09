@@ -170,7 +170,7 @@ export default function ResizablePanel({
         onMouseLeave={() => setIsHovering(false)}
         className={`
           z-50 transition-colors duration-150
-          ${isDragging ? 'bg-purple-500' : isHovering ? 'bg-purple-400/50' : 'bg-transparent hover:bg-purple-400/30'}
+          ${isDragging ? 'bg-blue-500' : isHovering ? 'bg-blue-400/50' : 'bg-transparent hover:bg-blue-400/30'}
         `}
       >
         {/* Visual indicator on hover/drag */}
@@ -183,7 +183,7 @@ export default function ResizablePanel({
           >
             <div
               className={`
-                bg-purple-500 rounded-full
+                bg-blue-500 rounded-full
                 ${direction === 'horizontal' ? 'w-1 h-8' : 'w-8 h-1'}
               `}
             />

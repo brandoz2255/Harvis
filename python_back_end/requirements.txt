@@ -23,10 +23,11 @@ torch==2.6.0
 torchaudio==2.6.0
 soundfile
 openai-whisper
+qwen-tts
 tavily-python
 
-# TTS - our bread and butter!
-chatterbox-tts
+# TTS engines
+# chatterbox-tts  # Optional backup TTS engine (heavier)
 langchain
 langchain-community
 langchain-openai

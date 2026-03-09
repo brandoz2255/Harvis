@@ -475,7 +475,7 @@ export default function PodcastView({ notebookId, notebookTitle, sources, notes 
       <div className="w-96 flex-shrink-0 border-r border-gray-800 flex flex-col overflow-hidden">
         <div className="p-6 border-b border-gray-800">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-orange-500 to-pink-500 flex items-center justify-center">
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500 to-cyan-500 flex items-center justify-center">
               <Mic className="w-5 h-5 text-white" />
             </div>
             <div>
@@ -898,7 +898,7 @@ export default function PodcastView({ notebookId, notebookTitle, sources, notes 
           <button
             onClick={handleGenerate}
             disabled={isGenerating || !title.trim() || totalSelected === 0}
-            className="w-full py-3.5 bg-gradient-to-r from-orange-500 to-pink-500 text-white rounded-xl hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-2 font-medium shadow-lg shadow-orange-500/20"
+            className="w-full py-3.5 bg-gradient-to-r from-blue-500 to-cyan-500 text-white rounded-xl hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-2 font-medium shadow-lg shadow-blue-500/20"
           >
             {isGenerating ? (
               <>
@@ -999,7 +999,7 @@ export default function PodcastView({ notebookId, notebookTitle, sources, notes 
                 <button
                   onClick={handleGenerateAudioFromEditedScript}
                   disabled={isGeneratingAudioFromDraft || draftTranscript.length === 0}
-                  className="px-4 py-2 bg-gradient-to-r from-orange-500 to-pink-500 text-white rounded-lg hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium flex items-center gap-2"
+                  className="px-4 py-2 bg-gradient-to-r from-blue-500 to-cyan-500 text-white rounded-lg hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium flex items-center gap-2"
                 >
                   {isGeneratingAudioFromDraft ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mic className="w-4 h-4" />}
                   Generate Audio from Edited Script
@@ -1025,7 +1025,7 @@ export default function PodcastView({ notebookId, notebookTitle, sources, notes 
             </div>
           ) : podcasts.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-64 text-center">
-              <div className="w-16 h-16 mb-6 rounded-2xl bg-gradient-to-br from-orange-500/20 to-pink-500/20 flex items-center justify-center">
+              <div className="w-16 h-16 mb-6 rounded-2xl bg-gradient-to-br from-blue-500/20 to-cyan-500/20 flex items-center justify-center">
                 <Mic className="w-8 h-8 text-gray-500" />
               </div>
               <h4 className="text-lg font-medium text-white mb-2">No podcasts yet</h4>

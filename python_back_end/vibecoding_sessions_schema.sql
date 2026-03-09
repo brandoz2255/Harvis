@@ -2,7 +2,7 @@
 -- This schema manages VibeCode development sessions with container persistence
 
 -- Table for vibe sessions
-CREATE TABLE IF NOT EXISTS vibe_sessions (
+CREATE TABLE IF NOT EXISTS vibecoding_sessions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     session_id VARCHAR(255) UNIQUE NOT NULL,
     user_id INTEGER NOT NULL,
@@ -18,9 +18,9 @@ CREATE TABLE IF NOT EXISTS vibe_sessions (
     CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
--- Indexes for vibe_sessions
-CREATE INDEX IF NOT EXISTS idx_vibe_sessions_user ON vibe_sessions(user_id);
-CREATE INDEX IF NOT EXISTS idx_vibe_sessions_status ON vibe_sessions(status);
+-- Indexes for vibecoding_sessions
+CREATE INDEX IF NOT EXISTS idx_vibecoding_sessions_user ON vibecoding_sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_vibecoding_sessions_status ON vibecoding_sessions(status);
 
 -- Table for user preferences
 CREATE TABLE IF NOT EXISTS user_prefs (
@@ -50,8 +50,8 @@ END;
 $$ language 'plpgsql';
 
 -- Apply triggers to tables
-CREATE TRIGGER update_vibe_sessions_updated_at 
-    BEFORE UPDATE ON vibe_sessions 
+CREATE TRIGGER update_vibecoding_sessions_updated_at 
+    BEFORE UPDATE ON vibecoding_sessions 
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
 CREATE TRIGGER update_user_prefs_updated_at 

@@ -36,6 +36,8 @@ class IngestionService:
     - Storing chunks in the database
     """
 
+    _working_model: str | None = None
+
     def __init__(self, manager: NotebookManager):
         self.manager = manager
 
@@ -453,82 +455,47 @@ class IngestionService:
         return chunks
 
     async def _get_embedding(self, text: str) -> Optional[List[float]]:
-        """Get embedding vector for text using Ollama with multiple model fallbacks"""
-        cloud_ollama_url = os.getenv("OLLAMA_CLOUD_URL", "https://harvis.example.com/ollama")
-        
-        # List of embedding models to try (in order of preference)
-        # Ollama can generate embeddings from any model, not just embedding-specific ones
+        """Get embedding vector for text using Ollama with cached model selection"""
+        # If we already found a working model, use it directly
+        if IngestionService._working_model:
+            result = self._try_embedding(OLLAMA_URL, IngestionService._working_model, text)
+            if result is not None:
+                return result
+            IngestionService._working_model = None
+
+        # Prioritize actually-installed embedding models first
         embedding_models = [
-            EMBEDDING_MODEL,  # nomic-embed-text (preferred)
+            "qwen3-embedding:4b",
+            EMBEDDING_MODEL,  # nomic-embed-text
             "mxbai-embed-large",
-            "all-minilm",
-            "codellama:7b",  # Available on local
-            "deepseek-coder:6.7b",  # Available on local
-            "gpt-oss:latest",  # Available on local
-            "llama3.2",
             "mistral",
+            "gpt-oss:latest",
         ]
-        
-        # Try local Ollama first with multiple models
+
         for model in embedding_models:
-            try:
-                response = requests.post(
-                    f"{OLLAMA_URL}/api/embeddings",
-                    json={
-                        "model": model,
-                        "prompt": text[:8000]  # Limit text length
-                    },
-                    timeout=60
-                )
+            result = self._try_embedding(OLLAMA_URL, model, text)
+            if result is not None:
+                IngestionService._working_model = model
+                logger.info(f"Locked embedding model to: {model}")
+                return result
 
-                if response.status_code == 200:
-                    data = response.json()
-                    embedding = data.get("embedding")
-                    if embedding:
-                        logger.info(f"Got embedding using local Ollama model: {model}")
-                        return embedding
-                elif response.status_code == 404:
-                    logger.debug(f"Local model {model} not found, trying next...")
-                    continue
-                else:
-                    logger.warning(f"Local Ollama embedding failed with {model}: {response.status_code}")
-                    
-            except requests.exceptions.ConnectionError:
-                logger.warning(f"Local Ollama not accessible, will try cloud...")
-                break
-            except Exception as e:
-                logger.warning(f"Local Ollama error with {model}: {e}")
-                continue
+        logger.error("All embedding models failed")
+        return None
 
-        # Try cloud Ollama as fallback with multiple models
-        for model in embedding_models:
-            try:
-                response = requests.post(
-                    f"{cloud_ollama_url}/api/embeddings",
-                    json={
-                        "model": model,
-                        "prompt": text[:8000]
-                    },
-                    timeout=60
-                )
-
-                if response.status_code == 200:
-                    data = response.json()
-                    embedding = data.get("embedding")
-                    if embedding:
-                        logger.info(f"Got embedding using cloud Ollama model: {model}")
-                        return embedding
-                elif response.status_code == 404:
-                    logger.debug(f"Cloud model {model} not found, trying next...")
-                    continue
-                else:
-                    logger.warning(f"Cloud Ollama embedding failed with {model}: {response.status_code}")
-
-            except Exception as e:
-                logger.warning(f"Cloud Ollama error with {model}: {e}")
-                continue
-
-        logger.error("All embedding providers and models failed")
+    def _try_embedding(self, base_url: str, model: str, text: str) -> Optional[List[float]]:
+        """Try to get an embedding from a specific model. Returns None on failure."""
+        try:
+            response = requests.post(
+                f"{base_url}/api/embeddings",
+                json={"model": model, "prompt": text[:8000]},
+                timeout=60
+            )
+            if response.status_code == 200:
+                embedding = response.json().get("embedding")
+                if embedding:
+                    return embedding
+        except Exception:
+            pass
         return None
 
     def _normalize_embedding_dimension(self, embedding: List[float], target_dim: int) -> List[float]:

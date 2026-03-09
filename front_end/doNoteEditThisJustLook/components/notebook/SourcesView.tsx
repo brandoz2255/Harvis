@@ -77,9 +77,9 @@ export default function SourcesView({
   const processingCount = sources.filter(s => s.status === 'processing' || s.status === 'pending').length
 
   return (
-    <div className="flex-1 flex flex-col overflow-hidden bg-[#0a0a0a]">
+    <div className="flex-1 flex flex-col overflow-hidden bg-background">
       {/* Header */}
-      <div className="flex items-center justify-between px-6 py-4 border-b border-gray-800">
+      <div className="flex items-center justify-between px-6 py-4 border-b border-border">
         <div className="flex items-center gap-4">
           <h2 className="text-lg font-semibold text-white">Sources</h2>
           <div className="flex items-center gap-2 text-sm text-gray-400">
@@ -104,7 +104,7 @@ export default function SourcesView({
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="Search sources..."
-              className="w-64 pl-9 pr-3 py-2 text-sm bg-[#111111] border border-gray-800 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              className="w-64 pl-9 pr-3 py-2 text-sm bg-card border border-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
             />
           </div>
 
@@ -115,7 +115,7 @@ export default function SourcesView({
               className={`flex items-center gap-2 px-3 py-2 text-sm rounded-lg transition-colors ${
                 filterType !== 'all'
                   ? 'bg-blue-500/10 text-blue-400 border border-blue-500/30'
-                  : 'text-gray-400 hover:text-white hover:bg-gray-800 border border-gray-800'
+                  : 'text-gray-400 hover:text-white hover:bg-gray-800 border border-border'
               }`}
             >
               <Filter className="w-4 h-4" />
@@ -125,7 +125,7 @@ export default function SourcesView({
             {showFilterMenu && (
               <>
                 <div className="fixed inset-0 z-10" onClick={() => setShowFilterMenu(false)} />
-                <div className="absolute right-0 top-full mt-1 bg-[#1a1a1a] border border-gray-800 rounded-lg shadow-xl py-1 z-20 min-w-[140px]">
+                <div className="absolute right-0 top-full mt-1 bg-popover border border-border rounded-lg shadow-xl py-1 z-20 min-w-[140px]">
                   <button
                     onClick={() => {
                       setFilterType('all')
@@ -160,7 +160,7 @@ export default function SourcesView({
           <div className="relative">
             <button
               onClick={() => setShowSortMenu(!showSortMenu)}
-              className="flex items-center gap-2 px-3 py-2 text-sm text-gray-400 hover:text-white hover:bg-gray-800 rounded-lg transition-colors border border-gray-800"
+              className="flex items-center gap-2 px-3 py-2 text-sm text-gray-400 hover:text-white hover:bg-gray-800 rounded-lg transition-colors border border-border"
             >
               <SortAsc className="w-4 h-4" />
               Sort
@@ -169,7 +169,7 @@ export default function SourcesView({
             {showSortMenu && (
               <>
                 <div className="fixed inset-0 z-10" onClick={() => setShowSortMenu(false)} />
-                <div className="absolute right-0 top-full mt-1 bg-[#1a1a1a] border border-gray-800 rounded-lg shadow-xl py-1 z-20 min-w-[140px]">
+                <div className="absolute right-0 top-full mt-1 bg-popover border border-border rounded-lg shadow-xl py-1 z-20 min-w-[140px]">
                   {[
                     { id: 'date', label: 'Date added' },
                     { id: 'name', label: 'Name' },
@@ -194,7 +194,7 @@ export default function SourcesView({
           </div>
 
           {/* View Toggle */}
-          <div className="flex items-center bg-[#111111] border border-gray-800 rounded-lg p-0.5">
+          <div className="flex items-center bg-card border border-border rounded-lg p-0.5">
             <button
               onClick={() => setViewMode('grid')}
               className={`p-1.5 rounded ${
@@ -297,7 +297,7 @@ export default function SourcesView({
 
       {/* Selection Actions Bar */}
       {selectedSources.size > 0 && (
-        <div className="border-t border-gray-800 px-6 py-3 bg-[#111111] flex items-center justify-between">
+        <div className="border-t border-border px-6 py-3 bg-card flex items-center justify-between">
           <span className="text-sm text-gray-400">
             {selectedSources.size} source{selectedSources.size !== 1 ? 's' : ''} selected
           </span>

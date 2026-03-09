@@ -19,6 +19,14 @@ from .proxy import router as proxy_router
 from .auth_github import router as auth_github_router, auth_router as auth_github_legacy_router
 from .repo_import import router as repo_import_router
 
+try:
+    from .ide_ai import router as ide_ai_router
+except ImportError as _e:
+    import logging as _logging
+    _logging.getLogger(__name__).warning(f"ide_ai module unavailable: {_e}")
+    from fastapi import APIRouter as _APIRouter
+    ide_ai_router = _APIRouter()
+
 __all__ = [
     "sessions_router",
     "models_router", 
@@ -34,4 +42,5 @@ __all__ = [
     "auth_github_router",
     "auth_github_legacy_router",
     "repo_import_router",
+    "ide_ai_router",
 ]

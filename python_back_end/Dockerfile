@@ -56,8 +56,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install dependencies in controlled order to avoid conflicts
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# Install numpy first with constraint compatible with chatterbox-tts (<1.26.0)
-RUN pip install --no-cache-dir "numpy>=1.24.0,<1.26.0"
+# Install numpy first (pandas/transitive deps require >=1.26.0)
+RUN pip install --no-cache-dir "numpy>=1.26.0,<2.0.0"
 
 # NOTE: PyTorch (torch, torchvision, torchaudio) already installed in base image
 # No need to install PyTorch separately - saves ~8GB and eliminates CI/CD layer size issues
@@ -68,8 +68,18 @@ RUN pip install --no-cache-dir --no-index --find-links=/wheels /wheels/* \
   && rm -rf /wheels \
   && pip cache purge
 
-# App user
-RUN useradd -m -u 1001 -s /bin/bash appuser
+# Docker CLI for vibecoding container management
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  docker.io \
+  && rm -rf /var/lib/apt/lists/*
+
+# Reinstall Python docker package to override any system docker-py conflict
+RUN pip install --no-cache-dir --force-reinstall "docker>=7.0.0"
+
+# App user with docker group access
+RUN useradd -m -u 1001 -s /bin/bash appuser \
+  && groupadd -g 999 dockerhost || true \
+  && usermod -aG 999 appuser || true
 
 # Copy application code and scripts
 WORKDIR /app

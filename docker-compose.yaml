@@ -54,6 +54,8 @@ services:
       dockerfile: Dockerfile
     container_name: harvis-backend
     restart: unless-stopped
+    group_add:
+      - "984"  # Host docker socket GID - gives appuser access to /var/run/docker.sock
     ports:
       - "8000:8000"
     environment:
@@ -72,6 +74,10 @@ services:
       - ml-models-cache:/models-cache
       - embedding-data:/app/embedding
       - /tmp:/tmp
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./python_back_end/main.py:/app/main.py:ro
+      - ./python_back_end/notebooks:/app/notebooks:ro
+      - ./python_back_end/vibecoding:/app/vibecoding:ro
     depends_on:
       ollama:
         condition: service_started

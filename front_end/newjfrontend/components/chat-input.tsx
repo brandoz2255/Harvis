@@ -381,7 +381,6 @@ export function ChatInput({ onSend, isLoading, isResearchMode, selectedModel, se
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: 1,
-          sampleRate: 16000,
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true

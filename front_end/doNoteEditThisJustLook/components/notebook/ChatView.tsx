@@ -114,9 +114,9 @@ export default function ChatView({
   }
 
   return (
-    <div className="flex-1 flex flex-col overflow-hidden bg-[#0a0a0a]">
+    <div className="flex-1 flex flex-col overflow-hidden bg-background">
       {/* Chat Header */}
-      <div className="flex items-center justify-between px-6 py-4 border-b border-gray-800">
+      <div className="flex items-center justify-between px-6 py-4 border-b border-border">
         <div className="flex items-center gap-3">
           <h2 className="text-lg font-semibold text-white">Chat</h2>
 
@@ -124,7 +124,7 @@ export default function ChatView({
           <div className="relative">
             <button
               onClick={() => setShowModelMenu(!showModelMenu)}
-              className="flex items-center gap-2 px-3 py-1.5 text-sm bg-[#111111] border border-gray-800 rounded-lg text-gray-300 hover:text-white transition-colors"
+              className="flex items-center gap-2 px-3 py-1.5 text-sm bg-card border border-border rounded-lg text-gray-300 hover:text-white transition-colors"
             >
               <span>{AI_MODELS.find(m => m.id === selectedModel)?.name || selectedModel}</span>
               <ChevronDown className="w-3 h-3" />
@@ -133,7 +133,7 @@ export default function ChatView({
             {showModelMenu && (
               <>
                 <div className="fixed inset-0 z-10" onClick={() => setShowModelMenu(false)} />
-                <div className="absolute left-0 top-full mt-1 bg-[#1a1a1a] border border-gray-800 rounded-lg shadow-xl py-1 z-20 min-w-[200px]">
+                <div className="absolute left-0 top-full mt-1 bg-popover border border-border rounded-lg shadow-xl py-1 z-20 min-w-[200px]">
                   {AI_MODELS.map(model => (
                     <button
                       key={model.id}
@@ -178,7 +178,7 @@ export default function ChatView({
           {showOptionsMenu && (
             <>
               <div className="fixed inset-0 z-10" onClick={() => setShowOptionsMenu(false)} />
-              <div className="absolute right-0 top-full mt-1 bg-[#1a1a1a] border border-gray-800 rounded-lg shadow-xl py-1 z-20 min-w-[180px]">
+              <div className="absolute right-0 top-full mt-1 bg-popover border border-border rounded-lg shadow-xl py-1 z-20 min-w-[180px]">
                 <button
                   onClick={handleCopyChat}
                   className="w-full px-3 py-2 text-left text-sm text-gray-300 hover:bg-gray-800 flex items-center gap-2"
@@ -193,7 +193,7 @@ export default function ChatView({
                   <Download className="w-4 h-4" />
                   Export as Markdown
                 </button>
-                <hr className="my-1 border-gray-800" />
+                <hr className="my-1 border-border" />
                 <button
                   onClick={() => {
                     onClearHistory()
@@ -230,7 +230,7 @@ export default function ChatView({
                     <button
                       key={i}
                       onClick={() => setInput(prompt)}
-                      className="text-left px-4 py-3 text-sm text-gray-300 bg-[#111111] border border-gray-800 hover:border-gray-700 rounded-lg transition-colors"
+                      className="text-left px-4 py-3 text-sm text-gray-300 bg-card border border-border hover:border-gray-700 rounded-lg transition-colors"
                     >
                       {prompt}
                     </button>
@@ -266,8 +266,8 @@ export default function ChatView({
       </div>
 
       {/* Input Area */}
-      <div className="px-6 py-4 border-t border-gray-800">
-        <div className="flex items-end gap-3 bg-[#111111] border border-gray-800 rounded-xl p-3">
+      <div className="px-6 py-4 border-t border-border">
+        <div className="flex items-end gap-3 bg-card border border-border rounded-xl p-3">
           <textarea
             ref={inputRef}
             value={input}
@@ -343,7 +343,7 @@ function ChatBubble({ message, sources }: ChatBubbleProps) {
           className={`group relative rounded-2xl px-4 py-3 ${
             isUser
               ? 'bg-blue-600 text-white'
-              : 'bg-[#111111] border border-gray-800 text-gray-100'
+              : 'bg-card border border-border text-gray-100'
           }`}
         >
           {/* Message Text */}
@@ -410,7 +410,7 @@ function CitationBadge({ citation, title }: CitationBadgeProps) {
       <button
         onMouseEnter={() => setShowTooltip(true)}
         onMouseLeave={() => setShowTooltip(false)}
-        className="flex items-center gap-1.5 px-2 py-1 bg-[#1a1a1a] border border-gray-700 rounded-lg text-xs text-gray-300 hover:text-white hover:border-gray-600 transition-colors"
+        className="flex items-center gap-1.5 px-2 py-1 bg-popover border border-gray-700 rounded-lg text-xs text-gray-300 hover:text-white hover:border-gray-600 transition-colors"
       >
         <FileText className="w-3 h-3" />
         <span className="truncate max-w-[120px]">{title}</span>
@@ -419,7 +419,7 @@ function CitationBadge({ citation, title }: CitationBadgeProps) {
 
       {/* Tooltip with quote */}
       {showTooltip && citation.quote && (
-        <div className="absolute bottom-full left-0 mb-2 w-64 p-3 bg-[#1a1a1a] border border-gray-700 rounded-lg shadow-xl z-10">
+        <div className="absolute bottom-full left-0 mb-2 w-64 p-3 bg-popover border border-gray-700 rounded-lg shadow-xl z-10">
           <p className="text-xs text-gray-400 italic">&ldquo;{citation.quote}&rdquo;</p>
           <div className="absolute bottom-0 left-4 transform translate-y-full">
             <div className="w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-gray-700" />

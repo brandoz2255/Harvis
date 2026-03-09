@@ -447,7 +447,7 @@ class NotebookManager:
                     FROM notebook_notes
                     WHERE notebook_id = $1
                     ORDER BY is_pinned DESC, created_at DESC
-                    LIMIT $3 OFFSET $4
+                    LIMIT $2 OFFSET $3
                 """, notebook_id, limit, offset)
 
                 total = await conn.fetchval("""

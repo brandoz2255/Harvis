@@ -8,6 +8,7 @@ import os
 import uuid
 import shutil
 import asyncio
+import json
 from typing import List, Optional, Dict, Any
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks, Request
@@ -74,7 +75,7 @@ async def get_current_user_from_request(request: Request) -> Dict:
     # Get database pool
     pool = getattr(request.app.state, 'pg_pool', None)
 
-    return await get_current_user_optimized(request, credentials, pool)
+    return await get_current_user_optimized(credentials=credentials, request=request, pool=pool)
 
 
 # ─── Notebook CRUD ─────────────────────────────────────────────────────────────
@@ -402,6 +403,98 @@ async def get_source_status(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/{notebook_id}/sources/{source_id}/content")
+async def get_source_content(
+    notebook_id: UUID,
+    source_id: UUID,
+    request: Request = None,
+    current_user: Dict = Depends(get_current_user_from_request),
+    manager: NotebookManager = Depends(get_notebook_manager)
+):
+    """Get the extracted text content of a source"""
+    try:
+        source = await manager.get_source(source_id, current_user["id"])
+        async with manager.db_pool.acquire() as conn:
+            content_text = await conn.fetchval(
+                "SELECT content_text FROM notebook_sources WHERE id = $1",
+                source_id
+            )
+        return {
+            "source_id": str(source_id),
+            "title": source.title,
+            "type": source.type.value if hasattr(source.type, 'value') else str(source.type),
+            "content": content_text or "",
+            "length": len(content_text) if content_text else 0,
+        }
+    except SourceNotFoundError:
+        raise HTTPException(status_code=404, detail="Source not found")
+    except Exception as e:
+        logger.error(f"Failed to get source content: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{notebook_id}/sources/{source_id}/status/stream")
+async def stream_source_status(
+    notebook_id: UUID,
+    source_id: UUID,
+    request: Request = None,
+    current_user: Dict = Depends(get_current_user_from_request),
+    manager: NotebookManager = Depends(get_notebook_manager)
+):
+    """SSE stream for real-time source processing status updates"""
+    from fastapi.responses import StreamingResponse
+
+    async def event_generator():
+        last_status = None
+        last_chunk_count = 0
+        while True:
+            try:
+                source = await manager.get_source(source_id, current_user["id"])
+                status = source.status.value if hasattr(source.status, 'value') else str(source.status)
+                chunk_count = source.chunk_count or 0
+                error_msg = source.error_message or ""
+
+                if status != last_status or chunk_count != last_chunk_count:
+                    data = json.dumps({
+                        "source_id": str(source_id),
+                        "status": status,
+                        "chunk_count": chunk_count,
+                        "error_message": error_msg,
+                    })
+                    yield f"data: {data}\n\n"
+                    last_status = status
+                    last_chunk_count = chunk_count
+
+                if status in ("ready", "error"):
+                    # Also fetch content_text length for final update
+                    async with manager.db_pool.acquire() as conn:
+                        text_len = await conn.fetchval(
+                            "SELECT LENGTH(content_text) FROM notebook_sources WHERE id = $1",
+                            source_id
+                        ) or 0
+                    final = json.dumps({
+                        "source_id": str(source_id),
+                        "status": status,
+                        "chunk_count": chunk_count,
+                        "error_message": error_msg,
+                        "text_length": text_len,
+                        "done": True,
+                    })
+                    yield f"data: {final}\n\n"
+                    break
+
+                await asyncio.sleep(0.8)
+            except Exception as e:
+                yield f"data: {json.dumps({'error': str(e)})}\n\n"
+                break
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @router.delete("/{notebook_id}/sources/{source_id}")
 async def delete_source(
     notebook_id: UUID,
@@ -434,6 +527,32 @@ async def delete_source(
         raise HTTPException(status_code=404, detail="Source not found")
     except Exception as e:
         logger.error(f"Failed to delete source: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{notebook_id}/sources/{source_id}/retry")
+async def retry_source_ingestion(
+    notebook_id: UUID,
+    source_id: UUID,
+    background_tasks: BackgroundTasks,
+    request: Request = None,
+    current_user: Dict = Depends(get_current_user_from_request),
+    manager: NotebookManager = Depends(get_notebook_manager)
+):
+    """Retry ingestion for a stuck/failed source"""
+    try:
+        source = await manager.get_source(source_id, current_user["id"])
+        await manager.update_source_status(source_id, SourceStatus.PENDING)
+
+        from .ingestion import run_ingestion_task
+        background_tasks.add_task(run_ingestion_task, manager, source_id, current_user["id"])
+
+        return {"message": "Re-ingestion started", "source_id": str(source_id)}
+
+    except SourceNotFoundError:
+        raise HTTPException(status_code=404, detail="Source not found")
+    except Exception as e:
+        logger.error(f"Failed to retry ingestion: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -800,8 +919,14 @@ async def add_youtube_source(
 @router.get("/transformations/types")
 async def list_transformation_types():
     """List available transformation types"""
-    from open_notebook.graphs.transform_graph import get_available_transformations
-    return {"transformations": get_available_transformations()}
+    return {"transformations": [
+        {"id": "summary", "name": "Summary", "description": "Generate a concise summary of the source content"},
+        {"id": "key_points", "name": "Key Points", "description": "Extract key points and takeaways"},
+        {"id": "questions", "name": "Study Questions", "description": "Generate study questions from the content"},
+        {"id": "outline", "name": "Outline", "description": "Create a structured outline of the content"},
+        {"id": "simplify", "name": "Simplify", "description": "Rewrite in simpler language"},
+        {"id": "action_items", "name": "Action Items", "description": "Extract action items and next steps"},
+    ]}
 
 
 @router.post("/{notebook_id}/sources/{source_id}/transform")
@@ -813,15 +938,21 @@ async def transform_source(
     current_user: Dict = Depends(get_current_user_from_request),
     manager: NotebookManager = Depends(get_notebook_manager)
 ):
-    """Apply an AI transformation to a source"""
-    from .models import TransformationRequest, Transformation
-    from open_notebook.graphs.transform_graph import build_transform_graph
+    """Apply an AI transformation to a source using Ollama"""
+    import httpx
+    
+    TRANSFORM_PROMPTS = {
+        "summary": "Provide a concise summary of the following content. Focus on the main ideas and key information:\n\n{content}",
+        "key_points": "Extract the key points and takeaways from the following content as a bulleted list:\n\n{content}",
+        "questions": "Generate 5-10 study questions based on the following content. Include a mix of factual and analytical questions:\n\n{content}",
+        "outline": "Create a structured outline of the following content with main topics and subtopics:\n\n{content}",
+        "simplify": "Rewrite the following content in simpler language that a general audience can understand:\n\n{content}",
+        "action_items": "Extract action items, recommendations, and next steps from the following content:\n\n{content}",
+    }
     
     try:
-        # Get source
         source = await manager.get_source(source_id, current_user["id"])
         
-        # Get content from source
         async with manager.db_pool.acquire() as conn:
             content_text = await conn.fetchval(
                 "SELECT content_text FROM notebook_sources WHERE id = $1",
@@ -831,35 +962,46 @@ async def transform_source(
         if not content_text:
             raise HTTPException(status_code=400, detail="Source has no content to transform")
         
-        # Run transformation
-        graph = build_transform_graph()
-        result = await graph.ainvoke({
-            "content": content_text,
-            "transformation": transform_request.transformation.value,
-            "model": transform_request.model,
-            "custom_prompt": transform_request.custom_prompt
-        })
+        transformation_type = transform_request.transformation if isinstance(transform_request.transformation, str) else transform_request.transformation.value
+        model = transform_request.model or "mistral"
         
-        if result.get("error"):
-            raise HTTPException(status_code=500, detail=result["error"])
+        if transform_request.custom_prompt:
+            prompt = transform_request.custom_prompt.replace("{content}", content_text[:8000])
+        else:
+            prompt_template = TRANSFORM_PROMPTS.get(transformation_type, TRANSFORM_PROMPTS["summary"])
+            prompt = prompt_template.format(content=content_text[:8000])
         
-        # Save transformation to database
-        async with manager.db_pool.acquire() as conn:
-            row = await conn.fetchrow("""
-                INSERT INTO notebook_transformations 
-                    (notebook_id, source_id, user_id, transformation_type, original_content, transformed_content, model_used, custom_prompt)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                RETURNING id, notebook_id, source_id, note_id, user_id, transformation_type, original_content, transformed_content, model_used, custom_prompt, created_at
-            """, notebook_id, source_id, current_user["id"], 
-                transform_request.transformation.value, content_text, result["result"],
-                transform_request.model, transform_request.custom_prompt)
+        ollama_url = os.environ.get("OLLAMA_URL", "http://ollama:11434")
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(f"{ollama_url}/api/generate", json={
+                "model": model, "prompt": prompt, "stream": False,
+            })
+            resp.raise_for_status()
+            transformed = resp.json().get("response", "")
         
-        return dict(row)
+        if not transformed:
+            raise HTTPException(status_code=500, detail="Empty response from model")
+        
+        try:
+            async with manager.db_pool.acquire() as conn:
+                row = await conn.fetchrow("""
+                    INSERT INTO notebook_transformations 
+                        (notebook_id, source_id, user_id, transformation_type, original_content, transformed_content, model_used, custom_prompt)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    RETURNING id, notebook_id, source_id, user_id, transformation_type, original_content, transformed_content, model_used, custom_prompt, created_at
+                """, notebook_id, source_id, current_user["id"], 
+                    transformation_type, content_text[:2000], transformed, model, transform_request.custom_prompt)
+                return dict(row)
+        except Exception:
+            return {"transformed_content": transformed, "model_used": model, "transformation_type": transformation_type}
         
     except NotebookNotFoundError:
         raise HTTPException(status_code=404, detail="Notebook not found")
     except SourceNotFoundError:
         raise HTTPException(status_code=404, detail="Source not found")
+    except httpx.HTTPError as e:
+        logger.error(f"Ollama request failed: {e}")
+        raise HTTPException(status_code=502, detail=f"Model request failed: {e}")
     except Exception as e:
         logger.error(f"Transformation failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -911,8 +1053,13 @@ async def list_transformations(
 @router.get("/podcasts/styles")
 async def list_podcast_styles():
     """List available podcast styles"""
-    from open_notebook.podcast import PodcastGenerator
-    return {"styles": PodcastGenerator.get_available_styles()}
+    return {"styles": [
+        {"id": "conversational", "name": "Conversational", "description": "Casual, friendly discussion between speakers"},
+        {"id": "interview", "name": "Interview", "description": "Q&A format with a host interviewing guests"},
+        {"id": "educational", "name": "Educational", "description": "Structured teaching with clear explanations"},
+        {"id": "debate", "name": "Debate", "description": "Multiple perspectives discussing and debating topics"},
+        {"id": "storytelling", "name": "Storytelling", "description": "Narrative format weaving information into a story"},
+    ]}
 
 
 # Standalone podcast generation endpoint (for Open Notebook integration)
@@ -948,42 +1095,40 @@ class StandalonePodcastAudioRequest(BaseModel):
         extra = "allow"
 
 
-async def _fetch_podcast_content(podcast_request: StandalonePodcastRequest, logger) -> str:
-    """Helper to fetch content from sources/notes for podcast generation"""
-    import httpx
-    
+async def _fetch_podcast_content(podcast_request: StandalonePodcastRequest, logger, manager=None) -> str:
+    """Helper to fetch content from sources/notes for podcast generation using local DB"""
     content = podcast_request.content or ""
     
-    # If source_ids provided, fetch content from Open Notebook
+    if not manager:
+        return content
+
+    # Fetch source content from our local database
     if podcast_request.source_ids and not content:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            for source_id in podcast_request.source_ids[:5]:  # Limit to 5 sources
+        async with manager.db_pool.acquire() as conn:
+            for source_id in podcast_request.source_ids[:5]:
                 try:
-                    # Fetch source from Open Notebook API
-                    resp = await client.get(
-                        f"http://open-notebook:5055/api/sources/{source_id}"
+                    from uuid import UUID
+                    sid = UUID(source_id) if isinstance(source_id, str) else source_id
+                    row = await conn.fetchrow(
+                        "SELECT title, content_text FROM notebook_sources WHERE id = $1", sid
                     )
-                    if resp.status_code == 200:
-                        source_data = resp.json()
-                        source_content = source_data.get("full_text") or source_data.get("content") or ""
-                        if source_content:
-                            content += f"\n\n=== SOURCE: {source_data.get('title', 'Untitled')} ===\n{source_content}"
+                    if row and row['content_text']:
+                        content += f"\n\n=== SOURCE: {row['title'] or 'Untitled'} ===\n{row['content_text']}"
                 except Exception as e:
                     logger.warning(f"Failed to fetch source {source_id}: {e}")
     
-    # If note_ids provided, fetch content from Open Notebook
+    # Fetch note content from our local database
     if podcast_request.note_ids and not content:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            for note_id in podcast_request.note_ids[:5]:  # Limit to 5 notes
+        async with manager.db_pool.acquire() as conn:
+            for note_id in podcast_request.note_ids[:5]:
                 try:
-                    resp = await client.get(
-                        f"http://open-notebook:5055/api/notes/{note_id}"
+                    from uuid import UUID
+                    nid = UUID(note_id) if isinstance(note_id, str) else note_id
+                    row = await conn.fetchrow(
+                        "SELECT title, content FROM notebook_notes WHERE id = $1", nid
                     )
-                    if resp.status_code == 200:
-                        note_data = resp.json()
-                        note_content = note_data.get("content") or ""
-                        if note_content:
-                            content += f"\n\n=== NOTE: {note_data.get('title', 'Untitled')} ===\n{note_content}"
+                    if row and row['content']:
+                        content += f"\n\n=== NOTE: {row['title'] or 'Untitled'} ===\n{row['content']}"
                 except Exception as e:
                     logger.warning(f"Failed to fetch note {note_id}: {e}")
     
@@ -1218,6 +1363,90 @@ async def delete_standalone_podcast(
     return {"success": True, "message": "Podcast deleted"}
 
 
+async def _generate_podcast_with_ollama(
+    content: str, podcast_request, log
+) -> dict:
+    """Generate a podcast script using Ollama LLM"""
+    import httpx
+    from datetime import datetime, timezone
+
+    ollama_url = os.environ.get("OLLAMA_URL", "http://ollama:11434")
+    model = "mistral"
+    
+    speaker_names = []
+    if podcast_request.custom_speakers:
+        speaker_names = [s.get("name", f"Speaker {i+1}") for i, s in enumerate(podcast_request.custom_speakers)]
+    else:
+        speaker_names = [f"Speaker {i+1}" for i in range(podcast_request.speakers)]
+
+    speakers_desc = ", ".join(speaker_names)
+    style = podcast_request.style or "conversational"
+    duration = podcast_request.duration_minutes or 10
+    
+    # Estimate ~150 words per minute of podcast, ~2 dialogue turns per minute
+    target_turns = max(duration * 2, 6)
+
+    prompt = f"""You are a podcast script writer. Create a {style} podcast script with {len(speaker_names)} speakers: {speakers_desc}.
+
+The podcast should be about {duration} minutes long (approximately {target_turns} dialogue exchanges).
+
+Base the podcast on this content:
+---
+{content[:6000]}
+---
+
+IMPORTANT: Return ONLY a valid JSON object with this exact structure, no other text:
+{{
+  "outline": "Brief outline of the podcast topics",
+  "transcript": [
+    {{"speaker": "{speaker_names[0]}", "dialogue": "First speaker's line"}},
+    {{"speaker": "{speaker_names[1] if len(speaker_names) > 1 else speaker_names[0]}", "dialogue": "Second speaker's line"}}
+  ]
+}}
+
+Make the dialogue natural, engaging, and informative. Each speaker should have a distinct voice. Include at least {target_turns} exchanges."""
+
+    async with httpx.AsyncClient(timeout=180.0) as client:
+        resp = await client.post(f"{ollama_url}/api/generate", json={
+            "model": model, "prompt": prompt, "stream": False,
+            "options": {"temperature": 0.8, "num_predict": 4096},
+        })
+        resp.raise_for_status()
+        raw = resp.json().get("response", "")
+
+    # Parse JSON from response
+    import re
+    json_match = re.search(r'\{[\s\S]*\}', raw)
+    if not json_match:
+        log.warning("Could not parse JSON from podcast response, using raw text")
+        return {
+            "status": "completed",
+            "outline": f"Podcast about: {podcast_request.title}",
+            "transcript": [{"speaker": speaker_names[0], "dialogue": raw[:500]}],
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    try:
+        parsed = json.loads(json_match.group())
+    except json.JSONDecodeError:
+        return {
+            "status": "completed",
+            "outline": f"Podcast about: {podcast_request.title}",
+            "transcript": [{"speaker": speaker_names[0], "dialogue": raw[:500]}],
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    return {
+        "status": "completed",
+        "outline": parsed.get("outline", ""),
+        "transcript": parsed.get("transcript", []),
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 @router.post("/podcasts/generate")
 async def generate_standalone_podcast(
     podcast_request: StandalonePodcastRequest,
@@ -1226,35 +1455,19 @@ async def generate_standalone_podcast(
     current_user: Dict = Depends(get_current_user_from_request),
     manager: NotebookManager = Depends(get_notebook_manager)
 ):
-    """
-    Generate a podcast from content (standalone, works with Open Notebook IDs).
-    This endpoint doesn't require notebook ownership verification.
-    Saves the podcast to the database for persistence.
-    """
-    from open_notebook.podcast import PodcastGenerator
-    import logging
-    
-    logger = logging.getLogger(__name__)
+    """Generate a podcast script from content using Ollama."""
+    import httpx
     
     try:
-        content = await _fetch_podcast_content(podcast_request, logger)
+        content = await _fetch_podcast_content(podcast_request, logger, manager)
         
         if not content.strip():
             raise HTTPException(400, "No content available. Provide content, source_ids, or note_ids.")
         
-        # Generate podcast directly
-        generator = PodcastGenerator()
-        result = await generator.generate(
-            content=content,
-            title=podcast_request.title,
-            speakers=podcast_request.speakers,
-            duration_minutes=podcast_request.duration_minutes,
-            style=podcast_request.style,
-            custom_speakers=podcast_request.custom_speakers,
-            generate_audio=podcast_request.generate_audio
+        result = await _generate_podcast_with_ollama(
+            content, podcast_request, logger
         )
         
-        # Save to database
         saved_podcast = await _save_podcast_to_db(manager, current_user["id"], podcast_request, result)
         return saved_podcast
         
@@ -1272,75 +1485,141 @@ async def generate_standalone_podcast_stream(
     current_user: Dict = Depends(get_current_user_from_request),
     manager: NotebookManager = Depends(get_notebook_manager)
 ):
-    """
-    Generate a podcast with Server-Sent Events (SSE) progress streaming.
-    Returns progress updates and final result as SSE events.
-    Saves the podcast to the database for persistence.
-    
-    Event types:
-    - progress: {step: 'outline'|'script'|'audio', message: string}
-    - result: Final podcast data (saved to database)
-    - error: Error message
-    """
-    from open_notebook.podcast import PodcastGenerator
+    """Generate a podcast with SSE progress streaming using Ollama."""
     from fastapi.responses import StreamingResponse
-    import json
-    import logging
     
-    logger = logging.getLogger(__name__)
     user_id = current_user["id"]
     
     async def generate_sse_events():
         try:
-            content = await _fetch_podcast_content(podcast_request, logger)
+            content = await _fetch_podcast_content(podcast_request, logger, manager)
             
             if not content.strip():
                 yield f"event: error\ndata: {json.dumps({'error': 'No content available. Provide content, source_ids, or note_ids.'})}\n\n"
                 return
             
-            # Generate podcast with progress streaming
-            generator = PodcastGenerator()
+            # Step 1: Outline
+            yield f"event: progress\ndata: {json.dumps({'step': 'outline', 'message': 'Generating podcast outline...'})}\n\n"
             
-            async for event in generator.generate_with_progress(
-                content=content,
-                title=podcast_request.title,
-                speakers=podcast_request.speakers,
-                duration_minutes=podcast_request.duration_minutes,
-                style=podcast_request.style,
-                custom_speakers=podcast_request.custom_speakers,
-                generate_audio=podcast_request.generate_audio
-            ):
-                event_type = event.get("event", "progress")
-                event_data = event.get("data", {})
+            result = await _generate_podcast_with_ollama(
+                content, podcast_request, logger
+            )
+            
+            # Step 2: Script done
+            yield f"event: progress\ndata: {json.dumps({'step': 'script', 'message': 'Podcast script generated'})}\n\n"
+
+            # Step 3: Audio generation via tts-service (SpeechT5 on GPU)
+            transcript = result.get("transcript", [])
+
+            # #region agent log
+            def _dlog(msg, data=None, hyp=""):
+                import time as _t
+                try:
+                    with open("/tmp/debug_podcast.log", "a") as _f:
+                        _f.write(json.dumps({"timestamp": int(_t.time()*1000), "location": "router.py:stream", "message": msg, "data": data or {}, "hypothesisId": hyp}) + "\n")
+                except Exception as log_e:
+                    logger.debug("debug_podcast.log write failed: %s", log_e)
+            # #endregion
+
+            # #region agent log
+            _dlog("audio_gen_entry", {"generate_audio": getattr(podcast_request, "generate_audio", True), "transcript_len": len(transcript)}, "H2")
+            # #endregion
+
+            if getattr(podcast_request, "generate_audio", True) and transcript:
+                yield f"event: progress\ndata: {json.dumps({'step': 'audio', 'message': 'Generating audio...'})}\n\n"
                 
-                if event_type == "result":
-                    # Save to database
-                    result = event_data
-                    try:
-                        saved_podcast = await _save_podcast_to_db(manager, user_id, podcast_request, result)
-                        yield f"event: result\ndata: {json.dumps(saved_podcast)}\n\n"
-                    except Exception as db_error:
-                        logger.error(f"Failed to save podcast to database: {db_error}")
-                        # Still return result even if DB save fails
-                        final_data = {
-                            "id": result.get("title", "").replace(" ", "_").lower()[:20],
-                            "title": podcast_request.title,
-                            "status": result.get("status", "completed"),
-                            "style": podcast_request.style,
-                            "speakers": podcast_request.speakers,
-                            "duration_minutes": podcast_request.duration_minutes,
-                            "audio_path": result.get("audio_path"),
-                            "audio_url": result.get("audio_url"),
-                            "transcript": result.get("transcript", []),
-                            "outline": result.get("outline"),
-                            "error_message": json.dumps(result.get("error") or result.get("audio_error")) if isinstance(result.get("error") or result.get("audio_error"), dict) else (result.get("error") or result.get("audio_error")),
-                            "duration_seconds": result.get("duration_seconds"),
-                            "created_at": result.get("started_at"),
-                            "completed_at": result.get("completed_at")
-                        }
-                        yield f"event: result\ndata: {json.dumps(final_data)}\n\n"
-                else:
-                    yield f"event: {event_type}\ndata: {json.dumps(event_data)}\n\n"
+                try:
+                    import httpx
+                    tts_url = os.environ.get("TTS_URL", "http://tts-service:8001")
+
+                    # Build script segments for the tts-service /generate/podcast endpoint
+                    script_segments = []
+                    speaker_names = set()
+                    for seg in transcript:
+                        dialogue = (seg.get("dialogue") or seg.get("text") or "").strip()
+                        speaker = (seg.get("speaker") or "Speaker").strip()
+                        if dialogue:
+                            script_segments.append({"speaker": speaker, "text": dialogue})
+                            speaker_names.add(speaker)
+
+                    # Map all speakers to default voice
+                    voice_mapping = {name: "__default__" for name in speaker_names}
+
+                    # #region agent log
+                    _dlog("tts_request", {"url": tts_url, "num_segments": len(script_segments), "speakers": list(speaker_names)}, "H2")
+                    # #endregion
+
+                    yield f"event: progress\ndata: {json.dumps({'step': 'audio', 'message': f'Synthesizing {len(script_segments)} segments...'})}\n\n"
+
+                    import time as _time_mod
+                    _tts_start = _time_mod.time()
+
+                    async with httpx.AsyncClient(timeout=600.0) as client:
+                        resp = await client.post(
+                            f"{tts_url}/generate/podcast",
+                            json={
+                                "script": script_segments,
+                                "voice_mapping": voice_mapping,
+                                "output_format": "wav",
+                                "normalize_audio": True,
+                                "add_silence_between_speakers": 0.3,
+                            },
+                        )
+
+                    _tts_elapsed = _time_mod.time() - _tts_start
+
+                    # #region agent log
+                    _dlog("tts_response", {"status": resp.status_code, "elapsed_s": round(_tts_elapsed, 2), "body": resp.text[:300]}, "H2")
+                    # #endregion
+
+                    if resp.status_code == 200:
+                        tts_data = resp.json()
+                        if tts_data.get("success"):
+                            # Audio URL is relative to tts-service, proxy via our endpoint
+                            tts_audio_url = tts_data.get("audio_url", "")
+                            tts_filename = tts_audio_url.split("/")[-1] if tts_audio_url else ""
+                            duration_secs = tts_data.get("duration", 0)
+
+                            result["audio_path"] = f"/api/notebooks/podcasts/tts-audio/{tts_filename}"
+                            result["audio_url"] = result["audio_path"]
+                            result["duration_seconds"] = duration_secs
+                            result["status"] = "completed"
+                            logger.info(f"Podcast audio generated via tts-service: {tts_filename} ({duration_secs:.1f}s)")
+                        else:
+                            logger.warning(f"TTS returned success=false: {tts_data}")
+                            result["status"] = "script_only"
+                    else:
+                        logger.warning(f"TTS returned {resp.status_code}: {resp.text[:200]}")
+                        result["status"] = "script_only"
+
+                except Exception as tts_err:
+                    # #region agent log
+                    _dlog("tts_error", {"error": str(tts_err), "type": type(tts_err).__name__}, "H2")
+                    # #endregion
+                    logger.warning(f"Audio generation failed: {tts_err}")
+                    result["status"] = "script_only"
+            
+            # Save to database
+            try:
+                saved_podcast = await _save_podcast_to_db(manager, user_id, podcast_request, result)
+                yield f"event: result\ndata: {json.dumps(saved_podcast)}\n\n"
+            except Exception as db_error:
+                logger.error(f"Failed to save podcast to database: {db_error}")
+                final_data = {
+                    "id": str(uuid.uuid4()),
+                    "title": podcast_request.title,
+                    "status": result.get("status", "completed"),
+                    "style": podcast_request.style,
+                    "speakers": podcast_request.speakers,
+                    "duration_minutes": podcast_request.duration_minutes,
+                    "transcript": result.get("transcript", []),
+                    "outline": result.get("outline"),
+                    "audio_path": result.get("audio_path"),
+                    "audio_url": result.get("audio_url"),
+                    "duration_seconds": result.get("duration_seconds"),
+                    "created_at": result.get("started_at"),
+                }
+                yield f"event: result\ndata: {json.dumps(final_data)}\n\n"
                     
         except Exception as e:
             logger.error(f"Failed to generate podcast: {e}")
@@ -1349,11 +1628,7 @@ async def generate_standalone_podcast_stream(
     return StreamingResponse(
         generate_sse_events(),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no"  # Disable nginx buffering
-        }
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
@@ -1363,19 +1638,38 @@ async def serve_standalone_podcast_audio(
     current_user: Dict = Depends(get_current_user_from_request)
 ):
     """Serve audio file for standalone podcast generation"""
-    import os
-    
-    from open_notebook.podcast.audio import PODCAST_OUTPUT_PATH
+    import tempfile
+    PODCAST_OUTPUT_PATH = os.environ.get("PODCAST_OUTPUT_PATH", "/tmp/podcasts")
 
-    # Sanitize filename to prevent directory traversal
     safe_filename = os.path.basename(filename)
-    audio_path = os.path.join(PODCAST_OUTPUT_PATH, "audio", safe_filename)
+
+    # Check podcast output directory first, then system temp (Chatterbox writes here)
+    for search_dir in [os.path.join(PODCAST_OUTPUT_PATH, "audio"), tempfile.gettempdir()]:
+        audio_path = os.path.join(search_dir, safe_filename)
+        if os.path.exists(audio_path):
+            media_type = "audio/mpeg" if audio_path.endswith(".mp3") else "audio/wav"
+            return FileResponse(audio_path, media_type=media_type, filename=safe_filename)
     
-    if not os.path.exists(audio_path):
-        raise HTTPException(status_code=404, detail="Audio file not found")
-    
-    media_type = "audio/mpeg" if audio_path.endswith(".mp3") else "audio/wav"
-    return FileResponse(audio_path, media_type=media_type, filename=safe_filename)
+    raise HTTPException(status_code=404, detail="Audio file not found")
+
+
+@router.get("/podcasts/tts-audio/{filename}")
+async def proxy_tts_audio(filename: str):
+    """Proxy audio files from tts-service container"""
+    import httpx
+    safe_filename = os.path.basename(filename)
+    tts_url = os.environ.get("TTS_URL", "http://tts-service:8001")
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(f"{tts_url}/audio/{safe_filename}")
+            if resp.status_code == 200:
+                from fastapi.responses import Response
+                media_type = "audio/mpeg" if safe_filename.endswith(".mp3") else "audio/wav"
+                return Response(content=resp.content, media_type=media_type,
+                                headers={"Content-Disposition": f'inline; filename="{safe_filename}"'})
+        raise HTTPException(status_code=404, detail="Audio file not found on TTS service")
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=502, detail=f"TTS service unreachable: {e}")
 
 
 @router.post("/podcasts/generate/audio")
@@ -1387,18 +1681,13 @@ async def generate_standalone_podcast_audio_from_script(
     """
     Generate podcast audio from a provided transcript (no LLM call).
     Intended for the \"script-only -> edit -> generate audio\" flow.
+    Audio generation requires TTS service (Chatterbox). Script is saved to DB.
     """
-    import logging
-    from open_notebook.podcast.audio import AudioGenerator
-    from open_notebook.podcast.script import get_default_speakers
-
-    logger = logging.getLogger(__name__)
     user_id = current_user["id"]
 
     try:
-        speaker_profiles = (audio_request.custom_speakers or get_default_speakers())[: audio_request.speakers]
+        speaker_profiles = (audio_request.custom_speakers or [{"name": f"Speaker {i+1}"} for i in range(audio_request.speakers)])[: audio_request.speakers]
 
-        # Build a script dict in the shape AudioGenerator expects
         transcript = audio_request.transcript or []
         cleaned_transcript = []
         for seg in transcript:
@@ -1418,27 +1707,59 @@ async def generate_standalone_podcast_audio_from_script(
             "transcript": cleaned_transcript
         }
 
-        audio_generator = AudioGenerator()
-        audio_result = await audio_generator.generate_audio(script)
+        audio_path = None
+        audio_url = None
+        duration_seconds = None
+        status = "completed"
+        error_msg = None
+
+        try:
+            import httpx
+            tts_url = os.environ.get("TTS_URL", "http://tts-service:8001")
+
+            script_segments = [{"speaker": seg["speaker"], "text": seg["dialogue"]} for seg in cleaned_transcript]
+            speaker_names = {seg["speaker"] for seg in cleaned_transcript}
+            voice_mapping = {name: "__default__" for name in speaker_names}
+
+            async with httpx.AsyncClient(timeout=600.0) as client:
+                resp = await client.post(f"{tts_url}/generate/podcast", json={
+                    "script": script_segments,
+                    "voice_mapping": voice_mapping,
+                    "output_format": "wav",
+                    "normalize_audio": True,
+                    "add_silence_between_speakers": 0.3,
+                })
+
+            if resp.status_code == 200:
+                tts_data = resp.json()
+                if tts_data.get("success"):
+                    tts_audio_url = tts_data.get("audio_url", "")
+                    tts_filename = tts_audio_url.split("/")[-1] if tts_audio_url else ""
+                    audio_path = f"/api/notebooks/podcasts/tts-audio/{tts_filename}"
+                    audio_url = audio_path
+                    duration_seconds = tts_data.get("duration", 0)
+                else:
+                    error_msg = "TTS generation returned success=false"
+            else:
+                error_msg = f"TTS returned {resp.status_code}"
+
+        except Exception as tts_err:
+            error_msg = f"TTS unavailable: {tts_err}"
+            logger.warning(f"TTS service not available: {tts_err}")
 
         result = {
             "title": audio_request.title,
             "style": audio_request.style,
             "duration_minutes": audio_request.duration_minutes,
             "transcript": cleaned_transcript,
-            "script": script
+            "script": script,
+            "status": status,
+            "audio_path": audio_path,
+            "audio_url": audio_url,
+            "duration_seconds": duration_seconds,
+            "audio_error": error_msg,
         }
 
-        if "error" in audio_result:
-            result["status"] = "error"
-            result["error"] = audio_result.get("error")
-        else:
-            result["audio_path"] = audio_result.get("audio_path")
-            result["audio_url"] = audio_generator.get_audio_url(audio_result.get("audio_path", ""))
-            result["duration_seconds"] = audio_result.get("duration_seconds")
-            result["status"] = "completed"
-
-        # Persist (update existing if podcast_id provided, otherwise insert new)
         if audio_request.podcast_id:
             return await _update_standalone_podcast_audio_in_db(
                 manager=manager,
@@ -1448,7 +1769,6 @@ async def generate_standalone_podcast_audio_from_script(
                 result=result
             )
 
-        # Insert new row
         standalone_req = StandalonePodcastRequest(
             notebook_id=audio_request.notebook_id,
             title=audio_request.title,
@@ -1518,35 +1838,28 @@ async def generate_podcast(
 
 
 async def _run_podcast_generation(db_pool, podcast_id: UUID, notebook_id: UUID, user_id: int, request):
-    """Background task for podcast generation"""
-    from open_notebook.podcast import PodcastGenerator
+    """Background task for podcast generation using Ollama"""
     from .models import PodcastStatus
-    import json
+    import httpx
     
     try:
-        # Update status to generating
         async with db_pool.acquire() as conn:
             await conn.execute(
                 "UPDATE notebook_podcasts SET status = $1 WHERE id = $2",
                 PodcastStatus.GENERATING.value, podcast_id
             )
             
-            # Get source content - either selected sources or all ready sources
             source_ids = getattr(request, 'source_ids', None)
             note_ids = getattr(request, 'note_ids', None)
-            
             source_content = []
             note_content = []
             
-            # Fetch source content
             if source_ids and len(source_ids) > 0:
-                # Use selected sources
                 rows = await conn.fetch("""
                     SELECT title, content_text FROM notebook_sources 
                     WHERE notebook_id = $1 AND id = ANY($2) AND status = 'ready' AND content_text IS NOT NULL
                 """, notebook_id, source_ids)
             else:
-                # Use all ready sources from notebook
                 rows = await conn.fetch("""
                     SELECT title, content_text FROM notebook_sources 
                     WHERE notebook_id = $1 AND status = 'ready' AND content_text IS NOT NULL
@@ -1554,61 +1867,51 @@ async def _run_podcast_generation(db_pool, podcast_id: UUID, notebook_id: UUID, 
             
             for row in rows:
                 if row["content_text"]:
-                    header = f"=== SOURCE: {row['title'] or 'Untitled'} ==="
-                    source_content.append(f"{header}\n{row['content_text']}")
+                    source_content.append(f"=== SOURCE: {row['title'] or 'Untitled'} ===\n{row['content_text']}")
             
-            # Fetch note content
             if note_ids and len(note_ids) > 0:
                 note_rows = await conn.fetch("""
                     SELECT title, content FROM notebook_notes 
                     WHERE notebook_id = $1 AND id = ANY($2) AND content IS NOT NULL
                 """, notebook_id, note_ids)
-                
                 for row in note_rows:
                     if row["content"]:
-                        header = f"=== NOTE: {row['title'] or 'Untitled Note'} ==="
-                        note_content.append(f"{header}\n{row['content']}")
+                        note_content.append(f"=== NOTE: {row['title'] or 'Untitled Note'} ===\n{row['content']}")
         
-        # Combine all content
-        all_content_parts = []
+        parts = []
         if source_content:
-            all_content_parts.append("SOURCES:\n" + "\n\n".join(source_content))
+            parts.append("SOURCES:\n" + "\n\n".join(source_content))
         if note_content:
-            all_content_parts.append("NOTES:\n" + "\n\n".join(note_content))
-        
-        content = "\n\n".join(all_content_parts)
+            parts.append("NOTES:\n" + "\n\n".join(note_content))
+        content = "\n\n".join(parts)
         
         if not content:
-            raise Exception("No content available in selected sources or notes. Make sure sources have been processed.")
+            raise Exception("No content available in selected sources or notes.")
         
-        # Generate podcast
-        generator = PodcastGenerator()
-        result = await generator.generate(
-            content=content,
+        # Use Ollama to generate the script
+        mock_request = StandalonePodcastRequest(
+            notebook_id=str(notebook_id),
             title=request.title,
+            style=request.style.value if hasattr(request.style, 'value') else str(request.style),
             speakers=request.speakers,
             duration_minutes=request.duration_minutes,
-            style=request.style.value,
-            custom_speakers=getattr(request, "custom_speakers", None)
+            content=content,
+            custom_speakers=getattr(request, "custom_speakers", None),
         )
+        result = await _generate_podcast_with_ollama(content, mock_request, logger)
         
-        # Update database with result
         async with db_pool.acquire() as conn:
             if result.get("status") == "error":
                 await conn.execute("""
-                    UPDATE notebook_podcasts 
-                    SET status = $1, error_message = $2
-                    WHERE id = $3
+                    UPDATE notebook_podcasts SET status = $1, error_message = $2 WHERE id = $3
                 """, PodcastStatus.ERROR.value, result.get("error", "Unknown error"), podcast_id)
             else:
                 transcript_json = json.dumps(result.get("transcript", []))
                 await conn.execute("""
                     UPDATE notebook_podcasts 
-                    SET status = $1, audio_path = $2, transcript = $3, outline = $4, 
-                        duration_seconds = $5, completed_at = CURRENT_TIMESTAMP
-                    WHERE id = $6
-                """, PodcastStatus.COMPLETED.value, result.get("audio_path"),
-                    transcript_json, result.get("outline"), result.get("duration_seconds"), podcast_id)
+                    SET status = $1, transcript = $2, outline = $3, completed_at = CURRENT_TIMESTAMP
+                    WHERE id = $4
+                """, PodcastStatus.COMPLETED.value, transcript_json, result.get("outline"), podcast_id)
     
     except Exception as e:
         logger.error(f"Podcast generation failed: {e}")

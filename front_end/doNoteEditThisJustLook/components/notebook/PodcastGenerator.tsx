@@ -262,7 +262,7 @@ export default function PodcastGenerator({
         {/* Header */}
         <div className="p-5 border-b border-white/10 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-xl bg-gradient-to-br from-orange-500 to-rose-500">
+            <div className="p-2 rounded-xl bg-gradient-to-br from-blue-500 to-cyan-500">
               <Mic className="w-5 h-5 text-white" />
             </div>
             <div>
@@ -382,7 +382,7 @@ export default function PodcastGenerator({
             <button
               onClick={handleGenerate}
               disabled={isGenerating || !title.trim()}
-              className="w-full py-3 bg-gradient-to-r from-orange-600 to-rose-600 hover:from-orange-500 hover:to-rose-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl transition-all flex items-center justify-center gap-2 font-medium shadow-lg shadow-orange-500/20"
+              className="w-full py-3 bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-orange-500 hover:to-rose-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl transition-all flex items-center justify-center gap-2 font-medium shadow-lg shadow-blue-500/20"
             >
               {isGenerating ? (
                 <>
@@ -450,7 +450,7 @@ export default function PodcastGenerator({
                         <div className="flex items-center gap-2">
                           <button
                             onClick={() => togglePlayback(podcast)}
-                            className="p-2.5 bg-gradient-to-r from-orange-600 to-rose-600 hover:from-orange-500 hover:to-rose-500 rounded-full transition-all shadow-lg"
+                            className="p-2.5 bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-orange-500 hover:to-rose-500 rounded-full transition-all shadow-lg"
                           >
                             {playingId === podcast.id ? (
                               <Pause className="w-4 h-4 text-white" />

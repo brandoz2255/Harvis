@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
 import uvicorn, os, sys, tempfile, uuid, base64, io, logging, re, requests, random, json, httpx
+import numpy as np
 from PIL import Image
 
 # Import optimized auth module
@@ -34,13 +35,30 @@ from passlib.context import CryptContext
 import asyncpg
 from gemini_api import query_gemini, is_gemini_configured
 from typing import List, Optional, Dict, Any, Union
-from vison_models.llm_connector import (
-    query_qwen,
-    query_llm,
-    load_qwen_model,
-    unload_qwen_model,
-    unload_ollama_model,
-)
+try:
+    from vison_models.llm_connector import (
+        query_qwen,
+        query_llm,
+        load_qwen_model,
+        unload_qwen_model,
+        unload_ollama_model,
+    )
+    VISION_MODELS_AVAILABLE = True
+except Exception as e:
+    VISION_MODELS_AVAILABLE = False
+    logger_init = logging.getLogger(__name__)
+    logger_init.warning(
+        "Vision models unavailable at startup; auth/chat endpoints remain enabled: %s", e
+    )
+
+    def _vision_unavailable(*args, **kwargs):
+        raise HTTPException(503, "Vision models are temporarily unavailable")
+
+    query_qwen = _vision_unavailable
+    query_llm = _vision_unavailable
+    load_qwen_model = _vision_unavailable
+    unload_qwen_model = _vision_unavailable
+    unload_ollama_model = _vision_unavailable
 
 # Import vibecoding routers
 from vibecoding import (
@@ -50,6 +68,13 @@ from vibecoding import (
     files_router,
     commands_router,
     containers_router,
+    terminal_router,
+    ai_assistant_router,
+    file_api_router,
+    user_prefs_router,
+    proxy_router,
+    repo_import_router,
+    ide_ai_router,
 )
 from vibecoding.core import initialize_vibe_agent
 from file_processing import extract_text_from_file
@@ -252,14 +277,24 @@ def safe_generate_speech_optimized(
             cfg_weight,
             auto_unload=auto_unload,
         )
-        if result is None or result == (None, None):
+        if (
+            result is None
+            or result == (None, None)
+            or result == (None, None, "none")
+        ):
             logger.warning("⚠️ TTS unavailable - skipping audio generation")
-            return None, None
-        return result
+            return None, None, "none"
+        if isinstance(result, tuple) and len(result) == 3:
+            return result
+        if isinstance(result, tuple) and len(result) == 2:
+            sr, wav = result
+            return sr, wav, "unknown"
+        logger.warning("⚠️ Unexpected TTS result shape: %s", type(result))
+        return None, None, "none"
     except Exception as tts_e:
-        logger.error(f"❌ TTS generation failed gracefully: {tts_e}")
+        logger.error(f"❌ TTS generation failed gracefully: {tts_e}", exc_info=True)
         logger.warning("⚠️ Continuing without TTS - chat will work without audio")
-        return None, None
+        return None, None, "none"
 
 
 def safe_save_audio(sr, wav, prefix="response"):
@@ -269,13 +304,38 @@ def safe_save_audio(sr, wav, prefix="response"):
         return None
 
     try:
+        if not isinstance(sr, (int, float)) or sr <= 0:
+            logger.error("❌ Invalid sample rate for audio save: %s", sr)
+            return None
+
+        wav = np.asarray(wav)
+        if wav.size == 0:
+            logger.error("❌ Empty waveform received for audio save")
+            return None
+        wav = np.squeeze(wav)
+        if wav.dtype != np.float32:
+            wav = wav.astype(np.float32)
+
+        peak = float(np.max(np.abs(wav)))
+        rms = float(np.sqrt(np.mean(np.square(wav))))
+        if peak > 1.0:
+            logger.warning("⚠️ Audio peak %.4f exceeds 1.0; clipping", peak)
+            wav = np.clip(wav, -1.0, 1.0)
+
         filename = f"{prefix}_{uuid.uuid4()}.wav"
         filepath = os.path.join(tempfile.gettempdir(), filename)
-        sf.write(filepath, wav, sr)
-        logger.info("Audio written to %s", filepath)
+        sf.write(filepath, wav, int(sr))
+        logger.info(
+            "Audio written %s sr=%s dur=%.3fs peak=%.4f rms=%.4f",
+            filepath,
+            int(sr),
+            len(wav) / float(sr),
+            peak,
+            rms,
+        )
         return f"/api/audio/{filename}"
     except Exception as e:
-        logger.error(f"❌ Failed to save audio file: {e}")
+        logger.error(f"❌ Failed to save audio file: {e}", exc_info=True)
         return None
 
 
@@ -557,6 +617,13 @@ app.include_router(execution_router)
 app.include_router(files_router)
 app.include_router(commands_router)
 app.include_router(containers_router)
+app.include_router(terminal_router)
+app.include_router(ai_assistant_router)
+app.include_router(file_api_router)
+app.include_router(user_prefs_router)
+app.include_router(proxy_router)
+app.include_router(repo_import_router)
+app.include_router(ide_ai_router)
 
 # Include RAG corpus router
 if RAG_CORPUS_AVAILABLE:
@@ -2085,6 +2152,10 @@ async def chat(
             # ── 8. Text-to-speech (with heartbeats) ─────────────────────────────────────────
             # Moved BEFORE persistence so we can save the audio path
             audio_path = None
+            tts_engine = "none"
+            tts_sample_rate = None
+            tts_duration_sec = None
+            audio_prompt_path = None
 
             if req.text_only:
                 logger.info("🔇 [Text Only Mode] Skipping TTS generation")
@@ -2126,7 +2197,12 @@ async def chat(
                         if event["type"] == "heartbeat":
                             yield f"data: {json.dumps({'status': 'processing', 'detail': 'Generating audio...'})}\n\n"
                         elif event["type"] == "result":
-                            sr, wav = event["data"]
+                            tts_result = event["data"]
+                            if isinstance(tts_result, tuple) and len(tts_result) == 3:
+                                sr, wav, tts_engine = tts_result
+                            else:
+                                sr, wav = tts_result
+                                tts_engine = "unknown"
 
                     if (
                         sr is not None
@@ -2135,17 +2211,15 @@ async def chat(
                         and len(wav.shape) >= 1
                         and wav.shape[0] > 0
                     ):
-                        filename = f"response_{uuid.uuid4()}.wav"
-                        filepath = os.path.join(tempfile.gettempdir(), filename)
-                        sf.write(filepath, wav, sr)
-                        logger.info("Audio written to %s", filepath)
-                        audio_path = f"/api/audio/{filename}"
+                        audio_path = safe_save_audio(sr, wav, prefix="response")
+                        tts_sample_rate = int(sr)
+                        tts_duration_sec = round(len(wav) / float(sr), 3)
                     else:
                         logger.warning(
                             "⚠️ TTS unavailable - returning response without audio"
                         )
                 except Exception as e:
-                    logger.error(f"❌ TTS Generation failed: {e}")
+                    logger.error(f"❌ TTS Generation failed: {e}", exc_info=True)
 
             # ── 9. Persist chat history to database ─────────────────────────────────────────
             yield f"data: {json.dumps({'status': 'saving', 'detail': 'Saving to history...'})}\n\n"
@@ -2235,6 +2309,10 @@ async def chat(
                 "session_id": str(session_id) if session_id else None,
                 "message_id": message_id,
                 "final_answer": final_answer,
+                "tts_engine": tts_engine,
+                "tts_ref_audio": audio_prompt_path,
+                "tts_sample_rate": tts_sample_rate,
+                "tts_duration_sec": tts_duration_sec,
             }
 
             if audio_path:
@@ -2527,6 +2605,10 @@ async def vision_chat(
 
             # Generate TTS if not text-only mode
             audio_path = None
+            tts_engine = "none"
+            tts_sample_rate = None
+            tts_duration_sec = None
+            tts_ref_audio = HARVIS_VOICE_PATH
             if not req.text_only:
                 if not final_answer or not final_answer.strip():
                     logger.warning(
@@ -2538,7 +2620,7 @@ async def vision_chat(
                         f"🎤 VISION TTS: Generating speech for {len(final_answer)} chars: '{final_answer[:80]}...'"
                     )
                     try:
-                        sr, wav = None, None
+                        sr, wav, tts_engine = None, None, "none"
                         async for event in run_tts_with_heartbeats(
                             text=final_answer,
                             audio_prompt=HARVIS_VOICE_PATH,
@@ -2550,17 +2632,24 @@ async def vision_chat(
                             if event["type"] == "heartbeat":
                                 yield f"data: {json.dumps({'status': 'processing', 'detail': 'Generating audio...'})}\n\n"
                             elif event["type"] == "result":
-                                sr, wav = event["data"]
+                                tts_result = event["data"]
+                                if isinstance(tts_result, tuple) and len(tts_result) == 3:
+                                    sr, wav, tts_engine = tts_result
+                                else:
+                                    sr, wav = tts_result
+                                    tts_engine = "unknown"
 
                         if wav is not None:
-                            filename = f"vision_{uuid.uuid4()}.wav"
-                            filepath = os.path.join(tempfile.gettempdir(), filename)
-                            sf.write(filepath, wav, sr)
-                            audio_path = f"/api/audio/{filename}"
+                            audio_path = safe_save_audio(sr, wav, prefix="vision")
                             logger.info(f"🔊 VISION: Generated TTS audio: {audio_path}")
+                            tts_sample_rate = int(sr) if sr else None
+                            tts_duration_sec = (
+                                round(len(wav) / float(sr), 3) if sr and wav is not None else None
+                            )
                     except Exception as tts_error:
                         logger.error(
-                            f"TTS generation failed for vision response: {tts_error}"
+                            f"TTS generation failed for vision response: {tts_error}",
+                            exc_info=True,
                         )
 
             # Final complete response
@@ -2571,6 +2660,10 @@ async def vision_chat(
                 "model": req.model,
                 "images_processed": len(processed_images),
                 "session_id": session_id,
+                "tts_engine": tts_engine,
+                "tts_ref_audio": tts_ref_audio,
+                "tts_sample_rate": tts_sample_rate,
+                "tts_duration_sec": tts_duration_sec,
             }
 
             if reasoning_content:
@@ -3006,7 +3099,7 @@ async def analyze_screen_with_tts(req: ScreenAnalysisWithTTSRequest):
             )
             audio_prompt_path = None
 
-        sr, wav = safe_generate_speech_optimized(
+        sr, wav, tts_engine = safe_generate_speech_optimized(
             text=llm_response,
             audio_prompt=audio_prompt_path,
             exaggeration=req.exaggeration,
@@ -3014,17 +3107,18 @@ async def analyze_screen_with_tts(req: ScreenAnalysisWithTTSRequest):
             cfg_weight=req.cfg_weight,
         )
 
-        # Save audio file
-        filename = f"screen_analysis_{uuid.uuid4()}.wav"
-        filepath = os.path.join(tempfile.gettempdir(), filename)
-        sf.write(filepath, wav, sr)
+        audio_path = safe_save_audio(sr, wav, prefix="screen_analysis")
 
         logger.info("✅ Complete screen analysis with TTS finished")
         return {
             "response": llm_response,
             "screen_analysis": qwen_analysis,
             "model_used": req.model,
-            "audio_path": f"/api/audio/{filename}",
+            "audio_path": audio_path,
+            "tts_engine": tts_engine,
+            "tts_ref_audio": audio_prompt_path,
+            "tts_sample_rate": int(sr) if sr else None,
+            "tts_duration_sec": round(len(wav) / float(sr), 3) if sr and wav is not None else None,
             "processing_stages": {
                 "qwen_analysis": "✅ Completed",
                 "llm_response": "✅ Completed",
@@ -3258,6 +3352,10 @@ async def mic_chat(
 
         # ── 5. Generate TTS ──────────────────────────────────────────────────────────
         audio_path = None
+        tts_engine = "none"
+        tts_sample_rate = None
+        tts_duration_sec = None
+        tts_ref_audio = None
 
         if text_only:
             logger.info("🔇 MIC-CHAT: [Text Only Mode] Skipping TTS generation")
@@ -3279,7 +3377,7 @@ async def mic_chat(
                     f"🎤 MIC-CHAT TTS: Generating speech for {len(final_answer)} chars: '{final_answer[:80]}...'"
                 )
 
-                sr, wav = await run_in_threadpool(
+                sr, wav, tts_engine = await run_in_threadpool(
                     safe_generate_speech_optimized,
                     text=final_answer,
                     exaggeration=0.5,
@@ -3296,15 +3394,14 @@ async def mic_chat(
                     and len(wav.shape) >= 1
                     and wav.shape[0] > 0
                 ):
-                    fname = f"response_{uuid.uuid4()}.wav"
-                    filepath = os.path.join(tempfile.gettempdir(), fname)
-                    sf.write(filepath, wav, sr)
-                    audio_path = f"/api/audio/{fname}"
-                    logger.info(f"🔊 MIC-CHAT: Audio written to {filepath}")
+                    audio_path = safe_save_audio(sr, wav, prefix="response")
+                    tts_ref_audio = audio_prompt_path
+                    tts_sample_rate = int(sr)
+                    tts_duration_sec = round(len(wav) / float(sr), 3)
                 else:
                     logger.warning("⚠️ MIC-CHAT: TTS returned no audio")
             except Exception as e:
-                logger.error(f"❌ MIC-CHAT: TTS failed: {e}")
+                logger.error(f"❌ MIC-CHAT: TTS failed: {e}", exc_info=True)
 
         # ── 6. Save to database ──────────────────────────────────────────────────────
         message_id = None
@@ -3372,6 +3469,10 @@ async def mic_chat(
             "message_id": message_id,
             "final_answer": final_answer,
             "transcription": text,
+            "tts_engine": tts_engine,
+            "tts_ref_audio": tts_ref_audio,
+            "tts_sample_rate": tts_sample_rate,
+            "tts_duration_sec": tts_duration_sec,
         }
 
         if audio_path:
@@ -3402,14 +3503,36 @@ async def mic_chat(
 
 
 # Research endpoints using the enhanced research module with advanced pipeline
-from agent_research import research_agent, fact_check_agent, comparative_research_agent
-from agent_research import (
-    async_research_agent,
-    async_fact_check_agent,
-    async_comparative_research_agent,
-)
-from agent_research import get_research_agent_stats, get_mcp_tool
-from research.web_search import WebSearchAgent
+try:
+    from agent_research import research_agent, fact_check_agent, comparative_research_agent
+    from agent_research import (
+        async_research_agent,
+        async_fact_check_agent,
+        async_comparative_research_agent,
+    )
+    from agent_research import get_research_agent_stats, get_mcp_tool
+    from research.web_search import WebSearchAgent
+    RESEARCH_AVAILABLE = True
+except Exception as e:
+    RESEARCH_AVAILABLE = False
+    logger.warning("Research module unavailable at startup: %s", e)
+
+    async def _research_unavailable(*args, **kwargs):
+        raise HTTPException(503, "Research module is temporarily unavailable")
+
+    def _research_unavailable_sync(*args, **kwargs):
+        raise HTTPException(503, "Research module is temporarily unavailable")
+
+    research_agent = _research_unavailable_sync
+    fact_check_agent = _research_unavailable_sync
+    comparative_research_agent = _research_unavailable_sync
+    async_research_agent = _research_unavailable
+    async_fact_check_agent = _research_unavailable
+    async_comparative_research_agent = _research_unavailable
+    get_research_agent_stats = _research_unavailable_sync
+    get_mcp_tool = _research_unavailable_sync
+    WebSearchAgent = None
+
 from pydantic import Field
 from typing import Optional, List
 
@@ -4049,7 +4172,7 @@ async def synthesize_speech(req: SynthesizeSpeechRequest):
             )
             audio_prompt_path = None
 
-        sr, wav = safe_generate_speech_optimized(
+        sr, wav, tts_engine = safe_generate_speech_optimized(
             text=req.text,
             audio_prompt=audio_prompt_path,
             exaggeration=req.exaggeration,
@@ -4057,12 +4180,15 @@ async def synthesize_speech(req: SynthesizeSpeechRequest):
             cfg_weight=req.cfg_weight,
         )
 
-        filename = f"response_{uuid.uuid4()}.wav"
-        filepath = os.path.join(tempfile.gettempdir(), filename)
-        sf.write(filepath, wav, sr)
-        logger.info("Audio written to %s", filepath)
+        audio_path = safe_save_audio(sr, wav, prefix="response")
 
-        return {"audio_path": f"/api/audio/{filename}"}
+        return {
+            "audio_path": audio_path,
+            "tts_engine": tts_engine,
+            "tts_ref_audio": audio_prompt_path,
+            "tts_sample_rate": int(sr) if sr else None,
+            "tts_duration_sec": round(len(wav) / float(sr), 3) if sr and wav is not None else None,
+        }
 
     except Exception as e:
         logger.exception("TTS synthesis endpoint crashed")
@@ -4381,3 +4507,77 @@ if VOICE_MODEL_AVAILABLE and TTS_ENGINE_AVAILABLE:
         if voice_manager.delete_model(name):
             return {"status": "ok", "deleted": name}
         raise HTTPException(404, f"Model not found: {name}")
+
+
+# ─── Voice Models Browse (proxy scraper for voice-models.com) ──────────────
+_voice_browse_cache: Dict[str, Any] = {"data": None, "fetched_at": 0}
+_VOICE_BROWSE_TTL = 300  # 5 min cache
+
+@app.get("/api/voice-models/browse", tags=["voice-models"])
+async def api_browse_voice_models():
+    """Scrape voice-models.com/top and return structured model list.
+    Results are cached for 5 minutes. Falls back gracefully on error."""
+    import time
+    now = time.time()
+    if _voice_browse_cache["data"] and (now - _voice_browse_cache["fetched_at"]) < _VOICE_BROWSE_TTL:
+        return _voice_browse_cache["data"]
+
+    try:
+        resp = requests.get(
+            "https://voice-models.com/top",
+            headers={"User-Agent": "Mozilla/5.0 (compatible; Harvis/1.0)"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(resp.text, "html.parser")
+        models = []
+
+        for row in soup.select("table tr"):
+            cells = row.find_all("td")
+            if len(cells) < 2:
+                continue
+            link_el = cells[0].find("a")
+            if not link_el:
+                continue
+            name = link_el.get_text(strip=True)
+            page_url = link_el.get("href", "")
+            if page_url and not page_url.startswith("http"):
+                page_url = "https://voice-models.com" + page_url
+
+            dl_link = cells[1].find("a")
+            download_url = dl_link.get("href", "") if dl_link else ""
+
+            run_link = cells[0].find("a", string="Run")
+            run_url = run_link.get("href", "") if run_link else ""
+
+            if name and download_url:
+                models.append({
+                    "name": name,
+                    "page_url": page_url,
+                    "download_url": download_url,
+                    "run_url": run_url,
+                })
+
+        result = {
+            "status": "ok",
+            "count": len(models),
+            "models": models,
+            "cached": False,
+        }
+        _voice_browse_cache["data"] = {**result, "cached": True}
+        _voice_browse_cache["fetched_at"] = now
+        logger.info(f"Fetched {len(models)} voice models from voice-models.com/top")
+        return result
+
+    except Exception as e:
+        logger.warning(f"Failed to fetch voice-models.com: {e}")
+        if _voice_browse_cache["data"]:
+            return {**_voice_browse_cache["data"], "stale": True}
+        return {
+            "status": "error",
+            "error": "Voice model website is currently unavailable. Using default Harvis voice.",
+            "count": 0,
+            "models": [],
+        }

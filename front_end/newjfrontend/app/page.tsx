@@ -12,7 +12,7 @@ import { Menu, Sparkles } from "lucide-react"
 import ModelSelector from "@/components/ModelSelector"
 import SearchToggle from "@/components/SearchToggle"
 import { useChatHistoryStore } from "@/stores/chatHistoryStore"
-import { apiClient } from "@/lib/api"
+import { apiClient, getAuthHeaders } from "@/lib/api"
 import { useUser } from "@/lib/auth/UserProvider"
 import type { Message, MessageObject, Attachment } from "@/types/message"
 import { isVisionModel } from "@/types/message"
@@ -21,6 +21,8 @@ import { useChat } from "@ai-sdk/react"
 import { Message as AiMessage } from "ai"
 
 import { useApiWithRetry } from "@/hooks/useApiWithRetry"
+import BlockPluginStack from "@/components/BlockPluginStack"
+import BlockPluginPanel from "@/components/BlockPluginPanel"
 
 export default function ChatPage() {
   const router = useRouter()
@@ -66,6 +68,7 @@ export default function ChatPage() {
     data: aiData 
   } = useChat({
     api: '/api/ai-chat',
+    headers: getAuthHeaders(),
     body: {
       model: selectedModel,
       sessionId: currentSession?.id || null,
@@ -834,6 +837,12 @@ export default function ChatPage() {
           />
         </div>
       </div>
+
+      {/* Plugin panel -- inline flex sibling so it pushes the chat area */}
+      <BlockPluginPanel />
+
+      {/* Plugin stack bubble -- fixed overlay */}
+      <BlockPluginStack />
     </div>
   )
 }

@@ -83,15 +83,21 @@ def download_whisper_model(model_name='base'):
 def check_chatterbox_model_exists():
     """Check if ChatterboxTTS model is already downloaded"""
 
-    if os.path.exists(HUGGINGFACE_CACHE_DIR):
-        contents = os.listdir(HUGGINGFACE_CACHE_DIR)
+    # HuggingFace stores models under hub/ subdirectory
+    hub_dir = os.path.join(HUGGINGFACE_CACHE_DIR, "hub")
+    search_dirs = [hub_dir, HUGGINGFACE_CACHE_DIR]
+
+    for search_dir in search_dirs:
+        if not os.path.exists(search_dir):
+            continue
+        contents = os.listdir(search_dir)
         model_dirs = [d for d in contents if d.startswith('models--')]
 
         if model_dirs:
-            logger.info(f"✅ Found existing ChatterboxTTS cache with {len(model_dirs)} model(s)")
+            logger.info(f"✅ Found existing ChatterboxTTS cache with {len(model_dirs)} model(s) in {search_dir}")
             # Verify that the cache contains actual model files
             for model_dir in model_dirs:
-                model_path = os.path.join(HUGGINGFACE_CACHE_DIR, model_dir)
+                model_path = os.path.join(search_dir, model_dir)
                 # Check if snapshots directory exists (HF cache structure)
                 snapshots_dir = os.path.join(model_path, 'snapshots')
                 if os.path.exists(snapshots_dir) and os.listdir(snapshots_dir):
@@ -110,15 +116,16 @@ def download_chatterbox_model():
     logger.info("📥 Downloading ChatterboxTTS model...")
 
     try:
-        from chatterbox.tts import ChatterboxTTS
-        logger.info("🚀 Starting the download...")
+        from huggingface_hub import snapshot_download
+        logger.info("🚀 Starting the download via huggingface_hub...")
         start_time = time.time()
 
-        model = ChatterboxTTS.from_pretrained(device='cpu')
+        snapshot_download(
+            repo_id="ResembleAI/chatterbox",
+            cache_dir=HUGGINGFACE_CACHE_DIR,
+        )
         elapsed = time.time() - start_time
         logger.info(f"✅ ChatterboxTTS model download successful in {elapsed:.1f}s")
-
-        del model
         return True
 
     except Exception as e:
