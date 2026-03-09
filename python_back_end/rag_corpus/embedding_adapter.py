@@ -90,19 +90,26 @@ class EmbeddingAdapter:
             return self._embed_with_huggingface(text)
 
     async def embed_batch(
-        self, texts: List[str], batch_size: int = 32
+        self, texts: List[str], batch_size: int = 32, max_concurrent: int = 4
     ) -> List[List[float]]:
         """
-        Generate embeddings for a batch of texts.
+        Generate embeddings for a batch of texts with concurrent processing.
 
         Args:
             texts: List of texts to embed
-            batch_size: Number of texts to process at once
+            batch_size: Number of texts to process in each batch
+            max_concurrent: Maximum concurrent embedding requests (prevents overwhelming Ollama)
 
         Returns:
             List of embedding vectors
         """
         embeddings = []
+        semaphore = asyncio.Semaphore(max_concurrent)
+
+        async def embed_with_limit(text: str) -> List[float]:
+            """Embed with concurrency limit."""
+            async with semaphore:
+                return await self._embed_with_ollama(text)
 
         for i in range(0, len(texts), batch_size):
             batch = texts[i : i + batch_size]
@@ -110,17 +117,31 @@ class EmbeddingAdapter:
                 f"Embedding batch {i // batch_size + 1}/{(len(texts) - 1) // batch_size + 1}"
             )
 
-            # Try Ollama first
+            # Try Ollama first with concurrent processing
             try:
-                batch_embeddings = await self._embed_batch_ollama(batch)
-                embeddings.extend(batch_embeddings)
+                # Process batch concurrently with semaphore limiting
+                batch_embeddings = await asyncio.gather(
+                    *[embed_with_limit(text) for text in batch],
+                    return_exceptions=True
+                )
+
+                # Handle any individual failures
+                processed_embeddings = []
+                for j, result in enumerate(batch_embeddings):
+                    if isinstance(result, Exception):
+                        logger.warning(f"Batch item {j} failed: {result}, using fallback")
+                        processed_embeddings.append(self._embed_with_huggingface(batch[j]))
+                    else:
+                        processed_embeddings.append(result)
+
+                embeddings.extend(processed_embeddings)
             except Exception as e:
                 logger.warning(f"Ollama batch embedding failed: {e}, using fallback")
                 batch_embeddings = self._embed_batch_huggingface(batch)
                 embeddings.extend(batch_embeddings)
 
-            # Small delay to avoid overwhelming the server
-            await asyncio.sleep(0.1)
+            # Reduced delay with concurrent processing
+            await asyncio.sleep(0.05)
 
         return embeddings
 

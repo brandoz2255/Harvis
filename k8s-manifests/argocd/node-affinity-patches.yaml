@@ -1,0 +1,87 @@
+---
+# Patch ArgoCD Deployments to run on rocky2vm.local
+# Apply these patches after installing ArgoCD
+
+# Patch for argocd-server
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: argocd-server
+  namespace: argocd
+spec:
+  template:
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: rocky2vm.local
+---
+# Patch for argocd-repo-server
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: argocd-repo-server
+  namespace: argocd
+spec:
+  template:
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: rocky2vm.local
+---
+# Patch for argocd-application-controller
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: argocd-application-controller
+  namespace: argocd
+spec:
+  template:
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: rocky2vm.local
+---
+# Patch for argocd-applicationset-controller
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: argocd-applicationset-controller
+  namespace: argocd
+spec:
+  template:
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: rocky2vm.local
+---
+# Patch for argocd-notifications-controller
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: argocd-notifications-controller
+  namespace: argocd
+spec:
+  template:
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: rocky2vm.local
+---
+# Patch for argocd-dex-server
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: argocd-dex-server
+  namespace: argocd
+spec:
+  template:
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: rocky2vm.local
+---
+# Patch for argocd-redis
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: argocd-redis
+  namespace: argocd
+spec:
+  template:
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: rocky2vm.local

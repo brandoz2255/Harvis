@@ -1,5 +1,521 @@
 # Recent Changes and Fixes Documentation
 
+## Date: 2026-03-04 — Thinking Mode Toggle + OpenClaw 503 Fix
+
+### Summary
+Two changes: (1) fix 503 errors from the Discord bot when calling nvidia-kimi by injecting `NVIDIA_API_KEY` into the backend K8s pod; (2) add a Deep Thinking toggle so users can enable/disable chain-of-thought reasoning on Kimi K2.5 (and future qwen3 models) per-request.
+
+### Fix 1: OpenClaw/Discord Bot 503 Error (NVIDIA_API_KEY missing in K8s)
+
+**Problem**: Discord bot → `/v1/chat/completions` with model `nvidia-kimi` returned 503. Backend pod lacked `NVIDIA_API_KEY` in its environment, so `model_proxy.py` raised HTTPException(503).
+
+**Root Cause**: `NVIDIA_API_KEY` was not declared in `kustomization.yaml` patches for the backend container.
+
+**Solution**: Added a JSON patch op to `k8s-manifests/overlays/prod/kustomization.yaml` that reads `nvidia-api-key` from `harvis-ai-openclaw-secret` (optional: true, so pod starts even if key is absent).
+
+**Note for operator**: Add the key to the secret:
+```bash
+kubectl patch secret harvis-ai-openclaw-secret -n ai-agents \
+  --type=json -p='[{"op":"add","path":"/data/nvidia-api-key","value":"<base64-key>"}]'
+```
+
+**Files Modified**: `k8s-manifests/overlays/prod/kustomization.yaml`
+
+### Fix 2: Thinking Mode Toggle
+
+**Problem**: When calling nvidia-kimi with `thinking: True`, the 30-60s thinking phase showed nothing in the frontend, and there was no way to toggle thinking off for faster responses.
+
+**Solution**:
+- Added `thinking_mode: bool = False` to `ChatRequest` in `python_back_end/main.py`
+- `chat_template_kwargs` now uses `req.thinking_mode` instead of hardcoded `True`
+- When `thinking_mode` is True, thinking chunks are streamed to frontend as `{"status": "thinking", "content": ...}` events
+- Added `thinkingMode` state to `front_end/newjfrontend/app/page.tsx`, passed as `thinking_mode` in request body
+- Added Deep Thinking toggle (Brain icon, purple) to settings menu in `front_end/newjfrontend/components/chat-input.tsx`
+
+**Files Modified**:
+- `python_back_end/main.py`
+- `front_end/newjfrontend/app/page.tsx`
+- `front_end/newjfrontend/components/chat-input.tsx`
+
+**Result**: Default is thinking off (fast streaming). User can enable Deep Thinking via ⚙ settings menu for slower but deeper responses.
+
+---
+
+## Date: 2026-03-02 — OpenClaw Logging, Token Tracking & Billing Dashboard
+
+### Summary
+OpenClaw's activity was completely opaque — no visibility into what tools agents
+were calling, no token usage numbers, no cost tracking. This change adds structured
+agent logging, per-call token/cost capture at the model proxy layer, a usage summary
+API endpoint, and surfaces the data in the frontend sidebar and workspace stats bar.
+
+### Problem
+- `model_proxy.py` forwarded LLM calls but never recorded token counts or cost
+- `openclaw_client.py` logged tool_call / tool_result at DEBUG — invisible in prod
+- No way to see today's spend or total tokens consumed
+- Frontend workspace panel showed time + event count but nothing about token usage
+
+### Root Cause
+Interception point existed (every cloud LLM call passes through `model_proxy.py`)
+but was never wired to write usage records. OpenClaw calls the proxy from its own
+HTTP client so per-workspace attribution isn't possible at proxy time — global
+per-call records with timestamps are used instead, aggregated by day/month.
+
+### Solution
+
+#### New DB table — `proxy_usage_log`
+**`front_end/newjfrontend/db/migrations/003_proxy_usage_log.sql`** (new file)
+- `BIGSERIAL` id, `model TEXT`, `tokens_in INT`, `tokens_out INT`, `cost_usd NUMERIC(12,8)`, `ts TIMESTAMPTZ`
+- Indexes on `ts DESC` and `(model, ts DESC)` for fast daily/monthly aggregation
+- Apply: `kubectl exec harvis-ai-pgsql-<pod> -- psql -U pguser -d database -c "<SQL>"`
+
+#### `python_back_end/workspace/model_proxy.py`
+- Added `asyncpg` import + `DATABASE_URL` env var read
+- Pricing constants: `_KIMI_COST_IN_PER_M = 0.14`, `_KIMI_COST_OUT_PER_M = 0.14`, `_OLLAMA_COST_PER_M = 0.0`
+- New `async def _log_usage(model, tokens_in, tokens_out, cost)` — writes to `proxy_usage_log` via a short-lived asyncpg connection; errors are warned but never propagated
+- **Non-streaming path**: after `resp.json()`, reads `data["usage"]` and fires `asyncio.create_task(_log_usage(...))`
+- **Streaming path**: injects `stream_options: {include_usage: true}` into Kimi requests before forwarding; `_stream_from_upstream()` signature extended with `model_name` + `is_kimi` params; parses usage from final SSE chunk while still forwarding all lines unchanged to OpenClaw
+
+#### `python_back_end/workspace/workspace_router.py`
+- New endpoint: `GET /api/workspace/usage/summary` (auth-gated, uses `get_current_user_optimized`)
+- Returns `{"today": {tokens_in, tokens_out, cost_usd}, "by_model": [{model, tokens_in, tokens_out, cost_usd}]}`
+- `today` = aggregated since `CURRENT_DATE` (UTC midnight)
+- `by_model` = last 30 days grouped by model, ordered by cost desc
+- Returns zeros gracefully when DB pool is unavailable
+
+#### `python_back_end/workspace/openclaw_client.py`
+- `tool_call` phase "start": upgraded from implicit DEBUG to `logger.info("[openclaw] tool_call  session=%.12s tool=%s args=%.80s", ...)`
+- `tool_result` phase "result": upgraded to `logger.info("[openclaw] tool_result session=%.12s tool=%s success=%s output=%.80s", ...)`
+- Log lines are greppable in kubectl: `kubectl -n ai-agents logs -f deploy/harvis-ai-merged-backend | grep "\[openclaw\]"`
+
+#### `front_end/newjfrontend/components/chat-sidebar.tsx`
+- New state: `usage: { today: { tokens_in, tokens_out, cost_usd } } | null`
+- `useEffect` polls `/api/workspace/usage/summary` on mount and every 60 seconds
+- Usage card rendered in sidebar footer (hidden when minimized): "Tokens today" count + "Cost today" in green
+- Silently skipped if endpoint unavailable (best-effort display)
+
+#### `front_end/newjfrontend/components/workspace/WorkspacePanel.tsx`
+- `StatsBarProps` extended: optional `tokensIn?`, `tokensOut?`, `costUsd?`
+- `StatsBar` renders two extra chips when values are non-zero: `🖥 N tok` (Cpu icon) and `$0.0000` (green text)
+- New state in `WorkspacePanel`: `runUsage` — fetched once when `isRunning` transitions to false
+- `useEffect` on `[isRunning, logEvents.length]` fetches `/api/workspace/usage/summary` on completion and populates chips
+- `StatsBar` render passes `tokensIn/Out/costUsd` from `runUsage?.today`
+
+### Verification
+```bash
+# 1. Confirm table exists after migration
+kubectl exec harvis-ai-pgsql-<pod> -- psql -U pguser -d database -c "\d proxy_usage_log"
+
+# 2. Check token capture after a kimi agent run
+kubectl -n ai-agents logs deploy/harvis-ai-merged-backend | grep "usage:"
+
+# 3. Hit the API
+curl -H "Authorization: Bearer <token>" http://localhost:9000/api/workspace/usage/summary
+
+# 4. Check structured agent logs
+kubectl -n ai-agents logs -f deploy/harvis-ai-merged-backend | grep "\[openclaw\]"
+```
+
+### What's visible after this change
+- **Sidebar footer**: "Tokens today: 12,345 / Cost today: $0.0017" — refreshes every 60s
+- **Workspace stats bar**: after a run completes, shows token count + cost chips alongside time/tool/event counters
+- **kubectl logs**: every tool_call and tool_result has a structured one-liner with session ID, tool name, args preview, and success flag — grep-friendly
+
+---
+
+## Date: 2026-03-02 — Discord Phase 1 (OpenClaw native channel)
+
+### Summary
+Wired OpenClaw's built-in Discord channel driver so you can DM the Harvis bot
+on Discord and talk directly to the OpenClaw agent (Ollama qwen3:4b locally,
+or Kimi K2.5 / gpt-oss via model proxy) without going through the Harvis web UI.
+
+### Files Modified
+
+**`k8s-manifests/overlays/prod/openclaw-secret.yaml`** (gitignored)
+- Added `discord-bot-token` — the Discord bot token
+- Added `discord-allowed-user-id` — your Discord user ID (`783435788431261777`), restricts bot to owner only
+- Added OAuth2 URL as a comment for reference
+
+**`k8s-manifests/overlays/prod/openclaw.yaml`**
+1. **ConfigMap `openclaw-config`** (`openclaw.json`):
+   - Changed `"channels": {}` → `"channels": { "discord": { ... } }`
+   - `token` reads `${DISCORD_BOT_TOKEN}` from env at runtime
+   - `allowedUserIds` locked to `["783435788431261777"]` — only you can message it
+   - `defaultAgent` is `"main"` (qwen3:4b local)
+2. **Deployment `harvis-ai-openclaw`**:
+   - Added `DISCORD_BOT_TOKEN` env var pulled from `harvis-ai-openclaw-secret`
+3. **NetworkPolicy `openclaw-isolation`**:
+   - Added egress rule: outbound TCP 443 to `0.0.0.0/0` excluding RFC-1918 private ranges
+   - Required for OpenClaw to connect to Discord's gateway (Cloudflare-backed)
+   - Private subnets (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) excluded so
+     internal cluster services remain unreachable via this rule
+
+**`Plans.md`**
+- Discord Phase 1 marked ✅ DONE in Implementation Order
+- Phase section updated with exact files changed and activation/pairing commands
+
+### Activation Steps (run once)
+```bash
+# Apply secret + manifest
+kubectl apply -f k8s-manifests/overlays/prod/openclaw-secret.yaml
+kubectl apply -f k8s-manifests/overlays/prod/openclaw.yaml
+
+# Restart pod to pick up new env var + config
+kubectl rollout restart deployment/harvis-ai-openclaw -n ai-agents
+kubectl rollout status deployment/harvis-ai-openclaw -n ai-agents
+
+# Pairing (one-time): DM the bot, watch logs for code
+kubectl -n ai-agents logs -f deployment/harvis-ai-openclaw | grep -i "pairing\|discord"
+# Then: kubectl -n ai-agents exec deployment/harvis-ai-openclaw -- node openclaw.mjs pairing approve discord <code>
+```
+
+### What's Next (Phase 2 — do later)
+`discord_bridge.py` in the Harvis Python backend — forwards Discord DMs through
+`/api/chat` with full session history and Harvis persona. Phase 1 talks to OpenClaw
+directly; Phase 2 gives Discord the same conversational memory as the web UI.
+
+---
+
+## Date: 2026-02-18 (Part 7)
+
+### Fixed Markdown Code Block Markers in Document Generation
+
+#### Problem:
+- Document generation was failing with `SyntaxError: invalid syntax`
+- Error showed: ```python-doc` in the executed code
+- Markdown code block markers were being included in the generated Python script
+- Validation was passing code that still contained markdown syntax
+
+#### Root Cause:
+- The `_validate_document_code()` function was not checking for markdown markers
+- When code passed other validation checks (imports, save patterns), it was accepted even with markdown markers
+- The generated script contained invalid Python syntax like:
+  ```python
+  ```python-doc
+  from pptx import Presentation
+  # ... code ...
+  ```
+
+#### Solution Applied:
+**Added markdown marker detection to `_validate_document_code()` in `python_back_end/artifacts/code_generator.py`**:
+
+```python
+# Check for markdown code block markers - code should NOT have these
+markdown_markers = ["```", "```python", "```python-doc", "```python-spreadsheet", 
+                    "```python-pdf", "```python-presentation"]
+for marker in markdown_markers:
+    if marker in code:
+        logger.warning(f"Code contains markdown marker: {marker}")
+        return False
+```
+
+**How it works**:
+1. Validation now rejects any code containing markdown markers
+2. This forces the extraction logic to properly strip markdown syntax
+3. Code is validated as clean Python before being executed
+4. Prevents syntax errors from markdown contamination
+
+#### Files Modified:
+- `python_back_end/artifacts/code_generator.py`:
+  - Lines 169-175: Added markdown marker detection in `_validate_document_code()`
+
+#### Result/Status:
+- ✅ Markdown markers are now detected and rejected
+- ✅ Validation fails early when code is not properly extracted
+- ✅ Clean Python code is executed, not markdown-wrapped code
+- ✅ No more `SyntaxError: invalid syntax` from markdown markers
+
+---
+
+## Date: 2026-02-18 (Part 6)
+
+### Updated CI Pipeline to Include Docker Push
+
+#### Problem:
+- CI pipeline only built images but didn't push them to Docker Hub
+- Had to manually run separate push commands after building
+- Document worker image wasn't automatically pushed with other images
+- Inconsistent with TUI workflow where user expects built images to be available
+
+#### Solution Applied:
+**Added Docker push functionality to `ci_pipeline.sh`**:
+
+1. **Added push step** after all images are built:
+   - Asks user if they want to push images (using whiptail GUI or CLI fallback)
+   - Pushes all 5 images in sequence if confirmed
+   - Shows manual push commands if user declines
+
+2. **All images included**:
+   - `dulc3/jarvis-frontend:$FRONTEND_VERSION`
+   - `dulc3/jarvis-backend:$BACKEND_VERSION`
+   - `dulc3/harvis-artifact-executor:$BACKEND_VERSION`
+   - `dulc3/harvis-code-executor:$BACKEND_VERSION`
+   - `dulc3/harvis-document-worker:$BACKEND_VERSION`
+
+3. **User-friendly prompts**:
+   - Uses whiptail for GUI confirmation if available
+   - Falls back to CLI read prompt if whiptail not available
+   - Shows helpful manual push commands if push is skipped
+
+#### Files Modified:
+- `ci_pipeline.sh`:
+  - Lines 217-249: Added push step with user confirmation
+  - Updated summary to show push status
+
+#### Usage:
+```bash
+./ci_pipeline.sh
+# Builds all images
+# Asks: "Push all images to Docker Hub?"
+# If yes: automatically pushes all 5 images
+# If no: shows manual push commands
+```
+
+#### Result/Status:
+- ✅ All images built and pushed in one command
+- ✅ Document worker included in push workflow
+- ✅ Interactive confirmation prevents accidental pushes
+- ✅ Consistent with TUI experience
+
+---
+
+## Date: 2026-02-18 (Part 5)
+
+### Enhanced Document Worker Error Logging
+
+#### Problem:
+- Document generation jobs were failing with generic error: "Document generation failed"
+- No visibility into what actually went wrong (stdout/stderr from failed script execution)
+- Could not debug why Python code execution was failing in local mode
+
+#### Solution Applied:
+**Enhanced error logging in `python_back_end/workers/document_worker.py`**:
+- Added logging of return code, stdout, and stderr when document generation fails
+- Captures full error details including Python traceback from failed scripts
+- Stores stderr in database job record for better debugging
+- Limits stderr to 500 chars to prevent database field overflow
+
+```python
+logger.error(f"❌ Document generation failed: {error_msg}")
+logger.error(f"   Return code: {returncode}")
+if stdout:
+    logger.error(f"   STDOUT: {stdout}")
+if stderr:
+    logger.error(f"   STDERR: {stderr}")
+```
+
+#### Files Modified:
+- `python_back_end/workers/document_worker.py`:
+  - Lines 157-172: Enhanced error logging with stdout/stderr capture
+
+#### Result/Status:
+- ✅ Full error details now visible in logs
+- ✅ Can see Python traceback from failed scripts
+- ✅ Better visibility into document generation failures
+
+---
+
+## Date: 2026-02-18 (Part 4)
+
+### Fixed Document Worker - Added CODE_EXECUTOR_LOCAL Environment Variable
+
+#### Problem:
+- Document generation jobs were failing with "Docker command not found" error
+- The document worker was trying to spawn Docker containers to execute Python code
+- Docker is not available inside Kubernetes pods (would require mounting host Docker socket)
+- Error: `Docker command not found. Is Docker installed?`
+
+#### Root Cause:
+- Missing `CODE_EXECUTOR_LOCAL` environment variable in ArgoCD overlay manifest
+- When the node affinity was changed to dulc3-os, the environment variable wasn't preserved
+- The code defaults to Docker mode when `CODE_EXECUTOR_LOCAL` is not set
+
+#### Solution Applied:
+**Added `CODE_EXECUTOR_LOCAL=true` environment variable to document worker manifests**:
+
+1. **Base manifest** (`k8s-manifests/services/document-worker.yaml`):
+   - Added `CODE_EXECUTOR_LOCAL: "true"` env var
+   - Document generation now runs locally inside the pod
+
+2. **Overlay manifest** (`k8s-manifests/overlays/prod/document-worker.yaml`):
+   - Added `CODE_EXECUTOR_LOCAL: "true"` env var
+   - ArgoCD deployment now uses local execution mode
+
+**How it works**:
+- When `CODE_EXECUTOR_LOCAL=true`, the code executes Python directly using subprocess
+- Uses libraries already installed in the document-worker image (openpyxl, python-pptx, etc.)
+- No Docker required - runs securely inside the pod container
+- Output files are written directly to the mounted PVC at `/data/artifacts`
+
+#### Files Modified:
+- `k8s-manifests/services/document-worker.yaml`:
+  - Lines 73-75: Added `CODE_EXECUTOR_LOCAL: "true"` environment variable
+  
+- `k8s-manifests/overlays/prod/document-worker.yaml`:
+  - Lines 73-75: Added `CODE_EXECUTOR_LOCAL: "true"` environment variable
+
+#### Deployment Instructions:
+1. Changes are already committed and pushed
+2. Argo CD will automatically sync the changes
+3. Document worker pods will restart with new environment variable
+4. Document generation will now work without Docker
+
+#### Result/Status:
+- ✅ Document worker runs code locally inside pod
+- ✅ No Docker socket mounting required
+- ✅ Libraries already present in image (openpyxl, python-docx, python-pptx, reportlab)
+- ✅ Secure execution within pod boundaries
+- ✅ Files written directly to PVC
+- ✅ Argo CD will auto-deploy changes
+
+---
+
+## Date: 2026-02-18 (Part 3)
+
+### Fixed Document Worker Node Affinity for Artifacts PVC
+
+#### Problem:
+- Document worker pods were being scheduled on rocky VMs (rocky1vm.local, rocky2vm.local, rocky3vm.local)
+- The artifacts PVC is located on `dulc3-os` node only
+- Pods scheduled on other nodes couldn't access the artifacts storage
+- Document generation jobs were failing due to PVC access issues
+
+#### Root Cause:
+- Node affinity was configured to avoid dulc3-os (comment said "NOT on dulc3-os")
+- The artifacts PVC is bound to dulc3-os node specifically
+- ReadWriteOnce (RWO) PVCs can only be mounted on one node at a time
+
+#### Solution Applied:
+**Updated node affinity in document worker manifests**:
+
+1. **Base manifest** (`k8s-manifests/services/document-worker.yaml`):
+   - Changed node affinity to ONLY allow `dulc3-os` node
+   - Removed rocky VMs from allowed nodes list
+   - Updated comment to explain the requirement
+
+2. **Overlay manifest** (`k8s-manifests/overlays/prod/document-worker.yaml`):
+   - Applied same change for production overlay
+   - Ensures production deployment also targets dulc3-os only
+
+#### Files Modified:
+- `k8s-manifests/services/document-worker.yaml`:
+  - Lines 23-34: Updated node affinity to only target `dulc3-os`
+  
+- `k8s-manifests/overlays/prod/document-worker.yaml`:
+  - Lines 23-35: Updated node affinity to only target `dulc3-os`
+
+#### Deployment Instructions:
+1. Commit and push changes to git
+2. Argo CD will automatically detect the changes
+3. Document worker pods will be rescheduled to dulc3-os
+4. Pods will now have access to the artifacts PVC
+
+#### Result/Status:
+- ✅ Document worker will only schedule on dulc3-os node
+- ✅ Pods will have access to artifacts PVC on that node
+- ✅ Document generation can write files to shared storage
+- ✅ Argo CD will auto-sync the changes
+
+---
+
+## Date: 2026-02-18 (Part 2)
+
+### Fixed Document Worker Code Extraction Error
+
+#### Problem:
+- Document generation jobs were failing with "No valid document generation code found in response"
+- Error occurred in document worker after job was successfully queued
+- Code was extracted successfully in main.py but failed when worker tried to re-extract it
+- Jobs retried 3 times then failed permanently
+
+#### Root Cause Analysis:
+1. **main.py extracts code**: When LLM generates document code, main.py calls `extract_document_code()` to extract it from markdown code blocks (e.g., ```python-doc)
+2. **Job stores extracted code**: The extracted Python code (without markdown) is stored in the job queue
+3. **Worker re-extracts**: Document worker receives the code and calls `extract_document_code()` again
+4. **Extraction fails**: The function looks for markdown code blocks but the code is already plain Python
+5. **Result**: Worker fails to find "valid" code even though valid code was provided
+
+**Code Flow**:
+```
+main.py: extract_document_code("```python-doc\ncode...\n```") -> "code..."
+        ↓
+Job Queue: stores "code..." (plain Python)
+        ↓
+Worker: extract_document_code("code...") -> None (no markdown blocks found!)
+```
+
+#### Solution Applied:
+**Modified `extract_document_code` in `python_back_end/artifacts/code_generator.py`**:
+- Added check at the beginning of function to validate if input is already valid Python code
+- If `_validate_document_code()` returns True on the raw input, use it directly
+- This handles cases where code was already extracted before being passed to the worker
+
+```python
+# First, check if this is already valid Python code (no markdown blocks)
+if _validate_document_code(llm_response, artifact_type):
+    logger.info(f"Using provided code directly (already extracted)")
+    return llm_response
+```
+
+#### Files Modified:
+- `python_back_end/artifacts/code_generator.py`:
+  - Lines 61-66: Added early return for already-extracted code
+  - Updated docstring to document the new behavior
+
+#### Result/Status:
+- ✅ Document worker now accepts both raw Python code and markdown-wrapped code
+- ✅ Jobs that were failing now process successfully
+- ✅ Backward compatible - still extracts code from markdown when needed
+- ✅ No more "No valid document generation code found" errors for valid code
+
+---
+
+## Date: 2026-02-18 (Part 1)
+
+### Fixed Artifact Dependencies Pydantic Validation Error
+
+#### Problem:
+- Backend was throwing `ValidationError: 1 validation error for ArtifactResponse` when retrieving artifacts
+- Error: `dependencies: Input should be a valid dictionary [type=dict_type, input_value='{}', input_type=str]`
+- Database stored `dependencies` as JSON string but Pydantic model expected dict type
+- Artifacts with dependencies couldn't be retrieved via `/api/artifacts/{artifact_id}` endpoint
+
+#### Root Cause Analysis:
+1. **Database Schema**: PostgreSQL stored `dependencies` column as JSONB
+2. **Pydantic Model**: `ArtifactResponse.dependencies: Optional[Dict[str, str]] = None` expected dict
+3. **Type Mismatch**: asyncpg returned JSON string `'{}'` instead of parsed dict
+4. **Location**: `storage.py:373` passed `artifact.get("dependencies")` directly to Pydantic model
+
+#### Solution Applied:
+**Modified `to_response` method in `python_back_end/artifacts/storage.py`**:
+1. Added `json` import at top of file
+2. Added logic to parse JSON string if dependencies is a string:
+   ```python
+   # Handle dependencies - parse JSON string if needed
+   dependencies = artifact.get("dependencies")
+   if isinstance(dependencies, str):
+       try:
+           dependencies = json.loads(dependencies)
+       except (json.JSONDecodeError, TypeError):
+           dependencies = None
+   ```
+3. Pass parsed `dependencies` to `ArtifactResponse` constructor
+
+#### Files Modified:
+- `python_back_end/artifacts/storage.py`:
+  - Line 4: Added `import json`
+  - Lines 362-368: Added JSON string parsing logic for dependencies field
+  - Line 382: Changed to use parsed `dependencies` variable
+
+#### Result/Status:
+- ✅ Pydantic validation errors resolved for artifacts with dependencies
+- ✅ Artifacts can now be retrieved successfully via API
+- ✅ Backward compatible - handles both dict and string formats
+- ✅ Graceful fallback to None for invalid JSON
+
+---
+
 ## Date: 2026-02-03 (Part 4)
 
 ### Fixed qwen3-embedding Dimension Mismatch - Updated from 2560 to 4096
@@ -428,449 +944,6 @@ Server: data: {"status": "complete", "final_answer": "...", "audio_path": "...",
 - All existing functionality preserved (history, TTS, reasoning separation, etc.)
 - Frontend displays progress in console logs
 - No UI changes required - responses work identically
-
----
-
-## Date: 2025-01-09
-
-### 12. VibeCode IDE Command Palette Implementation ✅ COMPLETED
-
-#### Problem:
-The VibeCode IDE lacked a quick, keyboard-driven way to access common commands and actions. Users had to:
-- Navigate through menus or remember multiple keyboard shortcuts
-- Click buttons scattered across the interface
-- Manually toggle panels and settings
-- Search for specific actions without a unified interface
-
-This made the IDE less efficient for keyboard-focused developers and reduced discoverability of available features.
-
-#### Root Cause Analysis:
-- **No Command Palette**: Missing a VSCode-style command palette (Ctrl+Shift+P)
-- **Limited Keyboard Shortcuts**: Only basic shortcuts implemented (Ctrl+S for save)
-- **Poor Discoverability**: Users couldn't easily find available commands
-- **No Fuzzy Search**: No way to quickly filter and find commands
-- **Scattered Actions**: Container controls, panel toggles, and file operations not centralized
-
-#### Solution Applied:
-
-**1. CommandPalette Component (`components/CommandPalette.tsx`)**:
-- **Modal Interface**: Full-screen overlay with centered command palette
-- **Search Input**: Auto-focused input with real-time filtering
-- **Fuzzy Search Algorithm**:
-  - Character-by-character matching across label, description, and keywords
-  - Intelligent scoring system prioritizing consecutive matches and word boundaries
-  - Sorts results by relevance score
-- **Keyboard Navigation**:
-  - ↑/↓ Arrow keys to navigate commands
-  - Enter to execute selected command
-  - Escape to close palette
-  - Auto-scroll to keep selected item in view
-- **Visual Feedback**:
-  - Blue highlight for selected command
-  - Icons for each command (lucide-react)
-  - Command descriptions and keywords
-  - "No commands found" message for empty results
-  - Footer with keyboard hints and command count
-
-**2. useIDECommands Hook**:
-- **Reusable Command Generator**: Creates standard IDE commands based on context
-- **Context-Aware Commands**: Commands appear/disappear based on state:
-  - "Save File" only when a file is open (`canSave`)
-  - "Start Container" only when container is stopped
-  - "Stop Container" only when container is running
-- **Available Commands**:
-  1. Save File (Ctrl+S)
-  2. New File
-  3. New Terminal
-  4. Start Container
-  5. Stop Container
-  6. Toggle Theme (Dark/Light)
-  7. Toggle Left Panel (File Explorer)
-  8. Toggle Right Panel (AI Assistant)
-  9. Toggle Terminal
-- **Dynamic Icons**: Theme toggle shows Sun/Moon based on current theme
-
-**3. IDE Integration (`app/ide/page.tsx`)**:
-- **State Management**:
-  - Added `showCommandPalette` state
-  - Added `showRightPanel` and `showTerminal` states for panel visibility
-- **Action Handlers**:
-  - `handleStartContainer()`: Calls `/api/vibecode/sessions/open`
-  - `handleStopContainer()`: Calls `/api/vibecode/sessions/suspend`
-  - `handleNewFile()`: Placeholder for new file creation
-  - `toggleLeftPanel()`, `toggleRightPanel()`, `toggleTerminal()`: Panel visibility toggles
-- **Keyboard Shortcuts**:
-  - **Ctrl/Cmd+Shift+P**: Open command palette
-  - **Ctrl/Cmd+S**: Save file
-  - **Ctrl/Cmd+B**: Toggle left panel (file explorer)
-  - **Ctrl/Cmd+J**: Toggle terminal
-  - **Ctrl/Cmd+`**: Focus terminal (show if hidden)
-- **Panel Visibility Controls**:
-  - Left, right, and terminal panels now conditionally rendered
-  - Toggle buttons appear when panels are hidden
-  - Smooth transitions for show/hide
-
-**4. Container Control Integration**:
-- **Start Container**: Sends POST to `/api/vibecode/sessions/open`
-- **Stop Container**: Sends POST to `/api/vibecode/sessions/suspend`
-- **Status Updates**: Updates session status optimistically with polling
-- **Visual Feedback**: Status changes from stopped → starting → running
-
-#### Technical Implementation:
-
-**Fuzzy Search Algorithm**:
-```typescript
-function fuzzyMatch(query: string, target: string): { matches: boolean; score: number }
-```
-- Matches if all query characters appear in order in target string
-- Scores based on:
-  - Consecutive character matches (bonus points)
-  - Matches at word boundaries (bonus points)
-  - String length (shorter strings preferred)
-- Searches across label (2x weight), description, and keywords
-
-**Command Interface**:
-```typescript
-interface Command {
-  id: string
-  label: string
-  description?: string
-  icon?: React.ReactNode
-  action: () => void
-  keywords?: string[]
-}
-```
-
-#### Files Modified:
-1. **Created**: `components/CommandPalette.tsx` (350+ lines)
-   - Main command palette component
-   - Fuzzy search implementation
-   - useIDECommands hook
-2. **Modified**: `app/ide/page.tsx`
-   - Added command palette state and integration
-   - Added keyboard shortcuts
-   - Added container control handlers
-   - Added panel visibility states
-   - Made panels conditionally visible
-
-#### Testing Results:
-✅ All sub-tasks completed:
-- [x] Create CommandPalette modal component with input and command list
-- [x] Add showCommandPalette state and modal overlay
-- [x] Implement command list: Save File, New File, New Terminal, Start Container, Stop Container, Toggle Theme, Toggle Panels
-- [x] Add fuzzy search filter on command list
-- [x] Wire each command to its action handler
-- [x] Test command palette opens and executes commands
-
-#### Requirements Satisfied:
-- **Requirement 13.8**: ✅ Command palette opens with Ctrl/Cmd+Shift+P
-- **Requirement 14.5**: ✅ Integrates with existing components and handlers
-
-#### User Experience Improvements:
-- **Keyboard-First Workflow**: All major actions accessible via keyboard
-- **Quick Command Access**: Type to find any command instantly
-- **Discoverability**: Users can browse all available commands
-- **Context Awareness**: Only relevant commands shown based on state
-- **Visual Consistency**: Matches VSCode command palette UX
-
-#### Performance:
-- **Instant Open**: Palette opens in < 100ms
-- **Responsive Search**: Filtering completes in < 50ms
-- **Optimized Rendering**: useMemo prevents unnecessary re-renders
-- **Smooth Navigation**: Keyboard navigation is fluid and responsive
-
-#### Status: ✅ COMPLETE
-Task 23.9 fully implemented and verified. Command palette is production-ready.
-
----
-
-## Date: 2025-01-09
-
-### 11. VibeCode IDE Status Bar Implementation ✅ COMPLETED
-
-#### Problem:
-The VibeCode IDE lacked a comprehensive status bar to display important session information, container status, file details, and provide quick access to common actions. Users had no way to:
-- See current session and container status at a glance
-- Track cursor position while editing
-- View current theme and font size settings
-- Quickly access command palette, theme toggle, or settings
-- Monitor container status changes in real-time
-
-#### Root Cause Analysis:
-- **Missing Status Bar Component**: No dedicated component for displaying IDE status information
-- **No Real-time Updates**: Container status wasn't being polled or updated automatically
-- **Limited User Feedback**: Users couldn't see cursor position or file modification status
-- **No Quick Actions**: Common actions required navigating through menus
-
-#### Solution Applied:
-
-**1. StatusBar Component (`components/StatusBar.tsx`)**:
-- Created comprehensive status bar component with left and right sections
-- **Left Section**: Session name, container status with color coding, file name, language, cursor position
-- **Right Section**: Theme indicator, font size display, quick action buttons
-- **Real-time Polling**: Polls container status every 5 seconds via API
-- **Color-coded Status Badges**:
-  - 🟢 Green: Running
-  - 🔴 Red: Stopped
-  - 🟡 Yellow: Starting (with spinner)
-  - 🟠 Orange: Stopping (with spinner)
-
-**2. Cursor Position Tracking (`components/VibeContainerCodeEditor.tsx`)**:
-- Added `onCursorPositionChange` callback prop to editor component
-- Implemented Monaco editor cursor position tracking in `handleEditorDidMount`
-- Tracks cursor position changes in real-time using `editor.onDidChangeCursorPosition`
-- Sets initial cursor position when editor mounts
-- Displays position in "Ln X, Col Y" format with monospace font
-
-**3. IDE Integration (`app/ide/page.tsx`)**:
-- Integrated `useUserPreferences` hook for theme and font size
-- Added cursor position state management
-- Implemented status bar action handlers:
-  - `handleCommandPaletteClick`: Placeholder for Task 23.9
-  - `handleThemeToggle`: Toggles theme and saves to preferences
-  - `handleSettingsClick`: Placeholder for future settings modal
-- Wired all StatusBar props with current IDE state
-- Replaced simple footer with comprehensive StatusBar component
-
-**4. Features Implemented**:
-- ✅ Session name display with "No session" fallback
-- ✅ Container status with real-time polling (5-second interval)
-- ✅ Color-coded status badges with appropriate icons
-- ✅ Selected file name with file icon
-- ✅ Dirty indicator (yellow dot) for unsaved changes
-- ✅ Language detection and display
-- ✅ Real-time cursor position tracking (line and column)
-- ✅ Theme indicator (moon/sun icon)
-- ✅ Font size display from user preferences
-- ✅ Quick action buttons with hover effects and tooltips
-- ✅ Graceful error handling for API failures
-
-#### Files Modified:
-1. `components/StatusBar.tsx` - New component (created)
-2. `app/ide/page.tsx` - Integrated StatusBar and user preferences
-3. `components/VibeContainerCodeEditor.tsx` - Added cursor position tracking
-4. `TASK_23_8_IMPLEMENTATION.md` - Implementation documentation
-5. `TASK_23_8_VERIFICATION.md` - Verification test plan
-
-#### Testing Results:
-- ✅ Build successful with no TypeScript errors
-- ✅ Component renders correctly in IDE layout
-- ✅ All props wire correctly from IDE state
-- ✅ Cursor position updates in real-time
-- ✅ Container status polling works as expected
-- ✅ Theme toggle saves to preferences
-- ✅ Visual design matches IDE aesthetic
-
-#### Requirements Satisfied:
-- ✅ Requirement 13.10: Status bar displays session info, container status, and current file
-- ✅ Requirement 14.10: Error handling follows existing patterns
-
-#### Status: ✅ COMPLETE
-- Task 23.8 marked as complete in tasks.md
-- Ready for Task 23.9 (Command Palette implementation)
-
----
-
-## Date: 2025-01-22
-
-### 10. VibeCode IDE Implementation Complete ✅ COMPLETED
-
-#### Problem:
-The Harvis AI platform had a legacy "Google Colab" integration that was outdated and limited in functionality. Users needed a modern, browser-based IDE experience similar to VSCode with:
-- Isolated development environments for multiple projects
-- Full file management capabilities
-- Interactive terminal access
-- Code execution with structured output
-- AI-powered coding assistance
-- Persistent workspaces that survive browser reloads
-
-#### Root Cause Analysis:
-- **Legacy Architecture**: Old Colab integration was tightly coupled and difficult to maintain
-- **Limited Functionality**: No proper file explorer, terminal, or session management
-- **Poor Isolation**: No container-based isolation between user projects
-- **Missing Features**: No AI assistance, code execution panel, or user preferences
-- **Scalability Issues**: Single-user design couldn't handle multiple concurrent sessions
-
-#### Solution Applied:
-
-**1. Backend Infrastructure (Tasks 1-8)**:
-- Set up Docker SDK integration for container management
-- Created `vibecoding` Python module with comprehensive session, container, file, terminal, execution, and AI assistant management
-- Implemented PostgreSQL schema with `vibe_sessions` and `user_prefs` tables
-- Added WebSocket support for real-time terminal access
-- Integrated Ollama for local AI assistance with cloud provider fallback
-- Implemented user preferences storage and retrieval
-
-**2. Frontend Components (Tasks 9-16)**:
-- Built SessionPickerModal for creating and managing development sessions
-- Created FileExplorer component with tree view, context menus, and drag-drop
-- Integrated Monaco Editor for code editing with syntax highlighting and auto-save
-- Added xterm.js terminal with WebSocket connection and full interactivity
-- Implemented CodeExecutionPanel for running code with structured output display
-- Built AIAssistantPanel with context-aware chat and model selection
-- Created ResizablePanel system for VSCode-like layout with persistent sizing
-- Implemented user preferences loading and saving
-
-**3. Migration and Cleanup (Task 17)**:
-- Created migration system to move legacy Colab files to `vibe_legacy/` directory
-- Removed all "Colab" references from codebase
-- Updated API endpoints to use `/api/vibecode/*` naming convention
-- Renamed components and CSS classes to use "Vibe" terminology
-
-**4. Security and Error Handling (Tasks 18-19)**:
-- Implemented comprehensive path sanitization to prevent directory traversal
-- Added command injection prevention with pattern blocking
-- Created rate limiting for execution and file operations
-- Built structured error handling with custom exception classes
-- Added retry logic with exponential backoff for transient failures
-- Implemented input validation with Pydantic models
-
-**5. Performance Optimization (Task 20)**:
-- Implemented container reuse to reduce startup time (< 1s reconnection)
-- Added file tree caching with 30-second TTL
-- Optimized file saves with debouncing (500ms delay)
-- Tracked container status in memory for fast lookups
-- Implemented cleanup task for inactive containers (2h timeout)
-
-**6. Testing and Validation (Task 21)**:
-- Wrote comprehensive unit tests for all backend modules (>80% coverage)
-- Created integration tests for complete workflows
-- Built E2E tests with Playwright for user scenarios
-- Added performance tests to verify SLA requirements
-- Validated all key metrics (container start < 3s, file save < 500ms, etc.)
-
-**7. Documentation and Deployment (Task 22)**:
-- Updated docker-compose.yaml with backend and frontend services
-- Configured nginx.conf with WebSocket support and proper routing
-- Created database migrations for vibe_sessions and user_prefs tables
-- Wrote comprehensive deployment guide with troubleshooting section
-- Documented all environment variables and configuration options
-
-#### Architecture Highlights:
-
-**Container Isolation**:
-- Each session runs in isolated Docker container: `vibecode-{user_id}-{session_id}`
-- Persistent volumes: `vibecode-{user_id}-{session_id}-ws` mounted at `/workspace`
-- Resource limits: 2GB RAM, 1.5 CPU cores, 512 PIDs
-- Security: `no-new-privileges:true`, isolated bridge network
-
-**API Endpoints**:
-- Session Management: `/api/vibecode/sessions/*`
-- File Operations: `/api/vibecode/files/*`
-- Code Execution: `/api/vibecode/exec`
-- Terminal WebSocket: `/api/vibecode/ws/terminal`
-- AI Assistant: `/api/vibecode/ai/*`
-- User Preferences: `/api/user/prefs`
-
-**Frontend Layout**:
-- Left Panel: File Explorer (resizable 200-500px)
-- Center Panel: Monaco Editor + Terminal (resizable terminal 100-600px)
-- Right Panel: AI Assistant + Code Execution tabs (resizable 300-600px)
-- All panel sizes persist in user preferences
-
-#### Files Created/Modified:
-
-**Backend Modules**:
-- `python_back_end/vibecoding/__init__.py`
-- `python_back_end/vibecoding/sessions.py` - Session lifecycle management
-- `python_back_end/vibecoding/containers.py` - Docker container orchestration
-- `python_back_end/vibecoding/file_operations.py` - File system operations
-- `python_back_end/vibecoding/file_api.py` - File API endpoints
-- `python_back_end/vibecoding/terminal.py` - WebSocket terminal handler
-- `python_back_end/vibecoding/execution.py` - Code execution engine
-- `python_back_end/vibecoding/ai_assistant.py` - AI integration
-- `python_back_end/vibecoding/user_prefs.py` - User preferences
-- `python_back_end/vibecoding/exceptions.py` - Custom exceptions
-- `python_back_end/vibecoding/validators.py` - Input validation
-- `python_back_end/vibecoding/rate_limiter.py` - Rate limiting
-- `python_back_end/vibecoding/command_security.py` - Command injection prevention
-- `python_back_end/vibecoding/file_cache.py` - File tree caching
-- `python_back_end/vibecoding/retry.py` - Retry logic
-- `python_back_end/vibecoding/migration.py` - Legacy Colab migration
-
-**Frontend Components**:
-- `front_end/jfrontend/app/vibecode/page.tsx` - Main VibeCode page
-- `front_end/jfrontend/components/VibeSessionManager.tsx` - Session picker modal
-- `front_end/jfrontend/components/MonacoVibeFileTree.tsx` - File explorer
-- `front_end/jfrontend/components/VibeContainerCodeEditor.tsx` - Monaco editor
-- `front_end/jfrontend/components/VibeTerminal.tsx` - Terminal component
-- `front_end/jfrontend/components/CodeExecutionPanel.tsx` - Execution panel
-- `front_end/jfrontend/components/AIAssistantPanel.tsx` - AI assistant
-- `front_end/jfrontend/components/ResizablePanel.tsx` - Resizable panels
-- `front_end/jfrontend/components/RightTabsPanel.tsx` - Right sidebar tabs
-- `front_end/jfrontend/lib/useUserPreferences.ts` - Preferences hook
-- `front_end/jfrontend/lib/apiError.ts` - Error handling
-
-**Database Migrations**:
-- `python_back_end/migrations/001_create_vibe_sessions.sql`
-- `python_back_end/migrations/002_create_user_prefs.sql`
-
-**Configuration**:
-- `aidev/docker-compose.yaml` - Added backend and frontend services with Docker socket mount
-- `aidev/nginx.conf` - Added WebSocket support and `/api/vibecode/*` routing
-- `python_back_end/.env` - Backend environment variables
-- `front_end/jfrontend/.env.local` - Frontend environment variables
-
-**Documentation**:
-- `aidev/VIBECODE_DEPLOYMENT_GUIDE.md` - Comprehensive deployment guide
-- `.kiro/specs/vibecode-ide/requirements.md` - Feature requirements
-- `.kiro/specs/vibecode-ide/design.md` - System design document
-- `.kiro/specs/vibecode-ide/tasks.md` - Implementation task list
-
-**Tests** (100+ test files):
-- Unit tests for all backend modules
-- Integration tests for complete workflows
-- E2E tests with Playwright
-- Performance tests for SLA validation
-- Security tests for path traversal and command injection
-
-#### Result/Status:
-- ✅ **Complete VSCode-like IDE**: Full-featured browser-based development environment
-- ✅ **Container Isolation**: Each session runs in isolated Docker container with persistent storage
-- ✅ **File Management**: Complete file explorer with create, read, update, delete, move, rename
-- ✅ **Interactive Terminal**: Full terminal access via WebSocket with 24-hour timeout
-- ✅ **Code Execution**: Structured execution panel supporting Python, Node.js, and Bash
-- ✅ **AI Assistant**: Context-aware AI help with Ollama local and cloud provider support
-- ✅ **User Preferences**: Persistent theme, layout, and model preferences
-- ✅ **Security**: Path sanitization, command injection prevention, rate limiting, JWT auth
-- ✅ **Performance**: Container start < 3s, file save < 500ms, file tree < 1s
-- ✅ **Testing**: >80% code coverage, comprehensive E2E tests
-- ✅ **Documentation**: Complete deployment guide with troubleshooting
-- ✅ **Migration**: Legacy Colab files automatically moved to vibe_legacy/
-
-#### Key Metrics Achieved:
-- **Container Start Time**: < 3 seconds (requirement met)
-- **File Save Performance**: < 500ms (requirement met)
-- **File Tree Loading**: < 1 second for 1000 files (requirement met)
-- **Terminal Connection**: < 1 second (requirement met)
-- **Code Coverage**: >80% (requirement met)
-- **E2E Test Coverage**: All critical user workflows (requirement met)
-
-#### User Experience Improvements:
-- **Before**: Limited Colab integration with no proper IDE features
-- **After**: Full VSCode-like experience in the browser with AI assistance
-- **Sessions**: Create unlimited isolated development environments
-- **Persistence**: All work saved in Docker volumes, survives browser reloads
-- **Collaboration**: Each user can have multiple concurrent sessions
-- **AI Integration**: Context-aware AI assistant understands your project
-
-#### Security Features:
-- JWT authentication on all endpoints
-- Path sanitization prevents directory traversal
-- Command injection prevention blocks dangerous patterns
-- Rate limiting prevents abuse (10 exec/min, 60 saves/min)
-- Container resource limits prevent resource exhaustion
-- Docker socket access properly secured
-- Input validation with Pydantic models
-
-#### Deployment Ready:
-- Docker Compose configuration complete
-- Nginx reverse proxy configured
-- Database migrations ready
-- Environment variables documented
-- Deployment guide with troubleshooting
-- Production checklist provided
-- Monitoring and logging configured
 
 ---
 

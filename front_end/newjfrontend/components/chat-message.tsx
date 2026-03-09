@@ -17,7 +17,10 @@ import { Button } from "@/components/ui/button"
 import { VoicePlayer } from "@/components/voice-player"
 import { AudioWaveform } from "@/components/ui/audio-waveform"
 import { ReasoningPanel } from "@/components/reasoning-panel"
-import { VideoCarousel, type VideoResult } from "@/components/video-carousel"
+import { ResearchChain } from "@/components/research-chain"
+import { ArtifactBlock } from "@/components/artifacts"
+import type { Message, VideoResult, ResearchChainData, ResearchStep, Artifact } from "@/types/message"
+import { VideoCarousel } from "@/components/video-carousel"
 import { YouTubeEmbed } from "@/components/youtube-embed"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
@@ -107,6 +110,10 @@ interface ChatMessageProps {
     image_count?: number
     [key: string]: any
   }
+  /** Research chain steps for visualizing AI research process */
+  researchChain?: ResearchChainData
+  /** AI-generated artifact (document, spreadsheet, website, etc.) */
+  artifact?: Artifact
 }
 
 // Language mapping for prism-react-renderer
@@ -196,6 +203,8 @@ export const ChatMessage = React.memo(function ChatMessage({
   inputType,
   status,
   metadata,
+  researchChain,
+  artifact,
 }: ChatMessageProps) {
   const [copied, setCopied] = useState(false)
   const [showVoice, setShowVoice] = useState(false)
@@ -203,8 +212,8 @@ export const ChatMessage = React.memo(function ChatMessage({
   const [playingVideo, setPlayingVideo] = useState<VideoResult | null>(null)
 
   // Memoize content processing to avoid re-computation during streaming
-  const { reasoning: extractedReasoning, finalAnswer } = useMemo(() => 
-    separateThinkingFromContent(content || ''), 
+  const { reasoning: extractedReasoning, finalAnswer } = useMemo(() =>
+    separateThinkingFromContent(content || ''),
     [content]
   )
 
@@ -212,7 +221,7 @@ export const ChatMessage = React.memo(function ChatMessage({
   const reasoning = extractedReasoning || propReasoning || ''
   // Use cleaned content (without think tags) for display
   const displayContent = finalAnswer
-  
+
   // Memoize markdown components to prevent re-creation on every render
   const markdownComponents = useMemo(() => ({
     // Style code blocks with syntax highlighting using prism-react-renderer
@@ -262,14 +271,14 @@ export const ChatMessage = React.memo(function ChatMessage({
     // Style lists
     ul({ children, ...props }: any) {
       return (
-        <ul className="list-disc list-inside space-y-1 mb-2" {...props}>
+        <ul className="list-disc list-outside space-y-1 mb-2 pl-5" {...props}>
           {children}
         </ul>
       )
     },
     ol({ children, ...props }: any) {
       return (
-        <ol className="list-decimal list-inside space-y-1 mb-2" {...props}>
+        <ol className="list-decimal list-outside space-y-1 mb-2 pl-5" {...props}>
           {children}
         </ol>
       )
@@ -332,14 +341,24 @@ export const ChatMessage = React.memo(function ChatMessage({
 
       <div
         className={cn(
-          "flex max-w-3xl flex-col gap-3",
+          "flex max-w-4xl flex-col gap-3",  // 30% wider: was max-w-3xl (48rem), now max-w-4xl (56rem)
           role === "user" && "items-end"
         )}
       >
 
+        {/* Research Chain - show AI research process */}
+        {role === "assistant" && researchChain && (
+          <ResearchChain
+            summary={researchChain.summary}
+            steps={researchChain.steps}
+            isLoading={researchChain.isLoading}
+            className="mb-3"
+          />
+        )}
+
         <div
           className={cn(
-            "rounded-2xl px-4 py-3",
+            "rounded-2xl px-4 py-3 pr-8",
             role === "user"
               ? "bg-primary text-primary-foreground"
               : "bg-card text-foreground"
@@ -347,25 +366,22 @@ export const ChatMessage = React.memo(function ChatMessage({
         >
           {role === "assistant" ? (
             <div className="prose prose-sm dark:prose-invert max-w-none">
-              {/* Show thinking indicator when content is empty (streaming reasoning) */}
-              {/* Show thinking indicator only when content is empty AND we are still waiting/streaming */}
-              {(!displayContent || displayContent.length === 0) && (status === 'pending' || status === 'streaming' || !status) && (
-                <div className="flex items-center gap-2 text-muted-foreground italic">
-                  <div className="flex gap-1">
-                    <div className="h-2 w-2 animate-bounce rounded-full bg-primary/50 [animation-delay:-0.3s]" />
-                    <div className="h-2 w-2 animate-bounce rounded-full bg-primary/50 [animation-delay:-0.15s]" />
-                    <div className="h-2 w-2 animate-bounce rounded-full bg-primary/50" />
-                  </div>
-                  <span className="text-sm">Thinking...</span>
-                </div>
-              )}
-
-              {/* Show "Empty response" if finished but no content (e.g. backend error or empty generation) */}
-              {(!displayContent || displayContent.length === 0) && status === 'sent' && (
+              {/* Show "Empty response" if finished but no content AND no research chain (e.g. backend error) */}
+              {(!displayContent || displayContent.length === 0) && status === 'sent' && !researchChain && (
                 <div className="text-muted-foreground italic text-sm">
                   (No content received)
                 </div>
               )}
+
+              {/* Show loading dots when streaming with no content yet (and no researchChain showing) */}
+              {(!displayContent || displayContent.length === 0) && (status === 'streaming' || status === 'pending') && !researchChain && (
+                <div className="flex items-center gap-2 py-1">
+                  <div className="h-2 w-2 animate-bounce rounded-full bg-primary [animation-delay:-0.3s]" />
+                  <div className="h-2 w-2 animate-bounce rounded-full bg-primary [animation-delay:-0.15s]" />
+                  <div className="h-2 w-2 animate-bounce rounded-full bg-primary" />
+                </div>
+              )}
+
               <ReactMarkdown
                 remarkPlugins={[remarkGfm]}
                 components={markdownComponents}
@@ -505,6 +521,23 @@ export const ChatMessage = React.memo(function ChatMessage({
           </div>
         ))}
 
+        {/* AI-Generated Artifact */}
+        {(() => {
+          console.log('🔍 DEBUG - ChatMessage artifact check:', {
+            role,
+            hasArtifact: !!artifact,
+            artifactId: artifact?.id,
+            artifactType: artifact?.type,
+            artifactStatus: artifact?.status,
+          })
+          return null
+        })()}
+        {role === "assistant" && artifact && (
+          <div className="w-full mt-4">
+            <ArtifactBlock artifact={artifact} />
+          </div>
+        )}
+
         {/* Audio Waveform */}
         {role === "assistant" && audioUrl && (
           <AudioWaveform audioUrl={audioUrl} />
@@ -591,9 +624,7 @@ export const ChatMessage = React.memo(function ChatMessage({
           </div>
         )}
 
-        {timestamp && (
-          <span className="text-xs text-muted-foreground">{timestamp}</span>
-        )}
+        {/* timestamp removed - timestamp prop still passed but not rendered */}
       </div>
 
       {role === "user" && (
@@ -607,6 +638,13 @@ export const ChatMessage = React.memo(function ChatMessage({
   // Custom comparison function for React.memo
   // Only re-render if these specific props have changed
   // This prevents unnecessary re-renders during streaming
+
+  // CRITICAL: Always re-render if research chain is actively loading/streaming
+  // This ensures live updates appear in the UI during research
+  if (nextProps.researchChain?.isLoading || prevProps.researchChain?.isLoading) {
+    return false // false means "props are different, do re-render"
+  }
+
   return (
     prevProps.role === nextProps.role &&
     prevProps.content === nextProps.content &&
@@ -621,6 +659,7 @@ export const ChatMessage = React.memo(function ChatMessage({
     JSON.stringify(prevProps.searchResults) === JSON.stringify(nextProps.searchResults) &&
     JSON.stringify(prevProps.videos) === JSON.stringify(nextProps.videos) &&
     JSON.stringify(prevProps.codeBlocks) === JSON.stringify(nextProps.codeBlocks) &&
-    JSON.stringify(prevProps.metadata) === JSON.stringify(nextProps.metadata)
+    JSON.stringify(prevProps.metadata) === JSON.stringify(nextProps.metadata) &&
+    JSON.stringify(prevProps.researchChain) === JSON.stringify(nextProps.researchChain)
   )
 })

@@ -1,0 +1,36 @@
+# Code Executor for Document Generation
+# Runs Python code in isolation to generate documents
+
+FROM python:3.11-slim
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    libreoffice-writer \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python packages for document generation
+RUN pip install --no-cache-dir \
+    openpyxl==3.1.2 \
+    python-docx==1.1.0 \
+    reportlab==4.0.4 \
+    python-pptx==0.6.23 \
+    pandas==2.1.4 \
+    fpdf2==2.7.6
+
+# Create the same user as the backend (appuser, UID 1001) for shared permissions
+RUN groupadd -r appuser && useradd -r -g appuser -u 1001 appuser
+
+# Create directories with proper ownership
+RUN mkdir -p /data/artifacts /workspace && \
+    chown -R appuser:appuser /data/artifacts /workspace && \
+    chmod 750 /data/artifacts /workspace
+
+# Switch to dedicated user
+USER appuser
+
+# Set working directory
+WORKDIR /workspace
+
+# Default command (can be overridden)
+CMD ["python3"]

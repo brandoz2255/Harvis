@@ -1,4 +1,3 @@
-from chatterbox.tts import ChatterboxTTS, punc_norm
 import torch
 import logging
 import time
@@ -7,34 +6,61 @@ import time
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ─── Chatterbox Import (Optional) ───────────────────────────────────────────────
+try:
+    from chatterbox.tts import ChatterboxTTS, punc_norm
+
+    CHATTERBOX_AVAILABLE = True
+except ImportError:
+    logger.warning(
+        "⚠️ Chatterbox TTS not available. Install with: pip install chatterbox-tts"
+    )
+    ChatterboxTTS = None
+    punc_norm = None
+    CHATTERBOX_AVAILABLE = False
+
+
 # ─── VRAM Management ────────────────────────────────────────────────────────────
 def get_vram_threshold():
     if not torch.cuda.is_available():
-        return float('inf')
+        return float("inf")
 
     total_mem = torch.cuda.get_device_properties(0).total_memory
     return max(int(total_mem * 0.8), 10 * 1024**3)
 
+
 THRESHOLD_BYTES = get_vram_threshold()
-logger.info(f"VRAM threshold set to {THRESHOLD_BYTES/1024**3:.1f} GiB")
+logger.info(f"VRAM threshold set to {THRESHOLD_BYTES / 1024**3:.1f} GiB")
+
 
 def wait_for_vram(threshold=THRESHOLD_BYTES, interval=0.5):
     if not torch.cuda.is_available():
         return
     used = torch.cuda.memory_allocated()
     while used > threshold:
-        logger.info(f"VRAM {used/1024**3:.1f} GiB > {threshold/1024**3:.1f} GiB. Waiting…")
+        logger.info(
+            f"VRAM {used / 1024**3:.1f} GiB > {threshold / 1024**3:.1f} GiB. Waiting…"
+        )
         time.sleep(interval)
         used = torch.cuda.memory_allocated()
     torch.cuda.empty_cache()
     logger.info("VRAM is now below threshold. Proceeding with TTS.")
 
+
 # ─── Global Model Variables ─────────────────────────────────────────────────────
 tts_model = None
+
 
 # ─── Load TTS Model (Chatterbox) ────────────────────────────────────────────────
 def load_tts_model(force_cpu=False):
     global tts_model
+
+    if not CHATTERBOX_AVAILABLE:
+        logger.error(
+            "❌ Chatterbox TTS not available. Install with: pip install chatterbox-tts"
+        )
+        return None
+
     tts_device = "cuda" if torch.cuda.is_available() and not force_cpu else "cpu"
 
     if tts_model is None:
@@ -55,8 +81,11 @@ def load_tts_model(force_cpu=False):
                 raise
     return tts_model
 
+
 # ─── Generate Speech ────────────────────────────────────────────────────────────
-def generate_speech(text, model, audio_prompt=None, exaggeration=0.5, temperature=0.6, cfg_weight=2.5):
+def generate_speech(
+    text, model, audio_prompt=None, exaggeration=0.5, temperature=0.6, cfg_weight=2.5
+):
     """
     Generate speech using TTS model.
 
@@ -66,7 +95,9 @@ def generate_speech(text, model, audio_prompt=None, exaggeration=0.5, temperatur
     """
     try:
         normalized = punc_norm(text)
-        logger.info(f"🔧 TTS params: temp={temperature}, cfg={cfg_weight}, exag={exaggeration}")
+        logger.info(
+            f"🔧 TTS params: temp={temperature}, cfg={cfg_weight}, exag={exaggeration}"
+        )
         if torch.cuda.is_available():
             try:
                 wav = model.generate(
@@ -74,7 +105,7 @@ def generate_speech(text, model, audio_prompt=None, exaggeration=0.5, temperatur
                     audio_prompt_path=audio_prompt,
                     exaggeration=exaggeration,
                     temperature=temperature,
-                    cfg_weight=cfg_weight
+                    cfg_weight=cfg_weight,
                 )
             except RuntimeError as e:
                 if "CUDA" in str(e):
@@ -86,11 +117,13 @@ def generate_speech(text, model, audio_prompt=None, exaggeration=0.5, temperatur
                             audio_prompt_path=audio_prompt,
                             exaggeration=exaggeration,
                             temperature=temperature,
-                            cfg_weight=cfg_weight
+                            cfg_weight=cfg_weight,
                         )
                     except RuntimeError as e2:
                         logger.error(f"CUDA Retry Failed: {e2}")
-                        raise ValueError("CUDA error persisted after cache clear") from e2
+                        raise ValueError(
+                            "CUDA error persisted after cache clear"
+                        ) from e2
                 else:
                     raise
         else:
@@ -100,7 +133,7 @@ def generate_speech(text, model, audio_prompt=None, exaggeration=0.5, temperatur
                 exaggeration=exaggeration,
                 temperature=temperature,
                 cfg_weight=cfg_weight,
-                device="cpu"
+                device="cpu",
             )
         return (model.sr, wav.squeeze(0).numpy())
     except Exception as e:

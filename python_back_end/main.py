@@ -16,7 +16,6 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
 import uvicorn, os, sys, tempfile, uuid, base64, io, logging, re, requests, random, json, httpx
-import numpy as np
 from PIL import Image
 
 # Import optimized auth module
@@ -34,31 +33,30 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 import asyncpg
 from gemini_api import query_gemini, is_gemini_configured
+from moonshot_api import (
+    MoonshotClient,
+    is_moonshot_model,
+    get_moonshot_model_id,
+    MOONSHOT_BASE_URL,
+)
 from typing import List, Optional, Dict, Any, Union
-try:
-    from vison_models.llm_connector import (
-        query_qwen,
-        query_llm,
-        load_qwen_model,
-        unload_qwen_model,
-        unload_ollama_model,
-    )
-    VISION_MODELS_AVAILABLE = True
-except Exception as e:
-    VISION_MODELS_AVAILABLE = False
-    logger_init = logging.getLogger(__name__)
-    logger_init.warning(
-        "Vision models unavailable at startup; auth/chat endpoints remain enabled: %s", e
-    )
+from vison_models.llm_connector import (
+    query_qwen,
+    query_llm,
+    load_qwen_model,
+    unload_qwen_model,
+    unload_ollama_model,
+)
 
-    def _vision_unavailable(*args, **kwargs):
-        raise HTTPException(503, "Vision models are temporarily unavailable")
+# Import workspace (Harvis Workspaces / OpenClaw integration)
+from workspace import workspace_router
+from workspace.model_proxy import model_proxy_router
+from workspace.github_proxy import github_proxy_router
+from workspace.rag_proxy import rag_proxy_router
+from workspace.kubectl_proxy import kubectl_proxy_router
 
-    query_qwen = _vision_unavailable
-    query_llm = _vision_unavailable
-    load_qwen_model = _vision_unavailable
-    unload_qwen_model = _vision_unavailable
-    unload_ollama_model = _vision_unavailable
+# Import tools routers
+from tools import maps_router, openclaw_proxy_router
 
 # Import vibecoding routers
 from vibecoding import (
@@ -77,34 +75,34 @@ from vibecoding import (
     ide_ai_router,
 )
 from vibecoding.core import initialize_vibe_agent
-from file_processing import extract_text_from_file
+from file_processing import (
+    extract_text_from_file,
+    convert_file_to_images,
+    is_vision_compatible_file,
+)
 
-# Import TTS engine manager (from open-notebook/vibecode merge)
-try:
-    from tts_engine_manager import (
-        TTSMode, set_mode, get_mode, generate_speech as tts_generate,
-        generate_podcast_segment, get_engine_status, unload_all_engines
-    )
-    TTS_ENGINE_AVAILABLE = True
-except ImportError:
-    TTS_ENGINE_AVAILABLE = False
-    logger_init = logging.getLogger(__name__)
-    logger_init.warning("tts_engine_manager not available, TTS engine endpoints disabled")
+# Import artifacts module for document/website generation
+from artifacts import (
+    artifact_router,
+    extract_artifact_manifest,
+    clean_response_content,
+    ArtifactManifest,
+    ArtifactStorage,
+)
+from artifacts.manifest_parser import extract_nextjs_project_from_codeblocks
+from artifacts.code_generator import (
+    generate_document_from_code,
+    extract_document_code,
+    get_output_filename,
+    auto_detect_document_type,
+)
+from artifacts.build_manager import ArtifactBuildManager
 
-# Import voice model manager (from open-notebook/vibecode merge)
-try:
-    from voice_model_manager import (
-        VoiceModelManager, download_popular_model, POPULAR_MODELS
-    )
-    VOICE_MODEL_AVAILABLE = True
-except ImportError:
-    VOICE_MODEL_AVAILABLE = False
+# Initialize artifact storage
+artifact_storage = ArtifactStorage()
 
-# Import generate_speech_smart if available
-try:
-    from model_manager import generate_speech_smart
-except ImportError:
-    pass
+# Build manager will be initialized in lifespan with db pool
+artifact_build_manager = None
 
 from pydantic import BaseModel
 import torch, soundfile as sf
@@ -120,11 +118,108 @@ print(f"Backend JWT_SECRET loaded: {SECRET_KEY[:10]}... Length: {len(SECRET_KEY)
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+# ─── API Key Encryption Setup ──────────────────────────────────────────────────
+from cryptography.fernet import Fernet
+import hashlib
+
+# Generate or load encryption key for API keys
+# Use JWT_SECRET as base to derive encryption key (ensures it's consistent across restarts)
+API_KEY_ENCRYPTION_SECRET = os.getenv("API_KEY_ENCRYPTION_SECRET", SECRET_KEY)
+# Derive a 32-byte key using SHA-256
+_api_key_encryption_key = hashlib.sha256(API_KEY_ENCRYPTION_SECRET.encode()).digest()
+# Create Fernet key (base64 encoded 32-byte key)
+_api_key_fernet_key = base64.urlsafe_b64encode(_api_key_encryption_key)
+_api_key_cipher = Fernet(_api_key_fernet_key)
+
+
+def encrypt_api_key(api_key: str) -> str:
+    """Encrypt an API key using Fernet symmetric encryption."""
+    if not api_key:
+        logger.warning("encrypt_api_key: Empty API key provided")
+        return ""
+
+    logger.info(
+        f"encrypt_api_key: INPUT length={len(api_key)}, preview={api_key[:8]}...{api_key[-4:]}"
+    )
+    encrypted = _api_key_cipher.encrypt(api_key.encode())
+    encrypted_b64 = base64.urlsafe_b64encode(encrypted).decode()
+    logger.info(
+        f"encrypt_api_key: OUTPUT length={len(encrypted_b64)}, preview={encrypted_b64[:30]}..."
+    )
+    return encrypted_b64
+
+
+def decrypt_api_key(encrypted_key: str) -> str:
+    """Decrypt an API key that was encrypted with encrypt_api_key."""
+    if not encrypted_key:
+        logger.warning("decrypt_api_key: Empty encrypted key provided")
+        return ""
+    try:
+        encrypted_bytes = base64.urlsafe_b64decode(encrypted_key.encode())
+        decrypted = _api_key_cipher.decrypt(encrypted_bytes)
+        decrypted_str = decrypted.decode()
+        logger.info(
+            f"decrypt_api_key: Successfully decrypted key, length={len(decrypted_str)}"
+        )
+        return decrypted_str
+    except Exception as e:
+        logger.error(f"Failed to decrypt API key: {e}")
+        logger.error(
+            f"Encrypted key length: {len(encrypted_key)}, prefix: {encrypted_key[:20]}..."
+        )
+        return ""
+
+
+async def get_user_api_key(
+    pool, user_id: int, provider_name: str
+) -> Optional[Dict[str, Any]]:
+    """Get a user's API key for a specific provider."""
+    logger.info(f"get_user_api_key: Looking for {provider_name} key for user {user_id}")
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT id, provider_name, api_key_encrypted, api_url, is_active, created_at, updated_at
+            FROM user_api_keys
+            WHERE user_id = $1 AND provider_name = $2 AND is_active = TRUE
+            """,
+            user_id,
+            provider_name,
+        )
+        if row:
+            encrypted_key = row["api_key_encrypted"]
+            logger.info(
+                f"get_user_api_key: Found encrypted key, length={len(encrypted_key) if encrypted_key else 0}"
+            )
+            decrypted_key = decrypt_api_key(encrypted_key)
+            logger.info(
+                f"get_user_api_key: Decrypted key length={len(decrypted_key) if decrypted_key else 0}"
+            )
+            return {
+                "id": row["id"],
+                "provider_name": row["provider_name"],
+                "api_key": decrypted_key,
+                "api_url": row["api_url"],
+                "is_active": row["is_active"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            }
+        logger.warning(f"get_user_api_key: No key found for {provider_name}")
+        return None
+
+
 # Images storage directory (mounted via PVC in K8s)
 IMAGES_DIR = os.getenv("IMAGES_DIR", "/app/images")
 os.makedirs(IMAGES_DIR, exist_ok=True)
 print(f"Images directory: {IMAGES_DIR}")
 security = HTTPBearer(auto_error=False)
+
+# ─── RAG Configuration ─────────────────────────────────────────────────────────
+# Centralized config for RAG retrieval - supports environment variable overrides
+RAG_CONFIG = {
+    "default_k": int(os.getenv("RAG_DEFAULT_K", "5")),
+    "score_threshold": float(os.getenv("RAG_SCORE_THRESHOLD", "0.35")),
+    "max_context_length": int(os.getenv("RAG_MAX_CONTEXT_LENGTH", "4000")),
+}
 
 # Database connection
 DATABASE_URL = os.getenv(
@@ -250,11 +345,16 @@ from model_manager import (
     wait_for_vram,
     transcribe_with_whisper_optimized,
     generate_speech_optimized,
+    generate_speech_unified,
     unload_tts_model,
     unload_whisper_model,
+    unload_qwen_tts_model,
     get_gpu_memory_stats,
     check_memory_pressure,
     auto_cleanup_if_needed,
+    set_active_tts_engine,
+    get_active_tts_engine,
+    get_available_tts_engines,
 )
 
 
@@ -266,35 +366,40 @@ def safe_generate_speech_optimized(
     temperature=0.3,
     cfg_weight=0.7,
     auto_unload=True,
+    tts_engine="qwen",
 ):
-    """Generate speech with graceful error handling - never crashes the app"""
+    """Generate speech with graceful error handling - never crashes the app.
+
+    Args:
+        text: Text to synthesize
+        audio_prompt: Voice prompt for cloning (Chatterbox only)
+        exaggeration: Voice expressiveness (Chatterbox only)
+        temperature: Generation temperature
+        cfg_weight: CFG weight (Chatterbox only)
+        auto_unload: Unload TTS after generation
+        tts_engine: "qwen" or "chatterbox" TTS engine selection
+    """
     try:
-        result = generate_speech_optimized(
-            text,
-            audio_prompt,
-            exaggeration,
-            temperature,
-            cfg_weight,
+        # Use unified TTS generation that supports both engines
+        result = generate_speech_unified(
+            text=text,
+            engine=tts_engine,
+            audio_prompt=audio_prompt,
+            exaggeration=exaggeration,
+            temperature=temperature,
+            cfg_weight=cfg_weight,
             auto_unload=auto_unload,
         )
-        if (
-            result is None
-            or result == (None, None)
-            or result == (None, None, "none")
-        ):
-            logger.warning("⚠️ TTS unavailable - skipping audio generation")
-            return None, None, "none"
-        if isinstance(result, tuple) and len(result) == 3:
-            return result
-        if isinstance(result, tuple) and len(result) == 2:
-            sr, wav = result
-            return sr, wav, "unknown"
-        logger.warning("⚠️ Unexpected TTS result shape: %s", type(result))
-        return None, None, "none"
+        if result is None or result == (None, None):
+            logger.warning(
+                f"⚠️ TTS ({tts_engine}) unavailable - skipping audio generation"
+            )
+            return None, None
+        return result
     except Exception as tts_e:
-        logger.error(f"❌ TTS generation failed gracefully: {tts_e}", exc_info=True)
+        logger.error(f"❌ TTS ({tts_engine}) generation failed gracefully: {tts_e}")
         logger.warning("⚠️ Continuing without TTS - chat will work without audio")
-        return None, None, "none"
+        return None, None
 
 
 def safe_save_audio(sr, wav, prefix="response"):
@@ -304,38 +409,13 @@ def safe_save_audio(sr, wav, prefix="response"):
         return None
 
     try:
-        if not isinstance(sr, (int, float)) or sr <= 0:
-            logger.error("❌ Invalid sample rate for audio save: %s", sr)
-            return None
-
-        wav = np.asarray(wav)
-        if wav.size == 0:
-            logger.error("❌ Empty waveform received for audio save")
-            return None
-        wav = np.squeeze(wav)
-        if wav.dtype != np.float32:
-            wav = wav.astype(np.float32)
-
-        peak = float(np.max(np.abs(wav)))
-        rms = float(np.sqrt(np.mean(np.square(wav))))
-        if peak > 1.0:
-            logger.warning("⚠️ Audio peak %.4f exceeds 1.0; clipping", peak)
-            wav = np.clip(wav, -1.0, 1.0)
-
         filename = f"{prefix}_{uuid.uuid4()}.wav"
         filepath = os.path.join(tempfile.gettempdir(), filename)
-        sf.write(filepath, wav, int(sr))
-        logger.info(
-            "Audio written %s sr=%s dur=%.3fs peak=%.4f rms=%.4f",
-            filepath,
-            int(sr),
-            len(wav) / float(sr),
-            peak,
-            rms,
-        )
+        sf.write(filepath, wav, sr)
+        logger.info("Audio written to %s", filepath)
         return f"/api/audio/{filename}"
     except Exception as e:
-        logger.error(f"❌ Failed to save audio file: {e}", exc_info=True)
+        logger.error(f"❌ Failed to save audio file: {e}")
         return None
 
 
@@ -429,9 +509,10 @@ async def lifespan(app: FastAPI):
         )
         app.state.pg_pool = await asyncpg.create_pool(
             dsn=database_url,
-            min_size=1,
-            max_size=10,
-            command_timeout=30,  # Increased from 5 to 30 seconds
+            min_size=5,  # Increased from 1 for faster RAG queries
+            max_size=20,  # Increased from 10 for concurrent RAG operations
+            command_timeout=30,
+            max_inactive_connection_lifetime=300,  # 5 minutes - clean up stale connections
         )
         logger.info("✅ Database connection pool created")
 
@@ -439,6 +520,22 @@ async def lifespan(app: FastAPI):
         db_pool = app.state.pg_pool
         chat_history_manager = ChatHistoryManager(db_pool)
         logger.info("✅ ChatHistoryManager initialized")
+
+        # Initialize ArtifactBuildManager for website/app builds
+        global artifact_build_manager
+        try:
+            artifact_build_manager = ArtifactBuildManager(db_pool)
+            app.state.artifact_build_manager = artifact_build_manager
+            # Start the build queue processor (for K8s deployments)
+            if os.environ.get("ENABLE_ARTIFACT_EXECUTOR", "false").lower() == "true":
+                await artifact_build_manager.start_queue_processor()
+                logger.info("✅ ArtifactBuildManager initialized with queue processor")
+            else:
+                logger.info(
+                    "✅ ArtifactBuildManager initialized (executor disabled - using Sandpack)"
+                )
+        except Exception as e:
+            logger.warning(f"⚠️ ArtifactBuildManager initialization failed: {e}")
 
         # Initialize global RAG retriever if available
         if RAG_CORPUS_AVAILABLE:
@@ -460,16 +557,19 @@ async def lifespan(app: FastAPI):
                     source_model_mapping = config_mgr.get_source_model_mapping()
                     model_collection_mapping = EMBEDDING_COLLECTIONS
 
-                    # Initialize multi-collection retriever
+                    # Initialize multi-collection retriever with centralized config
                     local_rag_retriever = MultiCollectionRetriever(
                         vectordb_adapters=vectordb_adapters,
                         embedding_adapters=embedding_adapters,
                         source_to_model=source_model_mapping,
                         model_to_collection=model_collection_mapping,
-                        default_k=5,
-                        score_threshold=0.5,
+                        default_k=RAG_CONFIG["default_k"],
+                        score_threshold=RAG_CONFIG["score_threshold"],
                     )
-                    logger.info("✅ Global Multi-Collection RAG retriever initialized")
+                    logger.info(
+                        f"✅ Global Multi-Collection RAG retriever initialized "
+                        f"(k={RAG_CONFIG['default_k']}, threshold={RAG_CONFIG['score_threshold']})"
+                    )
 
                     # Verify documents are indexed
                     try:
@@ -506,6 +606,23 @@ async def lifespan(app: FastAPI):
         logger.error(f"❌ Database connection failed: {e}")
         # Don't exit, allow app to start even if DB fails (will retry)
 
+    # Initialize job queue workers for background TTS/Whisper processing
+    try:
+        from job_queue import init_job_queue, start_tts_worker, start_whisper_worker
+
+        job_queue = await init_job_queue()
+        app.state.job_queue = job_queue
+        logger.info("✅ Job queue initialized")
+
+        # Start background workers
+        await start_tts_worker()
+        await start_whisper_worker()
+        logger.info("✅ Job queue workers started (TTS & Whisper)")
+
+    except Exception as e:
+        logger.warning(f"⚠️ Job queue initialization failed: {e}")
+        # Don't fail startup if job queue doesn't work
+
     yield
 
     # Shutdown: close connection pool
@@ -513,16 +630,30 @@ async def lifespan(app: FastAPI):
         await app.state.pg_pool.close()
         logger.info("✅ Database connection pool closed")
 
+    # Shutdown job queue
+    try:
+        from job_queue import shutdown_job_queue
+
+        await shutdown_job_queue()
+        logger.info("✅ Job queue shut down")
+    except Exception as e:
+        logger.warning(f"⚠️ Job queue shutdown error: {e}")
+
 
 app = FastAPI(lifespan=lifespan)
 
 
 # ─── Models Endpoint ──────────────────────────────────────────────────────────
 @app.get("/api/models", tags=["models"])
-async def list_models(current_user: UserResponse = Depends(get_current_user)):
+async def list_models(
+    request: Request, current_user: UserResponse = Depends(get_current_user)
+):
     """
     Fetch available models from Ollama and return them for the frontend selector.
+    Also includes Moonshot models if user has API key configured.
     """
+    formatted_models = []
+
     try:
         # Define Ollama Tags URL
         ollama_url = os.getenv("OLLAMA_URL", "http://ollama:11434")
@@ -533,53 +664,154 @@ async def list_models(current_user: UserResponse = Depends(get_current_user)):
         async with httpx.AsyncClient() as client:
             resp = await client.get(tags_url, timeout=5.0)
 
-        if resp.status_code != 200:
+        if resp.status_code == 200:
+            data = resp.json()
+            models = data.get("models", [])
+
+            # Format Ollama models for frontend
+            for m in models:
+                # Parse size (bytes -> GB)
+                size_gb = m.get("size", 0) / (1024**3)
+                size_str = f"{size_gb:.1f}GB"
+
+                formatted_models.append(
+                    {
+                        "name": m.get("name"),
+                        "displayName": m.get("name").split(":")[0],
+                        "size": size_str,
+                        "status": "available",
+                        "provider": "ollama",
+                    }
+                )
+        else:
             logger.error(f"Ollama returned status {resp.status_code}")
-            raise HTTPException(
-                status_code=502, detail="Failed to fetch models from Ollama"
-            )
-
-        data = resp.json()
-        models = data.get("models", [])
-
-        # Format for frontend
-        formatted_models = []
-        for m in models:
-            # Parse size (bytes -> GB)
-            size_gb = m.get("size", 0) / (1024**3)
-            size_str = f"{size_gb:.1f}GB"
-
-            formatted_models.append(
-                {
-                    "name": m.get("name"),
-                    "displayName": m.get("name").split(":")[0],  # Simple display name
-                    "size": size_str,
-                    "status": "available",
-                }
-            )
-
-        # Sort by name
-        formatted_models.sort(key=lambda x: x["name"])
-
-        return {"models": formatted_models}
-
     except Exception as e:
-        logger.error(f"Error fetching models: {e}")
-        # Return fallback models if Ollama is down, so UI implies offline but doesn't crash
-        return {
-            "models": [
-                {
-                    "name": "mistral",
-                    "displayName": "Mistral (Offline)",
-                    "status": "offline",
-                },
-                {
-                    "name": "llama3",
-                    "displayName": "Llama 3 (Offline)",
-                    "status": "offline",
-                },
-            ]
-        }
+        logger.error(f"Error fetching Ollama models: {e}")
+
+    # Fetch from external Ollama (if configured)
+    if EXTERNAL_OLLAMA_URL and EXTERNAL_OLLAMA_API_KEY:
+        try:
+            ext_url = f"{EXTERNAL_OLLAMA_URL}/api/tags"
+            ext_headers = {
+                "Authorization": f"Bearer {EXTERNAL_OLLAMA_API_KEY}",
+                "ngrok-skip-browser-warning": "true",
+                "User-Agent": "Harvis-Backend",
+            }
+            logger.info(f"Querying external Ollama models at: {ext_url}")
+            async with httpx.AsyncClient() as client:
+                ext_resp = await client.get(ext_url, headers=ext_headers, timeout=10.0)
+
+            if ext_resp.status_code == 200:
+                ext_data = ext_resp.json()
+                ext_models = ext_data.get("models", [])
+
+                for m in ext_models:
+                    size_gb = m.get("size", 0) / (1024**3)
+                    size_str = f"{size_gb:.1f}GB"
+                    model_name = m.get("name")
+
+                    # Avoid duplicates
+                    if not any(
+                        existing["name"] == model_name for existing in formatted_models
+                    ):
+                        formatted_models.append(
+                            {
+                                "name": model_name,
+                                "displayName": f"{model_name.split(':')[0]} (Cloud)",
+                                "size": size_str,
+                                "status": "available",
+                                "provider": "ollama-cloud",
+                            }
+                        )
+                        # Add to cache for routing
+                        EXTERNAL_MODELS_CACHE.add(model_name)
+
+                logger.info(f"Added {len(ext_models)} external Ollama models")
+            else:
+                logger.warning(
+                    f"External Ollama returned status {ext_resp.status_code}"
+                )
+        except Exception as e:
+            logger.warning(f"Could not connect to external Ollama: {e}")
+
+    # Check if user has Moonshot API key configured
+    try:
+        pool = getattr(request.app.state, "pg_pool", None)
+        if pool:
+            moonshot_config = await get_user_api_key(pool, current_user.id, "moonshot")
+            if moonshot_config and moonshot_config.get("api_key"):
+                # Add Moonshot models
+                formatted_models.extend(
+                    [
+                        {
+                            "name": "kimi-k2.5",
+                            "displayName": "Kimi K2.5 (Moonshot)",
+                            "size": "Cloud",
+                            "status": "available",
+                            "provider": "moonshot",
+                            "description": "Long-context reasoning model via Moonshot AI",
+                        },
+                        {
+                            "name": "kimi-k2",
+                            "displayName": "Kimi K2 (Moonshot)",
+                            "size": "Cloud",
+                            "status": "available",
+                            "provider": "moonshot",
+                            "description": "Advanced reasoning model via Moonshot AI",
+                        },
+                    ]
+                )
+                logger.info("Added Moonshot models for user with API key")
+    except Exception as e:
+        logger.error(f"Error checking Moonshot API key: {e}")
+
+    # Check if user has NVIDIA API key configured
+    try:
+        pool = getattr(request.app.state, "pg_pool", None)
+        if pool:
+            nvidia_config = await get_user_api_key(pool, current_user.id, "nvidia")
+            if nvidia_config and nvidia_config.get("api_key"):
+                formatted_models.extend(
+                    [
+                        {
+                            "name": "nvidia-kimi",
+                            "displayName": "Kimi K2.5 (NVIDIA NIM)",
+                            "size": "Cloud",
+                            "status": "available",
+                            "provider": "nvidia",
+                            "description": "Kimi K2.5 with thinking mode via NVIDIA NIM",
+                        },
+                    ]
+                )
+                logger.info("Added NVIDIA NIM models for user with API key")
+    except Exception as e:
+        logger.error(f"Error checking NVIDIA API key: {e}")
+
+    # Sort by name
+    formatted_models.sort(key=lambda x: x["name"])
+
+    return {"models": formatted_models}
+
+
+# ─── Fallback Models Function ─────────────────────────────────────────────────
+def get_fallback_models():
+    """Return fallback models when Ollama is down"""
+    return {
+        "models": [
+            {
+                "name": "mistral",
+                "displayName": "Mistral (Offline)",
+                "status": "offline",
+                "provider": "ollama",
+            },
+            {
+                "name": "llama3",
+                "displayName": "Llama 3 (Offline)",
+                "status": "offline",
+                "provider": "ollama",
+            },
+        ]
+    }
 
 
 # ─── Middleware ────────────────────────────────────────────────────────────────
@@ -625,41 +857,40 @@ app.include_router(proxy_router)
 app.include_router(repo_import_router)
 app.include_router(ide_ai_router)
 
-# Include RAG corpus router
-if RAG_CORPUS_AVAILABLE:
-    app.include_router(rag_router)
-
 # Include notebooks router (from open-notebook merge)
 try:
     from notebooks.router import router as notebooks_router
     app.include_router(notebooks_router)
-    logger.info("Notebooks router loaded")
 except Exception as e:
     logger.warning(f"Could not load notebooks router: {e}")
 
-# Include TTS proxy router (from open-notebook merge)
-try:
-    from api.tts_routes import router as tts_proxy_router
-    app.include_router(tts_proxy_router)
-    logger.info("TTS proxy router loaded")
-except Exception as e:
-    logger.warning(f"Could not load TTS proxy router: {e}")
+# Include RAG corpus router
+if RAG_CORPUS_AVAILABLE:
+    app.include_router(rag_router)
 
-# Include local podcast router (from open-notebook merge)
-try:
-    from api.local_podcast_routes import router as local_podcast_router
-    app.include_router(local_podcast_router)
-    logger.info("Local podcast router loaded")
-except Exception as e:
-    logger.warning(f"Could not load local podcast router: {e}")
+# Include artifacts router
+app.include_router(artifact_router)
 
-# Include vibe models router (from open-notebook merge)
-try:
-    from vibecoding.models import router as vibe_models_router
-    app.include_router(vibe_models_router)
-    logger.info("Vibe models router loaded")
-except Exception as e:
-    logger.warning(f"Could not load vibe models router: {e}")
+# Include workspace router (Harvis Workspaces — OpenClaw agent integration)
+app.include_router(workspace_router)
+# Include model proxy (OpenAI-compat endpoint for OpenClaw → Moonshot forwarding)
+# OpenClaw calls http://harvis-ai-merged-backend:8000/v1/chat/completions
+# so that the Moonshot API key never leaves the backend pod.
+app.include_router(model_proxy_router)
+# Include GitHub proxy (OpenClaw → backend → GitHub API forwarding).
+# Only dulc3/harvis-aidev is allowed; token stays server-side.
+app.include_router(github_proxy_router)
+# Include RAG proxy (OpenClaw → backend → pgvector semantic search).
+# OpenClaw agents call /rag/search to retrieve relevant code/docs chunks
+# without needing direct database access or holding DB credentials.
+app.include_router(rag_proxy_router)
+app.include_router(kubectl_proxy_router)
+
+# Include Maps proxy (Google Maps API endpoints without exposing API keys)
+app.include_router(maps_router)
+
+# Include OpenClaw tool proxy (web-fetch + document-save — internal service auth)
+app.include_router(openclaw_proxy_router)
 
 # ─── Device & models -----------------------------------------------------------
 device = 0 if torch.cuda.is_available() else -1
@@ -935,9 +1166,19 @@ async def run_tts_with_heartbeats(
     temperature: float,
     cfg_weight: float,
     auto_unload: bool,
+    tts_engine: str = "qwen",
 ):
     """
     Run TTS in a background thread with heartbeats.
+
+    Args:
+        text: Text to synthesize
+        audio_prompt: Voice prompt for cloning (Chatterbox only)
+        exaggeration: Voice expressiveness (Chatterbox only)
+        temperature: Generation temperature
+        cfg_weight: CFG weight (Chatterbox only)
+        auto_unload: Unload TTS after generation
+        tts_engine: "qwen" or "chatterbox" TTS engine selection
     """
     import asyncio
     import concurrent.futures
@@ -956,6 +1197,7 @@ async def run_tts_with_heartbeats(
             temperature=temperature,
             cfg_weight=cfg_weight,
             auto_unload=auto_unload,
+            tts_engine=tts_engine,
         )
 
     future = loop.run_in_executor(executor, tts_task)
@@ -1047,6 +1289,8 @@ class ChatRequest(BaseModel):
     cfg_weight: float = 2.0  # Higher cfg = follows text more closely
     low_vram: bool = False
     text_only: bool = False
+    tts_engine: str = "qwen"  # "qwen" or "chatterbox" TTS engine selection
+    thinking_mode: bool = False  # When True, use chain-of-thought reasoning (slower but deeper)
 
 
 class ResearchChatRequest(BaseModel):
@@ -1059,6 +1303,7 @@ class ResearchChatRequest(BaseModel):
     exaggeration: float = 0.5
     temperature: float = 0.5  # Lower temp = more stable TTS output
     cfg_weight: float = 2.0  # Higher cfg = follows text more closely
+    tts_engine: str = "qwen"  # "qwen" or "chatterbox" TTS engine selection
 
 
 class ScreenAnalysisRequest(BaseModel):
@@ -1071,6 +1316,7 @@ class SynthesizeSpeechRequest(BaseModel):
     exaggeration: float = 0.5
     temperature: float = 0.8
     cfg_weight: float = 0.5
+    tts_engine: str = "qwen"  # "qwen" or "chatterbox" TTS engine selection
 
 
 # VibeCommandRequest moved to vibecoding.commands
@@ -1096,12 +1342,14 @@ class VisionChatRequest(BaseModel):
     """Request model for Ollama vision chat (llava, moondream, etc.)"""
 
     message: str
-    images: List[str]  # List of base64 images (data-URI or raw)
+    images: List[str] = []  # List of base64 images (data-URI or raw)
     history: List[Dict[str, Any]] = []
     model: str = "llava"  # Default to llava, user can select any VL model
     session_id: Optional[str] = None
     low_vram: bool = False
     text_only: bool = False
+    # NEW: Support for document files (PDF, DOCX) that will be converted to images
+    files: Optional[List[Dict[str, Any]]] = None  # [{name, data, mimeType}]
 
 
 # VibeCodingRequest moved to vibecoding.commands
@@ -1118,6 +1366,29 @@ class RunCommandRequest(BaseModel):
 class SaveFileRequest(BaseModel):
     filename: str
     content: str
+
+
+# ─── API Key Management Models ------------------------------------------------
+class ApiKeyRequest(BaseModel):
+    provider_name: str
+    api_key: str
+    api_url: Optional[str] = None
+    is_active: bool = True
+
+
+class ApiKeyResponse(BaseModel):
+    id: int
+    provider_name: str
+    api_url: Optional[str] = None
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class ApiKeyUpdateRequest(BaseModel):
+    api_key: Optional[str] = None
+    api_url: Optional[str] = None
+    is_active: Optional[bool] = None
 
 
 # ─── Reasoning Model Helpers --------------------------------------------------
@@ -1191,6 +1462,12 @@ async def root() -> FileResponse:
     if os.path.exists(index_html):
         return FileResponse(index_html)
     raise HTTPException(404, "Frontend not found")
+
+
+@app.get("/health", tags=["health"])
+async def health_check():
+    """Lightweight health check for K8s liveness probe - responds immediately"""
+    return {"status": "healthy", "timestamp": time.time()}
 
 
 # ─── Chat History Endpoints ───────────────────────────────────────────────────────
@@ -1520,101 +1797,221 @@ async def get_authentication_stats():
     return get_auth_stats()
 
 
-# Import new modules
+# ─── API Key Management Endpoints ─────────────────────────────────────────────
+@app.get("/api/user/api-keys", response_model=List[ApiKeyResponse], tags=["api-keys"])
+async def get_user_api_keys(
+    request: Request, current_user: UserResponse = Depends(get_current_user)
+):
+    """Get all API keys for the current user (without the actual key values)"""
+    pool = getattr(request.app.state, "pg_pool", None)
+    if not pool:
+        raise HTTPException(status_code=500, detail="Database not available")
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, provider_name, api_url, is_active, created_at, updated_at
+            FROM user_api_keys
+            WHERE user_id = $1
+            ORDER BY provider_name
+            """,
+            current_user.id,
+        )
+
+        return [
+            ApiKeyResponse(
+                id=row["id"],
+                provider_name=row["provider_name"],
+                api_url=row["api_url"],
+                is_active=row["is_active"],
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+            )
+            for row in rows
+        ]
 
 
-# ── Auto-Research Detection for Perplexity-style behavior ──────────────────────
+@app.post("/api/user/api-keys", response_model=ApiKeyResponse, tags=["api-keys"])
+async def create_or_update_api_key(
+    request: Request,
+    api_key_data: ApiKeyRequest,
+    current_user: UserResponse = Depends(get_current_user),
+):
+    """Create or update an API key for a provider"""
+    pool = getattr(request.app.state, "pg_pool", None)
+    if not pool:
+        raise HTTPException(status_code=500, detail="Database not available")
+
+    # Log what we received
+    received_key = api_key_data.api_key
+    logger.info(
+        f"API SAVE: Received key for provider={api_key_data.provider_name}, length={len(received_key) if received_key else 0}, preview={received_key[:8] if received_key else 'EMPTY'}...{received_key[-4:] if received_key and len(received_key) > 4 else 'NONE'}"
+    )
+
+    # Encrypt the API key
+    encrypted_key = encrypt_api_key(api_key_data.api_key)
+
+    async with pool.acquire() as conn:
+        # Check if there's already an entry for this provider
+        existing = await conn.fetchrow(
+            """
+            SELECT id FROM user_api_keys
+            WHERE user_id = $1 AND provider_name = $2
+            """,
+            current_user.id,
+            api_key_data.provider_name,
+        )
+
+        if existing:
+            # Update existing entry
+            row = await conn.fetchrow(
+                """
+                UPDATE user_api_keys
+                SET api_key_encrypted = $3, api_url = $4, is_active = $5, updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = $1 AND provider_name = $2
+                RETURNING id, provider_name, api_url, is_active, created_at, updated_at
+                """,
+                current_user.id,
+                api_key_data.provider_name,
+                encrypted_key,
+                api_key_data.api_url,
+                api_key_data.is_active,
+            )
+        else:
+            # Create new entry
+            row = await conn.fetchrow(
+                """
+                INSERT INTO user_api_keys (user_id, provider_name, api_key_encrypted, api_url, is_active)
+                VALUES ($1, $2, $3, $4, $5)
+                RETURNING id, provider_name, api_url, is_active, created_at, updated_at
+                """,
+                current_user.id,
+                api_key_data.provider_name,
+                encrypted_key,
+                api_key_data.api_url,
+                api_key_data.is_active,
+            )
+
+        return ApiKeyResponse(
+            id=row["id"],
+            provider_name=row["provider_name"],
+            api_url=row["api_url"],
+            is_active=row["is_active"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+
+@app.delete("/api/user/api-keys/{provider_name}", tags=["api-keys"])
+async def delete_api_key(
+    provider_name: str,
+    request: Request,
+    current_user: UserResponse = Depends(get_current_user),
+):
+    """Delete an API key for a provider"""
+    pool = getattr(request.app.state, "pg_pool", None)
+    if not pool:
+        raise HTTPException(status_code=500, detail="Database not available")
+
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            """
+            DELETE FROM user_api_keys
+            WHERE user_id = $1 AND provider_name = $2
+            """,
+            current_user.id,
+            provider_name,
+        )
+
+        if result == "DELETE 0":
+            raise HTTPException(status_code=404, detail="API key not found")
+
+        return {"message": f"API key for {provider_name} deleted successfully"}
+
+
+@app.get(
+    "/api/user/api-keys/{provider_name}",
+    response_model=ApiKeyResponse,
+    tags=["api-keys"],
+)
+async def get_api_key_by_provider(
+    provider_name: str,
+    request: Request,
+    current_user: UserResponse = Depends(get_current_user),
+):
+    """Get a specific API key by provider name (without the actual key value)"""
+    pool = getattr(request.app.state, "pg_pool", None)
+    if not pool:
+        raise HTTPException(status_code=500, detail="Database not available")
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT id, provider_name, api_url, is_active, created_at, updated_at
+            FROM user_api_keys
+            WHERE user_id = $1 AND provider_name = $2
+            """,
+            current_user.id,
+            provider_name,
+        )
+
+        if not row:
+            raise HTTPException(status_code=404, detail="API key not found")
+
+        return ApiKeyResponse(
+            id=row["id"],
+            provider_name=row["provider_name"],
+            api_url=row["api_url"],
+            is_active=row["is_active"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+
+# ── Web Search Tool Detection ───────────────────────────────────────────────────
 def should_auto_research(message: str) -> bool:
     """
-    Detect if a message should trigger automatic web research (Perplexity-style).
-    Returns True for freshness/recommendation queries, False for conceptual questions.
+    Only trigger web research when the user explicitly asks for a search.
+    Harvis can also trigger search by emitting <web_search>query</web_search> in its response.
+    Freshness/recommendation keywords no longer auto-trigger — avoids false positives
+    on messages like "update the repo" or "what's the best way to refactor this".
     """
     msg_lower = message.lower()
 
-    # Keywords that indicate need for current/fresh information
-    freshness_keywords = [
-        "new",
-        "latest",
-        "current",
-        "2026",
-        "2025",
-        "today",
-        "this week",
-        "recently",
-        "best",
-        "top",
-        "recommend",
-        "compare",
-        "vs",
-        "which should",
-        "roadmap",
-        "release",
-        "what changed",
-        "update",
-        "version",
-        "trending",
-        "popular",
-        "modern",
-        "state of the art",
-        "sota",
-    ]
-
-    # Keywords that indicate conceptual questions (don't need web search)
-    conceptual_keywords = [
-        "explain",
-        "what is",
-        "how does",
-        "define",
-        "tutorial",
-        "teach me",
-        "understand",
-        "concept",
-        "basics",
-        "fundamentals",
-    ]
-
-    # Explicit research requests always trigger
+    # Only trigger on unambiguous explicit search requests
     explicit_research = [
-        "search",
+        "search for",
         "look up",
         "find sources",
-        "research",
-        "browse",
-        "check online",
-        "google",
         "web search",
+        "check online",
+        "search the web",
+        "google that",
+        "search online",
     ]
 
-    # Check for explicit research request first
     for keyword in explicit_research:
         if keyword in msg_lower:
-            logger.info(f"🔍 Auto-research triggered by explicit keyword: '{keyword}'")
-            return True
-
-    # Check for conceptual questions (skip research)
-    for keyword in conceptual_keywords:
-        if keyword in msg_lower:
-            # But override if freshness is also present
-            has_freshness = any(fk in msg_lower for fk in freshness_keywords)
-            if not has_freshness:
-                logger.info(f"📚 Conceptual question detected, skipping auto-research")
-                return False
-
-    # Check for freshness keywords
-    for keyword in freshness_keywords:
-        if keyword in msg_lower:
-            logger.info(f"🔍 Auto-research triggered by freshness keyword: '{keyword}'")
+            logger.info(f"🔍 Search triggered by explicit keyword: '{keyword}'")
             return True
 
     return False
 
 
 # ── Local RAG Context Helper ────────────────────────────────────────────────────
-async def get_local_rag_context(query: str, max_length: int = 2000) -> str:
+async def get_local_rag_context(query: str, max_length: int = None) -> str:
     """
     Retrieve relevant context from the local RAG corpus.
     Returns formatted context string or empty string if unavailable.
+
+    Uses RAG_CONFIG for default values:
+    - default_k: Number of results to retrieve (default: 5)
+    - max_context_length: Max chars for context (default: 4000)
     """
+    # Use RAG_CONFIG defaults if not specified
+    if max_length is None:
+        max_length = RAG_CONFIG["max_context_length"]
+
     logger.info(f"🔍 RAG: Starting context retrieval for query: '{query[:100]}...'")
 
     if local_rag_retriever is None:
@@ -1622,12 +2019,13 @@ async def get_local_rag_context(query: str, max_length: int = 2000) -> str:
         return ""
 
     try:
+        k = RAG_CONFIG["default_k"]
         logger.info(
-            f"🔍 RAG: Retriever initialized, querying with k=3, max_length={max_length}"
+            f"🔍 RAG: Retriever initialized, querying with k={k}, max_length={max_length}"
         )
 
-        # First, let's check if we can retrieve raw results
-        raw_results = await local_rag_retriever.retrieve(query, k=3)
+        # First, let's check if we can retrieve raw results (uses retriever's default_k)
+        raw_results = await local_rag_retriever.retrieve(query)
         logger.info(f"🔍 RAG: Retrieved {len(raw_results)} raw results from vector DB")
 
         if raw_results:
@@ -1642,9 +2040,9 @@ async def get_local_rag_context(query: str, max_length: int = 2000) -> str:
                 "⚠️ RAG: No results returned from vector DB - documents may not be indexed or query doesn't match"
             )
 
-        # Now get formatted context
+        # Now get formatted context (uses retriever's default_k)
         context = await local_rag_retriever.get_context_string(
-            query=query, k=3, max_length=max_length
+            query=query, max_length=max_length
         )
 
         if context:
@@ -1729,20 +2127,55 @@ async def chat(
                 )
                 yield f"data: {json.dumps({'status': 'researching', 'detail': 'Auto-research triggered, searching the web...'})}\n\n"
                 try:
-                    from agent_research import research_agent
+                    # Use streaming research agent for live progress updates
+                    analysis = ""
+                    sources = []
+                    videos = []
 
-                    research_result = await run_in_threadpool(
-                        research_agent,
-                        current_message_content,
-                        req.model,
-                        use_advanced=False,
-                    )
+                    async for event in async_research_agent_streaming(
+                        current_message_content, req.model
+                    ):
+                        event_type = event.get("type")
 
-                    if "error" not in research_result:
-                        analysis = research_result.get("analysis", "")
-                        sources = research_result.get("sources", [])
-                        videos = research_result.get("videos", [])
+                        if event_type == "search_query":
+                            # Forward search query to frontend
+                            query = event["query"]
+                            yield f"data: {json.dumps({'status': 'researching', 'detail': f'Searching for: {query}', 'type': 'search_query', 'query': query})}\n\n"
+                            logger.info(
+                                f"[Auto-Research] Streaming search query: {query}"
+                            )
 
+                        elif event_type == "search_result":
+                            # Forward search result to frontend
+                            title = event["title"]
+                            yield f"data: {json.dumps({'status': 'researching', 'detail': f'Found: {title}', 'type': 'search_result', 'title': title, 'url': event['url'], 'domain': event['domain']})}\n\n"
+
+                        elif event_type == "reading":
+                            # Forward reading progress to frontend
+                            domain = event["domain"]
+                            yield f"data: {json.dumps({'status': 'researching', 'detail': f'Reading {domain}...', 'type': 'reading', 'domain': domain, 'url': event['url']})}\n\n"
+
+                        elif event_type == "analysis":
+                            # Forward analysis progress
+                            yield f"data: {json.dumps({'status': 'researching', 'detail': event.get('detail', 'Analyzing...')})}\n\n"
+
+                        elif event_type == "complete":
+                            # Store final result
+                            result_data = event.get("result", {})
+                            analysis = result_data.get("analysis", "")
+                            sources = result_data.get("sources", [])
+                            sources_found = result_data.get("sources_found", 0)
+                            videos = result_data.get("videos", [])
+                            logger.info(
+                                f"[Auto-Research] Streaming research complete. Found {sources_found} sources"
+                            )
+
+                        elif event_type == "error":
+                            analysis = (
+                                f"Research Error: {event.get('error', 'Unknown error')}"
+                            )
+
+                    if analysis and not analysis.startswith("Research Error:"):
                         response_data = {
                             "status": "complete",
                             "response": analysis,
@@ -1889,7 +2322,292 @@ async def chat(
                 yield f"data: {json.dumps({'status': 'processing', 'detail': 'Querying Gemini...'})}\n\n"
                 response_text = query_gemini(req.message, req.history)
 
-            # ── 6. Ollama LLM generation branch (with heartbeats) ────────────────────────────
+            # ── 6. NVIDIA NIM (Kimi K2.5) model branch ───────────────────────────────────────
+            elif req.model == "nvidia-kimi":
+                import time as _time
+                _t0 = _time.monotonic()
+                yield f"data: {json.dumps({'status': 'processing', 'detail': 'Querying NVIDIA NIM...'})}\n\n"
+
+                pool = getattr(request.app.state, "pg_pool", None)
+                if not pool:
+                    yield f"data: {json.dumps({'status': 'error', 'error': 'Database not available'})}\n\n"
+                    return
+
+                nvidia_config = await get_user_api_key(pool, current_user.id, "nvidia")
+                if not nvidia_config or not nvidia_config.get("api_key"):
+                    yield f"data: {json.dumps({'status': 'error', 'error': 'NVIDIA API key not configured. Please add your key in Profile settings.'})}\n\n"
+                    return
+
+                nvidia_api_key = nvidia_config["api_key"]
+                logger.info(f"⏱️ NVIDIA: key fetch took {_time.monotonic()-_t0:.2f}s")
+
+                # Build messages (same system prompt logic as Moonshot branch)
+                _t1 = _time.monotonic()
+                system_prompt_path = os.path.join(os.path.dirname(__file__), "system_prompt.txt")
+                try:
+                    with open(system_prompt_path, "r", encoding="utf-8") as f:
+                        system_prompt = f.read().strip()
+                except FileNotFoundError:
+                    system_prompt = 'You are "Jarves", a voice-first local assistant.'
+
+                artifact_instructions_path = os.path.join(
+                    os.path.dirname(__file__), "prompts", "artifact_instructions_code.txt"
+                )
+                try:
+                    with open(artifact_instructions_path, "r", encoding="utf-8") as f:
+                        system_prompt += f"\n\n{f.read().strip()}"
+                except FileNotFoundError:
+                    pass
+
+                _t2 = _time.monotonic()
+                local_rag_context = await get_local_rag_context(current_message_content)
+                logger.info(f"⏱️ NVIDIA: RAG lookup took {_time.monotonic()-_t2:.2f}s (prompt so far: {len(system_prompt)} chars)")
+                if local_rag_context:
+                    system_prompt += f"\n\n--- RELEVANT DOCUMENTATION ---\n{local_rag_context}\n--- END ---"
+
+                messages = [{"role": "system", "content": system_prompt}]
+                for msg in history[:-1]:
+                    messages.append({"role": msg["role"], "content": msg["content"]})
+                messages.append({"role": "user", "content": current_message_content})
+
+                total_prompt_chars = sum(len(m["content"]) for m in messages)
+                logger.info(
+                    f"🟢 Using NVIDIA NIM: moonshotai/kimi-k2.5 | thinking_mode={req.thinking_mode} | "
+                    f"messages={len(messages)} total_prompt_chars={total_prompt_chars} | "
+                    f"pre-request setup took {_time.monotonic()-_t0:.2f}s"
+                )
+
+                # NVIDIA NIM Kimi K2.5 with thinking returns TWO delta fields:
+                #   delta.reasoning_content — chain-of-thought (thinking phase)
+                #   delta.content           — final answer (response phase)
+                # We collect both: thinking wrapped in <think> tags so the existing
+                # reasoning extractor strips it out before TTS and history saving.
+                response_text = ""
+                _thinking_buf = ""
+                _answer_buf = ""
+                _chunk_count = 0
+                _thinking_chunk_count = 0
+                _answer_chunk_count = 0
+                _ttft = None  # time-to-first-token
+                _t_stream_start = _time.monotonic()
+                try:
+                    logger.info(f"🔵 NVIDIA NIM: opening stream (thinking={req.thinking_mode})")
+                    async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
+                        async with client.stream(
+                            "POST",
+                            "https://integrate.api.nvidia.com/v1/chat/completions",
+                            headers={
+                                "Authorization": f"Bearer {nvidia_api_key}",
+                                "Content-Type": "application/json",
+                                "Accept": "text/event-stream",
+                            },
+                            json={
+                                "model": "moonshotai/kimi-k2.5",
+                                "messages": messages,
+                                "temperature": 1.0,
+                                "max_tokens": 16384,
+                                "stream": True,
+                                "chat_template_kwargs": {"thinking": req.thinking_mode},
+                                "stream_options": {"include_usage": True},
+                            },
+                        ) as resp:
+                            logger.info(f"🔵 NVIDIA NIM: response status={resp.status_code} headers={dict(resp.headers)}")
+                            if resp.status_code != 200:
+                                err = await resp.aread()
+                                err_text = err.decode()[:500]
+                                logger.error(f"🔴 NVIDIA NIM: upstream error {resp.status_code}: {err_text}")
+                                yield f"data: {json.dumps({'status': 'error', 'error': f'NVIDIA NIM error {resp.status_code}: {err_text}'})}\n\n"
+                                return
+                            logger.info("🔵 NVIDIA NIM: stream opened, reading chunks...")
+                            async for line in resp.aiter_lines():
+                                _chunk_count += 1
+                                if line == "data: [DONE]":
+                                    logger.info(f"🔵 NVIDIA NIM: received [DONE] after {_chunk_count} lines")
+                                    continue
+                                if line.startswith("data: "):
+                                    try:
+                                        chunk = json.loads(line[6:])
+                                        choices = chunk.get("choices", [])
+                                        if not choices:
+                                            # Could be a usage chunk
+                                            usage = chunk.get("usage")
+                                            if usage:
+                                                logger.info(f"🔵 NVIDIA NIM usage: {usage}")
+                                            continue
+                                        delta = choices[0].get("delta", {})
+                                        finish_reason = choices[0].get("finish_reason")
+                                        if finish_reason:
+                                            logger.info(f"🔵 NVIDIA NIM: finish_reason={finish_reason}")
+
+                                        thinking_chunk = delta.get("reasoning_content") or ""
+                                        answer_chunk = delta.get("content") or ""
+
+                                        if thinking_chunk:
+                                            _thinking_chunk_count += 1
+                                            _thinking_buf += thinking_chunk
+                                            if req.thinking_mode:
+                                                yield f"data: {json.dumps({'status': 'thinking', 'content': thinking_chunk})}\n\n"
+
+                                        if answer_chunk:
+                                            _answer_chunk_count += 1
+                                            if _ttft is None:
+                                                _ttft = _time.monotonic() - _t_stream_start
+                                                logger.info(f"⏱️ NVIDIA NIM: time-to-first-token = {_ttft:.2f}s")
+                                            _answer_buf += answer_chunk
+                                            yield f"data: {json.dumps({'status': 'streaming', 'content': answer_chunk})}\n\n"
+
+                                        # Log delta keys to catch unexpected fields
+                                        delta_keys = [k for k, v in delta.items() if v]
+                                        if delta_keys and _chunk_count % 50 == 1:
+                                            logger.debug(f"🔵 NVIDIA NIM delta keys at chunk {_chunk_count}: {delta_keys}")
+
+                                    except json.JSONDecodeError as je:
+                                        logger.warning(f"🟡 NVIDIA NIM: JSON decode error on line: {line[:100]} — {je}")
+                                    except Exception as ce:
+                                        logger.warning(f"🟡 NVIDIA NIM: chunk parse error: {ce}")
+
+                    _total_time = _time.monotonic() - _t_stream_start
+                    logger.info(
+                        f"🟢 NVIDIA NIM complete: total_time={_total_time:.2f}s TTFT={_ttft:.2f}s "
+                        f"total_lines={_chunk_count} "
+                        f"thinking_chunks={_thinking_chunk_count} ({len(_thinking_buf)} chars) "
+                        f"answer_chunks={_answer_chunk_count} ({len(_answer_buf)} chars) "
+                        f"tokens/s≈{len(_answer_buf)/max(_total_time,0.1):.0f} chars/s"
+                    )
+                    if not _answer_buf and not _thinking_buf:
+                        logger.error("🔴 NVIDIA NIM: both buffers empty — no content received from stream!")
+                    elif not _answer_buf:
+                        logger.warning(
+                            f"🟡 NVIDIA NIM: answer_buf empty but thinking_buf has {len(_thinking_buf)} chars. "
+                            f"thinking_mode={req.thinking_mode}. Model may have responded only via reasoning_content."
+                        )
+
+                    # Build response_text: thinking in <think> tags + final answer
+                    if _thinking_buf:
+                        response_text = f"<think>{_thinking_buf}</think>\n\n{_answer_buf}"
+                    else:
+                        response_text = _answer_buf
+                except Exception as e:
+                    logger.error(f"🔴 NVIDIA NIM stream exception: {type(e).__name__}: {e}")
+                    yield f"data: {json.dumps({'status': 'error', 'error': str(e)})}\n\n"
+                    return
+
+            # ── 7. Moonshot/Kimi model branch ────────────────────────────────────────────────
+            elif is_moonshot_model(req.model):
+                yield f"data: {json.dumps({'status': 'processing', 'detail': 'Querying Moonshot AI...'})}\n\n"
+
+                # Get user's Moonshot API key
+                pool = getattr(request.app.state, "pg_pool", None)
+                if not pool:
+                    yield f"data: {json.dumps({'status': 'error', 'error': 'Database not available'})}\n\n"
+                    return
+
+                moonshot_config = await get_user_api_key(
+                    pool, current_user.id, "moonshot"
+                )
+
+                if not moonshot_config or not moonshot_config.get("api_key"):
+                    logger.error(
+                        f"Moonshot API key not found or empty for user {current_user.id}"
+                    )
+                    yield f"data: {json.dumps({'status': 'error', 'error': 'Moonshot API key not configured. Please add your API key in Profile settings.'})}\n\n"
+                    return
+
+                # Debug: Log API key info (safely)
+                api_key = moonshot_config["api_key"]
+                if len(api_key) > 0:
+                    prefix = api_key[:4] if len(api_key) >= 4 else api_key[:2]
+                    suffix = api_key[-4:] if len(api_key) >= 4 else api_key[-2:]
+                    middle_len = max(0, len(api_key) - len(prefix) - len(suffix))
+                    middle = "*" * middle_len
+                    masked_key = f"{prefix}{middle}{suffix}"
+                    logger.info(
+                        f"🌙 Moonshot API key: {masked_key} (length={len(api_key)})"
+                    )
+                else:
+                    logger.error("🌙 Moonshot API key is EMPTY!")
+
+                # Create Moonshot client with user's API key
+                moonshot_client = MoonshotClient(
+                    api_key=api_key,
+                    base_url=moonshot_config.get("api_url") or MOONSHOT_BASE_URL,
+                )
+
+                # Get the correct model ID
+                moonshot_model_id = get_moonshot_model_id(req.model)
+
+                # Build messages
+                system_prompt_path = os.path.join(
+                    os.path.dirname(__file__), "system_prompt.txt"
+                )
+                try:
+                    with open(system_prompt_path, "r", encoding="utf-8") as f:
+                        system_prompt = f.read().strip()
+                except FileNotFoundError:
+                    system_prompt = (
+                        'You are "Jarves", a voice-first local assistant. '
+                        "Reply in ≤25 spoken-style words, sprinkling brief Spanish when natural."
+                    )
+
+                # Load artifact instructions (CODE-BASED approach)
+                artifact_instructions_path = os.path.join(
+                    os.path.dirname(__file__),
+                    "prompts",
+                    "artifact_instructions_code.txt",
+                )
+                try:
+                    with open(artifact_instructions_path, "r", encoding="utf-8") as f:
+                        artifact_instructions = f.read().strip()
+                    system_prompt += f"\n\n{artifact_instructions}"
+                    logger.info(
+                        "📦 Added CODE-BASED artifact instructions to system prompt"
+                    )
+                except FileNotFoundError:
+                    logger.warning("Artifact instructions file not found, skipping")
+                except Exception as e:
+                    logger.warning(f"Failed to load artifact instructions: {e}")
+
+                # Check if it's a reasoning model
+                is_reasoning_model = (
+                    "k2.5" in req.model.lower() or "k2" in req.model.lower()
+                )
+
+                if is_reasoning_model:
+                    system_prompt += (
+                        "\n\nIMPORTANT: When reasoning through problems, wrap your thinking process in <think>...</think> tags. "
+                        "This allows your reasoning to be shown separately from your final answer."
+                    )
+
+                # Add RAG context if available
+                local_rag_context = await get_local_rag_context(current_message_content)
+                if local_rag_context:
+                    system_prompt += (
+                        f"\n\n--- RELEVANT DOCUMENTATION FROM LOCAL CORPUS ---\n"
+                        f"{local_rag_context}\n"
+                        "--- END OF DOCUMENTATION CONTEXT ---"
+                    )
+
+                messages = [{"role": "system", "content": system_prompt}]
+                for msg in history[:-1]:
+                    messages.append({"role": msg["role"], "content": msg["content"]})
+                messages.append({"role": "user", "content": current_message_content})
+
+                logger.info(f"🌙 Using Moonshot AI with model: {moonshot_model_id}")
+
+                # Stream response from Moonshot
+                response_text = ""
+                try:
+                    async for chunk in moonshot_client.chat_completion_stream(
+                        model=moonshot_model_id, messages=messages
+                    ):
+                        response_text += chunk
+                        yield f"data: {json.dumps({'status': 'streaming', 'content': chunk})}\n\n"
+                except Exception as e:
+                    logger.error(f"Moonshot API error: {e}")
+                    yield f"data: {json.dumps({'status': 'error', 'error': str(e)})}\n\n"
+                    return
+
+            # ── 7. Ollama LLM generation branch (with heartbeats) ────────────────────────────
             else:
                 system_prompt_path = os.path.join(
                     os.path.dirname(__file__), "system_prompt.txt"
@@ -1904,6 +2622,25 @@ async def chat(
                         "Reply in ≤25 spoken-style words, sprinkling brief Spanish when natural, Be bilangual about 80 percent english and 20 percent spanish"
                         'Begin each answer with a short verbal acknowledgment (e.g., "Claro,", "¡Por supuesto!", "Right away").'
                     )
+
+                # Load artifact instructions (CODE-BASED approach)
+                artifact_instructions_path = os.path.join(
+                    os.path.dirname(__file__),
+                    "prompts",
+                    "artifact_instructions_code.txt",
+                )
+                try:
+                    with open(artifact_instructions_path, "r", encoding="utf-8") as f:
+                        artifact_instructions = f.read().strip()
+                    system_prompt += f"\n\n{artifact_instructions}"
+                    logger.info(
+                        "📦 Added CODE-BASED artifact instructions to system prompt"
+                    )
+                except FileNotFoundError:
+                    logger.warning("Artifact instructions file not found, skipping")
+                except Exception as e:
+                    logger.warning(f"Failed to load artifact instructions: {e}")
+
                 OLLAMA_ENDPOINT = "/api/chat"
 
                 is_reasoning_model = any(
@@ -2149,13 +2886,329 @@ async def chat(
             else:
                 logger.info(f"ℹ️ No reasoning tags found in response")
 
+            # ── 7.5 Artifact Detection ──────────────────────────────────────────────────────
+            artifact_info = None
+            try:
+                logger.info("🔍 Starting artifact detection...")
+
+                # First, try CODE-BASED document generation (new approach)
+                pool = getattr(request.app.state, "pg_pool", None)
+                if not pool:
+                    logger.warning(
+                        "⚠️ Database pool not available for artifact creation"
+                    )
+
+                # Check for document generation code (Excel, Word, PDF, PowerPoint)
+                document_types = ["spreadsheet", "document", "pdf", "presentation"]
+                code_artifact_type = None
+                code_title = None
+
+                logger.info(
+                    f"🔍 Checking for document code in response (length: {len(final_answer)} chars)"
+                )
+
+                logger.info(
+                    f"🔍 Checking for document generation code in response ({len(final_answer)} chars)"
+                )
+                logger.info(f"🔍 Looking for code blocks: {document_types}")
+
+                for doc_type in document_types:
+                    logger.info(f"🔍 Checking for {doc_type} code...")
+                    doc_code = extract_document_code(final_answer, doc_type)
+                    if doc_code:
+                        code_artifact_type = doc_type
+                        code_title = f"Generated {doc_type.capitalize()}"
+                        logger.info(
+                            f"✅ Found {doc_type} generation code ({len(doc_code)} chars)"
+                        )
+                        # Log first 200 chars of code for debugging
+                        logger.info(f"📝 Code preview: {doc_code[:200]}...")
+                        break
+                    else:
+                        logger.info(f"❌ No {doc_type} code found")
+
+                # Fallback: Auto-detect document type from imports
+                if not code_artifact_type:
+                    logger.info("🔍 Trying auto-detection from imports...")
+                    auto_result = auto_detect_document_type(final_answer)
+                    if auto_result:
+                        code_artifact_type, doc_code = auto_result
+                        code_title = f"Generated {code_artifact_type.capitalize()}"
+                        logger.info(
+                            f"✅ Auto-detected {code_artifact_type} from imports"
+                        )
+
+                if code_artifact_type:
+                    # ASYNC JOB-BASED GENERATION
+                    logger.info(
+                        f"📦 Async job-based {code_artifact_type} generation detected"
+                    )
+                    yield f"data: {json.dumps({'status': 'processing', 'detail': f'Queuing {code_artifact_type} generation...'})}\n\n"
+
+                    try:
+                        # Create async job for document generation
+                        import asyncpg
+                        from job_queue import get_job_queue
+
+                        # Generate IDs
+                        job_id = str(uuid.uuid4())
+                        artifact_id = str(uuid.uuid4())
+
+                        if pool:
+                            # Insert job into document_jobs table
+                            # Note: message_id is not available in streaming context, using NULL
+                            await pool.execute(
+                                """
+                                INSERT INTO document_jobs (
+                                    id, user_id, session_id, message_id, job_type,
+                                    status, payload, priority, created_at
+                                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+                                """,
+                                job_id,
+                                current_user.id,
+                                session_id if session_id else None,
+                                None,  # message_id not available in streaming context
+                                code_artifact_type,
+                                "pending",
+                                json.dumps(
+                                    {
+                                        "code": doc_code,
+                                        "title": code_title,
+                                        "artifact_id": artifact_id,
+                                    }
+                                ),
+                                0,
+                            )
+                            logger.info(f"💾 Created document job {job_id} in database")
+
+                            # Enqueue job in job queue
+                            queue = await get_job_queue()
+                            await queue.send(
+                                name="generate-document",
+                                data={
+                                    "document_job_id": job_id,
+                                    "code": doc_code,
+                                    "document_type": code_artifact_type,
+                                    "title": code_title,
+                                    "user_id": current_user.id,
+                                    "session_id": str(session_id)
+                                    if session_id
+                                    else None,
+                                    "artifact_id": artifact_id,
+                                },
+                                retry_limit=3,
+                                priority=0,
+                            )
+                            logger.info(f"📨 Enqueued job {job_id} for processing")
+
+                            # Build artifact_info with job reference (frontend will poll via SSE)
+                            artifact_info = {
+                                "id": artifact_id,
+                                "type": code_artifact_type,
+                                "title": code_title,
+                                "status": "generating",
+                                "download_url": f"/api/artifacts/{artifact_id}/download",
+                                "job_id": job_id,
+                                "code": doc_code,  # Include the code so users can view it later
+                            }
+                            logger.info(
+                                f"📦 Created async job: {job_id} for artifact {artifact_id}"
+                            )
+
+                            # Notify frontend that job is queued
+                            detail_msg = (
+                                f"{code_artifact_type.capitalize()} generation queued"
+                            )
+                            yield f"data: {json.dumps({'status': 'processing', 'detail': detail_msg, 'job_id': job_id, 'artifact_id': artifact_id})}\n\n"
+
+                            # Clean response by removing the code block
+                            final_answer = clean_response_content(final_answer)
+                            logger.info(f"🧹 Cleaned response, removed code block")
+                        else:
+                            logger.error("❌ No database pool available to create job")
+
+                    except Exception as job_error:
+                        logger.exception(
+                            f"💥 Exception creating async job: {job_error}"
+                        )
+                        # Fallback: try synchronous generation
+                        logger.warning("⚠️ Falling back to synchronous generation")
+                        try:
+                            # Use single artifact_id for both generation AND database record
+                            sync_artifact_id = str(uuid.uuid4())
+                            doc_result = generate_document_from_code(
+                                llm_response=final_answer,
+                                artifact_type=code_artifact_type,
+                                title=code_title,
+                                artifact_id=sync_artifact_id,
+                                use_docker=True,
+                            )
+                            if doc_result.get("success") and pool:
+                                # Get mime type based on artifact type
+                                mime_types = {
+                                    "spreadsheet": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                    "document": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                    "pdf": "application/pdf",
+                                    "presentation": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                                }
+                                mime_type = mime_types.get(
+                                    code_artifact_type, "application/octet-stream"
+                                )
+
+                                # Save artifact record to database
+                                await pool.execute(
+                                    """
+                                    INSERT INTO artifacts (
+                                        id, user_id, artifact_type, title,
+                                        file_path, file_size, mime_type, status, created_at
+                                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'ready', NOW())
+                                    ON CONFLICT (id) DO UPDATE SET
+                                        status = 'ready',
+                                        file_path = EXCLUDED.file_path,
+                                        file_size = EXCLUDED.file_size
+                                    """,
+                                    sync_artifact_id,
+                                    current_user.id,
+                                    code_artifact_type,
+                                    code_title,
+                                    doc_result.get("file_path"),
+                                    doc_result.get("file_size", 0),
+                                    mime_type,
+                                )
+                                logger.info(
+                                    f"💾 Saved artifact {sync_artifact_id} to database"
+                                )
+
+                                artifact_info = {
+                                    "id": sync_artifact_id,
+                                    "type": code_artifact_type,
+                                    "title": code_title,
+                                    "status": "ready",
+                                    "download_url": f"/api/artifacts/{sync_artifact_id}/download",
+                                    "code": doc_code,
+                                }
+                                final_answer = clean_response_content(final_answer)
+                            elif doc_result.get("success"):
+                                logger.error(
+                                    "❌ Document generated but no database pool to save record"
+                                )
+                            else:
+                                logger.error(
+                                    f"❌ Document generation failed: {doc_result.get('error')}"
+                                )
+                        except Exception as fallback_error:
+                            logger.error(
+                                f"❌ Fallback generation also failed: {fallback_error}"
+                            )
+                else:
+                    logger.info("🔍 No document generation code found in response")
+
+                # Fallback: Try JSON manifest approach (for websites/apps and backward compatibility)
+                if not artifact_info:
+                    logger.info("🔍 Attempting artifact detection from response...")
+                    logger.debug(
+                        f"Response preview (first 500 chars): {final_answer[:500] if final_answer else 'empty'}"
+                    )
+
+                    artifact_manifest = extract_artifact_manifest(final_answer)
+                    if artifact_manifest:
+                        logger.info(
+                            f"✅ JSON manifest found: {artifact_manifest.get('artifact_type')}"
+                        )
+
+                    # If no manifest found, try to auto-detect Next.js/React project from code blocks
+                    if not artifact_manifest:
+                        logger.info(
+                            "🔍 No JSON manifest, trying auto-detection from code blocks..."
+                        )
+                        artifact_manifest = extract_nextjs_project_from_codeblocks(
+                            final_answer
+                        )
+                        if artifact_manifest:
+                            logger.info(
+                                f"✅ Auto-detected Next.js/React project: {len(artifact_manifest.get('content', {}).get('files', {}))} files"
+                            )
+                        else:
+                            logger.info(
+                                "❌ No project structure detected in code blocks"
+                            )
+
+                    if artifact_manifest:
+                        logger.info(
+                            f"📦 Artifact detected: {artifact_manifest.get('artifact_type')} - {artifact_manifest.get('title')}"
+                        )
+                        yield f"data: {json.dumps({'status': 'processing', 'detail': 'Creating artifact...'})}\n\n"
+
+                        # Clean the final answer by removing the manifest
+                        final_answer = clean_response_content(final_answer)
+
+                        # Create artifact in database
+                        if pool:
+                            try:
+                                manifest = ArtifactManifest(**artifact_manifest)
+                                artifact_id = await artifact_storage.create_artifact(
+                                    pool=pool,
+                                    user_id=current_user.id,
+                                    manifest=manifest,
+                                    session_id=session_id if session_id else None,
+                                )
+
+                                # For document types, generate in background
+                                artifact_type = manifest.artifact_type
+                                if hasattr(artifact_type, "value"):
+                                    artifact_type = artifact_type.value
+
+                                if artifact_type not in ["website", "app", "code"]:
+                                    # Generate document artifact in background
+                                    import asyncio
+
+                                    asyncio.create_task(
+                                        artifact_storage.generate_artifact(
+                                            pool, artifact_id
+                                        )
+                                    )
+                                    artifact_status = "generating"
+                                else:
+                                    artifact_status = "ready"
+
+                                artifact_info = {
+                                    "id": str(artifact_id),
+                                    "type": artifact_type,
+                                    "title": manifest.title,
+                                    "status": artifact_status,
+                                }
+
+                                # Add download URL for ready artifacts
+                                if artifact_status == "ready" and artifact_type in [
+                                    "website",
+                                    "app",
+                                    "code",
+                                ]:
+                                    artifact_info["preview_url"] = (
+                                        f"/api/artifacts/{artifact_id}/preview"
+                                    )
+                                elif artifact_status == "generating":
+                                    artifact_info["download_url"] = (
+                                        f"/api/artifacts/{artifact_id}/download"
+                                    )
+
+                                logger.info(
+                                    f"📦 Created artifact {artifact_id} ({artifact_status})"
+                                )
+                                logger.info(
+                                    f"📦 Artifact info: {json.dumps(artifact_info)}"
+                                )
+                            except Exception as e:
+                                logger.error(f"Failed to create artifact: {e}")
+                                import traceback
+
+                                logger.error(f"Traceback: {traceback.format_exc()}")
+            except Exception as e:
+                logger.warning(f"Artifact detection failed: {e}")
+
             # ── 8. Text-to-speech (with heartbeats) ─────────────────────────────────────────
             # Moved BEFORE persistence so we can save the audio path
             audio_path = None
-            tts_engine = "none"
-            tts_sample_rate = None
-            tts_duration_sec = None
-            audio_prompt_path = None
 
             if req.text_only:
                 logger.info("🔇 [Text Only Mode] Skipping TTS generation")
@@ -2193,16 +3246,12 @@ async def chat(
                         temperature=req.temperature,
                         cfg_weight=req.cfg_weight,
                         auto_unload=req.low_vram,
+                        tts_engine=req.tts_engine,
                     ):
                         if event["type"] == "heartbeat":
                             yield f"data: {json.dumps({'status': 'processing', 'detail': 'Generating audio...'})}\n\n"
                         elif event["type"] == "result":
-                            tts_result = event["data"]
-                            if isinstance(tts_result, tuple) and len(tts_result) == 3:
-                                sr, wav, tts_engine = tts_result
-                            else:
-                                sr, wav = tts_result
-                                tts_engine = "unknown"
+                            sr, wav = event["data"]
 
                     if (
                         sr is not None
@@ -2211,15 +3260,17 @@ async def chat(
                         and len(wav.shape) >= 1
                         and wav.shape[0] > 0
                     ):
-                        audio_path = safe_save_audio(sr, wav, prefix="response")
-                        tts_sample_rate = int(sr)
-                        tts_duration_sec = round(len(wav) / float(sr), 3)
+                        filename = f"response_{uuid.uuid4()}.wav"
+                        filepath = os.path.join(tempfile.gettempdir(), filename)
+                        sf.write(filepath, wav, sr)
+                        logger.info("Audio written to %s", filepath)
+                        audio_path = f"/api/audio/{filename}"
                     else:
                         logger.warning(
                             "⚠️ TTS unavailable - returning response without audio"
                         )
                 except Exception as e:
-                    logger.error(f"❌ TTS Generation failed: {e}", exc_info=True)
+                    logger.error(f"❌ TTS Generation failed: {e}")
 
             # ── 9. Persist chat history to database ─────────────────────────────────────────
             yield f"data: {json.dumps({'status': 'saving', 'detail': 'Saving to history...'})}\n\n"
@@ -2228,6 +3279,16 @@ async def chat(
             if audio_path:
                 msg_metadata["audio_path"] = audio_path
                 msg_metadata["videos"] = []  # Placeholder
+
+            # Add artifact info to metadata so it persists with the message
+            if artifact_info:
+                msg_metadata["artifact"] = artifact_info
+                logger.info(
+                    f"💾 Added artifact to message metadata: {artifact_info['id']}"
+                )
+                logger.info(
+                    f"📝 Artifact has code: {bool(artifact_info.get('code'))}, code length: {len(artifact_info.get('code', ''))}"
+                )
 
             if session_id:
                 try:
@@ -2309,10 +3370,6 @@ async def chat(
                 "session_id": str(session_id) if session_id else None,
                 "message_id": message_id,
                 "final_answer": final_answer,
-                "tts_engine": tts_engine,
-                "tts_ref_audio": audio_prompt_path,
-                "tts_sample_rate": tts_sample_rate,
-                "tts_duration_sec": tts_duration_sec,
             }
 
             if audio_path:
@@ -2323,6 +3380,13 @@ async def chat(
                 logger.info(
                     f"🧠 Returning reasoning content ({len(reasoning_content)} chars)"
                 )
+
+            if artifact_info:
+                response_data["artifact"] = artifact_info
+                logger.info(
+                    f"📦 Returning artifact in response: {artifact_info['type']} - {artifact_info['title']} ({artifact_info['status']})"
+                )
+                logger.info(f"📦 Artifact data: {json.dumps(artifact_info)}")
 
             logger.info("✅ Chat streaming response complete")
             yield f"data: {json.dumps(response_data)}\n\n"
@@ -2462,11 +3526,54 @@ async def vision_chat(
                     logger.error(f"🖼️ Error processing image {idx + 1}: {img_err}")
                     continue
 
+            # NEW: Process document files (PDF, DOCX) and convert to images
+            if req.files:
+                yield f"data: {json.dumps({'status': 'processing', 'detail': f'Converting {len(req.files)} document(s) to images...'})}\n\n"
+
+                for file_idx, file_info in enumerate(req.files):
+                    try:
+                        file_name = file_info.get("name", f"file_{file_idx}")
+                        file_data = file_info.get("data", "")
+                        file_type = file_info.get("mimeType", "") or file_name
+
+                        if not file_data:
+                            logger.warning(f"📄 File {file_name}: No data provided")
+                            continue
+
+                        if not is_vision_compatible_file(file_type):
+                            logger.warning(
+                                f"📄 File {file_name}: Type {file_type} not compatible with vision"
+                            )
+                            continue
+
+                        logger.info(
+                            f"📄 Converting {file_name} ({file_type}) to images..."
+                        )
+                        yield f"data: {json.dumps({'status': 'processing', 'detail': f'Converting {file_name}...'})}\n\n"
+
+                        # Convert file to images
+                        file_images = convert_file_to_images(file_data, file_type)
+
+                        if file_images:
+                            logger.info(
+                                f"📄 {file_name}: Converted to {len(file_images)} images"
+                            )
+                            for img_base64, mime_type in file_images:
+                                processed_images.append(img_base64)
+                        else:
+                            logger.warning(
+                                f"📄 {file_name}: No images generated from conversion"
+                            )
+
+                    except Exception as file_err:
+                        logger.error(f"📄 Error converting file {file_idx}: {file_err}")
+                        continue
+
             if not processed_images:
-                yield f"data: {json.dumps({'status': 'error', 'error': 'No valid images provided'})}\n\n"
+                yield f"data: {json.dumps({'status': 'error', 'error': 'No valid images provided. Please upload images or supported documents (PDF, DOCX).'})}\n\n"
                 return
 
-            # Build messages array for Ollama vision
+            # Build messages array
             messages = []
             system_prompt = (
                 'You are "Harvis", an AI assistant with vision capabilities. '
@@ -2478,48 +3585,202 @@ async def vision_chat(
             for msg in req.history:
                 messages.append({"role": msg["role"], "content": msg["content"]})
 
-            user_message = {
-                "role": "user",
-                "content": req.message,
-                "images": processed_images,
-            }
-            messages.append(user_message)
+            # Check if this is an NVIDIA NIM vision model (Kimi K2.5)
+            if req.model == "nvidia-kimi":
+                pool = getattr(request.app.state, "pg_pool", None)
+                if not pool:
+                    yield f"data: {json.dumps({'status': 'error', 'error': 'Database not available'})}\n\n"
+                    return
 
-            payload = {"model": req.model, "messages": messages, "stream": False}
+                nvidia_config = await get_user_api_key(pool, current_user.id, "nvidia")
+                if not nvidia_config or not nvidia_config.get("api_key"):
+                    yield f"data: {json.dumps({'status': 'error', 'error': 'NVIDIA API key not configured. Add it in Profile settings.'})}\n\n"
+                    return
 
-            logger.info(
-                f"🖼️ VISION: Sending to Ollama model '{req.model}' with {len(processed_images)} image(s)"
-            )
+                nvidia_api_key = nvidia_config["api_key"]
 
-            # Send to Ollama with heartbeats
-            yield f"data: {json.dumps({'status': 'inference', 'detail': f'Analyzing with {req.model}...'})}\n\n"
+                # Build multimodal content — text + images (OpenAI image_url format)
+                content = [{"type": "text", "text": req.message}]
+                for img_b64 in processed_images:
+                    content.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{img_b64}"},
+                    })
+                messages.append({"role": "user", "content": content})
 
-            ollama_response = None
-            async for event in run_ollama_with_heartbeats(
-                "/api/chat", payload, timeout=3600
-            ):
-                if event["type"] == "heartbeat":
-                    elapsed = event["elapsed"]
-                    yield f"data: {json.dumps({'status': 'heartbeat', 'count': event['count'], 'elapsed': elapsed, 'detail': f'Still analyzing... ({elapsed}s)'})}\n\n"
-                elif event["type"] == "result":
-                    ollama_response = event["data"]
-                    break
-
-            if ollama_response is None:
-                yield f"data: {json.dumps({'status': 'error', 'error': 'Ollama vision request failed'})}\n\n"
-                return
-
-            if ollama_response.status_code != 200:
-                logger.error(
-                    f"Ollama vision error {ollama_response.status_code}: {ollama_response.text}"
+                logger.info(
+                    f"🖼️ VISION: Using NVIDIA NIM Kimi K2.5 with {len(processed_images)} image(s)"
                 )
-                yield f"data: {json.dumps({'status': 'error', 'error': f'Ollama vision error: {ollama_response.status_code}'})}\n\n"
-                return
+                yield f"data: {json.dumps({'status': 'inference', 'detail': f'Analyzing with NVIDIA Kimi K2.5...'})}\n\n"
 
-            response_text = (
-                ollama_response.json().get("message", {}).get("content", "").strip()
-            )
+                try:
+                    async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
+                        resp = await client.post(
+                            "https://integrate.api.nvidia.com/v1/chat/completions",
+                            headers={
+                                "Authorization": f"Bearer {nvidia_api_key}",
+                                "Content-Type": "application/json",
+                            },
+                            json={
+                                "model": "moonshotai/kimi-k2.5",
+                                "messages": messages,
+                                "temperature": 1.0,
+                                "max_tokens": 4096,
+                            },
+                        )
+                    if resp.status_code != 200:
+                        err = resp.text[:300]
+                        logger.error(f"🖼️ VISION NVIDIA error {resp.status_code}: {err}")
+                        yield f"data: {json.dumps({'status': 'error', 'error': f'NVIDIA vision error {resp.status_code}: {err}'})}\n\n"
+                        return
+                    data = resp.json()
+                    response_text = data["choices"][0]["message"]["content"]
+                    logger.info(f"🖼️ VISION NVIDIA: got {len(response_text)} chars")
+                except Exception as e:
+                    logger.error(f"🖼️ VISION NVIDIA exception: {e}")
+                    yield f"data: {json.dumps({'status': 'error', 'error': f'NVIDIA vision error: {str(e)}'})}\n\n"
+                    return
+
+            # Check if this is a Moonshot vision model
+            elif is_moonshot_model(req.model):
+                # Use Moonshot API for vision
+                pool = getattr(request.app.state, "pg_pool", None)
+                if not pool:
+                    yield f"data: {json.dumps({'status': 'error', 'error': 'Database not available'})}\n\n"
+                    return
+
+                moonshot_config = await get_user_api_key(
+                    pool, current_user.id, "moonshot"
+                )
+                if not moonshot_config or not moonshot_config.get("api_key"):
+                    yield f"data: {json.dumps({'status': 'error', 'error': 'Moonshot API key not configured'})}\n\n"
+                    return
+
+                try:
+                    moonshot_client = MoonshotClient(
+                        api_key=moonshot_config["api_key"],
+                        base_url=moonshot_config.get("api_url") or MOONSHOT_BASE_URL,
+                    )
+
+                    # Format messages for Moonshot vision (OpenAI-compatible format)
+                    content = [{"type": "text", "text": req.message}]
+                    for img_b64 in processed_images:
+                        content.append(
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{img_b64}"
+                                },
+                            }
+                        )
+
+                    messages.append({"role": "user", "content": content})
+
+                    moonshot_model_id = get_moonshot_model_id(req.model)
+                    logger.info(
+                        f"🖼️ VISION: Using Moonshot AI with model {moonshot_model_id} and {len(processed_images)} image(s)"
+                    )
+
+                    yield f"data: {json.dumps({'status': 'inference', 'detail': f'Analyzing with {moonshot_model_id}...'})}\n\n"
+
+                    response_text = await moonshot_client.chat_completion(
+                        model=moonshot_model_id, messages=messages
+                    )
+
+                    logger.info(
+                        f"🖼️ VISION: Got Moonshot response ({len(response_text)} chars)"
+                    )
+
+                except Exception as e:
+                    logger.error(f"🖼️ VISION: Moonshot request failed: {e}")
+                    yield f"data: {json.dumps({'status': 'error', 'error': f'Moonshot vision error: {str(e)}'})}\n\n"
+                    return
+            else:
+                # Use Ollama for vision
+                user_message = {
+                    "role": "user",
+                    "content": req.message,
+                    "images": processed_images,
+                }
+                messages.append(user_message)
+
+                payload = {"model": req.model, "messages": messages, "stream": False}
+
+                logger.info(
+                    f"🖼️ VISION: Sending to Ollama model '{req.model}' with {len(processed_images)} image(s)"
+                )
+
+                # Send to Ollama with heartbeats
+                yield f"data: {json.dumps({'status': 'inference', 'detail': f'Analyzing with {req.model}...'})}\n\n"
+
+                ollama_response = None
+                async for event in run_ollama_with_heartbeats(
+                    "/api/chat", payload, timeout=3600
+                ):
+                    if event["type"] == "heartbeat":
+                        elapsed = event["elapsed"]
+                        yield f"data: {json.dumps({'status': 'heartbeat', 'count': event['count'], 'elapsed': elapsed, 'detail': f'Still analyzing... ({elapsed}s)'})}\n\n"
+                    elif event["type"] == "result":
+                        ollama_response = event["data"]
+                        break
+
+                if ollama_response is None:
+                    yield f"data: {json.dumps({'status': 'error', 'error': 'Ollama vision request failed'})}\n\n"
+                    return
+
+                if ollama_response.status_code != 200:
+                    logger.error(
+                        f"Ollama vision error {ollama_response.status_code}: {ollama_response.text}"
+                    )
+                    yield f"data: {json.dumps({'status': 'error', 'error': f'Ollama vision error: {ollama_response.status_code}'})}\n\n"
+                    return
+
+                response_data = ollama_response.json()
+                logger.debug(f"🖼️ VISION: Raw Ollama response: {response_data}")
+
+                # Try multiple response formats (different models may return content differently)
+                response_text = (
+                    response_data.get("message", {}).get("content", "").strip()
+                )
+
+                # If empty, try alternative formats
+                if not response_text:
+                    response_text = response_data.get("response", "").strip()
+                if not response_text:
+                    response_text = response_data.get("content", "").strip()
+                if not response_text:
+                    response_text = response_data.get("text", "").strip()
+                if not response_text:
+                    # Check if there's a choices array (OpenAI-style format)
+                    choices = response_data.get("choices", [])
+                    if choices and len(choices) > 0:
+                        response_text = (
+                            choices[0].get("message", {}).get("content", "").strip()
+                        )
+                        if not response_text:
+                            response_text = choices[0].get("text", "").strip()
+
+            # Debug: Log the actual structure if content is empty
+            if not response_text:
+                logger.error(
+                    f"🖼️ VISION: Empty content! Response structure: {json.dumps(response_data, indent=2)[:1000]}"
+                )
+                # Also log if there's a done_reason or error
+                if "done_reason" in response_data:
+                    logger.error(
+                        f"🖼️ VISION: done_reason = {response_data.get('done_reason')}"
+                    )
+                if "error" in response_data:
+                    logger.error(f"🖼️ VISION: error = {response_data.get('error')}")
+
             logger.info(f"🖼️ VISION: Got response ({len(response_text)} chars)")
+
+            # Check if response is empty and return error instead of saving empty content
+            if not response_text:
+                error_msg = "The vision model returned an empty response. This may be due to: (1) The model failed to process the image, (2) The image format is not supported, or (3) The model is not properly loaded. Please try again or check the model logs."
+                logger.error(f"🖼️ VISION: {error_msg}")
+                yield f"data: {json.dumps({'status': 'error', 'error': error_msg})}\n\n"
+                return
 
             if req.low_vram:
                 logger.info(f"🧹 [Low VRAM Mode] Unloading vision model {req.model}")
@@ -2605,10 +3866,6 @@ async def vision_chat(
 
             # Generate TTS if not text-only mode
             audio_path = None
-            tts_engine = "none"
-            tts_sample_rate = None
-            tts_duration_sec = None
-            tts_ref_audio = HARVIS_VOICE_PATH
             if not req.text_only:
                 if not final_answer or not final_answer.strip():
                     logger.warning(
@@ -2620,7 +3877,9 @@ async def vision_chat(
                         f"🎤 VISION TTS: Generating speech for {len(final_answer)} chars: '{final_answer[:80]}...'"
                     )
                     try:
-                        sr, wav, tts_engine = None, None, "none"
+                        sr, wav = None, None
+                        # Use tts_engine from request if available, default to qwen
+                        tts_engine = getattr(req, "tts_engine", "qwen")
                         async for event in run_tts_with_heartbeats(
                             text=final_answer,
                             audio_prompt=HARVIS_VOICE_PATH,
@@ -2628,28 +3887,22 @@ async def vision_chat(
                             temperature=0.5,
                             cfg_weight=2.0,
                             auto_unload=req.low_vram,
+                            tts_engine=tts_engine,
                         ):
                             if event["type"] == "heartbeat":
                                 yield f"data: {json.dumps({'status': 'processing', 'detail': 'Generating audio...'})}\n\n"
                             elif event["type"] == "result":
-                                tts_result = event["data"]
-                                if isinstance(tts_result, tuple) and len(tts_result) == 3:
-                                    sr, wav, tts_engine = tts_result
-                                else:
-                                    sr, wav = tts_result
-                                    tts_engine = "unknown"
+                                sr, wav = event["data"]
 
                         if wav is not None:
-                            audio_path = safe_save_audio(sr, wav, prefix="vision")
+                            filename = f"vision_{uuid.uuid4()}.wav"
+                            filepath = os.path.join(tempfile.gettempdir(), filename)
+                            sf.write(filepath, wav, sr)
+                            audio_path = f"/api/audio/{filename}"
                             logger.info(f"🔊 VISION: Generated TTS audio: {audio_path}")
-                            tts_sample_rate = int(sr) if sr else None
-                            tts_duration_sec = (
-                                round(len(wav) / float(sr), 3) if sr and wav is not None else None
-                            )
                     except Exception as tts_error:
                         logger.error(
-                            f"TTS generation failed for vision response: {tts_error}",
-                            exc_info=True,
+                            f"TTS generation failed for vision response: {tts_error}"
                         )
 
             # Final complete response
@@ -2660,10 +3913,6 @@ async def vision_chat(
                 "model": req.model,
                 "images_processed": len(processed_images),
                 "session_id": session_id,
-                "tts_engine": tts_engine,
-                "tts_ref_audio": tts_ref_audio,
-                "tts_sample_rate": tts_sample_rate,
-                "tts_duration_sec": tts_duration_sec,
             }
 
             if reasoning_content:
@@ -2712,6 +3961,82 @@ async def serve_image(
     if not os.path.exists(full_path):
         raise HTTPException(404, f"Image file not found: {filename}")
     return FileResponse(full_path, media_type="image/png")
+
+
+@app.post("/api/uploads", tags=["uploads"])
+async def upload_file(
+    file: UploadFile = File(...),
+    current_user: UserResponse = Depends(get_current_user),
+):
+    """
+    Store an uploaded file (image, PDF, DOCX) and return a file_id that can
+    be passed to OpenClaw via a workspace task brief.
+
+    The file_id is then used with POST /api/tools/file-analyze so OpenClaw
+    can have Kimi vision analyze the document and recreate it as a DOCX.
+    """
+    ALLOWED_MIME_PREFIXES = (
+        "image/",
+        "application/pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml",
+        "application/msword",
+    )
+
+    mime_type = file.content_type or "application/octet-stream"
+    if not any(mime_type.startswith(p) for p in ALLOWED_MIME_PREFIXES):
+        raise HTTPException(
+            status_code=415,
+            detail=f"Unsupported file type: {mime_type}. "
+                   "Allowed: images, PDF, DOCX.",
+        )
+
+    # Derive safe extension from content_type
+    _EXT_MAP = {
+        "application/pdf": ".pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+        "application/msword": ".doc",
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/gif": ".gif",
+        "image/webp": ".webp",
+    }
+    ext = _EXT_MAP.get(mime_type, "")
+    if not ext and mime_type.startswith("image/"):
+        ext = f".{mime_type.split('/')[1]}"
+
+    file_id = str(uuid.uuid4())
+    stored_path = os.path.join(IMAGES_DIR, f"{file_id}{ext}")
+    meta_path = os.path.join(IMAGES_DIR, f"{file_id}.meta.json")
+
+    try:
+        contents = await file.read()
+        with open(stored_path, "wb") as f_out:
+            f_out.write(contents)
+        import json as _json
+        with open(meta_path, "w") as f_meta:
+            _json.dump({
+                "file_id": file_id,
+                "filename": file.filename or f"upload{ext}",
+                "mime_type": mime_type,
+                "stored_path": stored_path,
+                "user_id": current_user.id,
+                "size": len(contents),
+            }, f_meta)
+    except Exception as exc:
+        logger.error("upload_file: failed to store file: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Failed to store file: {exc}")
+
+    logger.info(
+        "upload_file: file_id=%s filename=%r mime=%s size=%d user=%d",
+        file_id, file.filename, mime_type, len(contents), current_user.id,
+    )
+
+    return {
+        "file_id": file_id,
+        "filename": file.filename,
+        "mime_type": mime_type,
+        "size": len(contents),
+    }
 
 
 @app.post("/api/analyze-screen", tags=["vision"])
@@ -3099,26 +4424,28 @@ async def analyze_screen_with_tts(req: ScreenAnalysisWithTTSRequest):
             )
             audio_prompt_path = None
 
-        sr, wav, tts_engine = safe_generate_speech_optimized(
+        # Use tts_engine from request if available, default to qwen
+        tts_engine = getattr(req, "tts_engine", "qwen")
+        sr, wav = safe_generate_speech_optimized(
             text=llm_response,
             audio_prompt=audio_prompt_path,
             exaggeration=req.exaggeration,
             temperature=req.temperature,
             cfg_weight=req.cfg_weight,
+            tts_engine=tts_engine,
         )
 
-        audio_path = safe_save_audio(sr, wav, prefix="screen_analysis")
+        # Save audio file
+        filename = f"screen_analysis_{uuid.uuid4()}.wav"
+        filepath = os.path.join(tempfile.gettempdir(), filename)
+        sf.write(filepath, wav, sr)
 
         logger.info("✅ Complete screen analysis with TTS finished")
         return {
             "response": llm_response,
             "screen_analysis": qwen_analysis,
             "model_used": req.model,
-            "audio_path": audio_path,
-            "tts_engine": tts_engine,
-            "tts_ref_audio": audio_prompt_path,
-            "tts_sample_rate": int(sr) if sr else None,
-            "tts_duration_sec": round(len(wav) / float(sr), 3) if sr and wav is not None else None,
+            "audio_path": f"/api/audio/{filename}",
             "processing_stages": {
                 "qwen_analysis": "✅ Completed",
                 "llm_response": "✅ Completed",
@@ -3261,6 +4588,71 @@ async def mic_chat(
             else:
                 if model == "gemini-1.5-flash":
                     response_text = query_gemini(text, history[:-1])
+                elif is_moonshot_model(model):
+                    # Use Moonshot/Kimi for voice chat
+                    pool = getattr(app.state, "pg_pool", None)
+                    if not pool:
+                        return JSONResponse(
+                            status_code=500,
+                            content={
+                                "status": "error",
+                                "error": "Database not available",
+                            },
+                        )
+
+                    moonshot_config = await get_user_api_key(
+                        pool, current_user.id, "moonshot"
+                    )
+                    if not moonshot_config or not moonshot_config.get("api_key"):
+                        return JSONResponse(
+                            status_code=400,
+                            content={
+                                "status": "error",
+                                "error": "Moonshot API key not configured",
+                            },
+                        )
+
+                    try:
+                        moonshot_client = MoonshotClient(
+                            api_key=moonshot_config["api_key"],
+                            base_url=moonshot_config.get("api_url")
+                            or MOONSHOT_BASE_URL,
+                        )
+
+                        sys_prompt_path = os.path.join(
+                            os.path.dirname(__file__), "system_prompt.txt"
+                        )
+                        try:
+                            with open(sys_prompt_path, "r", encoding="utf-8") as f:
+                                sys_prompt = f.read().strip()
+                        except FileNotFoundError:
+                            sys_prompt = 'You are "Jarves", a voice-first local assistant. Reply in ≤25 spoken-style words, sprinkling brief Spanish when natural.'
+
+                        messages = [{"role": "system", "content": sys_prompt}]
+                        for msg in history[:-1]:
+                            messages.append(
+                                {"role": msg["role"], "content": msg["content"]}
+                            )
+                        messages.append({"role": "user", "content": text})
+
+                        moonshot_model_id = get_moonshot_model_id(model)
+                        logger.info(
+                            f"🎤 MIC-CHAT: Using Moonshot AI with model {moonshot_model_id}"
+                        )
+
+                        response_text = await moonshot_client.chat_completion(
+                            model=moonshot_model_id, messages=messages
+                        )
+
+                    except Exception as e:
+                        logger.error(f"🎤 MIC-CHAT: Moonshot request failed: {e}")
+                        return JSONResponse(
+                            status_code=500,
+                            content={
+                                "status": "error",
+                                "error": f"Moonshot error: {str(e)}",
+                            },
+                        )
                 else:
                     sys_prompt_path = os.path.join(
                         os.path.dirname(__file__), "system_prompt.txt"
@@ -3352,10 +4744,6 @@ async def mic_chat(
 
         # ── 5. Generate TTS ──────────────────────────────────────────────────────────
         audio_path = None
-        tts_engine = "none"
-        tts_sample_rate = None
-        tts_duration_sec = None
-        tts_ref_audio = None
 
         if text_only:
             logger.info("🔇 MIC-CHAT: [Text Only Mode] Skipping TTS generation")
@@ -3377,7 +4765,7 @@ async def mic_chat(
                     f"🎤 MIC-CHAT TTS: Generating speech for {len(final_answer)} chars: '{final_answer[:80]}...'"
                 )
 
-                sr, wav, tts_engine = await run_in_threadpool(
+                sr, wav = await run_in_threadpool(
                     safe_generate_speech_optimized,
                     text=final_answer,
                     exaggeration=0.5,
@@ -3394,14 +4782,15 @@ async def mic_chat(
                     and len(wav.shape) >= 1
                     and wav.shape[0] > 0
                 ):
-                    audio_path = safe_save_audio(sr, wav, prefix="response")
-                    tts_ref_audio = audio_prompt_path
-                    tts_sample_rate = int(sr)
-                    tts_duration_sec = round(len(wav) / float(sr), 3)
+                    fname = f"response_{uuid.uuid4()}.wav"
+                    filepath = os.path.join(tempfile.gettempdir(), fname)
+                    sf.write(filepath, wav, sr)
+                    audio_path = f"/api/audio/{fname}"
+                    logger.info(f"🔊 MIC-CHAT: Audio written to {filepath}")
                 else:
                     logger.warning("⚠️ MIC-CHAT: TTS returned no audio")
             except Exception as e:
-                logger.error(f"❌ MIC-CHAT: TTS failed: {e}", exc_info=True)
+                logger.error(f"❌ MIC-CHAT: TTS failed: {e}")
 
         # ── 6. Save to database ──────────────────────────────────────────────────────
         message_id = None
@@ -3469,10 +4858,6 @@ async def mic_chat(
             "message_id": message_id,
             "final_answer": final_answer,
             "transcription": text,
-            "tts_engine": tts_engine,
-            "tts_ref_audio": tts_ref_audio,
-            "tts_sample_rate": tts_sample_rate,
-            "tts_duration_sec": tts_duration_sec,
         }
 
         if audio_path:
@@ -3501,38 +4886,16 @@ async def mic_chat(
                 pass
 
 
-
 # Research endpoints using the enhanced research module with advanced pipeline
-try:
-    from agent_research import research_agent, fact_check_agent, comparative_research_agent
-    from agent_research import (
-        async_research_agent,
-        async_fact_check_agent,
-        async_comparative_research_agent,
-    )
-    from agent_research import get_research_agent_stats, get_mcp_tool
-    from research.web_search import WebSearchAgent
-    RESEARCH_AVAILABLE = True
-except Exception as e:
-    RESEARCH_AVAILABLE = False
-    logger.warning("Research module unavailable at startup: %s", e)
-
-    async def _research_unavailable(*args, **kwargs):
-        raise HTTPException(503, "Research module is temporarily unavailable")
-
-    def _research_unavailable_sync(*args, **kwargs):
-        raise HTTPException(503, "Research module is temporarily unavailable")
-
-    research_agent = _research_unavailable_sync
-    fact_check_agent = _research_unavailable_sync
-    comparative_research_agent = _research_unavailable_sync
-    async_research_agent = _research_unavailable
-    async_fact_check_agent = _research_unavailable
-    async_comparative_research_agent = _research_unavailable
-    get_research_agent_stats = _research_unavailable_sync
-    get_mcp_tool = _research_unavailable_sync
-    WebSearchAgent = None
-
+from agent_research import research_agent, fact_check_agent, comparative_research_agent
+from agent_research import (
+    async_research_agent,
+    async_fact_check_agent,
+    async_comparative_research_agent,
+    async_research_agent_streaming,
+)
+from agent_research import get_research_agent_stats, get_mcp_tool
+from research.web_search import WebSearchAgent
 from pydantic import Field
 from typing import Optional, List
 
@@ -3558,12 +4921,35 @@ class AdvancedResearchRequest(BaseModel):
 @app.post("/api/research-chat", tags=["research"])
 async def research_chat(
     req: Union[ResearchChatRequest, AdvancedResearchRequest],
+    request: Request,
     current_user: UserResponse = Depends(get_current_user),
 ):
     """
     Enhanced research chat endpoint with SSE streaming to prevent Nginx 499 timeouts.
     Streams progress updates during web searches and LLM inference.
     """
+
+    # Check if using Moonshot model and set API key for research (before stream_research)
+    if is_moonshot_model(req.model):
+        pool = getattr(request.app.state, "pg_pool", None)
+        if pool:
+            moonshot_config = await get_user_api_key(pool, current_user.id, "moonshot")
+            if moonshot_config and moonshot_config.get("api_key"):
+                from agent_research import set_research_agent_moonshot_key
+
+                set_research_agent_moonshot_key(moonshot_config["api_key"])
+                logger.info(f"🌙 Moonshot API key set for research agent")
+
+    # Check if using NVIDIA NIM (Kimi K2.5) and set API key for research synthesis
+    if req.model == "nvidia-kimi":
+        pool = getattr(request.app.state, "pg_pool", None)
+        if pool:
+            nvidia_config = await get_user_api_key(pool, current_user.id, "nvidia")
+            if nvidia_config and nvidia_config.get("api_key"):
+                from agent_research import set_research_agent_nvidia_key
+
+                set_research_agent_nvidia_key(nvidia_config["api_key"])
+                logger.info(f"🟢 NVIDIA API key set for research agent")
 
     async def stream_research():
         try:
@@ -3607,31 +4993,66 @@ async def research_chat(
                     if isinstance(response_data, dict):
                         videos = response_data.get("videos", [])
                 else:
-                    # Standard research
-                    yield f"data: {json.dumps({'status': 'researching', 'detail': 'Analyzing search results'})}\n\n"
-                    response_data = await run_in_threadpool(
-                        research_agent, req.message, req.model, use_advanced=False
+                    # Standard research with live streaming progress
+                    logger.info(
+                        f"[Research Chat] Starting streaming research for: {req.message}"
                     )
 
-                    if "error" in response_data:
-                        response_content = f"Research Error: {response_data['error']}"
-                    else:
-                        analysis = response_data.get(
-                            "analysis", "No analysis available"
-                        )
-                        sources = response_data.get("sources", [])
-                        sources_found = response_data.get("sources_found", 0)
-                        videos = response_data.get("videos", [])  # Get YouTube videos
+                    # Stream research progress events to frontend
+                    async for event in async_research_agent_streaming(
+                        req.message, req.model
+                    ):
+                        event_type = event.get("type")
 
-                        response_content = f"{analysis}\n\n"
-                        if sources:
-                            response_content += (
-                                f"**Sources ({sources_found} found):**\n"
+                        if event_type == "search_query":
+                            # Forward search query to frontend
+                            query = event["query"]
+                            yield f"data: {json.dumps({'status': 'researching', 'detail': f'Searching for: {query}', 'type': 'search_query', 'query': query})}\n\n"
+                            logger.info(
+                                f"[Research Chat] Streaming search query: {query}"
                             )
-                            for i, source in enumerate(sources[:5], 1):
-                                title = source.get("title", "Unknown Title")
-                                url = source.get("url", "No URL")
-                                response_content += f"{i}. [{title}]({url})\n"
+
+                        elif event_type == "search_result":
+                            # Forward search result to frontend
+                            title = event["title"]
+                            yield f"data: {json.dumps({'status': 'researching', 'detail': f'Found: {title}', 'type': 'search_result', 'title': title, 'url': event['url'], 'domain': event['domain']})}\n\n"
+
+                        elif event_type == "reading":
+                            # Forward reading progress to frontend
+                            domain = event["domain"]
+                            yield f"data: {json.dumps({'status': 'researching', 'detail': f'Reading {domain}...', 'type': 'reading', 'domain': domain, 'url': event['url']})}\n\n"
+
+                        elif event_type == "analysis":
+                            # Forward analysis progress
+                            yield f"data: {json.dumps({'status': 'researching', 'detail': event.get('detail', 'Analyzing...')})}\n\n"
+
+                        elif event_type == "complete":
+                            # Store final result
+                            result_data = event.get("result", {})
+                            analysis = result_data.get(
+                                "analysis", "No analysis available"
+                            )
+                            sources = result_data.get("sources", [])
+                            sources_found = result_data.get("sources_found", 0)
+                            videos = result_data.get("videos", [])
+
+                            response_content = f"{analysis}\n\n"
+                            if sources:
+                                response_content += (
+                                    f"**Sources ({sources_found} found):**\n"
+                                )
+                                for i, source in enumerate(sources[:5], 1):
+                                    title = source.get("title", "Unknown Title")
+                                    url = source.get("url", "No URL")
+                                    response_content += f"{i}. [{title}]({url})\n"
+                            logger.info(
+                                f"[Research Chat] Streaming research complete. Found {sources_found} sources"
+                            )
+
+                        elif event_type == "error":
+                            response_content = (
+                                f"Research Error: {event.get('error', 'Unknown error')}"
+                            )
 
             except Exception as e:
                 logger.error(f"Research failed: {e}")
@@ -4172,144 +5593,189 @@ async def synthesize_speech(req: SynthesizeSpeechRequest):
             )
             audio_prompt_path = None
 
-        sr, wav, tts_engine = safe_generate_speech_optimized(
+        sr, wav = safe_generate_speech_optimized(
             text=req.text,
             audio_prompt=audio_prompt_path,
             exaggeration=req.exaggeration,
             temperature=req.temperature,
             cfg_weight=req.cfg_weight,
+            tts_engine=req.tts_engine,
         )
 
-        audio_path = safe_save_audio(sr, wav, prefix="response")
+        if sr is None or wav is None:
+            raise HTTPException(500, f"TTS ({req.tts_engine}) generation failed")
 
-        return {
-            "audio_path": audio_path,
-            "tts_engine": tts_engine,
-            "tts_ref_audio": audio_prompt_path,
-            "tts_sample_rate": int(sr) if sr else None,
-            "tts_duration_sec": round(len(wav) / float(sr), 3) if sr and wav is not None else None,
-        }
+        filename = f"response_{uuid.uuid4()}.wav"
+        filepath = os.path.join(tempfile.gettempdir(), filename)
+        sf.write(filepath, wav, sr)
+        logger.info("Audio written to %s", filepath)
+
+        return {"audio_path": f"/api/audio/{filename}", "tts_engine": req.tts_engine}
 
     except Exception as e:
         logger.exception("TTS synthesis endpoint crashed")
         raise HTTPException(500, str(e)) from e
 
 
-# ─── Advanced Research Endpoints ─────────────────────────────────────────────
+@app.get("/api/tts-engines", tags=["tts"])
+async def get_tts_engines():
+    """
+    Get list of available TTS engines.
+    Returns information about each engine including VRAM requirements.
+    """
+    try:
+        engines = get_available_tts_engines()
+        active = get_active_tts_engine()
+        return {
+            "engines": engines,
+            "active_engine": active,
+            "default_engine": "qwen",
+        }
+    except Exception as e:
+        logger.exception("Failed to get TTS engines")
+        raise HTTPException(500, str(e)) from e
 
 
-class StreamingResearchRequest(BaseModel):
-    """Request for streaming research"""
+class SetTTSEngineRequest(BaseModel):
+    engine: str  # "qwen" or "chatterbox"
 
-    query: str
-    model: str = "mistral"
-    enable_verification: bool = True
+
+@app.post("/api/tts-engine", tags=["tts"])
+async def set_tts_engine(req: SetTTSEngineRequest):
+    """
+    Set the active TTS engine.
+    """
+    try:
+        if req.engine not in ["chatterbox", "qwen"]:
+            raise HTTPException(
+                400, f"Invalid TTS engine: {req.engine}. Must be 'chatterbox' or 'qwen'"
+            )
+
+        set_active_tts_engine(req.engine)
+        return {
+            "success": True,
+            "active_engine": req.engine,
+            "message": f"TTS engine set to {req.engine}",
+        }
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    except Exception as e:
+        logger.exception("Failed to set TTS engine")
+        raise HTTPException(500, str(e)) from e
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Background Job Queue Endpoints (Async TTS/Whisper)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TTSJobRequest(BaseModel):
+    """Request for async TTS job"""
+
+    text: str
+    voice_id: Optional[str] = None
+    tts_engine: str = "qwen"
+
+
+class WhisperJobRequest(BaseModel):
+    """Request for async Whisper transcription job"""
+
+    audio_path: str
+
+
+@app.post("/api/jobs/tts", tags=["jobs"])
+async def create_tts_job(
+    req: TTSJobRequest, current_user: UserResponse = Depends(get_current_user)
+):
+    """
+    Create an async TTS generation job.
+
+    Returns immediately with job_id. Use /api/jobs/{job_id} to check status.
+    This avoids HTTP timeouts for long-running TTS generation.
+    """
+    try:
+        from job_queue import enqueue_tts_job
+
+        job_id = await enqueue_tts_job(
+            text=req.text,
+            voice_id=req.voice_id,
+            tts_engine=req.tts_engine,
+            user_id=current_user.id if current_user else None,
+        )
+
+        return {
+            "job_id": job_id,
+            "status": "queued",
+            "message": "TTS job queued successfully. Check /api/jobs/{job_id} for status.",
+        }
+
+    except Exception as e:
+        logger.exception("Failed to create TTS job")
+        raise HTTPException(500, f"Failed to create TTS job: {str(e)}") from e
+
+
+@app.post("/api/jobs/whisper", tags=["jobs"])
+async def create_whisper_job(
+    req: WhisperJobRequest, current_user: UserResponse = Depends(get_current_user)
+):
+    """
+    Create an async Whisper transcription job.
+
+    Returns immediately with job_id. Use /api/jobs/{job_id} to check status.
+    This avoids HTTP timeouts for long-running transcription.
+    """
+    try:
+        from job_queue import enqueue_whisper_job
+
+        job_id = await enqueue_whisper_job(
+            audio_path=req.audio_path, user_id=current_user.id if current_user else None
+        )
+
+        return {
+            "job_id": job_id,
+            "status": "queued",
+            "message": "Whisper job queued successfully. Check /api/jobs/{job_id} for status.",
+        }
+
+    except Exception as e:
+        logger.exception("Failed to create Whisper job")
+        raise HTTPException(500, f"Failed to create Whisper job: {str(e)}") from e
+
+
+@app.get("/api/jobs/{job_id}", tags=["jobs"])
+async def get_job_status(
+    job_id: str, current_user: UserResponse = Depends(get_current_user)
+):
+    """
+    Get the status of a background job.
+
+    Returns job state: 'created', 'active', 'completed', 'failed', etc.
+    For completed jobs, includes result data (audio_path, text, etc.)
+    """
+    try:
+        from job_queue import get_job_queue
+
+        queue = await get_job_queue()
+        status = await queue.get_job_status(job_id)
+
+        if not status:
+            raise HTTPException(404, f"Job {job_id} not found")
+
+        return status
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Failed to get job status for {job_id}")
+        raise HTTPException(500, f"Failed to get job status: {str(e)}") from e
 
 
 class ResearchStatsResponse(BaseModel):
-    """Research system statistics"""
+    """Response model for research stats endpoint"""
 
     pipeline_stats: dict
     cache_stats: dict
     system_info: dict
-
-
-@app.post("/api/research/stream", tags=["research"])
-async def streaming_research(req: StreamingResearchRequest):
-    """
-    Streaming research endpoint with real-time progress events
-    """
-    try:
-        logger.info(f"🌊 Starting streaming research for: {req.query}")
-
-        response = await async_research_agent(
-            query=req.query, model=req.model, enable_streaming=True
-        )
-
-        if hasattr(response, "__aiter__"):
-            # Return streaming response
-            from fastapi.responses import StreamingResponse
-            import json
-
-            async def generate_stream():
-                async for chunk in response:
-                    # Format as server-sent events
-                    if isinstance(chunk, str):
-                        yield f"data: {json.dumps({'type': 'content', 'data': chunk})}\n\n"
-                    else:
-                        yield f"data: {json.dumps({'type': 'event', 'data': str(chunk)})}\n\n"
-
-                # Send completion event
-                yield f"data: {json.dumps({'type': 'complete'})}\n\n"
-
-            return StreamingResponse(
-                generate_stream(),
-                media_type="text/plain",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "Connection": "keep-alive",
-                    "Content-Type": "text/event-stream",
-                },
-            )
-        else:
-            # Fallback to regular response
-            return {"content": response, "streaming": False}
-
-    except Exception as e:
-        logger.error(f"Streaming research error: {e}")
-        return {"error": f"Streaming research failed: {str(e)}"}
-
-
-@app.post("/api/research/advanced-fact-check", tags=["research"])
-async def advanced_fact_check(claim: str, model: str = "mistral"):
-    """
-    Advanced fact-checking with authority scoring and evidence analysis
-    """
-    try:
-        logger.info(f"🔍 Advanced fact-check for: {claim}")
-
-        result = await async_fact_check_agent(claim, model)
-
-        return {
-            "claim": claim,
-            "analysis": result,
-            "model_used": model,
-            "advanced": True,
-            "timestamp": datetime.now().isoformat(),
-        }
-
-    except Exception as e:
-        logger.error(f"Advanced fact-check error: {e}")
-        return {"error": f"Advanced fact-check failed: {str(e)}"}
-
-
-@app.post("/api/research/advanced-compare", tags=["research"])
-async def advanced_compare(
-    topics: List[str], context: str = None, model: str = "mistral"
-):
-    """
-    Advanced comparison with structured analysis
-    """
-    try:
-        if len(topics) < 2:
-            return {"error": "At least 2 topics required for comparison"}
-
-        logger.info(f"🔄 Advanced comparison of: {topics}")
-
-        result = await async_comparative_research_agent(topics, model, context)
-
-        return {
-            "topics": topics,
-            "context": context,
-            "analysis": result,
-            "model_used": model,
-            "advanced": True,
-            "timestamp": datetime.now().isoformat(),
-        }
-
-    except Exception as e:
-        logger.error(f"Advanced comparison error: {e}")
-        return {"error": f"Advanced comparison failed: {str(e)}"}
 
 
 @app.get("/api/research/stats", response_model=ResearchStatsResponse, tags=["research"])
@@ -4385,6 +5851,100 @@ async def research_health_check():
         }
 
 
+# ─── Job Queue Endpoints ─────────────────────────────────────────────────────
+# These endpoints allow the frontend to enqueue jobs for async processing
+
+from pydantic import BaseModel
+from typing import Dict, Any
+
+
+class EnqueueJobRequest(BaseModel):
+    name: str
+    data: Dict[str, Any]
+    retry_limit: int = 3
+    priority: int = 0
+
+
+@app.post("/api/jobs/enqueue", tags=["jobs"])
+async def enqueue_job(request: EnqueueJobRequest):
+    """
+    Enqueue a job for async processing
+    This is called by the frontend to create a background job
+    """
+    try:
+        from job_queue import get_job_queue
+
+        queue = await get_job_queue()
+        job_id = await queue.send(
+            name=request.name,
+            data=request.data,
+            retry_limit=request.retry_limit,
+            priority=request.priority,
+        )
+
+        logger.info(f"📨 Job enqueued via API: {request.name} (id: {job_id})")
+
+        return {"job_id": job_id, "status": "queued", "queue": request.name}
+
+    except Exception as e:
+        logger.error(f"Error enqueuing job: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to enqueue job: {str(e)}")
+
+
+@app.get("/api/jobs/{job_id}/status", tags=["jobs"])
+async def get_job_status(job_id: str):
+    """
+    Get the status of a job
+    """
+    try:
+        from job_queue import get_job_queue
+
+        queue = await get_job_queue()
+        status = await queue.get_job_status(job_id)
+
+        if not status:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        return status
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting job status: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to get job status: {str(e)}"
+        )
+
+
+# ─── Startup and Shutdown Events ─────────────────────────────────────────────
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize services on startup"""
+    try:
+        # Initialize job queue
+        from job_queue import init_job_queue
+
+        await init_job_queue()
+        logger.info("✅ Job queue initialized on startup")
+    except Exception as e:
+        logger.error(f"Failed to initialize job queue: {e}")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup on shutdown"""
+    try:
+        # Shutdown job queue
+        from job_queue import shutdown_job_queue
+
+        await shutdown_job_queue()
+        logger.info("🛑 Job queue shutdown")
+    except Exception as e:
+        logger.error(f"Error during shutdown: {e}")
+
+
 # ─── Vibe Coding Endpoints ─────────────────────────────────────────────────────
 
 # Vibe coding endpoint moved to vibecoding.commands
@@ -4396,188 +5956,3 @@ async def research_health_check():
 # Save file endpoint moved to vibecoding.commands
 
 # ─── Vibe Agent Helper Functions moved to vibecoding.core ─────────────────────
-
-
-# ─── TTS Engine & Voice Model Endpoints (from open-notebook merge) ───────────
-
-if TTS_ENGINE_AVAILABLE:
-    voice_manager = VoiceModelManager() if VOICE_MODEL_AVAILABLE else None
-
-    class PodcastSegmentRequest(BaseModel):
-        text: str
-        character_voice: str
-
-    class VoiceModelDownloadRequest(BaseModel):
-        url: str
-        name: Optional[str] = None
-        tags: Optional[List[str]] = None
-
-    class TTSModeRequest(BaseModel):
-        mode: str  # "interactive", "podcast", "lightweight"
-
-    @app.post("/api/tts/set-mode", tags=["tts-engine"])
-    async def api_set_tts_mode(req: TTSModeRequest):
-        """Set the TTS generation mode"""
-        mode_map = {
-            "interactive": TTSMode.INTERACTIVE,
-            "podcast": TTSMode.PODCAST,
-            "lightweight": TTSMode.LIGHTWEIGHT
-        }
-        if req.mode not in mode_map:
-            raise HTTPException(400, f"Invalid mode. Use: {list(mode_map.keys())}")
-        set_mode(mode_map[req.mode])
-        return {"status": "ok", "mode": req.mode}
-
-    @app.get("/api/tts/status", tags=["tts-engine"])
-    async def api_get_tts_status():
-        """Get status of all TTS engines"""
-        return get_engine_status()
-
-    @app.post("/api/podcast/generate-segment", tags=["podcast"])
-    async def api_generate_podcast_segment(req: PodcastSegmentRequest):
-        """Generate a podcast segment with character voice"""
-        try:
-            sr, audio = generate_podcast_segment(
-                req.text,
-                req.character_voice,
-                voice_models_dir=str(voice_manager.models_dir) if voice_manager else "/app/voice_models"
-            )
-            import soundfile as sf_seg
-            output_path = f"/tmp/podcast_segment_{uuid.uuid4()}.wav"
-            sf_seg.write(output_path, audio, sr)
-            return FileResponse(
-                output_path,
-                media_type="audio/wav",
-                filename=f"segment_{req.character_voice}.wav"
-            )
-        except FileNotFoundError:
-            raise HTTPException(404, f"Voice model not found: {req.character_voice}")
-        except Exception as e:
-            logger.error(f"Podcast generation failed: {e}")
-            raise HTTPException(500, str(e))
-
-if VOICE_MODEL_AVAILABLE and TTS_ENGINE_AVAILABLE:
-    @app.get("/api/voice-models/list", tags=["voice-models"])
-    async def api_list_voice_models(tag: Optional[str] = None):
-        """List available voice models"""
-        models = voice_manager.list_models(tag=tag)
-        return {
-            "count": len(models),
-            "models": [
-                {
-                    "name": m.name,
-                    "epochs": m.epochs,
-                    "size_mb": m.file_size_mb,
-                    "tags": m.tags,
-                    "has_index": m.index_path is not None
-                }
-                for m in models
-            ]
-        }
-
-    @app.get("/api/voice-models/popular", tags=["voice-models"])
-    async def api_list_popular_models():
-        """List pre-configured popular voice models"""
-        return {
-            "models": list(POPULAR_MODELS.keys()),
-            "note": "Use POST /api/voice-models/download-popular/{name} to download"
-        }
-
-    @app.post("/api/voice-models/download", tags=["voice-models"])
-    async def api_download_voice_model(req: VoiceModelDownloadRequest):
-        """Download a voice model from HuggingFace URL"""
-        info = voice_manager.download_model(req.url, name=req.name, tags=req.tags)
-        if info is None:
-            raise HTTPException(500, "Download failed")
-        return {"status": "ok", "name": info.name, "size_mb": info.file_size_mb, "epochs": info.epochs}
-
-    @app.post("/api/voice-models/download-popular/{name}", tags=["voice-models"])
-    async def api_download_popular_model(name: str):
-        """Download a pre-configured popular voice model"""
-        if name not in POPULAR_MODELS:
-            raise HTTPException(404, f"Unknown model. Available: {list(POPULAR_MODELS.keys())}")
-        info = download_popular_model(name, voice_manager)
-        if info is None:
-            raise HTTPException(500, "Download failed")
-        return {"status": "ok", "name": info.name, "size_mb": info.file_size_mb}
-
-    @app.delete("/api/voice-models/{name}", tags=["voice-models"])
-    async def api_delete_voice_model(name: str):
-        """Delete a voice model"""
-        if voice_manager.delete_model(name):
-            return {"status": "ok", "deleted": name}
-        raise HTTPException(404, f"Model not found: {name}")
-
-
-# ─── Voice Models Browse (proxy scraper for voice-models.com) ──────────────
-_voice_browse_cache: Dict[str, Any] = {"data": None, "fetched_at": 0}
-_VOICE_BROWSE_TTL = 300  # 5 min cache
-
-@app.get("/api/voice-models/browse", tags=["voice-models"])
-async def api_browse_voice_models():
-    """Scrape voice-models.com/top and return structured model list.
-    Results are cached for 5 minutes. Falls back gracefully on error."""
-    import time
-    now = time.time()
-    if _voice_browse_cache["data"] and (now - _voice_browse_cache["fetched_at"]) < _VOICE_BROWSE_TTL:
-        return _voice_browse_cache["data"]
-
-    try:
-        resp = requests.get(
-            "https://voice-models.com/top",
-            headers={"User-Agent": "Mozilla/5.0 (compatible; Harvis/1.0)"},
-            timeout=10,
-        )
-        resp.raise_for_status()
-
-        from bs4 import BeautifulSoup
-        soup = BeautifulSoup(resp.text, "html.parser")
-        models = []
-
-        for row in soup.select("table tr"):
-            cells = row.find_all("td")
-            if len(cells) < 2:
-                continue
-            link_el = cells[0].find("a")
-            if not link_el:
-                continue
-            name = link_el.get_text(strip=True)
-            page_url = link_el.get("href", "")
-            if page_url and not page_url.startswith("http"):
-                page_url = "https://voice-models.com" + page_url
-
-            dl_link = cells[1].find("a")
-            download_url = dl_link.get("href", "") if dl_link else ""
-
-            run_link = cells[0].find("a", string="Run")
-            run_url = run_link.get("href", "") if run_link else ""
-
-            if name and download_url:
-                models.append({
-                    "name": name,
-                    "page_url": page_url,
-                    "download_url": download_url,
-                    "run_url": run_url,
-                })
-
-        result = {
-            "status": "ok",
-            "count": len(models),
-            "models": models,
-            "cached": False,
-        }
-        _voice_browse_cache["data"] = {**result, "cached": True}
-        _voice_browse_cache["fetched_at"] = now
-        logger.info(f"Fetched {len(models)} voice models from voice-models.com/top")
-        return result
-
-    except Exception as e:
-        logger.warning(f"Failed to fetch voice-models.com: {e}")
-        if _voice_browse_cache["data"]:
-            return {**_voice_browse_cache["data"], "stale": True}
-        return {
-            "status": "error",
-            "error": "Voice model website is currently unavailable. Using default Harvis voice.",
-            "count": 0,
-            "models": [],
-        }

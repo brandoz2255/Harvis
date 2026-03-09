@@ -35,16 +35,43 @@ services:
       dockerfile: Dockerfile
     container_name: harvis-model-downloader
     user: root
-    command: ["download-models"]
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        python3 /app/download_models.py &&
+        echo 'Fixing model cache permissions for appuser...' &&
+        chown -R 1001:1001 /models-cache &&
+        echo 'Model cache permissions fixed'
     environment:
       HF_HOME: "/models-cache/huggingface"
       TRANSFORMERS_CACHE: "/models-cache/huggingface"
       WHISPER_CACHE: "/models-cache/whisper"
       PYTHONUNBUFFERED: "1"
+      # TTS Model Download Configuration
+      # Set to "false" to skip downloading that model (saves disk space)
+      DOWNLOAD_QWEN_TTS: "true"
+      DOWNLOAD_CHATTERBOX_TTS: "false"
     volumes:
       - ml-models-cache:/models-cache
     networks:
       - ollama-n8n-network
+
+  # Artifact Volume Permission Setup (runs as root to set proper permissions)
+  artifact-init:
+    image: busybox:latest
+    container_name: harvis-artifact-init
+    user: root
+    command: >
+      sh -c "mkdir -p /data/artifacts &&
+             chown -R 1001:1001 /data/artifacts &&
+             chmod 750 /data/artifacts &&
+             echo 'Artifact permissions initialized'"
+    volumes:
+      - artifact_data:/data/artifacts
+    networks:
+      - ollama-n8n-network
+    restart: "no"
 
   # Python FastAPI Backend
   backend:
@@ -70,6 +97,18 @@ services:
       ENVIRONMENT: "production"
       LOG_LEVEL: "INFO"
       PYTHONUNBUFFERED: "1"
+      ARTIFACT_STORAGE_DIR: "/data/artifacts"
+      # For Docker Compose, run code locally (not in separate containers)
+      # This avoids needing Docker socket access
+      CODE_EXECUTOR_LOCAL: "true"
+      # OpenClaw integration
+      OPENCLAW_URL: "ws://openclaw:18789"
+      OPENCLAW_GATEWAY_TOKEN: "${OPENCLAW_GATEWAY_TOKEN}"
+      # Cloud AI providers (loaded from .env — never hardcode here)
+      MOONSHOT_API_KEY: "${MOONSHOT_API_KEY:-}"
+      MOONSHOT_BASE_URL: "${MOONSHOT_BASE_URL:-https://api.moonshot.ai/v1}"
+      NVIDIA_API_KEY: "${NVIDIA_API_KEY:-}"
+    user: "1001:1001" # Run as appuser for consistent permissions
     volumes:
       - ml-models-cache:/models-cache
       - embedding-data:/app/embedding
@@ -78,12 +117,15 @@ services:
       - ./python_back_end/main.py:/app/main.py:ro
       - ./python_back_end/notebooks:/app/notebooks:ro
       - ./python_back_end/vibecoding:/app/vibecoding:ro
+      - artifact_data:/data/artifacts
     depends_on:
       ollama:
         condition: service_started
       pgsql:
         condition: service_healthy
       model-downloader:
+        condition: service_completed_successfully
+      artifact-init:
         condition: service_completed_successfully
     deploy:
       resources:
@@ -151,6 +193,49 @@ services:
     networks:
       - ollama-n8n-network
 
+  # Document Generation Worker (Async Job Processor)
+  # Handles PDF, DOCX, XLSX, PPTX generation in background
+  # Uses lightweight image (~200MB) - no GPU/ML dependencies needed
+  document-worker:
+    build:
+      context: ./python_back_end
+      dockerfile: Dockerfile.document-worker
+    container_name: harvis-document-worker
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: "postgresql://pguser:pgpassword@pgsql:5432/database"
+      OLLAMA_URL: "http://ollama:11434"
+      BACKEND_URL: "http://backend:8000"
+      ENVIRONMENT: "production"
+      LOG_LEVEL: "INFO"
+      PYTHONUNBUFFERED: "1"
+      ARTIFACT_STORAGE_DIR: "/data/artifacts"
+      WORKER_NAME: "document-worker-docker"
+    user: "1001:1001"
+    volumes:
+      - artifact_data:/data/artifacts
+    depends_on:
+      pgsql:
+        condition: service_healthy
+      backend:
+        condition: service_started
+      artifact-init:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '2.0'
+        reservations:
+          cpus: '0.25'
+    networks:
+      - ollama-n8n-network
+    healthcheck:
+      test: [ "CMD-SHELL", "python -c 'import asyncpg; import openpyxl; print(\"healthy\")'" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
   # PostgreSQL Database with pgvector
   pgsql:
     image: pgvector/pgvector:pg15
@@ -164,6 +249,9 @@ services:
     volumes:
       - pgsql_data:/var/lib/postgresql/data
       - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
+      - ./python_back_end/artifacts_schema.sql:/docker-entrypoint-initdb.d/artifacts_schema.sql:ro
+      - ./python_back_end/artifacts_build_jobs_schema.sql:/docker-entrypoint-initdb.d/artifacts_build_jobs_schema.sql:ro
+      - ./front_end/newjfrontend/db/migrations/001_add_document_jobs.sql:/docker-entrypoint-initdb.d/001_add_document_jobs.sql:ro
     ports:
       - "5432:5432"
     deploy:
@@ -283,6 +371,7 @@ volumes:
   pgsql_data:
   ml-models-cache:
   embedding-data:
+  artifact_data:
   surrealdb_data:
   open_notebook_data:
   tts_voices:

@@ -116,5 +116,10 @@ python_back_end/whisper_models/
 **/*.safetensors
 **/*.ckpt
 
-# Podcast audio data (generated files, persisted via bind mount)
-python_back_end/podcast_data/
+# openclaw directory
+openclaw/
+
+# ==========================================
+# OpenClaw secrets — apply manually via kubectl, never commit
+# ==========================================
+k8s-manifests/overlays/prod/openclaw-secret.yaml

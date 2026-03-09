@@ -1,156 +1,209 @@
+## 2026-02-24: Fix OpenClaw K8s Deployment — Full Debug Session
 
-## 2026-02-04: Image Persistence and UI Sync Fixes
+### Problems Addressed
 
-### Problem
-1. **Image persistence**: Images sent via vision/screenshare chat were not persisted - users only saw "[Image attached]" text without the actual image after refreshing
-2. **UI not updating immediately**: Vision chat messages were not appearing in the UI until manual refresh
+1. **Pod back-off restart loop** — `harvis-ai-openclaw` was crash-looping in the `ai-agents` namespace
+2. **CI pipeline clobbering openclaw image tag** — `ci_pipeline.sh` overwrote the openclaw `newTag` every harvis build
+3. **CI pipeline ordering bug** — `ci_openclaw_pipeline.sh` pushed kustomize to git before pushing the image to Docker Hub, so ArgoCD would pull a tag that didn't exist yet
+4. **Wrong nodeSelector hostname** — Pod had `Rockyvm2.local` (AI-generated typo); actual node is `rocky2vm.local`
+5. **PVC on wrong node** — `local-path` StorageClass scheduled the PVC on `dulc3-os` (control plane); OpenClaw's nodeSelector pointed to `rocky2vm.local` — PV/pod node mismatch
+6. **openclaw.json used JSON5 syntax** — Unquoted keys and `//` comments; newer OpenClaw builds require strict `JSON.parse()`
+7. **Config schema validation failures** (Zod):
+   - `models.providers.ollama.models` was missing (required array of `{id, name}`)
+   - `agents.defaults` had unknown key `skills` (schema is `.strict()`)
+   - `session.reset.mode: "never"` is not a valid value (only `"daily"` or `"idle"`)
+8. **Control UI startup error** — Gateway binding to `lan` required `controlUi.allowedOrigins` or explicit disable
+9. **Wrong health probe type** — K8s probes used `httpGet: /health` but OpenClaw only exposes `health` as a WebSocket RPC method, not an HTTP route — always returned 404
 
-### Solution
+### Root Cause Analysis
 
-#### 1. Image Persistence with PVC Storage
-**Files modified:**
-- `k8s-manifests/storage/pvcs.yaml` - Added `harvis-images-pvc` for image storage
-- `k8s-manifests/services/merged-ollama-backend.yaml` - Mounted images PVC to `/app/images`
-- `python_back_end/main.py`:
-  - Added `IMAGES_DIR` constant pointing to `/app/images`
-  - Modified `vision_chat` endpoint to save images to disk as PNG files
-  - Store image paths in message metadata as `{images: ["/api/images/<uuid>.png"], image_count: N}`
-  - Added `/api/images/{filename}` endpoint to serve images with authentication
+The crash loop was a cascade: wrong nodeSelector → wrong node for PVC → pod couldn't schedule → after nodeSelector fix, config schema errors → Zod validation failures prevented gateway start → after config fixes, Control UI error → after that fix, `httpGet /health` returned 404 → probes killed pod repeatedly.
 
-**Storage:**
-- Images are saved as PNG files in `/app/images` (mounted via PVC)
-- Each image gets a unique UUID filename
-- Backend serves images through authenticated endpoint
+The kustomize clobbering was a global `sed "s/newTag: .*/..."` in `ci_pipeline.sh` line 172 that replaced ALL `newTag:` entries including openclaw's on every harvis build.
 
-#### 2. Frontend Image Display
-**Files modified:**
-- `front_end/newjfrontend/types/message.ts` - Added `metadata` field to Message interface
-- `front_end/newjfrontend/components/chat-message.tsx`:
-  - Added metadata support to ChatMessage component
-  - Images from metadata are displayed in a grid layout
-  - Shows actual images instead of "[Image attached]" text
-- `front_end/newjfrontend/app/page.tsx`:
-  - Updated message conversion to include metadata
-  - Added metadata prop to ChatMessage component calls
+The PVC issue: k3s `local-path` provisioner pins the PVC to whichever node the pod first schedules on. Since openclaw had the wrong nodeSelector initially, the PVC was bound to `dulc3-os` (control plane). After fixing the nodeSelector, the pod and PVC were on different nodes.
 
-#### 3. UI Sync Fix for Vision Messages
-**Problem:** Vision chat didn't show user messages immediately - only showed AI response after completion
+### Solutions Applied
 
-**Solution in `front_end/newjfrontend/app/page.tsx`:**
-- Added optimistic user message immediately when vision chat starts
-- Shows attached image in the user message bubble
-- Shows placeholder assistant message with "streaming" status
-- Updates both messages with actual content after API response
-- Updates user message status to "sent" or "failed"
-- Replaces placeholder assistant message with actual response or error
+#### 1. `ci_pipeline.sh` — Targeted per-image kustomize replacement
+Replaced the global `sed` with a Python regex that only updates harvis images, leaving the openclaw `newTag` untouched.
 
-### Kubernetes Deployment
-To apply changes:
+#### 2. `ci_openclaw_pipeline.sh` — Fixed push ordering
+Reordered: Docker Hub push first → kustomize update → git commit → git push. ArgoCD now always finds the image before syncing.
 
-```bash
-# Apply new PVC
-kubectl apply -f k8s-manifests/storage/pvcs.yaml
+#### 3. `k8s-manifests/overlays/prod/openclaw.yaml` — Static PV on rocky2vm.local
+Deleted the `local-path` PVC. Created a static PersistentVolume (`openclaw-data-rocky2`) with explicit `nodeAffinity` for `rocky2vm.local`, `Retain` reclaim policy, and `local.path: /var/lib/openclaw-data`. Updated PVC to use `storageClassName: ""` + `volumeName: openclaw-data-rocky2` for a forced 1:1 bind. Fixed `nodeSelector` typo.
 
-# Update backend deployment with new volume mount
-kubectl apply -f k8s-manifests/services/backend-dedicated.yaml
-
-# Rebuild and deploy backend
-./scripts/build-and-push.sh  # or your build script
-
-# Apply K8s changes (for merged deployment)
-kubectl apply -f k8s-manifests/storage/pvcs.yaml
-kubectl apply -f k8s-manifests/services/merged-ollama-backend.yaml
-
-# Rebuild frontend
-docker-compose up --build -d frontend
+#### 4. `openclaw.json` ConfigMap — Full schema-compliant strict JSON config
+```json
+{
+  "gateway": {
+    "bind": "lan", "port": 18789,
+    "auth": {"mode": "token"},
+    "controlUi": {"enabled": false}
+  },
+  "session": {
+    "scope": "per-sender",
+    "maintenance": {"pruneAfter": "90d", "maxEntries": 2000}
+  },
+  "models": {
+    "mode": "replace",
+    "providers": {
+      "ollama": {
+        "baseUrl": "http://harvis-ai-merged-backend:11434",
+        "apiKey": "ollama-local",
+        "models": [{"id": "gpt-oss:latest", "name": "GPT-OSS"}]
+      }
+    }
+  },
+  "agents": {"defaults": {"model": {"primary": "ollama/gpt-oss:latest"}}},
+  "skills": {"load": {"extraDirs": ["/skills"]}},
+  "channels": {}
+}
 ```
 
-### Testing
-1. Start fresh - no session selected
-2. Send a text message - should create session A
-3. Enable screenshare and send a vision message - should use session A
-4. Image should appear immediately in user message bubble
-5. AI response should appear when ready (no refresh needed)
-6. Refresh the page - images should still be visible in chat history
+#### 5. Harvis Agent SKILL.md ConfigMap
+Created `harvis-agent-skill` ConfigMap with a full OpenClaw skill prompt (`/skills/harvis-agent/SKILL.md`). The skill defines the agent's identity, task routing table (`coder`/`researcher`/`writer`/`planner`), JSON response format, and security guardrails. Mounted via `subPath` into the OpenClaw pod at `/skills/harvis-agent/SKILL.md` (read-only).
 
-### Console Logs to Watch
-- `[Vision] Session from backend: <session-id>`
-- `[Vision] Set currentSession to: <session-id>`
-- `🖼️ Image X: Saved to /app/images/...`
+#### 6. Health probes — `tcpSocket` instead of `httpGet`
+OpenClaw's `health` is a WebSocket JSON-RPC method, not an HTTP GET route. The HTTP server returns 404 for `/health`. Switched both `livenessProbe` and `readinessProbe` to `tcpSocket: port: 18789`.
 
-## 2026-02-04 (Part 2): Unified Chat Interface - Bug Fixes
+### Files Modified
 
-### Problem
-1. **Screenshare sends twice**: User message appearing twice when sending vision/screenshare
-2. **Message disappearing**: User message bubble disappears after sending vision message
-3. **Response only after refresh**: Vision responses not appearing until page refresh
-4. **Model switching breaks chat**: Switching between LLM and VL models hides messages
+- `ci_pipeline.sh` — Targeted Python regex for per-image kustomize update
+- `ci_openclaw_pipeline.sh` — Push ordering: Docker Hub first, then kustomize
+- `k8s-manifests/overlays/prod/openclaw.yaml` — Static PV, corrected nodeSelector, schema-compliant config, Harvis Agent SKILL.md ConfigMap, tcpSocket probes
 
-### Solution
+### Final State
 
-#### 1. Unified Message State Management
-**File:** `front_end/newjfrontend/app/page.tsx`
-
-**Changes:**
-- Replaced simple conditional message selection with intelligent merging (lines 182-205)
-- Now combines `convertedMessages` (from AI SDK) with `localMessages` (vision/voice)
-- Deduplicates messages by checking ID, tempId, or content+role+timestamp
-- Sorts all messages chronologically
-
-```typescript
-// NEW: Unified message merging
-const messages = useMemo(() => {
-  const merged = [...convertedMessages]
-  localMessages.forEach(localMsg => {
-    const exists = merged.some(m => 
-      (m.id && m.id === localMsg.id) ||
-      (m.tempId && m.tempId === localMsg.tempId) ||
-      (m.role === localMsg.role && 
-       m.content === localMsg.content &&
-       Math.abs(m.timestamp.getTime() - localMsg.timestamp.getTime()) < 2000)
-    )
-    if (!exists) merged.push(localMsg)
-  })
-  return merged.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())
-}, [convertedMessages, localMessages])
+```
+harvis-ai-openclaw-56fc97f8d6-wt25k   1/1   Running   0   stable
+[gateway] agent model: ollama/gpt-oss:latest
+[gateway] listening on ws://0.0.0.0:18789 (PID 13)
+[heartbeat] started
+[health-monitor] started
 ```
 
-#### 2. Removed Duplicate Vision Messages
-**File:** `front_end/newjfrontend/app/page.tsx`
+---
 
-**Problem:** `handleSendMessage` was adding user message, then `handleVisionMessage` added it again
+## 2026-02-16: Add Ansible Playbooks to RAG VectorDB with Qwen3 Embedding
 
-**Changes:**
-- Removed optimistic user message addition from `handleVisionMessage` (was lines 541-553)
-- Updated function signature to accept `userTempId` parameter
-- Function now only adds assistant placeholder and updates existing user message
-- Passes userTempId from `handleSendMessage` to track which message to update
+### Problem
+The RAG corpus system supported various documentation sources (Kubernetes, Docker, Python, etc.) but lacked support for Ansible playbooks. Ansible playbooks are complex YAML files with Jinja2 templating, role hierarchies, and variable structures that require high-dimensional embeddings for semantic understanding.
 
-#### 3. Fixed Message Display Flow
-**File:** `front_end/newjfrontend/app/page.tsx`
+### Root Cause
+No fetcher existed to parse and index Ansible playbook content. The RAG system needed a specialized fetcher that could handle:
+- YAML with Jinja2 templates (`{{ variable }}`)
+- Role directory structures (tasks/, handlers/, vars/, defaults/, meta/)
+- Module invocations with complex parameters
+- Variable files and inventories
+- Playbook structural analysis
 
-**Changes:**
-- `handleSendMessage` now passes the user message tempId to `handleVisionMessage`
-- `handleVisionMessage` updates user message status to "sent" or "failed"
-- Assistant placeholder is created once and updated with response
-- Error handling updates both user and assistant messages appropriately
+### Solution Applied
+Implemented full Ansible playbook support using the high-tier `qwen3-embedding` model (4096 dimensions) for complex technical content.
+
+#### Files Modified:
+
+1. **Backend Fetcher** (`python_back_end/rag_corpus/source_fetchers.py`)
+   - Added `AnsiblePlaybookFetcher` class (~300 lines)
+   - Recursively scans directories for `.yml`/`.yaml` files
+   - Detects file types: tasks, handlers, variables, templates, inventories, playbooks
+   - Extracts role names from directory structure
+   - Parses YAML to identify modules used
+   - Enriches content with structural metadata for better embedding
+   - Updated `get_fetcher_for_config()` to handle "ansible" fetcher type
+   - Updated `get_fetcher()` to support "ansible_playbooks" source
+
+2. **Backend Routes** (`python_back_end/rag_corpus/routes.py`)
+   - Added `ansible_playbooks` to `SOURCE_EMBEDDING_MODELS` with `qwen3-embedding`
+   - Added `ansible_paths` field to `UpdateRagRequest` model
+   - Updated job creation to pass `ansible_paths` parameter
+
+3. **Job Manager** (`python_back_end/rag_corpus/job_manager.py`)
+   - Added `ansible_paths` field to `Job` dataclass
+   - Updated `create_job()` to accept `ansible_paths` parameter
+   - Updated `_get_fetcher()` to handle ansible_playbooks source
+
+4. **Frontend Settings** (`front_end/newjfrontend/app/settings/page.tsx`)
+   - Added `ansible_playbooks` to `SOURCE_CONFIG` in "devops" group
+   - Added state variables for ansible paths input
+   - Added `addAnsiblePath`/`removeAnsiblePath` handler functions
+   - Added Ansible paths input UI section (red-themed to match branding)
+   - Updated `handleStartUpdate` to include `ansible_paths`
+
+5. **TypeScript Types** (`front_end/newjfrontend/lib/rag.ts`)
+   - Added `ansible_paths?: string[]` to `RagUpdateRequest` interface
+
+### Features:
+- Uses `qwen3-embedding` (4096 dims) for high-fidelity semantic search
+- Parses YAML structure to extract playbook metadata
+- Detects Jinja2 templates and marks content accordingly
+- Identifies Ansible modules used in playbooks
+- Supports role directory structures (`roles/<name>/tasks/main.yml`, etc.)
+- UI input for specifying local playbook directories
+- Works with complex playbooks containing nested structures
 
 ### Result
-✅ Text, voice, vision, and screenshare all work in the same session
-✅ No duplicate message bubbles
-✅ Messages appear immediately without refresh
-✅ Switching between LLM and VL models preserves all messages
-✅ AI SDK integration remains intact and functional
-✅ Mic-chat and TTS continue to work seamlessly
+Users can now:
+1. Go to Settings page
+2. Select "Ansible Playbooks" source (in DevOps section)
+3. Enter paths to local directories containing Ansible content
+4. Click "Start Update" to index playbooks into the VectorDB
+5. Query the RAG corpus for Ansible-related questions
 
-### Testing Checklist
-- [ ] Send text message → visible immediately
-- [ ] Send screen capture → single user bubble, response appears
-- [ ] Use voice/mic-chat → integrates with text history
-- [ ] Switch from text to vision model → all previous messages visible
-- [ ] Switch from vision to text model → all previous messages visible
-- [ ] Refresh page → all messages persist
-- [ ] TTS toggle works in all modes
+The system uses Qwen3's high-dimensional embeddings to capture nuanced relationships in complex Ansible configurations, including Jinja2 templating patterns, module parameters, and role dependencies.
 
-### Build Status
-✅ Build successful - no TypeScript errors
+---
+
+## 2026-02-15: Add Image Copy/Paste Support to Chat Input
+
+### Problem
+Users needed to manually select images from file system. They couldn't simply copy and paste images directly into the chat interface.
+
+### Root Cause
+The chat input textarea component didn't have any paste event handling for image files.
+
+### Solution Applied
+Added clipboard paste event handling to the chat input component that detects and processes pasted images.
+
+**File:** `front_end/newjfrontend/components/chat-input.tsx`
+
+#### Changes Made:
+
+1. **Added `handlePaste` function** (lines 140-190)
+   - Intercepts paste events on the textarea
+   - Checks `e.clipboardData.items` for image data (screenshots, copied from browser)
+   - Checks `e.clipboardData.files` for file data (copied from file manager)
+   - Filters for supported image types (png, jpeg, gif, webp)
+   - Prevents image data from being pasted as text into textarea
+
+2. **Added `processImageBlob` helper function** (lines 192-212)
+   - Converts pasted image blob to base64
+   - Creates ImageAttachment object with proper metadata
+   - Adds to attachments state for display
+
+3. **Attached handler to Textarea** (line 848)
+   - Added `onPaste={handlePaste}` prop to the Textarea component
+
+4. **Updated placeholder text** (line 854)
+   - Changed from `"Ask anything..."` to `"Ask anything... (paste images to analyze)"`
+   - Users now know paste is supported
+
+### Features:
+- ✅ Paste screenshots directly (Cmd/Ctrl+Shift+3/4 on Mac, PrintScreen on Windows)
+- ✅ Paste copied images from browser/web pages
+- ✅ Paste images copied from file manager
+- ✅ Supports all existing image types (PNG, JPEG, GIF, WebP)
+- ✅ VL model requirement check (same as file upload)
+- ✅ Multiple images can be pasted at once
+- ✅ Works alongside existing upload methods (file picker, drag-drop if implemented)
+
+### Result
+Users can now:
+1. Take a screenshot
+2. Copy any image from the web or file manager
+3. Press Ctrl+V (or Cmd+V) while focused in the chat input
+4. The image immediately appears as an attachment
+5. Type a message and send - the AI will analyze the image
+
+---

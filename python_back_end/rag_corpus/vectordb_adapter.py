@@ -713,37 +713,53 @@ class MultiCollectionRetriever:
 
         all_results = []
 
+        logger.info(
+            f"📚 RAG multi-search: query='{query[:60]}...' sources={sources} "
+            f"collections={list(collections_to_query.keys())}"
+        )
+
         # Query each collection with appropriate embedding
         for collection_name, source_filter in collections_to_query.items():
             adapter = self.vectordb_adapters.get(collection_name)
             if not adapter:
+                logger.warning(f"📚 RAG: no vectordb adapter for collection '{collection_name}' — skipping")
                 continue
 
             model_name = self._get_model_for_collection(collection_name)
             embedder = self.embedding_adapters.get(model_name)
             if not embedder:
+                logger.warning(f"📚 RAG: no embedding adapter for model '{model_name}' (collection='{collection_name}') — skipping")
                 continue
+
+            logger.info(f"📚 RAG: querying collection='{collection_name}' model='{model_name}' sources={source_filter}")
 
             try:
                 # Generate query embedding with this model
                 query_embedding = await embedder.embed_text(query)
+                logger.info(f"📚 RAG: embedded query with '{model_name}' → {len(query_embedding)}-dim vector")
 
                 # Search this collection
                 results = await adapter.search(
                     query_embedding=query_embedding,
-                    k=k,  # Get k from each collection
+                    k=k,
                     sources=source_filter,
                     score_threshold=self.score_threshold
                 )
 
+                logger.info(f"📚 RAG: collection='{collection_name}' returned {len(results)} results")
                 all_results.extend(results)
 
             except Exception as e:
-                logger.warning(f"Error searching collection {collection_name}: {e}")
+                logger.warning(f"📚 RAG: error searching collection '{collection_name}' with model '{model_name}': {e}")
 
         # Sort all results by score (descending) and take top k
         all_results.sort(key=lambda r: r.score, reverse=True)
-        return all_results[:k]
+        top = all_results[:k]
+        logger.info(
+            f"📚 RAG multi-search complete: {len(all_results)} total → returning top {len(top)} "
+            f"(scores: {[round(r.score, 3) for r in top[:5]]})"
+        )
+        return top
 
     async def get_context_string(
         self,

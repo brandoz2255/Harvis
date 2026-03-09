@@ -19,7 +19,7 @@ spec:
         app.kubernetes.io/component: nginx
     spec:
       nodeSelector:
-        environment: "dulc3-os"
+        kubernetes.io/hostname: dulc3-os
       containers:
         - name: nginx
           image: "nginx:alpine"

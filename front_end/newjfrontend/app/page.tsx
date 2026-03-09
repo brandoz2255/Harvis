@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useRef, useEffect, useMemo, useCallback } from "react"
+import { flushSync } from "react-dom"
 import { useRouter } from "next/navigation"
 import { v4 as uuidv4 } from 'uuid'
 import { ChatSidebar } from "@/components/chat-sidebar"
@@ -21,8 +22,13 @@ import { useChat } from "@ai-sdk/react"
 import { Message as AiMessage } from "ai"
 
 import { useApiWithRetry } from "@/hooks/useApiWithRetry"
+import { useAsyncTTS } from "@/hooks/useAsyncTTS"
 import BlockPluginStack from "@/components/BlockPluginStack"
 import BlockPluginPanel from "@/components/BlockPluginPanel"
+import { WorkspaceLayout } from "@/components/workspace/WorkspaceLayout"
+import { WorkspacePanel } from "@/components/workspace/WorkspacePanel"
+import { WorkspaceSuggestionBanner } from "@/components/workspace/WorkspaceSuggestionBanner"
+import { useOpenClawStore } from "@/stores/openclawStore"
 
 export default function ChatPage() {
   const router = useRouter()

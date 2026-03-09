@@ -1,8 +1,8 @@
-"""
-Hook for OpenClaw WebSocket connection
-
-Manages real-time connection to OpenClaw task events.
-"""
+/**
+ * Hook for OpenClaw WebSocket connection
+ * 
+ * Manages real-time connection to OpenClaw task events.
+ */
 
 'use client'
 

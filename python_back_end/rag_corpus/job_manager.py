@@ -39,6 +39,9 @@ class Job:
     kubernetes_topics: List[str] = field(
         default_factory=list
     )  # For kubernetes_docs source
+    ansible_paths: List[str] = field(
+        default_factory=list
+    )  # For ansible_playbooks source
     progress: Dict[str, Any] = field(default_factory=dict)
     error: Optional[str] = None
     created_at: datetime = field(default_factory=datetime.utcnow)
@@ -55,6 +58,7 @@ class Job:
             "python_libraries": self.python_libraries,
             "docker_topics": self.docker_topics,
             "kubernetes_topics": self.kubernetes_topics,
+            "ansible_paths": self.ansible_paths,
             "progress": self.progress,
             "error": self.error,
             "created_at": self.created_at.isoformat(),
@@ -132,6 +136,8 @@ class JobManager:
             fetcher_kwargs["kubernetes_topics"] = job.kubernetes_topics
         elif source == "local_docs":
             fetcher_kwargs["docs_dirs"] = ["./docs"]
+        elif source == "ansible_playbooks":
+            fetcher_kwargs["ansible_paths"] = job.ansible_paths
 
         return get_fetcher(source, **fetcher_kwargs)
 
@@ -143,6 +149,7 @@ class JobManager:
         python_libraries: Optional[List[str]] = None,
         docker_topics: Optional[List[str]] = None,
         kubernetes_topics: Optional[List[str]] = None,
+        ansible_paths: Optional[List[str]] = None,
     ) -> str:
         """
         Create a new RAG update job.
@@ -154,6 +161,7 @@ class JobManager:
             python_libraries: Optional Python library names for python_docs source
             docker_topics: Optional Docker topics for docker_docs source (engine, compose, swarm, etc.)
             kubernetes_topics: Optional Kubernetes topics for kubernetes_docs source (concepts, tasks, networking, etc.)
+            ansible_paths: Optional local paths containing Ansible playbooks/roles
 
         Returns:
             Job ID
@@ -168,6 +176,7 @@ class JobManager:
             python_libraries=python_libraries or [],
             docker_topics=docker_topics or [],
             kubernetes_topics=kubernetes_topics or [],
+            ansible_paths=ansible_paths or [],
             progress={
                 "total_docs": 0,
                 "processed": 0,

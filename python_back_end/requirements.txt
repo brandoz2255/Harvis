@@ -13,10 +13,10 @@ asyncpg
 passlib[bcrypt]==1.7.4
 python-jose[cryptography]==3.3.0
 bcrypt==4.0.1
+cryptography>=41.0.0
 requests
 pydantic
 Pillow
-cryptography
 
 # Audio processing - install torch first to avoid conflicts
 torch==2.6.0
@@ -28,10 +28,18 @@ tavily-python
 
 # TTS engines
 # chatterbox-tts  # Optional backup TTS engine (heavier)
+# Note: Chatterbox TTS has dependency conflicts with transformers>=0.27.0 required by qwen3
+
+# Job queue for background processing (TTS, Whisper, etc.)
+# Using arq for Python async job queue (similar to pg-boss but for Python)
+arq>=0.26.0
+redis>=5.0.0
+
 langchain
 langchain-community
 langchain-openai
 langchain-postgres
+langchain-text-splitters
 sentence-transformers
 ddgs
 beautifulsoup4
@@ -72,3 +80,12 @@ pydub>=0.25.1
 # Optional: Multi-provider AI support
 openai>=1.0.0
 anthropic>=0.18.0
+
+# Document generation for artifacts
+openpyxl>=3.1.0
+python-pptx>=0.6.21
+weasyprint>=60.0
+reportlab>=4.0.0
+
+# PDF/DOCX to image conversion for vision models
+PyMuPDF>=1.23.0

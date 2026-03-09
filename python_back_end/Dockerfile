@@ -8,12 +8,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   && rm -rf /var/lib/apt/lists/*
 
 ############################
-# 👤 Create non-root user early (Podman compatibility)
+# Create non-root user early (Podman compatibility)
 ############################
 RUN useradd -m -u 1001 -s /bin/bash appuser
 
 ############################
-# 🐳 Docker socket access setup
+# Docker socket access setup
 ############################
 # Install Docker CLI for container management
 RUN apt-get update && apt-get install -y \
@@ -26,7 +26,7 @@ RUN groupadd -g 999 docker || true && \
   usermod -aG docker appuser || true
 
 ############################
-# 🐍 Python deps (as root, then switch to appuser)
+# Python deps (as root, then switch to appuser)
 ############################
 COPY requirements.txt .
 
@@ -48,9 +48,9 @@ RUN rm -f /wheels/numpy-*.whl
 # Use same PyTorch base image for runtime (PyTorch 2.6.0 + CUDA 12.4 + cuDNN 9)
 FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
 
-# Install system dependencies for AI services
+# Install system dependencies for AI services (including sox for TTS)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-  libgl1 ffmpeg tesseract-ocr tesseract-ocr-eng curl \
+  libgl1 ffmpeg tesseract-ocr tesseract-ocr-eng curl sox libsox-dev \
   && rm -rf /var/lib/apt/lists/*
 
 # Install dependencies in controlled order to avoid conflicts
@@ -75,6 +75,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Reinstall Python docker package to override any system docker-py conflict
 RUN pip install --no-cache-dir --force-reinstall "docker>=7.0.0"
+
+# Note: Chatterbox TTS has been removed due to dependency conflicts with transformers>=0.27.0
+# Qwen3 TTS is now the primary and recommended TTS engine
 
 # App user with docker group access
 RUN useradd -m -u 1001 -s /bin/bash appuser \

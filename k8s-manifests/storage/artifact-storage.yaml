@@ -1,0 +1,21 @@
+# Artifact Storage for Harvis AI
+# Stores generated documents (Excel, DOCX, PDF, PPTX) and website code
+#
+# Usage:
+# This PVC uses the default storage class (ReadWriteOnce)
+# Mounted in backend deployment at /data/artifacts
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: harvis-artifacts-pvc
+  namespace: ai-agents
+  labels:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: artifact-storage
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
