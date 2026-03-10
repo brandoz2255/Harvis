@@ -19,8 +19,10 @@ spec:
         app.kubernetes.io/component: merged-ollama-backend
     spec:
       runtimeClassName: nvidia
+      securityContext:
+        fsGroup: 1001   # ensures PVC mounts are writable by appuser (UID 1001) without chown
       nodeSelector:
-        kubernetes.io/hostname: dulc3-os    # RTX 3070 — vLLM runs here
+        kubernetes.io/hostname: dulc3-os    # RTX 3070 — SGLang runs here
       initContainers:
         - name: wait-for-db
           image: busybox:1.36
@@ -71,18 +73,58 @@ spec:
             limits:
               memory: 4Gi
               cpu: 2000m
+        # Download Qwen3.5-9B Q4_K_M GGUF for llama-server — skips if already on PVC
+        - name: download-qwen35
+          image: python:3.11-slim
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+              if [ -f /llama-models/qwen3.5-9b-q4_k_m.gguf ]; then
+                echo "Model already present, skipping download"
+                exit 0
+              fi
+              pip install -q huggingface_hub
+              python3 -c "
+              from huggingface_hub import hf_hub_download
+              import shutil
+              path = hf_hub_download(
+                  repo_id='bartowski/Qwen_Qwen3.5-9B-GGUF',
+                  filename='Qwen_Qwen3.5-9B-Q4_K_M.gguf',
+                  local_dir='/llama-models',
+              )
+              shutil.move(path, '/llama-models/qwen3.5-9b-q4_k_m.gguf')
+              print('Download complete.')
+              "
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-backend-secret
+                  key: hf-token
+          volumeMounts:
+            - name: llama-models
+              mountPath: /llama-models
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 500m
+            limits:
+              memory: 2Gi
+              cpu: 2000m
       containers:
-        # vLLM — Qwen3.5-9B INT4 (bitsandbytes) on RTX 3070 (8GB), fast agentic path
-        # Using official Qwen/Qwen3.5-9B with bitsandbytes INT4 (~4.5GB) to fit 8GB VRAM.
-        # GGUF repo (bartowski) has no config.json — vLLM requires a proper HF model repo.
-        - name: vllm
-          image: vllm/vllm-openai:latest
+        # SGLang — Qwen3.5-9B INT4 (bitsandbytes) on RTX 3070 (8GB), fast agentic path
+        # RadixAttention: shared prefix KV cache stays hot across tool calls.
+        # MTP speculative decoding: 2-3x decode speedup on predictable code tokens.
+        # fp8 KV cache unlocks 131K context on 8GB VRAM vs 65K with vLLM.
+        - name: sglang
+          image: dulc3/sglang-patch:test1
           imagePullPolicy: IfNotPresent
           ports:
-            - name: vllm
+            - name: sglang
               containerPort: 8001
               protocol: TCP
-          command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+          command: ["python3", "-m", "sglang.launch_server"]
           args:
             - "--model"
             - "Qwen/Qwen3.5-9B"
@@ -93,20 +135,30 @@ spec:
             - "--host"
             - "0.0.0.0"
             - "--quantization"
-            - "bitsandbytes"
+            - "bitsandbytes"        # INT4 weights — same quant as previous vLLM setup
             - "--load-format"
             - "bitsandbytes"
-            - "--max-model-len"
-            - "65536"          # 65K — tts-worker pod freed ~1.4GB GPU, now fits with fp8 KV
-            - "--gpu-memory-utilization"
-            - "0.85"           # 0.85×7.64GB=6.49GB for vLLM (TTS no longer on GPU)
             - "--kv-cache-dtype"
-            - "fp8"            # fp8 KV ~half the memory of fp16 — needed for 64K context
-            - "--enable-auto-tool-choice"
+            - "fp8_e4m3"            # fp8 KV = half memory of fp16 → unlocks 131K ctx (e4m3 = better precision than e5m2)
+            - "--context-length"
+            - "131072"              # 128K — fits with INT4 weights + fp8 KV on 8GB
+            - "--mem-fraction-static"
+            - "0.88"                # 12% VRAM headroom; prevents OOM on long outputs
+            - "--enable-torch-compile"
+            - "--reasoning-parser"
+            - "qwen3"               # handles <think>...</think> blocks
             - "--tool-call-parser"
-            - "hermes"
-            - "--enable-chunked-prefill"
-            - "--disable-log-stats"
+            - "qwen3_coder"         # correct tool parser for Qwen3.5 family — tool calling is automatic in SGLang via parser, no --enable-auto-tool-choice needed
+            - "--trust-remote-code"
+            # NEXTN MTP speculative decoding — patched image fixes the two upstream bugs:
+            #   Bug 1: speculative_eagle_topk null-guard (NoneType > int crash)
+            #   Bug 2: served_model_name colon assertion made LoRA-conditional
+            - "--speculative-algo"
+            - "NEXTN"
+            - "--speculative-num-steps"
+            - "3"
+            - "--speculative-num-draft-tokens"
+            - "4"
           env:
             - name: HF_HOME
               value: "/models-cache/huggingface"
@@ -115,9 +167,6 @@ spec:
                 secretKeyRef:
                   name: harvis-ai-backend-secret
                   key: hf-token
-            # No CUDA_VISIBLE_DEVICES — dulc3-os has 1 GPU, no pinning needed
-            - name: VLLM_WORKER_MULTIPROC_METHOD
-              value: "spawn"
             - name: TOKENIZERS_PARALLELISM
               value: "false"
           volumeMounts:
@@ -135,7 +184,7 @@ spec:
             httpGet:
               path: /health
               port: 8001
-            initialDelaySeconds: 120
+            initialDelaySeconds: 180   # SGLang torch.compile adds ~2min startup
             periodSeconds: 30
             timeoutSeconds: 10
             failureThreshold: 3
@@ -143,7 +192,7 @@ spec:
             httpGet:
               path: /v1/models
               port: 8001
-            initialDelaySeconds: 90
+            initialDelaySeconds: 120
             periodSeconds: 15
             timeoutSeconds: 10
             failureThreshold: 10
@@ -175,14 +224,14 @@ spec:
                   name: harvis-ai-backend-secret
                   key: external-ollama-api-key
                   optional: true
-            # vLLM co-located sidecar (localhost)
+            # SGLang co-located sidecar (localhost)
             - name: OLLAMA_URL
               value: "http://localhost:8001/v1"
             - name: VLLM_URL
               value: "http://localhost:8001/v1"
-            # llama-server on dulc3-top (ClusterIP service)
+            # llama-server co-located sidecar (localhost)
             - name: LLAMA_URL
-              value: "http://harvis-ai-llama-server:8080/v1"
+              value: "http://localhost:8080/v1"
             - name: BACKEND_URL
               value: "http://harvis-ai-merged-backend:8000"
             - name: HF_HOME
@@ -250,6 +299,68 @@ spec:
             timeoutSeconds: 5
             failureThreshold: 3
 
+        # llama-server — Qwen3.5-9B Q4_K_M on RTX 3070, shares GPU with sglang via same pod
+        # All 36 layers fit in 8GB VRAM (~5.4GB model). Use for llama.cpp-native features
+        # or as fallback when SGLang is restarting. Switch via LLAMA_URL in backend.
+        - name: llama-server
+          image: ghcr.io/ggerganov/llama.cpp:server-cuda
+          imagePullPolicy: Always
+          ports:
+            - name: llama
+              containerPort: 8080
+              protocol: TCP
+          command: ["/llama-server"]
+          args:
+            - "--model"
+            - "/llama-models/qwen3.5-9b-q4_k_m.gguf"
+            - "--host"
+            - "0.0.0.0"
+            - "--port"
+            - "8080"
+            - "--n-gpu-layers"
+            - "99"             # all layers in VRAM — RTX 3070 8GB fits full Q4_K_M (~5.4GB)
+            - "--ctx-size"
+            - "65536"          # 64K; remaining ~2.6GB VRAM covers KV cache
+            - "--cache-type-k"
+            - "q8_0"
+            - "--cache-type-v"
+            - "q8_0"
+            - "--n-parallel"
+            - "4"
+            - "--threads"
+            - "8"
+            - "--threads-batch"
+            - "8"
+            - "--no-mmap"
+            - "--served-model-name"
+            - "qwen3.5:9b"
+            - "--log-disable"
+          volumeMounts:
+            - name: llama-models
+              mountPath: /llama-models
+          resources:
+            requests:
+              memory: 2Gi
+              cpu: 1000m
+            limits:
+              memory: 6Gi     # no nvidia.com/gpu here — shared via pod-level allocation
+              cpu: 4000m
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /v1/models
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 5
+
       volumes:
         - name: embedding
           persistentVolumeClaim:
@@ -266,6 +377,9 @@ spec:
         - name: artifacts
           persistentVolumeClaim:
             claimName: harvis-artifacts-pvc
+        - name: llama-models
+          persistentVolumeClaim:
+            claimName: llama-model-cache
 ---
 apiVersion: v1
 kind: Service
@@ -282,9 +396,9 @@ spec:
       port: 8000
       targetPort: http
       protocol: TCP
-    - name: vllm
+    - name: sglang
       port: 8001
-      targetPort: vllm        # qwen3.5 via vLLM on dulc3-os
+      targetPort: sglang      # qwen3.5 via SGLang on dulc3-os
       protocol: TCP
   selector:
     app.kubernetes.io/name: harvis-ai

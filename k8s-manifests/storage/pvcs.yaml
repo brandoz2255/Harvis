@@ -89,8 +89,8 @@ spec:
       storage: 10Gi
 ---
 # Static PV pinned to dulc3-top for 15GB+ GGUF model (devstral-24B-Q4_K_M)
-# Pre-requisite: create /data/llama-models on dulc3-top:
-#   sudo mkdir -p /data/llama-models && sudo chmod 777 /data/llama-models
+# Pre-requisite: create /data/llama-models on dulc3-os:
+#   sudo mkdir -p /data/llama-models && sudo chmod 755 /data/llama-models
 apiVersion: v1
 kind: PersistentVolume
 metadata:
@@ -111,7 +111,7 @@ spec:
             - key: kubernetes.io/hostname
               operator: In
               values:
-                - dulc3-top
+                - dulc3-os
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

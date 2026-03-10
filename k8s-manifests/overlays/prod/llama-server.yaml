@@ -7,7 +7,7 @@ metadata:
     app.kubernetes.io/name: harvis-ai
     app.kubernetes.io/component: llama-server
 spec:
-  replicas: 1
+  replicas: 0   # GPU is shared with SGLang pod — scale up one, scale down the other
   selector:
     matchLabels:
       app.kubernetes.io/name: harvis-ai
@@ -20,9 +20,9 @@ spec:
     spec:
       runtimeClassName: nvidia
       nodeSelector:
-        kubernetes.io/hostname: dulc3-top    # GTX 1650 Ti (4GB) + CPU RAM
+        kubernetes.io/hostname: dulc3-os     # RTX 3070 (8GB) + larger CPU RAM pool
       initContainers:
-        # Download Qwen3.5-9B-Instruct Q4_K_M — skips if already present on the PVC
+        # Download Qwen3.5-9B Q4_K_M — skips if already present on the PVC
         - name: download-qwen35
           image: python:3.11-slim
           command: ["/bin/bash", "-c"]
@@ -38,8 +38,8 @@ spec:
               from huggingface_hub import hf_hub_download
               import shutil
               path = hf_hub_download(
-                  repo_id='bartowski/Qwen_Qwen3.5-9B-Instruct-GGUF',
-                  filename='Qwen3.5-9B-Instruct-Q4_K_M.gguf',
+                  repo_id='bartowski/Qwen_Qwen3.5-9B-GGUF',
+                  filename='Qwen_Qwen3.5-9B-Q4_K_M.gguf',
                   local_dir='/llama-models',
               )
               shutil.move(path, '/llama-models/qwen3.5-9b-q4_k_m.gguf')
@@ -62,9 +62,9 @@ spec:
               memory: 2Gi
               cpu: 2000m
       containers:
-        # llama-server — Qwen3.5-9B-Instruct Q4_K_M on GTX 1650 Ti + CPU RAM
-        # ~5.4GB total: 20 layers on GPU (~3GB VRAM), rest on CPU RAM
-        # Same model family as vLLM sidecar on dulc3-os — uniform API surface
+        # llama-server — Qwen3.5-9B Q4_K_M on RTX 3070 (8GB VRAM)
+        # ~5.4GB model: all 36 layers fit entirely in GPU VRAM — no CPU offload needed
+        # Note: requires GPU time-slicing if SGLang sidecar is also scheduled on dulc3-os
         - name: llama-server
           image: yusiwen/llama.cpp:latest
           imagePullPolicy: Always
@@ -81,32 +81,32 @@ spec:
             - "--port"
             - "8080"
             - "--n-gpu-layers"
-            - "20"             # ~3GB VRAM (20/36 layers); rest on CPU RAM
+            - "99"             # all layers on GPU — RTX 3070 8GB fits full Q4_K_M (~5.4GB)
             - "--ctx-size"
-            - "65536"          # 64K — fits with q4_0 KV on dulc3-top's CPU RAM
+            - "65536"          # 64K context; remaining ~2.6GB VRAM covers KV cache
             - "--cache-type-k"
-            - "q4_0"           # aggressive KV quant — needed with 4GB VRAM
+            - "q8_0"           # higher quality KV — viable with 8GB VRAM
             - "--cache-type-v"
-            - "q4_0"
+            - "q8_0"
             - "--n-parallel"
-            - "1"              # 1 slot — CPU-offloaded layers can't handle concurrency well
+            - "4"              # 4 concurrent slots — full GPU inference supports concurrency
             - "--threads"
-            - "12"             # CPU threads for offloaded layers
+            - "8"              # CPU threads (only for non-GPU work)
             - "--threads-batch"
-            - "12"
-            - "--no-mmap"      # pre-load weights into RAM (avoids page faults)
+            - "8"
+            - "--no-mmap"      # pre-load weights into VRAM (avoids page faults)
             - "--served-model-name"
             - "qwen3.5:9b"     # matches vLLM sidecar served-model-name
             - "--log-disable"
-          # No CUDA_VISIBLE_DEVICES — dulc3-top has 1 GPU, no pinning needed
+          # No CUDA_VISIBLE_DEVICES — dulc3-os has 1 GPU, no pinning needed
           resources:
             requests:
-              memory: 16Gi    # model weights on CPU + KV cache
-              cpu: 4000m
+              memory: 4Gi     # weights in VRAM; CPU RAM only for overhead + KV spillover
+              cpu: 2000m
             limits:
               nvidia.com/gpu: 1
-              memory: 24Gi
-              cpu: 12000m
+              memory: 8Gi
+              cpu: 8000m
           volumeMounts:
             - name: llama-models
               mountPath: /llama-models
