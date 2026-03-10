@@ -22,14 +22,14 @@ spec:
       nodeSelector:
         kubernetes.io/hostname: dulc3-top    # GTX 1650 Ti (4GB) + CPU RAM
       initContainers:
-        # Download DeepSeek-R1-Distill-Qwen-14B Q4_K_M — skips if already present on the PVC
-        - name: download-r1
+        # Download Qwen3.5-9B-Instruct Q4_K_M — skips if already present on the PVC
+        - name: download-qwen35
           image: python:3.11-slim
           command: ["/bin/bash", "-c"]
           args:
             - |
               set -e
-              if [ -f /llama-models/deepseek-r1-14b-q4_k_m.gguf ]; then
+              if [ -f /llama-models/qwen3.5-9b-q4_k_m.gguf ]; then
                 echo "Model already present, skipping download"
                 exit 0
               fi
@@ -38,11 +38,11 @@ spec:
               from huggingface_hub import hf_hub_download
               import shutil
               path = hf_hub_download(
-                  repo_id='bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF',
-                  filename='DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf',
+                  repo_id='bartowski/Qwen_Qwen3.5-9B-Instruct-GGUF',
+                  filename='Qwen3.5-9B-Instruct-Q4_K_M.gguf',
                   local_dir='/llama-models',
               )
-              shutil.move(path, '/llama-models/deepseek-r1-14b-q4_k_m.gguf')
+              shutil.move(path, '/llama-models/qwen3.5-9b-q4_k_m.gguf')
               print('Download complete.')
               "
           env:
@@ -62,9 +62,9 @@ spec:
               memory: 2Gi
               cpu: 2000m
       containers:
-        # llama-server — DeepSeek-R1-Distill-Qwen-14B Q4_K_M on GTX 1650 Ti + CPU RAM
-        # ~9.5GB total: 15 layers on GPU (~3.5GB VRAM), 25 layers offloaded to CPU RAM
-        # Complements vLLM/qwen3.5:9b (fast) with a reasoning model (slow but smart)
+        # llama-server — Qwen3.5-9B-Instruct Q4_K_M on GTX 1650 Ti + CPU RAM
+        # ~5.4GB total: 20 layers on GPU (~3GB VRAM), rest on CPU RAM
+        # Same model family as vLLM sidecar on dulc3-os — uniform API surface
         - name: llama-server
           image: yusiwen/llama.cpp:latest
           imagePullPolicy: Always
@@ -75,15 +75,15 @@ spec:
           command: ["llama-server"]
           args:
             - "--model"
-            - "/llama-models/deepseek-r1-14b-q4_k_m.gguf"
+            - "/llama-models/qwen3.5-9b-q4_k_m.gguf"
             - "--host"
             - "0.0.0.0"
             - "--port"
             - "8080"
             - "--n-gpu-layers"
-            - "15"             # 15/40 layers on 1650 Ti (3.5GB VRAM); rest on CPU RAM
+            - "20"             # ~3GB VRAM (20/36 layers); rest on CPU RAM
             - "--ctx-size"
-            - "65536"          # 64K — KV cache fits with q4_0 at this size
+            - "65536"          # 64K — fits with q4_0 KV on dulc3-top's CPU RAM
             - "--cache-type-k"
             - "q4_0"           # aggressive KV quant — needed with 4GB VRAM
             - "--cache-type-v"
@@ -96,7 +96,7 @@ spec:
             - "12"
             - "--no-mmap"      # pre-load weights into RAM (avoids page faults)
             - "--served-model-name"
-            - "deepseek-r1:14b"
+            - "qwen3.5:9b"     # matches vLLM sidecar served-model-name
             - "--log-disable"
           # No CUDA_VISIBLE_DEVICES — dulc3-top has 1 GPU, no pinning needed
           resources:

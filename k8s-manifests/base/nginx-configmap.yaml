@@ -135,6 +135,37 @@ data:
                 proxy_set_header Cookie $http_cookie;
             }
 
+            # Swarm orchestrator endpoint (streaming — planner→worker→writer loop)
+            location /api/swarm {
+                if ($request_method = 'OPTIONS') {
+                    add_header 'Access-Control-Allow-Origin' $cors_origin always;
+                    add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
+                    add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization' always;
+                    add_header 'Access-Control-Allow-Credentials' 'true' always;
+                    return 204;
+                }
+
+                add_header 'Access-Control-Allow-Origin' $cors_origin always;
+                add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
+                add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization' always;
+                add_header 'Access-Control-Allow-Credentials' 'true' always;
+
+                proxy_pass http://backend_api;
+                proxy_http_version 1.1;
+                proxy_set_header Connection "";
+                proxy_buffering off;
+                proxy_cache off;
+                add_header X-Accel-Buffering no;
+
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header Authorization $http_authorization;
+                proxy_set_header Cookie $http_cookie;
+
+                proxy_read_timeout 3600s;   # swarm loops can take minutes
+            }
+
             # Chat & Mic-Chat (Streaming + Keep-Alive)
             location ~ ^/api/(chat|mic-chat) {
                 if ($request_method = 'OPTIONS') {

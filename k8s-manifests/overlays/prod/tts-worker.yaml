@@ -1,0 +1,94 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: harvis-ai-tts-worker
+  namespace: ai-agents
+  labels:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: tts-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: harvis-ai
+      app.kubernetes.io/component: tts-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: harvis-ai
+        app.kubernetes.io/component: tts-worker
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: dulc3-os   # must share harvis-audio-pvc (RWO, same node)
+      initContainers:
+        - name: download-models
+          image: "harvis-tts-worker"
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              python3 /app/download_models.py
+              chown -R 1001:1001 /models-cache
+          env:
+            - name: HF_HOME
+              value: "/models-cache/huggingface"
+            - name: TRANSFORMERS_CACHE
+              value: "/models-cache/huggingface"
+            - name: WHISPER_CACHE
+              value: "/models-cache/whisper"
+            - name: DOWNLOAD_QWEN_TTS
+              value: "true"
+            - name: DOWNLOAD_CHATTERBOX_TTS
+              value: "false"
+          volumeMounts:
+            - name: ml-models-cache
+              mountPath: /models-cache
+          resources:
+            requests:
+              memory: 1Gi
+              cpu: 500m
+            limits:
+              memory: 4Gi
+              cpu: 2000m
+      containers:
+        - name: tts-worker
+          image: "harvis-tts-worker"
+          imagePullPolicy: Always
+          command: ["python3", "/app/workers/tts_worker.py"]
+          env:
+            - name: TTS_DEVICE
+              value: "cpu"
+            - name: WHISPER_DEVICE
+              value: "cpu"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-backend-secret
+                  key: database-url
+            - name: HF_HOME
+              value: "/models-cache/huggingface"
+            - name: TRANSFORMERS_CACHE
+              value: "/models-cache/huggingface"
+            - name: WHISPER_CACHE
+              value: "/models-cache/whisper"
+            - name: TMPDIR
+              value: "/tmp"
+          resources:
+            requests:
+              memory: 6Gi    # Qwen3-TTS 0.6B on CPU ~3GB + Whisper base ~500MB
+              cpu: 4000m
+            limits:
+              memory: 12Gi
+              cpu: 8000m
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp         # shared with harvis-backend (RWO, same node)
+            - name: ml-models-cache
+              mountPath: /models-cache
+      volumes:
+        - name: tmp
+          persistentVolumeClaim:
+            claimName: harvis-audio-pvc
+        - name: ml-models-cache
+          persistentVolumeClaim:
+            claimName: ml-models-cache
