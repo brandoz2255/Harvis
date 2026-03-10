@@ -118,7 +118,7 @@ spec:
         # MTP speculative decoding: 2-3x decode speedup on predictable code tokens.
         # fp8 KV cache unlocks 131K context on 8GB VRAM vs 65K with vLLM.
         - name: sglang
-          image: dulc3/sglang-patch:test2
+          image: dulc3/sglang-patch:test3
           imagePullPolicy: IfNotPresent
           ports:
             - name: sglang
@@ -127,7 +127,7 @@ spec:
           command: ["python3", "-m", "sglang.launch_server"]
           args:
             - "--model"
-            - "Qwen/Qwen3.5-9B"
+            - "Qwen/Qwen3.5-9B-Instruct-AWQ"  # pre-quantized AWQ: weights already INT4 on disk, no BF16 intermediate
             - "--served-model-name"
             - "qwen3.5:9b"
             - "--port"
@@ -135,15 +135,13 @@ spec:
             - "--host"
             - "0.0.0.0"
             - "--quantization"
-            - "bitsandbytes"        # INT4 weights — same quant as previous vLLM setup
-            - "--load-format"
-            - "bitsandbytes"
+            - "awq"                 # AWQ = SGLang native format; no bitsandbytes needed
             - "--kv-cache-dtype"
             - "fp8_e4m3"            # fp8 KV = half memory of fp16 → unlocks 131K ctx (e4m3 = better precision than e5m2)
             - "--context-length"
-            - "131072"              # 128K — fits with INT4 weights + fp8 KV on 8GB
+            - "131072"              # 128K — fits with AWQ weights + fp8 KV on 8GB
             - "--mem-fraction-static"
-            - "0.88"                # 12% VRAM headroom; prevents OOM on long outputs
+            - "0.70"                # lowered from 0.88: AWQ loads ~4.5GiB, 0.70×7.64=5.3GiB KV pool → ~2.6GiB headroom
             - "--enable-torch-compile"
             - "--reasoning-parser"
             - "qwen3"               # handles <think>...</think> blocks
@@ -174,6 +172,8 @@ spec:
             - name: TOKENIZERS_PARALLELISM
               value: "false"
             - name: SGLANG_ENABLE_SPEC_V2
+              value: "1"
+            - name: SGLANG_DISABLE_CUDNN_CHECK
               value: "1"
           volumeMounts:
             - name: ml-models-cache
