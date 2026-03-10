@@ -118,7 +118,7 @@ spec:
         # MTP speculative decoding: 2-3x decode speedup on predictable code tokens.
         # fp8 KV cache unlocks 131K context on 8GB VRAM vs 65K with vLLM.
         - name: sglang
-          image: dulc3/sglang-patch:test1
+          image: dulc3/sglang-patch:test2
           imagePullPolicy: IfNotPresent
           ports:
             - name: sglang
@@ -153,12 +153,16 @@ spec:
             # NEXTN MTP speculative decoding — patched image fixes the two upstream bugs:
             #   Bug 1: speculative_eagle_topk null-guard (NoneType > int crash)
             #   Bug 2: served_model_name colon assertion made LoRA-conditional
+            # Qwen3.5 (Qwen3_5ForConditionalGeneration) is a hybrid Mamba arch — radix cache +
+            # speculative decoding requires extra_buffer + SGLANG_ENABLE_SPEC_V2=1.
             - "--speculative-algo"
             - "NEXTN"
             - "--speculative-num-steps"
             - "3"
             - "--speculative-num-draft-tokens"
             - "4"
+            - "--mamba-scheduler-strategy"
+            - "extra_buffer"
           env:
             - name: HF_HOME
               value: "/models-cache/huggingface"
@@ -169,6 +173,8 @@ spec:
                   key: hf-token
             - name: TOKENIZERS_PARALLELISM
               value: "false"
+            - name: SGLANG_ENABLE_SPEC_V2
+              value: "1"
           volumeMounts:
             - name: ml-models-cache
               mountPath: /models-cache
