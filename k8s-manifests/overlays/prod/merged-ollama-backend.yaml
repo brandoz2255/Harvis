@@ -72,7 +72,9 @@ spec:
               memory: 4Gi
               cpu: 2000m
       containers:
-        # vLLM — Qwen3.5-9B on RTX 3070 (8GB), fast agentic path, 128K→256K context
+        # vLLM — Qwen3.5-9B INT4 (bitsandbytes) on RTX 3070 (8GB), fast agentic path
+        # Using official Qwen/Qwen3.5-9B with bitsandbytes INT4 (~4.5GB) to fit 8GB VRAM.
+        # GGUF repo (bartowski) has no config.json — vLLM requires a proper HF model repo.
         - name: vllm
           image: vllm/vllm-openai:latest
           imagePullPolicy: IfNotPresent
@@ -83,8 +85,6 @@ spec:
           command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
           args:
             - "--model"
-            - "bartowski/Qwen_Qwen3.5-9B-GGUF"
-            - "--tokenizer"
             - "Qwen/Qwen3.5-9B"
             - "--served-model-name"
             - "qwen3.5:9b"
@@ -92,21 +92,27 @@ spec:
             - "8001"
             - "--host"
             - "0.0.0.0"
-            - "--dtype"
-            - "auto"
+            - "--quantization"
+            - "bitsandbytes"
+            - "--load-format"
+            - "bitsandbytes"
             - "--max-model-len"
-            - "131072"         # 128K to start; bump to 262144 for full 256K once VRAM verified
+            - "65536"          # 64K — INT4 leaves ~3GB for KV cache at this size
             - "--gpu-memory-utilization"
             - "0.90"
             - "--enable-auto-tool-choice"
             - "--tool-call-parser"
             - "hermes"
             - "--enable-chunked-prefill"
-            - "--trust-remote-code"
             - "--disable-log-stats"
           env:
             - name: HF_HOME
               value: "/models-cache/huggingface"
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-backend-secret
+                  key: hf-token
             # No CUDA_VISIBLE_DEVICES — dulc3-os has 1 GPU, no pinning needed
             - name: VLLM_WORKER_MULTIPROC_METHOD
               value: "spawn"
