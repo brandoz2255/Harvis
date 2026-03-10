@@ -118,7 +118,7 @@ spec:
         # MTP speculative decoding: 2-3x decode speedup on predictable code tokens.
         # fp8 KV cache unlocks 131K context on 8GB VRAM vs 65K with vLLM.
         - name: sglang
-          image: dulc3/sglang-patch:test6
+          image: dulc3/sglang-patch:test9
           imagePullPolicy: IfNotPresent
           ports:
             - name: sglang
@@ -127,21 +127,23 @@ spec:
           command: ["python3", "-m", "sglang.launch_server"]
           args:
             - "--model"
-            - "cyankiwi/Qwen3.5-9B-AWQ-4bit"  # pre-quantized AWQ: 4.5GB on disk, no BF16 intermediate
+            - "Qwen/Qwen3.5-4B"     # base 4B — bitsandbytes NF4 works here; compressed-tensors/Marlin breaks on 4B GQA (size_n=32, not divisible by 64)
             - "--served-model-name"
-            - "qwen3.5:9b"
+            - "qwen3.5:4b"
             - "--port"
             - "8001"
             - "--host"
             - "0.0.0.0"
             - "--quantization"
-            - "awq"                 # SGLang native AWQ; weights already 4-bit, no runtime quantization
+            - "bitsandbytes"        # NF4: 4B weights ~2.25GB — well within headroom after 0.45 KV pre-alloc
+            - "--load-format"
+            - "bitsandbytes"
             - "--kv-cache-dtype"
-            - "fp8_e4m3"            # fp8 KV: ~1.0GB at 65k ctx (vs ~2.0GB fp16), maximizes headroom
+            - "fp8_e4m3"            # fp8 KV: 131k ctx ≈ 2.0GB, fits in 3.44GB pool
             - "--context-length"
-            - "65536"               # 64K: AWQ 4.5GB + runtime 0.5GB + fp8 KV 1.0GB = 6.0GB → fits in 7.64GB
+            - "131072"              # full 128k: 0.45×7.64=3.44GB KV pool; 4B NF4 load=~3.75GB; total ~7.2GB ✅
             - "--mem-fraction-static"
-            - "0.35"                # 35% KV pool (~2.7GB); AWQ weights need ~4.5GB, 0.35 leaves ~4.9GB free
+            - "0.45"                # 3.44GB KV pre-alloc; leaves 4.2GB for 4B NF4 weights+runtime (~3.75GB) ✅
             - "--enable-torch-compile"
             - "--reasoning-parser"
             - "qwen3"               # handles <think>...</think> blocks
