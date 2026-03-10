@@ -141,7 +141,7 @@ spec:
             - "--context-length"
             - "65536"               # 64K: fp8 KV at 65k ≈ 1GB; allows headroom for weights on 8GB GPU
             - "--mem-fraction-static"
-            - "0.50"                # 50% KV pool (3.8GB) + 50% for weights (3.8GB) → ~4.5GB weights fit, ~1.6GB headroom
+            - "0.45"                # 45% KV pool (3.3GB); leaves ~4.0GB for fp8 weights + driver/kernel context
             - "--enable-torch-compile"
             - "--reasoning-parser"
             - "qwen3"               # handles <think>...</think> blocks
