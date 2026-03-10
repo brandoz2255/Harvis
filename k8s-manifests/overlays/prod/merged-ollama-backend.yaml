@@ -118,7 +118,7 @@ spec:
         # MTP speculative decoding: 2-3x decode speedup on predictable code tokens.
         # fp8 KV cache unlocks 131K context on 8GB VRAM vs 65K with vLLM.
         - name: sglang
-          image: dulc3/sglang-patch:test4
+          image: dulc3/sglang-patch:test6
           imagePullPolicy: IfNotPresent
           ports:
             - name: sglang
@@ -127,7 +127,7 @@ spec:
           command: ["python3", "-m", "sglang.launch_server"]
           args:
             - "--model"
-            - "Qwen/Qwen3.5-9B"     # base model, already cached at /models-cache
+            - "cyankiwi/Qwen3.5-9B-AWQ-4bit"  # pre-quantized AWQ: 4.5GB on disk, no BF16 intermediate
             - "--served-model-name"
             - "qwen3.5:9b"
             - "--port"
@@ -135,13 +135,13 @@ spec:
             - "--host"
             - "0.0.0.0"
             - "--quantization"
-            - "fp8"                 # SGLang native fp8: loads weights at 1 byte/param, no BF16 intermediate, no bitsandbytes
+            - "awq"                 # SGLang native AWQ; weights already 4-bit, no runtime quantization
             - "--kv-cache-dtype"
-            - "fp8_e4m3"            # fp8 KV cache (e4m3 = better precision than e5m2)
+            - "fp8_e4m3"            # fp8 KV: ~1.0GB at 65k ctx (vs ~2.0GB fp16), maximizes headroom
             - "--context-length"
-            - "65536"               # 64K: fp8 KV at 65k ≈ 1GB; allows headroom for weights on 8GB GPU
+            - "65536"               # 64K: AWQ 4.5GB + runtime 0.5GB + fp8 KV 1.0GB = 6.0GB → fits in 7.64GB
             - "--mem-fraction-static"
-            - "0.45"                # 45% KV pool (3.3GB); leaves ~4.0GB for fp8 weights + driver/kernel context
+            - "0.35"                # 35% KV pool (~2.7GB); AWQ weights need ~4.5GB, 0.35 leaves ~4.9GB free
             - "--enable-torch-compile"
             - "--reasoning-parser"
             - "qwen3"               # handles <think>...</think> blocks

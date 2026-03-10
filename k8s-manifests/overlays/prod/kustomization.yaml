@@ -18,22 +18,22 @@ namespace: ai-agents
 images:
   - name: harvis-backend
     newName: dulc3/jarvis-backend
-    newTag: test4
+    newTag: test6
   - name: harvis-frontend
     newName: dulc3/jarvis-frontend
-    newTag: test4
+    newTag: test6
   - name: harvis-document-worker
     newName: dulc3/harvis-document-worker
-    newTag: test4
+    newTag: test6
   - name: harvis-tts-worker
     newName: dulc3/harvis-tts-worker   # same layers as jarvis-backend, separate tag for tracking
-    newTag: test4
+    newTag: test6
   - name: dulc3/openclaw
     newName: dulc3/openclaw
     newTag: v2.32.2
   - name: dulc3/sglang-patch
     newName: dulc3/sglang-patch
-    newTag: test4
+    newTag: test6
 
 # Patches for production
 patches:
@@ -46,24 +46,24 @@ patches:
         value: 1
       - op: replace
         path: /spec/template/spec/containers/1/image
-        value: dulc3/jarvis-backend:test4
+        value: dulc3/jarvis-backend:test6
       - op: replace
         path: /spec/template/spec/initContainers/1/image
-        value: dulc3/jarvis-backend:test4
+        value: dulc3/jarvis-backend:test6
   - target:
       kind: Deployment
       name: harvis-ai-frontend
     patch: |
       - op: replace
         path: /spec/template/spec/containers/0/image
-        value: dulc3/jarvis-frontend:test4
+        value: dulc3/jarvis-frontend:test6
   - target:
       kind: Deployment
       name: harvis-document-worker
     patch: |
       - op: replace
         path: /spec/template/spec/containers/0/image
-        value: dulc3/harvis-document-worker:test4
+        value: dulc3/harvis-document-worker:test6
 
   - target:
       kind: Deployment
@@ -71,10 +71,10 @@ patches:
     patch: |
       - op: replace
         path: /spec/template/spec/containers/0/image
-        value: dulc3/harvis-tts-worker:test4
+        value: dulc3/harvis-tts-worker:test6
       - op: replace
         path: /spec/template/spec/initContainers/0/image
-        value: dulc3/harvis-tts-worker:test4
+        value: dulc3/harvis-tts-worker:test6
 
   # Inject OpenClaw + Kimi K2.5 env vars into the backend container (index 1 = harvis-backend)
   # so the Python orchestrator knows where to find OpenClaw and has the Moonshot API key.
