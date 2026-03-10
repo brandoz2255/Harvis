@@ -87,3 +87,45 @@ spec:
   resources:
     requests:
       storage: 10Gi
+---
+# Static PV pinned to dulc3-top for 15GB+ GGUF model (devstral-24B-Q4_K_M)
+# Pre-requisite: create /data/llama-models on dulc3-top:
+#   sudo mkdir -p /data/llama-models && sudo chmod 777 /data/llama-models
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: llama-model-pv
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-path
+  local:
+    path: /data/llama-models
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - dulc3-top
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: llama-model-cache
+  namespace: ai-agents
+  labels:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: llama-server
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+  storageClassName: local-path
+  volumeName: llama-model-pv

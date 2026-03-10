@@ -1,0 +1,151 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: harvis-ai-llama-server
+  namespace: ai-agents
+  labels:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: llama-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: harvis-ai
+      app.kubernetes.io/component: llama-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: harvis-ai
+        app.kubernetes.io/component: llama-server
+    spec:
+      runtimeClassName: nvidia
+      nodeSelector:
+        kubernetes.io/hostname: dulc3-top    # GTX 1650 Ti (4GB) + CPU RAM
+      initContainers:
+        # Download DeepSeek-R1-Distill-Qwen-14B Q4_K_M — skips if already present on the PVC
+        - name: download-r1
+          image: python:3.11-slim
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+              if [ -f /llama-models/deepseek-r1-14b-q4_k_m.gguf ]; then
+                echo "Model already present, skipping download"
+                exit 0
+              fi
+              pip install -q huggingface_hub
+              python3 -c "
+              from huggingface_hub import hf_hub_download
+              import shutil
+              path = hf_hub_download(
+                  repo_id='bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF',
+                  filename='DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf',
+                  local_dir='/llama-models',
+              )
+              shutil.move(path, '/llama-models/deepseek-r1-14b-q4_k_m.gguf')
+              print('Download complete.')
+              "
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-backend-secret
+                  key: hf-token
+          volumeMounts:
+            - name: llama-models
+              mountPath: /llama-models
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 500m
+            limits:
+              memory: 2Gi
+              cpu: 2000m
+      containers:
+        # llama-server — DeepSeek-R1-Distill-Qwen-14B Q4_K_M on GTX 1650 Ti + CPU RAM
+        # ~9.5GB total: 15 layers on GPU (~3.5GB VRAM), 25 layers offloaded to CPU RAM
+        # Complements vLLM/qwen3.5:9b (fast) with a reasoning model (slow but smart)
+        - name: llama-server
+          image: ghcr.io/ggerganov/llama.cpp:server-cuda
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: llama
+              containerPort: 8080
+              protocol: TCP
+          command: ["/llama-server"]
+          args:
+            - "--model"
+            - "/llama-models/deepseek-r1-14b-q4_k_m.gguf"
+            - "--host"
+            - "0.0.0.0"
+            - "--port"
+            - "8080"
+            - "--n-gpu-layers"
+            - "15"             # 15/40 layers on 1650 Ti (3.5GB VRAM); rest on CPU RAM
+            - "--ctx-size"
+            - "65536"          # 64K — KV cache fits with q4_0 at this size
+            - "--cache-type-k"
+            - "q4_0"           # aggressive KV quant — needed with 4GB VRAM
+            - "--cache-type-v"
+            - "q4_0"
+            - "--n-parallel"
+            - "1"              # 1 slot — CPU-offloaded layers can't handle concurrency well
+            - "--threads"
+            - "12"             # CPU threads for offloaded layers
+            - "--threads-batch"
+            - "12"
+            - "--no-mmap"      # pre-load weights into RAM (avoids page faults)
+            - "--served-model-name"
+            - "deepseek-r1:14b"
+            - "--log-disable"
+          # No CUDA_VISIBLE_DEVICES — dulc3-top has 1 GPU, no pinning needed
+          resources:
+            requests:
+              memory: 16Gi    # model weights on CPU + KV cache
+              cpu: 4000m
+            limits:
+              nvidia.com/gpu: 1
+              memory: 24Gi
+              cpu: 12000m
+          volumeMounts:
+            - name: llama-models
+              mountPath: /llama-models
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            timeoutSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /v1/models
+              port: 8080
+            initialDelaySeconds: 90
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 5
+
+      volumes:
+        - name: llama-models
+          persistentVolumeClaim:
+            claimName: llama-model-cache
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: harvis-ai-llama-server
+  namespace: ai-agents
+  labels:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: llama-server
+spec:
+  type: ClusterIP
+  ports:
+    - name: llama
+      port: 8080
+      targetPort: llama
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: llama-server

@@ -103,11 +103,20 @@ data:
       "models": {
         "mode": "replace",
         "providers": {
-          "ollama": {
-            "baseUrl": "http://harvis-ai-merged-backend:11434",
-            "apiKey": "ollama-local",
+          "vllm-local": {
+            "api": "openai-completions",
+            "baseUrl": "http://harvis-ai-merged-backend:8001/v1",
+            "apiKey": "vllm-local",
             "models": [
-              { "id": "qwen3:4b-instruct-2507-q4_K_M", "name": "Qwen3 4B Instruct Q4 (Local)" }
+              { "id": "qwen3.5:9b", "name": "Qwen3.5 9B (vLLM, fast agentic, 256K ctx)" }
+            ]
+          },
+          "llama-local": {
+            "api": "openai-completions",
+            "baseUrl": "http://harvis-ai-llama-server:8080/v1",
+            "apiKey": "llama-local",
+            "models": [
+              { "id": "deepseek-r1:14b", "name": "DeepSeek R1 14B (llama.cpp, reasoning, dulc3-top)" }
             ]
           },
           "harvis-proxy": {
@@ -136,7 +145,7 @@ data:
           "elevatedDefault": "full",
           "timeoutSeconds": 600,
           "model": {
-            "primary": "harvis-proxy/nvidia-kimi"
+            "primary": "vllm-local/qwen3.5:9b"
           },
           "subagents": {
             "runTimeoutSeconds": 600,
@@ -148,7 +157,13 @@ data:
             "id": "main",
             "default": true,
             "model": {
-              "primary": "harvis-proxy/nvidia-kimi"
+              "primary": "vllm-local/qwen3.5:9b"
+            }
+          },
+          {
+            "id": "deep",
+            "model": {
+              "primary": "llama-local/deepseek-r1:14b"
             }
           },
           {
@@ -1386,7 +1401,7 @@ data:
 # NetworkPolicy: Enforce OpenClaw's isolation at the network level.
 #
 # INGRESS: Only the Harvis backend pod may connect (port 18789 WebSocket).
-# EGRESS:  Only to pgsql:5432 and backend:11434 (Ollama). Nothing else.
+# EGRESS:  Only to pgsql:5432, backend:8001 (vLLM), and backend:8080 (llama-server). Nothing else.
 #          DNS (port 53) is allowed so OpenClaw can resolve service names.
 #
 # This means even if OpenClaw is prompt-injected into calling a web tool,
@@ -1435,14 +1450,23 @@ spec:
         - protocol: TCP
           port: 5432
 
-    # Ollama (co-located in the backend pod, exposed via backend Service)
+    # vLLM (qwen3.5:9b — fast agentic, co-located in the backend pod)
     - to:
         - podSelector:
             matchLabels:
               app.kubernetes.io/component: merged-ollama-backend
       ports:
         - protocol: TCP
-          port: 11434
+          port: 8001
+
+    # llama-server (qwen3.5:9b via llama.cpp — separate pod on dulc3-top)
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: llama-server
+      ports:
+        - protocol: TCP
+          port: 8080
 
     # Harvis backend proxy (port 8000) — for Kimi K2.5 forwarding AND the
     # GitHub API proxy (/github/ endpoint).  PR creation goes through this
