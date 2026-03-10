@@ -66,13 +66,13 @@ spec:
         # ~9.5GB total: 15 layers on GPU (~3.5GB VRAM), 25 layers offloaded to CPU RAM
         # Complements vLLM/qwen3.5:9b (fast) with a reasoning model (slow but smart)
         - name: llama-server
-          image: ghcr.io/ggerganov/llama.cpp:server-cuda
+          image: ghcr.io/ggerganov/llama.cpp:full-cuda
           imagePullPolicy: IfNotPresent
           ports:
             - name: llama
               containerPort: 8080
               protocol: TCP
-          command: ["/llama-server"]
+          command: ["/app/llama-server"]
           args:
             - "--model"
             - "/llama-models/deepseek-r1-14b-q4_k_m.gguf"
