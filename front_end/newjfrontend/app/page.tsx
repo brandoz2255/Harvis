@@ -24,7 +24,7 @@ import { Message as AiMessage } from "ai"
 import { useApiWithRetry } from "@/hooks/useApiWithRetry"
 import { useAsyncTTS } from "@/hooks/useAsyncTTS"
 import BlockPluginStack from "@/components/BlockPluginStack"
-import BlockPluginPanel from "@/components/BlockPluginPanel"
+import BlockPluginPanel, { usePluginIsFullPage } from "@/components/BlockPluginPanel"
 import { WorkspaceLayout } from "@/components/workspace/WorkspaceLayout"
 import { WorkspacePanel } from "@/components/workspace/WorkspacePanel"
 import { WorkspaceSuggestionBanner } from "@/components/workspace/WorkspaceSuggestionBanner"
@@ -39,10 +39,12 @@ export default function ChatPage() {
   const [isResearchMode, setIsResearchMode] = useState(false)
   const [localMessages, setLocalMessages] = useState<Message[]>([])
   const [isLoading, setIsLoading] = useState(false)
+  const [workspaceEnabled, setWorkspaceEnabled] = useState(false)
+  const pluginIsFullPage = usePluginIsFullPage()
 
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const scrollRef = useRef<HTMLDivElement>(null)
-  
+
   // Use a ref to track if we should skip the next scroll (to prevent scroll jank during streaming)
   const skipNextScrollRef = useRef(false)
 
@@ -66,12 +68,12 @@ export default function ChatPage() {
   } = useChatHistoryStore()
 
   // Vercel AI SDK integration
-  const { 
-    messages: aiMessages, 
-    append, 
-    setMessages: setAiMessages, 
-    isLoading: isAiLoading, 
-    data: aiData 
+  const {
+    messages: aiMessages,
+    append,
+    setMessages: setAiMessages,
+    isLoading: isAiLoading,
+    data: aiData
   } = useChat({
     api: '/api/ai-chat',
     headers: getAuthHeaders(),
@@ -97,7 +99,7 @@ export default function ChatPage() {
   const videosMapRef = useRef<Map<string, any[]>>(new Map())
   const reasoningMapRef = useRef<Map<string, string>>(new Map())
   const processedDataLengthRef = useRef(0)
-  
+
   // Track previous aiData length to detect new data
   const prevAiDataLengthRef = useRef(0)
 
@@ -121,7 +123,7 @@ export default function ChatPage() {
 
       // Process new data items
       const mappedAudioUrls = new Set(audioUrlMapRef.current.values())
-      
+
       newItems.forEach((data: any) => {
         // Audio URLs
         if (data?.audioPath && !mappedAudioUrls.has(data.audioPath) && lastAssistantId) {
@@ -165,7 +167,7 @@ export default function ChatPage() {
   // Use useMemo to convert AI messages to local format - this prevents re-renders during streaming
   const convertedMessages = useMemo<Message[]>(() => {
     if (aiMessages.length === 0) return []
-    
+
     return aiMessages.map((m: any, index: number): Message => {
       const reasoningTool = m.toolInvocations?.find((t: any) => t.toolName === 'reasoning')
       const toolReasoning = reasoningTool?.result?.reasoning
@@ -193,23 +195,23 @@ export default function ChatPage() {
   const messages = useMemo(() => {
     // Start with AI SDK messages (converted from aiMessages)
     const merged = [...convertedMessages]
-    
+
     // Add localMessages that aren't already in merged
     localMessages.forEach(localMsg => {
-      const exists = merged.some(m => 
+      const exists = merged.some(m =>
         // Check by ID
         (m.id && m.id === localMsg.id) ||
         (m.tempId && m.tempId === localMsg.tempId) ||
         // Check by content + role + timestamp (within 2 seconds)
-        (m.role === localMsg.role && 
-         m.content === localMsg.content &&
-         Math.abs(m.timestamp.getTime() - localMsg.timestamp.getTime()) < 2000)
+        (m.role === localMsg.role &&
+          m.content === localMsg.content &&
+          Math.abs(m.timestamp.getTime() - localMsg.timestamp.getTime()) < 2000)
       )
       if (!exists) {
         merged.push(localMsg)
       }
     })
-    
+
     // Sort by timestamp to maintain chronological order
     return merged.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())
   }, [convertedMessages, localMessages])
@@ -270,7 +272,7 @@ export default function ChatPage() {
       skipNextScrollRef.current = false
       return
     }
-    
+
     if (scrollRef.current && messages.length > 0) {
       // Use requestAnimationFrame for smooth scrolling
       requestAnimationFrame(() => {
@@ -304,6 +306,181 @@ export default function ChatPage() {
     await selectSession(id)
     setSidebarOpen(false)
   }, [selectSession, setAiMessages])
+
+  // Helper: launch a workspace task and connect to SSE
+  const launchWorkspaceTask = useCallback(async (taskBrief: string) => {
+    const store = useOpenClawStore.getState()
+
+    store.addLogEvent({
+      type: 'log',
+      message: `Launching workspace: "${taskBrief.slice(0, 100)}"…`,
+      agent_label: 'harvis',
+    })
+
+    try {
+      const token = localStorage.getItem('token')
+      if (!token) {
+        store.addLogEvent({ type: 'error', message: 'Not authenticated — please log in.' })
+        return
+      }
+
+      const res = await fetch('/api/workspace/launch', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        credentials: 'include',
+        body: JSON.stringify({
+          task_brief: taskBrief,
+          chat_history: messages.map(m => ({ role: m.role, content: m.content })),
+          session_id: currentSession?.id ?? undefined,
+          agent_id: store.workspaceModel === 'kimi' ? 'kimi'
+            : store.workspaceModel === 'qwen3' ? 'qwen3'
+              : store.workspaceModel === 'nvidia-kimi' ? 'nvidia-kimi'
+                : 'main',
+        }),
+      })
+
+      if (!res.ok) {
+        const errBody = await res.text().catch(() => res.statusText)
+        store.addLogEvent({ type: 'error', message: `Launch failed (${res.status}): ${errBody}` })
+        return
+      }
+
+      const data = await res.json()
+      const { workspace_id, session_id } = data
+
+      store.setWorkspaceId(workspace_id)
+      store.setWorkspaceSessionId(session_id)
+
+      store.addLogEvent({
+        type: 'log',
+        message: `Workspace ${workspace_id} running — connecting to stream…`,
+        agent_label: 'harvis',
+      })
+
+      // Connect to SSE stream
+      const controller = new AbortController()
+      store.setSseAbortController(controller)
+
+      const streamRes = await fetch(`/api/workspace/stream/${workspace_id}`, {
+        headers: { 'Authorization': `Bearer ${token}` },
+        signal: controller.signal,
+      })
+
+      if (!streamRes.body) {
+        store.addLogEvent({ type: 'error', message: 'No SSE stream body returned.' })
+        return
+      }
+
+      const reader = streamRes.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      const readLoop = async () => {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split('\n')
+          buffer = lines.pop() ?? ''
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue
+            try {
+              const event = JSON.parse(line.slice(6))
+              if (event.type === 'stream_end') break
+              if (event.type === 'done') {
+                useOpenClawStore.getState().setFinalSummary(event.summary ?? '')
+              }
+              useOpenClawStore.getState().addLogEvent(event)
+            } catch { /* ignore malformed SSE */ }
+          }
+        }
+      }
+
+      readLoop().catch(() => { /* stream closed */ })
+    } catch (err) {
+      console.error('Workspace launch error:', err)
+      useOpenClawStore.getState().addLogEvent({
+        type: 'error',
+        message: `Workspace error: ${err instanceof Error ? err.message : String(err)}`,
+      })
+    }
+  }, [messages, currentSession])
+
+  // Force-launch workspace: always opens panel, launches task if text provided
+  const handleForceWorkspace = useCallback(async (taskBrief: string) => {
+    const store = useOpenClawStore.getState()
+
+    // Always open the workspace panel immediately
+    store.clearLogEvents()
+    store.setFinalSummary('')
+    store.setActiveTab('dashboard')
+    store.setWorkspaceActive(true)
+
+    // Also enable auto-suggest going forward
+    setWorkspaceEnabled(true)
+
+    if (taskBrief) {
+      // Text provided — launch a workspace task
+      await launchWorkspaceTask(taskBrief)
+    } else {
+      // No text — just open the panel, show ready state
+      store.addLogEvent({
+        type: 'log',
+        message: 'Workspace panel open — type a task and press the workspace button to launch.',
+        agent_label: 'harvis',
+      })
+    }
+  }, [launchWorkspaceTask])
+
+  // Auto-suggest workspace after chat responses when workspace is enabled
+  useEffect(() => {
+    if (!workspaceEnabled) return
+    if (messages.length < 2) return
+
+    // Only trigger after assistant messages
+    const lastMsg = messages[messages.length - 1]
+    if (lastMsg?.role !== 'assistant' || lastMsg?.status === 'streaming') return
+
+    // Don't suggest if workspace is already active or there's already a suggestion
+    const { isWorkspaceActive, suggestion } = useOpenClawStore.getState()
+    if (isWorkspaceActive || suggestion) return
+
+    const token = localStorage.getItem('token')
+    if (!token) return
+
+    // Debounce: call suggest endpoint
+    const timer = setTimeout(async () => {
+      try {
+        const res = await fetch('/api/workspace/suggest', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            chat_history: messages.slice(-10).map(m => ({
+              role: m.role,
+              content: m.content,
+            })),
+          }),
+        })
+
+        if (!res.ok) return
+
+        const data = await res.json()
+        if (data.should_suggest) {
+          useOpenClawStore.getState().setSuggestion(data)
+        }
+      } catch {
+        // silently fail — suggestion is best-effort
+      }
+    }, 1500)
+
+    return () => clearTimeout(timer)
+  }, [messages, workspaceEnabled])
 
   const isDuplicateMessage = useCallback((newMessage: Message, existingMessages: Message[]): boolean => {
     const recentMessages = existingMessages.slice(-3)
@@ -713,141 +890,155 @@ export default function ChatPage() {
 
   return (
     <div className="flex h-screen bg-background overflow-hidden">
-      {/* Sidebar */}
-      <div
-        className={`${sidebarOpen ? "translate-x-0" : "-translate-x-full"
-          } fixed inset-y-0 left-0 z-30 h-full transition-transform duration-300 lg:relative lg:translate-x-0`}
-      >
-        <ChatSidebar
-          chats={sessions.map((s) => ({
-            id: s.id,
-            title: s.title,
-            timestamp: new Date(s.updated_at).toLocaleDateString(),
-            starred: false,
-          }))}
-          codeBlocks={[]}
-          activeChat={currentSession?.id || ""}
-          onSelectChat={handleSelectChat}
-          onNewChat={handleNewChat}
-          onProfileClick={() => router.push("/profile")}
-        />
-      </div>
+      {/* When a plugin is in full-page mode, hide everything except the plugin panel */}
+      {!pluginIsFullPage && (
+        <>
+          {/* Sidebar */}
+          <div
+            className={`${sidebarOpen ? "translate-x-0" : "-translate-x-full"
+              } fixed inset-y-0 left-0 z-30 h-full transition-transform duration-300 lg:relative lg:translate-x-0`}
+          >
+            <ChatSidebar
+              chats={sessions.map((s) => ({
+                id: s.id,
+                title: s.title,
+                timestamp: new Date(s.updated_at).toLocaleDateString(),
+                starred: false,
+              }))}
+              activeChat={currentSession?.id || ""}
+              onSelectChat={handleSelectChat}
+              onNewChat={handleNewChat}
+              onProfileClick={() => router.push("/profile")}
+            />
+          </div>
 
-      {/* Overlay for mobile */}
-      {sidebarOpen && (
-        <div
-          className="fixed inset-0 z-20 bg-background/80 backdrop-blur-sm lg:hidden"
-          onClick={() => setSidebarOpen(false)}
-          onKeyDown={(e) => e.key === "Escape" && setSidebarOpen(false)}
-        />
+          {/* Overlay for mobile */}
+          {sidebarOpen && (
+            <div
+              className="fixed inset-0 z-20 bg-background/80 backdrop-blur-sm lg:hidden"
+              onClick={() => setSidebarOpen(false)}
+              onKeyDown={(e) => e.key === "Escape" && setSidebarOpen(false)}
+            />
+          )}
+
+          {/* Main Content — wrapped in WorkspaceLayout for split-view support */}
+          <WorkspaceLayout
+            chatComponent={
+              <div className="flex flex-1 flex-col overflow-hidden">
+                {/* Header */}
+                <header className="sticky top-0 z-10 shrink-0 flex items-center gap-4 border-b border-border bg-background px-4 py-3">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="lg:hidden"
+                    onClick={() => setSidebarOpen(true)}
+                  >
+                    <Menu className="h-5 w-5" />
+                  </Button>
+                  <div className="flex items-center gap-2">
+                    <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/20">
+                      <Sparkles className="h-4 w-4 text-primary" />
+                    </div>
+                    <div>
+                      <h1 className="text-sm font-medium text-foreground">
+                        {currentSession?.title || "New Chat"}
+                      </h1>
+                      <p className="text-xs text-muted-foreground">HARVIS Assistant</p>
+                    </div>
+                  </div>
+                  <div className="ml-auto flex items-center gap-2">
+                    <SearchToggle
+                      isResearchMode={isResearchMode}
+                      onToggle={setIsResearchMode}
+                    />
+                    <ModelSelector
+                      selectedModel={selectedModel}
+                      onModelChange={setSelectedModel}
+                    />
+                  </div>
+                </header>
+
+                {/* Chat Area */}
+                <div className="flex-1 overflow-y-auto" ref={scrollRef}>
+                  <div className="mx-auto max-w-4xl px-4 py-6">
+                    {messages.length === 0 ? (
+                      <div className="flex h-[60vh] flex-col items-center justify-center text-center">
+                        <div className="mb-6 flex h-20 w-20 items-center justify-center rounded-2xl bg-primary/20">
+                          <Sparkles className="h-10 w-10 text-primary" />
+                        </div>
+                        <h2 className="mb-2 text-2xl font-semibold text-foreground">
+                          How can I help you today?
+                        </h2>
+                        <p className="max-w-md text-muted-foreground">
+                          I'm HARVIS, your AI assistant. Ask me anything about coding,
+                          design, or any topic you'd like to explore.
+                        </p>
+                        <div className="mt-8 grid gap-3 sm:grid-cols-2">
+                          {[
+                            "Help me write a React component",
+                            "Explain TypeScript generics",
+                            "Design a database schema",
+                            "Debug my code",
+                          ].map((prompt) => (
+                            <button
+                              key={prompt}
+                              type="button"
+                              onClick={() => handleSendMessage(prompt)}
+                              className="rounded-xl border border-border bg-card px-4 py-3 text-left text-sm text-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+                            >
+                              {prompt}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                      messageList
+                    )}
+                    {isLoading && messages[messages.length - 1]?.role !== 'assistant' && (
+                      <div className="flex items-center gap-4 py-6">
+                        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/20">
+                          <Sparkles className="h-4 w-4 animate-pulse text-primary" />
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <div className="h-2 w-2 animate-bounce rounded-full bg-primary [animation-delay:-0.3s]" />
+                          <div className="h-2 w-2 animate-bounce rounded-full bg-primary [animation-delay:-0.15s]" />
+                          <div className="h-2 w-2 animate-bounce rounded-full bg-primary" />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Workspace Suggestion Banner — appears above input when backend suggests a workspace task */}
+                <WorkspaceSuggestionBanner
+                  chatHistory={messages.map(m => ({ role: m.role, content: m.content }))}
+                />
+
+                {/* Input Area */}
+                <div className="sticky bottom-0 z-10 shrink-0 border-t border-border bg-background">
+                  <ChatInput
+                    onSend={handleSendMessage}
+                    isLoading={isLoading}
+                    isResearchMode={isResearchMode}
+                    selectedModel={selectedModel}
+                    sessionId={currentSession?.id}
+                    onForceWorkspace={handleForceWorkspace}
+                    workspaceEnabled={workspaceEnabled}
+                    onWorkspaceEnabledChange={setWorkspaceEnabled}
+                  />
+                </div>
+              </div>
+            }
+            workspaceComponent={<WorkspacePanel />}
+          />
+        </>
       )}
 
-      {/* Main Content */}
-      <div className="flex flex-1 flex-col overflow-hidden">
-        {/* Header */}
-        <header className="sticky top-0 z-10 shrink-0 flex items-center gap-4 border-b border-border bg-background px-4 py-3">
-          <Button
-            variant="ghost"
-            size="icon"
-            className="lg:hidden"
-            onClick={() => setSidebarOpen(true)}
-          >
-            <Menu className="h-5 w-5" />
-          </Button>
-          <div className="flex items-center gap-2">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/20">
-              <Sparkles className="h-4 w-4 text-primary" />
-            </div>
-            <div>
-              <h1 className="text-sm font-medium text-foreground">
-                {currentSession?.title || "New Chat"}
-              </h1>
-              <p className="text-xs text-muted-foreground">HARVIS Assistant</p>
-            </div>
-          </div>
-          <div className="ml-auto flex items-center gap-2">
-            <SearchToggle
-              isResearchMode={isResearchMode}
-              onToggle={setIsResearchMode}
-            />
-            <ModelSelector
-              selectedModel={selectedModel}
-              onModelChange={setSelectedModel}
-              lowVram={lowVram}
-              onLowVramChange={setLowVram}
-              textOnly={textOnly}
-              onTextOnlyChange={setTextOnly}
-            />
-          </div>
-        </header>
-
-        {/* Chat Area */}
-        <div className="flex-1 overflow-y-auto" ref={scrollRef}>
-          <div className="mx-auto max-w-4xl px-4 py-6">
-            {messages.length === 0 ? (
-              <div className="flex h-[60vh] flex-col items-center justify-center text-center">
-                <div className="mb-6 flex h-20 w-20 items-center justify-center rounded-2xl bg-primary/20">
-                  <Sparkles className="h-10 w-10 text-primary" />
-                </div>
-                <h2 className="mb-2 text-2xl font-semibold text-foreground">
-                  How can I help you today?
-                </h2>
-                <p className="max-w-md text-muted-foreground">
-                  I'm HARVIS, your AI assistant. Ask me anything about coding,
-                  design, or any topic you'd like to explore.
-                </p>
-                <div className="mt-8 grid gap-3 sm:grid-cols-2">
-                  {[
-                    "Help me write a React component",
-                    "Explain TypeScript generics",
-                    "Design a database schema",
-                    "Debug my code",
-                  ].map((prompt) => (
-                    <button
-                      key={prompt}
-                      type="button"
-                      onClick={() => handleSendMessage(prompt)}
-                      className="rounded-xl border border-border bg-card px-4 py-3 text-left text-sm text-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-                    >
-                      {prompt}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            ) : (
-              messageList
-            )}
-            {isLoading && messages[messages.length - 1]?.role !== 'assistant' && (
-              <div className="flex items-center gap-4 py-6">
-                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/20">
-                  <Sparkles className="h-4 w-4 animate-pulse text-primary" />
-                </div>
-                <div className="flex items-center gap-2">
-                  <div className="h-2 w-2 animate-bounce rounded-full bg-primary [animation-delay:-0.3s]" />
-                  <div className="h-2 w-2 animate-bounce rounded-full bg-primary [animation-delay:-0.15s]" />
-                  <div className="h-2 w-2 animate-bounce rounded-full bg-primary" />
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Input Area */}
-        <div className="sticky bottom-0 z-10 shrink-0 border-t border-border bg-background">
-          <ChatInput
-            onSend={handleSendMessage}
-            isLoading={isLoading}
-            isResearchMode={isResearchMode}
-            selectedModel={selectedModel}
-            sessionId={currentSession?.id}
-          />
-        </div>
-      </div>
-
-      {/* Plugin panel -- inline flex sibling so it pushes the chat area */}
+      {/* Plugin panel — in full-page mode this is the ONLY child in the flex container,
+          so it naturally fills the entire screen width and height */}
       <BlockPluginPanel />
 
-      {/* Plugin stack bubble -- fixed overlay */}
+      {/* Plugin stack bubble -- fixed overlay (hidden when a plugin is active) */}
       <BlockPluginStack />
     </div>
   )

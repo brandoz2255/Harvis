@@ -19,12 +19,14 @@ import {
   Plus,
   File,
   AlertCircle,
+  Zap,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { Input } from "@/components/ui/input"
 import type { MessageObject, Attachment, ImageAttachment, FileAttachment, MCPPlugin } from "@/types/message"
 import { isVisionModel } from "@/types/message"
+import { useOpenClawStore } from "@/stores/openclawStore"
 
 interface ChatInputProps {
   onSend: (message: string | MessageObject) => void
@@ -33,6 +35,12 @@ interface ChatInputProps {
   selectedModel?: string
   sessionId?: string | null  // Current chat session ID for voice history
   className?: string
+  /** Callback to force-launch workspace with current text */
+  onForceWorkspace?: (taskBrief: string) => void
+  /** Whether auto-delegate to workspace is enabled */
+  workspaceEnabled?: boolean
+  /** Toggle auto-delegate */
+  onWorkspaceEnabledChange?: (enabled: boolean) => void
 }
 
 // Supported file types for file upload
@@ -55,7 +63,7 @@ const SUPPORTED_FILE_TYPES = {
 
 const SUPPORTED_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp']
 
-export function ChatInput({ onSend, isLoading, isResearchMode, selectedModel, sessionId, className }: ChatInputProps) {
+export function ChatInput({ onSend, isLoading, isResearchMode, selectedModel, sessionId, className, onForceWorkspace, workspaceEnabled, onWorkspaceEnabledChange }: ChatInputProps) {
   const [message, setMessage] = useState("")
   const [isRecording, setIsRecording] = useState(false)
   const [isProcessingVoice, setIsProcessingVoice] = useState(false)
@@ -690,6 +698,29 @@ export function ChatInput({ onSend, isLoading, isResearchMode, selectedModel, se
                         <Plug className="h-4 w-4" />
                         Add MCP Plugin
                       </button>
+                      {/* Workspace auto-delegate toggle */}
+                      <button
+                        type="button"
+                        onClick={() => onWorkspaceEnabledChange?.(!workspaceEnabled)}
+                        className="flex w-full items-center justify-between gap-2 rounded-md px-3 py-2 text-sm hover:bg-accent"
+                      >
+                        <div className="flex items-center gap-2">
+                          <Zap className={cn(
+                            "h-4 w-4",
+                            workspaceEnabled ? "text-violet-400" : "text-muted-foreground"
+                          )} />
+                          <span>Workspace</span>
+                        </div>
+                        <div className={cn(
+                          "w-8 h-4 rounded-full transition-colors relative",
+                          workspaceEnabled ? "bg-violet-500" : "bg-muted"
+                        )}>
+                          <div className={cn(
+                            "absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform",
+                            workspaceEnabled ? "translate-x-4" : "translate-x-0.5"
+                          )} />
+                        </div>
+                      </button>
                       {mcpPlugins.length > 0 && (
                         <>
                           <div className="my-1 border-t border-border" />
@@ -805,6 +836,17 @@ export function ChatInput({ onSend, isLoading, isResearchMode, selectedModel, se
                   <span className="absolute -top-1 -right-1 w-2 h-2 bg-red-600 rounded-full animate-ping" />
                 )}
               </Button>
+              {onForceWorkspace && (
+                <Button
+                  type="button"
+                  onClick={() => onForceWorkspace(message.trim())}
+                  disabled={isLoading}
+                  title="Launch Workspace"
+                  className="h-9 w-9 shrink-0 rounded-xl bg-violet-600 text-white hover:bg-violet-500 disabled:opacity-50"
+                >
+                  <Zap className="h-5 w-5" />
+                </Button>
+              )}
               <Button
                 onClick={handleSend}
                 disabled={(!message.trim() && attachments.length === 0) || isLoading}
@@ -919,3 +961,4 @@ export function ChatInput({ onSend, isLoading, isResearchMode, selectedModel, se
     </div>
   )
 }
+

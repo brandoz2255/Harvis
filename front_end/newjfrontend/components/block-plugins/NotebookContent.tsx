@@ -3,22 +3,22 @@
 import { useEffect } from "react"
 import {
   BookOpen, Search, AudioWaveform,
-  Settings, Maximize2, Minimize2,
+  Settings,
 } from "lucide-react"
 import { useNotebookPluginStore, type PluginTab } from "@/stores/notebookPluginStore"
 import { useBlockPluginStore } from "@/stores/blockPluginStore"
 
 import NotebookListCompact from "@/components/notebook-plugin/NotebookListCompact"
-import SearchCompact       from "@/components/notebook-plugin/SearchCompact"
-import SettingsCompact     from "@/components/notebook-plugin/SettingsCompact"
-import NotebookWorkspace   from "@/components/notebook-plugin/NotebookWorkspace"
-import VoiceContent        from "@/components/block-plugins/VoiceContent"
+import SearchCompact from "@/components/notebook-plugin/SearchCompact"
+import SettingsCompact from "@/components/notebook-plugin/SettingsCompact"
+import NotebookWorkspace from "@/components/notebook-plugin/NotebookWorkspace"
+import VoiceContent from "@/components/block-plugins/VoiceContent"
 
 const TOP_TABS: { id: PluginTab; icon: typeof BookOpen; label: string }[] = [
-  { id: "notebooks", icon: BookOpen,      label: "Notebooks" },
-  { id: "voices",    icon: AudioWaveform,  label: "Voices" },
-  { id: "search",    icon: Search,         label: "Search" },
-  { id: "settings",  icon: Settings,       label: "Settings" },
+  { id: "notebooks", icon: BookOpen, label: "Notebooks" },
+  { id: "voices", icon: AudioWaveform, label: "Voices" },
+  { id: "search", icon: Search, label: "Search" },
+  { id: "settings", icon: Settings, label: "Settings" },
 ]
 
 const NOTEBOOK_SCOPED_TABS: PluginTab[] = ['sources', 'chat', 'podcasts']
@@ -26,15 +26,15 @@ const NOTEBOOK_SCOPED_TABS: PluginTab[] = ['sources', 'chat', 'podcasts']
 function TabBody({ tab }: { tab: PluginTab }) {
   switch (tab) {
     case "notebooks": return <NotebookListCompact />
-    case "voices":    return <VoiceContent />
-    case "search":    return <SearchCompact />
-    case "settings":  return <SettingsCompact />
-    default:          return <NotebookListCompact />
+    case "voices": return <VoiceContent />
+    case "search": return <SearchCompact />
+    case "settings": return <SettingsCompact />
+    default: return <NotebookListCompact />
   }
 }
 
 export default function NotebookContent() {
-  const { activeTab, setActiveTab, selectedNotebookId, viewMode, toggleViewMode } = useNotebookPluginStore()
+  const { activeTab, setActiveTab, selectedNotebookId } = useNotebookPluginStore()
   const { panelWidth } = useBlockPluginStore()
 
   const hasSelectedNotebook = !!selectedNotebookId
@@ -70,16 +70,6 @@ export default function NotebookContent() {
             </button>
           ))}
         </div>
-
-        {hasSelectedNotebook && (
-          <button
-            onClick={toggleViewMode}
-            title={viewMode === 'full' ? 'Half view' : 'Full page'}
-            className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors shrink-0"
-          >
-            {viewMode === 'full' ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
-          </button>
-        )}
       </div>
 
       {/* Content */}

@@ -884,7 +884,12 @@ app.include_router(github_proxy_router)
 # OpenClaw agents call /rag/search to retrieve relevant code/docs chunks
 # without needing direct database access or holding DB credentials.
 app.include_router(rag_proxy_router)
-app.include_router(kubectl_proxy_router)
+# Include kubectl proxy — mounted at BOTH prefixes so:
+#   • Frontend (via nginx) hits /api/kubectl/pending, /api/kubectl/approve, etc.
+#   • OpenClaw pods call /kubectl/exec, /kubectl/health directly (pod-to-pod).
+# Both share the same handlers & in-memory approval state.
+app.include_router(kubectl_proxy_router, prefix="/api/kubectl")
+app.include_router(kubectl_proxy_router, prefix="/kubectl")
 
 # Include Maps proxy (Google Maps API endpoints without exposing API keys)
 app.include_router(maps_router)

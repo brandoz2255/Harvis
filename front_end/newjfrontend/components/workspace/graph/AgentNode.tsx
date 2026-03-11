@@ -1,14 +1,15 @@
 'use client';
 
 import React, { memo } from 'react';
-import { Handle, Position, NodeProps } from '@xyflow/react';
-import { 
-  Bot, 
-  Code, 
-  Search, 
-  PenTool, 
-  MessageSquare, 
-  Sparkles, 
+import { Handle, Position } from '@xyflow/react';
+import type { NodeProps, Node } from '@xyflow/react';
+import {
+  Bot,
+  Code,
+  Search,
+  PenTool,
+  MessageSquare,
+  Sparkles,
   Play,
   AlertCircle,
   CheckCircle,
@@ -17,10 +18,11 @@ import {
   Cpu,
   GitBranch,
 } from 'lucide-react';
-import { 
-  AgentNodeData, 
-  AgentNodeType, 
+import {
+  AgentNodeData,
+  AgentNodeType,
   AgentStatus,
+  AgentNode as AgentNodeType2,
   AGENT_TYPE_COLORS,
   AGENT_STATUS_COLORS,
   AGENT_STATUS_ICONS,
@@ -47,42 +49,41 @@ const statusIcons: Record<AgentStatus, typeof CheckCircle> = {
   error: AlertCircle,
 };
 
-interface AgentNodeProps extends NodeProps<AgentNodeData> {}
-
-export const AgentNode = memo(function AgentNode({ 
-  data, 
+export const AgentNode = memo(function AgentNode({
+  data,
   selected,
   dragging,
-}: AgentNodeProps) {
-  const TypeIcon = typeIcons[data.type] || Bot;
-  const StatusIcon = statusIcons[data.status];
-  const typeColor = AGENT_TYPE_COLORS[data.type];
-  const statusColor = AGENT_STATUS_COLORS[data.status];
-  
-  const duration = data.startedAt ? getAgentDuration(data) : '—';
-  const tokenText = data.tokensUsed ? formatTokenCount(data.tokensUsed.total) : '';
+}: NodeProps) {
+  const d = data as unknown as AgentNodeData;
+  const TypeIcon = typeIcons[d.type] || Bot;
+  const StatusIcon = statusIcons[d.status];
+  const typeColor = AGENT_TYPE_COLORS[d.type];
+  const statusColor = AGENT_STATUS_COLORS[d.status];
+
+  const duration = d.startedAt ? getAgentDuration(d as AgentNodeType2) : '—';
+  const tokenText = d.tokensUsed ? formatTokenCount(d.tokensUsed.total) : '';
   
   // Card width based on content
-  const cardWidth = data.task && data.task.length > 40 ? 'w-72' : 'w-56';
-  
+  const cardWidth = d.task && d.task.length > 40 ? 'w-72' : 'w-56';
+
   return (
     <div className={`
       group relative transition-all duration-200
-      ${data.isDimmed ? 'opacity-30' : 'opacity-100'}
+      ${d.isDimmed ? 'opacity-30' : 'opacity-100'}
       ${selected ? 'z-50' : 'z-10'}
     `}>
       {/* Selection ring */}
       {selected && (
         <div className="absolute inset-0 -m-3 rounded-2xl border-2 border-white animate-pulse" />
       )}
-      
+
       {/* Main card */}
-      <div 
+      <div
         className={`
           relative ${cardWidth} rounded-xl border-2 backdrop-blur-sm
           transition-all duration-200 cursor-pointer overflow-hidden
-          ${selected 
-            ? 'border-white shadow-xl shadow-white/10 ring-2 ring-white/30' 
+          ${selected
+            ? 'border-white shadow-xl shadow-white/10 ring-2 ring-white/30'
             : 'border-gray-700 hover:border-gray-500 hover:shadow-lg'
           }
           ${dragging ? 'cursor-grabbing' : 'cursor-move'}
@@ -91,75 +92,75 @@ export const AgentNode = memo(function AgentNode({
         style={{ borderColor: selected ? typeColor : undefined }}
       >
         {/* Top colored border strip */}
-        <div 
+        <div
           className="absolute top-0 left-0 right-0 h-1"
           style={{ backgroundColor: typeColor }}
         />
-        
+
         {/* Status pulse animation for running agents */}
-        {data.status === 'running' && (
-          <div 
+        {d.status === 'running' && (
+          <div
             className="absolute inset-0 opacity-20 animate-pulse"
             style={{ backgroundColor: statusColor }}
           />
         )}
-        
+
         {/* Header row */}
         <div className="flex items-center justify-between px-3 py-2 border-b border-gray-800">
           {/* Type icon */}
           <div className="flex items-center gap-2">
-            <div 
+            <div
               className="w-6 h-6 rounded-md flex items-center justify-center"
               style={{ backgroundColor: `${typeColor}20` }}
             >
-              <TypeIcon 
-                size={14} 
+              <TypeIcon
+                size={14}
                 style={{ color: typeColor }}
               />
             </div>
-            
+
             {/* Label */}
             <span className="text-xs font-medium text-gray-300 truncate max-w-28">
-              {data.label}
+              {d.label}
             </span>
           </div>
-          
+
           {/* Status indicator */}
           <div className="flex items-center gap-1.5">
-            {data.subAgentCount > 0 && (
+            {d.subAgentCount > 0 && (
               <div className="flex items-center gap-1 text-xs text-gray-400">
                 <GitBranch size={12} />
-                <span>{data.subAgentCount}</span>
+                <span>{d.subAgentCount}</span>
               </div>
             )}
-            
-            <div 
+
+            <div
               className="w-2 h-2 rounded-full"
-              style={{ 
+              style={{
                 backgroundColor: statusColor,
                 boxShadow: `0 0 8px ${statusColor}`,
               }}
             />
           </div>
         </div>
-        
+
         {/* Body content */}
         <div className="px-3 py-2 space-y-2">
           {/* Task description */}
-          {data.task && (
+          {d.task && (
             <p className="text-xs text-gray-400 line-clamp-2 leading-relaxed">
-              {data.task}
+              {d.task}
             </p>
           )}
-          
+
           {/* Model info */}
           <div className="flex items-center gap-1.5">
             <Cpu size={12} className="text-gray-500" />
             <span className="text-xs text-gray-500 font-mono">
-              {data.model.split('/').pop() || data.model}
+              {d.model.split('/').pop() || d.model}
             </span>
           </div>
-          
+
           {/* Footer stats */}
           <div className="flex items-center justify-between pt-1 border-t border-gray-800">
             <div className="flex items-center gap-2">
@@ -167,7 +168,7 @@ export const AgentNode = memo(function AgentNode({
               <span className="text-xs text-gray-500 font-mono">
                 {duration}
               </span>
-              
+
               {/* Tokens */}
               {tokenText && (
                 <span className="text-xs text-gray-500">
@@ -175,56 +176,56 @@ export const AgentNode = memo(function AgentNode({
                 </span>
               )}
             </div>
-            
+
             {/* Progress bar for running agents */}
-            {data.status === 'running' && data.progress !== undefined && (
+            {d.status === 'running' && d.progress !== undefined && (
               <div className="flex items-center gap-1.5">
                 <div className="w-16 h-1 bg-gray-800 rounded-full overflow-hidden">
-                  <div 
+                  <div
                     className="h-full rounded-full transition-all"
-                    style={{ 
-                      width: `${data.progress}%`,
+                    style={{
+                      width: `${d.progress}%`,
                       backgroundColor: typeColor,
                     }}
                   />
                 </div>
                 <span className="text-xs text-gray-500 font-mono">
-                  {Math.round(data.progress)}%
+                  {Math.round(d.progress)}%
                 </span>
               </div>
             )}
-            
+
             {/* Discord channel tag */}
-            {data.discordChannel && (
+            {d.discordChannel && (
               <div className="flex items-center gap-1 text-xs text-[#5865f2]">
                 <MessageSquare size={10} />
-                <span className="truncate max-w-16">{data.discordChannel}</span>
+                <span className="truncate max-w-16">{d.discordChannel}</span>
               </div>
             )}
           </div>
         </div>
       </div>
-      
+
       {/* Connection handles */}
-      <Handle 
-        type="target" 
-        position={Position.Left} 
+      <Handle
+        type="target"
+        position={Position.Left}
         id="target"
         className="!w-2 !h-2 !bg-gray-600 !border-none"
       />
-      <Handle 
-        type="source" 
-        position={Position.Right} 
+      <Handle
+        type="source"
+        position={Position.Right}
         id="source"
         className="!w-2 !h-2 !bg-gray-600 !border-none"
       />
-      
+
       {/* Sub-agent count badge */}
-      {data.subAgentCount > 0 && (
-        <div 
+      {d.subAgentCount > 0 && (
+        <div
           className="absolute -bottom-1 -right-1 px-1.5 py-0.5 rounded-full text-xs font-medium bg-gray-800 border border-gray-700"
         >
-          <span className="text-gray-400">{data.subAgentCount}</span>
+          <span className="text-gray-400">{d.subAgentCount}</span>
         </div>
       )}
     </div>

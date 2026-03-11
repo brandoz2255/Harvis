@@ -13,8 +13,8 @@ import {
 import { useNotebookPluginStore } from "@/stores/notebookPluginStore"
 import ResizablePanel from "@/components/ResizablePanel"
 
-import NotebookContent  from "@/components/block-plugins/NotebookContent"
-import VibeCodeContent  from "@/components/block-plugins/VibeCodeContent"
+import NotebookContent from "@/components/block-plugins/NotebookContent"
+import VibeCodeContent from "@/components/block-plugins/VibeCodeContent"
 
 const ICON_MAP: Record<string, LucideIcon> = {
   BookOpen,
@@ -24,8 +24,22 @@ const ICON_MAP: Record<string, LucideIcon> = {
 function PluginContent({ pluginId, isFullPage }: { pluginId: BlockPluginId; isFullPage: boolean }) {
   switch (pluginId) {
     case "open-notebook": return <NotebookContent />
-    case "vibe-code":     return <VibeCodeContent fullPage={isFullPage} />
+    case "vibe-code": return <VibeCodeContent fullPage={isFullPage} />
   }
+}
+
+/**
+ * Hook for external components (like page.tsx) to check if the plugin is in
+ * full-page mode — so they can hide the sidebar and chat area.
+ */
+export function usePluginIsFullPage(): boolean {
+  const activePluginId = useBlockPluginStore((s) => s.activePluginId)
+  const notebookViewMode = useNotebookPluginStore((s) => s.viewMode)
+  const viewModes = useBlockPluginStore((s) => s.viewModes)
+
+  if (!activePluginId) return false
+  if (activePluginId === 'open-notebook') return notebookViewMode === 'full'
+  return (viewModes[activePluginId] || 'compact') === 'full'
 }
 
 export default function BlockPluginPanel() {
@@ -36,29 +50,18 @@ export default function BlockPluginPanel() {
   const Icon = activeDef ? (ICON_MAP[activeDef.iconName] ?? BookOpen) : BookOpen
   const isOpen = !!(activePluginId && activeDef)
 
-  // For notebooks, respect the notebook plugin store's viewMode for backwards compat
-  // For other plugins, use the block plugin store's viewMode
   const isFullPage = activePluginId === 'open-notebook'
     ? notebookViewMode === 'full'
     : (activePluginId ? getViewMode(activePluginId) === 'full' : false)
 
   const supportsFullPage = activeDef?.supportsFullPage ?? false
-  const effectiveWidth = isFullPage ? '100%' : (isOpen ? panelWidth : 0)
 
   if (!isOpen || !activeDef || !activePluginId) {
-    return (
-      <motion.div
-        className="hidden lg:block shrink-0 h-full overflow-hidden"
-        initial={false}
-        animate={{ width: 0 }}
-        transition={{ type: "spring", damping: 28, stiffness: 300 }}
-      />
-    )
+    return null
   }
 
   const handleToggleFullPage = () => {
     if (activePluginId === 'open-notebook') {
-      // Use notebook store for backwards compat
       useNotebookPluginStore.getState().toggleViewMode()
     } else if (activePluginId) {
       toggleViewMode(activePluginId)
@@ -66,7 +69,7 @@ export default function BlockPluginPanel() {
   }
 
   const panelContent = (
-    <div className="flex flex-col h-full bg-card border-l border-border">
+    <div className={`flex flex-col h-full bg-card ${isFullPage ? '' : 'border-l border-border'}`}>
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">
         <div className="flex items-center gap-2">
@@ -80,7 +83,7 @@ export default function BlockPluginPanel() {
           {supportsFullPage && (
             <button
               onClick={handleToggleFullPage}
-              className="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+              className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
               title={isFullPage ? "Compact view" : "Full page view"}
             >
               {isFullPage ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
@@ -88,7 +91,7 @@ export default function BlockPluginPanel() {
           )}
           <button
             onClick={close}
-            className="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+            className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
           >
             <X className="w-4 h-4" />
           </button>
@@ -102,41 +105,47 @@ export default function BlockPluginPanel() {
     </div>
   )
 
+  // ── Full page mode: simple flex child that fills ALL available space ─────
+  // The parent page.tsx hides the sidebar and chat when this is active,
+  // so this div naturally takes the full width and height.
+  if (isFullPage) {
+    return (
+      <div className="flex-1 h-full min-w-0 overflow-hidden">
+        {panelContent}
+      </div>
+    )
+  }
+
+  // ── Compact mode: resizable side panel ──────────────────────────────────
   return (
     <motion.div
-      className={`hidden lg:block shrink-0 h-full overflow-hidden ${isFullPage ? 'flex-1' : ''}`}
+      className="hidden lg:block shrink-0 h-full overflow-hidden"
       initial={false}
-      animate={{ width: isFullPage ? '100%' : panelWidth }}
+      animate={{ width: panelWidth }}
       transition={{ type: "spring", damping: 28, stiffness: 300 }}
-      style={isFullPage ? { flexGrow: 1, flexShrink: 1, flexBasis: 0 } : undefined}
     >
       <AnimatePresence mode="wait">
         <motion.div
-          key={`${activePluginId}-${isFullPage}`}
+          key={activePluginId}
           className="h-full"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.15 }}
         >
-          {isFullPage ? (
-            <div className="h-full">
-              {panelContent}
-            </div>
-          ) : (
-            <ResizablePanel
-              width={panelWidth}
-              onResize={setPanelWidth}
-              minWidth={320}
-              maxWidth={800}
-              handlePosition="left"
-              className="h-full"
-            >
-              {panelContent}
-            </ResizablePanel>
-          )}
+          <ResizablePanel
+            width={panelWidth}
+            onResize={setPanelWidth}
+            minWidth={320}
+            maxWidth={800}
+            handlePosition="left"
+            className="h-full"
+          >
+            {panelContent}
+          </ResizablePanel>
         </motion.div>
       </AnimatePresence>
     </motion.div>
   )
 }
+

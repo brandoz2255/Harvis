@@ -26,6 +26,10 @@ export default function BlockPluginStack() {
 
   const hasActivePlugin = activePluginId !== null
 
+  // Hide the floating stack entirely when a plugin panel is open —
+  // the panel has its own close button, and the stack covers the send button.
+  if (hasActivePlugin) return null
+
   return (
     <div className="fixed bottom-6 right-6 z-40 hidden lg:block">
       {/* Plugin buttons -- absolutely positioned above the main bubble */}

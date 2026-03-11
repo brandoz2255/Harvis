@@ -12,7 +12,7 @@ import remarkGfm from 'remark-gfm'
 import {
   ArrowLeft, Plus, FileText, MessageSquare, StickyNote, Mic,
   Send, Loader2, Trash2, Link, Type, MoreVertical,
-  AlertCircle, ChevronDown, ChevronUp, Maximize2, Minimize2,
+  AlertCircle, ChevronDown, ChevronUp,
   Sparkles, Copy, Check, Cpu, Download, Globe, Youtube, ExternalLink
 } from 'lucide-react'
 
@@ -37,7 +37,7 @@ export default function NotebookWorkspace() {
   } = useNotebookStore()
 
   const {
-    selectedNotebookId, selectNotebook, setActiveTab, viewMode, toggleViewMode,
+    selectedNotebookId, selectNotebook, setActiveTab, viewMode,
   } = useNotebookPluginStore()
 
   const [mobileTab, setMobileTab] = useState<MobileTab>('chat')
@@ -454,12 +454,7 @@ export default function NotebookWorkspace() {
           </div>
         </div>
 
-        <div className="flex items-center gap-1 shrink-0">
-          <button onClick={toggleViewMode} title={isFullMode ? 'Half view' : 'Full page'}
-            className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-secondary">
-            {isFullMode ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
-          </button>
-        </div>
+        <div className="flex items-center gap-1 shrink-0" />
       </div>
 
       {/* Tab bar + content */}
