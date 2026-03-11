@@ -1807,6 +1807,17 @@ spec:
               memory: 256Mi
               cpu: 500m
 
+        # 5. Create skills directory structure for skill files
+        - name: create-skills-dir
+          image: busybox:1.36
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              mkdir -p /home/node/.openclaw/skills/{harvis-agent,harvis-github,harvis-rag,harvis-research,harvis-document,harvis-soul,harvis-vibecoding,harvis-planner,harvis-coding}
+              echo "Skills directory created at /home/node/.openclaw/skills/"
+          volumeMounts:
+            - name: openclaw-data
+              mountPath: /home/node/.openclaw
 
       containers:
         - name: openclaw
