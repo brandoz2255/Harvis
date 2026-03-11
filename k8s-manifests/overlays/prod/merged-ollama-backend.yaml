@@ -77,6 +77,7 @@ spec:
             limits:
               memory: 128Mi
               cpu: 500m
+
       containers:
         # Harvis Backend
         - name: harvis-backend
@@ -128,7 +129,11 @@ spec:
             - name: TMPDIR
               value: "/tmp"
             - name: DISABLE_LOCAL_TTS_WORKERS
-              value: "true"   # TTS/Whisper run in tts-worker pod; skip GPU allocation here
+              value: "false"  # TTS/Whisper run locally in this pod (moved from separate worker)
+            - name: TTS_DEVICE
+              value: "cpu"   # Run TTS on CPU (GPU is full with llama-server)
+            - name: WHISPER_DEVICE
+              value: "cpu"    # Run Whisper on CPU to save GPU memory for LLM
             - name: UVICORN_WORKERS
               value: "1"
             - name: UVICORN_TIMEOUT_KEEP_ALIVE
