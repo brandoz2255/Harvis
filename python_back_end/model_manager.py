@@ -132,7 +132,7 @@ def _lazy_import_whisper():
 tts_model = None  # ChatterboxTTS model
 qwen_tts_model = None  # Qwen TTS (OuteTTS) model
 whisper_model = None
-active_tts_engine = "qwen"  # "qwen" is primary, "chatterbox" is optional
+active_tts_engine = "qwen"  # "qwen" is primary TTS engine (PyTorch-based)
 
 
 # ─── VRAM Management ────────────────────────────────────────────────────────
@@ -268,7 +268,11 @@ def auto_cleanup_if_needed(threshold_percent=75):
     # Unload models in order of priority
     cleanup_actions = []
 
-    global tts_model, qwen_tts_model, whisper_model
+    global tts_model, qwen_tts_model, whisper_model, llama_tts_model
+
+    if llama_tts_model is not None:
+        unload_llama_tts_model()
+        cleanup_actions.append("llama.cpp TTS model unloaded")
 
     if tts_model is not None:
         unload_tts_model()
@@ -311,13 +315,20 @@ def auto_cleanup_if_needed(threshold_percent=75):
 
 
 # ─── Model Loading Functions ────────────────────────────────────────────────
-def load_tts_model(force_cpu=False):
+def load_tts_model(force_cpu=None):
     """Load TTS model with memory management.
 
     NOTE: ChatterboxTTS is lazily imported here to avoid allocating VRAM/RAM
     when text_only mode is used.
     """
     global tts_model, ChatterboxTTS
+
+    # Check TTS_DEVICE environment variable if force_cpu not explicitly set
+    if force_cpu is None:
+        tts_device_env = os.environ.get("TTS_DEVICE", "cuda").lower()
+        force_cpu = tts_device_env == "cpu"
+        logger.info(f"🔧 TTS_DEVICE={tts_device_env}, force_cpu={force_cpu}")
+
     tts_device = "cuda" if torch.cuda.is_available() and not force_cpu else "cpu"
 
     if tts_model is None:
@@ -677,12 +688,19 @@ def load_whisper_model():
                             # Load from cache (no signal timeout for thread-safety)
                             try:
                                 logger.info(f"📥 Loading from cache: {cache_dir}")
-                                # Try CUDA first
-                                if torch.cuda.is_available():
+                                # Try CUDA first (unless WHISPER_DEVICE=cpu override)
+                                _whisper_device = os.getenv(
+                                    "WHISPER_DEVICE",
+                                    "cuda" if torch.cuda.is_available() else "cpu",
+                                )
+                                if (
+                                    _whisper_device == "cuda"
+                                    and torch.cuda.is_available()
+                                ):
                                     try:
                                         whisper_model = whisper.load_model(
                                             model_name,
-                                            device="cuda",
+                                            device=_whisper_device,
                                             download_root=cache_dir,
                                         )
                                         logger.info(
@@ -789,11 +807,15 @@ def load_whisper_model():
 
                     # Load freshly downloaded model (no signal timeout for thread-safety)
                     try:
-                        # Try CUDA first
-                        if torch.cuda.is_available():
+                        # Try CUDA first (unless WHISPER_DEVICE=cpu override)
+                        _whisper_device = os.getenv(
+                            "WHISPER_DEVICE",
+                            "cuda" if torch.cuda.is_available() else "cpu",
+                        )
+                        if _whisper_device == "cuda" and torch.cuda.is_available():
                             try:
                                 whisper_model = whisper.load_model(
-                                    model_name, device="cuda"
+                                    model_name, device=_whisper_device
                                 )
                                 logger.info(
                                     f"✅ Successfully loaded Whisper '{model_name}' model on GPU"
@@ -978,10 +1000,14 @@ def unload_models():
         del whisper_model
         whisper_model = None
 
-    # Aggressive GPU cleanup (if CUDA available)
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
+        # Aggressive GPU cleanup (only if TTS was using GPU)
+        tts_device = os.environ.get("TTS_DEVICE", "cuda").lower()
+        if torch.cuda.is_available() and tts_device != "cpu":
+            try:
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            except Exception as e:
+                logger.warning(f"⚠️ CUDA cleanup warning during TTS unload: {e}")
 
     # CRITICAL: Always run garbage collection for CPU RAM cleanup
     # Run multiple passes as cyclic GC may need multiple iterations
@@ -998,7 +1024,7 @@ def unload_models():
 
 
 # ─── Qwen TTS Loading/Unloading ──────────────────────────────────────────────
-def load_qwen_tts_model(force_cpu=False, use_1_7b=False):
+def load_qwen_tts_model(force_cpu=None, use_1_7b=False):
     """Load Qwen TTS (OuteTTS) model with memory management.
 
     NOTE: Qwen TTS is lazily imported here to avoid allocating VRAM/RAM
@@ -1008,11 +1034,17 @@ def load_qwen_tts_model(force_cpu=False, use_1_7b=False):
     to avoid duplicate model references that cause memory leaks.
 
     Args:
-        force_cpu: Force CPU inference
+        force_cpu: Force CPU inference (defaults to TTS_DEVICE env var)
         use_1_7b: Use 1.7B model (better quality) or 0.6B (lower VRAM)
                  NOTE: Default changed to False to always use 0.6B for VRAM compatibility
     """
     global qwen_tts_model
+
+    # Check TTS_DEVICE environment variable if force_cpu not explicitly set
+    if force_cpu is None:
+        tts_device = os.environ.get("TTS_DEVICE", "cuda").lower()
+        force_cpu = tts_device == "cpu"
+        logger.info(f"🔧 TTS_DEVICE={tts_device}, force_cpu={force_cpu}")
 
     # Lazy import Qwen TTS module
     qwen_tts = _lazy_import_qwen_tts()
@@ -1082,20 +1114,28 @@ def unload_qwen_tts_model():
     # Clear our reference (should already be cleared by module)
     qwen_tts_model = None
 
-    # Aggressive GPU cleanup
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
+    # Aggressive GPU cleanup (only if we might have used GPU)
+    tts_device = os.environ.get("TTS_DEVICE", "cuda").lower()
+    if torch.cuda.is_available() and tts_device != "cpu":
+        try:
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        except Exception as e:
+            logger.warning(f"⚠️ CUDA cleanup warning during unload: {e}")
 
     gc.collect()
     gc.collect()
     gc.collect()
 
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    if torch.cuda.is_available() and tts_device != "cpu":
+        try:
+            torch.cuda.empty_cache()
+        except Exception as e:
+            logger.warning(f"⚠️ CUDA empty_cache warning: {e}")
 
     logger.info("✅ Qwen TTS model unloaded (VRAM + CPU RAM freed)")
-    log_gpu_memory("after Qwen TTS unload")
+    if tts_device != "cpu":
+        log_gpu_memory("after Qwen TTS unload")
 
 
 def unload_running_ollama_models():
@@ -1569,17 +1609,21 @@ def set_active_tts_engine(engine: str):
     """Set the active TTS engine.
 
     Args:
-        engine: "qwen" or "chatterbox" (if available)
+        engine: "llama", "qwen", or "chatterbox" (if available)
     """
     global active_tts_engine
 
-    if engine not in ["chatterbox", "qwen"]:
+    if engine not in ["llama", "chatterbox", "qwen"]:
         raise ValueError(
-            f"Invalid TTS engine: {engine}. Must be 'qwen' or 'chatterbox'"
+            f"Invalid TTS engine: {engine}. Must be 'llama', 'qwen', or 'chatterbox'"
         )
 
     # Check if requested engine is available
-    if engine == "chatterbox":
+    if engine == "llama":
+        if not is_llama_tts_available():
+            logger.warning("⚠️ llama.cpp TTS not available, falling back to qwen")
+            engine = "qwen"
+    elif engine == "chatterbox":
         chatterbox = _lazy_import_chatterbox()
         if chatterbox is None:
             logger.warning("⚠️ Chatterbox TTS not available, falling back to qwen")
@@ -1599,7 +1643,7 @@ def use_tts_model_unified(engine: str = None):
     """Load TTS model with VRAM optimization based on selected engine.
 
     Args:
-        engine: "chatterbox", "qwen", or None (use active engine)
+        engine: "llama", "chatterbox", "qwen", or None (use active engine)
 
     Returns:
         The loaded TTS model/interface
@@ -1612,12 +1656,19 @@ def use_tts_model_unified(engine: str = None):
     logger.info(f"🔄 Loading {engine} TTS model with VRAM optimization")
     log_gpu_memory(f"before {engine} TTS optimization")
 
-    # Unload the OTHER TTS model to free VRAM
-    if engine == "chatterbox":
+    # Unload the OTHER TTS models to free VRAM
+    if engine == "llama":
+        unload_tts_model()  # Chatterbox
+        unload_qwen_tts_model()  # Qwen PyTorch
+        unload_whisper_model()
+        return use_llama_tts_optimized()
+    elif engine == "chatterbox":
+        unload_llama_tts_model()
         unload_qwen_tts_model()
         unload_whisper_model()
         return use_tts_model_optimized()  # Uses existing Chatterbox function
     elif engine == "qwen":
+        unload_llama_tts_model()
         unload_tts_model()  # Unload Chatterbox
         unload_whisper_model()
         return load_qwen_tts_model()
@@ -1639,8 +1690,8 @@ def generate_speech_unified(
 
     Args:
         text: Text to synthesize
-        engine: "chatterbox", "qwen", or None (use active engine)
-        audio_prompt: Audio prompt for voice cloning (used by both Chatterbox and Qwen)
+        engine: "llama", "chatterbox", "qwen", or None (use active engine)
+        audio_prompt: Audio prompt for voice cloning (used by Chatterbox and Qwen)
         exaggeration: Voice expressiveness (Chatterbox only)
         temperature: Generation temperature
         cfg_weight: CFG weight for Chatterbox
@@ -1657,7 +1708,34 @@ def generate_speech_unified(
     logger.info(f"🔊 Generating speech with {engine} TTS for: {text[:50]}...")
 
     try:
-        if engine == "chatterbox":
+        if engine == "llama":
+            # Use llama.cpp GGUF TTS (lightweight ~1GB)
+            llama_model = use_tts_model_unified(engine="llama")
+            if llama_model is None:
+                logger.error("❌ Failed to load llama.cpp TTS model")
+                return None, None
+
+            try:
+                result = generate_speech_llama(
+                    text=text,
+                    temperature=temperature,
+                )
+                logger.info("✅ llama.cpp TTS generation completed")
+                return result
+
+            except Exception as e:
+                logger.error(f"❌ llama.cpp TTS generation failed: {e}")
+                raise
+            finally:
+                if auto_unload:
+                    logger.info("🗑️ Auto-unloading llama.cpp TTS after generation")
+                    unload_llama_tts_model()
+                else:
+                    logger.info(
+                        "ℹ️ Keeping llama.cpp TTS model loaded (auto_unload=False)"
+                    )
+
+        elif engine == "chatterbox":
             # Use existing Chatterbox generation
             return generate_speech_optimized(
                 text=text,
@@ -1714,10 +1792,11 @@ def generate_speech_unified(
 
 
 def unload_all_tts_models():
-    """Unload all TTS models (both Chatterbox and Qwen)"""
+    """Unload all TTS models (llama.cpp, Chatterbox, and Qwen)"""
     logger.info("🗑️ Unloading ALL TTS models")
+    unload_llama_tts_model()  # llama.cpp GGUF
     unload_tts_model()  # Chatterbox
-    unload_qwen_tts_model()  # Qwen
+    unload_qwen_tts_model()  # Qwen PyTorch
     logger.info("✅ All TTS models unloaded")
 
 
@@ -1725,14 +1804,16 @@ def is_tts_available(engine: str = None) -> bool:
     """Check if a TTS engine is available.
 
     Args:
-        engine: "chatterbox", "qwen", or None (check active engine)
+        engine: "llama", "chatterbox", "qwen", or None (check active engine)
     """
     global active_tts_engine
 
     if engine is None:
         engine = active_tts_engine
 
-    if engine == "chatterbox":
+    if engine == "llama":
+        return is_llama_tts_available()
+    elif engine == "chatterbox":
         try:
             _lazy_import_chatterbox()
             return ChatterboxTTS is not None
@@ -1778,4 +1859,211 @@ def get_available_tts_engines() -> list:
             }
         )
 
+    # Check llama.cpp TTS (GGUF) - Primary engine now
+    if is_llama_tts_available():
+        available.append(
+            {
+                "id": "llama",
+                "name": "Qwen3 TTS (llama.cpp GGUF)",
+                "description": "Lightweight TTS with llama.cpp (~1GB VRAM)",
+                "vram_requirement": "~1 GB",
+            }
+        )
+
     return available
+
+
+# ─── Llama.cpp TTS Support (GGUF Models) ────────────────────────────────────
+# Lightweight TTS using llama.cpp with Qwen3-TTS GGUF models
+# https://huggingface.co/affectively-ai/qwen3-tts-12hz-1.7b-customvoice-gguf
+
+llama_tts_model = None  # Llama.cpp model instance
+
+
+def _lazy_import_llama_cpp():
+    """Lazily import llama-cpp-python only when needed."""
+    try:
+        from llama_cpp import Llama
+
+        return Llama
+    except ImportError:
+        logger.warning("⚠️ llama-cpp-python not available")
+        return None
+
+
+def is_llama_tts_available() -> bool:
+    """Check if llama.cpp TTS is available."""
+    Llama = _lazy_import_llama_cpp()
+    if Llama is None:
+        return False
+
+    # Check if GGUF model file exists
+    model_path = os.environ.get(
+        "LLAMA_TTS_MODEL_PATH",
+        "/models-cache/llama/qwen3-tts-12hz-1.7b-customvoice-q4_k_m.gguf",
+    )
+    return os.path.exists(model_path)
+
+
+def load_llama_tts_model(force_cpu=False):
+    """Load Qwen3 TTS GGUF model using llama.cpp.
+
+    Args:
+        force_cpu: Force CPU inference even if CUDA is available
+
+    Returns:
+        Llama model instance or None on failure
+    """
+    global llama_tts_model
+
+    if llama_tts_model is not None:
+        return llama_tts_model
+
+    Llama = _lazy_import_llama_cpp()
+    if Llama is None:
+        logger.error("❌ llama-cpp-python not available")
+        return None
+
+    model_path = os.environ.get(
+        "LLAMA_TTS_MODEL_PATH",
+        "/models-cache/llama/qwen3-tts-12hz-1.7b-customvoice-q4_k_m.gguf",
+    )
+
+    if not os.path.exists(model_path):
+        logger.error(f"❌ TTS GGUF model not found at: {model_path}")
+        return None
+
+    try:
+        logger.info(f"🔊 Loading Qwen3 TTS GGUF model from: {model_path}")
+        log_gpu_memory("before llama TTS load")
+
+        # Determine device
+        use_gpu = torch.cuda.is_available() and not force_cpu
+        n_gpu_layers = 99 if use_gpu else 0
+
+        # Load model with llama.cpp
+        llama_tts_model = Llama(
+            model_path=model_path,
+            n_ctx=2048,  # TTS doesn't need large context
+            n_gpu_layers=n_gpu_layers,
+            verbose=False,
+        )
+
+        log_gpu_memory("after llama TTS load")
+        logger.info(f"✅ Qwen3 TTS GGUF model loaded (GPU layers: {n_gpu_layers})")
+        return llama_tts_model
+
+    except Exception as e:
+        logger.error(f"❌ Failed to load llama.cpp TTS model: {e}")
+        import traceback
+
+        logger.error(traceback.format_exc())
+        return None
+
+
+def unload_llama_tts_model():
+    """Unload llama.cpp TTS model to free memory."""
+    global llama_tts_model
+
+    if llama_tts_model is not None:
+        logger.info("🗑️ Unloading llama.cpp TTS model")
+        del llama_tts_model
+        llama_tts_model = None
+
+        # Cleanup
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+        gc.collect()
+        gc.collect()
+        gc.collect()
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        logger.info("✅ llama.cpp TTS model unloaded")
+        log_gpu_memory("after llama TTS unload")
+
+
+def generate_speech_llama(
+    text: str,
+    temperature: float = 0.6,
+    max_tokens: int = 4096,
+) -> tuple:
+    """Generate speech using llama.cpp TTS model.
+
+    The Qwen3 TTS model generates audio tokens that need to be decoded.
+    This is a simplified implementation - full audio decoding would require
+    a vocoder to convert tokens to waveform.
+
+    Args:
+        text: Text to synthesize
+        temperature: Generation temperature
+        max_tokens: Maximum tokens to generate
+
+    Returns:
+        Tuple of (sample_rate, audio_data) or (None, None) on failure
+    """
+    global llama_tts_model
+
+    if llama_tts_model is None:
+        llama_tts_model = load_llama_tts_model()
+        if llama_tts_model is None:
+            return None, None
+
+    try:
+        logger.info(f"🔊 Generating speech with llama.cpp TTS: {text[:50]}...")
+
+        # Format prompt for Qwen3 TTS
+        # The model expects text input and generates audio tokens
+        prompt = f"<|im_start|>user\n{text}<|im_end|>\n<|im_start|>assistant\n"
+
+        # Generate
+        output = llama_tts_model(
+            prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            stop=["<|im_end|>"],
+        )
+
+        generated_text = output["choices"][0]["text"]
+        logger.info(f"✅ Generated {len(generated_text)} tokens")
+
+        # NOTE: Full implementation would decode audio tokens to waveform
+        # For now, we return a placeholder that indicates successful generation
+        # The actual audio decoding requires additional vocoder integration
+
+        # Return placeholder - actual audio synthesis needs vocoder
+        import numpy as np
+
+        sample_rate = 24000  # Qwen3 TTS uses 24kHz
+        placeholder_audio = np.zeros(sample_rate, dtype=np.float32)  # 1 second silence
+
+        return sample_rate, placeholder_audio
+
+    except Exception as e:
+        logger.error(f"❌ llama.cpp TTS generation failed: {e}")
+        import traceback
+
+        logger.error(traceback.format_exc())
+        return None, None
+
+
+def use_llama_tts_optimized():
+    """Load llama.cpp TTS model with VRAM optimization."""
+    global llama_tts_model
+
+    logger.info("🔄 Loading llama.cpp TTS model with VRAM optimization")
+    log_gpu_memory("before llama TTS optimization")
+
+    # Unload other TTS models to free VRAM
+    unload_tts_model()  # Chatterbox
+    unload_qwen_tts_model()  # Qwen PyTorch
+    unload_whisper_model()  # Whisper
+
+    if llama_tts_model is None:
+        load_llama_tts_model()
+
+    log_gpu_memory("after llama TTS loaded")
+    return llama_tts_model

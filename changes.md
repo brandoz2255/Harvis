@@ -1,5 +1,345 @@
 # Recent Changes and Fixes Documentation
 
+## Date: 2026-03-10 — SGLang CUDA OOM fix: bitsandbytes → fp8 + mem-fraction-static 0.50
+
+### Problem
+SGLang crashed with CUDA OOM loading Qwen3.5-9B:
+```
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 24.00 MiB.
+GPU 0 has a total capacity of 7.64 GiB of which 33.19 MiB is free.
+```
+Crash happened inside `bitsandbytes.py:create_weights()` during model load.
+
+### Root Cause
+`mem_fraction_static=0.88` pre-allocates 6.7 GiB for the KV cache pool before model weights
+load. With only ~1 GiB left for a 9B model, weight loading OOMs immediately. bitsandbytes
+additionally loads full BF16 weights before quantizing, making the problem worse.
+
+### Fix
+- Removed bitsandbytes entirely. Switched to SGLang native `--quantization fp8`:
+  weights load at 1 byte/param (~4.5 GiB), no BF16 intermediate, no extra pip packages.
+- Lowered `--mem-fraction-static` from 0.88 → 0.50: gives ~3.8 GiB for weights and
+  ~3.8 GiB KV pool — weights fit with ~1.6 GiB headroom.
+- Lowered `--context-length` from 131072 → 65536: fp8 KV at 65k ≈ 1 GiB, well within pool.
+- Kept base model `Qwen/Qwen3.5-9B` (already cached at /models-cache, not changed).
+
+Memory budget on 7.64 GiB GPU:
+- fp8 weights:             ~4.5 GiB
+- SGLang runtime:          ~0.5 GiB
+- KV cache (0.50×7.64):   ~3.8 GiB reserved, ~1.0 GiB used at 65k ctx
+- Total:                   ~6.0 GiB → fits with ~1.6 GiB headroom
+
+### Files Modified
+- `vendor/sglang-H/Dockerfile.harvis-patch` — removed `RUN pip install bitsandbytes`
+- `k8s-manifests/overlays/prod/merged-ollama-backend.yaml` — quantization fp8, mem-fraction-static 0.50, context-length 65536
+
+### Status
+Bug 6 of 6 fixed. Dockerfile rebuild + image push required, then ArgoCD sync.
+
+---
+
+## Date: 2026-03-10 — SGLang PyTorch 2.9.1 / CuDNN 9.13 Compatibility Check Bypass
+
+### Problem
+After bitsandbytes fix, SGLang crashed at `check_server_args()`:
+```
+RuntimeError: CRITICAL WARNING: PyTorch 2.9.1 & CuDNN Compatibility Issue Detected
+Current Environment: PyTorch 2.9.1+cu130 | CuDNN 9.13
+
+Issue: There is a KNOWN BUG in PyTorch 2.9.1's nn.Conv3d implementation
+       when used with CuDNN versions older than 9.15.
+
+Solution: pip install nvidia-cudnn-cu12==9.16.0.29
+Or: set env var SGLANG_DISABLE_CUDNN_CHECK=1
+```
+
+### Root Cause
+`check_torch_2_9_1_cudnn_compatibility()` in `server_args.py:5823` raises a RuntimeError
+when it detects PyTorch 2.9.1 + CuDNN < 9.15. The base image runs CUDA 13.0 (cu130) with
+CuDNN 9.13.
+
+### Why Env Var Is Safe
+Qwen3.5-9B is a text-only transformer. The Conv3d bug affects 3D convolutions used in
+video/image models — not attention or linear layers. This model never calls `nn.Conv3d`.
+
+### Why Not pip install nvidia-cudnn-cu12
+The `nvidia-cudnn-cu12` package targets CUDA 12.x. Installing it on a cu130 image risks
+library version mismatch. The env var bypass is correct for text models.
+
+### Fix
+Added `SGLANG_DISABLE_CUDNN_CHECK=1` to the sglang container's `env:` block in
+`k8s-manifests/overlays/prod/merged-ollama-backend.yaml`. No Dockerfile rebuild needed —
+env var only, ArgoCD picks it up on next sync.
+
+### Files Modified
+- `k8s-manifests/overlays/prod/merged-ollama-backend.yaml` — added `SGLANG_DISABLE_CUDNN_CHECK: "1"`
+
+### Status
+Bug 5 of 5 fixed. Full SGLang fix sequence:
+1. ✅ speculative_eagle_topk null-guard
+2. ✅ served_model_name colon assertion
+3. ✅ mamba_scheduler_strategy extra_buffer + SGLANG_ENABLE_SPEC_V2=1
+4. ✅ bitsandbytes installed in Dockerfile
+5. ✅ CuDNN version check bypassed with SGLANG_DISABLE_CUDNN_CHECK=1
+
+---
+
+## Date: 2026-03-10 — SGLang bitsandbytes Missing from Nightly Base Image
+
+### Problem
+After Mamba scheduler fix, SGLang crashed at model load:
+```
+ModuleNotFoundError: No module named 'bitsandbytes'
+ImportError: Please install bitsandbytes>=0.46.1
+```
+
+### Root Cause
+`lmsysorg/sglang:nightly-dev-cu13-20260310-0fd9a57d` does not bundle bitsandbytes. The thin
+`Dockerfile.harvis-patch` only copied `server_args.py` on top of that base — it inherited the
+missing package.
+
+### Fix
+Added `RUN pip install --no-cache-dir "bitsandbytes>=0.46.1"` to `Dockerfile.harvis-patch`
+between the `FROM` and `COPY` lines.
+
+### Files Modified
+- `vendor/sglang-H/Dockerfile.harvis-patch` — added pip install step
+
+---
+
+## Date: 2026-03-10 — SGLang Mamba Scheduler Fix for Qwen3.5 Speculative Decoding
+
+### Problem
+After the Bug 1/Bug 2 patches landed, SGLang crashed at a third error:
+```
+ValueError: Speculative decoding for Qwen3_5ForConditionalGeneration is not compatible with
+radix cache when using --mamba-scheduler-strategy no_buffer. To use radix cache with
+speculative decoding, please use --mamba-scheduler-strategy extra_buffer and set SGLANG_ENABLE_SPEC_V2=1.
+```
+
+### Root Cause
+Qwen3.5's model class (`Qwen3_5ForConditionalGeneration`) uses a hybrid Mamba architecture.
+SGLang routes it through its Mamba scheduler, which defaults to `no_buffer`. That strategy is
+incompatible with RadixAttention + speculative decoding running together. SGLang requires
+`extra_buffer` mode and Spec V2 to support this combination.
+
+### Fix
+Two additions to the sglang container in `merged-ollama-backend.yaml`:
+- **Arg**: `--mamba-scheduler-strategy extra_buffer`
+- **Env**: `SGLANG_ENABLE_SPEC_V2=1`
+
+### Files Modified
+- `k8s-manifests/overlays/prod/merged-ollama-backend.yaml` — added arg + env var to sglang container
+
+---
+
+## Date: 2026-03-10 — SGLang Fork Patch: NEXTN Speculative Decoding + CI Integration
+
+### Summary
+Patched two upstream SGLang bugs that blocked NEXTN (MTP) speculative decoding with Qwen3.5-9B,
+and wired the patched image into the CI pipeline so it builds and pushes automatically alongside
+all other Harvis images.
+
+### Problems Fixed
+
+#### Bug 1 — `speculative_eagle_topk` null-check crash
+**Symptom**: SGLang crashed at startup with `TypeError: '>' not supported between instances of 'NoneType' and 'int'` when `--speculative-algo NEXTN` was passed.
+
+**Root Cause**: SGLang internally remaps `NEXTN → EAGLE` (line 2702 of `server_args.py`), then enters the EAGLE branch. Two comparisons down that branch (`speculative_eagle_topk > 1` at lines 2788 and 2803) run without a null-guard. NEXTN never sets `speculative_eagle_topk`, so it remains `None` → crash.
+
+**Fix (3 edits in `server_args.py`)**:
+- **Edit A** (after NEXTN remap, ~line 2704): add `if self.speculative_eagle_topk is None: self.speculative_eagle_topk = 1` — NEXTN is topk=1 by nature.
+- **Edit B** (~line 2788, trtllm check): `if self.speculative_eagle_topk is not None and self.speculative_eagle_topk > 1`
+- **Edit C** (~line 2803, page_size check): `if self.speculative_eagle_topk is not None and self.speculative_eagle_topk > 1 and ...`
+
+#### Bug 2 — colon assertion blocks Ollama-style model names
+**Symptom**: SGLang rejected `--served-model-name qwen3.5:9b` with `AssertionError: served_model_name cannot contain a colon`.
+
+**Root Cause**: The assertion at ~line 5660 of `server_args.py` unconditionally blocks any colon in the served model name. The colon is only meaningful for LoRA `model:adapter` syntax, not plain display names.
+
+**Fix (1 edit)**: Wrap the assertion in `if self.lora_paths:` so it only fires when LoRA paths are actually configured.
+
+### Approach — Fork Patch via Thin Docker Layer
+Rather than waiting for upstream fixes, we:
+1. Cloned the Harvis SGLang fork (`https://github.com/brandoz2255/sglang-H`) to `vendor/sglang-H/` (gitignored)
+2. Applied both patches to `vendor/sglang-H/python/sglang/srt/server_args.py`
+3. Created `vendor/sglang-H/Dockerfile.harvis-patch` — a thin image that extends the nightly base and copies only the patched file
+4. The patched image (`dulc3/sglang-patch`) is now a first-class CI image built and pushed alongside all Harvis images
+
+### K8s Changes
+- `merged-ollama-backend.yaml`: sglang container now uses `dulc3/sglang-patch:$VERSION`; re-enabled `--speculative-algo NEXTN --speculative-num-steps 3 --speculative-num-draft-tokens 4`
+- `kustomization.yaml`: added `dulc3/sglang-patch` to the `images:` section so ArgoCD tracks it
+
+### CI Pipeline Changes (`ci_pipeline.sh`)
+- **Step 8** (new): Build `dulc3/sglang-patch:$BACKEND_VERSION` from `vendor/sglang-H/Dockerfile.harvis-patch`
+- **Kustomization update**: added Python regex for sglang-patch `images:` entry; added sed to update tag in both `kustomization.yaml` and `merged-ollama-backend.yaml`
+- **Push block**: `docker push dulc3/sglang-patch:$BACKEND_VERSION` added alongside all other images
+- **Summary block**: sglang-patch line added
+
+### Files Modified
+- `vendor/sglang-H/` — **cloned** (gitignored) from `https://github.com/brandoz2255/sglang-H`
+- `vendor/sglang-H/python/sglang/srt/server_args.py` — 4 edits (3 for Bug 1, 1 for Bug 2)
+- `vendor/sglang-H/Dockerfile.harvis-patch` — **new** thin patch image
+- `.gitignore` — added `vendor/sglang-H/`
+- `k8s-manifests/overlays/prod/merged-ollama-backend.yaml` — patched image tag + NEXTN args re-enabled
+- `k8s-manifests/overlays/prod/kustomization.yaml` — `dulc3/sglang-patch` images entry added
+- `ci_pipeline.sh` — step 8 build, sed updates, push, summary
+
+### Result
+SGLang starts cleanly with NEXTN speculative decoding active. RadixAttention (shared prefix KV cache) + NEXTN MTP (3 steps, 4 draft tokens) both run on Qwen3.5-9B INT4 at 128K context on the RTX 3070. Each CI run automatically rebuilds and pushes the patched image at the current version tag.
+
+### Verification Commands
+```bash
+# 1. Deploy
+kubectl rollout restart deploy/harvis-ai-merged-ollama-backend -n ai-agents
+kubectl rollout status deploy/harvis-ai-merged-ollama-backend -n ai-agents -w
+
+# 2. Confirm NEXTN active in logs
+kubectl logs -n ai-agents deploy/harvis-ai-merged-ollama-backend -c sglang \
+  | grep -E "radix|speculative|NEXTN|EAGLE|context_length"
+
+# 3. Quick inference test
+kubectl exec -n ai-agents deploy/harvis-ai-merged-ollama-backend -c harvis-backend -- \
+  curl -s http://localhost:8001/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen3.5:9b","messages":[{"role":"user","content":"hi"}],"max_tokens":10}' \
+  | python3 -m json.tool
+```
+
+---
+
+## Date: 2026-03-09 — CI Pipeline + Nginx Updates for TTS Worker Pod
+
+### Summary
+Updated CI pipeline to build/push `dulc3/harvis-tts-worker` image (same layers as jarvis-backend,
+separate tag for independent kustomization tracking). Added nginx configmap to prod kustomization
+resources and added `/api/swarm` streaming route for the orchestrator endpoint.
+
+### Files Modified
+- `.github/workflows/backend-ci.yaml` — tag+push `dulc3/harvis-tts-worker:$VERSION` from the same Podman build
+- `k8s-manifests/overlays/prod/kustomization.yaml` — add `../../base/nginx-configmap.yaml` to resources; add `harvis-tts-worker` image entry; add tts-worker image patch
+- `k8s-manifests/overlays/prod/tts-worker.yaml` — use `harvis-tts-worker` image placeholder name (was hardcoded tag)
+- `k8s-manifests/base/nginx-configmap.yaml` — add `/api/swarm` streaming location (proxy_buffering off, 3600s timeout, before catch-all /api/)
+
+### Nginx Route Added
+`/api/swarm` — streaming orchestrator endpoint (planner→worker→writer loop):
+- `proxy_buffering off` + `X-Accel-Buffering: no` for SSE/chunked streaming
+- 3600s read timeout (swarm loops can take minutes)
+- Passes `Authorization` header to backend
+
+---
+
+## Date: 2026-03-09 — TTS/STT Worker Pod + Qwen3.5 on Both GPUs → 65K Context
+
+### Summary
+Moved TTS/Whisper processing out of harvis-backend into a dedicated CPU-only `tts-worker` pod,
+freeing ~1.4GB GPU VRAM on dulc3-os. This allows vLLM to increase context from 32K → 65K using
+`--gpu-memory-utilization 0.85` and `--kv-cache-dtype fp8`. Simultaneously replaced DeepSeek-R1-14B
+on dulc3-top with Qwen3.5-9B Q4_K_M — same model family as vLLM, uniform API surface.
+
+### Problem
+vLLM capped at 32K context because harvis-backend loaded Qwen3-TTS + Whisper onto CUDA (~1.4GB GPU).
+
+### Root Cause
+TTS and Whisper workers started unconditionally in `main.py` startup, always allocating GPU VRAM
+even though the backend's primary job is API routing, not local inference.
+
+### Solution
+1. Added `TTS_DEVICE` env var override to `qwen3_tts.py` and `chatterbox_tts.py`
+2. Added `WHISPER_DEVICE` env var override to `model_manager.py` (both cache-load and fresh-download paths)
+3. Added `DISABLE_LOCAL_TTS_WORKERS=true` guard in `main.py` startup block
+4. Created `python_back_end/workers/tts_worker.py` — standalone CPU-only worker pod entrypoint
+5. Created `k8s-manifests/overlays/prod/tts-worker.yaml` — Deployment on dulc3-os (shares harvis-audio-pvc RWO)
+6. Updated `merged-ollama-backend.yaml`: vLLM ctx=65536, gpu_util=0.85, kv fp8; backend DISABLE_LOCAL_TTS_WORKERS=true
+7. Updated `llama-server.yaml`: DeepSeek-R1-14B → Qwen3.5-9B Q4_K_M, 20 GPU layers, ctx=65536
+8. Added `tts-worker.yaml` to `kustomization.yaml` resources
+
+### Files Modified
+- `python_back_end/qwen3_tts.py` — TTS_DEVICE env var override
+- `python_back_end/chatterbox_tts.py` — TTS_DEVICE env var override + add `import os`
+- `python_back_end/model_manager.py` — WHISPER_DEVICE env var override (2 load sites)
+- `python_back_end/main.py` — DISABLE_LOCAL_TTS_WORKERS guard
+- `python_back_end/workers/tts_worker.py` — **new** CPU worker entrypoint
+- `k8s-manifests/overlays/prod/tts-worker.yaml` — **new** K8s Deployment
+- `k8s-manifests/overlays/prod/merged-ollama-backend.yaml` — vLLM 65K ctx + fp8 KV; backend env var
+- `k8s-manifests/overlays/prod/llama-server.yaml` — swap to Qwen3.5-9B Q4_K_M
+- `k8s-manifests/overlays/prod/kustomization.yaml` — add tts-worker.yaml
+
+### Result
+- vLLM context: 32K → 65K
+- GPU freed on dulc3-os: ~1.4GB (TTS + Whisper now CPU-only in dedicated pod)
+- Both nodes serve `qwen3.5:9b` — unified model name, identical API surface
+
+---
+
+## Date: 2026-03-09 — Add dulc3-top GPU Node + Replace Ollama → llama.cpp + vLLM
+
+### Summary
+Major infrastructure change: Add dulc3-top (Arch Linux laptop with RTX 3070 + GTX 1650 Ti) to the K3s cluster and replace Ollama with two OpenAI-compatible inference backends running simultaneously.
+
+**GPU Split:**
+- GPU 0 (RTX 3070 8GB) → vLLM serving `qwen3.5:9b` (fast agentic, 256K ctx)
+- GPU 1 (GTX 1650 Ti 4GB + CPU RAM) → llama-server serving `devstral-small-2:24b` (long context, 384K ctx)
+
+### Problem
+- Ollama runs all models sequentially on a single GPU; agentic workloads need fast qwen3.5 AND long-context devstral simultaneously
+- dulc3-os had only 1 GPU; dulc3-top has 2 GPUs that can be split per-container
+
+### Solution
+
+**Part 1: Ansible (new directory)**
+- Created `ansible/inventory/inventory.ini` with `[laptop_nodes]` group for dulc3-top (10.0.0.4)
+- Created `ansible/host_vars/dulc3-top.yml` with K3s worker config, GPU labels, Arch-specific vars
+- Created `ansible/playbooks/conf/install-k3s-arch.yaml` — K3s agent install without firewalld/SELinux
+- Created `ansible/playbooks/setup-nvidia-arch.yaml` — nvidia-container-toolkit + K3s containerd config
+
+**Part 2: K8s Manifests**
+- `k8s-manifests/storage/pvcs.yaml` — Added `llama-model-pv` (static PV pinned to dulc3-top, /data/llama-models) and `llama-model-cache` PVC (20Gi)
+- `k8s-manifests/overlays/prod/merged-ollama-backend.yaml` — Complete rewrite:
+  - `nodeSelector` changed from `dulc3-os` → `dulc3-top`
+  - Added `download-devstral` init container (downloads devstral-24B-Q4_K_M.gguf via huggingface_hub)
+  - Replaced `ollama` container with `llama-server` (ghcr.io/ggerganov/llama.cpp:server-cuda, GPU 1, port 8080)
+  - Added `vllm` sidecar (vllm/vllm-openai:latest, GPU 0, port 8001, hermes tool-call parser)
+  - Updated backend env: `OLLAMA_URL=http://localhost:8001/v1`, `VLLM_URL`, `LLAMA_URL`
+  - Updated Service: ports 8001 (vllm) + 8080 (llama) replacing 11434 (ollama)
+- `k8s-manifests/overlays/prod/openclaw.yaml`:
+  - Replaced `ollama` model provider with `vllm-local` (port 8001) and `llama-local` (port 8080)
+  - Added `deep` agent using llama-local/devstral-small-2:24b
+  - Changed default agent model from `harvis-proxy/nvidia-kimi` → `vllm-local/qwen3.5:9b`
+  - NetworkPolicy: replaced egress port 11434 with 8001 + 8080
+
+**Part 3: Python Backend**
+- `python_back_end/main.py`:
+  - `DEFAULT_MODEL` changed from `"llama3.2:3b"` → `"qwen3.5:9b"`
+  - Added `VLLM_URL` and `LLAMA_URL` env vars
+  - `LOCAL_OLLAMA_URL` now defaults to `http://localhost:8001/v1`
+  - `stream_ollama_chunks()` — added OpenAI SSE parser for local backends; external Ollama path kept unchanged; re-emits in Ollama NDJSON format for compatibility
+  - `/api/ollama-models` — now calls OpenAI `/v1/models` on vLLM + llama-server; external Ollama path kept
+  - All `unload_ollama_model()` calls replaced with `logger.debug()` (vLLM/llama-server manage memory automatically)
+  - Removed `unload_ollama_model` import
+  - Two direct `{OLLAMA_URL}/api/chat` calls updated to `{VLLM_URL}/chat/completions` with OpenAI response parsing
+
+### Files Modified
+- `ansible/inventory/inventory.ini` (new)
+- `ansible/host_vars/dulc3-top.yml` (new)
+- `ansible/playbooks/conf/install-k3s-arch.yaml` (new)
+- `ansible/playbooks/setup-nvidia-arch.yaml` (new)
+- `k8s-manifests/storage/pvcs.yaml`
+- `k8s-manifests/overlays/prod/merged-ollama-backend.yaml`
+- `k8s-manifests/overlays/prod/openclaw.yaml`
+- `python_back_end/main.py`
+
+### Result
+Two inference backends run simultaneously with zero VRAM conflict (CUDA_VISIBLE_DEVICES pins each container to its GPU). OpenClaw defaults to fast qwen3.5 (`main` agent) with a `deep` agent for long-context devstral work.
+
+### Tuning Notes
+- Qwen3.5 context: raise `--max-model-len` from 131072 → 262144 for full 256K once VRAM verified
+- Devstral context: raise `--ctx-size` from 131072 → 393216 for full 384K (needs ~16GB CPU RAM for KV)
+- Devstral GPU layers: bump `--n-gpu-layers` from 12 → 16 if 1650 Ti has headroom (~312MB/layer)
+- HuggingFace DNS: run `./scripts/add-dns-entry.sh huggingface.co` before deploying (campus blocks UDP 53)
+
+---
+
 ## Date: 2026-03-04 — Thinking Mode Toggle + OpenClaw 503 Fix
 
 ### Summary

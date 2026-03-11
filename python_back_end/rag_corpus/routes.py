@@ -32,6 +32,17 @@ EMBEDDING_MODEL = os.getenv(
     "RAG_EMBEDDING_MODEL", "nomic-embed-text"
 )  # 768 dims, default
 
+# Per-model embedding server URLs (llama.cpp on dulc3-top, CPU-only)
+# Falls back to OLLAMA_URL for backward compat if not set
+EMBED_NOMIC_URL = os.getenv("EMBED_NOMIC_URL", OLLAMA_URL)   # port 8081, nomic-embed-text
+EMBED_QW3_URL = os.getenv("EMBED_QW3_URL", OLLAMA_URL)        # port 8082, Qwen3-Embedding-4B
+
+# Map model name → embedding server URL
+_EMBED_URL_MAP = {
+    "nomic-embed-text": EMBED_NOMIC_URL,
+    "qwen3-embedding": EMBED_QW3_URL,
+}
+
 # Per-source embedding model configuration
 # qwen3-embedding: 4096 dims - for complex technical/code content
 # nomic-embed-text: 768 dims - for general devops/docs
@@ -203,11 +214,13 @@ async def initialize_rag_corpus(db_pool) -> bool:
         logger.info(f"Loaded {len(_config_manager.get_all())} source configurations")
 
         # Initialize embedding adapters for each tier
+        # Routes each model to its dedicated llama.cpp server (or Ollama if not configured)
         for tier, config in EMBEDDING_TIER_CONFIG.items():
             model_name = config["model"]
             if model_name not in _embedding_adapters:
+                embed_url = _EMBED_URL_MAP.get(model_name, OLLAMA_URL)
                 _embedding_adapters[model_name] = EmbeddingAdapter(
-                    model_name=model_name, ollama_url=OLLAMA_URL
+                    model_name=model_name, ollama_url=embed_url
                 )
                 logger.info(
                     f"Initialized embedding adapter: {model_name} ({config['dimensions']} dims)"

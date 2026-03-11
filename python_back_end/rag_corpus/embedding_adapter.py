@@ -28,18 +28,28 @@ class EmbeddingAdapter:
         model_name: str = "nomic-embed-text",  # 768 dims, excellent quality
         ollama_url: str = "http://ollama:11434",
         use_huggingface_fallback: bool = True,
+        api_format: str = "auto",
     ):
         """
         Initialize the embedding adapter.
 
         Args:
-            model_name: Ollama embedding model name
-            ollama_url: URL of Ollama server
+            model_name: Embedding model name
+            ollama_url: URL of embedding server (Ollama or llama.cpp)
             use_huggingface_fallback: Whether to fall back to HuggingFace
+            api_format: "auto" (detect from URL), "ollama", or "llamacpp"
         """
         self.model_name = model_name
         self.ollama_url = ollama_url.rstrip("/")
         self.use_huggingface_fallback = use_huggingface_fallback
+
+        # Detect API format: llama.cpp uses /v1/embeddings (OpenAI-compatible)
+        # Ollama uses /api/embeddings with {"prompt": ...}
+        if api_format == "auto":
+            port = self.ollama_url.split(":")[-1].split("/")[0]
+            self._api_format = "ollama" if port == "11434" else "llamacpp"
+        else:
+            self._api_format = api_format
 
         self._session: Optional[aiohttp.ClientSession] = None
         self._hf_model = None
@@ -73,6 +83,25 @@ class EmbeddingAdapter:
                 logger.warning("sentence-transformers not available for fallback")
         return self._hf_model
 
+    async def _embed_with_llamacpp(self, text: str) -> List[float]:
+        """Generate embedding using llama.cpp OpenAI-compatible /v1/embeddings."""
+        session = await self._get_session()
+        text = self._truncate_text(text)
+        payload = {"input": text}
+        logger.debug(f"Calling llama.cpp embeddings API at {self.ollama_url}")
+        async with session.post(
+            f"{self.ollama_url}/v1/embeddings", json=payload
+        ) as resp:
+            if resp.status != 200:
+                error_text = await resp.text()
+                raise RuntimeError(f"llama.cpp API error: {resp.status} - {error_text}")
+            data = await resp.json()
+            embedding = data["data"][0]["embedding"]
+            if self._embedding_dim is None:
+                self._embedding_dim = len(embedding)
+                logger.info(f"llama.cpp embedding dimension: {self._embedding_dim}")
+            return embedding
+
     async def embed_text(self, text: str) -> List[float]:
         """
         Generate embedding for a single text.
@@ -84,9 +113,11 @@ class EmbeddingAdapter:
             Embedding vector as list of floats
         """
         try:
+            if self._api_format == "llamacpp":
+                return await self._embed_with_llamacpp(text)
             return await self._embed_with_ollama(text)
         except Exception as e:
-            logger.warning(f"Ollama embedding failed: {e}, trying fallback")
+            logger.warning(f"Embedding failed ({self._api_format}): {e}, trying fallback")
             return self._embed_with_huggingface(text)
 
     async def embed_batch(
@@ -117,7 +148,7 @@ class EmbeddingAdapter:
                 f"Embedding batch {i // batch_size + 1}/{(len(texts) - 1) // batch_size + 1}"
             )
 
-            # Try Ollama first with concurrent processing
+            # Try embedding server with concurrent processing
             try:
                 # Process batch concurrently with semaphore limiting
                 batch_embeddings = await asyncio.gather(
@@ -243,23 +274,30 @@ class EmbeddingAdapter:
             Health status dict
         """
         try:
-            # Test Ollama
             session = await self._get_session()
-            async with session.get(f"{self.ollama_url}/api/tags") as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    models = [m.get("name", "") for m in data.get("models", [])]
-                    has_embed_model = any(self.model_name in m for m in models)
-
-                    return {
-                        "status": "healthy" if has_embed_model else "warning",
-                        "ollama_available": True,
-                        "embedding_model": self.model_name,
-                        "model_loaded": has_embed_model,
-                        "available_models": models[:10],  # Limit list
-                    }
+            if self._api_format == "llamacpp":
+                async with session.get(f"{self.ollama_url}/health") as resp:
+                    if resp.status == 200:
+                        return {
+                            "status": "healthy",
+                            "backend": "llamacpp",
+                            "embedding_model": self.model_name,
+                        }
+            else:
+                async with session.get(f"{self.ollama_url}/api/tags") as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        models = [m.get("name", "") for m in data.get("models", [])]
+                        has_embed_model = any(self.model_name in m for m in models)
+                        return {
+                            "status": "healthy" if has_embed_model else "warning",
+                            "backend": "ollama",
+                            "embedding_model": self.model_name,
+                            "model_loaded": has_embed_model,
+                            "available_models": models[:10],
+                        }
         except Exception as e:
-            logger.warning(f"Ollama health check failed: {e}")
+            logger.warning(f"Embedding health check failed ({self._api_format}): {e}")
 
         # Check HuggingFace fallback
         hf_available = self._get_huggingface_model() is not None

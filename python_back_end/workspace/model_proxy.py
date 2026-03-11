@@ -42,11 +42,11 @@ OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 # Pricing constants (USD per million tokens)
-_KIMI_COST_IN_PER_M   = 0.14
-_KIMI_COST_OUT_PER_M  = 0.14
+_KIMI_COST_IN_PER_M = 0.14
+_KIMI_COST_OUT_PER_M = 0.14
 _NVIDIA_COST_IN_PER_M = 0.14
 _NVIDIA_COST_OUT_PER_M = 0.14
-_OLLAMA_COST_PER_M    = 0.0   # self-hosted, no marginal cost
+_OLLAMA_COST_PER_M = 0.0  # self-hosted, no marginal cost
 
 
 async def _log_usage(model: str, tokens_in: int, tokens_out: int, cost: float) -> None:
@@ -57,15 +57,32 @@ async def _log_usage(model: str, tokens_in: int, tokens_out: int, cost: float) -
         conn = await asyncpg.connect(DATABASE_URL)
         await conn.execute(
             "INSERT INTO proxy_usage_log(model, tokens_in, tokens_out, cost_usd) VALUES($1,$2,$3,$4)",
-            model, tokens_in, tokens_out, cost,
+            model,
+            tokens_in,
+            tokens_out,
+            cost,
         )
         await conn.close()
-        logger.info("usage: model=%s in=%d out=%d cost=$%.6f", model, tokens_in, tokens_out, cost)
+        logger.info(
+            "usage: model=%s in=%d out=%d cost=$%.6f",
+            model,
+            tokens_in,
+            tokens_out,
+            cost,
+        )
     except Exception as e:
         logger.warning("usage log failed: %s", e)
 
+
 # Model prefixes routed to Moonshot
-_KIMI_MODELS = {"kimi-k2.5", "kimi-k2", "kimi-k1.5", "moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"}
+_KIMI_MODELS = {
+    "kimi-k2.5",
+    "kimi-k2",
+    "kimi-k1.5",
+    "moonshot-v1-8k",
+    "moonshot-v1-32k",
+    "moonshot-v1-128k",
+}
 
 # Models routed to NVIDIA NIM (moonshotai/kimi-k2.5 hosted on NVIDIA infrastructure)
 _NVIDIA_MODELS = {"nvidia-kimi"}
@@ -82,7 +99,7 @@ def _verify_token(authorization: str | None) -> None:
         return  # dev mode — no token configured
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing Authorization header")
-    token = authorization[len("Bearer "):]
+    token = authorization[len("Bearer ") :]
     if token != OPENCLAW_GATEWAY_TOKEN:
         raise HTTPException(status_code=401, detail="Invalid proxy token")
 
@@ -100,10 +117,15 @@ def _resolve_route(model_name: str) -> tuple[str, dict, bool, bool, str | None]:
     # Kimi / Moonshot models
     if model_name in _KIMI_MODELS:
         if not MOONSHOT_API_KEY:
-            raise HTTPException(status_code=503, detail="MOONSHOT_API_KEY not configured on backend")
+            raise HTTPException(
+                status_code=503, detail="MOONSHOT_API_KEY not configured on backend"
+            )
         return (
             f"{MOONSHOT_BASE_URL}/chat/completions",
-            {"Authorization": f"Bearer {MOONSHOT_API_KEY}", "Content-Type": "application/json"},
+            {
+                "Authorization": f"Bearer {MOONSHOT_API_KEY}",
+                "Content-Type": "application/json",
+            },
             True,
             False,
             None,
@@ -112,10 +134,15 @@ def _resolve_route(model_name: str) -> tuple[str, dict, bool, bool, str | None]:
     # NVIDIA NIM — Kimi K2.5 hosted on NVIDIA infrastructure
     if model_name in _NVIDIA_MODELS:
         if not NVIDIA_API_KEY:
-            raise HTTPException(status_code=503, detail="NVIDIA_API_KEY not configured on backend")
+            raise HTTPException(
+                status_code=503, detail="NVIDIA_API_KEY not configured on backend"
+            )
         return (
             f"{NVIDIA_BASE_URL}/chat/completions",
-            {"Authorization": f"Bearer {NVIDIA_API_KEY}", "Content-Type": "application/json"},
+            {
+                "Authorization": f"Bearer {NVIDIA_API_KEY}",
+                "Content-Type": "application/json",
+            },
             False,
             True,
             "moonshotai/kimi-k2.5",  # NVIDIA NIM expects the full model path
@@ -127,7 +154,7 @@ def _resolve_route(model_name: str) -> tuple[str, dict, bool, bool, str | None]:
             raise HTTPException(
                 status_code=503,
                 detail="EXTERNAL_OLLAMA_URL not configured on backend. "
-                       "Add it to the harvis-backend-env K8s secret.",
+                "Add it to the harvis-backend-env K8s secret.",
             )
         headers = {"Content-Type": "application/json"}
         if EXTERNAL_OLLAMA_API_KEY:
@@ -143,8 +170,38 @@ def _resolve_route(model_name: str) -> tuple[str, dict, bool, bool, str | None]:
     raise HTTPException(
         status_code=400,
         detail=f"Model '{model_name}' not routable through this proxy. "
-               f"Supported: kimi-k2.5, nvidia-kimi, gpt-oss:*, qwen3:*",
+        f"Supported: kimi-k2.5, nvidia-kimi, gpt-oss:*, qwen3:*",
     )
+
+
+def _filter_messages_for_moonshot(messages: list) -> list:
+    """Filter out tool/function messages and empty content for Moonshot API."""
+    filtered = []
+    for msg in messages:
+        role = msg.get("role", "")
+
+        # Drop tool / function result messages
+        if role in ("tool", "function"):
+            logger.warning(f"Filtering out {role} role message for Moonshot")
+            continue
+
+        # Strip tool_calls from assistant messages
+        if role == "assistant" and msg.get("tool_calls"):
+            msg = {k: v for k, v in msg.items() if k != "tool_calls"}
+
+        # Check for empty content
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            if not content or not content.strip():
+                logger.warning(f"Filtering out empty {role} message")
+                continue
+        elif isinstance(content, list):
+            if not content:
+                logger.warning(f"Filtering out empty multimodal {role} message")
+                continue
+
+        filtered.append(msg)
+    return filtered
 
 
 @model_proxy_router.post("/chat/completions")
@@ -180,6 +237,10 @@ async def proxy_chat_completions(
     if is_kimi or is_nvidia:
         body = {**body, "temperature": 1.0}
 
+    # Filter messages for Moonshot/Kimi to remove tool calls and empty messages
+    if is_kimi and "messages" in body:
+        body["messages"] = _filter_messages_for_moonshot(body["messages"])
+
     # NVIDIA NIM Kimi: only inject thinking param if caller requested it.
     # Sending {"thinking": False} (or True without care) can cause NVIDIA NIM to error.
     # OpenClaw requests don't send thinking_mode, so default = off (omit entirely).
@@ -196,7 +257,9 @@ async def proxy_chat_completions(
 
     logger.info(
         "model_proxy: model=%s stream=%s → %s",
-        model_name, is_streaming, target_url.split("/v1")[0],
+        model_name,
+        is_streaming,
+        target_url.split("/v1")[0],
     )
 
     if is_streaming:
@@ -204,18 +267,33 @@ async def proxy_chat_completions(
         if is_kimi or is_nvidia:
             body = {**body, "stream_options": {"include_usage": True}}
         return StreamingResponse(
-            _stream_from_upstream(target_url, headers, body, model_name=model_name, is_kimi=is_kimi or is_nvidia, is_nvidia=is_nvidia),
+            _stream_from_upstream(
+                target_url,
+                headers,
+                body,
+                model_name=model_name,
+                is_kimi=is_kimi or is_nvidia,
+                is_nvidia=is_nvidia,
+            ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
     # Non-streaming
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0)) as client:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(600.0, connect=10.0)
+        ) as client:
             resp = await client.post(target_url, json=body, headers=headers)
             if resp.status_code != 200:
-                logger.error("model_proxy: upstream error %s: %s", resp.status_code, resp.text[:200])
-                raise HTTPException(status_code=502, detail=f"Upstream API error: {resp.status_code}")
+                logger.error(
+                    "model_proxy: upstream error %s: %s",
+                    resp.status_code,
+                    resp.text[:200],
+                )
+                raise HTTPException(
+                    status_code=502, detail=f"Upstream API error: {resp.status_code}"
+                )
             data = resp.json()
             usage = data.get("usage", {})
             if usage:
@@ -257,15 +335,26 @@ async def _stream_from_upstream(
     → content in forwarded chunks so the Discord bot sees thinking output too.
     """
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0)) as client:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(600.0, connect=10.0)
+        ) as client:
             async with client.stream("POST", url, json=body, headers=headers) as resp:
                 if resp.status_code != 200:
                     error_body = await resp.aread()
                     error_msg = error_body.decode(errors="replace")[:200]
-                    logger.error("model_proxy: upstream streaming error %s: %s", resp.status_code, error_msg)
-                    error_event = json.dumps({
-                        "error": {"message": f"Upstream error {resp.status_code}: {error_msg}", "type": "proxy_error"}
-                    })
+                    logger.error(
+                        "model_proxy: upstream streaming error %s: %s",
+                        resp.status_code,
+                        error_msg,
+                    )
+                    error_event = json.dumps(
+                        {
+                            "error": {
+                                "message": f"Upstream error {resp.status_code}: {error_msg}",
+                                "type": "proxy_error",
+                            }
+                        }
+                    )
                     yield f"data: {error_event}\n\n"
                     return
 
@@ -279,10 +368,20 @@ async def _stream_from_upstream(
                             if usage.get("prompt_tokens"):
                                 ti = usage["prompt_tokens"]
                                 to_ = usage.get("completion_tokens", 0)
-                                rate_in  = _KIMI_COST_IN_PER_M  if is_kimi else _OLLAMA_COST_PER_M
-                                rate_out = _KIMI_COST_OUT_PER_M if is_kimi else _OLLAMA_COST_PER_M
+                                rate_in = (
+                                    _KIMI_COST_IN_PER_M
+                                    if is_kimi
+                                    else _OLLAMA_COST_PER_M
+                                )
+                                rate_out = (
+                                    _KIMI_COST_OUT_PER_M
+                                    if is_kimi
+                                    else _OLLAMA_COST_PER_M
+                                )
                                 cost = (ti * rate_in + to_ * rate_out) / 1_000_000
-                                asyncio.create_task(_log_usage(model_name, ti, to_, cost))
+                                asyncio.create_task(
+                                    _log_usage(model_name, ti, to_, cost)
+                                )
 
                             # NVIDIA NIM: drop pure reasoning_content chunks entirely.
                             # Discord/OpenClaw should only see the final answer (content),
@@ -311,5 +410,7 @@ async def _stream_from_upstream(
 
     except Exception as exc:
         logger.error("model_proxy: stream error: %s", exc)
-        error_event = json.dumps({"error": {"message": str(exc), "type": "proxy_error"}})
+        error_event = json.dumps(
+            {"error": {"message": str(exc), "type": "proxy_error"}}
+        )
         yield f"data: {error_event}\n\n"

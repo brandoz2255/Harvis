@@ -45,7 +45,6 @@ from vison_models.llm_connector import (
     query_llm,
     load_qwen_model,
     unload_qwen_model,
-    unload_ollama_model,
 )
 
 # Import workspace (Harvis Workspaces / OpenClaw integration)
@@ -607,10 +606,15 @@ async def lifespan(app: FastAPI):
         app.state.job_queue = job_queue
         logger.info("✅ Job queue initialized")
 
-        # Start background workers
-        await start_tts_worker()
-        await start_whisper_worker()
-        logger.info("✅ Job queue workers started (TTS & Whisper)")
+        # Start background workers (skipped if external tts-worker pod handles them)
+        if os.getenv("DISABLE_LOCAL_TTS_WORKERS", "false").lower() != "true":
+            await start_tts_worker()
+            await start_whisper_worker()
+            logger.info("✅ Job queue workers started (TTS & Whisper)")
+        else:
+            logger.info(
+                "⏭️  Local TTS/Whisper workers disabled (external tts-worker pod)"
+            )
 
     except Exception as e:
         logger.warning(f"⚠️ Job queue initialization failed: {e}")
@@ -780,6 +784,41 @@ async def list_models(
     except Exception as e:
         logger.error(f"Error checking NVIDIA API key: {e}")
 
+    # Check if llama-server is running (Qwen3-8B on local GPU)
+    try:
+        vllm_url = os.getenv("VLLM_URL", "http://localhost:8080/v1")
+        llama_url = os.getenv("LLAMA_URL", "http://localhost:8080/v1")
+
+        # Try to get models from llama-server (OpenAI-compatible endpoint)
+        async with httpx.AsyncClient() as client:
+            llama_resp = await client.get(f"{llama_url}/models", timeout=5.0)
+
+        if llama_resp.status_code == 200:
+            llama_data = llama_resp.json()
+            llama_models = llama_data.get("data", [])
+
+            for m in llama_models:
+                model_id = m.get("id", "unknown")
+                # Avoid duplicates
+                if not any(
+                    existing["name"] == model_id for existing in formatted_models
+                ):
+                    formatted_models.append(
+                        {
+                            "name": model_id,
+                            "displayName": f"{model_id} (Local GPU)",
+                            "size": "8GB",
+                            "status": "available",
+                            "provider": "llama-server",
+                            "description": "Qwen3-8B running locally on RTX 3070 via llama.cpp",
+                        }
+                    )
+            logger.info(f"Added {len(llama_models)} llama-server models")
+        else:
+            logger.warning(f"llama-server returned status {llama_resp.status_code}")
+    except Exception as e:
+        logger.warning(f"Could not connect to llama-server: {e}")
+
     # Sort by name
     formatted_models.sort(key=lambda x: x["name"])
 
@@ -878,9 +917,16 @@ logger.info("Using device: %s", "cuda" if device == 0 else "cpu")
 
 # ─── Config --------------------------------------------------------------------
 
-LOCAL_OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
+# vLLM (qwen3.5:9b, fast agentic) is the primary local inference backend.
+# OLLAMA_URL is kept as the env var name for backwards compatibility;
+# in the merged pod it points to vLLM at port 8001.
+LOCAL_OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:8001/v1")
+VLLM_URL = os.getenv("VLLM_URL", "http://localhost:8001/v1")  # vLLM — fast, qwen3.5
+LLAMA_URL = os.getenv(
+    "LLAMA_URL", "http://localhost:8080/v1"
+)  # llama-server — devstral long-ctx
 API_KEY = os.getenv("OLLAMA_API_KEY", "key")
-DEFAULT_MODEL = "llama3.2:3b"
+DEFAULT_MODEL = "qwen3.5:9b"
 
 # External Ollama endpoint (for large models hosted elsewhere)
 # NOTE: Set to empty string by default - external routing only when explicitly configured
@@ -977,8 +1023,11 @@ MAX_RESPONSE_SIZE = int(
 
 async def stream_ollama_chunks(endpoint, payload, timeout=3600):
     """
-    Stream chunks from Ollama using async httpx.
-    Replaces the threading/queue implementation for better stability.
+    Stream chunks from the local inference backend (vLLM or llama-server).
+    Both backends expose OpenAI-compatible SSE streaming at /v1/chat/completions.
+
+    Yields JSON-encoded bytes in Ollama NDJSON format so existing consumers
+    remain unchanged:  {"message": {"content": "..."}, "done": false}
     """
     import httpx
 
@@ -986,7 +1035,7 @@ async def stream_ollama_chunks(endpoint, payload, timeout=3600):
     model_name = payload.get("model", "")
     is_external_model = model_name in EXTERNAL_MODELS_CACHE
 
-    # Determine URL and headers
+    # Determine URL and headers — external Ollama kept for large cloud-hosted models
     if is_external_model and EXTERNAL_OLLAMA_URL and EXTERNAL_OLLAMA_API_KEY:
         url = f"{EXTERNAL_OLLAMA_URL}{endpoint}"
         headers = {
@@ -995,37 +1044,95 @@ async def stream_ollama_chunks(endpoint, payload, timeout=3600):
             "User-Agent": "Harvis-Backend",
         }
         logger.info(f"🌐 Using external Ollama for {model_name}: {url}")
+        # External Ollama uses Ollama NDJSON format — stream raw lines as before
+        try:
+            timeout_config = httpx.Timeout(timeout, connect=60.0)
+            async with httpx.AsyncClient(timeout=timeout_config) as client:
+                async with client.stream(
+                    "POST", url, json=payload, headers=headers
+                ) as response:
+                    if response.status_code != 200:
+                        error_text = await response.aread()
+                        raise Exception(
+                            f"External Ollama error {response.status_code}: {error_text.decode('utf-8', errors='ignore')[:200]}"
+                        )
+                    async for line in response.aiter_lines():
+                        if line:
+                            yield line.encode("utf-8")
+        except httpx.ReadTimeout:
+            logger.error(f"❌ External Ollama read timeout after {timeout}s")
+            raise Exception("Ollama generation timed out")
+        except Exception as e:
+            logger.error(f"❌ External Ollama stream error: {e}")
+            raise
+        return
+
+    # Local backend: vLLM or llama-server (OpenAI SSE format)
+    # Translate Ollama /api/chat payload → OpenAI /v1/chat/completions payload
+    openai_payload = {
+        "model": model_name or DEFAULT_MODEL,
+        "messages": payload.get("messages", []),
+        "stream": True,
+        "temperature": payload.get("options", {}).get("temperature", 0.7),
+    }
+    if "max_tokens" in payload.get("options", {}):
+        openai_payload["max_tokens"] = payload["options"]["max_tokens"]
+
+    # Use vLLM for default; llama-server for specific models (long-context or GGUF)
+    llama_server_models = ["devstral-small-2:24b", "qwen3:8b", "qwen3-8b"]
+    if model_name in llama_server_models or model_name.startswith("qwen3"):
+        base_url = LLAMA_URL
+        logger.info(f"🏠 Using llama-server for {model_name}: {base_url}")
     else:
-        # User settings override (if applicable - currently not passed to this func)
-        url = f"{LOCAL_OLLAMA_URL}{endpoint}"
-        headers = {}
-        logger.info(f"🏠 Using local Ollama: {url}")
+        base_url = VLLM_URL
+        logger.info(f"🏠 Using vLLM (fast): {base_url}")
+
+    url = f"{base_url}/chat/completions"
+    headers = {"Content-Type": "application/json"}
 
     try:
-        # Increase timeout for connection and reading
         timeout_config = httpx.Timeout(timeout, connect=60.0)
-
         async with httpx.AsyncClient(timeout=timeout_config) as client:
             async with client.stream(
-                "POST", url, json=payload, headers=headers
+                "POST", url, json=openai_payload, headers=headers
             ) as response:
                 if response.status_code != 200:
-                    # Read error body
                     error_text = await response.aread()
-                    error_msg = f"Ollama error {response.status_code}: {error_text.decode('utf-8', errors='ignore')[:200]}"
-                    raise Exception(error_msg)
+                    raise Exception(
+                        f"Inference backend error {response.status_code}: {error_text.decode('utf-8', errors='ignore')[:200]}"
+                    )
 
-                # Stream lines
+                # Parse OpenAI SSE and re-emit in Ollama NDJSON format
                 async for line in response.aiter_lines():
-                    if line:
-                        # Yield bytes to match existing consumer logic
-                        yield line.encode("utf-8")
+                    if not line:
+                        continue
+                    if line.startswith("data: "):
+                        data_str = line[6:]
+                        if data_str.strip() == "[DONE]":
+                            yield json.dumps(
+                                {"message": {"content": ""}, "done": True}
+                            ).encode("utf-8")
+                            break
+                        try:
+                            chunk_json = json.loads(data_str)
+                            content_chunk = (
+                                chunk_json.get("choices", [{}])[0]
+                                .get("delta", {})
+                                .get("content", "")
+                            ) or ""
+                            ollama_chunk = {
+                                "message": {"content": content_chunk},
+                                "done": False,
+                            }
+                            yield json.dumps(ollama_chunk).encode("utf-8")
+                        except (json.JSONDecodeError, IndexError):
+                            continue
 
     except httpx.ReadTimeout:
-        logger.error(f"❌ Ollama read timeout after {timeout}s")
-        raise Exception("Ollama generation timed out")
+        logger.error(f"❌ Inference backend read timeout after {timeout}s")
+        raise Exception("Inference backend generation timed out")
     except Exception as e:
-        logger.error(f"❌ Async stream error: {e}")
+        logger.error(f"❌ Inference backend stream error: {e}")
         raise
 
 
@@ -1269,7 +1376,9 @@ class ChatRequest(BaseModel):
     low_vram: bool = False
     text_only: bool = False
     tts_engine: str = "qwen"  # "qwen" or "chatterbox" TTS engine selection
-    thinking_mode: bool = False  # When True, use chain-of-thought reasoning (slower but deeper)
+    thinking_mode: bool = (
+        False  # When True, use chain-of-thought reasoning (slower but deeper)
+    )
 
 
 class ResearchChatRequest(BaseModel):
@@ -2304,6 +2413,7 @@ async def chat(
             # ── 6. NVIDIA NIM (Kimi K2.5) model branch ───────────────────────────────────────
             elif req.model == "nvidia-kimi":
                 import time as _time
+
                 _t0 = _time.monotonic()
                 yield f"data: {json.dumps({'status': 'processing', 'detail': 'Querying NVIDIA NIM...'})}\n\n"
 
@@ -2318,11 +2428,13 @@ async def chat(
                     return
 
                 nvidia_api_key = nvidia_config["api_key"]
-                logger.info(f"⏱️ NVIDIA: key fetch took {_time.monotonic()-_t0:.2f}s")
+                logger.info(f"⏱️ NVIDIA: key fetch took {_time.monotonic() - _t0:.2f}s")
 
                 # Build messages (same system prompt logic as Moonshot branch)
                 _t1 = _time.monotonic()
-                system_prompt_path = os.path.join(os.path.dirname(__file__), "system_prompt.txt")
+                system_prompt_path = os.path.join(
+                    os.path.dirname(__file__), "system_prompt.txt"
+                )
                 try:
                     with open(system_prompt_path, "r", encoding="utf-8") as f:
                         system_prompt = f.read().strip()
@@ -2330,7 +2442,9 @@ async def chat(
                     system_prompt = 'You are "Jarves", a voice-first local assistant.'
 
                 artifact_instructions_path = os.path.join(
-                    os.path.dirname(__file__), "prompts", "artifact_instructions_code.txt"
+                    os.path.dirname(__file__),
+                    "prompts",
+                    "artifact_instructions_code.txt",
                 )
                 try:
                     with open(artifact_instructions_path, "r", encoding="utf-8") as f:
@@ -2340,7 +2454,9 @@ async def chat(
 
                 _t2 = _time.monotonic()
                 local_rag_context = await get_local_rag_context(current_message_content)
-                logger.info(f"⏱️ NVIDIA: RAG lookup took {_time.monotonic()-_t2:.2f}s (prompt so far: {len(system_prompt)} chars)")
+                logger.info(
+                    f"⏱️ NVIDIA: RAG lookup took {_time.monotonic() - _t2:.2f}s (prompt so far: {len(system_prompt)} chars)"
+                )
                 if local_rag_context:
                     system_prompt += f"\n\n--- RELEVANT DOCUMENTATION ---\n{local_rag_context}\n--- END ---"
 
@@ -2353,7 +2469,7 @@ async def chat(
                 logger.info(
                     f"🟢 Using NVIDIA NIM: moonshotai/kimi-k2.5 | thinking_mode={req.thinking_mode} | "
                     f"messages={len(messages)} total_prompt_chars={total_prompt_chars} | "
-                    f"pre-request setup took {_time.monotonic()-_t0:.2f}s"
+                    f"pre-request setup took {_time.monotonic() - _t0:.2f}s"
                 )
 
                 # NVIDIA NIM Kimi K2.5 with thinking returns TWO delta fields:
@@ -2370,8 +2486,12 @@ async def chat(
                 _ttft = None  # time-to-first-token
                 _t_stream_start = _time.monotonic()
                 try:
-                    logger.info(f"🔵 NVIDIA NIM: opening stream (thinking={req.thinking_mode})")
-                    async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
+                    logger.info(
+                        f"🔵 NVIDIA NIM: opening stream (thinking={req.thinking_mode})"
+                    )
+                    async with httpx.AsyncClient(
+                        timeout=httpx.Timeout(300.0, connect=10.0)
+                    ) as client:
                         async with client.stream(
                             "POST",
                             "https://integrate.api.nvidia.com/v1/chat/completions",
@@ -2390,18 +2510,26 @@ async def chat(
                                 "stream_options": {"include_usage": True},
                             },
                         ) as resp:
-                            logger.info(f"🔵 NVIDIA NIM: response status={resp.status_code} headers={dict(resp.headers)}")
+                            logger.info(
+                                f"🔵 NVIDIA NIM: response status={resp.status_code} headers={dict(resp.headers)}"
+                            )
                             if resp.status_code != 200:
                                 err = await resp.aread()
                                 err_text = err.decode()[:500]
-                                logger.error(f"🔴 NVIDIA NIM: upstream error {resp.status_code}: {err_text}")
+                                logger.error(
+                                    f"🔴 NVIDIA NIM: upstream error {resp.status_code}: {err_text}"
+                                )
                                 yield f"data: {json.dumps({'status': 'error', 'error': f'NVIDIA NIM error {resp.status_code}: {err_text}'})}\n\n"
                                 return
-                            logger.info("🔵 NVIDIA NIM: stream opened, reading chunks...")
+                            logger.info(
+                                "🔵 NVIDIA NIM: stream opened, reading chunks..."
+                            )
                             async for line in resp.aiter_lines():
                                 _chunk_count += 1
                                 if line == "data: [DONE]":
-                                    logger.info(f"🔵 NVIDIA NIM: received [DONE] after {_chunk_count} lines")
+                                    logger.info(
+                                        f"🔵 NVIDIA NIM: received [DONE] after {_chunk_count} lines"
+                                    )
                                     continue
                                 if line.startswith("data: "):
                                     try:
@@ -2411,14 +2539,20 @@ async def chat(
                                             # Could be a usage chunk
                                             usage = chunk.get("usage")
                                             if usage:
-                                                logger.info(f"🔵 NVIDIA NIM usage: {usage}")
+                                                logger.info(
+                                                    f"🔵 NVIDIA NIM usage: {usage}"
+                                                )
                                             continue
                                         delta = choices[0].get("delta", {})
                                         finish_reason = choices[0].get("finish_reason")
                                         if finish_reason:
-                                            logger.info(f"🔵 NVIDIA NIM: finish_reason={finish_reason}")
+                                            logger.info(
+                                                f"🔵 NVIDIA NIM: finish_reason={finish_reason}"
+                                            )
 
-                                        thinking_chunk = delta.get("reasoning_content") or ""
+                                        thinking_chunk = (
+                                            delta.get("reasoning_content") or ""
+                                        )
                                         answer_chunk = delta.get("content") or ""
 
                                         if thinking_chunk:
@@ -2430,20 +2564,30 @@ async def chat(
                                         if answer_chunk:
                                             _answer_chunk_count += 1
                                             if _ttft is None:
-                                                _ttft = _time.monotonic() - _t_stream_start
-                                                logger.info(f"⏱️ NVIDIA NIM: time-to-first-token = {_ttft:.2f}s")
+                                                _ttft = (
+                                                    _time.monotonic() - _t_stream_start
+                                                )
+                                                logger.info(
+                                                    f"⏱️ NVIDIA NIM: time-to-first-token = {_ttft:.2f}s"
+                                                )
                                             _answer_buf += answer_chunk
                                             yield f"data: {json.dumps({'status': 'streaming', 'content': answer_chunk})}\n\n"
 
                                         # Log delta keys to catch unexpected fields
                                         delta_keys = [k for k, v in delta.items() if v]
                                         if delta_keys and _chunk_count % 50 == 1:
-                                            logger.debug(f"🔵 NVIDIA NIM delta keys at chunk {_chunk_count}: {delta_keys}")
+                                            logger.debug(
+                                                f"🔵 NVIDIA NIM delta keys at chunk {_chunk_count}: {delta_keys}"
+                                            )
 
                                     except json.JSONDecodeError as je:
-                                        logger.warning(f"🟡 NVIDIA NIM: JSON decode error on line: {line[:100]} — {je}")
+                                        logger.warning(
+                                            f"🟡 NVIDIA NIM: JSON decode error on line: {line[:100]} — {je}"
+                                        )
                                     except Exception as ce:
-                                        logger.warning(f"🟡 NVIDIA NIM: chunk parse error: {ce}")
+                                        logger.warning(
+                                            f"🟡 NVIDIA NIM: chunk parse error: {ce}"
+                                        )
 
                     _total_time = _time.monotonic() - _t_stream_start
                     logger.info(
@@ -2451,10 +2595,12 @@ async def chat(
                         f"total_lines={_chunk_count} "
                         f"thinking_chunks={_thinking_chunk_count} ({len(_thinking_buf)} chars) "
                         f"answer_chunks={_answer_chunk_count} ({len(_answer_buf)} chars) "
-                        f"tokens/s≈{len(_answer_buf)/max(_total_time,0.1):.0f} chars/s"
+                        f"tokens/s≈{len(_answer_buf) / max(_total_time, 0.1):.0f} chars/s"
                     )
                     if not _answer_buf and not _thinking_buf:
-                        logger.error("🔴 NVIDIA NIM: both buffers empty — no content received from stream!")
+                        logger.error(
+                            "🔴 NVIDIA NIM: both buffers empty — no content received from stream!"
+                        )
                     elif not _answer_buf:
                         logger.warning(
                             f"🟡 NVIDIA NIM: answer_buf empty but thinking_buf has {len(_thinking_buf)} chars. "
@@ -2463,11 +2609,15 @@ async def chat(
 
                     # Build response_text: thinking in <think> tags + final answer
                     if _thinking_buf:
-                        response_text = f"<think>{_thinking_buf}</think>\n\n{_answer_buf}"
+                        response_text = (
+                            f"<think>{_thinking_buf}</think>\n\n{_answer_buf}"
+                        )
                     else:
                         response_text = _answer_buf
                 except Exception as e:
-                    logger.error(f"🔴 NVIDIA NIM stream exception: {type(e).__name__}: {e}")
+                    logger.error(
+                        f"🔴 NVIDIA NIM stream exception: {type(e).__name__}: {e}"
+                    )
                     yield f"data: {json.dumps({'status': 'error', 'error': str(e)})}\n\n"
                     return
 
@@ -2833,11 +2983,8 @@ async def chat(
                 )
 
                 if req.low_vram and not req.text_only:
-                    logger.info(
-                        f"🧹 [Low VRAM Mode] Unloading Ollama model {req.model} to free VRAM"
-                    )
-                    unload_ollama_model(
-                        req.model, OLLAMA_ENDPOINT.replace("/api/chat", "")
+                    logger.debug(
+                        f"[Low VRAM Mode] Skipping model unload for {req.model} — vLLM/llama-server manage memory automatically"
                     )
                 else:
                     logger.info(
@@ -3581,10 +3728,12 @@ async def vision_chat(
                 # Build multimodal content — text + images (OpenAI image_url format)
                 content = [{"type": "text", "text": req.message}]
                 for img_b64 in processed_images:
-                    content.append({
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{img_b64}"},
-                    })
+                    content.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{img_b64}"},
+                        }
+                    )
                 messages.append({"role": "user", "content": content})
 
                 logger.info(
@@ -3593,7 +3742,9 @@ async def vision_chat(
                 yield f"data: {json.dumps({'status': 'inference', 'detail': f'Analyzing with NVIDIA Kimi K2.5...'})}\n\n"
 
                 try:
-                    async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
+                    async with httpx.AsyncClient(
+                        timeout=httpx.Timeout(300.0, connect=10.0)
+                    ) as client:
                         resp = await client.post(
                             "https://integrate.api.nvidia.com/v1/chat/completions",
                             headers={
@@ -3762,8 +3913,9 @@ async def vision_chat(
                 return
 
             if req.low_vram:
-                logger.info(f"🧹 [Low VRAM Mode] Unloading vision model {req.model}")
-                unload_ollama_model(req.model, LOCAL_OLLAMA_URL)
+                logger.debug(
+                    f"[Low VRAM Mode] Skipping vision model unload for {req.model} — vLLM/llama-server manage memory automatically"
+                )
 
             # Separate reasoning if present
             reasoning_content = None
@@ -3965,8 +4117,7 @@ async def upload_file(
     if not any(mime_type.startswith(p) for p in ALLOWED_MIME_PREFIXES):
         raise HTTPException(
             status_code=415,
-            detail=f"Unsupported file type: {mime_type}. "
-                   "Allowed: images, PDF, DOCX.",
+            detail=f"Unsupported file type: {mime_type}. Allowed: images, PDF, DOCX.",
         )
 
     # Derive safe extension from content_type
@@ -3992,22 +4143,30 @@ async def upload_file(
         with open(stored_path, "wb") as f_out:
             f_out.write(contents)
         import json as _json
+
         with open(meta_path, "w") as f_meta:
-            _json.dump({
-                "file_id": file_id,
-                "filename": file.filename or f"upload{ext}",
-                "mime_type": mime_type,
-                "stored_path": stored_path,
-                "user_id": current_user.id,
-                "size": len(contents),
-            }, f_meta)
+            _json.dump(
+                {
+                    "file_id": file_id,
+                    "filename": file.filename or f"upload{ext}",
+                    "mime_type": mime_type,
+                    "stored_path": stored_path,
+                    "user_id": current_user.id,
+                    "size": len(contents),
+                },
+                f_meta,
+            )
     except Exception as exc:
         logger.error("upload_file: failed to store file: %s", exc)
         raise HTTPException(status_code=500, detail=f"Failed to store file: {exc}")
 
     logger.info(
         "upload_file: file_id=%s filename=%r mime=%s size=%d user=%d",
-        file_id, file.filename, mime_type, len(contents), current_user.id,
+        file_id,
+        file.filename,
+        mime_type,
+        len(contents),
+        current_user.id,
     )
 
     return {
@@ -4214,28 +4373,34 @@ async def analyze_and_respond(req: AnalyzeAndRespondRequest):
                     "stream": False,
                 }
 
-                logger.info(f"→ Asking Ollama with model {req.model}")
-                headers = (
-                    {"Authorization": f"Bearer {API_KEY}"} if API_KEY != "key" else {}
-                )
+                logger.info(f"→ Asking inference backend with model {req.model}")
+                headers = {"Content-Type": "application/json"}
 
                 try:
                     resp = requests.post(
-                        f"{OLLAMA_URL}/api/chat",
+                        f"{VLLM_URL}/chat/completions",
                         json=payload,
                         headers=headers,
                         timeout=90,
                     )
 
                     if resp.status_code != 200:
-                        logger.error("Ollama error %s: %s", resp.status_code, resp.text)
+                        logger.error(
+                            "Inference backend error %s: %s",
+                            resp.status_code,
+                            resp.text,
+                        )
                         raise HTTPException(
                             status_code=500,
                             detail=f"LLM request failed with status {resp.status_code}",
                         )
 
                     llm_response = (
-                        resp.json().get("message", {}).get("content", "").strip()
+                        resp.json()
+                        .get("choices", [{}])[0]
+                        .get("message", {})
+                        .get("content", "")
+                        .strip()
                     )
 
                     if not llm_response:
@@ -4384,12 +4549,21 @@ async def analyze_screen_with_tts(req: ScreenAnalysisWithTTSRequest):
                 ],
                 "stream": False,
             }
-            headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY != "key" else {}
+            headers = {"Content-Type": "application/json"}
             resp = requests.post(
-                f"{OLLAMA_URL}/api/chat", json=payload, headers=headers, timeout=90
+                f"{VLLM_URL}/chat/completions",
+                json=payload,
+                headers=headers,
+                timeout=90,
             )
             resp.raise_for_status()
-            llm_response = resp.json().get("message", {}).get("content", "").strip()
+            llm_response = (
+                resp.json()
+                .get("choices", [{}])[0]
+                .get("message", {})
+                .get("content", "")
+                .strip()
+            )
 
         # Phase 3: Reload TTS for audio generation
         logger.info("🔊 Phase 3: Reloading TTS for audio generation")
@@ -4696,10 +4870,9 @@ async def mic_chat(
                     )
 
                     if low_vram and not text_only:
-                        logger.info(
-                            f"🧹 [Low VRAM Mode] Unloading Ollama model {model} to free VRAM for TTS"
+                        logger.debug(
+                            f"[Low VRAM Mode] Skipping model unload for {model} — vLLM/llama-server manage memory automatically"
                         )
-                        unload_ollama_model(model, "")
 
                 if has_reasoning_content(response_text):
                     reasoning_content, final_answer = (
@@ -5242,28 +5415,44 @@ logger.info("Models will be loaded on demand for optimal memory management")
 @app.get("/api/ollama-models", tags=["models"])
 async def get_ollama_models():
     """
-    Fetches the list of available models from both local and external Ollama servers.
+    Fetches the list of available models from vLLM, llama-server, and (optionally)
+    the external Ollama endpoint.  Both local backends expose OpenAI /v1/models.
     """
     ollama_model_names = []
 
-    # Fetch from local Ollama
+    # Fetch from vLLM (qwen3.5:9b)
     try:
-        url = f"{OLLAMA_URL}/api/tags"
-        headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY != "key" else {}
-        logger.info(f"Trying to connect to local Ollama at: {url}")
-        response = requests.get(url, headers=headers, timeout=10)
-
+        url = f"{VLLM_URL}/models"
+        logger.info(f"Trying to connect to vLLM at: {url}")
+        response = requests.get(url, timeout=10)
         if response.status_code == 200:
-            models = response.json().get("models", [])
-            local_models = [model["name"] for model in models]
+            models = response.json().get("data", [])
+            local_models = [m["id"] for m in models]
             ollama_model_names.extend(local_models)
-            logger.info(f"Available models from local Ollama: {local_models}")
+            logger.info(f"Available models from vLLM: {local_models}")
         else:
-            logger.warning(f"Local Ollama returned status {response.status_code}")
+            logger.warning(f"vLLM returned status {response.status_code}")
     except requests.exceptions.RequestException as e:
-        logger.warning(f"Could not connect to local Ollama: {e}")
+        logger.warning(f"Could not connect to vLLM: {e}")
 
-    # Fetch from external Ollama (if configured)
+    # Fetch from llama-server (devstral-24b)
+    try:
+        url = f"{LLAMA_URL}/models"
+        logger.info(f"Trying to connect to llama-server at: {url}")
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            models = response.json().get("data", [])
+            llama_models = [
+                m["id"] for m in models if m["id"] not in ollama_model_names
+            ]
+            ollama_model_names.extend(llama_models)
+            logger.info(f"Available models from llama-server: {llama_models}")
+        else:
+            logger.warning(f"llama-server returned status {response.status_code}")
+    except requests.exceptions.RequestException as e:
+        logger.warning(f"Could not connect to llama-server: {e}")
+
+    # Fetch from external Ollama (if configured — for large cloud-hosted models)
     if EXTERNAL_OLLAMA_URL and EXTERNAL_OLLAMA_API_KEY:
         try:
             ext_url = f"{EXTERNAL_OLLAMA_URL}/api/tags"
@@ -5289,11 +5478,9 @@ async def get_ollama_models():
                 # Update the global cache for routing
                 global EXTERNAL_MODELS_CACHE
 
-                # We update the set with found models
                 for name in external_model_names:
                     EXTERNAL_MODELS_CACHE.add(name)
 
-                # Add external models that aren't already in the list
                 for model_name in external_model_names:
                     if model_name not in ollama_model_names:
                         ollama_model_names.append(model_name)
@@ -5315,7 +5502,8 @@ async def get_ollama_models():
 
     if not ollama_model_names:
         raise HTTPException(
-            status_code=503, detail="Could not connect to any Ollama server"
+            status_code=503,
+            detail="Could not connect to vLLM, llama-server, or external Ollama",
         )
 
     return ollama_model_names
@@ -5444,11 +5632,12 @@ async def unload_model(request: UnloadModelRequest):
         unload_qwen_model()
         unloaded_models = ["TTS", "Whisper", "Qwen2VL"]
 
-        # Also try to unload Ollama models if model_name provided
+        # vLLM and llama-server manage memory automatically — no explicit unload needed
         if request.model_name:
-            success = unload_ollama_model(request.model_name)
-            if success:
-                unloaded_models.append(f"Ollama-{request.model_name}")
+            logger.debug(
+                f"Skipping Ollama model unload for {request.model_name} — not applicable with vLLM/llama-server"
+            )
+            unloaded_models.append(f"InferenceBackend-{request.model_name}")
 
     elif request.model_type == "tts":
         unload_tts_model()
@@ -5464,15 +5653,15 @@ async def unload_model(request: UnloadModelRequest):
 
     elif request.model_type == "ollama":
         if not request.model_name:
-            raise HTTPException(400, "model_name required for Ollama model unloading")
-
-        success = unload_ollama_model(request.model_name)
-        if success:
-            unloaded_models.append(f"Ollama-{request.model_name}")
-        else:
             raise HTTPException(
-                500, f"Failed to unload Ollama model: {request.model_name}"
+                400, "model_name required for inference backend model unloading"
             )
+
+        # vLLM and llama-server manage memory automatically; nothing to unload
+        logger.debug(
+            f"Skipping Ollama/inference model unload for {request.model_name} — vLLM/llama-server manage memory automatically"
+        )
+        unloaded_models.append(f"InferenceBackend-{request.model_name}")
 
     else:
         raise HTTPException(400, f"Invalid model_type: {request.model_type}")

@@ -63,7 +63,7 @@ export interface WorkspaceSuggestion {
   task_type_label: string
   task_brief: string
   reason: string
-  model?: 'local' | 'kimi' | 'nvidia-kimi' | 'qwen3'  // preferred model from LLM signal
+  model?: 'kimi' | 'nvidia-kimi' | 'qwen3'  // preferred model from LLM signal
 }
 
 // ─── Kubectl Approval ─────────────────────────────────────────────────────────
@@ -145,7 +145,7 @@ interface OpenClawState {
   suggestion: WorkspaceSuggestion | null
   workspaceId: string | null
   workspaceSessionId: string | null   // persists across launches for same user (resumable)
-  workspaceModel: 'local' | 'kimi' | 'nvidia-kimi' | 'qwen3'
+  workspaceModel: 'kimi' | 'nvidia-kimi' | 'qwen3'
   logEvents: WorkspaceLogEvent[]
   finalSummary: string
   sseAbortController: AbortController | null
@@ -182,7 +182,7 @@ interface OpenClawState {
   setSuggestion: (suggestion: WorkspaceSuggestion | null) => void
   setWorkspaceId: (id: string | null) => void
   setWorkspaceSessionId: (id: string | null) => void
-  setWorkspaceModel: (model: 'local' | 'kimi' | 'nvidia-kimi' | 'qwen3') => void
+  setWorkspaceModel: (model: 'kimi' | 'nvidia-kimi' | 'qwen3') => void
   addLogEvent: (event: Omit<WorkspaceLogEvent, 'id' | 'timestamp'>) => void
   clearLogEvents: () => void
   setFinalSummary: (summary: string) => void
@@ -366,7 +366,7 @@ export const useOpenClawStore = create<OpenClawState>()(
         state.isChatMinimized = false
         state.suggestion = null
         state.workspaceId = null
-        state.workspaceModel = 'local'
+        state.workspaceModel = 'kimi'
         state.workspaceSessionId = null   // always fresh session on next launch
         state.logEvents = []
         state.finalSummary = ''

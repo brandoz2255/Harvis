@@ -1,0 +1,24 @@
+# K3s config for dulc3-top (Arch Linux laptop, WireGuard VPN at 10.0.0.4)
+k3s_role: worker
+k3s_master_ip: "10.0.0.2"           # dulc3-os VPN IP (control plane)
+k3s_node_ip: "10.0.0.4"
+k3s_flannel_iface: wg0
+k3s_version: "latest"
+k3s_force_reinstall: false
+
+# Worker node labels injected at join time
+worker_labels:
+  - "gpu=true"
+  - "gpu-count=2"
+  - "node-type=laptop"
+
+
+# GPU assignments (for reference — enforced by CUDA_VISIBLE_DEVICES in each pod)
+# GPU 0: RTX 3070 8GB  → vLLM (qwen3.5:9b, fast agentic)
+# GPU 1: GTX 1650 Ti 4GB → llama-server (devstral-24b, long context)
+
+# No firewalld on Arch — skip firewall tasks
+skip_firewall: true
+
+# Arch-specific package manager
+ansible_pkg_mgr: pacman

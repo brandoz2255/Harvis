@@ -182,7 +182,9 @@ def load_qwen_tts_model(force_cpu: bool = False, use_1_7b: bool = False):
             raise ImportError("qwen-tts is not installed")
 
         # Always use 0.6B model for better VRAM compatibility (~3-4GB instead of ~7GB)
-        device = "cuda:0" if torch.cuda.is_available() and not force_cpu else "cpu"
+        _tts_device_override = os.getenv("TTS_DEVICE", "").lower()
+        device = "cpu" if (_tts_device_override == "cpu" or force_cpu) else \
+                 ("cuda:0" if torch.cuda.is_available() else "cpu")
         model_id = QWEN_TTS_MODEL_0_6B  # Always use 0.6B model
 
         if use_1_7b:

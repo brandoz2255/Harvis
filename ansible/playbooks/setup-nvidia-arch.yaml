@@ -1,0 +1,43 @@
+---
+# Setup NVIDIA Container Toolkit on Arch Linux for K3s GPU workloads.
+# Run AFTER install-k3s-arch.yaml once the k3s-agent service exists.
+#
+# Usage:
+#   ansible-playbook -i inventory/inventory.ini playbooks/setup-nvidia-arch.yaml
+- name: Setup NVIDIA Container Toolkit on Arch Linux
+  hosts: laptop_nodes
+  become: true
+  tasks:
+    - name: Install nvidia-container-toolkit
+      community.general.pacman:
+        name: nvidia-container-toolkit
+        state: present
+
+    - name: Create K3s containerd config directory
+      file:
+        path: /var/lib/rancher/k3s/agent/etc/containerd
+        state: directory
+        mode: '0755'
+
+    - name: Configure NVIDIA runtime for K3s containerd
+      shell: |
+        nvidia-ctk runtime configure \
+          --runtime=containerd \
+          --config=/var/lib/rancher/k3s/agent/etc/containerd/config.toml
+      args:
+        creates: /var/lib/rancher/k3s/agent/etc/containerd/config.toml
+
+    - name: Restart k3s-agent to pick up NVIDIA runtime
+      systemd:
+        name: k3s-agent
+        state: restarted
+        daemon_reload: true
+
+    - name: Verify NVIDIA device plugin will see GPUs
+      shell: nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader
+      register: gpu_info
+      changed_when: false
+
+    - name: Print detected GPUs
+      debug:
+        msg: "Detected GPUs on {{ inventory_hostname }}:\n{{ gpu_info.stdout }}"

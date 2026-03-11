@@ -1,0 +1,71 @@
+---
+# Install K3s agent on Arch Linux (dulc3-top).
+# Arch-compatible version of install-k3s-workers.yaml:
+#   - No firewalld tasks (Arch uses nftables/ufw, not firewalld)
+#   - No SELinux tasks
+#   - Uses community.general.pacman for any packages
+#   - K3s curl installer is distro-agnostic
+#
+# Pre-requisites:
+#   - WireGuard interface wg0 must be up (10.0.0.4/24)
+#   - dulc3-os (10.0.0.2) must be reachable via VPN
+#   - k3s_cluster_token must be retrieved from dulc3-os:
+#       sudo cat /var/lib/rancher/k3s/server/node-token
+#
+# Usage:
+#   ansible-playbook -i inventory/inventory.ini \
+#     playbooks/conf/install-k3s-arch.yaml \
+#     --extra-vars "k3s_cluster_token=<TOKEN>"
+- name: Install K3s Agent on Arch Linux
+  hosts: laptop_nodes
+  become: true
+  tasks:
+    - name: Check if k3s binary is already installed
+      stat:
+        path: /usr/local/bin/k3s
+      register: k3s_binary
+
+    - name: Create K3s config directory
+      file:
+        path: /etc/rancher/k3s
+        state: directory
+        mode: '0755'
+
+    - name: Write K3s agent config
+      copy:
+        dest: /etc/rancher/k3s/config.yaml
+        mode: '0644'
+        content: |
+          node-ip: {{ k3s_node_ip }}
+          flannel-iface: {{ k3s_flannel_iface }}
+
+    - name: Install k3s agent via official installer
+      shell: |
+        curl -sfL https://get.k3s.io | \
+          K3S_URL=https://{{ k3s_master_ip }}:6443 \
+          K3S_TOKEN={{ k3s_cluster_token }} \
+          sh -s - agent \
+          {% for label in worker_labels %}--node-label="{{ label }}" {% endfor %}
+      when: not k3s_binary.stat.exists or k3s_force_reinstall
+      environment:
+        INSTALL_K3S_CHANNEL: "{{ k3s_version }}"
+
+    - name: Enable and start k3s-agent
+      systemd:
+        name: k3s-agent
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Wait for node to register with control plane
+      pause:
+        seconds: 15
+
+    - name: Confirm k3s-agent is running
+      systemd:
+        name: k3s-agent
+      register: agent_status
+
+    - name: Print k3s-agent status
+      debug:
+        msg: "k3s-agent state: {{ agent_status.status.ActiveState }}"

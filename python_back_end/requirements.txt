@@ -25,9 +25,12 @@ soundfile
 openai-whisper
 tavily-python
 
-# TTS - Qwen3 is our primary engine
+# TTS - llama.cpp for GGUF models (lightweight ~1GB)
+llama-cpp-python
+
+# Legacy TTS (optional fallback)
 # chatterbox-tts  # REMOVED: conflicts with transformers>=0.27.0 required by qwen3
-qwen-tts
+qwen-tts  # Qwen TTS for text-to-speech
 
 # Job queue for background processing (TTS, Whisper, etc.)
 # Using arq for Python async job queue (similar to pg-boss but for Python)

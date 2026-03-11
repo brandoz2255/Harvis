@@ -90,6 +90,11 @@ jobs:
           podman build -t dulc3/jarvis-backend:$VERSION .
           podman tag dulc3/jarvis-backend:$VERSION dulc3/jarvis-backend:latest
 
+          # tts-worker uses the same image with a different entrypoint — tag it separately
+          # so kustomization can track it independently
+          podman tag dulc3/jarvis-backend:$VERSION dulc3/harvis-tts-worker:$VERSION
+          podman tag dulc3/jarvis-backend:$VERSION dulc3/harvis-tts-worker:latest
+
           echo "Disk usage after Podman build:"
           df -h
 
@@ -101,6 +106,10 @@ jobs:
         run: |
           podman push dulc3/jarvis-backend:$VERSION
           podman push dulc3/jarvis-backend:latest
+
+          # Push tts-worker image (same layers, separate tag for kustomization tracking)
+          podman push dulc3/harvis-tts-worker:$VERSION
+          podman push dulc3/harvis-tts-worker:latest
 
           # Clean up images after successful push
           podman system prune -a -f

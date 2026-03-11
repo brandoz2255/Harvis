@@ -160,7 +160,38 @@ else
   exit 1
 fi
 
-# 7. Update Kustomization for ArgoCD
+# 7. Tag TTS Worker (same image as backend — different entrypoint, no separate build needed)
+log_info "Tagging TTS Worker (reuses jarvis-backend image)..."
+if docker tag dulc3/jarvis-backend:$BACKEND_VERSION dulc3/harvis-tts-worker:$BACKEND_VERSION; then
+  log_success "TTS Worker tagged: dulc3/harvis-tts-worker:$BACKEND_VERSION"
+else
+  log_error "TTS Worker tagging failed!"
+  exit 1
+fi
+
+# 8. Build SGLang Patch (thin layer on nightly base — applies upstream bug fixes for NEXTN spec decoding)
+log_info "Starting SGLang Patch Build..."
+SGLANG_PATCH_DIR="vendor/sglang-H"
+
+if [ -d "$SGLANG_PATCH_DIR" ]; then
+  pushd "$SGLANG_PATCH_DIR" >/dev/null
+
+  if docker build -f Dockerfile.harvis-patch -t dulc3/sglang-patch:$BACKEND_VERSION .; then
+    log_success "SGLang Patch built successfully with tag: dulc3/sglang-patch:$BACKEND_VERSION"
+  else
+    log_error "SGLang Patch build failed!"
+    popd >/dev/null
+    exit 1
+  fi
+
+  popd >/dev/null
+else
+  log_error "SGLang patch directory not found: $SGLANG_PATCH_DIR"
+  log_error "Run: git clone https://github.com/brandoz2255/sglang-H vendor/sglang-H"
+  exit 1
+fi
+
+# 9. Update Kustomization for ArgoCD
 echo ""
 log_info "Updating Kustomization for ArgoCD..."
 KUSTOMIZE_FILE="k8s-manifests/overlays/prod/kustomization.yaml"
@@ -181,6 +212,8 @@ replacements = [
     (r'(  - name: harvis-backend\n    newName: dulc3/jarvis-backend\n    newTag: )\S+',      r'\g<1>$BACKEND_VERSION'),
     (r'(  - name: harvis-frontend\n    newName: dulc3/jarvis-frontend\n    newTag: )\S+',     r'\g<1>$FRONTEND_VERSION'),
     (r'(  - name: harvis-document-worker\n    newName: dulc3/harvis-document-worker\n    newTag: )\S+', r'\g<1>$BACKEND_VERSION'),
+    (r'(  - name: harvis-tts-worker\n    newName: dulc3/harvis-tts-worker[^\n]*\n    newTag: )\S+', r'\g<1>$BACKEND_VERSION'),
+    (r'(  - name: dulc3/sglang-patch\n    newName: dulc3/sglang-patch\n    newTag: )\S+',    r'\g<1>$BACKEND_VERSION'),
 ]
 
 for pattern, repl in replacements:
@@ -200,6 +233,13 @@ PYEOF
 
   # Update patch image references for document-worker
   sed -i "s|dulc3/harvis-document-worker:[^ ]*|dulc3/harvis-document-worker:$BACKEND_VERSION|g" "$KUSTOMIZE_FILE"
+
+  # Update patch image references for tts-worker
+  sed -i "s|dulc3/harvis-tts-worker:[^ ]*|dulc3/harvis-tts-worker:$BACKEND_VERSION|g" "$KUSTOMIZE_FILE"
+
+  # Update sglang-patch references (kustomization images: section + merged-ollama-backend.yaml)
+  sed -i "s|dulc3/sglang-patch:[^ ]*|dulc3/sglang-patch:$BACKEND_VERSION|g" "$KUSTOMIZE_FILE"
+  sed -i "s|dulc3/sglang-patch:[^ ]*|dulc3/sglang-patch:$BACKEND_VERSION|g" "k8s-manifests/overlays/prod/merged-ollama-backend.yaml"
 
   log_success "Kustomization updated with new image versions"
 
@@ -237,7 +277,7 @@ else
   log_info "You may need to update it manually"
 fi
 
-# 8. Push Images (Optional)
+# 10. Push Images (Optional)
 echo ""
 log_info "Docker images built successfully!"
 
@@ -264,6 +304,8 @@ if [ "$PUSH_IMAGES" = true ]; then
   docker push dulc3/harvis-artifact-executor:$BACKEND_VERSION && \
   docker push dulc3/harvis-code-executor:$BACKEND_VERSION && \
   docker push dulc3/harvis-document-worker:$BACKEND_VERSION && \
+  docker push dulc3/harvis-tts-worker:$BACKEND_VERSION && \
+  docker push dulc3/sglang-patch:$BACKEND_VERSION && \
   log_success "All images pushed successfully!"
 else
   log_info "Skipping push. To push manually, run:"
@@ -272,17 +314,21 @@ else
   echo "  docker push dulc3/harvis-artifact-executor:$BACKEND_VERSION"
   echo "  docker push dulc3/harvis-code-executor:$BACKEND_VERSION"
   echo "  docker push dulc3/harvis-document-worker:$BACKEND_VERSION"
+  echo "  docker push dulc3/harvis-tts-worker:$BACKEND_VERSION"
+  echo "  docker push dulc3/sglang-patch:$BACKEND_VERSION"
 fi
 
 # Summary
 echo ""
 echo "=========================================="
 log_success "CI Pipeline Completed Successfully!"
-echo "Frontend: dulc3/jarvis-frontend:$FRONTEND_VERSION"
-echo "Backend:  dulc3/jarvis-backend:$BACKEND_VERSION"
+echo "Frontend:         dulc3/jarvis-frontend:$FRONTEND_VERSION"
+echo "Backend:          dulc3/jarvis-backend:$BACKEND_VERSION"
 echo "Artifact Executor: dulc3/harvis-artifact-executor:$BACKEND_VERSION"
-echo "Code Executor: dulc3/harvis-code-executor:$BACKEND_VERSION"
-echo "Document Worker: dulc3/harvis-document-worker:$BACKEND_VERSION"
+echo "Code Executor:    dulc3/harvis-code-executor:$BACKEND_VERSION"
+echo "Document Worker:  dulc3/harvis-document-worker:$BACKEND_VERSION"
+echo "TTS Worker:       dulc3/harvis-tts-worker:$BACKEND_VERSION  (tagged from backend)"
+echo "SGLang Patch:     dulc3/sglang-patch:$BACKEND_VERSION        (NEXTN spec decoding fix)"
 echo ""
 echo "ArgoCD will auto-deploy the new images within 3 minutes!"
 echo "=========================================="

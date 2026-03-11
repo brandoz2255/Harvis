@@ -1,3 +1,4 @@
+import os
 import torch
 import logging
 import time
@@ -61,7 +62,9 @@ def load_tts_model(force_cpu=False):
         )
         return None
 
-    tts_device = "cuda" if torch.cuda.is_available() and not force_cpu else "cpu"
+    _tts_device_override = os.getenv("TTS_DEVICE", "").lower()
+    tts_device = "cpu" if (_tts_device_override == "cpu" or force_cpu) else \
+                 ("cuda" if torch.cuda.is_available() else "cpu")
 
     if tts_model is None:
         try:

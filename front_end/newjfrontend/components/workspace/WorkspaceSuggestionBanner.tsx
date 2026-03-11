@@ -10,7 +10,6 @@ import { cn } from '@/lib/utils'
 const MODEL_OPTIONS = [
   { value: 'kimi' as const, label: 'Kimi K2.5', description: 'Moonshot (fast)' },
   { value: 'nvidia-kimi' as const, label: 'Kimi K2.5 NVIDIA', description: 'NVIDIA NIM (thinking mode)' },
-  { value: 'local' as const, label: 'Local AI', description: 'Local Ollama model' },
   { value: 'qwen3' as const, label: 'Qwen3 235B', description: 'Cloud Ollama' },
 ]
 
@@ -144,7 +143,7 @@ export function WorkspaceSuggestionBanner({ chatHistory }: WorkspaceSuggestionBa
           agent_id: workspaceModel === 'kimi' ? 'kimi'
                   : workspaceModel === 'qwen3' ? 'qwen3'
                   : workspaceModel === 'nvidia-kimi' ? 'nvidia-kimi'
-                  : 'main',
+                  : 'kimi',
         }),
       })
 

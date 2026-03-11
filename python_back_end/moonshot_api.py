@@ -26,12 +26,27 @@ class MoonshotClient:
 
     def _filter_empty_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
-        Filter out empty messages that would cause API errors.
-        Moonshot API requires all messages to have non-empty content.
-        Handles both string content and multimodal list content (for vision).
+        Filter out empty and tool-role messages before sending to Moonshot.
+
+        Moonshot API requirements:
+        - All messages must have non-empty content.
+        - tool / function role messages are invalid unless tools are defined in the
+          request (we never send tools). Strip them to avoid "tool_call_id not found".
+        - Strip tool_calls from assistant messages for the same reason.
         """
         filtered = []
         for msg in messages:
+            role = msg.get("role", "")
+
+            # Drop tool / function result messages — Kimi is called without tools
+            if role in ("tool", "function"):
+                logger.warning(f"Filtering out {role} role message (no tools defined)")
+                continue
+
+            # Strip tool_calls field from assistant messages if present
+            if role == "assistant" and msg.get("tool_calls"):
+                msg = {k: v for k, v in msg.items() if k != "tool_calls"}
+
             content = msg.get("content", "")
             # Handle multimodal content (list format for vision)
             if isinstance(content, list):
@@ -39,13 +54,13 @@ class MoonshotClient:
                 if content:
                     filtered.append(msg)
                 else:
-                    logger.warning(f"Filtering out empty multimodal {msg.get('role', 'unknown')} message")
+                    logger.warning(f"Filtering out empty multimodal {role} message")
             # Handle string content
             elif isinstance(content, str):
                 if content and content.strip():
                     filtered.append(msg)
                 else:
-                    logger.warning(f"Filtering out empty {msg.get('role', 'unknown')} message")
+                    logger.warning(f"Filtering out empty {role} message")
             else:
                 # Unknown content type, keep it
                 filtered.append(msg)

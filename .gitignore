@@ -119,6 +119,9 @@ python_back_end/whisper_models/
 # openclaw directory
 openclaw/
 
+# SGLang fork vendor clone (gitignored — patched locally, not committed)
+vendor/sglang-H/
+
 # ==========================================
 # OpenClaw secrets — apply manually via kubectl, never commit
 # ==========================================

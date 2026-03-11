@@ -1,6 +1,20 @@
-from transformers import AutoProcessor, AutoModelForVision2Seq
+from transformers import AutoProcessor
 from PIL import Image
 import torch
+
+# Try different import paths for AutoModelForVision2Seq
+try:
+    from transformers import AutoModelForVision2Seq
+except ImportError:
+    # In newer transformers versions, this might be in a different module
+    try:
+        from transformers.models.qwen2_vl import (
+            Qwen2VLForConditionalGeneration as AutoModelForVision2Seq,
+        )
+    except ImportError:
+        # Fallback: try importing from models.auto
+        from transformers.models.auto import AutoModelForVision2Seq
+
 
 class Qwen2VL:
     def __init__(self, model_name="Qwen/Qwen2-VL-2B-Instruct", revision="main"):
@@ -10,24 +24,29 @@ class Qwen2VL:
             model_name,
             revision="main",
             torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-            device_map="auto"
+            device_map="auto",
         )
 
     def predict(self, image_path, prompt):
         image = Image.open(image_path)
         messages = [
-            {"role": "system", "content": "You are a helpful assistant with vision abilities."},
-            {"role": "user", "content": [
-                {"type": "image", "image": image},
-                {"type": "text", "text": prompt}
-            ]}
+            {
+                "role": "system",
+                "content": "You are a helpful assistant with vision abilities.",
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image},
+                    {"type": "text", "text": prompt},
+                ],
+            },
         ]
-        text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        text = self.processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
         inputs = self.processor(
-            text=[text],
-            images=[image],
-            padding=True,
-            return_tensors="pt"
+            text=[text], images=[image], padding=True, return_tensors="pt"
         ).to(self.model.device)
         with torch.no_grad():
             generated_ids = self.model.generate(**inputs, max_new_tokens=128)
