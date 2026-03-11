@@ -113,12 +113,12 @@ spec:
               memory: 2Gi
               cpu: 2000m
       containers:
-        # SGLang — Qwen3.5-9B INT4 (bitsandbytes) on RTX 3070 (8GB), fast agentic path
+        # SGLang — Qwen3-8B-AWQ (official Qwen AWQ 4-bit) on RTX 3070 (8GB), fast agentic path
         # RadixAttention: shared prefix KV cache stays hot across tool calls.
         # MTP speculative decoding: 2-3x decode speedup on predictable code tokens.
         # fp8 KV cache unlocks 131K context on 8GB VRAM vs 65K with vLLM.
         - name: sglang
-          image: dulc3/sglang-patch:test10
+          image: dulc3/sglang-patch:test11
           imagePullPolicy: IfNotPresent
           ports:
             - name: sglang
@@ -127,22 +127,22 @@ spec:
           command: ["python3", "-m", "sglang.launch_server"]
           args:
             - "--model"
-            - "Qwen/Qwen3.5-4B"     # base 4B; fp8 weight quant: 4B×1byte=4GB, fits on 8GB GPU
+            - "Qwen/Qwen3-8B-AWQ"             # official Qwen AWQ 4-bit; 8 KV heads avoids Marlin size_n=32 alignment issue
             - "--served-model-name"
-            - "qwen3.5:4b"
+            - "qwen3:8b"
             - "--port"
             - "8001"
             - "--host"
             - "0.0.0.0"
             - "--quantization"
-            - "fp8"                 # fp8 works on 4B: 4GB weights; bitsandbytes=hard blocked (AttributeError); compressed-tensors=Marlin GQA alignment failure
+            - "awq"                 # awq_marlin fails: embed_tokens is BF16+Marlin pre-pack = 6.49GB+ needed, exceeds available
             - "--kv-cache-dtype"
             - "fp8_e4m3"            # fp8 KV cache
             - "--context-length"
-            - "131072"              # 128k; KV pool at 0.25 = 1.91GB; 4B fp8 KV is smaller than 9B, fits
+            - "32768"               # Qwen3-8B-AWQ config.json caps at 40960; 32K is safe power-of-2
             - "--mem-fraction-static"
-            - "0.25"                # 0.25×7.64=1.91GB KV pre-alloc; leaves 5.73GB for 4B fp8 weights(4GB)+runtime(0.5GB) ✅
-            - "--enable-torch-compile"
+            - "0.85"                # 0.80 fails KV pool ("increase mem-fraction-static"); 0.85 is minimum that passes KV pool on 8GB
+            # --enable-torch-compile removed: compile artifacts bloat CUDA graphs to 192MB even at bs=4 (229MB free); without compile, bs=4 graphs ~30-50MB
             - "--reasoning-parser"
             - "qwen3"               # handles <think>...</think> blocks
             - "--tool-call-parser"
@@ -161,6 +161,8 @@ spec:
             - "4"
             - "--mamba-scheduler-strategy"
             - "extra_buffer"
+            - "--cuda-graph-max-bs"
+            - "1"                   # bs=1 graph (201MB) fits in 233MB free; bs=2 needs another 192MB → OOM. Only capture bs=1.
           env:
             - name: HF_HOME
               value: "/models-cache/huggingface"
@@ -175,6 +177,8 @@ spec:
               value: "1"
             - name: SGLANG_DISABLE_CUDNN_CHECK
               value: "1"
+            - name: PYTORCH_CUDA_ALLOC_CONF
+              value: "expandable_segments:True"  # reuses fragmented VRAM blocks during fp8 weight load; fixes 40MB gap OOM
           volumeMounts:
             - name: ml-models-cache
               mountPath: /models-cache
@@ -230,9 +234,13 @@ spec:
                   name: harvis-ai-backend-secret
                   key: external-ollama-api-key
                   optional: true
-            # SGLang co-located sidecar (localhost)
+            # Embedding servers on dulc3-top (llama.cpp, CPU-only, OpenAI-compatible)
             - name: OLLAMA_URL
-              value: "http://localhost:8001/v1"
+              value: "http://harvis-ai-llama-embed:8081"   # backward compat — points to nomic
+            - name: EMBED_NOMIC_URL
+              value: "http://harvis-ai-llama-embed:8081"   # nomic-embed-text, 768 dims
+            - name: EMBED_QW3_URL
+              value: "http://harvis-ai-llama-embed:8082"   # Qwen3-Embedding-4B, 4096 dims
             - name: VLLM_URL
               value: "http://localhost:8001/v1"
             # llama-server co-located sidecar (localhost)
@@ -324,7 +332,7 @@ spec:
             - "--port"
             - "8080"
             - "--n-gpu-layers"
-            - "99"             # all layers in VRAM — RTX 3070 8GB fits full Q4_K_M (~5.4GB)
+            - "0"              # CPU-only — SGLang already claims the full RTX 3070 8GB; two GPU processes on same card = OOM
             - "--ctx-size"
             - "65536"          # 64K; remaining ~2.6GB VRAM covers KV cache
             - "--cache-type-k"
@@ -405,7 +413,6 @@ spec:
     - name: sglang
       port: 8001
       targetPort: sglang      # qwen3.5 via SGLang on dulc3-os
-      protocol: TCP
   selector:
     app.kubernetes.io/name: harvis-ai
     app.kubernetes.io/component: merged-ollama-backend

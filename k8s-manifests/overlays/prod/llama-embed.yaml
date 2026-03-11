@@ -1,0 +1,309 @@
+# llama-embed — embedding servers on dulc3-top (1650 Ti)
+#
+# Storage: PV+PVC defined here so ArgoCD (overlays/prod path) can manage them.
+# Pre-requisite on dulc3-top: sudo mkdir -p /data/embed-models && sudo chmod 755 /data/embed-models
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: embed-model-pv
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-path
+  local:
+    path: /data/embed-models
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - dulc3-top
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: embed-model-cache
+  namespace: ai-agents
+  labels:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: llama-embed
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: local-path
+  volumeName: embed-model-pv
+---
+# llama-embed — CPU embedding servers on dulc3-top (1650 Ti)
+#
+# Two llama.cpp server processes, each loaded with one embedding model:
+#   embed-nomic  (port 8081): nomic-embed-text-v1.5  768 dims  — STANDARD tier (docs)
+#   embed-qwen3  (port 8082): Qwen3-Embedding-4B     4096 dims — HIGH tier (code)
+#
+# Both run CPU-only (-ngl 0) so the 1650 Ti 4GB GPU stays free for future llama-rpc.
+# CPU latency is 50-200ms per batch — acceptable for RAG (not latency-sensitive).
+#
+# Service: harvis-ai-llama-embed
+#   port 8081 → embed-nomic   (nomic-embed-text)
+#   port 8082 → embed-qwen3   (Qwen3-Embedding-4B)
+#
+# Backend uses:
+#   EMBED_NOMIC_URL=http://harvis-ai-llama-embed:8081
+#   EMBED_QW3_URL=http://harvis-ai-llama-embed:8082
+#
+# Pre-requisite on dulc3-top:
+#   sudo mkdir -p /data/embed-models && sudo chmod 755 /data/embed-models
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: harvis-ai-llama-embed
+  namespace: ai-agents
+  labels:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: llama-embed
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: harvis-ai
+      app.kubernetes.io/component: llama-embed
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: harvis-ai
+        app.kubernetes.io/component: llama-embed
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: dulc3-top    # 1650 Ti — GPU reserved for future RPC
+      initContainers:
+        # Download nomic-embed-text-v1.5 Q4_K_M (~274MB) — skip if present
+        - name: download-nomic
+          image: python:3.11-slim
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+              if [ -f /embed-models/nomic-embed-text-v1.5.Q4_K_M.gguf ]; then
+                echo "nomic model already present, skipping"
+                exit 0
+              fi
+              pip install -q huggingface_hub
+              python3 -c "
+              from huggingface_hub import hf_hub_download
+              import shutil
+              path = hf_hub_download(
+                  repo_id='nomic-ai/nomic-embed-text-v1.5-GGUF',
+                  filename='nomic-embed-text-v1.5.Q4_K_M.gguf',
+                  local_dir='/embed-models',
+              )
+              shutil.move(path, '/embed-models/nomic-embed-text-v1.5.Q4_K_M.gguf')
+              print('nomic download complete.')
+              "
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-backend-secret
+                  key: hf-token
+                  optional: true
+          volumeMounts:
+            - name: embed-models
+              mountPath: /embed-models
+          resources:
+            requests:
+              memory: 256Mi
+              cpu: 250m
+            limits:
+              memory: 1Gi
+              cpu: 1000m
+
+        # Download Qwen3-Embedding-4B Q4_K_M (~2.5GB) — skip if present
+        - name: download-qwen3-embed
+          image: python:3.11-slim
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+              if [ -f /embed-models/Qwen3-Embedding-4B-Q4_K_M.gguf ]; then
+                echo "qwen3-embedding model already present, skipping"
+                exit 0
+              fi
+              pip install -q huggingface_hub
+              python3 -c "
+              from huggingface_hub import hf_hub_download
+              import shutil
+              path = hf_hub_download(
+                  repo_id='Qwen/Qwen3-Embedding-4B-GGUF',
+                  filename='Qwen3-Embedding-4B-Q4_K_M.gguf',
+                  local_dir='/embed-models',
+              )
+              shutil.move(path, '/embed-models/Qwen3-Embedding-4B-Q4_K_M.gguf')
+              print('qwen3-embedding download complete.')
+              "
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-backend-secret
+                  key: hf-token
+                  optional: true
+          volumeMounts:
+            - name: embed-models
+              mountPath: /embed-models
+          resources:
+            requests:
+              memory: 256Mi
+              cpu: 250m
+            limits:
+              memory: 1Gi
+              cpu: 1000m
+
+      containers:
+        # embed-nomic — nomic-embed-text-v1.5, 768 dims, STANDARD tier
+        # CPU-only: -ngl 0; ~274MB model, fast on CPU for RAG batch workloads
+        - name: embed-nomic
+          image: ghcr.io/ggerganov/llama.cpp:server-cuda
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: embed-nomic
+              containerPort: 8081
+              protocol: TCP
+          command: ["/llama-server"]
+          args:
+            - "--model"
+            - "/embed-models/nomic-embed-text-v1.5.Q4_K_M.gguf"
+            - "--host"
+            - "0.0.0.0"
+            - "--port"
+            - "8081"
+            - "--embeddings"           # enable /v1/embeddings endpoint
+            - "--pooling"
+            - "mean"                   # nomic-embed-text uses mean pooling
+            - "--ctx-size"
+            - "8192"
+            - "--n-gpu-layers"
+            - "0"                      # CPU-only — GPU reserved for future RPC
+            - "--threads"
+            - "4"
+            - "--threads-batch"
+            - "4"
+            - "--no-mmap"
+          volumeMounts:
+            - name: embed-models
+              mountPath: /embed-models
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 250m
+            limits:
+              memory: 2Gi
+              cpu: 2000m
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+
+        # embed-qwen3 — Qwen3-Embedding-4B, 4096 dims, HIGH tier (code/technical)
+        # CPU-only: -ngl 0; ~2.5GB model, 50-200ms latency acceptable for RAG
+        - name: embed-qwen3
+          image: ghcr.io/ggerganov/llama.cpp:server-cuda
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: embed-qwen3
+              containerPort: 8082
+              protocol: TCP
+          command: ["/llama-server"]
+          args:
+            - "--model"
+            - "/embed-models/Qwen3-Embedding-4B-Q4_K_M.gguf"
+            - "--host"
+            - "0.0.0.0"
+            - "--port"
+            - "8082"
+            - "--embeddings"           # enable /v1/embeddings endpoint
+            - "--pooling"
+            - "last"                   # Qwen3-Embedding uses last-token pooling
+            - "--ctx-size"
+            - "8192"
+            - "--n-gpu-layers"
+            - "0"                      # CPU-only — GPU reserved for future RPC
+            - "--threads"
+            - "4"
+            - "--threads-batch"
+            - "4"
+            - "--no-mmap"
+          volumeMounts:
+            - name: embed-models
+              mountPath: /embed-models
+          resources:
+            requests:
+              memory: 3Gi
+              cpu: 500m
+            limits:
+              memory: 6Gi
+              cpu: 4000m
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8082
+            initialDelaySeconds: 90
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8082
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+
+      volumes:
+        - name: embed-models
+          persistentVolumeClaim:
+            claimName: embed-model-cache
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: harvis-ai-llama-embed
+  namespace: ai-agents
+  labels:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: llama-embed
+spec:
+  type: ClusterIP
+  ports:
+    - name: embed-nomic
+      port: 8081
+      targetPort: embed-nomic
+      protocol: TCP
+    - name: embed-qwen3
+      port: 8082
+      targetPort: embed-qwen3
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: llama-embed
