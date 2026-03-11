@@ -31,7 +31,7 @@ images:
   #   newTag: unbroken
   - name: dulc3/openclaw
     newName: dulc3/openclaw
-    newTag: v2.33.5
+    newTag: v2.33.6
 # Patches for production
 patches:
   - target:
