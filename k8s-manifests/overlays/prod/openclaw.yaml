@@ -202,7 +202,7 @@ data:
       },
       "skills": {
         "load": {
-          "extraDirs": ["/skills"]
+          "extraDirs": ["/home/node/.openclaw/skills"]
         }
       },
       "channels": {
@@ -217,7 +217,7 @@ data:
 
 ---
 # Harvis Agent SKILL.md — injected into OpenClaw's skill prompt at runtime.
-# OpenClaw reads this from /skills/harvis-agent/SKILL.md via skills.load.extraDirs.
+# OpenClaw reads this from /home/node/.openclaw/skills/harvis-agent/SKILL.md via skills.load.extraDirs.
 # This is a pure prompt: no binaries, no installs, no external deps.
 apiVersion: v1
 kind: ConfigMap
@@ -275,11 +275,11 @@ data:
     | GitHub operations (PRs, issues, commits) | `harvis-github` |
     | Search the local codebase or docs | `local_rag` tool directly |
 
-    **To use a skill**: call `read /skills/<name>/SKILL.md` first, then follow the
+    **To use a skill**: call `read /home/node/.openclaw/home/node/.openclaw/skills/<name>/SKILL.md` first, then follow the
     exact workflow in that file. Do NOT try to `exec harvis-github` or similar —
     skills are markdown files, not executables.
 
-    **GitHub specifically**: call `read /skills/harvis-github/SKILL.md` and follow
+    **GitHub specifically**: call `read /home/node/.openclaw/skills/harvis-github/SKILL.md` and follow
     every step. GitHub credentials are `$GH_APP_ID`, `$GH_INSTALLATION_ID`,
     `$GH_PRIVATE_KEY` — NOT `$GH_TOKEN` and NOT the `gh` CLI.
     **Never use `local_rag` for web research** — it only searches the local vector DB.
@@ -536,7 +536,7 @@ data:
 ---
 # Harvis RAG SKILL.md — lets OpenClaw agents search the Harvis pgvector DB
 # via the backend's /rag/search proxy endpoint.
-# OpenClaw reads this from /skills/harvis-rag/SKILL.md via skills.load.extraDirs.
+# OpenClaw reads this from /home/node/.openclaw/skills/harvis-rag/SKILL.md via skills.load.extraDirs.
 # No credentials needed: auth is via OPENCLAW_GATEWAY_TOKEN already in the env.
 apiVersion: v1
 kind: ConfigMap
@@ -652,7 +652,7 @@ data:
 
 ---
 # Harvis Research SKILL.md — web research via the safe backend proxy.
-# OpenClaw reads this from /skills/harvis-research/SKILL.md.
+# OpenClaw reads this from /home/node/.openclaw/skills/harvis-research/SKILL.md.
 # All external fetches go through /api/tools/web-fetch — no direct internet access.
 apiVersion: v1
 kind: ConfigMap
@@ -797,7 +797,7 @@ data:
 
 ---
 # Harvis Document SKILL.md — DOCX generation + file mimicry via Kimi vision.
-# OpenClaw reads this from /skills/harvis-document/SKILL.md.
+# OpenClaw reads this from /home/node/.openclaw/skills/harvis-document/SKILL.md.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -1216,12 +1216,12 @@ data:
 
     | Task | Skill |
     |------|-------|
-    | Write/edit code, fix bugs, PRs, vibe coding | read /skills/harvis-vibecoding/SKILL.md |
-    | GitHub PRs, commits, repo browsing | read /skills/harvis-github/SKILL.md |
-    | Search local knowledge base / RAG | read /skills/harvis-rag/SKILL.md |
-    | Research, web lookups, fact-check | read /skills/harvis-research/SKILL.md |
-    | Generate DOCX / PDF documents | read /skills/harvis-document/SKILL.md |
-    | General Harvis behavior | read /skills/harvis-agent/SKILL.md |
+    | Write/edit code, fix bugs, PRs, vibe coding | read /home/node/.openclaw/skills/harvis-vibecoding/SKILL.md |
+    | GitHub PRs, commits, repo browsing | read /home/node/.openclaw/skills/harvis-github/SKILL.md |
+    | Search local knowledge base / RAG | read /home/node/.openclaw/skills/harvis-rag/SKILL.md |
+    | Research, web lookups, fact-check | read /home/node/.openclaw/skills/harvis-research/SKILL.md |
+    | Generate DOCX / PDF documents | read /home/node/.openclaw/skills/harvis-document/SKILL.md |
+    | General Harvis behavior | read /home/node/.openclaw/skills/harvis-agent/SKILL.md |
 
     Pick the most specific skill. Read only one up front.
 
@@ -1376,13 +1376,13 @@ data:
     ### Skill file paths (when you need to `read` a skill)
     | Skill | Exact path |
     |-------|-----------|
-    | harvis-github | `/skills/harvis-github/SKILL.md` |
-    | harvis-research | `/skills/harvis-research/SKILL.md` |
-    | harvis-agent | `/skills/harvis-agent/SKILL.md` |
-    | harvis-document | `/skills/harvis-document/SKILL.md` |
-    | harvis-rag | `/skills/harvis-rag/SKILL.md` |
+    | harvis-github | `/home/node/.openclaw/skills/harvis-github/SKILL.md` |
+    | harvis-research | `/home/node/.openclaw/skills/harvis-research/SKILL.md` |
+    | harvis-agent | `/home/node/.openclaw/skills/harvis-agent/SKILL.md` |
+    | harvis-document | `/home/node/.openclaw/skills/harvis-document/SKILL.md` |
+    | harvis-rag | `/home/node/.openclaw/skills/harvis-rag/SKILL.md` |
 
-    Skills live at `/skills/<name>/SKILL.md`. There is NO `/app/skills/` path. There is NO `github-operations` skill.
+    Skills live at `/home/node/.openclaw/skills/<name>/SKILL.md`. There is NO `/app/home/node/.openclaw/skills/` path. There is NO `github-operations` skill.
 
     ---
 
@@ -1390,7 +1390,7 @@ data:
 
     When a user asks you to commit, push, or open a PR:
 
-    1. **Read the skill first**: `read /skills/harvis-github/SKILL.md` — it has the exact step-by-step.
+    1. **Read the skill first**: `read /home/node/.openclaw/skills/harvis-github/SKILL.md` — it has the exact step-by-step.
     2. **Git commands via `exec` ARE available** — credentials come from env vars (`$GH_APP_ID`, `$GH_INSTALLATION_ID`, `$GH_PRIVATE_KEY`).
     3. **PR creation**: `exec curl -X POST http://harvis-ai-merged-backend:8000/github/pulls` — use `exec curl`, NOT `web_fetch`.
     4. **Never** try to call `api.github.com` directly — the backend proxy is the only path.
@@ -1520,7 +1520,7 @@ spec:
 ---
 # Harvis Coding SKILL.md — Kimi K2.5 handles all coding tasks.
 # Kimi K2.5 handles reasoning, architecture, complex multi-file edits, and sub-agent work.
-# Mounted at /skills/harvis-coding/SKILL.md via skills.load.extraDirs: ["/skills"].
+# Mounted at /home/node/.openclaw/skills/harvis-coding/SKILL.md via skills.load.extraDirs: ["/home/node/.openclaw/skills"].
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -1727,6 +1727,86 @@ spec:
               memory: 128Mi
               cpu: 200m
 
+        # 4. Clone (or pull) the Harvis repo into the agent workspace so the agent
+        # starts with the repo already present. Without this the agent wastes its
+        # entire turn running `ls -la` in a loop trying to find the workspace.
+        # Uses the same GitHub App JWT pattern as the harvis-github skill.
+        - name: clone-workspace
+          image: dulc3/openclaw:latest
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              WORKSPACE=/home/node/.openclaw/workspace/Harvis
+
+              mint_token() {
+                GH_JWT=$(node -e "
+              const {createSign}=require('crypto');
+              const key=(process.env.GH_PRIVATE_KEY||'').replace(/\\\\n/g,'\\n');
+              const appId=process.env.GH_APP_ID;
+              const now=Math.floor(Date.now()/1000);
+              const hdr=Buffer.from(JSON.stringify({alg:'RS256',typ:'JWT'})).toString('base64url');
+              const pld=Buffer.from(JSON.stringify({iat:now-60,exp:now+600,iss:appId})).toString('base64url');
+              const s=hdr+'.'+pld;
+              const sign=createSign('RSA-SHA256');
+              sign.update(s);
+              console.log(s+'.'+sign.sign(key,'base64url'));
+              ")
+                curl -sf -X POST \
+                  -H "Authorization: Bearer $GH_JWT" \
+                  -H "Accept: application/vnd.github+json" \
+                  -H "X-GitHub-Api-Version: 2022-11-28" \
+                  "https://api.github.com/app/installations/${GH_INSTALLATION_ID}/access_tokens" \
+                | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write(JSON.parse(d).token))"
+              }
+
+              git config --global user.name "HarvisAI[bot]"
+              git config --global user.email "2995570+HarvisAI[bot]@users.noreply.github.com"
+              git config --global credential.helper store
+
+              GH_TOKEN=$(mint_token)
+              printf 'https://x-access-token:%s@github.com\n' "$GH_TOKEN" > /home/node/.git-credentials
+              chmod 600 /home/node/.git-credentials
+
+              if [ -d "$WORKSPACE/.git" ]; then
+                echo "Repo already present, pulling latest..."
+                cd "$WORKSPACE"
+                git pull origin main || echo "Pull failed — using existing clone (offline?)"
+              else
+                echo "Cloning harvis-aidev into $WORKSPACE..."
+                mkdir -p "$(dirname $WORKSPACE)"
+                git clone https://github.com/dulc3/harvis-aidev.git "$WORKSPACE"
+                echo "Clone complete."
+              fi
+          env:
+            - name: HOME
+              value: /home/node
+            - name: GH_APP_ID
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-openclaw-secret
+                  key: harvis-github-app-id
+            - name: GH_INSTALLATION_ID
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-openclaw-secret
+                  key: harvis-github-installation-id
+            - name: GH_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-openclaw-secret
+                  key: harvis-github-private-key
+          volumeMounts:
+            - name: openclaw-data
+              mountPath: /home/node/.openclaw
+          resources:
+            requests:
+              memory: 128Mi
+              cpu: 100m
+            limits:
+              memory: 256Mi
+              cpu: 500m
+
 
       containers:
         - name: openclaw
@@ -1824,6 +1904,14 @@ spec:
             - name: PYTHONPATH
               value: "/python-extra"
 
+            # Prevent git from blocking on credential prompts in a non-TTY container.
+            # Without these, `git clone` of any auth-required repo hangs indefinitely,
+            # exec never returns a result, and the model spins retrying the same command.
+            - name: GIT_TERMINAL_PROMPT
+              value: "0"
+            - name: GIT_ASKPASS
+              value: "echo"
+
           volumeMounts:
             # PVC for all OpenClaw runtime state (sessions, logs, agent workspaces)
             - name: openclaw-data
@@ -1838,54 +1926,54 @@ spec:
               # won't try to rewrite it.
             # exec-approvals.json is written by the startup command (runs as node user,
             # correct ownership + permissions for OpenClaw's ensureExecApprovals() writes)
-            # Harvis Agent skill — mounted at /skills/harvis-agent/SKILL.md
+            # Harvis Agent skill — mounted at /home/node/.openclaw/skills/harvis-agent/SKILL.md
             # OpenClaw discovers this via skills.load.extraDirs: ["/skills"]
             - name: harvis-agent-skill
-              mountPath: /skills/harvis-agent/SKILL.md
+              mountPath: /home/node/.openclaw/home/node/.openclaw/skills/harvis-agent/SKILL.md
               subPath: SKILL.md
               readOnly: true
             # Harvis GitHub skill — safe PR-only workflow for harvisai-dulc3-cmd bot.
             # Always prompt-injected when a GitHub/PR task is detected.
             - name: harvis-github-skill
-              mountPath: /skills/harvis-github/SKILL.md
+              mountPath: /home/node/.openclaw/home/node/.openclaw/skills/harvis-github/SKILL.md
               subPath: SKILL.md
               readOnly: true
             # Harvis RAG skill — semantic search over the Harvis pgvector DB via
             # the backend's /rag/search proxy endpoint. No DB credentials needed.
             - name: harvis-rag-skill
-              mountPath: /skills/harvis-rag/SKILL.md
+              mountPath: /home/node/.openclaw/home/node/.openclaw/skills/harvis-rag/SKILL.md
               subPath: SKILL.md
               readOnly: true
             # Harvis Research skill — web research via backend proxy + DOCX artifact.
             # All external fetches go through /api/tools/web-fetch (no direct internet).
             - name: harvis-research-skill
-              mountPath: /skills/harvis-research/SKILL.md
+              mountPath: /home/node/.openclaw/home/node/.openclaw/skills/harvis-research/SKILL.md
               subPath: SKILL.md
               readOnly: true
             # Harvis Document skill — structured DOCX generation from markdown.
             - name: harvis-document-skill
-              mountPath: /skills/harvis-document/SKILL.md
+              mountPath: /home/node/.openclaw/home/node/.openclaw/skills/harvis-document/SKILL.md
               subPath: SKILL.md
               readOnly: true
             # Harvis Soul skill — always-on personality anchor + tool truth.
             # always: true metadata ensures it's injected into every session.
             - name: harvis-soul-skill
-              mountPath: /skills/harvis-soul/SOUL.md
+              mountPath: /home/node/.openclaw/home/node/.openclaw/skills/harvis-soul/SOUL.md
               subPath: SOUL.md
               readOnly: true
             # Harvis Vibe Coding skill — exact tool usage guide for code edits.
             - name: harvis-vibecoding-skill
-              mountPath: /skills/harvis-vibecoding/SKILL.md
+              mountPath: /home/node/.openclaw/home/node/.openclaw/skills/harvis-vibecoding/SKILL.md
               subPath: SKILL.md
               readOnly: true
             # Harvis Planner — web app agent system prompt (smarter than Discord main).
             - name: harvis-planner-skill
-              mountPath: /skills/harvis-planner/harvis_planner.md
+              mountPath: /home/node/.openclaw/home/node/.openclaw/skills/harvis-planner/harvis_planner.md
               subPath: harvis_planner.md
               readOnly: true
             # Harvis Coding skill — Kimi K2.5 handles all coding tasks.
             - name: harvis-coding-skill
-              mountPath: /skills/harvis-coding/SKILL.md
+              mountPath: /home/node/.openclaw/home/node/.openclaw/skills/harvis-coding/SKILL.md
               subPath: SKILL.md
               readOnly: true
             # python-extra: shared emptyDir where install-python-docx puts python-docx
