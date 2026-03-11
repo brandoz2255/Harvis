@@ -19,23 +19,19 @@ namespace: ai-agents
 images:
   - name: harvis-backend
     newName: dulc3/jarvis-backend
-    newTag: test11
+    newTag: unbroken
   - name: harvis-frontend
     newName: dulc3/jarvis-frontend
-    newTag: test11
+    newTag: unbroken
   - name: harvis-document-worker
     newName: dulc3/harvis-document-worker
-    newTag: test11
+    newTag: unbroken
   - name: harvis-tts-worker
     newName: dulc3/harvis-tts-worker   # same layers as jarvis-backend, separate tag for tracking
-    newTag: test11
+    newTag: unbroken
   - name: dulc3/openclaw
     newName: dulc3/openclaw
     newTag: v2.32.2
-  - name: dulc3/sglang-patch
-    newName: dulc3/sglang-patch
-    newTag: test11
-
 # Patches for production
 patches:
   - target:
@@ -46,25 +42,22 @@ patches:
         path: /spec/replicas
         value: 1
       - op: replace
-        path: /spec/template/spec/containers/1/image
-        value: dulc3/jarvis-backend:test11
-      - op: replace
-        path: /spec/template/spec/initContainers/1/image
-        value: dulc3/jarvis-backend:test11
+        path: /spec/template/spec/containers/0/image
+        value: dulc3/jarvis-backend:unbroken
   - target:
       kind: Deployment
       name: harvis-ai-frontend
     patch: |
       - op: replace
         path: /spec/template/spec/containers/0/image
-        value: dulc3/jarvis-frontend:test11
+        value: dulc3/jarvis-frontend:unbroken
   - target:
       kind: Deployment
       name: harvis-document-worker
     patch: |
       - op: replace
         path: /spec/template/spec/containers/0/image
-        value: dulc3/harvis-document-worker:test11
+        value: dulc3/harvis-document-worker:unbroken
 
   - target:
       kind: Deployment
@@ -72,24 +65,24 @@ patches:
     patch: |
       - op: replace
         path: /spec/template/spec/containers/0/image
-        value: dulc3/harvis-tts-worker:test11
+        value: dulc3/harvis-tts-worker:unbroken
       - op: replace
         path: /spec/template/spec/initContainers/0/image
-        value: dulc3/harvis-tts-worker:test11
+        value: dulc3/harvis-tts-worker:unbroken
 
-  # Inject OpenClaw + Kimi K2.5 env vars into the backend container (index 1 = harvis-backend)
+  # Inject OpenClaw + Kimi K2.5 env vars into the backend container (index 0 = harvis-backend)
   # so the Python orchestrator knows where to find OpenClaw and has the Moonshot API key.
   - target:
       kind: Deployment
       name: harvis-ai-merged-ollama-backend
     patch: |-
       - op: add
-        path: /spec/template/spec/containers/1/env/-
+        path: /spec/template/spec/containers/0/env/-
         value:
           name: OPENCLAW_URL
           value: "ws://harvis-ai-openclaw:18789"
       - op: add
-        path: /spec/template/spec/containers/1/env/-
+        path: /spec/template/spec/containers/0/env/-
         value:
           name: OPENCLAW_GATEWAY_TOKEN
           valueFrom:
@@ -97,7 +90,7 @@ patches:
               name: harvis-ai-openclaw-secret
               key: openclaw-gateway-token
       - op: add
-        path: /spec/template/spec/containers/1/env/-
+        path: /spec/template/spec/containers/0/env/-
         value:
           name: MOONSHOT_API_KEY
           valueFrom:
@@ -105,12 +98,12 @@ patches:
               name: harvis-ai-openclaw-secret
               key: moonshot-api-key
       - op: add
-        path: /spec/template/spec/containers/1/env/-
+        path: /spec/template/spec/containers/0/env/-
         value:
           name: MOONSHOT_BASE_URL
           value: "https://api.moonshot.ai/v1"
       - op: add
-        path: /spec/template/spec/containers/1/env/-
+        path: /spec/template/spec/containers/0/env/-
         value:
           name: NVIDIA_API_KEY
           valueFrom:

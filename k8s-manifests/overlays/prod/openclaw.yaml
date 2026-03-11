@@ -145,7 +145,7 @@ data:
           "elevatedDefault": "full",
           "timeoutSeconds": 600,
           "model": {
-            "primary": "vllm-local/qwen3.5:9b"
+            "primary": "harvis-proxy/kimi-k2.5"
           },
           "subagents": {
             "runTimeoutSeconds": 600,
@@ -160,7 +160,7 @@ data:
             "id": "main",
             "default": true,
             "model": {
-              "primary": "vllm-local/qwen3.5:9b"
+              "primary": "harvis-proxy/kimi-k2.5"
             }
           },
           {
@@ -182,7 +182,7 @@ data:
               "primary": "harvis-proxy/kimi-k2.5"
             },
             "subagents": {
-              "model": "vllm-local/qwen3.5:9b"
+              "model": "harvis-proxy/kimi-k2.5"
             },
             "skills": ["harvis-coding"]
           },
@@ -1518,9 +1518,8 @@ spec:
           port: 443
 
 ---
-# Harvis Coding SKILL.md — Kimi K2.5 orchestrator with qwen3.5:9b sub-agents.
-# Kimi K2.5 handles reasoning, architecture, and complex multi-file edits.
-# qwen3.5:9b workers (vllm-local) handle grep, small edits, shell commands, file reads.
+# Harvis Coding SKILL.md — Kimi K2.5 handles all coding tasks.
+# Kimi K2.5 handles reasoning, architecture, complex multi-file edits, and sub-agent work.
 # Mounted at /skills/harvis-coding/SKILL.md via skills.load.extraDirs: ["/skills"].
 apiVersion: v1
 kind: ConfigMap
@@ -1532,20 +1531,18 @@ data:
     ---
     name: harvis-coding
     description: >
-      Kimi K2.5 orchestrator for coding tasks. Kimi reasons, plans, and writes
-      complex code. qwen3.5:9b sub-agents (vllm-local, RTX 3070) handle parallel
-      search, small isolated edits, and shell commands — keeping Kimi's context clean.
+      Kimi K2.5 for all coding tasks. Handles reasoning, architecture, complex
+      multi-file edits, search, and sub-agent orchestration.
     read_when:
       - User asks for a coding task, bug fix, feature, or code review
       - Working on multi-file changes or architectural refactors
-      - Benchmarking qwen3.5 sub-agent performance
     ---
 
     # Harvis Coding Skill
 
-    You are **Kimi K2.5**, the **orchestrator** for coding tasks in Harvis.
-    Your job is to reason, plan, and synthesize. Your sub-agents (qwen3.5:9b on the
-    local RTX 3070 via vLLM) do the fast, parallel, mechanical work.
+    You are **Kimi K2.5**, handling all coding tasks in Harvis.
+    You reason, plan, write code, and spawn sub-agents (also Kimi K2.5) for
+    parallel mechanical work.
 
     ## Role Split
 
@@ -1556,16 +1553,15 @@ data:
     | Code review + feedback synthesis | **You (Kimi K2.5)** |
     | Writing new features (needs full context) | **You (Kimi K2.5)** |
     | Debugging complex logic, interpreting stack traces | **You (Kimi K2.5)** |
-    | Grep / codebase search ("find all usages of X") | **Sub-agent (qwen3.5:9b)** |
-    | Reading a file to summarise imports/exports | **Sub-agent (qwen3.5:9b)** |
-    | Small isolated edits (rename, fix typo, update constant) | **Sub-agent (qwen3.5:9b)** |
-    | Applying a specific patch you already wrote | **Sub-agent (qwen3.5:9b)** |
-    | Shell commands (run tests, git status, list files) | **Sub-agent (qwen3.5:9b)** |
+    | Grep / codebase search ("find all usages of X") | **Sub-agent (Kimi K2.5)** |
+    | Reading a file to summarise imports/exports | **Sub-agent (Kimi K2.5)** |
+    | Small isolated edits (rename, fix typo, update constant) | **Sub-agent (Kimi K2.5)** |
+    | Applying a specific patch you already wrote | **Sub-agent (Kimi K2.5)** |
+    | Shell commands (run tests, git status, list files) | **Sub-agent (Kimi K2.5)** |
 
     ## Spawning a Sub-agent
 
-    Use `sessions_spawn` — qwen3.5 is the default sub-agent model for the `kimi`
-    agent, so no explicit `model` override is needed (but you may pass it for clarity):
+    Use `sessions_spawn` to offload parallel, mechanical work:
 
     ```
     sessions_spawn({
@@ -1599,7 +1595,6 @@ data:
     - **Never spawn a sub-agent** for tasks that require the full conversation context
       or where you need to reason about the output before using it.
     - **Always read sub-agent results** before proceeding — do not assume success.
-    - Sub-agent tasks should complete in under 2 minutes (RTX 3070, 8GB, fast inference).
     - Sub-agent context cap: up to 5 active children at a time per the cluster config.
 
 ---
@@ -1888,7 +1883,7 @@ spec:
               mountPath: /skills/harvis-planner/harvis_planner.md
               subPath: harvis_planner.md
               readOnly: true
-            # Harvis Coding skill — Kimi K2.5 orchestrator with qwen3.5 sub-agents.
+            # Harvis Coding skill — Kimi K2.5 handles all coding tasks.
             - name: harvis-coding-skill
               mountPath: /skills/harvis-coding/SKILL.md
               subPath: SKILL.md

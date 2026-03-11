@@ -87,27 +87,23 @@ spec:
       initContainers:
         # Download nomic-embed-text-v1.5 Q4_K_M (~274MB) — skip if present
         - name: download-nomic
-          image: python:3.11-slim
-          command: ["/bin/bash", "-c"]
+          image: curlimages/curl:latest
+          command: ["/bin/sh", "-c"]
           args:
             - |
               set -e
-              if [ -f /embed-models/nomic-embed-text-v1.5.Q4_K_M.gguf ]; then
+              DEST=/embed-models/nomic-embed-text-v1.5.Q4_K_M.gguf
+              if [ -f "$DEST" ]; then
                 echo "nomic model already present, skipping"
                 exit 0
               fi
-              pip install -q huggingface_hub
-              python3 -c "
-              from huggingface_hub import hf_hub_download
-              import shutil
-              path = hf_hub_download(
-                  repo_id='nomic-ai/nomic-embed-text-v1.5-GGUF',
-                  filename='nomic-embed-text-v1.5.Q4_K_M.gguf',
-                  local_dir='/embed-models',
-              )
-              shutil.move(path, '/embed-models/nomic-embed-text-v1.5.Q4_K_M.gguf')
-              print('nomic download complete.')
-              "
+              echo "Downloading nomic-embed-text-v1.5.Q4_K_M.gguf..."
+              curl -fL \
+                -H "Authorization: Bearer ${HF_TOKEN}" \
+                -o "${DEST}.tmp" \
+                "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.Q4_K_M.gguf"
+              mv "${DEST}.tmp" "$DEST"
+              echo "nomic download complete: $(du -sh $DEST | cut -f1)"
           env:
             - name: HF_TOKEN
               valueFrom:
@@ -120,35 +116,31 @@ spec:
               mountPath: /embed-models
           resources:
             requests:
-              memory: 256Mi
-              cpu: 250m
+              memory: 32Mi
+              cpu: 100m
             limits:
-              memory: 1Gi
-              cpu: 1000m
+              memory: 128Mi
+              cpu: 500m
 
         # Download Qwen3-Embedding-4B Q4_K_M (~2.5GB) — skip if present
         - name: download-qwen3-embed
-          image: python:3.11-slim
-          command: ["/bin/bash", "-c"]
+          image: curlimages/curl:latest
+          command: ["/bin/sh", "-c"]
           args:
             - |
               set -e
-              if [ -f /embed-models/Qwen3-Embedding-4B-Q4_K_M.gguf ]; then
+              DEST=/embed-models/Qwen3-Embedding-4B-Q4_K_M.gguf
+              if [ -f "$DEST" ]; then
                 echo "qwen3-embedding model already present, skipping"
                 exit 0
               fi
-              pip install -q huggingface_hub
-              python3 -c "
-              from huggingface_hub import hf_hub_download
-              import shutil
-              path = hf_hub_download(
-                  repo_id='Qwen/Qwen3-Embedding-4B-GGUF',
-                  filename='Qwen3-Embedding-4B-Q4_K_M.gguf',
-                  local_dir='/embed-models',
-              )
-              shutil.move(path, '/embed-models/Qwen3-Embedding-4B-Q4_K_M.gguf')
-              print('qwen3-embedding download complete.')
-              "
+              echo "Downloading Qwen3-Embedding-4B-Q4_K_M.gguf..."
+              curl -fL \
+                -H "Authorization: Bearer ${HF_TOKEN}" \
+                -o "${DEST}.tmp" \
+                "https://huggingface.co/Qwen/Qwen3-Embedding-4B-GGUF/resolve/main/Qwen3-Embedding-4B-Q4_K_M.gguf"
+              mv "${DEST}.tmp" "$DEST"
+              echo "qwen3-embedding download complete: $(du -sh $DEST | cut -f1)"
           env:
             - name: HF_TOKEN
               valueFrom:
@@ -161,23 +153,23 @@ spec:
               mountPath: /embed-models
           resources:
             requests:
-              memory: 256Mi
-              cpu: 250m
+              memory: 32Mi
+              cpu: 100m
             limits:
-              memory: 1Gi
-              cpu: 1000m
+              memory: 128Mi
+              cpu: 500m
 
       containers:
         # embed-nomic — nomic-embed-text-v1.5, 768 dims, STANDARD tier
         # CPU-only: -ngl 0; ~274MB model, fast on CPU for RAG batch workloads
         - name: embed-nomic
-          image: ghcr.io/ggerganov/llama.cpp:server-cuda
-          imagePullPolicy: IfNotPresent
+          image: ghcr.io/ggml-org/llama.cpp:server-cuda
+          imagePullPolicy: Always
           ports:
             - name: embed-nomic
               containerPort: 8081
               protocol: TCP
-          command: ["/llama-server"]
+          command: ["/app/llama-server"]
           args:
             - "--model"
             - "/embed-models/nomic-embed-text-v1.5.Q4_K_M.gguf"
@@ -227,13 +219,13 @@ spec:
         # embed-qwen3 — Qwen3-Embedding-4B, 4096 dims, HIGH tier (code/technical)
         # CPU-only: -ngl 0; ~2.5GB model, 50-200ms latency acceptable for RAG
         - name: embed-qwen3
-          image: ghcr.io/ggerganov/llama.cpp:server-cuda
-          imagePullPolicy: IfNotPresent
+          image: ghcr.io/ggml-org/llama.cpp:server-cuda
+          imagePullPolicy: Always
           ports:
             - name: embed-qwen3
               containerPort: 8082
               protocol: TCP
-          command: ["/llama-server"]
+          command: ["/app/llama-server"]
           args:
             - "--model"
             - "/embed-models/Qwen3-Embedding-4B-Q4_K_M.gguf"
