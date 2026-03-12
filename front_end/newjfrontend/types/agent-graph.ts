@@ -9,13 +9,14 @@ export type AgentStatus = 'idle' | 'running' | 'waiting' | 'completed' | 'error'
 /** Agent node type - the role/function of the agent */
 export type AgentNodeType = 
   | 'planner'      // High-level task planning
-  | 'coder'        // Code generation/review
+  | 'coder'        // Code generation/review (also OpenCode)
   | 'researcher'   // Web research, data gathering
   | 'writer'       // Document generation
   | 'discord'      // Discord bot/bridge
   | 'orchestrator' // Main agent that spawns others
   | 'executor'     // Task execution
-  | 'reviewer';    // Code/content review
+  | 'reviewer'    // Code/content review
+  | 'opencode';   // OpenCode coding agent (sub-agent)
 
 /** Color scheme for each agent type */
 export const AGENT_TYPE_COLORS: Record<AgentNodeType, string> = {
@@ -27,6 +28,7 @@ export const AGENT_TYPE_COLORS: Record<AgentNodeType, string> = {
   orchestrator: '#ec4899', // pink-500
   executor: '#06b6d4',     // cyan-500
   reviewer: '#f97316',     // orange-500
+  opencode: '#06b6d4',     // cyan-500 (same as executor)
 };
 
 /** Status indicator colors */

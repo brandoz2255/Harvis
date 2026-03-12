@@ -119,6 +119,10 @@ python_back_end/whisper_models/
 # openclaw directory
 openclaw/
 
+# OpenCode repo clone (embedded git repo - not tracked)
+opencode/
+opencode/opencode/
+
 # SGLang fork vendor clone (gitignored — patched locally, not committed)
 vendor/sglang-H/
 

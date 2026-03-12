@@ -15,7 +15,7 @@ function inferAgentType(label: string): AgentNodeType {
   const lower = label.toLowerCase();
   if (lower === 'agent') return 'orchestrator';
   if (lower.includes('plan')) return 'planner';
-  if (lower.includes('cod') || lower.includes('dev')) return 'coder';
+  if (lower.includes('cod') || lower.includes('dev') || lower.includes('opencode')) return 'coder';
   if (lower.includes('research') || lower.includes('search')) return 'researcher';
   if (lower.includes('write') || lower.includes('doc')) return 'writer';
   return 'executor';

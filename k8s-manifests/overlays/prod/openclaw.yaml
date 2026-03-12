@@ -177,7 +177,7 @@ data:
             "model": {
               "primary": "harvis-proxy/nvidia-kimi"
             },
-            "skills": ["harvis-planner", "harvis-vibecoding", "harvis-github", "harvis-rag", "harvis-research", "harvis-document"]
+            "skills": ["harvis-planner", "harvis-coding", "harvis-github", "harvis-rag", "harvis-research", "harvis-document"]
           },
           {
             "id": "kimi",
@@ -277,6 +277,7 @@ data:
     | Write/generate a document, proposal, changelog, README | `harvis-document` |
     | GitHub operations (PRs, issues, commits) | `harvis-github` |
     | Search the local codebase or docs | `local_rag` tool directly |
+    | Coding tasks (write, edit, fix bugs, features) | `harvis-coding` (uses OpenCode) |
 
     **To use a skill**: call `read /home/node/.openclaw/skills/<name>/SKILL.md` first, then follow the
     exact workflow in that file. Do NOT try to `exec harvis-github` or similar —
@@ -286,6 +287,10 @@ data:
     every step. GitHub credentials are `$GH_APP_ID`, `$GH_INSTALLATION_ID`,
     `$GH_PRIVATE_KEY` — NOT `$GH_TOKEN` and NOT the `gh` CLI.
     **Never use `local_rag` for web research** — it only searches the local vector DB.
+
+    **Coding tasks**: Use `harvis-coding` skill which delegates to OpenCode. OpenCode
+    runs Kimi K2.5 but returns compact JSON summaries (not raw terminal output),
+    saving 5-10x tokens per task.
 
     ## How to Handle a Task
 
@@ -1219,7 +1224,7 @@ data:
 
     | Task | Skill |
     |------|-------|
-    | Write/edit code, fix bugs, PRs, vibe coding | read /home/node/.openclaw/skills/harvis-vibecoding/SKILL.md |
+    | Write/edit code, fix bugs, PRs, vibe coding | read /home/node/.openclaw/skills/harvis-coding/SKILL.md |
     | GitHub PRs, commits, repo browsing | read /home/node/.openclaw/skills/harvis-github/SKILL.md |
     | Search local knowledge base / RAG | read /home/node/.openclaw/skills/harvis-rag/SKILL.md |
     | Research, web lookups, fact-check | read /home/node/.openclaw/skills/harvis-research/SKILL.md |
@@ -1230,17 +1235,13 @@ data:
 
     ## Planning Format
 
-    Before any multi-step task:
+    Before any multi-step coding task:
 
     Plan:
-    1. Read harvis-vibecoding skill
-    2. Scan repo for relevant files
-    3. Read exact lines to change (offset + limit)
-    4. Edit with exact old_string from read output
-    5. Run validation gate (type-check / py_compile / yaml check — see below)
-    6. Fix any errors, re-validate
-    7. Commit with co-author trailer
-    8. Open PR
+    1. Read harvis-coding skill (uses OpenCode for efficient coding)
+    2. Delegate the coding task to OpenCode via the opencode tool
+    3. Read the compact JSON result
+    4. Report summary to user
 
     Starting step 1...
 
@@ -1521,8 +1522,8 @@ spec:
           port: 443
 
 ---
-# Harvis Coding SKILL.md — Kimi K2.5 handles all coding tasks.
-# Kimi K2.5 handles reasoning, architecture, complex multi-file edits, and sub-agent work.
+# Harvis Coding SKILL.md — Delegates coding tasks to OpenCode for token-efficient execution.
+# OpenCode runs with Kimi K2.5 and returns compact JSON summaries instead of raw terminal output.
 # Mounted at /home/node/.openclaw/skills/harvis-coding/SKILL.md via skills.load.extraDirs: ["/home/node/.openclaw/skills"].
 apiVersion: v1
 kind: ConfigMap
@@ -1534,71 +1535,79 @@ data:
     ---
     name: harvis-coding
     description: >
-      Kimi K2.5 for all coding tasks. Handles reasoning, architecture, complex
-      multi-file edits, search, and sub-agent orchestration.
+      Coding tasks delegated to OpenCode. OpenCode uses Kimi K2.5 internally and returns
+      compact JSON summaries (not raw terminal output) - saving 5-10x tokens per task.
     read_when:
       - User asks for a coding task, bug fix, feature, or code review
       - Working on multi-file changes or architectural refactors
     ---
 
-    # Harvis Coding Skill
+    # Harvis Coding Skill (OpenCode-Powered)
 
-    You are **Kimi K2.5**, handling all coding tasks in Harvis.
-    You reason, plan, write code, and spawn sub-agents (also Kimi K2.5) for
-    parallel mechanical work.
+    **All coding tasks are delegated to OpenCode** which runs Kimi K2.5 and returns
+    compact JSON summaries instead of raw terminal output. This saves 5-10x tokens.
 
-    ## Role Split
+    ## The Tool: opencode
 
-    | Task | Who handles it |
-    |------|----------------|
-    | Architecture decisions + design | **You (Kimi K2.5)** |
-    | Complex multi-file refactors | **You (Kimi K2.5)** |
-    | Code review + feedback synthesis | **You (Kimi K2.5)** |
-    | Writing new features (needs full context) | **You (Kimi K2.5)** |
-    | Debugging complex logic, interpreting stack traces | **You (Kimi K2.5)** |
-    | Grep / codebase search ("find all usages of X") | **Sub-agent (Kimi K2.5)** |
-    | Reading a file to summarise imports/exports | **Sub-agent (Kimi K2.5)** |
-    | Small isolated edits (rename, fix typo, update constant) | **Sub-agent (Kimi K2.5)** |
-    | Applying a specific patch you already wrote | **Sub-agent (Kimi K2.5)** |
-    | Shell commands (run tests, git status, list files) | **Sub-agent (Kimi K2.5)** |
-
-    ## Spawning a Sub-agent
-
-    Use `sessions_spawn` to offload parallel, mechanical work:
+    Use the `opencode` tool for ALL coding tasks:
 
     ```
-    sessions_spawn({
-      task: "<self-contained instruction with full file paths and expected output>",
-      label: "<short-label>",
-      runTimeoutSeconds: 120
+    opencode({
+      prompt: "Your coding task here. Be specific: what files, goal, constraints.",
+      session_id: "optional - from previous call to continue same session"
     })
     ```
 
-    **Self-contained means**: the sub-agent has NO context from this conversation.
-    Include file paths, exact symbol names, line ranges, and the output format you expect.
+    ## Workflow
 
-    ## Orchestration Pattern
+    1. **Delegate to OpenCode** — Call `opencode` with a specific prompt
+    2. **Read the result** — You'll get compact JSON with:
+       - `files_changed`: list of files modified
+       - `commands_run`: list of commands executed
+       - `tests_passed`: boolean
+       - `summary`: one sentence summary
+       - `status`: "ok" | "error" | "needs_review"
+    3. **Report to user** — Summarize what was done based on the JSON
 
-    For a typical coding task:
+    ## Continuing a Session
 
-    1. **Plan (you)** — Break the task into atomic steps before touching any files.
-    2. **Scan (sub-agents, parallel)** — Spawn multiple sub-agents concurrently to
-       grep the codebase, read relevant files, and summarise their findings.
-    3. **Synthesize (you)** — Read all sub-agent results. Form the complete solution.
-    4. **Write large edits (you)** — New files, complex multi-block changes, and
-       anything requiring cross-file reasoning.
-    5. **Apply small edits (sub-agents)** — Renames, find-replace, patch application.
-    6. **Verify (sub-agent)** — Spawn one sub-agent to run `npm test` / `pytest` /
-       `cargo test` and report the result.
-    7. **Review (you)** — Synthesize the verification result and deliver the final answer.
+    If working on the same codebase across multiple calls, pass `session_id` from
+    the previous result to continue the same OpenCode session:
 
-    ## Rules
+    ```
+    opencode({
+      prompt: "Continue working on the same task...",
+      session_id: "abc123-from-previous-result"
+    })
+    ```
 
-    - **Spawn sub-agents in parallel** when tasks are independent.
-    - **Never spawn a sub-agent** for tasks that require the full conversation context
-      or where you need to reason about the output before using it.
-    - **Always read sub-agent results** before proceeding — do not assume success.
-    - Sub-agent context cap: up to 5 active children at a time per the cluster config.
+    ## Example
+
+    User: "Create a new API endpoint for user authentication"
+
+    You:
+    ```
+    opencode({
+      prompt: "Create a new API endpoint for user authentication in python_back_end/main.py. Add POST /api/auth/login that accepts email/password, validates against the database, and returns a JWT token. Include proper error handling for invalid credentials.",
+    })
+    ```
+
+    Then read the JSON result and report:
+    - "Created POST /api/auth/login endpoint in main.py with JWT authentication"
+    - Files changed: ["python_back_end/main.py"]
+    - Tests passed: true/false
+
+    ## Why OpenCode?
+
+    | Before (raw bash) | After (OpenCode tool) |
+    |-------------------|----------------------|
+    | 500-2000 tokens/step | 50-100 tokens/step |
+    | Full terminal output in context | Compact JSON only |
+
+    OpenCode is already configured with:
+    - Model: Kimi K2.5
+    - Agent: harvis-coder (compact output mode)
+    - Server: localhost:4096 (in same pod)
 
 ---
 # Deployment: OpenClaw gateway
