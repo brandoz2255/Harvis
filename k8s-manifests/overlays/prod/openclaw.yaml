@@ -138,6 +138,9 @@ data:
           "allowFrom": {
             "discord": ["783435788431261777"]
           }
+        },
+        "exec": {
+          "host": "sandbox"
         }
       },
       "agents": {
@@ -275,7 +278,7 @@ data:
     | GitHub operations (PRs, issues, commits) | `harvis-github` |
     | Search the local codebase or docs | `local_rag` tool directly |
 
-    **To use a skill**: call `read /home/node/.openclaw/home/node/.openclaw/skills/<name>/SKILL.md` first, then follow the
+    **To use a skill**: call `read /home/node/.openclaw/skills/<name>/SKILL.md` first, then follow the
     exact workflow in that file. Do NOT try to `exec harvis-github` or similar —
     skills are markdown files, not executables.
 
@@ -1813,8 +1816,16 @@ spec:
           command: ["/bin/sh", "-c"]
           args:
             - |
-              mkdir -p /home/node/.openclaw/skills/{harvis-agent,harvis-github,harvis-rag,harvis-research,harvis-document,harvis-soul,harvis-vibecoding,harvis-planner,harvis-coding}
-              echo "Skills directory created at /home/node/.openclaw/skills/"
+              mkdir -p /home/node/.openclaw/skills/harvis-agent
+              mkdir -p /home/node/.openclaw/skills/harvis-github
+              mkdir -p /home/node/.openclaw/skills/harvis-rag
+              mkdir -p /home/node/.openclaw/skills/harvis-research
+              mkdir -p /home/node/.openclaw/skills/harvis-document
+              mkdir -p /home/node/.openclaw/skills/harvis-soul
+              mkdir -p /home/node/.openclaw/skills/harvis-vibecoding
+              mkdir -p /home/node/.openclaw/skills/harvis-planner
+              mkdir -p /home/node/.openclaw/skills/harvis-coding
+              echo "Skills directories created successfully"
           volumeMounts:
             - name: openclaw-data
               mountPath: /home/node/.openclaw
@@ -1940,51 +1951,51 @@ spec:
             # Harvis Agent skill — mounted at /home/node/.openclaw/skills/harvis-agent/SKILL.md
             # OpenClaw discovers this via skills.load.extraDirs: ["/skills"]
             - name: harvis-agent-skill
-              mountPath: /home/node/.openclaw/home/node/.openclaw/skills/harvis-agent/SKILL.md
+              mountPath: /home/node/.openclaw/skills/harvis-agent/SKILL.md
               subPath: SKILL.md
               readOnly: true
             # Harvis GitHub skill — safe PR-only workflow for harvisai-dulc3-cmd bot.
             # Always prompt-injected when a GitHub/PR task is detected.
             - name: harvis-github-skill
-              mountPath: /home/node/.openclaw/home/node/.openclaw/skills/harvis-github/SKILL.md
+              mountPath: /home/node/.openclaw/skills/harvis-github/SKILL.md
               subPath: SKILL.md
               readOnly: true
             # Harvis RAG skill — semantic search over the Harvis pgvector DB via
             # the backend's /rag/search proxy endpoint. No DB credentials needed.
             - name: harvis-rag-skill
-              mountPath: /home/node/.openclaw/home/node/.openclaw/skills/harvis-rag/SKILL.md
+              mountPath: /home/node/.openclaw/skills/harvis-rag/SKILL.md
               subPath: SKILL.md
               readOnly: true
             # Harvis Research skill — web research via backend proxy + DOCX artifact.
             # All external fetches go through /api/tools/web-fetch (no direct internet).
             - name: harvis-research-skill
-              mountPath: /home/node/.openclaw/home/node/.openclaw/skills/harvis-research/SKILL.md
+              mountPath: /home/node/.openclaw/skills/harvis-research/SKILL.md
               subPath: SKILL.md
               readOnly: true
             # Harvis Document skill — structured DOCX generation from markdown.
             - name: harvis-document-skill
-              mountPath: /home/node/.openclaw/home/node/.openclaw/skills/harvis-document/SKILL.md
+              mountPath: /home/node/.openclaw/skills/harvis-document/SKILL.md
               subPath: SKILL.md
               readOnly: true
             # Harvis Soul skill — always-on personality anchor + tool truth.
             # always: true metadata ensures it's injected into every session.
             - name: harvis-soul-skill
-              mountPath: /home/node/.openclaw/home/node/.openclaw/skills/harvis-soul/SOUL.md
+              mountPath: /home/node/.openclaw/skills/harvis-soul/SOUL.md
               subPath: SOUL.md
               readOnly: true
             # Harvis Vibe Coding skill — exact tool usage guide for code edits.
             - name: harvis-vibecoding-skill
-              mountPath: /home/node/.openclaw/home/node/.openclaw/skills/harvis-vibecoding/SKILL.md
+              mountPath: /home/node/.openclaw/skills/harvis-vibecoding/SKILL.md
               subPath: SKILL.md
               readOnly: true
             # Harvis Planner — web app agent system prompt (smarter than Discord main).
             - name: harvis-planner-skill
-              mountPath: /home/node/.openclaw/home/node/.openclaw/skills/harvis-planner/harvis_planner.md
+              mountPath: /home/node/.openclaw/skills/harvis-planner/harvis_planner.md
               subPath: harvis_planner.md
               readOnly: true
             # Harvis Coding skill — Kimi K2.5 handles all coding tasks.
             - name: harvis-coding-skill
-              mountPath: /home/node/.openclaw/home/node/.openclaw/skills/harvis-coding/SKILL.md
+              mountPath: /home/node/.openclaw/skills/harvis-coding/SKILL.md
               subPath: SKILL.md
               readOnly: true
             # python-extra: shared emptyDir where install-python-docx puts python-docx
