@@ -42,23 +42,33 @@ spec:
             limits:
               memory: 32Mi
               cpu: 50m
-        # Download Qwen3-8B Q4_K_M GGUF for llama-server — skips if already on PVC
-        - name: download-qwen35
+        # [DISABLED] Download Qwen3-8B Q4_K_M — too large for RTX 3070 in desktop mode (~5.5GB VRAM)
+        # Replaced by the 2B distilled model below. Re-enable when k8s VRAM operator is in place.
+        # - name: download-qwen35
+        #   image: curlimages/curl:latest
+        #   args:
+        #     - DEST=/llama-models/Qwen3-8B-Q4_K_M.gguf
+        #     - curl -fL -H "Authorization: Bearer ${HF_TOKEN}" -o "${DEST}.tmp"
+        #       "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf"
+
+        # Download Qwen3.5-2B Claude-4.6 Opus Reasoning-Distilled Q4_K_M (~1.27GB)
+        # Fits easily on RTX 3070 8GB leaving plenty of VRAM for KV cache and TTS/Whisper on CPU.
+        - name: download-qwen35-2b
           image: curlimages/curl:latest
           command: ["/bin/sh", "-c"]
           args:
             - |
               set -e
-              DEST=/llama-models/Qwen3-8B-Q4_K_M.gguf
+              DEST=/llama-models/Qwen3.5-2B.Q4_K_M.gguf
               if [ -f "$DEST" ]; then
                 echo "Model already present, skipping download"
                 exit 0
               fi
-              echo "Downloading Qwen3-8B-Q4_K_M.gguf from HuggingFace..."
+              echo "Downloading Qwen3.5-2B.Q4_K_M.gguf from HuggingFace..."
               curl -fL \
                 -H "Authorization: Bearer ${HF_TOKEN}" \
                 -o "${DEST}.tmp" \
-                "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf"
+                "https://huggingface.co/Jackrong/Qwen3.5-2B-Claude-4.6-Opus-Reasoning-Distilled-GGUF/resolve/main/Qwen3.5-2B.Q4_K_M.gguf"
               mv "${DEST}.tmp" "$DEST"
               echo "Download complete: $(du -sh $DEST | cut -f1)"
           env:
@@ -114,7 +124,7 @@ spec:
             - name: EMBED_QW3_URL
               value: "http://harvis-ai-llama-embed:8082"   # Qwen3-Embedding-4B, 4096 dims
             - name: VLLM_URL
-              value: "http://localhost:8080/v1"   # llama-server (Qwen3-8B Q4_K_M)
+              value: "http://localhost:8080/v1"   # llama-server (Qwen3.5-2B distilled Q4_K_M)
             # llama-server co-located sidecar (localhost)
             - name: LLAMA_URL
               value: "http://localhost:8080/v1"
@@ -189,9 +199,14 @@ spec:
             timeoutSeconds: 5
             failureThreshold: 3
 
-        # llama-server — Qwen3-8B Q4_K_M on RTX 3070 (8GB), full GPU offload via llama.cpp
-        # GGML Q4_K_M: in-register dequant, no materialized fp16 buffer → fits on 8GB
-        # ~5.5GB weights + ~1.0GB KV cache (16K, q8_0) + ~0.3GB overhead = ~6.8GB
+        # llama-server — Qwen3.5-2B Claude-4.6 Opus Reasoning-Distilled Q4_K_M on RTX 3070 (8GB)
+        # ~1.27GB weights → leaves ~6.5GB free for 128K KV cache (q8_0) + GPU overhead
+        # Swapped from 8B (too large for desktop mode) — k8s VRAM operator will auto-select model later
+        # [DISABLED MODEL]: Qwen3-8B-Q4_K_M.gguf — re-enable when VRAM operator is deployed
+        # - "--model"
+        # - "/llama-models/Qwen3-8B-Q4_K_M.gguf"
+        # - "--alias"
+        # - "qwen3:8b"
         - name: llama-server
           image: ghcr.io/ggml-org/llama.cpp:server-cuda
           imagePullPolicy: Always
@@ -202,7 +217,7 @@ spec:
           command: ["/app/llama-server"]
           args:
             - "--model"
-            - "/llama-models/Qwen3-8B-Q4_K_M.gguf"
+            - "/llama-models/Qwen3.5-2B.Q4_K_M.gguf"
             - "--host"
             - "0.0.0.0"
             - "--port"
@@ -210,21 +225,21 @@ spec:
             - "--n-gpu-layers"
             - "99"
             - "--ctx-size"
-            - "16384"
+            - "131072"         # 128K context — plenty of VRAM with 2B model
             - "--parallel"
-            - "1"
+            - "8"              # 8 concurrent slots (2B is light, lots of headroom)
             - "--alias"
-            - "qwen3:8b"
+            - "qwen3.5:2b"
           volumeMounts:
             - name: llama-models
               mountPath: /llama-models
           resources:
             requests:
-              memory: 4Gi
+              memory: 1Gi      # 2B model is much lighter than 8B
               cpu: 500m
             limits:
               nvidia.com/gpu: 1
-              memory: 12Gi
+              memory: 6Gi      # 1.27GB weights + 128K KV cache at q8_0 + overhead
               cpu: 4000m
           livenessProbe:
             httpGet:

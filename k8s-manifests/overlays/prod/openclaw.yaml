@@ -505,6 +505,50 @@ data:
 
     ---
 
+    ## Creating a New Repository
+
+    Use this when the user explicitly asks you to create a new GitHub repo on their behalf.
+
+    **Always confirm with the user before creating** — repo creation is irreversible without manual deletion.
+
+    ### Step — Create the repo via the Harvis backend proxy
+
+    ```bash
+    cat > /tmp/repo-payload.json <<EOF
+    {
+      "name": "my-new-repo",
+      "description": "Short description of the project",
+      "private": false,
+      "auto_init": true
+    }
+    EOF
+
+    curl -s -X POST \
+      -H "Authorization: Bearer $OPENCLAW_GATEWAY_TOKEN" \
+      -H "Content-Type: application/json" \
+      http://backend:8000/github/repos \
+      -d @/tmp/repo-payload.json | tee /tmp/repo-result.json
+
+    python3 -c "import json,sys; d=json.load(open('/tmp/repo-result.json')); print(d.get('repo_url','ERROR:', d))"
+    python3 -c "import json,sys; d=json.load(open('/tmp/repo-result.json')); print('Clone:', d.get('clone_url',''))"
+
+    rm -f /tmp/repo-payload.json /tmp/repo-result.json
+    ```
+
+    **Rules for repo creation:**
+    - `name`: alphanumeric, hyphens, underscores, dots — max 100 chars, no spaces
+    - `private`: default `false`; set `true` only if user explicitly requests private
+    - `auto_init`: always `true` so the repo is immediately cloneable
+    - After creation, the returned `full_name` can be used as a PR target in the same session
+
+    **Log the creation:**
+    ```bash
+    echo "[harvis-github] $(date -u '+%Y-%m-%dT%H:%M:%SZ') ACTION: create_repo name=<name>" \
+      >> /home/node/workspaces/github-audit.log
+    ```
+
+    ---
+
     ## Security Checks
 
     Before any git push, verify the target branch:
