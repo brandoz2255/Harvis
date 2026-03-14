@@ -1610,6 +1610,57 @@ data:
     - Server: localhost:4096 (in same pod)
 
 ---
+# OpenCode ConfigMap — contains opencode.json and harvis-coder agent definition
+# Mounted to /root/.config/opencode/ in the OpenClaw pod
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: opencode-config
+  namespace: ai-agents
+data:
+  opencode.json: |
+    {
+      "$schema": "https://opencode.ai/config.json",
+      "model": "harvis/kimi-k2.5",
+      "provider": {
+        "harvis": {
+          "options": {
+            "baseURL": "http://backend:8000/api/opencode/chat"
+          }
+        }
+      }
+    }
+
+  harvis-coder.md: |
+    ---
+    description: "Coding sub-agent for Harvis OpenClaw tasks. Always returns compact JSON."
+    mode: subagent
+    model: harvis/kimi-k2.5
+    tools:
+      bash: true
+      read: true
+      write: true
+      edit: true
+    permissions:
+      bash: allow
+      edit: allow
+    ---
+
+    You are a focused coding agent. Complete the task, then output ONLY this JSON block
+    as your final message — nothing else after it, no explanation, no markdown:
+
+    {
+      "files_changed": ["list of file paths created or modified"],
+      "commands_run": ["list of bash commands executed"],
+      "tests_passed": true,
+      "summary": "One sentence and outcome.",
+     : what was done "status": "ok | error | needs_review"
+    }
+
+    If status is "error", add an "error" key with one sentence describing the failure.
+    Never output raw terminal logs. Summarize everything.
+
+---
 # Deployment: OpenClaw gateway
 # Single replica — OpenClaw writes session state to local JSONL files on the PVC.
 # Multiple replicas would cause split-brain session state.
@@ -2002,10 +2053,19 @@ spec:
               mountPath: /home/node/.openclaw/skills/harvis-planner/harvis_planner.md
               subPath: harvis_planner.md
               readOnly: true
-            # Harvis Coding skill — Kimi K2.5 handles all coding tasks.
+            # Harvis Coding skill — OpenCode-powered coding delegation.
             - name: harvis-coding-skill
               mountPath: /home/node/.openclaw/skills/harvis-coding/SKILL.md
               subPath: SKILL.md
+              readOnly: true
+            # OpenCode config — contains opencode.json and harvis-coder agent
+            - name: opencode-config
+              mountPath: /root/.config/opencode/opencode.json
+              subPath: opencode.json
+              readOnly: true
+            - name: opencode-config
+              mountPath: /root/.config/opencode/.opencode/agent/harvis-coder.md
+              subPath: harvis-coder.md
               readOnly: true
             # python-extra: shared emptyDir where install-python-docx puts python-docx
             - name: python-extra
@@ -2072,6 +2132,10 @@ spec:
         - name: harvis-coding-skill
           configMap:
             name: harvis-coding-skill
+        # OpenCode config — mounted to /root/.config/opencode/
+        - name: opencode-config
+          configMap:
+            name: opencode-config
         - name: python-extra
           emptyDir: {}
 ---
