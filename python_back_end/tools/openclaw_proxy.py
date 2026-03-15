@@ -13,6 +13,8 @@ Endpoints:
   POST /api/tools/document-save  — convert markdown → DOCX artifact
   POST /api/tools/file-analyze   — analyze uploaded file with Kimi vision,
                                    return structured document layout
+  POST /api/tools/vision-query   — analyze a base64 image with Kimi K2.5 vision,
+                                   called by OpenClaw agents for Discord image attachments
 """
 
 import asyncio
@@ -611,3 +613,90 @@ async def file_analyze(
         "pages_analyzed": len(image_pairs),
         "structure": structure,
     }
+
+
+# ─── Vision query ───────────────────────────────────────────────────────────────
+
+class VisionQueryRequest(BaseModel):
+    image_b64: str          # raw base64, no data-URI prefix
+    mime_type: str = "image/png"
+    question: str = "Describe this image in detail."
+
+
+@openclaw_proxy_router.post("/vision-query")
+async def vision_query(
+    req: VisionQueryRequest,
+    request: Request,
+) -> Dict[str, Any]:
+    """Analyze a base64 image with Kimi K2.5 vision.
+
+    Auth: Authorization: Bearer <OPENCLAW_GATEWAY_TOKEN>
+    Called by OpenClaw agents when they receive Discord image attachments.
+    """
+    _verify_openclaw_token(request.headers.get("Authorization"))
+
+    # Resize if needed — cap at 1024px on longest side to stay within Moonshot limits
+    try:
+        import base64 as _b64
+        import io
+        from PIL import Image
+        raw = _b64.b64decode(req.image_b64)
+        img = Image.open(io.BytesIO(raw))
+        if max(img.size) > 1024:
+            img.thumbnail((1024, 1024), Image.LANCZOS)
+            buf = io.BytesIO()
+            fmt = "JPEG" if req.mime_type == "image/jpeg" else "PNG"
+            img.save(buf, format=fmt)
+            req = req.model_copy(update={
+                "image_b64": _b64.b64encode(buf.getvalue()).decode(),
+                "mime_type": f"image/{fmt.lower()}",
+            })
+    except Exception as resize_err:
+        logger.warning("vision-query: resize failed, using original: %s", resize_err)
+
+    moonshot_key = os.getenv("MOONSHOT_API_KEY", "")
+    moonshot_url = os.getenv("MOONSHOT_BASE_URL", "https://api.moonshot.ai/v1").rstrip("/")
+    if not moonshot_key:
+        raise HTTPException(status_code=503, detail="MOONSHOT_API_KEY not configured")
+
+    content = [
+        {"type": "text", "text": req.question},
+        {"type": "image_url",
+         "image_url": {"url": f"data:{req.mime_type};base64,{req.image_b64}"}},
+    ]
+    payload = {
+        "model": "kimi-k2.5",
+        "messages": [{"role": "user", "content": content}],
+        "temperature": 1.0,
+        "max_tokens": 2048,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                f"{moonshot_url}/chat/completions",
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {moonshot_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.HTTPStatusError as exc:
+        logger.error("vision-query: Kimi API error %s: %s", exc.response.status_code, exc.response.text[:200])
+        raise HTTPException(status_code=502,
+            detail=f"Moonshot vision error ({exc.response.status_code}): {exc.response.text[:200]}")
+    except Exception as exc:
+        logger.error("vision-query: request failed: %s", exc)
+        raise HTTPException(status_code=502, detail=f"Vision request failed: {exc}")
+
+    analysis: str = (
+        data.get("choices", [{}])[0]
+        .get("message", {})
+        .get("content", "")
+    ).strip()
+
+    logger.info("vision-query: completed, response_len=%d", len(analysis))
+
+    return {"analysis": analysis}

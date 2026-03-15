@@ -67,7 +67,7 @@ class EmbeddingAdapter:
     async def _embed_with_llamacpp(self, text: str) -> List[float]:
         """Generate embedding using llama.cpp OpenAI-compatible /v1/embeddings."""
         session = await self._get_session()
-        text = self._truncate_text(text)
+        text = self._truncate_text(text, max_chars=3500)  # --ctx-size 2048 on 1650 Ti
         payload = {"input": text}
         logger.debug(f"Calling llama.cpp embeddings API at {self.ollama_url}")
         async with session.post(
@@ -117,7 +117,7 @@ class EmbeddingAdapter:
         async def embed_with_limit(text: str) -> List[float]:
             """Embed with concurrency limit."""
             async with semaphore:
-                return await self._embed_with_ollama(text)
+                return await self.embed_text(text)
 
         for i in range(0, len(texts), batch_size):
             batch = texts[i : i + batch_size]

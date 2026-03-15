@@ -140,7 +140,7 @@ data:
           }
         },
         "exec": {
-          "host": "sandbox"
+          "host": "gateway"
         }
       },
       "agents": {

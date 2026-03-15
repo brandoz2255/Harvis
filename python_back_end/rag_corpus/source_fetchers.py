@@ -51,7 +51,8 @@ class BaseFetcher(ABC):
             self._session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=30),
                 headers={
-                    "User-Agent": "Harvis-RAG-Bot/1.0 (https://github.com/harvis)"
+                    "User-Agent": "Harvis-RAG-Bot/1.0 (https://github.com/harvis)",
+                    "Accept-Encoding": "gzip, deflate",  # exclude brotli — aiohttp has no br decoder
                 },
             )
         return self._session
