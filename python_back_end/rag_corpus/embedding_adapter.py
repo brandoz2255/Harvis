@@ -27,7 +27,6 @@ class EmbeddingAdapter:
         self,
         model_name: str = "nomic-embed-text",  # 768 dims, excellent quality
         ollama_url: str = "http://ollama:11434",
-        use_huggingface_fallback: bool = True,
         api_format: str = "auto",
     ):
         """
@@ -36,12 +35,10 @@ class EmbeddingAdapter:
         Args:
             model_name: Embedding model name
             ollama_url: URL of embedding server (Ollama or llama.cpp)
-            use_huggingface_fallback: Whether to fall back to HuggingFace
             api_format: "auto" (detect from URL), "ollama", or "llamacpp"
         """
         self.model_name = model_name
         self.ollama_url = ollama_url.rstrip("/")
-        self.use_huggingface_fallback = use_huggingface_fallback
 
         # Detect API format: llama.cpp uses /v1/embeddings (OpenAI-compatible)
         # Ollama uses /api/embeddings with {"prompt": ...}
@@ -52,7 +49,6 @@ class EmbeddingAdapter:
             self._api_format = api_format
 
         self._session: Optional[aiohttp.ClientSession] = None
-        self._hf_model = None
         self._embedding_dim: Optional[int] = None
 
     async def _get_session(self) -> aiohttp.ClientSession:
@@ -67,21 +63,6 @@ class EmbeddingAdapter:
         """Close HTTP session."""
         if self._session and not self._session.closed:
             await self._session.close()
-
-    def _get_huggingface_model(self):
-        """Lazily load HuggingFace model."""
-        if self._hf_model is None and self.use_huggingface_fallback:
-            try:
-                from sentence_transformers import SentenceTransformer
-
-                # Use the same model as existing embedding system
-                self._hf_model = SentenceTransformer(
-                    "sentence-transformers/all-MiniLM-L6-v2"
-                )
-                logger.info("Loaded HuggingFace fallback model: all-MiniLM-L6-v2")
-            except ImportError:
-                logger.warning("sentence-transformers not available for fallback")
-        return self._hf_model
 
     async def _embed_with_llamacpp(self, text: str) -> List[float]:
         """Generate embedding using llama.cpp OpenAI-compatible /v1/embeddings."""
@@ -112,13 +93,9 @@ class EmbeddingAdapter:
         Returns:
             Embedding vector as list of floats
         """
-        try:
-            if self._api_format == "llamacpp":
-                return await self._embed_with_llamacpp(text)
-            return await self._embed_with_ollama(text)
-        except Exception as e:
-            logger.warning(f"Embedding failed ({self._api_format}): {e}, trying fallback")
-            return self._embed_with_huggingface(text)
+        if self._api_format == "llamacpp":
+            return await self._embed_with_llamacpp(text)
+        return await self._embed_with_ollama(text)
 
     async def embed_batch(
         self, texts: List[str], batch_size: int = 32, max_concurrent: int = 4
@@ -148,30 +125,21 @@ class EmbeddingAdapter:
                 f"Embedding batch {i // batch_size + 1}/{(len(texts) - 1) // batch_size + 1}"
             )
 
-            # Try embedding server with concurrent processing
-            try:
-                # Process batch concurrently with semaphore limiting
-                batch_embeddings = await asyncio.gather(
-                    *[embed_with_limit(text) for text in batch],
-                    return_exceptions=True
-                )
+            # Process batch concurrently with semaphore limiting
+            batch_embeddings = await asyncio.gather(
+                *[embed_with_limit(text) for text in batch],
+                return_exceptions=True
+            )
 
-                # Handle any individual failures
-                processed_embeddings = []
-                for j, result in enumerate(batch_embeddings):
-                    if isinstance(result, Exception):
-                        logger.warning(f"Batch item {j} failed: {result}, using fallback")
-                        processed_embeddings.append(self._embed_with_huggingface(batch[j]))
-                    else:
-                        processed_embeddings.append(result)
+            # Raise on any individual failures — no silent fallback
+            for j, result in enumerate(batch_embeddings):
+                if isinstance(result, Exception):
+                    raise RuntimeError(
+                        f"Embedding failed for batch item {j} "
+                        f"(model={self.model_name}, url={self.ollama_url}): {result}"
+                    )
 
-                embeddings.extend(processed_embeddings)
-            except Exception as e:
-                logger.warning(f"Ollama batch embedding failed: {e}, using fallback")
-                batch_embeddings = self._embed_batch_huggingface(batch)
-                embeddings.extend(batch_embeddings)
-
-            # Reduced delay with concurrent processing
+            embeddings.extend(batch_embeddings)
             await asyncio.sleep(0.05)
 
         return embeddings
@@ -245,27 +213,6 @@ class EmbeddingAdapter:
 
         return embeddings
 
-    def _embed_with_huggingface(self, text: str) -> List[float]:
-        """Generate embedding using HuggingFace."""
-        model = self._get_huggingface_model()
-        if model is None:
-            raise RuntimeError("No embedding model available")
-
-        # Truncate for HuggingFace models (typically 512 token limit)
-        text = self._truncate_text(text, max_chars=2000)
-
-        embedding = model.encode(text, convert_to_numpy=True)
-        return embedding.tolist()
-
-    def _embed_batch_huggingface(self, texts: List[str]) -> List[List[float]]:
-        """Generate embeddings for a batch using HuggingFace."""
-        model = self._get_huggingface_model()
-        if model is None:
-            raise RuntimeError("No embedding model available")
-
-        embeddings = model.encode(texts, convert_to_numpy=True)
-        return embeddings.tolist()
-
     async def check_health(self) -> dict:
         """
         Check if the embedding service is healthy.
@@ -318,7 +265,7 @@ class EmbeddingAdapter:
         defaults = {
             "nomic-embed-text": 768,
             "qwen3-embedding:4b-q4_K_M": 384,  # Quantized version outputs 384
-            "qwen3-embedding": 4096,  # Full version outputs 4096
+            "qwen3-embedding": 2560,  # Qwen3-Embedding-4B outputs 2560 (4096 is the 8B model)
             "mxbai-embed-large": 1024,
             "snowflake-arctic-embed": 1024,
             "all-MiniLM-L6-v2": 384,

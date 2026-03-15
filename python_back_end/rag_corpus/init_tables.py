@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 # Collection configurations matching EMBEDDING_TIER_CONFIG in source_config.py
 RAG_COLLECTIONS = {
-    "local_rag_corpus_code": {"dimension": 4096, "tier": "high"},
+    "local_rag_corpus_code": {"dimension": 2560, "tier": "high"},
     "local_rag_corpus_docs": {"dimension": 768, "tier": "standard"},
 }
 

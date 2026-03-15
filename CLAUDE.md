@@ -7,7 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This is the Harvis AI Project, a sophisticated AI voice assistant that combines Next.js frontend with Python backend services. The project features voice-first interaction, browser automation, AI-powered coding assistance, and authentication with PostgreSQL.
 
 Remember the web app is ran through docker commands and the docker compose is just for the microservices that the web app runs on
-
+ok new update the web app is no logner ran through via docker commands its hosted on k8s the docker stuff are for those  who want to run it on laptops more on that later this is a opensource project to replace openwebUI and potentially have it as a full Claude opensource  option 
+hence all the agentic tools pluged into  this platform 
 ---
 
 ## OpenClaw Integration (Active Project)
@@ -22,7 +23,7 @@ OpenClaw (`openclaw/openclaw/`) is a self-hosted AI gateway that provides LLMs w
 - **Harvis** = orchestrator. Handles voice, chat UI, auth, session state, and routes tasks to OpenClaw.
 - **OpenClaw** = agent brain/router. Executes multi-step tool-calling tasks, manages sub-agents, runs tool loops.
 - **Users never talk to OpenClaw directly** — all messages go through Harvis, which forwards to OpenClaw and surfaces the result back.
-
+- or they go throught discord as well ! important distintion but the discord bot and harvis bot are both the same bot plugged into two different gateways 
 ### Security Model (CRITICAL)
 
 OpenClaw is inherently vulnerable to prompt injection when it has internet access. Our mitigation:

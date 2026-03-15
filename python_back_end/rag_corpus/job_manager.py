@@ -80,6 +80,7 @@ class JobManager:
         rag_dir: str,
         ollama_url: str = "http://ollama:11434",
         embedding_model: str = "nomic-embed-text",  # 768 dims, excellent quality
+        embed_url_map: Optional[Dict[str, str]] = None,
     ):
         """
         Initialize the job manager.
@@ -89,11 +90,13 @@ class JobManager:
             rag_dir: Directory for storing RAG documents
             ollama_url: URL of Ollama server
             embedding_model: Model to use for embeddings
+            embed_url_map: Per-model URL overrides, e.g. {"qwen3-embedding": "http://harvis-ai-llama-embed:8082"}
         """
         self.db_pool = db_pool
         self.rag_dir = rag_dir
         self.ollama_url = ollama_url
         self.embedding_model = embedding_model
+        self._embed_url_map: Dict[str, str] = embed_url_map or {}
         self._jobs: Dict[str, Job] = {}
         self._running_tasks: Dict[str, asyncio.Task] = {}
 
@@ -107,8 +110,9 @@ class JobManager:
         if self._embedding_adapter is None:
             from .embedding_adapter import EmbeddingAdapter
 
+            embed_url = self._embed_url_map.get(self.embedding_model, self.ollama_url)
             self._embedding_adapter = EmbeddingAdapter(
-                model_name=self.embedding_model, ollama_url=self.ollama_url
+                model_name=self.embedding_model, ollama_url=embed_url
             )
         return self._embedding_adapter
 
@@ -271,9 +275,10 @@ class JobManager:
                 # Create embedding adapter for this model
                 from .embedding_adapter import EmbeddingAdapter
 
+                embed_url = self._embed_url_map.get(model_name, self.ollama_url)
                 embedding_adapter = EmbeddingAdapter(
                     model_name=model_name,
-                    ollama_url=self.ollama_url,
+                    ollama_url=embed_url,
                 )
 
                 try:

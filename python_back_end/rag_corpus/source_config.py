@@ -26,7 +26,7 @@ class SourceCategory(str, Enum):
 class EmbeddingTier(str, Enum):
     """Embedding model tiers based on complexity needs."""
 
-    HIGH = "high"  # qwen3-embedding (4096 dims) - complex/code
+    HIGH = "high"  # qwen3-embedding (2560 dims) - complex/code (Qwen3-Embedding-4B)
     STANDARD = "standard"  # nomic-embed-text (768 dims) - general docs
 
 
@@ -35,7 +35,7 @@ EMBEDDING_TIER_CONFIG = {
     EmbeddingTier.HIGH: {
         "model": "qwen3-embedding",
         "collection": "local_rag_corpus_code",
-        "dimensions": 4096,
+        "dimensions": 2560,
         "description": "High-dimensional embeddings for complex technical content",
     },
     EmbeddingTier.STANDARD: {

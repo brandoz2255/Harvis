@@ -44,10 +44,10 @@ _EMBED_URL_MAP = {
 }
 
 # Per-source embedding model configuration
-# qwen3-embedding: 4096 dims - for complex technical/code content
+# qwen3-embedding: 2560 dims - for complex technical/code content (Qwen3-Embedding-4B)
 # nomic-embed-text: 768 dims - for general devops/docs
 SOURCE_EMBEDDING_MODELS = {
-    # Technical/Code-heavy sources → qwen3-embedding (full 4096 dims)
+    # Technical/Code-heavy sources → qwen3-embedding (2560 dims, Qwen3-Embedding-4B)
     "kubernetes_docs": "qwen3-embedding",  # Complex edge cases, YAML configs
     "github": "qwen3-embedding",  # Code repositories
     "stack_overflow": "qwen3-embedding",  # Code Q&A with nuanced answers
@@ -85,7 +85,7 @@ def get_embedding_model_for_source(source: str) -> str:
 
 # Collection names based on embedding model (different dims need separate tables)
 EMBEDDING_COLLECTIONS = {
-    "qwen3-embedding": "local_rag_corpus_code",  # 4096 dims - code/complex
+    "qwen3-embedding": "local_rag_corpus_code",  # 2560 dims - code/complex
     "nomic-embed-text": "local_rag_corpus_docs",  # 768 dims - general docs
 }
 
@@ -242,6 +242,7 @@ async def initialize_rag_corpus(db_pool) -> bool:
             rag_dir=RAG_DIR,
             ollama_url=OLLAMA_URL,
             embedding_model=EMBEDDING_MODEL,
+            embed_url_map=_EMBED_URL_MAP,
         )
 
         logger.info("✅ RAG corpus services initialized (multi-model + dynamic config)")
@@ -585,7 +586,7 @@ async def get_rag_config():
             "high": {
                 "model": "qwen3-embedding",
                 "collection": "local_rag_corpus_code",
-                "dimensions": 4096,
+                "dimensions": 2560,
                 "description": "For complex code/technical content",
             },
             "standard": {

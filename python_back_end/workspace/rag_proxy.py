@@ -14,9 +14,9 @@ Endpoints:
   GET  /rag/health   — check embedding models and DB connectivity
 
 Note on indexing:
-  local_rag_corpus_code uses halfvec(4096). pgvector 0.8.0 limits ANN indexes
-  (both hnsw and ivfflat) to 4000 dimensions, so that table falls back to a
-  sequential scan. At 2 241 rows this is fast enough (~10-30 ms).
+  local_rag_corpus_code uses halfvec(2560). pgvector 0.8.0 limits ANN indexes
+  (both hnsw and ivfflat) to 4000 dimensions, so an HNSW index can be added
+  after rebuild completes. At 2 241 rows sequential scan is fast enough (~10-30 ms).
   local_rag_corpus_docs uses vector(768) and has an HNSW index already.
 """
 
@@ -32,6 +32,8 @@ logger = logging.getLogger(__name__)
 
 OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
+EMBED_NOMIC_URL = os.getenv("EMBED_NOMIC_URL", OLLAMA_URL)   # port 8081, nomic-embed-text (llama.cpp)
+EMBED_QW3_URL = os.getenv("EMBED_QW3_URL", OLLAMA_URL)        # port 8082, Qwen3-Embedding-4B (llama.cpp)
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
 NVIDIA_RERANK_URL = "https://ai.api.nvidia.com/v1/retrieval/nvidia/reranking"
 
@@ -39,14 +41,16 @@ NVIDIA_RERANK_URL = "https://ai.api.nvidia.com/v1/retrieval/nvidia/reranking"
 _CORPUS_CONFIG = {
     "code": {
         "table": "local_rag_corpus_code",
-        "model": "qwen3-embedding:latest",  # was qwen3:embedding4b — wrong name caused 404 → HF fallback → dim mismatch
-        "dims": 4096,
+        "model": "qwen3-embedding",
+        "embed_url": None,  # resolved at runtime from EMBED_QW3_URL
+        "dims": 2560,
         "cast": "halfvec",
         "ops": "<=>",   # cosine distance
     },
     "docs": {
         "table": "local_rag_corpus_docs",
-        "model": "nomic-embed-text:latest",
+        "model": "nomic-embed-text",
+        "embed_url": None,  # resolved at runtime from EMBED_NOMIC_URL
         "dims": 768,
         "cast": "vector",
         "ops": "<=>",
@@ -66,27 +70,57 @@ def _verify_openclaw_token(authorization: Optional[str]) -> None:
         raise HTTPException(status_code=401, detail="Invalid proxy token")
 
 
+_EMBED_URL_MAP = {
+    "qwen3-embedding": EMBED_QW3_URL,
+    "nomic-embed-text": EMBED_NOMIC_URL,
+}
+
+
 async def _embed(query: str, model: str) -> List[float]:
-    """Call Ollama /api/embeddings and return the vector."""
-    # Truncate to ~8 000 chars to stay within model context
+    """Call the appropriate embedding server and return the vector.
+
+    llama.cpp servers (ports 8081/8082) use OpenAI-compatible /v1/embeddings.
+    Falls back to Ollama /api/embeddings if no dedicated URL is configured.
+    """
     if len(query) > 8000:
         query = query[:8000]
+
+    embed_url = _EMBED_URL_MAP.get(model, OLLAMA_URL)
+    use_llamacpp = embed_url != OLLAMA_URL
+
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
-        async with session.post(
-            f"{OLLAMA_URL}/api/embeddings",
-            json={"model": model, "prompt": query},
-        ) as resp:
-            if resp.status != 200:
-                text = await resp.text()
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"Ollama embedding error ({resp.status}): {text[:200]}",
-                )
-            data = await resp.json()
-            vec = data.get("embedding")
-            if not vec:
-                raise HTTPException(status_code=502, detail="Ollama returned empty embedding")
-            return vec
+        if use_llamacpp:
+            # llama.cpp OpenAI-compatible endpoint
+            async with session.post(
+                f"{embed_url}/v1/embeddings",
+                json={"input": query},
+            ) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"llama.cpp embedding error ({resp.status}): {text[:200]}",
+                    )
+                data = await resp.json()
+                vec = data.get("data", [{}])[0].get("embedding")
+        else:
+            # Ollama endpoint
+            async with session.post(
+                f"{embed_url}/api/embeddings",
+                json={"model": model, "prompt": query},
+            ) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"Ollama embedding error ({resp.status}): {text[:200]}",
+                    )
+                data = await resp.json()
+                vec = data.get("embedding")
+
+    if not vec:
+        raise HTTPException(status_code=502, detail="Embedding server returned empty vector")
+    return vec
 
 
 # ─── Request / response models ──────────────────────────────────────────────
@@ -177,7 +211,7 @@ async def rag_search(
     """
     Semantic search over the Harvis vector database.
 
-    context_type "code"  → searches local_rag_corpus_code  (qwen3:embedding4b, halfvec 4096)
+    context_type "code"  → searches local_rag_corpus_code  (qwen3:embedding4b, halfvec 2560)
     context_type "docs"  → searches local_rag_corpus_docs  (nomic-embed-text, vector 768)
     """
     _verify_openclaw_token(authorization)
@@ -296,28 +330,35 @@ async def rag_health(
         except Exception as exc:
             logger.warning("rag_proxy health: db error: %s", exc)
 
-    # Check Ollama model availability
+    # Check embedding server availability (llama.cpp /health, or Ollama /api/tags fallback)
     models_status: dict = {}
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                f"{ollama_url}/api/tags",
-                timeout=aiohttp.ClientTimeout(total=5),
-            ) as r:
-                tags_data = await r.json()
-                pulled = {m["name"] for m in tags_data.get("models", [])}
-
+    async with aiohttp.ClientSession() as session:
         for ctx, cfg in _CORPUS_CONFIG.items():
             model = cfg["model"]
-            # Match exact name or prefix (e.g. "qwen3-embedding" in "qwen3-embedding:latest")
-            available = model in pulled or any(
-                model.split(":")[0] == t.split(":")[0] for t in pulled
-            )
-            models_status[ctx] = {"name": model, "available": available}
-    except Exception as exc:
-        logger.warning("rag_proxy health: ollama tags error: %s", exc)
-        for ctx, cfg in _CORPUS_CONFIG.items():
-            models_status[ctx] = {"name": cfg["model"], "available": False}
+            embed_url = _EMBED_URL_MAP.get(model, OLLAMA_URL)
+            try:
+                if embed_url != OLLAMA_URL:
+                    # llama.cpp server — check /health
+                    async with session.get(
+                        f"{embed_url}/health",
+                        timeout=aiohttp.ClientTimeout(total=5),
+                    ) as r:
+                        available = r.status == 200
+                else:
+                    # Ollama fallback — check /api/tags
+                    async with session.get(
+                        f"{embed_url}/api/tags",
+                        timeout=aiohttp.ClientTimeout(total=5),
+                    ) as r:
+                        tags_data = await r.json()
+                        pulled = {m["name"] for m in tags_data.get("models", [])}
+                        available = model in pulled or any(
+                            model.split(":")[0] == t.split(":")[0] for t in pulled
+                        )
+                models_status[ctx] = {"name": model, "url": embed_url, "available": available}
+            except Exception as exc:
+                logger.warning("rag_proxy health: embed check failed for %s: %s", ctx, exc)
+                models_status[ctx] = {"name": model, "url": embed_url, "available": False}
 
     all_models_ok = all(v["available"] for v in models_status.values())
 

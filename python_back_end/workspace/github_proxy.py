@@ -8,9 +8,9 @@ themselves.
 Security model:
   - Verifies OPENCLAW_GATEWAY_TOKEN on every request (only OpenClaw can call this).
   - Hard-coded allowlist: only `dulc3/harvis-aidev` may receive PRs.
-  - Only the `pulls` endpoint is exposed — no arbitrary GitHub API passthrough.
+  - Only the `pulls` and `repos` endpoints are exposed — no arbitrary GitHub API passthrough.
   - HARVIS_GITHUB_TOKEN stays in the backend pod; OpenClaw never sees its value.
-  - Every PR creation is logged with timestamp, branch, title, and result.
+  - Every PR and repo creation is logged with timestamp and result.
   - Force-push and push-to-main are prevented at the git level (skill), and
     also enforced here by rejecting any PR that targets main via a non-harvis/* branch.
 
@@ -18,6 +18,7 @@ Endpoints:
   POST /github/pulls          — create a pull request
   GET  /github/pulls          — list open PRs for the repo
   GET  /github/pulls/{number} — get a specific PR
+  POST /github/repos          — create a new repository under the authenticated user
 """
 
 import json
@@ -270,4 +271,91 @@ async def get_pull_request(
             resp = await client.get(url, headers=headers)
         return resp.json()
     except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+# ─── Repo creation ─────────────────────────────────────────────────────────────
+
+class CreateRepoRequest(BaseModel):
+    name: str
+    description: str = ""
+    private: bool = False
+    auto_init: bool = True   # creates initial commit with README so the repo is immediately cloneable
+
+    @field_validator("name")
+    @classmethod
+    def name_must_be_valid(cls, v: str) -> str:
+        if not re.match(r'^[a-zA-Z0-9_.-]{1,100}$', v):
+            raise ValueError(
+                "Repo name must be 1-100 characters: letters, digits, hyphens, underscores, or dots"
+            )
+        return v
+
+
+@github_proxy_router.post("/repos")
+async def create_repository(
+    req: CreateRepoRequest,
+    authorization: Optional[str] = Header(default=None),
+):
+    """
+    Create a new GitHub repository under the authenticated user's account.
+
+    The repository is created via the GitHub API using the backend token —
+    the caller (OpenClaw) never sees the token value.
+
+    Returns the new repo's html_url, clone_url, and full_name on success.
+    """
+    _verify_openclaw_token(authorization)
+
+    payload = {
+        "name": req.name,
+        "description": req.description,
+        "private": req.private,
+        "auto_init": req.auto_init,
+    }
+
+    url = f"{_GITHUB_API_BASE}/user/repos"
+    logger.info(
+        "github_proxy: creating repo name=%r private=%s description=%r",
+        req.name, req.private, req.description[:80] if req.description else "",
+    )
+
+    try:
+        headers = await _gh_headers()
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+
+        result = resp.json()
+
+        if resp.status_code == 201:
+            full_name = result.get("full_name", "")
+            html_url = result.get("html_url", "")
+            clone_url = result.get("clone_url", "")
+            logger.info(
+                "github_proxy: repo created %s %s",
+                full_name, html_url,
+            )
+            return {
+                "ok": True,
+                "full_name": full_name,
+                "repo_url": html_url,
+                "clone_url": clone_url,
+                "private": result.get("private", req.private),
+            }
+
+        logger.warning(
+            "github_proxy: GitHub API returned %s for create repo %r: %s",
+            resp.status_code, req.name, str(result)[:200],
+        )
+        raise HTTPException(
+            status_code=resp.status_code,
+            detail=result.get("message", f"GitHub API error {resp.status_code}"),
+        )
+
+    except HTTPException:
+        raise
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="GitHub API request timed out")
+    except Exception as exc:
+        logger.error("github_proxy: unexpected error creating repo: %s", exc)
         raise HTTPException(status_code=502, detail=str(exc))
