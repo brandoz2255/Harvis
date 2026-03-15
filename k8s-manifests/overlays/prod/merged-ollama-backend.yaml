@@ -122,7 +122,7 @@ spec:
             - name: EMBED_NOMIC_URL
               value: "http://harvis-ai-llama-embed:8081"   # nomic-embed-text, 768 dims
             - name: EMBED_QW3_URL
-              value: "http://harvis-ai-llama-embed:8082"   # Qwen3-Embedding-4B, 4096 dims
+              value: "http://harvis-ai-llama-embed:8082"   # Qwen3-Embedding-4B, 2560 dims
             - name: VLLM_URL
               value: "http://localhost:8080/v1"   # llama-server (Qwen3.5-2B distilled Q4_K_M)
             # llama-server co-located sidecar (localhost)
