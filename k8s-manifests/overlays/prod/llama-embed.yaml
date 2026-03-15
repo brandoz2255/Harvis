@@ -46,10 +46,10 @@ spec:
 #
 # Two llama.cpp server processes, each loaded with one embedding model:
 #   embed-nomic  (port 8081): nomic-embed-text-v1.5  768 dims  — STANDARD tier (docs)
-#   embed-qwen3  (port 8082): Qwen3-Embedding-4B     4096 dims — HIGH tier (code)
+#   embed-qwen3  (port 8082): Qwen3-Embedding-4B     2560 dims — HIGH tier (code)
 #
-# Both run CPU-only (-ngl 0) so the 1650 Ti 4GB GPU stays free for future llama-rpc.
-# CPU latency is 50-200ms per batch — acceptable for RAG (not latency-sensitive).
+# embed-nomic: CPU-only (-ngl 0) — 274MB model, negligible CPU load
+# embed-qwen3: GPU (-ngl 99) — 2.5GB Q4_K_M fits in 1650 Ti 4GB, fast GPU embedding for code RAG
 #
 # Service: harvis-ai-llama-embed
 #   port 8081 → embed-nomic   (nomic-embed-text)
@@ -82,13 +82,34 @@ spec:
         app.kubernetes.io/name: harvis-ai
         app.kubernetes.io/component: llama-embed
     spec:
+      runtimeClassName: nvidia              # needed for GPU access on embed-qwen3 container
       nodeSelector:
-        kubernetes.io/hostname: dulc3-top    # 1650 Ti — GPU reserved for future RPC
+        kubernetes.io/hostname: dulc3-top    # 1650 Ti (4GB) — qwen3-embed on GPU, nomic on CPU
       initContainers:
+        # Fix PVC permissions first — local PVs are owned by root by default,
+        # curlimages/curl runs as non-root (curl_user) and can't write without this.
+        - name: fix-permissions
+          image: busybox:1.36
+          command: ["sh", "-c", "chmod 777 /embed-models && echo 'permissions fixed'"]
+          securityContext:
+            runAsUser: 0    # must run as root to chmod the PVC mount
+          volumeMounts:
+            - name: embed-models
+              mountPath: /embed-models
+          resources:
+            requests:
+              memory: 16Mi
+              cpu: 10m
+            limits:
+              memory: 32Mi
+              cpu: 50m
+
         # Download nomic-embed-text-v1.5 Q4_K_M (~274MB) — skip if present
         - name: download-nomic
           image: curlimages/curl:latest
           command: ["/bin/sh", "-c"]
+          securityContext:
+            runAsUser: 0    # run as root so curl can write to PVC mount
           args:
             - |
               set -e
@@ -126,6 +147,8 @@ spec:
         - name: download-qwen3-embed
           image: curlimages/curl:latest
           command: ["/bin/sh", "-c"]
+          securityContext:
+            runAsUser: 0    # run as root so curl can write to PVC mount
           args:
             - |
               set -e
@@ -216,8 +239,10 @@ spec:
             timeoutSeconds: 5
             failureThreshold: 5
 
-        # embed-qwen3 — Qwen3-Embedding-4B, 4096 dims, HIGH tier (code/technical)
-        # CPU-only: -ngl 0; ~2.5GB model, 50-200ms latency acceptable for RAG
+        # embed-qwen3 — Qwen3-Embedding-4B Q4_K_M, 2560 dims, HIGH tier (code/technical)
+        # GPU: ~2.5GB weights fit in 1650 Ti 4GB with ~1.5GB headroom for KV + overhead
+        # Q4_K_M quality loss vs BF16: <0.5% on MTEB — negligible for RAG use
+        # Embedding forward-pass only (no generation) so KV cache is essentially zero
         - name: embed-qwen3
           image: ghcr.io/ggml-org/llama.cpp:server-cuda
           imagePullPolicy: Always
@@ -237,24 +262,21 @@ spec:
             - "--pooling"
             - "last"                   # Qwen3-Embedding uses last-token pooling
             - "--ctx-size"
-            - "8192"
+            - "2048"                   # 2048 sufficient for RAG chunks; 8192 OOMs 4GB VRAM (1.15GB KV cache)
             - "--n-gpu-layers"
-            - "0"                      # CPU-only — GPU reserved for future RPC
-            - "--threads"
-            - "4"
-            - "--threads-batch"
-            - "4"
+            - "99"                     # full GPU offload — all layers fit in 1650 Ti 4GB
             - "--no-mmap"
           volumeMounts:
             - name: embed-models
               mountPath: /embed-models
           resources:
             requests:
-              memory: 3Gi
-              cpu: 500m
+              memory: 512Mi            # weights are in VRAM, not RAM
+              cpu: 250m
             limits:
-              memory: 6Gi
-              cpu: 4000m
+              nvidia.com/gpu: 1        # 1650 Ti — ~2.8GB used, 1.2GB headroom
+              memory: 4Gi              # --no-mmap loads full 2.5GB model into RAM before VRAM transfer
+              cpu: 2000m
           livenessProbe:
             httpGet:
               path: /health
