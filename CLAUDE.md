@@ -216,8 +216,8 @@ CREATE INDEX IF NOT EXISTS idx_oc_messages_session ON openclaw_messages(session_
 ### Building OpenClaw Image
 
 ```bash
-cd openclaw/openclaw/
-docker build -t openclaw:local .
+# Build context is openclaw/ (not openclaw/openclaw/) so skills/ can be baked in
+docker build -t openclaw:local -f openclaw/openclaw/Dockerfile openclaw/
 
 # Verify it starts
 docker run --rm \

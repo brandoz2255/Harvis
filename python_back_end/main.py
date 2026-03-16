@@ -646,46 +646,123 @@ async def list_models(
     request: Request, current_user: UserResponse = Depends(get_current_user)
 ):
     """
-    Fetch available models from Ollama and return them for the frontend selector.
-    Also includes Moonshot models if user has API key configured.
+    Fetch available models from all backends and return them for the frontend selector.
+    Uses caching to reduce latency. Results are cached for 60 seconds.
     """
+    # Check cache first
+    cached = _get_cached_models()
+    if cached is not None:
+        # Still need to add user-specific models (Moonshot/NVIDIA) if applicable
+        pool = getattr(request.app.state, "pg_pool", None)
+        user_models = []
+
+        if pool:
+            # Check Moonshot
+            try:
+                moonshot_config = await get_user_api_key(
+                    pool, current_user.id, "moonshot"
+                )
+                if moonshot_config and moonshot_config.get("api_key"):
+                    user_models.extend(
+                        [
+                            {"name": "kimi-k2.5", "provider": "moonshot"},
+                            {"name": "kimi-k2", "provider": "moonshot"},
+                        ]
+                    )
+            except Exception:
+                pass
+
+            # Check NVIDIA
+            try:
+                nvidia_config = await get_user_api_key(pool, current_user.id, "nvidia")
+                if nvidia_config and nvidia_config.get("api_key"):
+                    user_models.append({"name": "nvidia-kimi", "provider": "nvidia"})
+            except Exception:
+                pass
+
+        # Merge user-specific models into cached list
+        existing_names = {m["name"] for m in cached.get("models", [])}
+        for um in user_models:
+            if um["name"] not in existing_names:
+                if um["provider"] == "moonshot":
+                    cached["models"].append(
+                        {
+                            "name": um["name"],
+                            "displayName": f"{um['name'].replace('kimi-', 'Kimi ').title()} (Moonshot)",
+                            "size": "Cloud",
+                            "status": "available",
+                            "provider": "moonshot",
+                        }
+                    )
+                elif um["provider"] == "nvidia":
+                    cached["models"].append(
+                        {
+                            "name": um["name"],
+                            "displayName": "Kimi K2.5 (NVIDIA NIM)",
+                            "size": "Cloud",
+                            "status": "available",
+                            "provider": "nvidia",
+                        }
+                    )
+
+        cached["models"].sort(key=lambda x: x["name"])
+        return cached
+
     formatted_models = []
 
+    # Fetch from llama-server (local GPU via llama.cpp) - PRIMARY
     try:
-        # Define Ollama Tags URL
-        ollama_url = os.getenv("OLLAMA_URL", "http://ollama:11434")
-        tags_url = f"{ollama_url}/api/tags"
-
-        # Query Ollama
-        logger.info(f"Querying Ollama models at: {tags_url}")
+        llama_url = os.getenv("LLAMA_URL", "http://localhost:8080/v1")
         async with httpx.AsyncClient() as client:
-            resp = await client.get(tags_url, timeout=5.0)
+            resp = await client.get(f"{llama_url}/models", timeout=5.0)
 
         if resp.status_code == 200:
             data = resp.json()
-            models = data.get("models", [])
-
-            # Format Ollama models for frontend
-            for m in models:
-                # Parse size (bytes -> GB)
-                size_gb = m.get("size", 0) / (1024**3)
-                size_str = f"{size_gb:.1f}GB"
-
-                formatted_models.append(
-                    {
-                        "name": m.get("name"),
-                        "displayName": m.get("name").split(":")[0],
-                        "size": size_str,
-                        "status": "available",
-                        "provider": "ollama",
-                    }
-                )
-        else:
-            logger.error(f"Ollama returned status {resp.status_code}")
+            for m in data.get("data", []):
+                model_id = m.get("id", "unknown")
+                if not any(
+                    existing["name"] == model_id for existing in formatted_models
+                ):
+                    formatted_models.append(
+                        {
+                            "name": model_id,
+                            "displayName": f"{model_id} (Local GPU)",
+                            "size": "8GB",
+                            "status": "available",
+                            "provider": "llama-server",
+                        }
+                    )
+            logger.info(f"Added {len(data.get('data', []))} llama-server models")
     except Exception as e:
-        logger.error(f"Error fetching Ollama models: {e}")
+        logger.warning(f"Could not connect to llama-server: {e}")
 
-    # Fetch from external Ollama (if configured)
+    # Fetch from vLLM (fast local inference)
+    try:
+        vllm_url = os.getenv("VLLM_URL", "http://localhost:8001/v1")
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"{vllm_url}/models", timeout=5.0)
+
+        if resp.status_code == 200:
+            data = resp.json()
+            for m in data.get("data", []):
+                model_id = m.get("id", "unknown")
+                if not any(
+                    existing["name"] == model_id for existing in formatted_models
+                ):
+                    formatted_models.append(
+                        {
+                            "name": model_id,
+                            "displayName": f"{model_id} (vLLM)",
+                            "size": "8GB",
+                            "status": "available",
+                            "provider": "vllm",
+                        }
+                    )
+            logger.info(f"Added {len(data.get('data', []))} vLLM models")
+    except Exception as e:
+        logger.warning(f"Could not connect to vLLM: {e}")
+
+    # Fetch from external Ollama (if configured) - runs in parallel with above
     if EXTERNAL_OLLAMA_URL and EXTERNAL_OLLAMA_API_KEY:
         try:
             ext_url = f"{EXTERNAL_OLLAMA_URL}/api/tags"
@@ -694,20 +771,13 @@ async def list_models(
                 "ngrok-skip-browser-warning": "true",
                 "User-Agent": "Harvis-Backend",
             }
-            logger.info(f"Querying external Ollama models at: {ext_url}")
             async with httpx.AsyncClient() as client:
                 ext_resp = await client.get(ext_url, headers=ext_headers, timeout=10.0)
 
             if ext_resp.status_code == 200:
                 ext_data = ext_resp.json()
-                ext_models = ext_data.get("models", [])
-
-                for m in ext_models:
-                    size_gb = m.get("size", 0) / (1024**3)
-                    size_str = f"{size_gb:.1f}GB"
+                for m in ext_data.get("models", []):
                     model_name = m.get("name")
-
-                    # Avoid duplicates
                     if not any(
                         existing["name"] == model_name for existing in formatted_models
                     ):
@@ -715,29 +785,22 @@ async def list_models(
                             {
                                 "name": model_name,
                                 "displayName": f"{model_name.split(':')[0]} (Cloud)",
-                                "size": size_str,
+                                "size": _parse_model_size(m.get("size")),
                                 "status": "available",
                                 "provider": "ollama-cloud",
                             }
                         )
-                        # Add to cache for routing
                         EXTERNAL_MODELS_CACHE.add(model_name)
-
-                logger.info(f"Added {len(ext_models)} external Ollama models")
-            else:
-                logger.warning(
-                    f"External Ollama returned status {ext_resp.status_code}"
-                )
+                logger.info(f"Added external Ollama models")
         except Exception as e:
             logger.warning(f"Could not connect to external Ollama: {e}")
 
     # Check if user has Moonshot API key configured
-    try:
-        pool = getattr(request.app.state, "pg_pool", None)
-        if pool:
+    pool = getattr(request.app.state, "pg_pool", None)
+    if pool:
+        try:
             moonshot_config = await get_user_api_key(pool, current_user.id, "moonshot")
             if moonshot_config and moonshot_config.get("api_key"):
-                # Add Moonshot models
                 formatted_models.extend(
                     [
                         {
@@ -759,70 +822,45 @@ async def list_models(
                     ]
                 )
                 logger.info("Added Moonshot models for user with API key")
-    except Exception as e:
-        logger.error(f"Error checking Moonshot API key: {e}")
+        except Exception as e:
+            logger.error(f"Error checking Moonshot API key: {e}")
 
-    # Check if user has NVIDIA API key configured
-    try:
-        pool = getattr(request.app.state, "pg_pool", None)
-        if pool:
+        # Check if user has NVIDIA API key configured
+        try:
             nvidia_config = await get_user_api_key(pool, current_user.id, "nvidia")
             if nvidia_config and nvidia_config.get("api_key"):
-                formatted_models.extend(
-                    [
-                        {
-                            "name": "nvidia-kimi",
-                            "displayName": "Kimi K2.5 (NVIDIA NIM)",
-                            "size": "Cloud",
-                            "status": "available",
-                            "provider": "nvidia",
-                            "description": "Kimi K2.5 with thinking mode via NVIDIA NIM",
-                        },
-                    ]
+                formatted_models.append(
+                    {
+                        "name": "nvidia-kimi",
+                        "displayName": "Kimi K2.5 (NVIDIA NIM)",
+                        "size": "Cloud",
+                        "status": "available",
+                        "provider": "nvidia",
+                        "description": "Kimi K2.5 with thinking mode via NVIDIA NIM",
+                    }
                 )
                 logger.info("Added NVIDIA NIM models for user with API key")
-    except Exception as e:
-        logger.error(f"Error checking NVIDIA API key: {e}")
-
-    # Check if llama-server is running (Qwen3-8B on local GPU)
-    try:
-        vllm_url = os.getenv("VLLM_URL", "http://localhost:8080/v1")
-        llama_url = os.getenv("LLAMA_URL", "http://localhost:8080/v1")
-
-        # Try to get models from llama-server (OpenAI-compatible endpoint)
-        async with httpx.AsyncClient() as client:
-            llama_resp = await client.get(f"{llama_url}/models", timeout=5.0)
-
-        if llama_resp.status_code == 200:
-            llama_data = llama_resp.json()
-            llama_models = llama_data.get("data", [])
-
-            for m in llama_models:
-                model_id = m.get("id", "unknown")
-                # Avoid duplicates
-                if not any(
-                    existing["name"] == model_id for existing in formatted_models
-                ):
-                    formatted_models.append(
-                        {
-                            "name": model_id,
-                            "displayName": f"{model_id} (Local GPU)",
-                            "size": "8GB",
-                            "status": "available",
-                            "provider": "llama-server",
-                            "description": "Qwen3-8B running locally on RTX 3070 via llama.cpp",
-                        }
-                    )
-            logger.info(f"Added {len(llama_models)} llama-server models")
-        else:
-            logger.warning(f"llama-server returned status {llama_resp.status_code}")
-    except Exception as e:
-        logger.warning(f"Could not connect to llama-server: {e}")
+        except Exception as e:
+            logger.error(f"Error checking NVIDIA API key: {e}")
 
     # Sort by name
     formatted_models.sort(key=lambda x: x["name"])
 
+    # Cache the result (without user-specific models)
+    cache_data = {"models": formatted_models.copy()}
+    _set_cached_models(cache_data)
+
     return {"models": formatted_models}
+
+
+# ─── Cache Management Endpoint ───────────────────────────────────────────────────
+@app.post("/api/models/clear-cache", tags=["models"])
+async def clear_models_cache(current_user: UserResponse = Depends(get_current_user)):
+    """Clear the models cache (useful after adding/removing models)"""
+    global _models_cache
+    _models_cache = {"data": None, "timestamp": 0}
+    logger.info("Models cache cleared")
+    return {"status": "cached", "message": "Models cache cleared"}
 
 
 # ─── Fallback Models Function ─────────────────────────────────────────────────
@@ -939,6 +977,39 @@ EXTERNAL_OLLAMA_API_KEY = os.getenv("EXTERNAL_OLLAMA_API_KEY", "")
 # Models cache for routing decisions
 # Only models discovered from the external endpoint will be added here
 EXTERNAL_MODELS_CACHE = set()
+
+# ─── Model List Cache (for /api/models endpoint) ─────────────────────────────────
+import time
+
+_models_cache = {"data": None, "timestamp": 0}
+_MODELS_CACHE_TTL = 60  # Cache models list for 60 seconds
+
+
+def _get_cached_models():
+    """Return cached models if still valid, otherwise None"""
+    if (
+        _models_cache["data"]
+        and (time.time() - _models_cache["timestamp"]) < _MODELS_CACHE_TTL
+    ):
+        return _models_cache["data"]
+    return None
+
+
+def _set_cached_models(models):
+    """Cache the models list"""
+    _models_cache["data"] = models
+    _models_cache["timestamp"] = time.time()
+
+
+def _parse_model_size(size_value):
+    """Parse model size, handling both int and string types"""
+    try:
+        size = int(size_value) if isinstance(size_value, str) else size_value
+        if size:
+            return f"{size / (1024**3):.1f}GB"
+    except (ValueError, TypeError, ZeroDivisionError):
+        pass
+    return "Unknown"
 
 
 def make_ollama_request(
@@ -1083,7 +1154,11 @@ async def stream_ollama_chunks(endpoint, payload, timeout=3600):
 
     # Use vLLM for default; llama-server for specific models (long-context or GGUF)
     llama_server_models = ["devstral-small-2:24b", "qwen3:8b", "qwen3-8b"]
-    if model_name in llama_server_models or model_name.startswith("qwen3"):
+    if (
+        model_name in llama_server_models
+        or model_name.startswith("qwen3")
+        or model_name.startswith("qwen2")
+    ):
         base_url = LLAMA_URL
         logger.info(f"🏠 Using llama-server for {model_name}: {base_url}")
     else:

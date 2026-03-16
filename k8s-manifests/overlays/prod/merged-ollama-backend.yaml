@@ -225,7 +225,7 @@ spec:
             - "--n-gpu-layers"
             - "99"
             - "--ctx-size"
-            - "131072"         # 128K context — plenty of VRAM with 2B model
+            - "32768"         # 32K context — fits in 6GB VRAM with Q4_K_M
             - "--parallel"
             - "8"              # 8 concurrent slots (2B is light, lots of headroom)
             - "--alias"
@@ -239,7 +239,7 @@ spec:
               cpu: 500m
             limits:
               nvidia.com/gpu: 1
-              memory: 6Gi      # 1.27GB weights + 128K KV cache at q8_0 + overhead
+              memory: 6Gi      # 1.27GB weights + 32K KV cache at q4 + overhead
               cpu: 4000m
           livenessProbe:
             httpGet:

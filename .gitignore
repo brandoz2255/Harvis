@@ -130,3 +130,4 @@ vendor/sglang-H/
 # OpenClaw secrets — apply manually via kubectl, never commit
 # ==========================================
 k8s-manifests/overlays/prod/openclaw-secret.yaml
+mascot/
