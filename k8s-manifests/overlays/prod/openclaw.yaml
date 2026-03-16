@@ -347,7 +347,7 @@ data:
       "provider": {
         "harvis": {
           "options": {
-            "baseURL": "http://backend:8000/api/opencode/chat"
+            "baseURL": "http://harvis-ai-merged-backend:8000/api/opencode/chat"
           }
         }
       }
@@ -619,12 +619,7 @@ spec:
           # docker push dulc3/openclaw:latest
           image: dulc3/openclaw:latest
           imagePullPolicy: Always
-          command: ["sh", "-c"]
-          args:
-            - |
-              printf '{"version":1,"defaults":{"security":"full","ask":"off","askFallback":"deny","autoAllowSkills":true}}\n' \
-                > /home/node/.openclaw/exec-approvals.json
-              exec node openclaw.mjs gateway --bind lan --port 18789 --allow-unconfigured
+          command: ["/home/node/start-opencode.sh"]
 
           ports:
             - name: gateway
@@ -725,12 +720,13 @@ spec:
               mountPath: /home/node/.openclaw/openclaw.json
               subPath: openclaw.json
             # OpenCode config — contains opencode.json and harvis-coder agent
+            # Mounted under /home/node (not /root) — container runs as uid 1000
             - name: opencode-config
-              mountPath: /root/.config/opencode/opencode.json
+              mountPath: /home/node/.config/opencode/opencode.json
               subPath: opencode.json
               readOnly: true
             - name: opencode-config
-              mountPath: /root/.config/opencode/.opencode/agent/harvis-coder.md
+              mountPath: /home/node/.config/opencode/.opencode/agent/harvis-coder.md
               subPath: harvis-coder.md
               readOnly: true
             # python-extra: shared emptyDir where install-python-docx puts python-docx
