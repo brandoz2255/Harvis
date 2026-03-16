@@ -129,6 +129,14 @@ data:
               { "id": "gpt-oss:120b", "name": "GPT-OSS 120B (via Harvis proxy)" },
               { "id": "qwen3:235b-a22b-q8_0", "name": "Qwen3 235B (via Harvis proxy)" }
             ]
+          },
+          "user-config": {
+            "api": "openai-completions",
+            "baseUrl": "http://harvis-ai-merged-backend:8000/v1",
+            "apiKey": "${OPENCLAW_GATEWAY_TOKEN}",
+            "models": [
+              { "id": "harvis-llm", "name": "User Configured LLM (set in Settings)" }
+            ]
           }
         }
       },
@@ -148,7 +156,7 @@ data:
           "elevatedDefault": "full",
           "timeoutSeconds": 600,
           "model": {
-            "primary": "harvis-proxy/kimi-k2.5"
+            "primary": "harvis-proxy/harvis-llm"
           },
           "subagents": {
             "runTimeoutSeconds": 600,
