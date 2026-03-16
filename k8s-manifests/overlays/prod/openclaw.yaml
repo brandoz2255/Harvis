@@ -205,7 +205,7 @@ data:
       },
       "skills": {
         "load": {
-          "extraDirs": ["/home/node/.openclaw/skills"]
+          "extraDirs": ["/app/skills"]
         }
       },
       "channels": {
@@ -592,25 +592,6 @@ spec:
               memory: 256Mi
               cpu: 500m
 
-        # 5. Create skills directory structure for skill files
-        - name: create-skills-dir
-          image: busybox:1.36
-          command: ["/bin/sh", "-c"]
-          args:
-            - |
-              mkdir -p /home/node/.openclaw/skills/harvis-agent
-              mkdir -p /home/node/.openclaw/skills/harvis-github
-              mkdir -p /home/node/.openclaw/skills/harvis-rag
-              mkdir -p /home/node/.openclaw/skills/harvis-research
-              mkdir -p /home/node/.openclaw/skills/harvis-document
-              mkdir -p /home/node/.openclaw/skills/harvis-soul
-              mkdir -p /home/node/.openclaw/skills/harvis-vibecoding
-              mkdir -p /home/node/.openclaw/skills/harvis-planner
-              mkdir -p /home/node/.openclaw/skills/harvis-coding
-              echo "Skills directories created successfully"
-          volumeMounts:
-            - name: openclaw-data
-              mountPath: /home/node/.openclaw
 
       containers:
         - name: openclaw
