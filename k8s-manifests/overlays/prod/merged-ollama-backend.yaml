@@ -162,7 +162,7 @@ spec:
         #   where size_n=48 is not divisible by GPTQ_MARLIN_MIN_THREAD_N=64.
         #   Fix lives in vendor/sglang-H/ — PR pending upstream sglang repo.
         - name: sglang
-          image: dulc3/sglang-patch:test
+          image: dulc3/sglang-patch:test2
           imagePullPolicy: Always
           ports:
             - name: sglang
