@@ -68,18 +68,39 @@ log_info "Building: $IMAGE_NAME"
 log_info "Source:   $OPENCLAW_DIR"
 echo ""
 
+# ─── Sync skills into build context ──────────────────────────────────────────
+# Source of truth: skills/Harvis/ and skills/Shared/ at the repo root.
+# openclaw/skills/ is the staging area for the Docker build context (gitignored).
+
+log_info "Syncing skills into Docker build context..."
+mkdir -p openclaw/skills
+
+# Harvis-specific skills
+if [ -d "skills/Harvis" ]; then
+  rsync -a --delete skills/Harvis/ openclaw/skills/
+  log_info "  Synced skills/Harvis/ → openclaw/skills/"
+fi
+
+# Shared skills (append, don't overwrite Harvis)
+if [ -d "skills/Shared" ]; then
+  rsync -a skills/Shared/ openclaw/skills/
+  log_info "  Synced skills/Shared/ → openclaw/skills/"
+fi
+
+echo ""
+
 # ─── Build ───────────────────────────────────────────────────────────────────
 
 log_info "Starting OpenClaw build..."
 log_warn "Note: OpenClaw uses pnpm + Bun for its build. This may take a few minutes on first run."
 
-pushd "$OPENCLAW_DIR" > /dev/null
-
-if docker build -t "$IMAGE_NAME" .; then
+# Build context is openclaw/ so:
+#   - COPY openclaw/...    resolves to openclaw/openclaw/... (the submodule)
+#   - COPY skills/         resolves to openclaw/skills/     (synced from skills/Harvis/ above)
+if docker build -t "$IMAGE_NAME" -f "$OPENCLAW_DIR/Dockerfile" openclaw/; then
   log_success "OpenClaw built: $IMAGE_NAME"
 else
   log_error "OpenClaw build failed!"
-  popd > /dev/null
   exit 1
 fi
 
@@ -88,8 +109,6 @@ if [ "$OPENCLAW_VERSION" != "latest" ]; then
   docker tag "$IMAGE_NAME" "dulc3/openclaw:latest"
   log_info "Also tagged as: dulc3/openclaw:latest"
 fi
-
-popd > /dev/null
 
 # ─── Smoke test (optional but recommended) ───────────────────────────────────
 

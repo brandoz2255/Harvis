@@ -58,6 +58,8 @@ interface ChatSidebarProps {
   className?: string
 }
 
+type MascotInteraction = "idle" | "surprised" | "happy"
+
 // Artifact type icons mapping
 const ARTIFACT_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
   spreadsheet: FileSpreadsheet,
@@ -104,7 +106,20 @@ export function ChatSidebar({
     allocated_gb?: number
   } | null>(null)
   const [clearMessage, setClearMessage] = useState<string | null>(null)
+  const [mascotInteraction, setMascotInteraction] = useState<MascotInteraction>("idle")
   const isFetchingStats = useRef(false)
+
+  // Handle mascot click - triggers new chat with fun animation
+  const handleMascotClick = () => {
+    setMascotInteraction("surprised")
+    setTimeout(() => {
+      setMascotInteraction("happy")
+      setTimeout(() => {
+        onNewChat()
+        setTimeout(() => setMascotInteraction("idle"), 500)
+      }, 300)
+    }, 300)
+  }
 
   // Usage tracking state (polls /api/workspace/usage/summary every 60s)
   const [usage, setUsage] = useState<{
@@ -324,9 +339,6 @@ export function ChatSidebar({
           isMinimized && "justify-center px-2"
         )}>
           <div className="flex items-center gap-2">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary">
-              <Sparkles className="h-4 w-4 text-primary-foreground" />
-            </div>
             {!isMinimized && (
               <span className="text-lg font-semibold text-foreground">Harvis</span>
             )}

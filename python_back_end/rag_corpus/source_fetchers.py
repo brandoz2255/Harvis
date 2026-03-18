@@ -52,7 +52,7 @@ class BaseFetcher(ABC):
                 timeout=aiohttp.ClientTimeout(total=30),
                 headers={
                     "User-Agent": "Harvis-RAG-Bot/1.0 (https://github.com/harvis)",
-                    "Accept-Encoding": "gzip, deflate",  # exclude brotli — aiohttp has no br decoder
+                    "Accept-Encoding": "gzip, deflate, br",
                 },
             )
         return self._session
@@ -1618,7 +1618,9 @@ class KubernetesDocsFetcher(BaseFetcher):
                         for sitemap_loc in soup.find_all("loc"):
                             nested_url = sitemap_loc.text.strip()
                             if "sitemap" in nested_url.lower():
-                                nested_urls = await self._parse_sitemap(session, nested_url)
+                                nested_urls = await self._parse_sitemap(
+                                    session, nested_url
+                                )
                                 urls.extend(nested_urls)
                     else:
                         # Regular sitemap with direct URLs
@@ -1806,7 +1808,9 @@ class GenericDocsFetcher(BaseFetcher):
             try:
                 sitemap_urls = await self._fetch_sitemap(session, self.sitemap_url)
                 urls_to_fetch.update(sitemap_urls)
-                logger.info(f"Found {len(sitemap_urls)} URLs from sitemap for {self.source_id}")
+                logger.info(
+                    f"Found {len(sitemap_urls)} URLs from sitemap for {self.source_id}"
+                )
             except Exception as e:
                 logger.warning(f"Could not fetch sitemap for {self.source_id}: {e}")
 
@@ -1823,7 +1827,7 @@ class GenericDocsFetcher(BaseFetcher):
         urls_to_fetch = self._filter_urls(urls_to_fetch)
 
         # Limit number of pages
-        urls_list = list(urls_to_fetch)[:self.max_pages]
+        urls_list = list(urls_to_fetch)[: self.max_pages]
         logger.info(f"Fetching {len(urls_list)} pages for {self.source_id}")
 
         # Fetch each page
@@ -1847,7 +1851,9 @@ class GenericDocsFetcher(BaseFetcher):
         logger.info(f"Fetched {len(documents)} documents for {self.source_id}")
         return documents
 
-    async def _fetch_sitemap(self, session: aiohttp.ClientSession, sitemap_url: str) -> set:
+    async def _fetch_sitemap(
+        self, session: aiohttp.ClientSession, sitemap_url: str
+    ) -> set:
         """Fetch URLs from sitemap (handles sitemap indexes too)."""
         urls = set()
 
@@ -1880,7 +1886,9 @@ class GenericDocsFetcher(BaseFetcher):
 
         return urls
 
-    async def _crawl_links(self, session: aiohttp.ClientSession, start_url: str, depth: int = 2) -> set:
+    async def _crawl_links(
+        self, session: aiohttp.ClientSession, start_url: str, depth: int = 2
+    ) -> set:
         """Crawl links from a starting URL."""
         urls = set()
         visited = set()
@@ -1917,7 +1925,14 @@ class GenericDocsFetcher(BaseFetcher):
                             # Skip anchors, files, etc.
                             if "#" not in href and not any(
                                 ext in href.lower()
-                                for ext in [".png", ".jpg", ".gif", ".pdf", ".zip", ".tar"]
+                                for ext in [
+                                    ".png",
+                                    ".jpg",
+                                    ".gif",
+                                    ".pdf",
+                                    ".zip",
+                                    ".tar",
+                                ]
                             ):
                                 urls.add(href)
                                 if current_depth < depth:
@@ -1963,18 +1978,16 @@ class GenericDocsFetcher(BaseFetcher):
 
                 # Extract title
                 title_tag = soup.find("h1") or soup.find("title")
-                title = (
-                    title_tag.get_text(strip=True)
-                    if title_tag
-                    else "Documentation"
-                )
+                title = title_tag.get_text(strip=True) if title_tag else "Documentation"
 
                 # Extract main content - try multiple selectors
                 main = (
                     soup.find("main")
                     or soup.find("article")
                     or soup.find("div", {"role": "main"})
-                    or soup.find("div", class_=re.compile(r"content|body|article|docs|prose"))
+                    or soup.find(
+                        "div", class_=re.compile(r"content|body|article|docs|prose")
+                    )
                     or soup.find("div", id=re.compile(r"content|docs|main"))
                 )
 
@@ -2117,7 +2130,7 @@ class AnsiblePlaybookFetcher(BaseFetcher):
         for path in extra_urls:
             if os.path.isdir(path):
                 valid_dirs.append(path)
-            elif os.path.isfile(path) and path.endswith(('.yml', '.yaml')):
+            elif os.path.isfile(path) and path.endswith((".yml", ".yaml")):
                 doc = self._read_playbook_file(path, keywords)
                 if doc:
                     documents.append(doc)
@@ -2220,7 +2233,7 @@ class AnsiblePlaybookFetcher(BaseFetcher):
             rel_path = filepath
             for playbook_dir in self.playbook_dirs:
                 if filepath.startswith(playbook_dir):
-                    rel_path = filepath[len(playbook_dir):].lstrip("/")
+                    rel_path = filepath[len(playbook_dir) :].lstrip("/")
                     break
 
             # Extract role name if applicable
@@ -2239,7 +2252,9 @@ class AnsiblePlaybookFetcher(BaseFetcher):
                     "role_name": role_name,
                     "size_bytes": len(raw_content),
                     "has_jinja2": "{{" in raw_content or "{%" in raw_content,
-                    "modules_used": self._extract_modules(parsed_content) if parsed_content else [],
+                    "modules_used": self._extract_modules(parsed_content)
+                    if parsed_content
+                    else [],
                 },
             )
 
@@ -2247,9 +2262,7 @@ class AnsiblePlaybookFetcher(BaseFetcher):
             logger.error(f"Error reading Ansible file {filepath}: {e}")
             return None
 
-    def _detect_ansible_file_type(
-        self, filepath: str, parsed_content: Any
-    ) -> str:
+    def _detect_ansible_file_type(self, filepath: str, parsed_content: Any) -> str:
         """Detect the type of Ansible file."""
         path_lower = filepath.lower()
 
@@ -2281,18 +2294,30 @@ class AnsiblePlaybookFetcher(BaseFetcher):
                 # Check if it looks like a playbook
                 if parsed_content and isinstance(parsed_content[0], dict):
                     first_item = parsed_content[0]
-                    if "hosts" in first_item or "tasks" in first_item or "roles" in first_item:
+                    if (
+                        "hosts" in first_item
+                        or "tasks" in first_item
+                        or "roles" in first_item
+                    ):
                         return "playbook"
                     elif "name" in first_item and any(
-                        k in first_item for k in ["copy", "template", "file", "apt", "yum", "service", "command", "shell"]
+                        k in first_item
+                        for k in [
+                            "copy",
+                            "template",
+                            "file",
+                            "apt",
+                            "yum",
+                            "service",
+                            "command",
+                            "shell",
+                        ]
                     ):
                         return "tasks"
 
         return "playbook"  # Default
 
-    def _extract_title(
-        self, filepath: str, parsed_content: Any, file_type: str
-    ) -> str:
+    def _extract_title(self, filepath: str, parsed_content: Any, file_type: str) -> str:
         """Extract a meaningful title for the document."""
         import os
 
@@ -2352,7 +2377,7 @@ class AnsiblePlaybookFetcher(BaseFetcher):
                 lines.append("### Playbook Structure:\n")
                 for i, play in enumerate(parsed_content):
                     if isinstance(play, dict):
-                        name = play.get("name", f"Play {i+1}")
+                        name = play.get("name", f"Play {i + 1}")
                         hosts = play.get("hosts", "unknown")
                         lines.append(f"- Play: {name} (hosts: {hosts})\n")
 
@@ -2361,7 +2386,11 @@ class AnsiblePlaybookFetcher(BaseFetcher):
                         if roles:
                             lines.append("  Roles:\n")
                             for role in roles:
-                                role_name = role if isinstance(role, str) else role.get("role", role.get("name", str(role)))
+                                role_name = (
+                                    role
+                                    if isinstance(role, str)
+                                    else role.get("role", role.get("name", str(role)))
+                                )
                                 lines.append(f"    - {role_name}\n")
 
                         # Count tasks
@@ -2378,7 +2407,21 @@ class AnsiblePlaybookFetcher(BaseFetcher):
                         lines.append(f"- {name}\n")
                         # Collect module names
                         for key in task.keys():
-                            if key not in ["name", "when", "register", "tags", "vars", "loop", "with_items", "notify", "become", "become_user", "block", "rescue", "always"]:
+                            if key not in [
+                                "name",
+                                "when",
+                                "register",
+                                "tags",
+                                "vars",
+                                "loop",
+                                "with_items",
+                                "notify",
+                                "become",
+                                "become_user",
+                                "block",
+                                "rescue",
+                                "always",
+                            ]:
                                 modules.add(key)
                 if modules:
                     lines.append(f"\n### Modules Used: {', '.join(sorted(modules))}\n")
@@ -2403,21 +2446,62 @@ class AnsiblePlaybookFetcher(BaseFetcher):
 
         # Known Ansible module names (common ones)
         known_modules = {
-            "copy", "template", "file", "lineinfile", "blockinfile",
-            "apt", "yum", "dnf", "package", "pip",
-            "service", "systemd", "command", "shell", "raw",
-            "user", "group", "authorized_key",
-            "git", "get_url", "uri", "fetch", "unarchive",
-            "docker_container", "docker_image", "docker_network",
-            "k8s", "kubernetes",
-            "debug", "fail", "assert", "set_fact", "include_vars",
-            "include_tasks", "import_tasks", "include_role", "import_role",
-            "wait_for", "pause", "meta",
-            "firewalld", "ufw", "iptables",
-            "cron", "at", "mount",
-            "mysql_db", "mysql_user", "postgresql_db", "postgresql_user",
-            "aws_s3", "ec2", "ec2_instance", "cloudformation",
-            "azure_rm_virtualmachine", "gcp_compute_instance",
+            "copy",
+            "template",
+            "file",
+            "lineinfile",
+            "blockinfile",
+            "apt",
+            "yum",
+            "dnf",
+            "package",
+            "pip",
+            "service",
+            "systemd",
+            "command",
+            "shell",
+            "raw",
+            "user",
+            "group",
+            "authorized_key",
+            "git",
+            "get_url",
+            "uri",
+            "fetch",
+            "unarchive",
+            "docker_container",
+            "docker_image",
+            "docker_network",
+            "k8s",
+            "kubernetes",
+            "debug",
+            "fail",
+            "assert",
+            "set_fact",
+            "include_vars",
+            "include_tasks",
+            "import_tasks",
+            "include_role",
+            "import_role",
+            "wait_for",
+            "pause",
+            "meta",
+            "firewalld",
+            "ufw",
+            "iptables",
+            "cron",
+            "at",
+            "mount",
+            "mysql_db",
+            "mysql_user",
+            "postgresql_db",
+            "postgresql_user",
+            "aws_s3",
+            "ec2",
+            "ec2_instance",
+            "cloudformation",
+            "azure_rm_virtualmachine",
+            "gcp_compute_instance",
         }
 
         def extract_from_tasks(tasks):
@@ -2426,7 +2510,9 @@ class AnsiblePlaybookFetcher(BaseFetcher):
             for task in tasks:
                 if isinstance(task, dict):
                     for key in task.keys():
-                        if key in known_modules or key.startswith(("ansible.", "community.", "amazon.", "azure.", "google.")):
+                        if key in known_modules or key.startswith(
+                            ("ansible.", "community.", "amazon.", "azure.", "google.")
+                        ):
                             modules.add(key)
                     # Check block/rescue/always
                     for sub_key in ["block", "rescue", "always"]:
@@ -2463,29 +2549,19 @@ def get_fetcher_for_config(config) -> BaseFetcher:
     fetcher_type = config.fetcher_type
 
     if fetcher_type == "kubernetes":
-        return KubernetesDocsFetcher(
-            kubernetes_topics=config.options.get("topics", [])
-        )
+        return KubernetesDocsFetcher(kubernetes_topics=config.options.get("topics", []))
     elif fetcher_type == "docker":
-        return DockerDocsFetcher(
-            docker_topics=config.options.get("topics", [])
-        )
+        return DockerDocsFetcher(docker_topics=config.options.get("topics", []))
     elif fetcher_type == "github":
-        return GitHubFetcher(
-            github_token=config.options.get("github_token")
-        )
+        return GitHubFetcher(github_token=config.options.get("github_token"))
     elif fetcher_type == "stackoverflow":
         return StackOverflowFetcher()
     elif fetcher_type == "nextjs":
         return NextJSDocsFetcher()
     elif fetcher_type == "python":
-        return PythonDocsFetcher(
-            python_libraries=config.options.get("libraries", [])
-        )
+        return PythonDocsFetcher(python_libraries=config.options.get("libraries", []))
     elif fetcher_type == "local":
-        return LocalDocsFetcher(
-            docs_dirs=config.options.get("docs_dirs", [])
-        )
+        return LocalDocsFetcher(docs_dirs=config.options.get("docs_dirs", []))
     elif fetcher_type == "ansible":
         return AnsiblePlaybookFetcher(
             playbook_dirs=config.options.get("playbook_dirs", [])

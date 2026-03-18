@@ -104,74 +104,160 @@ def _verify_token(authorization: str | None) -> None:
         raise HTTPException(status_code=401, detail="Invalid proxy token")
 
 
-def _resolve_route(model_name: str) -> tuple[str, dict, bool, bool, str | None]:
+# Cache for OpenClaw config to avoid DB hits on every request
+_openclaw_config_cache = None
+_config_cache_time = 0
+_config_cache_ttl = 30  # Cache for 30 seconds
+
+
+async def _get_openclaw_config() -> dict | None:
+    """Get OpenClaw config from database (cached)."""
+    global _openclaw_config_cache, _config_cache_time
+    
+    import time
+    import base64
+    from cryptography.fernet import Fernet
+    
+    # Check cache
+    if _openclaw_config_cache and (time.time() - _config_cache_time) < _config_cache_ttl:
+        return _openclaw_config_cache
+    
+    if not DATABASE_URL:
+        return None
+    
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+        # Ensure table exists (self-heal if startup migration was missed)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS openclaw_llm_config (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                provider_url VARCHAR(500) NOT NULL,
+                api_key_encrypted TEXT,
+                model_id VARCHAR(255) NOT NULL,
+                provider_type VARCHAR(50) DEFAULT 'openai',
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id)
+            )
+        """)
+        row = await conn.fetchrow(
+            "SELECT provider_url, api_key_encrypted, model_id, provider_type FROM openclaw_llm_config WHERE is_active = TRUE LIMIT 1"
+        )
+        await conn.close()
+        
+        if not row:
+            return None
+        
+        # Decrypt API key if present
+        api_key = None
+        if row["api_key_encrypted"]:
+            try:
+                # Use same encryption key derivation as main.py
+                import hashlib
+                import os
+                secret = os.getenv("JWT_SECRET", "harvis-secret-key")
+                encryption_key = hashlib.sha256(secret.encode()).digest()
+                fernet_key = base64.urlsafe_b64encode(encryption_key)
+                cipher = Fernet(fernet_key)
+                encrypted_bytes = base64.urlsafe_b64decode(row["api_key_encrypted"].encode())
+                api_key = cipher.decrypt(encrypted_bytes).decode()
+            except Exception as e:
+                logger.warning(f"Failed to decrypt OpenClaw API key: {e}")
+        
+        _openclaw_config_cache = {
+            "provider_url": row["provider_url"],
+            "api_key": api_key,
+            "model_id": row["model_id"],
+            "provider_type": row["provider_type"],
+        }
+        _config_cache_time = time.time()
+        return _openclaw_config_cache
+    except Exception as e:
+        logger.warning(f"Failed to fetch OpenClaw config: {e}")
+        return None
+
+
+async def _resolve_route(model_name: str) -> tuple[str, dict, bool, bool, str | None]:
     """
     Determine the upstream URL and headers for a given model name.
-
-    Returns (target_url, headers, is_kimi, is_nvidia, upstream_model_override).
-    - is_kimi: True for Moonshot-hosted Kimi (forces temperature=1.0)
-    - is_nvidia: True for NVIDIA NIM Kimi (injects chat_template_kwargs thinking=true)
-    - upstream_model_override: if set, replace model name in the forwarded body
-    Raises HTTP 400 if the model is not routable.
+    
+    First checks user-configured OpenClaw settings in database.
+    Falls back to legacy hardcoded models if no config found.
     """
-    # Kimi / Moonshot models
-    if model_name in _KIMI_MODELS:
-        if not MOONSHOT_API_KEY:
-            raise HTTPException(
-                status_code=503, detail="MOONSHOT_API_KEY not configured on backend"
-            )
+    # Try to get user-configured OpenClaw settings
+    config = await _get_openclaw_config()
+    
+    if config:
+        # User has configured their own OpenClaw LLM
+        provider_url = config["provider_url"].rstrip("/")
+        api_key = config["api_key"]
+        provider_type = config.get("provider_type", "openai")
+        
+        # Build headers
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        
+        # Determine if this is a reasoning model (needs special handling)
+        is_kimi = provider_type == "moonshot" or "moonshot" in provider_url
+        is_nvidia = provider_type == "nvidia" or "nvidia" in provider_url
+        
+        # Ollama doesn't need special handling
+        is_ollama = provider_type == "ollama" or "ollama" in provider_url or "localhost" in provider_url
+        
+        # For Ollama, use /v1/chat/completions endpoint
+        if is_ollama:
+            target_url = f"{provider_url}/v1/chat/completions"
+        else:
+            target_url = f"{provider_url}/chat/completions"
+        
+        logger.info(
+            f"model_proxy: using user-configured provider: {provider_type}, url: {provider_url}"
+        )
+        
         return (
-            f"{MOONSHOT_BASE_URL}/chat/completions",
-            {
-                "Authorization": f"Bearer {MOONSHOT_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            True,
-            False,
+            target_url,
+            headers,
+            is_kimi,
+            is_nvidia,
             None,
         )
+    
+    # Fallback to legacy hardcoded routing
+    logger.info(f"model_proxy: no user config found, using legacy routing for {model_name}")
 
-    # NVIDIA NIM — Kimi K2.5 hosted on NVIDIA infrastructure
+    if model_name in _KIMI_MODELS:
+        if not MOONSHOT_API_KEY:
+            raise HTTPException(status_code=503, detail="Moonshot API key not configured")
+        target_url = MOONSHOT_BASE_URL.rstrip("/") + "/chat/completions"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {MOONSHOT_API_KEY}",
+        }
+        return target_url, headers, True, False, None
+
     if model_name in _NVIDIA_MODELS:
         if not NVIDIA_API_KEY:
-            raise HTTPException(
-                status_code=503, detail="NVIDIA_API_KEY not configured on backend"
-            )
-        return (
-            f"{NVIDIA_BASE_URL}/chat/completions",
-            {
-                "Authorization": f"Bearer {NVIDIA_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            False,
-            True,
-            "moonshotai/kimi-k2.5",  # NVIDIA NIM expects the full model path
-        )
+            raise HTTPException(status_code=503, detail="NVIDIA API key not configured")
+        target_url = NVIDIA_BASE_URL.rstrip("/") + "/chat/completions"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {NVIDIA_API_KEY}",
+        }
+        return target_url, headers, False, True, "moonshotai/kimi-k2.5"
 
-    # Cloud Ollama models (gpt-oss, qwen3, etc.)
     if model_name.startswith(_OLLAMA_CLOUD_PREFIXES):
         if not EXTERNAL_OLLAMA_URL:
-            raise HTTPException(
-                status_code=503,
-                detail="EXTERNAL_OLLAMA_URL not configured on backend. "
-                "Add it to the harvis-backend-env K8s secret.",
-            )
+            raise HTTPException(status_code=503, detail="External Ollama URL not configured")
+        target_url = EXTERNAL_OLLAMA_URL.rstrip("/") + "/v1/chat/completions"
         headers = {"Content-Type": "application/json"}
         if EXTERNAL_OLLAMA_API_KEY:
             headers["Authorization"] = f"Bearer {EXTERNAL_OLLAMA_API_KEY}"
-        return (
-            f"{EXTERNAL_OLLAMA_URL.rstrip('/')}/v1/chat/completions",
-            headers,
-            False,
-            False,
-            None,
-        )
+        return target_url, headers, False, False, None
 
-    raise HTTPException(
-        status_code=400,
-        detail=f"Model '{model_name}' not routable through this proxy. "
-        f"Supported: kimi-k2.5, nvidia-kimi, gpt-oss:*, qwen3:*",
-    )
+    raise HTTPException(status_code=400, detail=f"Unknown model: {model_name}")
 
 
 def _filter_messages_for_moonshot(messages: list) -> list:
@@ -227,7 +313,7 @@ async def proxy_chat_completions(
         model_name = model_name.split("/", 1)[1]
         body = {**body, "model": model_name}
 
-    target_url, headers, is_kimi, is_nvidia, upstream_model = _resolve_route(model_name)
+    target_url, headers, is_kimi, is_nvidia, upstream_model = await _resolve_route(model_name)
 
     # Apply upstream model name override (e.g. nvidia-kimi → moonshotai/kimi-k2.5)
     if upstream_model:

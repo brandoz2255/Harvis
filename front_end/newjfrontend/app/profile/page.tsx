@@ -29,6 +29,7 @@ import {
   Save,
   AlertCircle,
   Zap,
+  Bot,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -83,12 +84,99 @@ export default function ProfilePage() {
   const [apiKeyLoading, setApiKeyLoading] = useState(false)
   const [apiKeyMessage, setApiKeyMessage] = useState<{type: "success" | "error"; text: string} | null>(null)
 
+  // OpenClaw Config State
+  const [openclawConfig, setOpenclawConfig] = useState({
+    provider_url: "",
+    api_key: "",
+    model_id: "",
+    provider_type: "openai",
+    is_active: false,
+  })
+  const [openclawLoading, setOpenclawLoading] = useState(false)
+  const [openclawMessage, setOpenclawMessage] = useState<{type: "success" | "error"; text: string} | null>(null)
+  const [showOpenclawKey, setShowOpenclawKey] = useState(false)
+
   // Load API keys on mount
   useEffect(() => {
     if (user) {
       loadApiKeys()
+      loadOpenclawConfig()
     }
   }, [user])
+
+  // Load OpenClaw config
+  const loadOpenclawConfig = async () => {
+    try {
+      const token = localStorage.getItem('token')
+      const response = await fetch('/api/user/openclaw-config', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      })
+      if (response.ok) {
+        const config = await response.json()
+        setOpenclawConfig({
+          provider_url: config.provider_url || "",
+          api_key: config.id > 0 ? "••••••••" : "",
+          model_id: config.model_id || "",
+          provider_type: config.provider_type || "openai",
+          is_active: config.is_active,
+        })
+      }
+    } catch (error) {
+      console.error('Failed to load OpenClaw config:', error)
+    }
+  }
+
+  // Save OpenClaw config
+  const saveOpenclawConfig = async () => {
+    setOpenclawLoading(true)
+    setOpenclawMessage(null)
+    try {
+      const token = localStorage.getItem('token')
+      // Only send API key if it's not the placeholder
+      const configToSave = {
+        ...openclawConfig,
+        api_key: openclawConfig.api_key === "••••••••" ? "" : openclawConfig.api_key,
+      }
+      const response = await fetch('/api/user/openclaw-config', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(configToSave)
+      })
+      if (response.ok) {
+        setOpenclawMessage({ type: "success", text: "Harvis Claw LLM configured successfully!" })
+        loadOpenclawConfig()
+      } else {
+        const err = await response.json()
+        setOpenclawMessage({ type: "error", text: err.detail || "Failed to save config" })
+      }
+    } catch (error) {
+      setOpenclawMessage({ type: "error", text: "Failed to save configuration" })
+    }
+    setOpenclawLoading(false)
+  }
+
+  // Reset OpenClaw config
+  const resetOpenclawConfig = async () => {
+    setOpenclawLoading(true)
+    setOpenclawMessage(null)
+    try {
+      const token = localStorage.getItem('token')
+      const response = await fetch('/api/user/openclaw-config', {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` }
+      })
+      if (response.ok) {
+        setOpenclawMessage({ type: "success", text: "Reset to default Ollama config" })
+        loadOpenclawConfig()
+      }
+    } catch (error) {
+      setOpenclawMessage({ type: "error", text: "Failed to reset config" })
+    }
+    setOpenclawLoading(false)
+  }
 
   const loadApiKeys = async () => {
     try {
@@ -541,6 +629,105 @@ export default function ProfilePage() {
                   </a>
                 </p>
               </div>
+            </CardContent>
+          </Card>
+
+          {/* Harvis Claw LLM Configuration Card */}
+          <Card className="border-border bg-card">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-foreground">
+                <Bot className="h-5 w-5 text-primary" />
+                Harvis Claw LLM Configuration
+              </CardTitle>
+              <CardDescription>
+                Configure which LLM the Harvis Claw workspace agent uses for agentic tasks
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {openclawMessage && (
+                <Alert variant={openclawMessage.type === "error" ? "destructive" : "default"}>
+                  <AlertCircle className="h-4 w-4" />
+                  <AlertDescription>{openclawMessage.text}</AlertDescription>
+                </Alert>
+              )}
+
+              {/* Provider Type */}
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-foreground">Provider Type</label>
+                <select
+                  value={openclawConfig.provider_type}
+                  onChange={(e) => setOpenclawConfig({ ...openclawConfig, provider_type: e.target.value })}
+                  className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground"
+                >
+                  <option value="ollama">Ollama (Local)</option>
+                  <option value="openai">OpenAI Compatible</option>
+                  <option value="moonshot">Moonshot (Kimi)</option>
+                  <option value="nvidia">NVIDIA NIM</option>
+                  <option value="anthropic">Anthropic</option>
+                </select>
+              </div>
+
+              {/* Provider URL */}
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-foreground">API URL</label>
+                <Input
+                  value={openclawConfig.provider_url}
+                  onChange={(e) => setOpenclawConfig({ ...openclawConfig, provider_url: e.target.value })}
+                  placeholder="http://ollama:11434"
+                  className="bg-background border-border text-foreground"
+                />
+              </div>
+
+              {/* Model ID */}
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-foreground">Model ID</label>
+                <Input
+                  value={openclawConfig.model_id}
+                  onChange={(e) => setOpenclawConfig({ ...openclawConfig, model_id: e.target.value })}
+                  placeholder="qwen2.5-coder:32b"
+                  className="bg-background border-border text-foreground"
+                />
+              </div>
+
+              {/* API Key */}
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-foreground">API Key (optional)</label>
+                <div className="relative">
+                  <Input
+                    type={showOpenclawKey ? "text" : "password"}
+                    value={openclawConfig.api_key}
+                    onChange={(e) => setOpenclawConfig({ ...openclawConfig, api_key: e.target.value })}
+                    placeholder="Leave empty if not required"
+                    className="bg-background border-border text-foreground pr-10"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowOpenclawKey(!showOpenclawKey)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                  >
+                    {showOpenclawKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </button>
+                </div>
+              </div>
+
+              {/* Actions */}
+              <div className="flex gap-2 pt-2">
+                <Button onClick={saveOpenclawConfig} disabled={openclawLoading} className="gap-2">
+                  <Save className="h-4 w-4" />
+                  {openclawLoading ? "Saving..." : "Save Configuration"}
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={resetOpenclawConfig}
+                  disabled={openclawLoading}
+                  className="border-border"
+                >
+                  Reset to Default
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Default: Ollama at http://ollama:11434 with qwen2.5-coder:32b
+              </p>
             </CardContent>
           </Card>
 

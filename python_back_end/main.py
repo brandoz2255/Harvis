@@ -967,7 +967,7 @@ LLAMA_URL = os.getenv(
     "LLAMA_URL", "http://localhost:8080/v1"
 )  # llama-server — devstral long-ctx
 API_KEY = os.getenv("OLLAMA_API_KEY", "key")
-DEFAULT_MODEL = "qwen3.5:9b"
+DEFAULT_MODEL = "qwen3.5-27b"
 
 # External Ollama endpoint (for large models hosted elsewhere)
 # NOTE: Set to empty string by default - external routing only when explicitly configured
@@ -1557,6 +1557,27 @@ class ApiKeyUpdateRequest(BaseModel):
     is_active: Optional[bool] = None
 
 
+
+
+# ─── Harvis Claw LLM Config Models ───────────────────────────────────────────
+
+class OpenClawConfigRequest(BaseModel):
+    provider_url: str
+    api_key: Optional[str] = None
+    model_id: str
+    provider_type: str = "openai"  # 'openai', 'ollama', 'anthropic'
+
+
+class OpenClawConfigResponse(BaseModel):
+    id: int
+    provider_url: str
+    model_id: str
+    provider_type: str
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+# ─── Harvis Claw LLM Config Models ───────────────────────────────────────────
 # ─── Reasoning Model Helpers --------------------------------------------------
 def separate_thinking_from_final_output(text: str) -> tuple[str, str]:
     """
@@ -2134,8 +2155,123 @@ async def get_api_key_by_provider(
         )
 
 
+# ─── Harvis Claw LLM Config Endpoints ─────────────────────────────────────
+
+@app.get("/api/user/openclaw-config", response_model=OpenClawConfigResponse, tags=["openclaw"])
+async def get_openclaw_config(
+    request: Request,
+    current_user: UserResponse = Depends(get_current_user),
+):
+    """Get the current user's Harvis Claw LLM configuration"""
+    pool = getattr(request.app.state, "pg_pool", None)
+    if not pool:
+        raise HTTPException(status_code=500, detail="Database not available")
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT id, provider_url, model_id, provider_type, is_active, created_at, updated_at
+            FROM openclaw_llm_config
+            WHERE user_id = $1 AND is_active = TRUE
+            """,
+            current_user.id,
+        )
+
+        if not row:
+            # Return default config for new users
+            return OpenClawConfigResponse(
+                id=0,
+                provider_url="http://ollama:11434",
+                model_id="qwen2.5-coder:32b",
+                provider_type="ollama",
+                is_active=True,
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow(),
+            )
+
+        return OpenClawConfigResponse(
+            id=row["id"],
+            provider_url=row["provider_url"],
+            model_id=row["model_id"],
+            provider_type=row["provider_type"],
+            is_active=row["is_active"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+
+@app.post("/api/user/openclaw-config", response_model=OpenClawConfigResponse, tags=["openclaw"])
+async def save_openclaw_config(
+    request: Request,
+    config: OpenClawConfigRequest,
+    current_user: UserResponse = Depends(get_current_user),
+):
+    """Save the user's Harvis Claw LLM configuration"""
+    pool = getattr(request.app.state, "pg_pool", None)
+    if not pool:
+        raise HTTPException(status_code=500, detail="Database not available")
+
+    # Encrypt the API key if provided
+    encrypted_key = None
+    if config.api_key:
+        encrypted_key = encrypt_api_key(config.api_key)
+
+    async with pool.acquire() as conn:
+        # Upsert the config
+        row = await conn.fetchrow(
+            """
+            INSERT INTO openclaw_llm_config (user_id, provider_url, api_key_encrypted, model_id, provider_type, is_active)
+            VALUES ($1, $2, $3, $4, $5, TRUE)
+            ON CONFLICT (user_id) DO UPDATE SET
+                provider_url = EXCLUDED.provider_url,
+                api_key_encrypted = EXCLUDED.api_key_encrypted,
+                model_id = EXCLUDED.model_id,
+                provider_type = EXCLUDED.provider_type,
+                is_active = TRUE,
+                updated_at = CURRENT_TIMESTAMP
+            RETURNING id, provider_url, model_id, provider_type, is_active, created_at, updated_at
+            """,
+            current_user.id,
+            config.provider_url,
+            encrypted_key,
+            config.model_id,
+            config.provider_type,
+        )
+
+        return OpenClawConfigResponse(
+            id=row["id"],
+            provider_url=row["provider_url"],
+            model_id=row["model_id"],
+            provider_type=row["provider_type"],
+            is_active=row["is_active"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+
+@app.delete("/api/user/openclaw-config", tags=["openclaw"])
+async def delete_openclaw_config(
+    request: Request,
+    current_user: UserResponse = Depends(get_current_user),
+):
+    """Reset Harvis Claw config to default (Ollama)"""
+    pool = getattr(request.app.state, "pg_pool", None)
+    if not pool:
+        raise HTTPException(status_code=500, detail="Database not available")
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            DELETE FROM openclaw_llm_config
+            WHERE user_id = $1
+            """,
+            current_user.id,
+        )
+
+        return {"message": "OpenClaw config reset to default (Ollama)"}
+
+
 # ── Web Search Tool Detection ───────────────────────────────────────────────────
-def should_auto_research(message: str) -> bool:
     """
     Only trigger web research when the user explicitly asks for a search.
     Harvis can also trigger search by emitting <web_search>query</web_search> in its response.
@@ -6174,6 +6310,26 @@ async def startup_event():
 
         await init_job_queue()
         logger.info("✅ Job queue initialized on startup")
+        
+        # Initialize OpenClaw LLM config table
+        pool = getattr(app.state, "pg_pool", None)
+        if pool:
+            async with pool.acquire() as conn:
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS openclaw_llm_config (
+                        id SERIAL PRIMARY KEY,
+                        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                        provider_url VARCHAR(500) NOT NULL,
+                        api_key_encrypted TEXT,
+                        model_id VARCHAR(255) NOT NULL,
+                        provider_type VARCHAR(50) DEFAULT 'openai',
+                        is_active BOOLEAN DEFAULT TRUE,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(user_id)
+                    )
+                """)
+                logger.info("✅ OpenClaw LLM config table initialized")
     except Exception as e:
         logger.error(f"Failed to initialize job queue: {e}")
 

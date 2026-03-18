@@ -10,6 +10,7 @@ import { ChatInput } from "@/components/chat-input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import { Menu, Sparkles, ArrowUpRight } from "lucide-react"
+import { HarvisMascot } from "@/components/mascots"
 import ModelSelector from "@/components/ModelSelector"
 import SearchToggle from "@/components/SearchToggle"
 import { useChatHistoryStore } from "@/stores/chatHistoryStore"
@@ -1469,7 +1470,7 @@ export default function ChatPage() {
   if (isAuthLoading) {
     return (
       <div className="flex h-screen w-full items-center justify-center bg-background">
-        <Sparkles className="h-10 w-10 animate-pulse text-primary" />
+        <HarvisMascot state="talking" size={60} className="animate-pulse" />
       </div>
     )
   }
@@ -1538,9 +1539,6 @@ export default function ChatPage() {
                 <Menu className="h-5 w-5" />
               </Button>
               <div className="flex items-center gap-2">
-                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/20">
-                  <Sparkles className="h-4 w-4 text-primary" />
-                </div>
                 <div>
                   <h1 className="text-sm font-medium text-foreground">
                     {currentSession?.title || "New Chat"}
@@ -1578,8 +1576,8 @@ export default function ChatPage() {
               <div className="mx-auto max-w-4xl px-4 py-6">
                 {messages.length === 0 ? (
                   <div className="flex h-[60vh] flex-col items-center justify-center text-center">
-                    <div className="mb-6 flex h-20 w-20 items-center justify-center rounded-2xl bg-primary/20">
-                      <Sparkles className="h-10 w-10 text-primary" />
+                    <div className="mb-6">
+                      <HarvisMascot state="idle" size={80} className="" interactive={true} />
                     </div>
                     <h2 className="mb-2 text-2xl font-semibold text-foreground">
                       How can I help you today?

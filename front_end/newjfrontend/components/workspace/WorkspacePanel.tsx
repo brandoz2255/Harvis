@@ -26,6 +26,7 @@ import {
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { HarvisClawMascot } from '@/components/mascots'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useOpenClawStore, type WorkspaceLogEvent, type KubectlPendingCommand } from '@/stores/openclawStore'
@@ -1076,6 +1077,11 @@ export function WorkspacePanel({ onContinueInChat }: { onContinueInChat?: (summa
 
         {/* Header */}
         <div className="flex items-center gap-3 border-b border-border px-4 py-2.5 shrink-0">
+          <HarvisClawMascot 
+            state={isRunning ? "working" : "idle"} 
+            size={40} 
+            className="shrink-0"
+          />
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 mb-0.5">
               <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
