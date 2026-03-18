@@ -717,7 +717,39 @@ async def list_models(
 
     formatted_models = []
 
-    # Fetch from llama-server (local GPU via llama.cpp) - PRIMARY
+    # Fetch from local Ollama (Docker service at http://ollama:11434)
+    try:
+        ollama_base = os.getenv("OLLAMA_URL", "http://ollama:11434").rstrip("/")
+        if "/v1" in ollama_base:
+            ollama_tags_url = ollama_base.replace("/v1", "") + "/api/tags"
+        else:
+            ollama_tags_url = f"{ollama_base}/api/tags"
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(ollama_tags_url, timeout=5.0)
+
+        if resp.status_code == 200:
+            data = resp.json()
+            for m in data.get("models", []):
+                model_name = m.get("name", "unknown")
+                raw_size = m.get("size", 0)
+                size_str = _parse_model_size(raw_size) if raw_size else ""
+                if not any(
+                    existing["name"] == model_name for existing in formatted_models
+                ):
+                    formatted_models.append(
+                        {
+                            "name": model_name,
+                            "displayName": f"{model_name.split(':')[0]} (Ollama)",
+                            "size": size_str,
+                            "status": "available",
+                            "provider": "ollama",
+                        }
+                    )
+            logger.info(f"Added {len(data.get('models', []))} Ollama models from {ollama_tags_url}")
+    except Exception as e:
+        logger.warning(f"Could not connect to local Ollama: {e}")
+
+    # Fetch from llama-server (local GPU via llama.cpp)
     try:
         llama_url = os.getenv("LLAMA_URL", "http://localhost:8080/v1")
         async with httpx.AsyncClient() as client:
@@ -5660,6 +5692,25 @@ async def get_ollama_models():
     """
     ollama_model_names = []
 
+    # Fetch from local Ollama (Docker service at http://ollama:11434)
+    try:
+        ollama_base = os.getenv("OLLAMA_URL", "http://ollama:11434").rstrip("/")
+        if "/v1" in ollama_base:
+            ollama_tags_url = ollama_base.replace("/v1", "") + "/api/tags"
+        else:
+            ollama_tags_url = f"{ollama_base}/api/tags"
+        logger.info(f"Trying to connect to local Ollama at: {ollama_tags_url}")
+        response = requests.get(ollama_tags_url, timeout=10)
+        if response.status_code == 200:
+            models = response.json().get("models", [])
+            local_ollama = [m["name"] for m in models]
+            ollama_model_names.extend(local_ollama)
+            logger.info(f"Available models from local Ollama: {local_ollama}")
+        else:
+            logger.warning(f"Local Ollama returned status {response.status_code}")
+    except requests.exceptions.RequestException as e:
+        logger.warning(f"Could not connect to local Ollama: {e}")
+
     # Fetch from vLLM (qwen3.5:9b)
     try:
         url = f"{VLLM_URL}/models"
@@ -5667,7 +5718,7 @@ async def get_ollama_models():
         response = requests.get(url, timeout=10)
         if response.status_code == 200:
             models = response.json().get("data", [])
-            local_models = [m["id"] for m in models]
+            local_models = [m["id"] for m in models if m["id"] not in ollama_model_names]
             ollama_model_names.extend(local_models)
             logger.info(f"Available models from vLLM: {local_models}")
         else:
