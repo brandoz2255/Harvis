@@ -56,10 +56,11 @@ const typeColors: Record<NodeType, { bg: string; border: string; text: string }>
 };
 
 export const GraphNode = memo(function GraphNode({
-  data,
+  data: rawData,
   selected,
   dragging,
-}: NodeProps<GraphNodeData>) {
+}: NodeProps) {
+  const data = rawData as unknown as GraphNodeData;
   const Icon = typeIcons[data.type] || FileText;
   const colors = typeColors[data.type] || typeColors.file;
 

@@ -1,0 +1,43 @@
+# TTS Service Requirements
+# PyTorch installed separately in Dockerfile
+
+# FastAPI and server
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+
+# Transformers for model loading
+transformers>=4.35.0
+accelerate>=0.24.0
+bitsandbytes>=0.41.0
+
+# Audio processing
+librosa>=0.10.0
+soundfile>=0.12.0
+scipy>=1.11.0
+
+# Speaker embedding (for voice cloning)
+speechbrain>=1.0.2
+
+# Hugging Face Hub
+huggingface-hub>=0.30.2
+
+# Default speaker embeddings for SpeechT5 (CMU Arctic xvectors)
+datasets>=2.14.0
+
+# Pydantic for data validation
+pydantic>=2.0.0
+
+# Logging
+loguru>=0.7.0
+
+# Dia/VibeVoice model support (voice cloning)
+git+https://github.com/nari-labs/dia.git
+
+# RVC (Retrieval-based Voice Conversion) support
+rvc-python>=0.1.5
+praat-parselmouth>=0.4.3
+pyworld>=0.3.4
+
+# HTTP client for voice catalog
+httpx>=0.25.0

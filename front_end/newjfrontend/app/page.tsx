@@ -9,12 +9,12 @@ import { ChatMessage } from "@/components/chat-message"
 import { ChatInput } from "@/components/chat-input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
-import { Menu, Sparkles, ArrowUpRight } from "lucide-react"
+import { Menu, Sparkles } from "lucide-react"
 import { HarvisMascot } from "@/components/mascots"
 import ModelSelector from "@/components/ModelSelector"
 import SearchToggle from "@/components/SearchToggle"
 import { useChatHistoryStore } from "@/stores/chatHistoryStore"
-import { apiClient } from "@/lib/api"
+import { apiClient, getAuthHeaders } from "@/lib/api"
 import { useUser } from "@/lib/auth/UserProvider"
 import type { Message, MessageObject, Attachment } from "@/types/message"
 import { isVisionModel } from "@/types/message"
@@ -24,193 +24,30 @@ import { Message as AiMessage } from "ai"
 
 import { useApiWithRetry } from "@/hooks/useApiWithRetry"
 import { useAsyncTTS } from "@/hooks/useAsyncTTS"
+import BlockPluginStack from "@/components/BlockPluginStack"
+import BlockPluginPanel, { usePluginIsFullPage } from "@/components/BlockPluginPanel"
 import { WorkspaceLayout } from "@/components/workspace/WorkspaceLayout"
 import { WorkspacePanel } from "@/components/workspace/WorkspacePanel"
 import { WorkspaceSuggestionBanner } from "@/components/workspace/WorkspaceSuggestionBanner"
 import { useOpenClawStore } from "@/stores/openclawStore"
 
-// Auto-research detection (mirrors backend logic)
-// Returns true for queries that need fresh/current information
-function shouldAutoResearch(message: string): boolean {
-  const msgLower = message.toLowerCase()
-
-  // Keywords that indicate need for current/fresh information
-  const freshnessKeywords = [
-    "new", "latest", "current", "2026", "2025", "today", "this week",
-    "recently", "best", "top", "recommend", "compare", "vs", "which should",
-    "roadmap", "release", "what changed", "update", "version", "trending",
-    "popular", "modern", "state of the art", "sota"
-  ]
-
-  // Keywords that indicate conceptual questions (don't need web search)
-  const conceptualKeywords = [
-    "explain", "what is", "how does", "define", "tutorial",
-    "teach me", "understand", "concept", "basics", "fundamentals"
-  ]
-
-  // Explicit research requests always trigger
-  const explicitResearch = [
-    "search", "look up", "find sources", "research", "browse",
-    "check online", "google", "web search"
-  ]
-
-  // Check for explicit research request first
-  for (const keyword of explicitResearch) {
-    if (msgLower.includes(keyword)) {
-      console.log(`[AutoResearch] Triggered by explicit keyword: '${keyword}'`)
-      return true
-    }
-  }
-
-  // Check for conceptual questions (skip research)
-  for (const keyword of conceptualKeywords) {
-    if (msgLower.includes(keyword)) {
-      // But override if freshness is also present
-      const hasFreshness = freshnessKeywords.some(fk => msgLower.includes(fk))
-      if (!hasFreshness) {
-        console.log(`[AutoResearch] Conceptual question, skipping`)
-        return false
-      }
-    }
-  }
-
-  // Check for freshness keywords
-  for (const keyword of freshnessKeywords) {
-    if (msgLower.includes(keyword)) {
-      console.log(`[AutoResearch] Triggered by freshness keyword: '${keyword}'`)
-      return true
-    }
-  }
-
-  return false
-}
-
 export default function ChatPage() {
   const router = useRouter()
   const { user, isLoading: isAuthLoading } = useUser()
   const [selectedModel, setSelectedModel] = useState<string>("")
-  const [lowVram, setLowVram] = useState(true)   // Default to low VRAM (safer)
-  const [textOnly, setTextOnly] = useState(true)  // Default to text only (no TTS)
-  const [ttsEngine, setTtsEngine] = useState<"qwen" | "chatterbox">("qwen")  // TTS engine selection (qwen is primary)
+  const [lowVram, setLowVram] = useState(false)
+  const [textOnly, setTextOnly] = useState(false)
   const [isResearchMode, setIsResearchMode] = useState(false)
-  const [workspaceEnabled, setWorkspaceEnabled] = useState(true) // Workspace auto-delegation toggle
-  const [thinkingMode, setThinkingMode] = useState(false) // Deep thinking (chain-of-thought) toggle
   const [localMessages, setLocalMessages] = useState<Message[]>([])
   const [isLoading, setIsLoading] = useState(false)
+  const [workspaceEnabled, setWorkspaceEnabled] = useState(false)
+  const pluginIsFullPage = usePluginIsFullPage()
 
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const scrollRef = useRef<HTMLDivElement>(null)
 
-  // Harvis Workspaces
-  const {
-    setSuggestion,
-    isWorkspaceActive,
-    suggestion,
-    setWorkspaceId,
-    setWorkspaceSessionId,
-    setWorkspaceActive,
-    setSseAbortController,
-    clearLogEvents,
-    addLogEvent,
-    setFinalSummary,
-    workspaceModel,
-  } = useOpenClawStore()
-
-  // Directly launch workspace with current chat context (skips suggestion banner)
-  const sendToWorkspace = useCallback(async () => {
-    if (localMessages.length === 0) return
-    const token = localStorage.getItem('token')
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-    if (token) headers['Authorization'] = `Bearer ${token}`
-
-    // Use the last user message as the task brief (truncated to 150 chars)
-    const lastUserMsg = [...localMessages].reverse().find((m) => m.role === 'user')
-    const taskBrief = (lastUserMsg?.content ?? 'Continue this task').slice(0, 150)
-
-    try {
-      const res = await fetch('/api/workspace/launch', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          task_brief: taskBrief,
-          chat_history: localMessages.map((m) => ({ role: m.role, content: m.content ?? '' })),
-          agent_id: workspaceModel,
-        }),
-      })
-      if (!res.ok) return
-      const data = await res.json()
-      const { workspace_id, session_id } = data
-
-      clearLogEvents()
-      setFinalSummary('')
-      setWorkspaceId(workspace_id)
-      setWorkspaceSessionId(session_id ?? null)
-      setWorkspaceActive(true)
-
-      // Open SSE stream
-      const controller = new AbortController()
-      setSseAbortController(controller)
-      const streamRes = await fetch(`/api/workspace/stream/${workspace_id}`, {
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-        signal: controller.signal,
-      })
-      const reader = streamRes.body?.getReader()
-      if (!reader) return
-      const decoder = new TextDecoder()
-      let buffer = ''
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() ?? ''
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue
-          try {
-            const event = JSON.parse(line.slice(6))
-            if (event.type === 'stream_end') { reader.cancel(); return }
-            if (event.type === 'done') setFinalSummary(event.summary ?? '')
-            addLogEvent(event)
-          } catch { /* ignore */ }
-        }
-      }
-    } catch {
-      // Non-critical — workspace launch is best-effort
-    }
-  }, [
-    localMessages, workspaceModel, clearLogEvents, setFinalSummary,
-    setWorkspaceId, setWorkspaceSessionId, setWorkspaceActive,
-    setSseAbortController, addLogEvent,
-  ])
-
-  const detectWorkspace = useCallback(async (history: Message[]) => {
-    try {
-      const token = localStorage.getItem('token')
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-      if (token) headers['Authorization'] = `Bearer ${token}`
-      const res = await fetch('/api/workspace/suggest', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          chat_history: history.map((m) => ({ role: m.role, content: m.content ?? '' })),
-        }),
-      })
-      if (!res.ok) return
-      const data = await res.json()
-      if (data.should_suggest) setSuggestion(data)
-    } catch {
-      // Non-critical — workspace suggestion is best-effort
-    }
-  }, [setSuggestion])
-
   // Use a ref to track if we should skip the next scroll (to prevent scroll jank during streaming)
   const skipNextScrollRef = useRef(false)
-
-  // Async TTS hook for voice mode
-  const { submitTTS, cancelTTS, status: ttsStatus, audioUrl: ttsAudioUrl, error: ttsError } = useAsyncTTS()
-
-  // Track active TTS jobs per message
-  const activeTTSJobsRef = useRef<Map<string, { jobId: string; messageId: string }>>(new Map())
 
   // Auth protection
   useEffect(() => {
@@ -240,27 +77,15 @@ export default function ChatPage() {
     data: aiData
   } = useChat({
     api: '/api/ai-chat',
-    // Add auth headers dynamically via credentials - simpler than custom fetch
-    credentials: 'include',
+    headers: getAuthHeaders(),
     body: {
       model: selectedModel,
       sessionId: currentSession?.id || null,
       textOnly: textOnly,
       lowVram: lowVram,
-      ttsEngine: ttsEngine,
     },
     onError: (e: any) => {
       console.error("AI SDK Error:", e)
-      console.error("AI SDK Error details:", {
-        message: e?.message,
-        cause: e?.cause,
-        name: e?.name,
-        stack: e?.stack?.slice(0, 500)
-      })
-      // Check if this is a non-stream response error (backend down, etc.)
-      if (e?.message?.includes('input stream') || e?.name === 'TypeError') {
-        console.error("AI SDK: Received non-stream response. Backend may be down or returned invalid data.")
-      }
       setIsLoading(false)
     },
     onFinish: (message: any) => {
@@ -274,273 +99,71 @@ export default function ChatPage() {
   const searchResultsMapRef = useRef<Map<string, any[]>>(new Map())
   const videosMapRef = useRef<Map<string, any[]>>(new Map())
   const reasoningMapRef = useRef<Map<string, string>>(new Map())
-  const researchChainMapRef = useRef<Map<string, any>>(new Map())
-  const artifactMapRef = useRef<Map<string, any>>(new Map())
   const processedDataLengthRef = useRef(0)
 
   // Track previous aiData length to detect new data
   const prevAiDataLengthRef = useRef(0)
-
-  // Buffer for research events that arrive before assistant message exists
-  const pendingResearchEventsRef = useRef<any[]>([])
-
-  // State trigger to force re-render when research chain updates
-  const [researchChainUpdateTrigger, setResearchChainUpdateTrigger] = useState(0)
-
-  // State trigger to force re-render when artifacts are received
-  const [artifactUpdateTrigger, setArtifactUpdateTrigger] = useState(0)
-
-  // Helper function to process a single research event and update the chain
-  // Uses immutable updates to ensure React detects changes
-  const processResearchEvent = useCallback((data: any, assistantId: string) => {
-    // Case 1: Pre-formed chain object
-    if (data?.research_chain) {
-      researchChainMapRef.current.set(assistantId, data.research_chain)
-      return true
-    }
-    // Case 2: Structured research events from auto-research streaming
-    else if (data?.status === 'researching' && data?.eventType) {
-      const currentChain = researchChainMapRef.current.get(assistantId) || {
-        summary: "Researching...",
-        steps: [],
-        isLoading: true
-      }
-
-      const eventType = data.eventType
-
-      if (eventType === 'search_query') {
-        const query = data.query || data.detail
-        if (query) {
-          const newSteps = [...currentChain.steps, {
-            type: 'search',
-            query: query,
-            resultCount: 0,
-            results: []
-          }]
-          researchChainMapRef.current.set(assistantId, { ...currentChain, steps: newSteps })
-          return true
-        }
-      }
-      else if (eventType === 'search_result') {
-        const title = data.title || 'Unknown'
-        const url = data.url || ''
-        const domain = data.domain || ''
-
-        // Create new steps array with updated search step (immutable)
-        const newSteps = currentChain.steps.map((step: any, i: number) => {
-          const isLastSearch = step.type === 'search' &&
-            !currentChain.steps.slice(i + 1).some((s: any) => s.type === 'search')
-
-          if (isLastSearch && !step.results.some((r: any) => r.url === url)) {
-            return {
-              ...step,
-              results: [...step.results, { title, url, domain }],
-              resultCount: step.results.length + 1
-            }
-          }
-          return step
-        })
-        researchChainMapRef.current.set(assistantId, { ...currentChain, steps: newSteps })
-        return true
-      }
-      else if (eventType === 'reading') {
-        const domain = data.domain || data.detail
-        if (domain) {
-          const newSteps = [...currentChain.steps, {
-            type: 'read',
-            domain: domain,
-            summary: 'Reading content...'
-          }]
-          researchChainMapRef.current.set(assistantId, { ...currentChain, steps: newSteps })
-          return true
-        }
-      }
-    }
-    // Case 3: Legacy log parsing for backward compatibility
-    else if (data?.status === 'progress' || data?.status === 'researching' || data?.type === 'log') {
-      const logMessage = data.message || data.detail || data.content
-      if (logMessage && typeof logMessage === 'string') {
-        const currentChain = researchChainMapRef.current.get(assistantId) || {
-          summary: "Researching...",
-          steps: [],
-          isLoading: true
-        }
-
-        const lastStep = currentChain.steps[currentChain.steps.length - 1] as any
-        if (!lastStep || (lastStep.content !== logMessage && lastStep.query !== logMessage && lastStep.domain !== logMessage)) {
-          const lowerLog = logMessage.toLowerCase()
-          let newStep: any = null
-
-          if (lowerLog.includes('search') || lowerLog.includes('googl')) {
-            newStep = {
-              type: 'search',
-              query: logMessage.replace(/searching for|search/gi, '').trim() || logMessage,
-              resultCount: 0,
-              results: []
-            }
-          } else if (lowerLog.includes('read') || lowerLog.includes('brow') || lowerLog.includes('access')) {
-            newStep = {
-              type: 'read',
-              domain: logMessage,
-              summary: 'Reading content...'
-            }
-          } else {
-            newStep = {
-              type: 'thinking',
-              content: logMessage
-            }
-          }
-
-          if (newStep) {
-            const newSteps = [...currentChain.steps, newStep]
-            researchChainMapRef.current.set(assistantId, { ...currentChain, steps: newSteps })
-            return true
-          }
-        }
-      }
-    }
-    return false
-  }, [])
 
   // Process aiData updates in a separate effect (doesn't trigger re-renders of messages)
   useEffect(() => {
     if (!aiData || aiData.length === 0) {
       processedDataLengthRef.current = 0
       prevAiDataLengthRef.current = 0
-      pendingResearchEventsRef.current = []
       return
     }
 
-    const assistantMsgIds = aiMessages
-      .filter((m: any) => m.role === 'assistant')
-      .map((m: any) => m.id)
-    const lastAssistantId = assistantMsgIds[assistantMsgIds.length - 1]
-
-    // Process any pending research events now that we have an assistant message
-    if (lastAssistantId && pendingResearchEventsRef.current.length > 0) {
-      console.log(`[AI-Chat] Processing ${pendingResearchEventsRef.current.length} buffered research events for ${lastAssistantId}`)
-      let updated = false
-      pendingResearchEventsRef.current.forEach(event => {
-        if (processResearchEvent(event, lastAssistantId)) {
-          updated = true
-        }
-      })
-      pendingResearchEventsRef.current = []
-      if (updated) {
-        setResearchChainUpdateTrigger(prev => prev + 1)
-      }
-    }
-
-    // Only process new data items
+    // Only process if we have new data
     if (aiData.length > prevAiDataLengthRef.current) {
+      const assistantMsgIds = aiMessages
+        .filter((m: any) => m.role === 'assistant')
+        .map((m: any) => m.id)
+      const lastAssistantId = assistantMsgIds[assistantMsgIds.length - 1]
+
       const newItems = aiData.slice(prevAiDataLengthRef.current)
       prevAiDataLengthRef.current = aiData.length
 
+      // Process new data items
       const mappedAudioUrls = new Set(audioUrlMapRef.current.values())
-      let chainUpdated = false
 
-      newItems.forEach((rawData: any) => {
-        // AI SDK wraps data in arrays when sent via 2:[...], so unwrap if needed
-        const dataItems = Array.isArray(rawData) ? rawData : [rawData]
+      newItems.forEach((data: any) => {
+        // Audio URLs
+        if (data?.audioPath && !mappedAudioUrls.has(data.audioPath) && lastAssistantId) {
+          audioUrlMapRef.current.set(lastAssistantId, data.audioPath)
+          mappedAudioUrls.add(data.audioPath)
+        }
 
-        dataItems.forEach((data: any) => {
-          // Audio URLs
-          if (data?.audioPath && !mappedAudioUrls.has(data.audioPath) && lastAssistantId) {
-            audioUrlMapRef.current.set(lastAssistantId, data.audioPath)
-            mappedAudioUrls.add(data.audioPath)
-          }
+        // Search results
+        const results = data?.searchResults || data?.results || data?.sources
+        if (results && lastAssistantId && !searchResultsMapRef.current.has(lastAssistantId)) {
+          searchResultsMapRef.current.set(lastAssistantId, results)
+        }
 
-          // Search results
-          const results = data?.searchResults || data?.results || data?.sources
-          if (results && lastAssistantId && !searchResultsMapRef.current.has(lastAssistantId)) {
-            searchResultsMapRef.current.set(lastAssistantId, results)
-          }
+        // Videos
+        if (data?.videos && lastAssistantId && !videosMapRef.current.has(lastAssistantId)) {
+          videosMapRef.current.set(lastAssistantId, data.videos)
+        }
 
-          // Videos
-          if (data?.videos && lastAssistantId && !videosMapRef.current.has(lastAssistantId)) {
-            videosMapRef.current.set(lastAssistantId, data.videos)
-          }
-
-          // Research Chain - Handle with buffering if no assistant message yet
-          const isResearchEvent = data?.research_chain ||
-            (data?.status === 'researching') ||
-            (data?.status === 'progress') ||
-            (data?.type === 'log')
-
-          if (isResearchEvent) {
-            console.log('[AI-Chat] Research event received:', {
-              status: data?.status,
-              eventType: data?.eventType,
-              lastAssistantId,
-              aiMessagesCount: aiMessages.length,
-              isAutoResearch: data?.isAutoResearch
-            })
-
-            // FIX: Initialize research chain for auto-research mode (same UI as forced research)
-            // This ensures the "Researching..." UI appears even when user didn't toggle research mode
-            if (data?.isAutoResearch && lastAssistantId && !researchChainMapRef.current.has(lastAssistantId)) {
-              console.log('[AI-Chat] Auto-research detected, initializing research chain for', lastAssistantId)
-              researchChainMapRef.current.set(lastAssistantId, {
-                summary: "Researching...",
-                steps: [],
-                isLoading: true
-              })
-              chainUpdated = true
-            }
-
-            if (lastAssistantId) {
-              if (processResearchEvent(data, lastAssistantId)) {
-                console.log('[AI-Chat] Research chain updated for', lastAssistantId)
-                chainUpdated = true
+        // Session ID - sync currentSession when backend creates/returns a session
+        // This ensures vision/screenshare uses the same session as regular chat
+        if (data?.sessionId && data.sessionId !== currentSession?.id) {
+          console.log(`[AI-Chat] Syncing session from backend: ${data.sessionId}`)
+          // Find or create the session object to set as current
+          const existingSession = sessions.find(s => s.id === data.sessionId)
+          if (existingSession) {
+            setCurrentSession(existingSession)
+          } else {
+            // Session was just created - fetch sessions and set the new one
+            fetchSessions().then(() => {
+              const newSession = useChatHistoryStore.getState().sessions.find(s => s.id === data.sessionId)
+              if (newSession) {
+                setCurrentSession(newSession)
               }
-            } else {
-              // Buffer research events until assistant message exists
-              console.log('[AI-Chat] Buffering research event (no assistant message yet)', data?.eventType)
-              pendingResearchEventsRef.current.push(data)
-            }
-          }
-
-          // Session ID - sync currentSession when backend creates/returns a session
-          if (data?.sessionId && data.sessionId !== currentSession?.id) {
-            console.log(`[AI-Chat] Syncing session from backend: ${data.sessionId}`)
-            const existingSession = sessions.find(s => s.id === data.sessionId)
-            if (existingSession) {
-              setCurrentSession(existingSession)
-            } else {
-              fetchSessions().then(() => {
-                const newSession = useChatHistoryStore.getState().sessions.find(s => s.id === data.sessionId)
-                if (newSession) {
-                  setCurrentSession(newSession)
-                }
-              })
-            }
-          }
-
-          // Workspace signal — auto-launch from LLM XML tag
-          if (data?.type === 'workspace_signal' && workspaceEnabled) {
-            console.log('[AI-Chat] Workspace signal received:', data.task_brief)
-            const modelMap: Record<string, 'local' | 'kimi' | 'gpt-oss'> = {
-              local: 'local', kimi: 'kimi', 'gpt-oss': 'gpt-oss',
-            }
-            setSuggestion({
-              should_suggest: true,
-              auto_launch: true,
-              confidence: 1.0,
-              task_type: 'multi_step',
-              task_type_label: 'Auto-detected task',
-              task_brief: data.task_brief || 'Execute workspace task',
-              reason: 'LLM signaled workspace via XML tag.',
-              model: modelMap[data.model] || 'local',
             })
           }
-        }) // End of dataItems.forEach
-      }) // End of newItems.forEach
-
-      if (chainUpdated) {
-        setResearchChainUpdateTrigger(prev => prev + 1)
-      }
+        }
+      })
     }
-  }, [aiData, aiMessages, currentSession?.id, sessions, setCurrentSession, fetchSessions, processResearchEvent])
+  }, [aiData, aiMessages, currentSession?.id, sessions, setCurrentSession, fetchSessions])
 
   // Use useMemo to convert AI messages to local format - this prevents re-renders during streaming
   const convertedMessages = useMemo<Message[]>(() => {
@@ -559,16 +182,14 @@ export default function ChatPage() {
         model: selectedModel,
         status: (index === aiMessages.length - 1 && isAiLoading) ? 'streaming' : 'sent',
         reasoning: reasoning,
-        researchChain: researchChainMapRef.current.get(m.id),
         audioUrl: audioUrlMapRef.current.get(m.id),
         searchResults: searchResultsMapRef.current.get(m.id),
         videos: videosMapRef.current.get(m.id),
-        artifact: artifactMapRef.current.get(m.id),
         metadata: m.metadata,
         inputType: m.inputType,
       }
     })
-  }, [aiMessages, selectedModel, isAiLoading, researchChainUpdateTrigger, artifactUpdateTrigger])
+  }, [aiMessages, selectedModel, isAiLoading])
 
   // Unified message merging - combines AI SDK messages with local messages
   // This ensures text, vision, voice, and all modes appear together seamlessly
@@ -576,9 +197,9 @@ export default function ChatPage() {
     // Start with AI SDK messages (converted from aiMessages)
     const merged = [...convertedMessages]
 
-    // Merge localMessages - replace if exists and local has more data
+    // Add localMessages that aren't already in merged
     localMessages.forEach(localMsg => {
-      const existingIndex = merged.findIndex(m =>
+      const exists = merged.some(m =>
         // Check by ID
         (m.id && m.id === localMsg.id) ||
         (m.tempId && m.tempId === localMsg.tempId) ||
@@ -587,44 +208,10 @@ export default function ChatPage() {
           m.content === localMsg.content &&
           Math.abs(m.timestamp.getTime() - localMsg.timestamp.getTime()) < 2000)
       )
-
-      if (existingIndex === -1) {
-        // Message doesn't exist, add it
+      if (!exists) {
         merged.push(localMsg)
-      } else if (localMsg.artifact || localMsg.audioUrl || localMsg.searchResults || localMsg.reasoning) {
-        // DEBUG: Log artifact merge
-        if (localMsg.artifact) {
-          console.log('🔍 DEBUG - Merging artifact into message:', {
-            messageId: localMsg.id,
-            artifactId: localMsg.artifact.id,
-            artifactType: localMsg.artifact.type,
-          })
-        }
-        // Message exists but local version has additional data (artifact, audio, etc.)
-        // Merge the data: keep local data, fall back to merged data if local doesn't have it
-        merged[existingIndex] = {
-          ...merged[existingIndex],
-          ...localMsg,
-          // Ensure these fields are taken from local if they exist
-          artifact: localMsg.artifact || merged[existingIndex].artifact,
-          audioUrl: localMsg.audioUrl || merged[existingIndex].audioUrl,
-          searchResults: localMsg.searchResults || merged[existingIndex].searchResults,
-          videos: localMsg.videos || merged[existingIndex].videos,
-          reasoning: localMsg.reasoning || merged[existingIndex].reasoning,
-          researchChain: localMsg.researchChain || merged[existingIndex].researchChain,
-        }
       }
     })
-
-    // DEBUG: Log final messages with artifacts
-    const messagesWithArtifacts = merged.filter(m => m.artifact)
-    if (messagesWithArtifacts.length > 0) {
-      console.log('🔍 DEBUG - Final messages with artifacts:', messagesWithArtifacts.map(m => ({
-        id: m.id,
-        artifactId: m.artifact?.id,
-        artifactType: m.artifact?.type,
-      })))
-    }
 
     // Sort by timestamp to maintain chronological order
     return merged.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())
@@ -638,8 +225,6 @@ export default function ChatPage() {
       videosMapRef.current.clear()
       audioUrlMapRef.current.clear()
       reasoningMapRef.current.clear()
-      researchChainMapRef.current.clear()
-      artifactMapRef.current.clear()
       processedDataLengthRef.current = 0
       prevAiDataLengthRef.current = 0
 
@@ -649,7 +234,6 @@ export default function ChatPage() {
         if (msg.metadata) {
           const sources = msg.metadata.sources || msg.metadata.searchResults
           const videos = msg.metadata.videos
-          const artifact = msg.metadata.artifact
 
           if (sources && sources.length > 0) {
             searchResultsMapRef.current.set(msgId, sources)
@@ -657,24 +241,10 @@ export default function ChatPage() {
           if (videos && videos.length > 0) {
             videosMapRef.current.set(msgId, videos)
           }
-          if (artifact) {
-            console.log('📦 Loading artifact from history:', {
-              msgId,
-              artifactId: artifact.id,
-              type: artifact.type,
-              hasCode: !!artifact.code,
-              codeLength: artifact.code?.length
-            })
-            artifactMapRef.current.set(msgId, artifact)
-          }
         }
 
         if (msg.reasoning) {
           reasoningMapRef.current.set(msgId, msg.reasoning)
-        }
-
-        if (msg.researchChain) {
-          researchChainMapRef.current.set(msgId, msg.researchChain)
         }
 
         return {
@@ -734,10 +304,184 @@ export default function ChatPage() {
     searchResultsMapRef.current.clear()
     videosMapRef.current.clear()
     reasoningMapRef.current.clear()
-    researchChainMapRef.current.clear()
     await selectSession(id)
     setSidebarOpen(false)
   }, [selectSession, setAiMessages])
+
+  // Helper: launch a workspace task and connect to SSE
+  const launchWorkspaceTask = useCallback(async (taskBrief: string) => {
+    const store = useOpenClawStore.getState()
+
+    store.addLogEvent({
+      type: 'log',
+      message: `Launching workspace: "${taskBrief.slice(0, 100)}"…`,
+      agent_label: 'harvis',
+    })
+
+    try {
+      const token = localStorage.getItem('token')
+      if (!token) {
+        store.addLogEvent({ type: 'error', message: 'Not authenticated — please log in.' })
+        return
+      }
+
+      const res = await fetch('/api/workspace/launch', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        credentials: 'include',
+        body: JSON.stringify({
+          task_brief: taskBrief,
+          chat_history: messages.map(m => ({ role: m.role, content: m.content })),
+          session_id: currentSession?.id ?? undefined,
+          agent_id: store.workspaceModel === 'kimi' ? 'kimi'
+            : store.workspaceModel === 'qwen3' ? 'qwen3'
+              : store.workspaceModel === 'nvidia-kimi' ? 'nvidia-kimi'
+                : 'main',
+        }),
+      })
+
+      if (!res.ok) {
+        const errBody = await res.text().catch(() => res.statusText)
+        store.addLogEvent({ type: 'error', message: `Launch failed (${res.status}): ${errBody}` })
+        return
+      }
+
+      const data = await res.json()
+      const { workspace_id, session_id } = data
+
+      store.setWorkspaceId(workspace_id)
+      store.setWorkspaceSessionId(session_id)
+
+      store.addLogEvent({
+        type: 'log',
+        message: `Workspace ${workspace_id} running — connecting to stream…`,
+        agent_label: 'harvis',
+      })
+
+      // Connect to SSE stream
+      const controller = new AbortController()
+      store.setSseAbortController(controller)
+
+      const streamRes = await fetch(`/api/workspace/stream/${workspace_id}`, {
+        headers: { 'Authorization': `Bearer ${token}` },
+        signal: controller.signal,
+      })
+
+      if (!streamRes.body) {
+        store.addLogEvent({ type: 'error', message: 'No SSE stream body returned.' })
+        return
+      }
+
+      const reader = streamRes.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      const readLoop = async () => {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split('\n')
+          buffer = lines.pop() ?? ''
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue
+            try {
+              const event = JSON.parse(line.slice(6))
+              if (event.type === 'stream_end') break
+              if (event.type === 'done') {
+                useOpenClawStore.getState().setFinalSummary(event.summary ?? '')
+              }
+              useOpenClawStore.getState().addLogEvent(event)
+            } catch { /* ignore malformed SSE */ }
+          }
+        }
+      }
+
+      readLoop().catch(() => { /* stream closed */ })
+    } catch (err) {
+      console.error('Workspace launch error:', err)
+      useOpenClawStore.getState().addLogEvent({
+        type: 'error',
+        message: `Workspace error: ${err instanceof Error ? err.message : String(err)}`,
+      })
+    }
+  }, [messages, currentSession])
+
+  // Force-launch workspace: always opens panel, launches task if text provided
+  const handleForceWorkspace = useCallback(async (taskBrief: string) => {
+    const store = useOpenClawStore.getState()
+
+    // Always open the workspace panel immediately
+    store.clearLogEvents()
+    store.setFinalSummary('')
+    store.setActiveTab('dashboard')
+    store.setWorkspaceActive(true)
+
+    // Also enable auto-suggest going forward
+    setWorkspaceEnabled(true)
+
+    if (taskBrief) {
+      // Text provided — launch a workspace task
+      await launchWorkspaceTask(taskBrief)
+    } else {
+      // No text — just open the panel, show ready state
+      store.addLogEvent({
+        type: 'log',
+        message: 'Workspace panel open — type a task and press the workspace button to launch.',
+        agent_label: 'harvis',
+      })
+    }
+  }, [launchWorkspaceTask])
+
+  // Auto-suggest workspace after chat responses when workspace is enabled
+  useEffect(() => {
+    if (!workspaceEnabled) return
+    if (messages.length < 2) return
+
+    // Only trigger after assistant messages
+    const lastMsg = messages[messages.length - 1]
+    if (lastMsg?.role !== 'assistant' || lastMsg?.status === 'streaming') return
+
+    // Don't suggest if workspace is already active or there's already a suggestion
+    const { isWorkspaceActive, suggestion } = useOpenClawStore.getState()
+    if (isWorkspaceActive || suggestion) return
+
+    const token = localStorage.getItem('token')
+    if (!token) return
+
+    // Debounce: call suggest endpoint
+    const timer = setTimeout(async () => {
+      try {
+        const res = await fetch('/api/workspace/suggest', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            chat_history: messages.slice(-10).map(m => ({
+              role: m.role,
+              content: m.content,
+            })),
+          }),
+        })
+
+        if (!res.ok) return
+
+        const data = await res.json()
+        if (data.should_suggest) {
+          useOpenClawStore.getState().setSuggestion(data)
+        }
+      } catch {
+        // silently fail — suggestion is best-effort
+      }
+    }, 1500)
+
+    return () => clearTimeout(timer)
+  }, [messages, workspaceEnabled])
 
   const isDuplicateMessage = useCallback((newMessage: Message, existingMessages: Message[]): boolean => {
     const recentMessages = existingMessages.slice(-3)
@@ -776,9 +520,6 @@ export default function ChatPage() {
 
     if (isLoading) return
 
-    // Check if this query should trigger auto-research (bypass AI SDK streaming)
-    const isAutoResearch = shouldAutoResearch(messageContent)
-
     const hasImages = messageAttachments.some(a => a.type === 'image')
     if (hasImages && isVisionModel(selectedModel || '')) {
       const imageAttachment = messageAttachments.find(a => a.type === 'image')
@@ -805,43 +546,25 @@ export default function ChatPage() {
       }
       setLocalMessages((prev) => [...prev, userMessage])
 
-      if (isResearchMode || isAutoResearch || isVisionModel(selectedModel || '')) {
+      if (isResearchMode || isVisionModel(selectedModel || '')) {
         const placeholderAiMsg: Message = {
           id: assistantId,
           role: 'assistant',
           content: '',
           timestamp: new Date(),
           model: selectedModel,
-          status: 'streaming',
-          // Initialize research chain for research mode or auto-research
-          ...((isResearchMode || isAutoResearch) && {
-            researchChain: {
-              summary: isAutoResearch ? "Auto-researching..." : "Researching...",
-              steps: [],
-              isLoading: true
-            }
-          })
+          status: 'streaming'
         }
         setLocalMessages((prev) => [...prev, placeholderAiMsg])
-        // Store in ref for streaming updates
-        if (isResearchMode || isAutoResearch) {
-          researchChainMapRef.current.set(assistantId, placeholderAiMsg.researchChain!)
-        }
       }
 
-      if (!isResearchMode && !isAutoResearch && !isVisionModel(selectedModel || '')) {
-        // Regular chat - use AI SDK streaming
+      if (!isResearchMode && !isVisionModel(selectedModel || '')) {
         setIsLoading(true)
         await append({
           role: 'user',
           content: messageContent,
         })
         return;
-      }
-
-      // Log auto-research detection
-      if (isAutoResearch && !isResearchMode) {
-        console.log('[AutoResearch] Using non-streaming path for auto-research query')
       }
     }
 
@@ -859,13 +582,7 @@ export default function ChatPage() {
         throw new Error('Authentication required. Please log in again.')
       }
 
-      // Use research endpoint for both explicit research mode and auto-research
-      const useResearchEndpoint = isResearchMode || isAutoResearch
-      const endpoint = useResearchEndpoint ? '/api/research-chat' : '/api/chat'
-
-      if (isAutoResearch) {
-        console.log('[AutoResearch] Routing to research endpoint for query:', messageContent.slice(0, 50))
-      }
+      const endpoint = isResearchMode ? '/api/research-chat' : '/api/chat'
 
       const requestBody: any = {
         message: messageContent,
@@ -876,16 +593,11 @@ export default function ChatPage() {
         model: selectedModel,
         session_id: sessionId || null,
         low_vram: lowVram,
-        // When voice mode is enabled (!textOnly), request text-only response to avoid timeout
-        // Then we'll generate TTS asynchronously after receiving the text
-        text_only: !textOnly ? true : textOnly,
-        tts_engine: ttsEngine,
-        thinking_mode: thinkingMode,
+        text_only: textOnly,
         attachments: messageAttachments.length > 0 ? messageAttachments : undefined
       }
 
-      // Add research parameters for both explicit research and auto-research
-      if (useResearchEndpoint) {
+      if (isResearchMode) {
         requestBody.enableWebSearch = true
         requestBody.exaggeration = 0.5
         requestBody.temperature = 0.8
@@ -905,9 +617,7 @@ export default function ChatPage() {
         timeout: 3600000,
         maxRetries: 0,
         onChunk: (chunk: any) => {
-          // FIX: Use flushSync to force immediate re-render for live streaming UI
-          // Without this, React batches updates and UI only refreshes at the end
-          flushSync(() => setLocalMessages((prev) => {
+          setLocalMessages((prev) => {
             const newMessages = [...prev]
             const index = newMessages.findIndex(m => m.id === assistantId)
             if (index === -1) return prev
@@ -918,164 +628,9 @@ export default function ChatPage() {
 
             if (chunk.status === 'progress' || chunk.status === 'researching') {
               const statusText = chunk.message || chunk.detail
-              const eventType = chunk.type
-
-              if (statusText || eventType) {
-                // Build research chain from logs
-                // Check ref first in case the initial state update hasn't propagated yet
-                const currentChain = currentMsg.researchChain ||
-                  researchChainMapRef.current.get(assistantId) || {
-                  summary: "Researching...",
-                  steps: [],
-                  isLoading: true
-                }
-
-                // Handle structured event types from backend streaming
-                // IMPORTANT: Create new arrays/objects to ensure React detects changes
-                if (eventType === 'search_query') {
-                  // New search query started
-                  const query = chunk.query || statusText
-                  const newSteps = [...currentChain.steps, {
-                    type: 'search',
-                    query: query,
-                    resultCount: 0,
-                    results: []
-                  }]
-                  updates.researchChain = { ...currentChain, steps: newSteps }
-                  researchChainMapRef.current.set(assistantId, updates.researchChain)
-                  hasUpdates = true
-                }
-                else if (eventType === 'search_result') {
-                  // Search result found - add to last search step
-                  const title = chunk.title || 'Unknown'
-                  const url = chunk.url || ''
-                  const domain = chunk.domain || ''
-
-                  // Create new steps array with updated search step
-                  const newSteps = currentChain.steps.map((step: any, i: number) => {
-                    // Find the last search step
-                    const isLastSearch = step.type === 'search' &&
-                      !currentChain.steps.slice(i + 1).some((s: any) => s.type === 'search')
-
-                    if (isLastSearch && !step.results.some((r: any) => r.url === url)) {
-                      return {
-                        ...step,
-                        results: [...step.results, { title, url, domain }],
-                        resultCount: step.results.length + 1
-                      }
-                    }
-                    return step
-                  })
-                  updates.researchChain = { ...currentChain, steps: newSteps }
-                  researchChainMapRef.current.set(assistantId, updates.researchChain)
-                  hasUpdates = true
-                }
-                else if (eventType === 'reading') {
-                  // Reading content from a domain
-                  const domain = chunk.domain || statusText
-                  const newSteps = [...currentChain.steps, {
-                    type: 'read',
-                    domain: domain,
-                    summary: 'Reading content...'
-                  }]
-                  updates.researchChain = { ...currentChain, steps: newSteps }
-                  researchChainMapRef.current.set(assistantId, updates.researchChain)
-                  hasUpdates = true
-                }
-                // Legacy log parsing for backward compatibility
-                else if (statusText) {
-                  const lowerLog = statusText.toLowerCase()
-
-                  // Check for result count updates (e.g. "Found 5 relevant search results for query:")
-                  const resultCountMatch = statusText.match(/Found (\d+) relevant search results/i)
-                  if (resultCountMatch) {
-                    const count = parseInt(resultCountMatch[1], 10)
-                    // Update the last search step's result count
-                    for (let i = currentChain.steps.length - 1; i >= 0; i--) {
-                      if (currentChain.steps[i].type === 'search') {
-                        (currentChain.steps[i] as any).resultCount = count
-                        break
-                      }
-                    }
-                    updates.researchChain = { ...currentChain }
-                    researchChainMapRef.current.set(assistantId, updates.researchChain)
-                    hasUpdates = true
-                  }
-                  // Check for URL extraction from raw result logs (e.g. "Raw result 1: Title='...', URL='...'")
-                  else if (statusText.includes("Raw result") || statusText.includes("URL='")) {
-                    const urlMatch = statusText.match(/URL='([^']+)'/i)
-                    const titleMatch = statusText.match(/Title='([^']+)'/i)
-                    if (urlMatch) {
-                      const url = urlMatch[1]
-                      const title = titleMatch ? titleMatch[1] : url
-                      let domain = url
-                      try {
-                        domain = new URL(url).hostname.replace('www.', '')
-                      } catch { }
-
-                      // Create new steps array with updated search step (immutable update)
-                      const newSteps = currentChain.steps.map((step: any, i: number) => {
-                        const isLastSearch = step.type === 'search' &&
-                          !currentChain.steps.slice(i + 1).some((s: any) => s.type === 'search')
-
-                        if (isLastSearch && !step.results.some((r: any) => r.url === url)) {
-                          return {
-                            ...step,
-                            results: [...step.results, { title, url, domain }],
-                            resultCount: step.results.length + 1
-                          }
-                        }
-                        return step
-                      })
-                      updates.researchChain = { ...currentChain, steps: newSteps }
-                      researchChainMapRef.current.set(assistantId, updates.researchChain)
-                      hasUpdates = true
-                    }
-                  }
-                  // Avoid duplicate steps for other log types
-                  else {
-                    const lastStep = currentChain.steps[currentChain.steps.length - 1] as any
-                    if (!lastStep || (lastStep.content !== statusText && lastStep.query !== statusText && lastStep.domain !== statusText)) {
-                      let newStep: any = null
-
-                      if (lowerLog.includes('searching for') || lowerLog.includes('search') && !lowerLog.includes('result')) {
-                        const queryMatch = statusText.match(/['"]([^'"]+)['"]/i)
-                        const query = queryMatch ? queryMatch[1] : statusText.replace(/searching for|search/gi, '').trim() || statusText
-                        newStep = {
-                          type: 'search',
-                          query: query,
-                          resultCount: 0,
-                          results: []
-                        }
-                      } else if (lowerLog.includes('read') || lowerLog.includes('brow') || lowerLog.includes('access') || lowerLog.includes('fetch') || lowerLog.includes('extract')) {
-                        const urlInLog = statusText.match(/https?:\/\/[^\s]+/i)
-                        let domain = statusText
-                        if (urlInLog) {
-                          try {
-                            domain = new URL(urlInLog[0]).hostname.replace('www.', '')
-                          } catch { }
-                        }
-                        newStep = {
-                          type: 'read',
-                          domain: domain,
-                          summary: 'Reading content...'
-                        }
-                      } else if (!lowerLog.includes('ddgs') && !lowerLog.includes('primp') && !lowerLog.includes('response:')) {
-                        newStep = {
-                          type: 'thinking',
-                          content: statusText
-                        }
-                      }
-
-                      if (newStep) {
-                        const newSteps = [...currentChain.steps, newStep]
-                        updates.researchChain = { ...currentChain, steps: newSteps }
-                        researchChainMapRef.current.set(assistantId, updates.researchChain)
-                        hasUpdates = true
-                      }
-                    }
-                  }
-                }
+              if (statusText) {
+                updates.reasoning = (currentMsg.reasoning || '') + (currentMsg.reasoning ? '\n' : '') + `> ${statusText}`
+                hasUpdates = true
               }
             }
 
@@ -1100,47 +655,6 @@ export default function ChatPage() {
                 updates.audioUrl = chunk.audio_path
                 hasUpdates = true
               }
-              // Workspace suggestion — fire after response completes (non-blocking)
-              if (!isWorkspaceActive) {
-                setTimeout(() => detectWorkspace(localMessages), 300)
-              }
-              // Mark research chain as complete (check both message state AND ref for auto-research)
-              const chainFromMsg = currentMsg.researchChain
-              const chainFromRef = researchChainMapRef.current.get(assistantId)
-              const existingChain = chainFromMsg || chainFromRef
-              if (existingChain) {
-                updates.researchChain = {
-                  ...existingChain,
-                  isLoading: false,
-                  summary: chunk.research_summary || existingChain.summary || "Research completed"
-                }
-                researchChainMapRef.current.set(assistantId, updates.researchChain)
-                hasUpdates = true
-              }
-              // Handle artifact from response
-              if (chunk.artifact) {
-                console.log('📦 Received artifact in stream:', {
-                  id: chunk.artifact.id,
-                  type: chunk.artifact.type,
-                  hasCode: !!chunk.artifact.code,
-                  codeLength: chunk.artifact.code?.length
-                })
-                const artifactData = {
-                  id: chunk.artifact.id,
-                  type: chunk.artifact.type,
-                  title: chunk.artifact.title,
-                  status: chunk.artifact.status,
-                  downloadUrl: chunk.artifact.download_url || chunk.artifact.downloadUrl,
-                  previewUrl: chunk.artifact.preview_url || chunk.artifact.previewUrl,
-                  code: chunk.artifact.code,  // Include the code!
-                }
-                updates.artifact = artifactData
-                // Also update artifactMapRef so it persists during re-renders
-                artifactMapRef.current.set(assistantId, artifactData)
-                // Force re-render to show artifact immediately
-                setArtifactUpdateTrigger(prev => prev + 1)
-                hasUpdates = true
-              }
             }
 
             if (chunk.sources || chunk.search_results) {
@@ -1153,12 +667,6 @@ export default function ChatPage() {
               hasUpdates = true
             }
 
-            if (chunk.research_chain) {
-              updates.researchChain = chunk.research_chain
-              researchChainMapRef.current.set(assistantId, chunk.research_chain)
-              hasUpdates = true
-            }
-
             if (hasUpdates) {
               return newMessages.map((msg, i) =>
                 i === index ? { ...msg, ...updates } : msg
@@ -1166,7 +674,7 @@ export default function ChatPage() {
             }
 
             return prev
-          }))
+          })
         }
       })
 
@@ -1184,21 +692,8 @@ export default function ChatPage() {
           ? data.history[data.history.length - 1]?.content
           : '')
 
-      // DEBUG: Log what we received from backend
-      console.log('🔍 DEBUG - Response data:', {
-        hasArtifact: !!data.artifact,
-        artifactId: data.artifact?.id,
-        artifactType: data.artifact?.type,
-        artifactStatus: data.artifact?.status,
-        assistantId: assistantId,
-      })
-
-      // CRITICAL: Use the SAME assistantId we created at the start, not a new one
-      // Also preserve the research chain we built during streaming if backend didn't send one
-      const existingResearchChain = researchChainMapRef.current.get(assistantId)
-
       const assistantMessage: Message = {
-        id: assistantId,  // Use the same ID, not a new one!
+        id: (Date.now() + 1).toString(),
         role: "assistant",
         content: assistantContent,
         timestamp: new Date(),
@@ -1209,76 +704,12 @@ export default function ChatPage() {
         searchResults: data.search_results || data.sources,
         searchQuery: data.searchQuery,
         videos: data.videos,
-        researchChain: data.research_chain || (existingResearchChain ? { ...existingResearchChain, isLoading: false } : undefined),
         autoResearched: data.auto_researched,
-        artifact: data.artifact ? {
-          id: data.artifact.id,
-          type: data.artifact.type,
-          title: data.artifact.title,
-          status: data.artifact.status,
-          downloadUrl: data.artifact.download_url || data.artifact.downloadUrl,
-          previewUrl: data.artifact.preview_url || data.artifact.previewUrl,
-          code: data.artifact.code,  // Include the code!
-        } : undefined,
       }
-
-      // CRITICAL: Update artifactMapRef so UI shows artifact immediately without refresh
-      if (data.artifact) {
-        artifactMapRef.current.set(assistantId, data.artifact)
-        // Force re-render to show artifact immediately
-        setArtifactUpdateTrigger(prev => prev + 1)
-        console.log('📦 Updated artifactMapRef for immediate display:', data.artifact.id)
-      }
-
-      // DEBUG: Log before setting localMessages
-      console.log('🔍 DEBUG - Setting localMessages with artifact:', {
-        assistantId: assistantId,
-        hasArtifact: !!assistantMessage.artifact,
-        artifactId: assistantMessage.artifact?.id,
-      })
 
       setLocalMessages((prev) =>
         prev.map(msg => msg.id === assistantId ? assistantMessage : msg)
       )
-
-      // If voice mode is enabled, generate TTS asynchronously to avoid timeout
-      if (!textOnly && assistantContent) {
-        console.log('🎙️ Voice mode enabled - submitting async TTS job for:', assistantContent.slice(0, 50) + '...')
-
-        submitTTS(assistantContent, {
-          ttsEngine,
-          onComplete: (audioUrl) => {
-            console.log('✅ TTS completed, updating message with audio:', audioUrl)
-            // Update the message with the audio URL
-            setLocalMessages((prev) =>
-              prev.map(msg =>
-                msg.id === assistantId
-                  ? { ...msg, audioUrl, status: 'sent' }
-                  : msg
-              )
-            )
-          },
-          onError: (error) => {
-            console.error('❌ TTS failed:', error)
-            // Mark the message as having failed TTS but keep the text
-            setLocalMessages((prev) =>
-              prev.map(msg =>
-                msg.id === assistantId
-                  ? { ...msg, ttsError: error, status: 'sent' }
-                  : msg
-              )
-            )
-          }
-        }).then(jobId => {
-          if (jobId) {
-            console.log('📥 TTS job submitted:', jobId)
-            // Track the job
-            activeTTSJobsRef.current.set(assistantId, { jobId, messageId: assistantId })
-          }
-        }).catch(err => {
-          console.error('Failed to submit TTS job:', err)
-        })
-      }
     } catch (error) {
       console.error("Chat error:", error)
       if (typeof input === 'string') {
@@ -1291,7 +722,7 @@ export default function ChatPage() {
     } finally {
       setIsLoading(false)
     }
-  }, [messages, isLoading, selectedModel, isResearchMode, currentSession, lowVram, textOnly, ttsEngine, submitTTS, isDuplicateMessage, fetchWithRetry, append, createNewChat])
+  }, [messages, isLoading, selectedModel, isResearchMode, currentSession, lowVram, textOnly, isDuplicateMessage, fetchWithRetry, append, createNewChat])
 
   // Handle vision messages
   const handleVisionMessage = useCallback(async (prompt: string, imageData: string, attachments: Attachment[], userTempId?: string) => {
@@ -1319,23 +750,6 @@ export default function ChatPage() {
         .filter(a => a.type === 'image')
         .map(a => a.data)
 
-      // Include document files (PDF, DOCX) for vision processing
-      const documentFiles = attachments
-        .filter(a => {
-          const mimeType = (a.mimeType || '').toLowerCase()
-          const name = (a.name || '').toLowerCase()
-          return mimeType.includes('pdf') ||
-            mimeType.includes('word') ||
-            mimeType.includes('docx') ||
-            name.endsWith('.pdf') ||
-            name.endsWith('.docx')
-        })
-        .map(a => ({
-          name: a.name,
-          data: a.data,
-          mimeType: a.mimeType
-        }))
-
       let sessionId = currentSession?.id
       if (!sessionId) {
         const newSession = await createNewChat()
@@ -1349,9 +763,8 @@ export default function ChatPage() {
           'Authorization': `Bearer ${token}`
         },
         body: JSON.stringify({
-          message: prompt || (documentFiles.length > 0 ? 'Please analyze this document.' : 'What do you see in this image?'),
+          message: prompt || 'What do you see in this image?',
           images: images,
-          files: documentFiles.length > 0 ? documentFiles : undefined,
           history: messages.map(m => ({
             role: m.role,
             content: m.content
@@ -1359,8 +772,7 @@ export default function ChatPage() {
           model: selectedModel,
           session_id: sessionId,
           low_vram: lowVram,
-          text_only: textOnly,
-          tts_engine: ttsEngine
+          text_only: textOnly
         }),
         credentials: 'include'
       }, {
@@ -1461,8 +873,6 @@ export default function ChatPage() {
         inputType={message.inputType}
         status={message.status}
         metadata={message.metadata}
-        researchChain={message.researchChain}
-        artifact={message.artifact}
       />
     ))
   }, [messages])
@@ -1481,187 +891,156 @@ export default function ChatPage() {
 
   return (
     <div className="flex h-screen bg-background overflow-hidden">
-      {/* Sidebar */}
-      <div
-        className={`${sidebarOpen ? "translate-x-0" : "-translate-x-full"
-          } fixed inset-y-0 left-0 z-30 h-full transition-transform duration-300 lg:relative lg:translate-x-0`}
-      >
-        <ChatSidebar
-          chats={sessions.map((s) => ({
-            id: s.id,
-            title: s.title,
-            timestamp: new Date(s.updated_at).toLocaleDateString(),
-            starred: false,
-          }))}
-          activeChat={currentSession?.id || ""}
-          onSelectChat={handleSelectChat}
-          onNewChat={handleNewChat}
-          onProfileClick={() => router.push("/profile")}
-        />
-      </div>
+      {/* When a plugin is in full-page mode, hide everything except the plugin panel */}
+      {!pluginIsFullPage && (
+        <>
+          {/* Sidebar */}
+          <div
+            className={`${sidebarOpen ? "translate-x-0" : "-translate-x-full"
+              } fixed inset-y-0 left-0 z-30 h-full transition-transform duration-300 lg:relative lg:translate-x-0`}
+          >
+            <ChatSidebar
+              chats={sessions.map((s) => ({
+                id: s.id,
+                title: s.title,
+                timestamp: new Date(s.updated_at).toLocaleDateString(),
+                starred: false,
+              }))}
+              activeChat={currentSession?.id || ""}
+              onSelectChat={handleSelectChat}
+              onNewChat={handleNewChat}
+              onProfileClick={() => router.push("/profile")}
+            />
+          </div>
 
-      {/* Overlay for mobile */}
-      {sidebarOpen && (
-        <div
-          className="fixed inset-0 z-20 bg-background/80 backdrop-blur-sm lg:hidden"
-          onClick={() => setSidebarOpen(false)}
-          onKeyDown={(e) => e.key === "Escape" && setSidebarOpen(false)}
-        />
-      )}
+          {/* Overlay for mobile */}
+          {sidebarOpen && (
+            <div
+              className="fixed inset-0 z-20 bg-background/80 backdrop-blur-sm lg:hidden"
+              onClick={() => setSidebarOpen(false)}
+              onKeyDown={(e) => e.key === "Escape" && setSidebarOpen(false)}
+            />
+          )}
 
-      {/* Main Content — wrapped in WorkspaceLayout for split-view when workspace is active */}
-      <WorkspaceLayout className="flex-1 overflow-hidden"
-        workspaceComponent={
-          <WorkspacePanel
-            onContinueInChat={(summary) => {
-              const summaryMsg: Message = {
-                id: `ws-summary-${Date.now()}`,
-                role: 'assistant',
-                content: `✅ **Workspace completed:**\n\n${summary}`,
-                timestamp: new Date(),
-                model: selectedModel,
-                status: 'sent',
-              }
-              setLocalMessages((prev) => [...prev, summaryMsg])
-            }}
-          />
-        }
-        chatComponent={
-          <div className="flex flex-1 flex-col overflow-hidden h-full">
-            {/* Header */}
-            <header className="sticky top-0 z-10 shrink-0 flex items-center gap-4 border-b border-border bg-background px-4 py-3">
-              <Button
-                variant="ghost"
-                size="icon"
-                className="lg:hidden"
-                onClick={() => setSidebarOpen(true)}
-              >
-                <Menu className="h-5 w-5" />
-              </Button>
-              <div className="flex items-center gap-2">
-                <div>
-                  <h1 className="text-sm font-medium text-foreground">
-                    {currentSession?.title || "New Chat"}
-                  </h1>
-                  <p className="text-xs text-muted-foreground">HARVIS Assistant</p>
-                </div>
-              </div>
-              <div className="ml-auto flex items-center gap-2">
-                <SearchToggle
-                  isResearchMode={isResearchMode}
-                  onToggle={setIsResearchMode}
-                />
-                {/* Send current chat to OpenClaw workspace */}
-                {localMessages.length > 0 && !isWorkspaceActive && (
+          {/* Main Content — wrapped in WorkspaceLayout for split-view support */}
+          <WorkspaceLayout
+            chatComponent={
+              <div className="flex flex-1 flex-col overflow-hidden">
+                {/* Header */}
+                <header className="sticky top-0 z-10 shrink-0 flex items-center gap-4 border-b border-border bg-background px-4 py-3">
                   <Button
                     variant="ghost"
-                    size="sm"
-                    onClick={sendToWorkspace}
-                    title="Send chat context to Harvis Workspace (OpenClaw agent)"
-                    className="h-8 gap-1.5 text-xs text-muted-foreground hover:text-violet-400 hover:bg-violet-400/10 border border-transparent hover:border-violet-400/30"
+                    size="icon"
+                    className="lg:hidden"
+                    onClick={() => setSidebarOpen(true)}
                   >
-                    <ArrowUpRight className="h-3.5 w-3.5" />
-                    Workspace
+                    <Menu className="h-5 w-5" />
                   </Button>
-                )}
-                <ModelSelector
-                  selectedModel={selectedModel}
-                  onModelChange={setSelectedModel}
-                />
-              </div>
-            </header>
-
-            {/* Chat Area */}
-            <div className="flex-1 overflow-y-auto" ref={scrollRef}>
-              <div className="mx-auto max-w-4xl px-4 py-6">
-                {messages.length === 0 ? (
-                  <div className="flex h-[60vh] flex-col items-center justify-center text-center">
-                    <div className="mb-6">
-                      <HarvisMascot state="idle" size={80} className="" interactive={true} />
-                    </div>
-                    <h2 className="mb-2 text-2xl font-semibold text-foreground">
-                      How can I help you today?
-                    </h2>
-                    <p className="max-w-md text-muted-foreground">
-                      I'm HARVIS, your AI assistant. Ask me anything about coding,
-                      design, or any topic you'd like to explore.
-                    </p>
-                    <div className="mt-8 grid gap-3 sm:grid-cols-2">
-                      {[
-                        "Help me write a React component",
-                        "Explain TypeScript generics",
-                        "Design a database schema",
-                        "Debug my code",
-                      ].map((prompt) => (
-                        <button
-                          key={prompt}
-                          type="button"
-                          onClick={() => handleSendMessage(prompt)}
-                          className="rounded-xl border border-border bg-card px-4 py-3 text-left text-sm text-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-                        >
-                          {prompt}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                ) : (
-                  messageList
-                )}
-                {isLoading && messages[messages.length - 1]?.role !== 'assistant' && (
-                  <div className="flex items-center gap-4 py-6">
+                  <div className="flex items-center gap-2">
                     <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/20">
-                      <Sparkles className="h-4 w-4 animate-pulse text-primary" />
+                      <Sparkles className="h-4 w-4 text-primary" />
                     </div>
-                    <div className="flex items-center gap-2">
-                      <div className="h-2 w-2 animate-bounce rounded-full bg-primary [animation-delay:-0.3s]" />
-                      <div className="h-2 w-2 animate-bounce rounded-full bg-primary [animation-delay:-0.15s]" />
-                      <div className="h-2 w-2 animate-bounce rounded-full bg-primary" />
+                    <div>
+                      <h1 className="text-sm font-medium text-foreground">
+                        {currentSession?.title || "New Chat"}
+                      </h1>
+                      <p className="text-xs text-muted-foreground">HARVIS Assistant</p>
                     </div>
                   </div>
-                )}
+                  <div className="ml-auto flex items-center gap-2">
+                    <SearchToggle
+                      isResearchMode={isResearchMode}
+                      onToggle={setIsResearchMode}
+                    />
+                    <ModelSelector
+                      selectedModel={selectedModel}
+                      onModelChange={setSelectedModel}
+                    />
+                  </div>
+                </header>
+
+                {/* Chat Area */}
+                <div className="flex-1 overflow-y-auto" ref={scrollRef}>
+                  <div className="mx-auto max-w-4xl px-4 py-6">
+                    {messages.length === 0 ? (
+                      <div className="flex h-[60vh] flex-col items-center justify-center text-center">
+                        <div className="mb-6 flex h-20 w-20 items-center justify-center rounded-2xl bg-primary/20">
+                          <Sparkles className="h-10 w-10 text-primary" />
+                        </div>
+                        <h2 className="mb-2 text-2xl font-semibold text-foreground">
+                          How can I help you today?
+                        </h2>
+                        <p className="max-w-md text-muted-foreground">
+                          I'm HARVIS, your AI assistant. Ask me anything about coding,
+                          design, or any topic you'd like to explore.
+                        </p>
+                        <div className="mt-8 grid gap-3 sm:grid-cols-2">
+                          {[
+                            "Help me write a React component",
+                            "Explain TypeScript generics",
+                            "Design a database schema",
+                            "Debug my code",
+                          ].map((prompt) => (
+                            <button
+                              key={prompt}
+                              type="button"
+                              onClick={() => handleSendMessage(prompt)}
+                              className="rounded-xl border border-border bg-card px-4 py-3 text-left text-sm text-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+                            >
+                              {prompt}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                      messageList
+                    )}
+                    {isLoading && messages[messages.length - 1]?.role !== 'assistant' && (
+                      <div className="flex items-center gap-4 py-6">
+                        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/20">
+                          <Sparkles className="h-4 w-4 animate-pulse text-primary" />
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <div className="h-2 w-2 animate-bounce rounded-full bg-primary [animation-delay:-0.3s]" />
+                          <div className="h-2 w-2 animate-bounce rounded-full bg-primary [animation-delay:-0.15s]" />
+                          <div className="h-2 w-2 animate-bounce rounded-full bg-primary" />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Workspace Suggestion Banner — appears above input when backend suggests a workspace task */}
+                <WorkspaceSuggestionBanner
+                  chatHistory={messages.map(m => ({ role: m.role, content: m.content }))}
+                />
+
+                {/* Input Area */}
+                <div className="sticky bottom-0 z-10 shrink-0 border-t border-border bg-background">
+                  <ChatInput
+                    onSend={handleSendMessage}
+                    isLoading={isLoading}
+                    isResearchMode={isResearchMode}
+                    selectedModel={selectedModel}
+                    sessionId={currentSession?.id}
+                    onForceWorkspace={handleForceWorkspace}
+                    workspaceEnabled={workspaceEnabled}
+                    onWorkspaceEnabledChange={setWorkspaceEnabled}
+                  />
+                </div>
               </div>
-            </div>
+            }
+            workspaceComponent={<WorkspacePanel />}
+          />
+        </>
+      )}
 
-            {/* Workspace suggestion banner — shown above input when a task is detected */}
-            {suggestion?.should_suggest && !isWorkspaceActive && workspaceEnabled && (
-              <WorkspaceSuggestionBanner
-                chatHistory={localMessages.map((m) => ({ role: m.role, content: m.content ?? '' }))}
-              />
-            )}
+      {/* Plugin panel — in full-page mode this is the ONLY child in the flex container,
+          so it naturally fills the entire screen width and height */}
+      <BlockPluginPanel />
 
-            {/* Input Area */}
-            <div className="sticky bottom-0 z-10 shrink-0 border-t border-border bg-background">
-              <ChatInput
-                onSend={handleSendMessage}
-                isLoading={isLoading}
-                isResearchMode={isResearchMode}
-                selectedModel={selectedModel}
-                sessionId={currentSession?.id}
-                voiceMode={!textOnly}
-                onVoiceModeChange={(enabled) => setTextOnly(!enabled)}
-                extraVram={!lowVram}
-                onExtraVramChange={(enabled) => setLowVram(!enabled)}
-                ttsEngine={ttsEngine}
-                onTtsEngineChange={setTtsEngine}
-                onForceWorkspace={(text) => {
-                  setSuggestion({
-                    should_suggest: true,
-                    confidence: 1.0,
-                    task_type: 'multi_step',
-                    task_type_label: 'Multi-step task',
-                    task_brief: text || 'Execute the task in a Harvis Workspace',
-                    reason: 'Workspace manually triggered.',
-                  })
-                }}
-                workspaceEnabled={workspaceEnabled}
-                onWorkspaceEnabledChange={setWorkspaceEnabled}
-                thinkingMode={thinkingMode}
-                onThinkingModeChange={setThinkingMode}
-              />
-            </div>
-          </div>
-        }
-      />
+      {/* Plugin stack bubble -- fixed overlay (hidden when a plugin is active) */}
+      <BlockPluginStack />
     </div>
   )
 }

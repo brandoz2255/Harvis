@@ -27,7 +27,7 @@ import { WorkspaceNode, NodeType } from '../../../types/graph';
 
 const nodeTypes = {
   workspaceNode: GraphNode,
-};
+} as unknown as import('@xyflow/react').NodeTypes;
 
 interface GraphViewProps {
   /** Initial nodes data */
@@ -134,12 +134,16 @@ export function GraphView({
     if (!searchQuery.trim()) return nodes;
     const query = searchQuery.toLowerCase();
     return nodes.filter(
-      (node) =>
-        node.data?.label?.toLowerCase().includes(query) ||
-        node.data?.description?.toLowerCase().includes(query) ||
-        node.data?.tags?.some((tag: string) =>
-          tag.toLowerCase().includes(query)
-        )
+      (node) => {
+        const d = node.data as Record<string, any>;
+        return (
+          d?.label?.toLowerCase().includes(query) ||
+          d?.description?.toLowerCase().includes(query) ||
+          d?.tags?.some((tag: string) =>
+            tag.toLowerCase().includes(query)
+          )
+        );
+      }
     );
   }, [nodes, searchQuery]);
 
@@ -267,8 +271,8 @@ export function GraphView({
             physicsEnabled={physicsEnabled}
             onTogglePhysics={() => setPhysicsEnabled(!physicsEnabled)}
             onFitView={() => fitView({ padding: 0.2, duration: 800 })}
-            onZoomIn={() => zoomTo((z) => z * 1.2)}
-            onZoomOut={() => zoomTo((z) => z / 1.2)}
+            onZoomIn={() => zoomTo(1.2)}
+            onZoomOut={() => zoomTo(0.8)}
             darkMode={darkMode}
           />
         </Panel>
@@ -279,11 +283,14 @@ export function GraphView({
             <GraphSearch
               query={searchQuery}
               onChange={setSearchQuery}
-              results={filteredNodes.map((n) => ({
-                id: n.id,
-                label: n.data?.label || n.id,
-                type: n.data?.type,
-              }))}
+              results={filteredNodes.map((n) => {
+                const nd = n.data as Record<string, any>;
+                return {
+                  id: n.id,
+                  label: (nd?.label as string) || n.id,
+                  type: nd?.type as NodeType | undefined,
+                };
+              })}
               onSelect={focusNode}
               darkMode={darkMode}
             />

@@ -11,6 +11,7 @@ import {
   Edge,
   useNodesState,
   useEdgesState,
+  type NodeTypes,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 
@@ -20,7 +21,7 @@ import { useAgentStream } from '../../../hooks/useAgentStream';
 import { useWorkspaceAgentGraph } from '../../../hooks/useWorkspaceAgentGraph';
 import { AgentNodeData } from '../../../types/agent-graph';
 
-const nodeTypes = { agentNode: AgentNode };
+const nodeTypes = { agentNode: AgentNode } as unknown as NodeTypes;
 
 interface AgentGraphViewProps {
   /** Token for WebSocket auth (required in live-ws mode) */

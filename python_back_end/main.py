@@ -65,6 +65,13 @@ from vibecoding import (
     files_router,
     commands_router,
     containers_router,
+    terminal_router,
+    ai_assistant_router,
+    file_api_router,
+    user_prefs_router,
+    proxy_router,
+    repo_import_router,
+    ide_ai_router,
 )
 from vibecoding.core import initialize_vibe_agent
 from file_processing import (
@@ -919,6 +926,20 @@ app.include_router(execution_router)
 app.include_router(files_router)
 app.include_router(commands_router)
 app.include_router(containers_router)
+app.include_router(terminal_router)
+app.include_router(ai_assistant_router)
+app.include_router(file_api_router)
+app.include_router(user_prefs_router)
+app.include_router(proxy_router)
+app.include_router(repo_import_router)
+app.include_router(ide_ai_router)
+
+# Include notebooks router (from open-notebook merge)
+try:
+    from notebooks.router import router as notebooks_router
+    app.include_router(notebooks_router)
+except Exception as e:
+    logger.warning(f"Could not load notebooks router: {e}")
 
 # Include RAG corpus router
 if RAG_CORPUS_AVAILABLE:
@@ -940,7 +961,12 @@ app.include_router(github_proxy_router)
 # OpenClaw agents call /rag/search to retrieve relevant code/docs chunks
 # without needing direct database access or holding DB credentials.
 app.include_router(rag_proxy_router)
-app.include_router(kubectl_proxy_router)
+# Include kubectl proxy — mounted at BOTH prefixes so:
+#   • Frontend (via nginx) hits /api/kubectl/pending, /api/kubectl/approve, etc.
+#   • OpenClaw pods call /kubectl/exec, /kubectl/health directly (pod-to-pod).
+# Both share the same handlers & in-memory approval state.
+app.include_router(kubectl_proxy_router, prefix="/api/kubectl")
+app.include_router(kubectl_proxy_router, prefix="/kubectl")
 
 # Include Maps proxy (Google Maps API endpoints without exposing API keys)
 app.include_router(maps_router)

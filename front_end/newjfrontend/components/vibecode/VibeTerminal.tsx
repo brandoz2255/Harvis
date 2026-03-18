@@ -1,0 +1,394 @@
+"use client"
+
+import React, { useEffect, useRef, useState } from 'react'
+import { Terminal } from '@xterm/xterm'
+import { FitAddon } from '@xterm/addon-fit'
+import '@xterm/xterm/css/xterm.css'
+import { Terminal as TerminalIcon, Power, RefreshCw, Maximize2, Minimize2 } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
+
+interface VibeTerminalProps {
+  sessionId: string
+  isContainerRunning?: boolean
+  onContainerStart?: () => Promise<void>
+  compact?: boolean
+  className?: string
+}
+
+export default function VibeTerminal({
+  sessionId,
+  isContainerRunning = false,
+  onContainerStart,
+  compact = false,
+  className = ""
+}: VibeTerminalProps) {
+  const terminalRef = useRef<HTMLDivElement>(null)
+  const xtermRef = useRef<Terminal | null>(null)
+  const fitAddonRef = useRef<FitAddon | null>(null)
+  const wsRef = useRef<WebSocket | null>(null)
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+
+  const [isConnected, setIsConnected] = useState(false)
+  const [isConnecting, setIsConnecting] = useState(false)
+  const [isMaximized, setIsMaximized] = useState(false)
+
+  const [fontSize, setFontSize] = useState(() => {
+    if (compact) return 12
+    if (typeof window !== 'undefined') {
+      const cssVar = getComputedStyle(document.documentElement).getPropertyValue('--vibe-font-size')
+      return cssVar ? parseInt(cssVar) : 14
+    }
+    return 14
+  })
+
+  // Initialize xterm.js terminal
+  useEffect(() => {
+    if (!terminalRef.current) return
+
+    const terminal = new Terminal({
+      cursorBlink: true,
+      fontSize: fontSize,
+      fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+      theme: {
+        background: '#000000',
+        foreground: '#d4d4d4',
+        cursor: '#d4d4d4',
+        black: '#000000',
+        red: '#cd3131',
+        green: '#0dbc79',
+        yellow: '#e5e510',
+        blue: '#2472c8',
+        magenta: '#bc3fbc',
+        cyan: '#11a8cd',
+        white: '#e5e5e5',
+        brightBlack: '#666666',
+        brightRed: '#f14c4c',
+        brightGreen: '#23d18b',
+        brightYellow: '#f5f543',
+        brightBlue: '#3b8eea',
+        brightMagenta: '#d670d6',
+        brightCyan: '#29b8db',
+        brightWhite: '#e5e5e5'
+      },
+      scrollback: compact ? 500 : 1000,
+      convertEol: true
+    })
+
+    const fitAddon = new FitAddon()
+    terminal.loadAddon(fitAddon)
+    terminal.open(terminalRef.current)
+    fitAddon.fit()
+
+    xtermRef.current = terminal
+    fitAddonRef.current = fitAddon
+
+    terminal.writeln('\x1b[1;32m╔═══════════════════════════════════════════════════════════╗\x1b[0m')
+    terminal.writeln('\x1b[1;32m║\x1b[0m          \x1b[1;36mVibeCode Interactive Terminal\x1b[0m                  \x1b[1;32m║\x1b[0m')
+    terminal.writeln('\x1b[1;32m╚═══════════════════════════════════════════════════════════╝\x1b[0m')
+    terminal.writeln('')
+
+    const handleResize = () => {
+      fitAddon.fit()
+    }
+    window.addEventListener('resize', handleResize)
+
+    return () => {
+      window.removeEventListener('resize', handleResize)
+      terminal.dispose()
+      xtermRef.current = null
+      fitAddonRef.current = null
+    }
+  }, [fontSize])
+
+  // Watch for font size changes from CSS variable
+  useEffect(() => {
+    const observer = new MutationObserver(() => {
+      const cssVar = getComputedStyle(document.documentElement).getPropertyValue('--vibe-font-size')
+      if (cssVar) {
+        const newSize = parseInt(cssVar)
+        if (newSize !== fontSize && xtermRef.current) {
+          setFontSize(newSize)
+          xtermRef.current.options.fontSize = newSize
+          fitAddonRef.current?.fit()
+        }
+      }
+    })
+
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ['style']
+    })
+
+    return () => observer.disconnect()
+  }, [fontSize])
+
+  // Connect WebSocket to backend terminal
+  const connectWebSocket = React.useCallback(() => {
+    if (!sessionId || !xtermRef.current) return
+    if (wsRef.current?.readyState === WebSocket.OPEN) return
+
+    if (!isContainerRunning) {
+      const terminal = xtermRef.current
+      terminal.writeln('\x1b[33mContainer is not running. Click "Start Container" first.\x1b[0m')
+      return
+    }
+
+    setIsConnecting(true)
+    const terminal = xtermRef.current
+
+    terminal.writeln('\x1b[33mConnecting to container terminal...\x1b[0m')
+
+    try {
+      const token = localStorage.getItem('token')
+      if (!token) {
+        terminal.writeln('\x1b[31mAuthentication token not found\x1b[0m')
+        setIsConnecting(false)
+        return
+      }
+
+      const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+      const wsUrl = `${wsProtocol}//${window.location.host}/ws/vibecoding/terminal?session_id=${sessionId}&token=${token}`
+
+      const ws = new WebSocket(wsUrl)
+      wsRef.current = ws
+
+      const connectionTimeout = setTimeout(() => {
+        if (ws.readyState !== WebSocket.OPEN) {
+          ws.close()
+          terminal.writeln('\x1b[31mConnection timeout\x1b[0m')
+          setIsConnecting(false)
+        }
+      }, 10000)
+
+      ws.onopen = () => {
+        clearTimeout(connectionTimeout)
+        setIsConnected(true)
+        setIsConnecting(false)
+        terminal.writeln('\x1b[32mConnected to container terminal\x1b[0m')
+        terminal.writeln('')
+
+        terminal.onData((data) => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(data)
+          }
+        })
+      }
+
+      ws.onmessage = (event) => {
+        if (event.data instanceof Blob) {
+          event.data.arrayBuffer().then(buffer => {
+            const uint8Array = new Uint8Array(buffer)
+            terminal.write(uint8Array)
+          })
+        } else if (event.data instanceof ArrayBuffer) {
+          const uint8Array = new Uint8Array(event.data)
+          terminal.write(uint8Array)
+        } else {
+          terminal.write(event.data)
+        }
+      }
+
+      ws.onerror = () => {
+        terminal.writeln('\x1b[31mConnection error\x1b[0m')
+        setIsConnected(false)
+        setIsConnecting(false)
+      }
+
+      ws.onclose = (event) => {
+        setIsConnected(false)
+        setIsConnecting(false)
+
+        if (event.wasClean) {
+          terminal.writeln('\x1b[33mConnection closed\x1b[0m')
+        } else {
+          terminal.writeln('\x1b[31mConnection lost - reconnecting in 3s...\x1b[0m')
+
+          if (reconnectTimeoutRef.current) {
+            clearTimeout(reconnectTimeoutRef.current)
+          }
+
+          reconnectTimeoutRef.current = setTimeout(() => {
+            if (sessionId && isContainerRunning) {
+              connectWebSocket()
+            }
+          }, 3000)
+        }
+
+        wsRef.current = null
+      }
+
+    } catch (error) {
+      console.error('Failed to connect terminal:', error)
+      terminal.writeln('\x1b[31mFailed to establish connection\x1b[0m')
+      setIsConnecting(false)
+    }
+  }, [sessionId, isContainerRunning])
+
+  const disconnectWebSocket = React.useCallback(() => {
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current)
+      reconnectTimeoutRef.current = null
+    }
+
+    if (wsRef.current) {
+      wsRef.current.close()
+      wsRef.current = null
+    }
+
+    setIsConnected(false)
+
+    if (xtermRef.current) {
+      xtermRef.current.writeln('\x1b[33mDisconnected from terminal\x1b[0m')
+    }
+  }, [])
+
+  // Auto-connect when container is running
+  useEffect(() => {
+    if (sessionId && isContainerRunning && !wsRef.current) {
+      const timer = setTimeout(() => {
+        connectWebSocket()
+      }, 500)
+      return () => clearTimeout(timer)
+    }
+
+    if (!isContainerRunning && wsRef.current) {
+      disconnectWebSocket()
+    }
+  }, [sessionId, isContainerRunning, connectWebSocket, disconnectWebSocket])
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      disconnectWebSocket()
+    }
+  }, [disconnectWebSocket])
+
+  // Refit terminal when maximized state changes
+  useEffect(() => {
+    if (fitAddonRef.current) {
+      setTimeout(() => {
+        fitAddonRef.current?.fit()
+      }, 100)
+    }
+  }, [isMaximized])
+
+  const handleReconnect = () => {
+    disconnectWebSocket()
+    setTimeout(() => {
+      connectWebSocket()
+    }, 500)
+  }
+
+  const handleClear = () => {
+    if (xtermRef.current) {
+      xtermRef.current.clear()
+    }
+  }
+
+  const handleContainerStart = async () => {
+    if (onContainerStart) {
+      if (xtermRef.current) {
+        xtermRef.current.writeln('\x1b[33mStarting container...\x1b[0m')
+      }
+      await onContainerStart()
+    }
+  }
+
+  return (
+    <div
+      className={`bg-background border border-border rounded-lg overflow-hidden flex flex-col shadow-2xl ${
+        isMaximized ? 'fixed inset-4 z-50' : ''
+      } ${className}`}
+    >
+      {/* Terminal Title Bar */}
+      <div className={`bg-muted/50 ${compact ? 'px-2 py-1' : 'px-4 py-2'} flex items-center justify-between border-b border-border`}>
+        <div className="flex items-center space-x-2">
+          {!compact && (
+            <div className="flex space-x-2">
+              <div className="w-3 h-3 rounded-full bg-red-500 hover:bg-red-400 cursor-pointer" onClick={disconnectWebSocket}></div>
+              <div className="w-3 h-3 rounded-full bg-yellow-500 hover:bg-yellow-400 cursor-pointer" onClick={() => setIsMaximized(!isMaximized)}></div>
+              <div className="w-3 h-3 rounded-full bg-green-500 hover:bg-green-400 cursor-pointer" onClick={() => xtermRef.current?.focus()}></div>
+            </div>
+          )}
+
+          <TerminalIcon className={`${compact ? 'w-3 h-3' : 'w-4 h-4'} text-green-400`} />
+          {!compact && <span className="text-foreground text-sm font-medium">Terminal</span>}
+
+          <Badge
+            variant="outline"
+            className={`text-xs border-0 ${
+              isConnected
+                ? 'bg-green-900/50 text-green-400'
+                : isConnecting
+                ? 'bg-yellow-900/50 text-yellow-400'
+                : 'bg-red-900/50 text-red-400'
+            }`}
+          >
+            {isConnected ? 'Connected' : isConnecting ? 'Connecting...' : 'Disconnected'}
+          </Badge>
+        </div>
+
+        <div className="flex items-center space-x-1">
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-6 w-6 p-0 text-muted-foreground hover:text-foreground"
+            onClick={handleClear}
+            title="Clear terminal"
+          >
+            <RefreshCw className="w-3 h-3" />
+          </Button>
+
+          {!compact && (
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-6 w-6 p-0 text-muted-foreground hover:text-foreground"
+              onClick={() => setIsMaximized(!isMaximized)}
+              title={isMaximized ? "Minimize" : "Maximize"}
+            >
+              {isMaximized ? <Minimize2 className="w-3 h-3" /> : <Maximize2 className="w-3 h-3" />}
+            </Button>
+          )}
+
+          {!isContainerRunning && (
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-6 w-6 p-0 text-green-400 hover:text-green-300"
+              onClick={handleContainerStart}
+              title="Start container"
+            >
+              <Power className="w-3 h-3" />
+            </Button>
+          )}
+
+          {isContainerRunning && !isConnected && !isConnecting && (
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-6 w-6 p-0 text-blue-400 hover:text-blue-300"
+              onClick={handleReconnect}
+              title="Reconnect"
+            >
+              <RefreshCw className="w-3 h-3" />
+            </Button>
+          )}
+        </div>
+      </div>
+
+      {/* Terminal Content */}
+      <div className="flex-1 overflow-hidden bg-black">
+        <div ref={terminalRef} className="h-full w-full" />
+      </div>
+
+      {/* Status Bar */}
+      {!isContainerRunning && (
+        <div className="bg-muted/50 px-3 py-2 text-xs text-yellow-400 border-t border-border flex items-center justify-center">
+          <span>Container is not running. Start the container to use the terminal.</span>
+        </div>
+      )}
+    </div>
+  )
+}

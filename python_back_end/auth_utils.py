@@ -50,20 +50,20 @@ async def get_current_user(
         # Get user from database
         import logging
         logger = logging.getLogger(__name__)
-        logger.info(f"Pool status: {pool is not None}, Pool: {type(pool) if pool else 'None'}")
+        logger.debug(f"Pool status: {pool is not None}, Pool: {type(pool) if pool else 'None'}")
         
         if pool:
             # Use connection pool (preferred)
             import logging
             logger = logging.getLogger(__name__)
-            logger.info(f"Using connection pool for user {user_id}")
+            logger.debug(f"Using connection pool for user {user_id}")
             try:
                 async with pool.acquire() as conn:
                     user_record = await conn.fetchrow(
                         "SELECT id, username, email, avatar FROM users WHERE id = $1",
                         int(user_id)
                     )
-                logger.info(f"Successfully fetched user {user_id} from database")
+                logger.debug(f"Successfully fetched user {user_id} from database")
             except Exception as e:
                 logger.error(f"Pool connection failed for user {user_id}: {e}")
                 raise

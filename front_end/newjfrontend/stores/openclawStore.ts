@@ -323,7 +323,8 @@ export const useOpenClawStore = create<OpenClawState>()(
     setWorkspaceActive: (active) =>
       set((state) => {
         state.isWorkspaceActive = active
-        state.isChatMinimized = active
+        // Don't auto-minimize chat — let user see both panels in split view
+        if (!active) state.isChatMinimized = false
       }),
 
     setChatMinimized: (minimized) => set({ isChatMinimized: minimized }),

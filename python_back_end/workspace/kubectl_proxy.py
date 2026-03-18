@@ -88,7 +88,7 @@ ALLOWED_WRITE_PREFIXES: tuple[str, ...] = (
     "scale replicaset",
 )
 
-kubectl_proxy_router = APIRouter(prefix="/kubectl", tags=["kubectl-proxy"])
+kubectl_proxy_router = APIRouter(tags=["kubectl-proxy"])
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────

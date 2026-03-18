@@ -17,13 +17,13 @@ services:
           devices:
             - driver: nvidia
               count: 1
-              capabilities: [ gpu ]
+              capabilities: [gpu]
         limits:
           memory: 30G
     networks:
       - ollama-n8n-network
     healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:11434/api/tags" ]
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -40,9 +40,9 @@ services:
       - -c
       - |
         python3 /app/download_models.py &&
-        echo '🔧 Fixing model cache permissions for appuser...' &&
+        echo 'Fixing model cache permissions for appuser...' &&
         chown -R 1001:1001 /models-cache &&
-        echo '✅ Model cache permissions fixed'
+        echo 'Model cache permissions fixed'
     environment:
       HF_HOME: "/models-cache/huggingface"
       TRANSFORMERS_CACHE: "/models-cache/huggingface"
@@ -63,8 +63,8 @@ services:
     container_name: harvis-artifact-init
     user: root
     command: >
-      sh -c "mkdir -p /data/artifacts && 
-             chown -R 1001:1001 /data/artifacts && 
+      sh -c "mkdir -p /data/artifacts &&
+             chown -R 1001:1001 /data/artifacts &&
              chmod 750 /data/artifacts &&
              echo 'Artifact permissions initialized'"
     volumes:
@@ -81,6 +81,8 @@ services:
       dockerfile: Dockerfile
     container_name: harvis-backend
     restart: unless-stopped
+    group_add:
+      - "984"  # Host docker socket GID - gives appuser access to /var/run/docker.sock
     ports:
       - "8000:8000"
     environment:
@@ -111,6 +113,10 @@ services:
       - ml-models-cache:/models-cache
       - embedding-data:/app/embedding
       - /tmp:/tmp
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./python_back_end/main.py:/app/main.py:ro
+      - ./python_back_end/notebooks:/app/notebooks:ro
+      - ./python_back_end/vibecoding:/app/vibecoding:ro
       - artifact_data:/data/artifacts
     depends_on:
       ollama:
@@ -127,7 +133,7 @@ services:
           devices:
             - driver: nvidia
               count: 1
-              capabilities: [ gpu ]
+              capabilities: [gpu]
         limits:
           memory: 15G
     networks:
@@ -255,10 +261,106 @@ services:
     networks:
       - ollama-n8n-network
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U pguser -d database" ]
+      test: ["CMD-SHELL", "pg_isready -U pguser -d database"]
       interval: 10s
       timeout: 5s
       retries: 5
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Open Notebook Services
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  surrealdb:
+    image: surrealdb/surrealdb:v2
+    container_name: surrealdb
+    restart: unless-stopped
+    command: start --log info --user root --pass root rocksdb:/mydata/mydatabase.db
+    environment:
+      - SURREAL_EXPERIMENTAL_GRAPHQL=true
+    volumes:
+      - surrealdb_data:/mydata
+    user: root
+    networks:
+      - ollama-n8n-network
+
+  open-notebook:
+    image: lfnovo/open_notebook:v1-latest
+    container_name: open-notebook
+    restart: unless-stopped
+    ports:
+      - "8502:8502"
+      - "5055:5055"
+    environment:
+      # SurrealDB Configuration
+      SURREAL_URL: ws://surrealdb:8000/rpc
+      SURREAL_USER: root
+      SURREAL_PASSWORD: root
+      SURREAL_NAMESPACE: open_notebook
+      SURREAL_DATABASE: open_notebook
+      # Ollama Configuration (shared with your backend)
+      OLLAMA_API_BASE: http://ollama:11434
+      # API Configuration
+      API_URL: http://localhost:8502
+      INTERNAL_API_URL: http://localhost:5055
+      API_CLIENT_TIMEOUT: "300"
+    volumes:
+      - open_notebook_data:/app/data
+    depends_on:
+      - surrealdb
+    networks:
+      - ollama-n8n-network
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # TTS Service - Voice Cloning & Podcast Generation
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  tts-service:
+    build:
+      context: .
+      dockerfile: docker/tts-service/Dockerfile
+    container_name: tts-service
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    environment:
+      # TTS Configuration
+      TTS_HOST: "0.0.0.0"
+      TTS_PORT: "8001"
+      QUANTIZE_4BIT: "true"
+      # Force GPU mode for RTX 50 series (sm_120) with PyTorch nightly
+      TTS_FORCE_GPU: "true"
+      # Enable Dia for voice cloning (uses GPU)
+      TTS_ENABLE_DIA: "true"
+      # Storage paths (inside container)
+      VOICES_DIR: /app/voices
+      OUTPUT_DIR: /app/output
+      MODEL_CACHE_DIR: /app/models
+      # RVC Configuration
+      RVC_MODELS_DIR: /app/rvc_models
+      RVC_ASSETS_DIR: /app/assets
+      RVC_MAX_CACHED_MODELS: "4"
+    volumes:
+      - tts_voices:/app/voices
+      - tts_output:/app/output
+      - tts_models:/app/models
+      - tts_rvc_models:/app/rvc_models
+      - tts_rvc_assets:/app/assets
+      - ./python_back_end/tts_system:/app/tts_system:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks:
+      - ollama-n8n-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
 networks:
   ollama-n8n-network:
@@ -270,3 +372,10 @@ volumes:
   ml-models-cache:
   embedding-data:
   artifact_data:
+  surrealdb_data:
+  open_notebook_data:
+  tts_voices:
+  tts_output:
+  tts_models:
+  tts_rvc_models:
+  tts_rvc_assets:

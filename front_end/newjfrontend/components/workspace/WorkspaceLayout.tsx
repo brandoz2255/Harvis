@@ -28,8 +28,8 @@ export function WorkspaceLayout({
   if (!isWorkspaceActive) {
     // Normal chat mode — full width, no split
     return (
-      <div className={cn('flex h-full', className)}>
-        <div className="flex-1 flex flex-col overflow-hidden">{chatComponent}</div>
+      <div className={cn('flex flex-1 h-full min-w-0', className)}>
+        <div className="flex-1 flex flex-col overflow-hidden min-w-0">{chatComponent}</div>
         {sidebarComponent && (
           <div className="w-80 border-l">{sidebarComponent}</div>
         )}
@@ -39,7 +39,7 @@ export function WorkspaceLayout({
 
   // Workspace mode: chat LEFT (minimized), workspace panel RIGHT (larger)
   return (
-    <div className={cn('flex h-full', className)}>
+    <div className={cn('flex flex-1 h-full min-w-0', className)}>
       {/* Chat area LEFT — shrinks when workspace is active */}
       <div
         className={cn(

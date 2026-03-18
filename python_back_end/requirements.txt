@@ -23,19 +23,21 @@ torch==2.6.0
 torchaudio==2.6.0
 soundfile
 openai-whisper
+qwen-tts
 tavily-python
 
 # TTS - llama.cpp for GGUF models (lightweight ~1GB)
 llama-cpp-python
 
-# Legacy TTS (optional fallback)
+# TTS engines
 # chatterbox-tts  # REMOVED: conflicts with transformers>=0.27.0 required by qwen3
-qwen-tts  # Qwen TTS for text-to-speech
+qwen-tts
 
 # Job queue for background processing (TTS, Whisper, etc.)
 # Using arq for Python async job queue (similar to pg-boss but for Python)
 arq>=0.26.0
 redis>=5.0.0
+
 langchain
 langchain-community
 langchain-openai
@@ -73,6 +75,15 @@ yt-dlp>=2024.0.0
 pypdf>=3.0.0
 python-magic>=0.4.27
 python-docx
+
+# Open Notebook integration dependencies
+langgraph>=0.2.0
+jinja2>=3.1.0
+pydub>=0.25.1
+
+# Optional: Multi-provider AI support
+openai>=1.0.0
+anthropic>=0.18.0
 
 # Document generation for artifacts
 openpyxl>=3.1.0

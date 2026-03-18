@@ -275,7 +275,7 @@ function LogLine({ event }: { event: WorkspaceLogEvent }) {
           [{event.agent_label}]
         </span>
       )}
-      <span className="text-xs leading-relaxed">{event.message}</span>
+      <span className="text-xs leading-relaxed">{event.message ?? event.content}</span>
     </div>
   )
 }
@@ -495,9 +495,9 @@ function StoredEventLine({ event }: { event: StoredEvent }) {
         <div className="flex items-start gap-1.5 py-1 rounded bg-green-500/10 px-2 mt-1">
           <CheckCircle2 className="h-3 w-3 text-green-400 shrink-0 mt-0.5" />
           <span className="text-[10px] font-medium text-green-400">Complete</span>
-          {p.summary && (
+          {p.summary ? (
             <span className="text-[10px] text-foreground/70 ml-1 truncate">{String(p.summary)}</span>
-          )}
+          ) : null}
         </div>
       )
     case 'error':
@@ -690,7 +690,7 @@ function HistoryTab() {
             } catch { /* ignore malformed */ }
           }
         }
-      })().catch(() => {})
+      })().catch(() => { })
     } catch (err) {
       console.error('Workspace rerun error:', err)
     } finally {
@@ -765,7 +765,7 @@ function HistoryTab() {
           key={run.id}
           run={run}
           onSelect={handleSelectRun}
-          isSelected={selectedRun?.id === run.id}
+          isSelected={false}
           onRerun={handleRerun}
           isRerunning={rerunningId === run.id}
         />
@@ -1035,11 +1035,17 @@ export function WorkspacePanel({ onContinueInChat }: { onContinueInChat?: (summa
 
   const handleCancel = async () => {
     if (!workspaceId) return
-    const token = localStorage.getItem('token')
-    const headers: Record<string, string> = {}
-    if (token) headers['Authorization'] = `Bearer ${token}`
-    await fetch(`/api/workspace/cancel/${workspaceId}`, { method: 'POST', headers })
-    closeWorkspace()
+    try {
+      const token = localStorage.getItem('token')
+      const headers: Record<string, string> = {}
+      if (token) headers['Authorization'] = `Bearer ${token}`
+      await fetch(`/api/workspace/cancel/${workspaceId}`, { method: 'POST', headers })
+      // Don't close the panel — let the SSE stream deliver the 'cancelled' event
+      // so the user sees confirmation. They can close with the X button.
+    } catch (err) {
+      console.error('Workspace cancel failed:', err)
+      // Even if cancel fails, user can still close via X button
+    }
   }
 
   const taskBrief = currentTask?.description ?? 'Running workspace task…'
@@ -1104,20 +1110,20 @@ export function WorkspacePanel({ onContinueInChat }: { onContinueInChat?: (summa
                 onClick={handleCancel}
                 className="h-7 px-2 text-xs text-muted-foreground hover:text-destructive hover:bg-destructive/10"
               >
-                <X className="h-3.5 w-3.5 mr-1" />
+                <XCircle className="h-3.5 w-3.5 mr-1" />
                 Cancel
               </Button>
             )}
-            {!isRunning && (
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={closeWorkspace}
-                className="h-7 w-7 text-muted-foreground hover:text-foreground"
-              >
-                <X className="h-3.5 w-3.5" />
-              </Button>
-            )}
+            {/* Always-visible close button — dismisses the panel regardless of state */}
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={closeWorkspace}
+              title="Close workspace panel"
+              className="h-7 w-7 text-muted-foreground hover:text-foreground"
+            >
+              <X className="h-3.5 w-3.5" />
+            </Button>
           </div>
         </div>
 

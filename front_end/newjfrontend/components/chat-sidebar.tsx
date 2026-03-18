@@ -25,10 +25,12 @@ import {
   Presentation,
   Globe,
   Box,
+  Zap,
 } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { ArtifactViewer } from "./artifacts/ArtifactViewer"
+import { useOpenClawStore } from "@/stores/openclawStore"
 
 interface Chat {
   id: string
@@ -346,7 +348,7 @@ export function ChatSidebar({
         </div>
 
         {/* New Chat Button */}
-        <div className={cn("p-3", isMinimized && "px-2")}>
+        <div className={cn("p-3 space-y-2", isMinimized && "px-2")}>
           <Button
             onClick={onNewChat}
             className={cn(
@@ -359,6 +361,9 @@ export function ChatSidebar({
             <Plus className="h-4 w-4 shrink-0" />
             {!isMinimized && <span>New Chat</span>}
           </Button>
+
+          {/* Workspace Toggle */}
+          <WorkspaceToggleButton isMinimized={isMinimized} />
         </div>
 
         {/* Search - Hidden when minimized */}
@@ -690,6 +695,43 @@ function ArtifactItem({
         </div>
       </div>
     </button>
+  )
+}
+
+// ─── Workspace Toggle Button ────────────────────────────────────────────────
+
+function WorkspaceToggleButton({ isMinimized }: { isMinimized: boolean }) {
+  const { isWorkspaceActive, setWorkspaceActive, closeWorkspace, workspaceId } = useOpenClawStore()
+
+  const handleToggle = () => {
+    if (isWorkspaceActive) {
+      closeWorkspace()
+    } else {
+      setWorkspaceActive(true)
+    }
+  }
+
+  return (
+    <Button
+      onClick={handleToggle}
+      className={cn(
+        "justify-center gap-2 transition-all duration-300",
+        isMinimized ? "w-full px-2" : "w-full justify-start",
+        isWorkspaceActive
+          ? "bg-violet-500/20 text-violet-400 hover:bg-violet-500/30 border border-violet-500/30"
+          : "bg-muted/50 text-muted-foreground hover:bg-muted hover:text-foreground"
+      )}
+      variant="ghost"
+      title={isWorkspaceActive ? "Close Workspace" : "Open Workspace"}
+    >
+      <Zap className={cn("h-4 w-4 shrink-0", isWorkspaceActive && "text-violet-400")} />
+      {!isMinimized && (
+        <span>{isWorkspaceActive ? "Workspace Active" : "Workspace"}</span>
+      )}
+      {!isMinimized && workspaceId && isWorkspaceActive && (
+        <span className="ml-auto h-2 w-2 rounded-full bg-green-400 animate-pulse" />
+      )}
+    </Button>
   )
 }
 

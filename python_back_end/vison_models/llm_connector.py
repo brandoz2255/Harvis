@@ -3,7 +3,11 @@ import os
 import torch
 import logging
 import google.generativeai as genai
-from .qwen import Qwen2VL
+try:
+    from .qwen import Qwen2VL
+except (ImportError, ModuleNotFoundError) as _e:
+    Qwen2VL = None
+    logging.getLogger(__name__).warning(f"Qwen2VL unavailable: {_e}")
 
 # Set up logging
 logger = logging.getLogger(__name__)
