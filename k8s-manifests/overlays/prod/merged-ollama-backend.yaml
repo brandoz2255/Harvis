@@ -22,7 +22,7 @@ spec:
       securityContext:
         fsGroup: 1001   # ensures PVC mounts are writable by appuser (UID 1001) without chown
       nodeSelector:
-        kubernetes.io/hostname: dulc3-os    # RTX 3070 — llama.cpp runs here
+        kubernetes.io/hostname: dulc3-os    # RTX 5090 — SGLang runs here
       initContainers:
         - name: wait-for-db
           image: busybox:1.36
@@ -42,51 +42,6 @@ spec:
             limits:
               memory: 32Mi
               cpu: 50m
-        # [DISABLED] Download Qwen3-8B Q4_K_M — too large for RTX 3070 in desktop mode (~5.5GB VRAM)
-        # Replaced by the 2B distilled model below. Re-enable when k8s VRAM operator is in place.
-        # - name: download-qwen35
-        #   image: curlimages/curl:latest
-        #   args:
-        #     - DEST=/llama-models/Qwen3-8B-Q4_K_M.gguf
-        #     - curl -fL -H "Authorization: Bearer ${HF_TOKEN}" -o "${DEST}.tmp"
-        #       "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf"
-
-        # Download Qwen3.5-2B Claude-4.6 Opus Reasoning-Distilled Q4_K_M (~1.27GB)
-        # Fits easily on RTX 3070 8GB leaving plenty of VRAM for KV cache and TTS/Whisper on CPU.
-        - name: download-qwen35-2b
-          image: curlimages/curl:latest
-          command: ["/bin/sh", "-c"]
-          args:
-            - |
-              set -e
-              DEST=/llama-models/Qwen3.5-2B.Q4_K_M.gguf
-              if [ -f "$DEST" ]; then
-                echo "Model already present, skipping download"
-                exit 0
-              fi
-              echo "Downloading Qwen3.5-2B.Q4_K_M.gguf from HuggingFace..."
-              curl -fL \
-                -H "Authorization: Bearer ${HF_TOKEN}" \
-                -o "${DEST}.tmp" \
-                "https://huggingface.co/Jackrong/Qwen3.5-2B-Claude-4.6-Opus-Reasoning-Distilled-GGUF/resolve/main/Qwen3.5-2B.Q4_K_M.gguf"
-              mv "${DEST}.tmp" "$DEST"
-              echo "Download complete: $(du -sh $DEST | cut -f1)"
-          env:
-            - name: HF_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: harvis-ai-backend-secret
-                  key: hf-token
-          volumeMounts:
-            - name: llama-models
-              mountPath: /llama-models
-          resources:
-            requests:
-              memory: 64Mi
-              cpu: 100m
-            limits:
-              memory: 128Mi
-              cpu: 500m
 
       containers:
         # Harvis Backend
@@ -124,8 +79,8 @@ spec:
             - name: EMBED_QW3_URL
               value: "http://harvis-ai-llama-embed:8082"   # Qwen3-Embedding-4B, 2560 dims
             - name: VLLM_URL
-              value: "http://localhost:8080/v1"   # llama-server (Qwen3.5-2B distilled Q4_K_M)
-            # llama-server co-located sidecar (localhost)
+              value: "http://localhost:8080/v1"   # SGLang sidecar (Qwen3.5-27B AWQ on RTX 5090)
+            # SGLang co-located sidecar (localhost)
             - name: LLAMA_URL
               value: "http://localhost:8080/v1"
             - name: BACKEND_URL
@@ -141,7 +96,7 @@ spec:
             - name: DISABLE_LOCAL_TTS_WORKERS
               value: "false"  # TTS/Whisper run locally in this pod (moved from separate worker)
             - name: TTS_DEVICE
-              value: "cpu"   # Run TTS on CPU (GPU is full with llama-server)
+              value: "cpu"   # Run TTS on CPU (leave GPU for SGLang)
             - name: WHISPER_DEVICE
               value: "cpu"    # Run Whisper on CPU to save GPU memory for LLM
             - name: UVICORN_WORKERS
@@ -199,64 +154,75 @@ spec:
             timeoutSeconds: 5
             failureThreshold: 3
 
-        # llama-server — Qwen3.5-2B Claude-4.6 Opus Reasoning-Distilled Q4_K_M on RTX 3070 (8GB)
-        # ~1.27GB weights → leaves ~6.5GB free for 128K KV cache (q8_0) + GPU overhead
-        # Swapped from 8B (too large for desktop mode) — k8s VRAM operator will auto-select model later
-        # [DISABLED MODEL]: Qwen3-8B-Q4_K_M.gguf — re-enable when VRAM operator is deployed
-        # - "--model"
-        # - "/llama-models/Qwen3-8B-Q4_K_M.gguf"
-        # - "--alias"
-        # - "qwen3:8b"
-        - name: llama-server
-          image: ghcr.io/ggml-org/llama.cpp:server-cuda
+        # SGLang — Qwen3.5-27B AWQ-BF16-INT4 on RTX 5090 (32GB)
+        # --mem-fraction-static 0.875: caps VRAM at 28GB (28/32), leaving 4GB headroom
+        #   weights ~13.5GB + KV pool ~14.5GB @ fp8_e4m3 → ~116K token context
+        # Image: dulc3/sglang-patch — extends dev-cu13 with Bug 4 fix:
+        #   compressed_tensors WNA16 Marlin alignment crash for GQA layers
+        #   where size_n=48 is not divisible by GPTQ_MARLIN_MIN_THREAD_N=64.
+        #   Fix lives in vendor/sglang-H/ — PR pending upstream sglang repo.
+        - name: sglang
+          image: dulc3/sglang-patch:test
           imagePullPolicy: Always
           ports:
-            - name: llama
+            - name: sglang
               containerPort: 8080
               protocol: TCP
-          command: ["/app/llama-server"]
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-backend-secret
+                  key: hf-token
+            - name: HF_HOME
+              value: "/models-cache/huggingface"
+          command: ["python", "-m", "sglang.launch_server"]
           args:
-            - "--model"
-            - "/llama-models/Qwen3.5-2B.Q4_K_M.gguf"
+            - "--model-path"
+            - "cyankiwi/Qwen3.5-27B-AWQ-BF16-INT4"
             - "--host"
             - "0.0.0.0"
             - "--port"
             - "8080"
-            - "--n-gpu-layers"
-            - "99"
-            - "--ctx-size"
-            - "32768"         # 32K context — fits in 6GB VRAM with Q4_K_M
-            - "--parallel"
-            - "8"              # 8 concurrent slots (2B is light, lots of headroom)
-            - "--alias"
-            - "qwen3.5:2b"
+            - "--served-model-name"
+            - "qwen3.5-27b"
+            - "--context-length"
+            - "262144"
+            - "--kv-cache-dtype"
+            - "fp8_e4m3"
+            - "--reasoning-parser"
+            - "qwen3"
+            - "--tool-call-parser"
+            - "qwen3_coder"
+            - "--mem-fraction-static"
+            - "0.875"
           volumeMounts:
-            - name: llama-models
-              mountPath: /llama-models
+            - name: ml-models-cache
+              mountPath: /models-cache
           resources:
             requests:
-              memory: 1Gi      # 2B model is much lighter than 8B
-              cpu: 500m
+              memory: 8Gi
+              cpu: 1000m
             limits:
               nvidia.com/gpu: 1
-              memory: 6Gi      # 1.27GB weights + 32K KV cache at q4 + overhead
-              cpu: 4000m
+              memory: 30Gi
+              cpu: 8000m
           livenessProbe:
             httpGet:
               path: /health
               port: 8080
-            initialDelaySeconds: 60
+            initialDelaySeconds: 180    # 27B AWQ model download + load takes time on first run
             periodSeconds: 30
-            timeoutSeconds: 10
-            failureThreshold: 3
+            timeoutSeconds: 15
+            failureThreshold: 5
           readinessProbe:
             httpGet:
               path: /v1/models
               port: 8080
-            initialDelaySeconds: 30
-            periodSeconds: 15
+            initialDelaySeconds: 120
+            periodSeconds: 20
             timeoutSeconds: 10
-            failureThreshold: 5
+            failureThreshold: 8
 
       volumes:
         - name: embedding
@@ -274,9 +240,6 @@ spec:
         - name: artifacts
           persistentVolumeClaim:
             claimName: harvis-artifacts-pvc
-        - name: llama-models
-          persistentVolumeClaim:
-            claimName: llama-model-cache
 ---
 apiVersion: v1
 kind: Service
