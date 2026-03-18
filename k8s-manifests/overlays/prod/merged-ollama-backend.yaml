@@ -155,14 +155,16 @@ spec:
             failureThreshold: 3
 
         # SGLang — Qwen3.5-27B AWQ-BF16-INT4 on RTX 5090 (32GB)
-        # --mem-fraction-static 0.875: caps VRAM at 28GB (28/32), leaving 4GB headroom
-        #   weights ~13.5GB + KV pool ~14.5GB @ fp8_e4m3 → ~116K token context
-        # Image: dulc3/sglang-patch — extends dev-cu13 with Bug 4 fix:
-        #   compressed_tensors WNA16 Marlin alignment crash for GQA layers
-        #   where size_n=48 is not divisible by GPTQ_MARLIN_MIN_THREAD_N=64.
-        #   Fix lives in vendor/sglang-H/ — PR pending upstream sglang repo.
+        # --mem-fraction-static 0.875: caps VRAM at 28GB (28/32)
+        #   AWQ weights ~13.5GB + KV pool ~14.5GB @ fp8_e4m3 → ~116K token context
+        # Image: dulc3/sglang-patch:test32 — extends dev-cu13 with Bug 4 + Bug 5 fixes:
+        #   Bug 4: compressed_tensors WNA16 Marlin alignment crash for GQA layers
+        #   Bug 5: linear_attn (SSM/GDN) weight key mismatch — without this fix, all
+        #          SSM layers are left at random init → model produces instant EOS.
+        #   Fix: qwen3_5.py forces linear_attn_quant_config=None so SSM projection
+        #        layers register ".weight" in params_dict, matching the AWQ checkpoint.
         - name: sglang
-          image: dulc3/sglang-patch:test2
+          image: dulc3/sglang-patch:test32
           imagePullPolicy: Always
           ports:
             - name: sglang
@@ -190,12 +192,14 @@ spec:
             - "262144"
             - "--kv-cache-dtype"
             - "fp8_e4m3"
-            - "--reasoning-parser"
-            - "qwen3"
-            - "--tool-call-parser"
-            - "qwen3_coder"
+            # AWQ int4: weights ~13.5GB, leaving ~18.5GB for KV cache + SSM state
+            # Bug 5 fixed: SSM layers now load as fp16 (unquantized, as the AWQ
+            # checkpoint stores them) — no more random-init → instant EOS
+            # No reasoning/tool-call parsers: incompatible with Qwen3.5 chat template
             - "--mem-fraction-static"
             - "0.875"
+            - "--attention-backend"
+            - "triton"
           volumeMounts:
             - name: ml-models-cache
               mountPath: /models-cache
