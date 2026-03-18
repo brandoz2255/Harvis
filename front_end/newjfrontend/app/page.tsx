@@ -964,8 +964,8 @@ export default function ChatPage() {
                   <div className="mx-auto max-w-4xl px-4 py-6">
                     {messages.length === 0 ? (
                       <div className="flex h-[60vh] flex-col items-center justify-center text-center">
-                        <div className="mb-6 flex h-20 w-20 items-center justify-center rounded-2xl bg-primary/20">
-                          <Sparkles className="h-10 w-10 text-primary" />
+                        <div className="mb-6">
+                          <HarvisMascot state="idle" size={80} interactive={true} />
                         </div>
                         <h2 className="mb-2 text-2xl font-semibold text-foreground">
                           How can I help you today?
