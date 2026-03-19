@@ -22,7 +22,7 @@ spec:
       securityContext:
         fsGroup: 1001   # ensures PVC mounts are writable by appuser (UID 1001) without chown
       nodeSelector:
-        kubernetes.io/hostname: dulc3-os    # RTX 5090 — SGLang runs here
+        kubernetes.io/hostname: dulc3-os    # RTX 5090 32GB
       initContainers:
         - name: wait-for-db
           image: busybox:1.36
@@ -42,6 +42,42 @@ spec:
             limits:
               memory: 32Mi
               cpu: 50m
+
+        - name: download-gguf
+          image: alpine:3
+          command: ['sh', '-c']
+          args:
+            - |
+              DEST=/models-cache/gguf/Qwen3.5-27B.Q4_K_M.gguf
+              if [ -f "$DEST" ]; then
+                echo "✅ GGUF already cached at $DEST, skipping download"
+                exit 0
+              fi
+              mkdir -p /models-cache/gguf
+              echo "Downloading Qwen3.5-27B.Q4_K_M.gguf (~16.5GB)..."
+              apk add --no-cache curl
+              curl -L --fail --show-error \
+                -H "Authorization: Bearer ${HF_TOKEN}" \
+                -o "$DEST.tmp" \
+                "https://huggingface.co/Jackrong/Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled-GGUF/resolve/main/Qwen3.5-27B.Q4_K_M.gguf"
+              mv "$DEST.tmp" "$DEST"
+              echo "✅ Download complete: $(du -h $DEST | cut -f1)"
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-backend-secret
+                  key: hf-token
+          volumeMounts:
+            - name: ml-models-cache
+              mountPath: /models-cache
+          resources:
+            requests:
+              memory: 64Mi
+              cpu: 100m
+            limits:
+              memory: 128Mi
+              cpu: 500m
 
       containers:
         # Harvis Backend
@@ -78,9 +114,9 @@ spec:
               value: "http://harvis-ai-llama-embed:8081"   # nomic-embed-text, 768 dims
             - name: EMBED_QW3_URL
               value: "http://harvis-ai-llama-embed:8082"   # Qwen3-Embedding-4B, 2560 dims
+            # llama.cpp sidecar (localhost:8080) — OpenAI-compatible
             - name: VLLM_URL
-              value: "http://localhost:8080/v1"   # SGLang sidecar (Qwen3.5-27B AWQ on RTX 5090)
-            # SGLang co-located sidecar (localhost)
+              value: "http://localhost:8080/v1"
             - name: LLAMA_URL
               value: "http://localhost:8080/v1"
             - name: BACKEND_URL
@@ -94,11 +130,11 @@ spec:
             - name: TMPDIR
               value: "/tmp"
             - name: DISABLE_LOCAL_TTS_WORKERS
-              value: "false"  # TTS/Whisper run locally in this pod (moved from separate worker)
+              value: "false"
             - name: TTS_DEVICE
-              value: "cpu"   # Run TTS on CPU (leave GPU for SGLang)
+              value: "cpu"
             - name: WHISPER_DEVICE
-              value: "cpu"    # Run Whisper on CPU to save GPU memory for LLM
+              value: "cpu"
             - name: UVICORN_WORKERS
               value: "1"
             - name: UVICORN_TIMEOUT_KEEP_ALIVE
@@ -154,21 +190,41 @@ spec:
             timeoutSeconds: 5
             failureThreshold: 3
 
-        # SGLang — Qwen3.5-27B AWQ-BF16-INT4 on RTX 5090 (32GB)
-        # --mem-fraction-static 0.90: caps VRAM at ~28.8GB
-        #   Model loads as Qwen3_5ForConditionalGeneration (VL variant); weights ~25GB
-        #   → ~3GB GPU KV cache (hot) + 6GB CPU offload (cold) = 9GB total → 128K ctx
-        # Image: dulc3/sglang-patch:test77 — extends dev-cu13 with Bug 4 + Bug 5 fixes:
-        #   Bug 4: compressed_tensors WNA16 Marlin alignment crash for GQA layers
-        #   Bug 5: linear_attn (SSM/GDN) weight key mismatch — without this fix, all
-        #          SSM layers are left at random init → model produces instant EOS.
-        #   Fix: qwen3_5.py forces linear_attn_quant_config=None so SSM projection
-        #        layers register ".weight" in params_dict, matching the AWQ checkpoint.
-        - name: sglang
-          image: dulc3/sglang-patch:test77
+        # llama.cpp server — Qwen3.5-27B Q4_K_M on RTX 5090 (32GB)
+        #
+        # Why llama.cpp instead of SGLang:
+        #   SGLang blocked by Marlin sm_120 (Blackwell) kernel bug — all INT4/AWQ formats
+        #   silently corrupt weights or OOM. fp8 runtime quant uses ~27GB leaving no KV room.
+        #   llama.cpp uses its own CUDA GEMM path (not Marlin) → works on sm_120 natively.
+        #   Ollama already confirmed Qwen3.5-27B Q4_K_M works on this GPU via llama.cpp.
+        #
+        # Model: Qwen3.5-27B Q4_K_M GGUF
+        #   ~15GB on disk, ~15GB VRAM → leaves ~16GB free for KV + mamba SSM state
+        #
+        # Context: 80K (81920 tokens)
+        #   KV for hybrid model — llama.cpp only allocates KV for the 16 full-attention
+        #   layers (not the 48 GDN/SSM layers) → efficient KV usage same as fix #3 goal
+        #   Estimated KV at 80K: ~16layers × 4kv_heads × 128dim × 2 × 1byte × 80K ≈ 1.3GB
+        #
+        # --flash-attn: required for long context efficiency on sm_120
+        # -ngl 99: all layers on GPU (model fits at ~15GB, ~17GB headroom remaining)
+        # --parallel 4: 4 concurrent sequences; set lower if VRAM tight
+        # --cache-type-k q8_0 / --cache-type-v q8_0: quantized KV → halves KV memory
+        #
+        # Model: Jackrong/Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled-GGUF  Q4_K_M
+        #   Dense 27B (NOT MoE) — repo card: 16.5GB VRAM at Q4_K_M, 29-35 tok/s, 262K ctx.
+        #   SGLang previously OOM'd loading this as qwen2_moe — that was a SGLang mis-detection
+        #   bug, not the model's actual architecture. llama.cpp GGUF loads correctly.
+        #   LLAMA_CACHE env points to PVC so model is cached across pod restarts.
+        #
+        # API compatibility: llama-server exposes OpenAI-compatible /v1/chat/completions
+        #   and /v1/completions at port 8080. Backend LLAMA_URL=http://localhost:8080/v1
+        #   already points here — no backend changes needed.
+        - name: llama-cpp
+          image: ghcr.io/ggml-org/llama.cpp:server-cuda
           imagePullPolicy: Always
           ports:
-            - name: sglang
+            - name: llama
               containerPort: 8080
               protocol: TCP
           env:
@@ -177,59 +233,66 @@ spec:
                 secretKeyRef:
                   name: harvis-ai-backend-secret
                   key: hf-token
-            - name: HF_HOME
-              value: "/models-cache/huggingface"
-          command: ["python", "-m", "sglang.launch_server"]
+            # CUDA_VISIBLE_DEVICES: use the single GPU in this pod
+            - name: CUDA_VISIBLE_DEVICES
+              value: "0"
           args:
-            - "--model-path"
-            - "cyankiwi/Qwen3.5-27B-AWQ-BF16-INT4"
+            # Model loaded from PVC (downloaded by download-gguf init container)
+            - "-m"
+            - "/models-cache/gguf/Qwen3.5-27B.Q4_K_M.gguf"
+            - "--alias"
+            - "qwen3.5-27b"
             - "--host"
             - "0.0.0.0"
             - "--port"
             - "8080"
-            - "--served-model-name"
-            - "qwen3.5-27b"
-            - "--context-length"
-            - "131072"
-            - "--kv-cache-dtype"
-            - "fp8_e4m3"
-            # KV budget: 3 GB GPU (hot pages) + 6 GB CPU offload (cold pages) = 9 GB total
-            # ~64-100 KB/token @ fp8 → 128K context fits within 9 GB with headroom.
-            # Bug 5 fixed: SSM layers load as fp16 (unquantized per AWQ checkpoint).
-            # No reasoning/tool-call parsers: incompatible with Qwen3.5 chat template.
-            - "--mem-fraction-static"
-            - "0.90"
-            - "--cpu-offload-gb"
-            - "6"
-            - "--attention-backend"
-            - "triton"
+            # Context and GPU
+            - "--ctx-size"
+            - "262144"   # repo card: 262K supported with no compromises; ~4GB KV at q4_0 leaves ~10GB headroom
+            - "-ngl"
+            - "99"          # all layers on GPU
+            - "--flash-attn"
+            - "on"
+            # Parallel slots — llama.cpp allocates ctx-size × parallel KV tokens total.
+            # 262K × 4 = 1M tokens → ~16GB KV → OOM. Keep at 1 (single user system).
+            - "--parallel"
+            - "1"
+            # KV cache quantization — q4_0 halves footprint vs q8_0 (4 bits vs 8 bits)
+            # At 80K ctx × 16 attn layers: q4_0 ≈ 0.7GB vs q8_0 ≈ 1.3GB
+            - "--cache-type-k"
+            - "q4_0"
+            - "--cache-type-v"
+            - "q4_0"
+            # No --chat-template: use template embedded in GGUF metadata.
+            # Jackrong's distilled model has a custom template — overriding with "qwen"
+            # corrupts conversation structure → hallucinated questions, language switches.
           volumeMounts:
             - name: ml-models-cache
               mountPath: /models-cache
           resources:
             requests:
-              memory: 8Gi
-              cpu: 1000m
+              memory: 4Gi
+              cpu: 500m
             limits:
               nvidia.com/gpu: 1
-              memory: 30Gi
+              memory: 28Gi
               cpu: 8000m
           livenessProbe:
             httpGet:
               path: /health
               port: 8080
-            initialDelaySeconds: 180    # 27B AWQ model download + load takes time on first run
+            initialDelaySeconds: 300   # first run downloads ~15GB GGUF; subsequent runs ~10s
             periodSeconds: 30
-            timeoutSeconds: 15
+            timeoutSeconds: 10
             failureThreshold: 5
           readinessProbe:
             httpGet:
               path: /v1/models
               port: 8080
-            initialDelaySeconds: 120
+            initialDelaySeconds: 60    # subsequent restarts: model loads in <30s from PVC cache
             periodSeconds: 20
             timeoutSeconds: 10
-            failureThreshold: 8
+            failureThreshold: 10
 
       volumes:
         - name: embedding
@@ -262,6 +325,32 @@ spec:
     - name: backend
       port: 8000
       targetPort: http
+      protocol: TCP
+    - name: llama
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: merged-ollama-backend
+---
+# NodePort for external access — local opencode vibe coding sessions on host machine.
+# Access llama-cpp directly: http://dulc3-os:<nodePort>/v1/chat/completions
+apiVersion: v1
+kind: Service
+metadata:
+  name: harvis-ai-llama-nodeport
+  namespace: ai-agents
+  labels:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: merged-ollama-backend
+spec:
+  type: NodePort
+  ports:
+    - name: llama
+      port: 8080
+      targetPort: 8080
+      nodePort: 30880
       protocol: TCP
   selector:
     app.kubernetes.io/name: harvis-ai

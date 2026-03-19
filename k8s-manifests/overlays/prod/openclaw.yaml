@@ -103,6 +103,14 @@ data:
       "models": {
         "mode": "replace",
         "providers": {
+          "qwen-local": {
+            "api": "openai-completions",
+            "baseUrl": "http://harvis-ai-merged-backend:8080/v1",
+            "apiKey": "qwen-local",
+            "models": [
+              { "id": "qwen3.5-27b", "name": "Qwen3.5-27B Claude-distilled (llama.cpp, 262K ctx, RTX 5090)" }
+            ]
+          },
           "vllm-local": {
             "api": "openai-completions",
             "baseUrl": "http://harvis-ai-merged-backend:8001/v1",
@@ -171,7 +179,7 @@ data:
             "id": "main",
             "default": true,
             "model": {
-              "primary": "harvis-proxy/kimi-k2.5"
+              "primary": "qwen-local/qwen3.5-27b"
             }
           },
           {
@@ -279,27 +287,10 @@ spec:
         - protocol: TCP
           port: 5432
 
-    # vLLM (qwen3.5:9b — fast agentic, co-located in the backend pod)
-    - to:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/component: merged-ollama-backend
-      ports:
-        - protocol: TCP
-          port: 8001
-
-    # llama-server (qwen3.5:9b via llama.cpp — separate pod on dulc3-top)
-    - to:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/component: llama-server
-      ports:
-        - protocol: TCP
-          port: 8080
-
-    # Harvis backend proxy (port 8000) — for Kimi K2.5 forwarding AND the
-    # GitHub API proxy (/github/ endpoint).  PR creation goes through this
-    # proxy so the backend can enforce the repo allowlist and log all actions.
+    # merged-ollama-backend — all ports in one rule:
+    #   8000: Harvis backend proxy (Kimi K2.5, GitHub API proxy)
+    #   8001: vLLM sidecar (qwen3.5:9b, fast agentic)
+    #   8080: llama-cpp sidecar (qwen3.5-27b Claude-distilled, 262K ctx) ← DEFAULT MODEL
     - to:
         - podSelector:
             matchLabels:
@@ -307,6 +298,10 @@ spec:
       ports:
         - protocol: TCP
           port: 8000
+        - protocol: TCP
+          port: 8001
+        - protocol: TCP
+          port: 8080
 
     # GitHub HTTPS — required for git clone/push operations.
     # PR creation is handled by the backend proxy above (no direct API calls
@@ -351,11 +346,14 @@ data:
   opencode.json: |
     {
       "$schema": "https://opencode.ai/config.json",
-      "model": "harvis/kimi-k2.5",
+      "model": "qwen-local/qwen3.5-27b",
       "provider": {
-        "harvis": {
+        "qwen-local": {
+          "name": "qwen-local",
+          "api": "openai",
           "options": {
-            "baseURL": "http://harvis-ai-merged-backend:8000/api/opencode/chat"
+            "baseURL": "http://harvis-ai-merged-backend:8080/v1",
+            "apiKey": "qwen-local"
           }
         }
       }
