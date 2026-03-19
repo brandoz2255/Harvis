@@ -158,14 +158,14 @@ spec:
         # --mem-fraction-static 0.90: caps VRAM at ~28.8GB
         #   Model loads as Qwen3_5ForConditionalGeneration (VL variant); weights ~25GB
         #   → ~3GB GPU KV cache (hot) + 6GB CPU offload (cold) = 9GB total → 128K ctx
-        # Image: dulc3/sglang-patch:test64 — extends dev-cu13 with Bug 4 + Bug 5 fixes:
+        # Image: dulc3/sglang-patch:test77 — extends dev-cu13 with Bug 4 + Bug 5 fixes:
         #   Bug 4: compressed_tensors WNA16 Marlin alignment crash for GQA layers
         #   Bug 5: linear_attn (SSM/GDN) weight key mismatch — without this fix, all
         #          SSM layers are left at random init → model produces instant EOS.
         #   Fix: qwen3_5.py forces linear_attn_quant_config=None so SSM projection
         #        layers register ".weight" in params_dict, matching the AWQ checkpoint.
         - name: sglang
-          image: dulc3/sglang-patch:test64
+          image: dulc3/sglang-patch:test77
           imagePullPolicy: Always
           ports:
             - name: sglang
