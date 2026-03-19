@@ -155,16 +155,17 @@ spec:
             failureThreshold: 3
 
         # SGLang — Qwen3.5-27B AWQ-BF16-INT4 on RTX 5090 (32GB)
-        # --mem-fraction-static 0.875: caps VRAM at 28GB (28/32)
-        #   AWQ weights ~13.5GB + KV pool ~14.5GB @ fp8_e4m3 → ~116K token context
-        # Image: dulc3/sglang-patch:test32 — extends dev-cu13 with Bug 4 + Bug 5 fixes:
+        # --mem-fraction-static 0.90: caps VRAM at ~28.8GB
+        #   Model loads as Qwen3_5ForConditionalGeneration (VL variant); weights ~25GB
+        #   → ~3GB GPU KV cache (hot) + 6GB CPU offload (cold) = 9GB total → 128K ctx
+        # Image: dulc3/sglang-patch:test64 — extends dev-cu13 with Bug 4 + Bug 5 fixes:
         #   Bug 4: compressed_tensors WNA16 Marlin alignment crash for GQA layers
         #   Bug 5: linear_attn (SSM/GDN) weight key mismatch — without this fix, all
         #          SSM layers are left at random init → model produces instant EOS.
         #   Fix: qwen3_5.py forces linear_attn_quant_config=None so SSM projection
         #        layers register ".weight" in params_dict, matching the AWQ checkpoint.
         - name: sglang
-          image: dulc3/sglang-patch:test32
+          image: dulc3/sglang-patch:test64
           imagePullPolicy: Always
           ports:
             - name: sglang
@@ -189,15 +190,17 @@ spec:
             - "--served-model-name"
             - "qwen3.5-27b"
             - "--context-length"
-            - "262144"
+            - "131072"
             - "--kv-cache-dtype"
             - "fp8_e4m3"
-            # AWQ int4: weights ~13.5GB, leaving ~18.5GB for KV cache + SSM state
-            # Bug 5 fixed: SSM layers now load as fp16 (unquantized, as the AWQ
-            # checkpoint stores them) — no more random-init → instant EOS
-            # No reasoning/tool-call parsers: incompatible with Qwen3.5 chat template
+            # KV budget: 3 GB GPU (hot pages) + 6 GB CPU offload (cold pages) = 9 GB total
+            # ~64-100 KB/token @ fp8 → 128K context fits within 9 GB with headroom.
+            # Bug 5 fixed: SSM layers load as fp16 (unquantized per AWQ checkpoint).
+            # No reasoning/tool-call parsers: incompatible with Qwen3.5 chat template.
             - "--mem-fraction-static"
-            - "0.875"
+            - "0.90"
+            - "--cpu-offload-gb"
+            - "6"
             - "--attention-backend"
             - "triton"
           volumeMounts:
