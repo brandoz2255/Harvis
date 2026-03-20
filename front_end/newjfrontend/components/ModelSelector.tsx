@@ -18,6 +18,16 @@ interface ModelSelectorProps {
     className?: string
 }
 
+// Local llama.cpp model configuration
+const LOCAL_LLAMA_MODELS: ModelInfo[] = [
+    {
+        name: 'qwen3.5:27b',
+        displayName: 'Qwen3.5 27B (llama.cpp Local)',
+        status: 'available',
+        size: '27B'
+    }
+]
+
 export default function ModelSelector({
     selectedModel,
     onModelChange,
@@ -55,11 +65,13 @@ export default function ModelSelector({
                 size: model.size,
             }))
 
-            setModels(modelInfos)
+            // Combine backend models with local llama.cpp models
+            const allModels = [...modelInfos, ...LOCAL_LLAMA_MODELS]
+            setModels(allModels)
 
             // Auto-select first available model if none selected
-            if (!selectedModel && modelInfos.length > 0) {
-                const firstAvailable = modelInfos.find(m => m.status === 'available')
+            if (!selectedModel && allModels.length > 0) {
+                const firstAvailable = allModels.find(m => m.status === 'available')
                 if (firstAvailable) {
                     onModelChange(firstAvailable.name)
                 }
@@ -71,14 +83,9 @@ export default function ModelSelector({
             } else {
                 setError(err instanceof Error ? err.message : 'Failed to load models')
             }
+            // Fall back to local llama.cpp models only
             if (models.length === 0) {
-                setModels([
-                    {
-                        name: 'offline-mode',
-                        displayName: 'Offline Mode',
-                        status: 'offline',
-                    }
-                ])
+                setModels(LOCAL_LLAMA_MODELS)
             }
         } finally {
             clearTimeout(timeoutId)
