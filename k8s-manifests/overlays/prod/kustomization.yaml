@@ -19,13 +19,13 @@ namespace: ai-agents
 images:
   - name: harvis-backend
     newName: dulc3/jarvis-backend
-    newTag: new
+    newTag: stable
   - name: harvis-frontend
     newName: dulc3/jarvis-frontend
-    newTag: new
+    newTag: stable
   - name: harvis-document-worker
     newName: dulc3/harvis-document-worker
-    newTag: new
+    newTag: stable
   # - name: harvis-tts-worker  # REMOVED: TTS/Whisper now runs in main backend
   #   newName: dulc3/harvis-tts-worker
   #   newTag: unbroken
@@ -43,21 +43,21 @@ patches:
         value: 1
       - op: replace
         path: /spec/template/spec/containers/0/image
-        value: dulc3/jarvis-backend:new
+        value: dulc3/jarvis-backend:stable
   - target:
       kind: Deployment
       name: harvis-ai-frontend
     patch: |
       - op: replace
         path: /spec/template/spec/containers/0/image
-        value: dulc3/jarvis-frontend:new
+        value: dulc3/jarvis-frontend:stable
   - target:
       kind: Deployment
       name: harvis-document-worker
     patch: |
       - op: replace
         path: /spec/template/spec/containers/0/image
-        value: dulc3/harvis-document-worker:new
+        value: dulc3/harvis-document-worker:stable
 
   # Inject OpenClaw + Kimi K2.5 env vars into the backend container (index 0 = harvis-backend)
   # so the Python orchestrator knows where to find OpenClaw and has the Moonshot API key.

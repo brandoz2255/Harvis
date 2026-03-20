@@ -335,7 +335,7 @@ spec:
     app.kubernetes.io/component: merged-ollama-backend
 ---
 # NodePort for external access — local opencode vibe coding sessions on host machine.
-# Access llama-cpp directly: http://dulc3-os:<nodePort>/v1/chat/completions
+# Access llama-cpp directly: http://dulc3-os:30880/v1/chat/completions
 apiVersion: v1
 kind: Service
 metadata:

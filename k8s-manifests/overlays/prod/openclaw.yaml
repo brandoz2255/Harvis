@@ -335,60 +335,6 @@ spec:
           port: 443
 
 ---
-# OpenCode ConfigMap — contains opencode.json and harvis-coder agent definition
-# Mounted to /root/.config/opencode/ in the OpenClaw pod
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: opencode-config
-  namespace: ai-agents
-data:
-  opencode.json: |
-    {
-      "$schema": "https://opencode.ai/config.json",
-      "model": "qwen-local/qwen3.5-27b",
-      "provider": {
-        "qwen-local": {
-          "name": "qwen-local",
-          "api": "openai",
-          "options": {
-            "baseURL": "http://harvis-ai-merged-backend:8080/v1",
-            "apiKey": "qwen-local"
-          }
-        }
-      }
-    }
-
-  harvis-coder.md: |
-    ---
-    description: "Coding sub-agent for Harvis OpenClaw tasks. Always returns compact JSON."
-    mode: subagent
-    model: harvis/kimi-k2.5
-    tools:
-      bash: true
-      read: true
-      write: true
-      edit: true
-    permissions:
-      bash: allow
-      edit: allow
-    ---
-
-    You are a focused coding agent. Complete the task, then output ONLY this JSON block
-    as your final message — nothing else after it, no explanation, no markdown:
-
-    {
-      "files_changed": ["list of file paths created or modified"],
-      "commands_run": ["list of bash commands executed"],
-      "tests_passed": true,
-      "summary": "One sentence and outcome.",
-     : what was done "status": "ok | error | needs_review"
-    }
-
-    If status is "error", add an "error" key with one sentence describing the failure.
-    Never output raw terminal logs. Summarize everything.
-
----
 # Deployment: OpenClaw gateway
 # Single replica — OpenClaw writes session state to local JSONL files on the PVC.
 # Multiple replicas would cause split-brain session state.
@@ -606,7 +552,7 @@ spec:
           # docker push dulc3/openclaw:latest
           image: dulc3/openclaw:latest
           imagePullPolicy: Always
-          command: ["/home/node/start-opencode.sh"]
+          command: ["node", "/app/openclaw.mjs", "gateway", "--bind", "lan", "--port", "18789", "--allow-unconfigured"]
 
           ports:
             - name: gateway
@@ -706,16 +652,6 @@ spec:
             - name: openclaw-config
               mountPath: /home/node/.openclaw/openclaw.json
               subPath: openclaw.json
-            # OpenCode config — contains opencode.json and harvis-coder agent
-            # Mounted under /home/node (not /root) — container runs as uid 1000
-            - name: opencode-config
-              mountPath: /home/node/.config/opencode/opencode.json
-              subPath: opencode.json
-              readOnly: true
-            - name: opencode-config
-              mountPath: /home/node/.config/opencode/.opencode/agent/harvis-coder.md
-              subPath: harvis-coder.md
-              readOnly: true
             # python-extra: shared emptyDir where install-python-docx puts python-docx
             - name: python-extra
               mountPath: /python-extra
@@ -754,10 +690,6 @@ spec:
         - name: openclaw-config
           configMap:
             name: openclaw-config
-        # OpenCode config — mounted to /root/.config/opencode/
-        - name: opencode-config
-          configMap:
-            name: opencode-config
         - name: python-extra
           emptyDir: {}
 ---
