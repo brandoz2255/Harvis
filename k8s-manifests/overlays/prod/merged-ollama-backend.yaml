@@ -248,17 +248,22 @@ spec:
             - "8080"
             # Context and GPU
             - "--ctx-size"
-            - "262144"   # repo card: 262K supported with no compromises; ~4GB KV at q4_0 leaves ~10GB headroom
+            - "512000"   # 512K context (upgraded from 262K)
             - "-ngl"
             - "99"          # all layers on GPU
             - "--flash-attn"
             - "on"
+            # YaRN context extrapolation — native context is 262K, extrapolate beyond
+            - "--yarn-ext-factor"
+            - "1.0"
+            - "--yarn-orig-ctx"
+            - "262144"
             # Parallel slots — llama.cpp allocates ctx-size × parallel KV tokens total.
-            # 262K × 4 = 1M tokens → ~16GB KV → OOM. Keep at 1 (single user system).
+            # 512K × 4 = 2M tokens → ~32GB KV → OOM. Keep at 1 (single user system).
             - "--parallel"
             - "1"
             # KV cache quantization — q4_0 halves footprint vs q8_0 (4 bits vs 8 bits)
-            # At 80K ctx × 16 attn layers: q4_0 ≈ 0.7GB vs q8_0 ≈ 1.3GB
+            # At 512K ctx × 16 attn layers: q4_0 ≈ 2.0GB (vs 4.1GB at f16)
             - "--cache-type-k"
             - "q4_0"
             - "--cache-type-v"
