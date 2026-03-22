@@ -201,15 +201,16 @@ spec:
         # Model: Qwen3.5-27B Q4_K_M GGUF
         #   ~15GB on disk, ~15GB VRAM → leaves ~16GB free for KV + mamba SSM state
         #
-        # Context: 80K (81920 tokens)
+        # Context: 262144 (262K native max)
+        #   No YaRN — staying within native context avoids RoPE extrapolation CPU overhead.
         #   KV for hybrid model — llama.cpp only allocates KV for the 16 full-attention
-        #   layers (not the 48 GDN/SSM layers) → efficient KV usage same as fix #3 goal
-        #   Estimated KV at 80K: ~16layers × 4kv_heads × 128dim × 2 × 1byte × 80K ≈ 1.3GB
+        #   layers (not the 48 GDN/SSM layers) → efficient KV usage.
+        #   Estimated KV at 262K q4_0: ~1.0GB (vs ~2.0GB at 512K)
         #
         # --flash-attn: required for long context efficiency on sm_120
-        # -ngl 99: all layers on GPU (model fits at ~15GB, ~17GB headroom remaining)
-        # --parallel 4: 4 concurrent sequences; set lower if VRAM tight
-        # --cache-type-k q8_0 / --cache-type-v q8_0: quantized KV → halves KV memory
+        # -ngl 99: all layers on GPU (model fits at ~15GB, ~16GB headroom remaining)
+        # --parallel 1: single slot (single user system, avoids KV multiplication)
+        # --cache-type-k q4_0 / --cache-type-v q4_0: quantized KV → minimal KV footprint
         #
         # Model: Jackrong/Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled-GGUF  Q4_K_M
         #   Dense 27B (NOT MoE) — repo card: 16.5GB VRAM at Q4_K_M, 29-35 tok/s, 262K ctx.
@@ -248,22 +249,15 @@ spec:
             - "8080"
             # Context and GPU
             - "--ctx-size"
-            - "512000"   # 512K context (upgraded from 262K)
+            - "262144"   # 262K native max — no YaRN needed, avoids extrapolation CPU overhead
             - "-ngl"
             - "99"          # all layers on GPU
             - "--flash-attn"
             - "on"
-            # YaRN context extrapolation — native context is 262K, extrapolate beyond
-            - "--yarn-ext-factor"
-            - "1.0"
-            - "--yarn-orig-ctx"
-            - "262144"
-            # Parallel slots — llama.cpp allocates ctx-size × parallel KV tokens total.
-            # 512K × 4 = 2M tokens → ~32GB KV → OOM. Keep at 1 (single user system).
+            # Parallel slots — at native 262K ctx, single slot is fine for this system.
             - "--parallel"
             - "1"
-            # KV cache quantization — q4_0 halves footprint vs q8_0 (4 bits vs 8 bits)
-            # At 512K ctx × 16 attn layers: q4_0 ≈ 2.0GB (vs 4.1GB at f16)
+            # KV cache quantization — q4_0 at 262K × 16 attn layers ≈ 1.0GB
             - "--cache-type-k"
             - "q4_0"
             - "--cache-type-v"
