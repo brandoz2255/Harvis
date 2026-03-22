@@ -1,0 +1,20 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Dev overlay — backend only, no base dependency.
+# Image tag is updated automatically by ci_pipeline.sh on every backend build.
+# ArgoCD harvis-dev app watches this file; a tag change triggers a sync → rollout.
+
+namespace: ai-agents-dev
+
+resources:
+  - namespace.yaml
+  - backend-dev.yaml
+
+# Image tag updated by ci_pipeline.sh dev step — do not edit manually.
+images:
+  - name: dulc3/jarvis-backend
+    newTag: dev-32642b8  # ci: dev image tag
+
+commonLabels:
+  environment: dev

@@ -1,0 +1,64 @@
+---
+# ArgoCD Application — Harvis Dev Backend
+#
+# Purpose: boot-test the newest backend image before promoting to prod.
+#
+# Workflow:
+#   1. ci_pipeline.sh builds backend → tags dev-HASH → updates dev kustomization → pushes to git
+#   2. This app auto-syncs → new pod starts in ai-agents-dev
+#   3. Check: kubectl logs -n ai-agents-dev deploy/harvis-dev-backend -f
+#   4. Curl:   kubectl exec -n ai-agents-dev deploy/harvis-dev-backend -- curl -s localhost:8000/health
+#   5. ✅ passes → promote BACKEND_VERSION tag to prod via ci_pipeline.sh → prod ArgoCD syncs
+#
+# Notes:
+#   - selfHeal: false — if the pod CrashLoops, ArgoCD stops retrying so you can read logs.
+#   - Manual sync: argocd app sync harvis-dev
+#   - One-time secret setup required (see backend-dev.yaml header comment).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: harvis-dev
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: gitops
+    environment: dev
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/brandoz2255/aidev.git
+    targetRevision: HEAD
+    path: k8s-manifests/overlays/dev
+    kustomize:
+      commonLabels:
+        environment: dev
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: ai-agents-dev
+
+  # Auto-sync ON (picks up kustomization tag updates from CI) but selfHeal OFF
+  # so a CrashLoopBackOff doesn't get healed away — you need to see the failure.
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: false
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+    retry:
+      limit: 2
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 1m
+
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas
+
+  revisionHistoryLimit: 5
