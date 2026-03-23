@@ -75,6 +75,14 @@ spec:
             - name: CODE_EXECUTOR_LOCAL
               value: "true"
 
+            # Artifact generation settings
+            - name: ARTIFACT_MAX_AUTO_RETRIES
+              value: "4"
+            - name: ARTIFACT_JOB_TIMEOUT_SECONDS
+              value: "60"
+            - name: ARTIFACT_RETRY_POLL_INTERVAL
+              value: "0.5"
+
             # Worker-specific settings
             - name: WORKER_NAME
               valueFrom:

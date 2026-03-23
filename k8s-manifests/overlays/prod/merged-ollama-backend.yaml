@@ -139,6 +139,13 @@ spec:
               value: "1"
             - name: UVICORN_TIMEOUT_KEEP_ALIVE
               value: "120"
+            # Artifact generation settings
+            - name: ARTIFACT_MAX_AUTO_RETRIES
+              value: "4"
+            - name: ARTIFACT_JOB_TIMEOUT_SECONDS
+              value: "60"
+            - name: ARTIFACT_RETRY_POLL_INTERVAL
+              value: "0.5"
           envFrom:
             - configMapRef:
                 name: harvis-ai-backend-config
