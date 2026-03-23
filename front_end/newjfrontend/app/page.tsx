@@ -336,10 +336,8 @@ export default function ChatPage() {
           task_brief: taskBrief,
           chat_history: messages.map(m => ({ role: m.role, content: m.content })),
           session_id: currentSession?.id ?? undefined,
-          agent_id: store.workspaceModel === 'kimi' ? 'kimi'
-            : store.workspaceModel === 'qwen3' ? 'qwen3'
-              : store.workspaceModel === 'nvidia-kimi' ? 'nvidia-kimi'
-                : 'main',
+          agent_id: store.workspaceModel,
+          model_name: store.workspaceModelName,
         }),
       })
 
