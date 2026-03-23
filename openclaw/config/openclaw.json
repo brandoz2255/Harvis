@@ -1,0 +1,125 @@
+{
+  "gateway": {
+    "bind": "lan",
+    "port": 18789,
+    "auth": {
+      "mode": "token"
+    },
+    "controlUi": {
+      "enabled": false
+    }
+  },
+  "commands": {
+    "bash": true,
+    "bashForegroundMs": 2000
+  },
+  "browser": {
+    "ssrfPolicy": {
+      "hostnameAllowlist": ["backend"]
+    }
+  },
+  "session": {
+    "scope": "per-sender",
+    "maintenance": {
+      "pruneAfter": "90d",
+      "maxEntries": 2000
+    }
+  },
+  "models": {
+    "mode": "replace",
+    "providers": {
+      "ollama-local": {
+        "api": "openai-completions",
+        "baseUrl": "http://ollama:11434/v1",
+        "apiKey": "ollama-local"
+      },
+      "harvis-proxy": {
+        "api": "openai-completions",
+        "baseUrl": "http://backend:8000/v1",
+        "apiKey": "${OPENCLAW_GATEWAY_TOKEN}",
+        "models": [
+          { "id": "nvidia-kimi", "name": "Kimi K2.5 (NVIDIA NIM)" },
+          { "id": "kimi-k2.5", "name": "Kimi K2.5 (Moonshot)" },
+          { "id": "gpt-oss:120b", "name": "GPT-OSS 120B (via Harvis proxy)" }
+        ]
+      },
+      "user-config": {
+        "api": "openai-completions",
+        "baseUrl": "http://backend:8000/v1",
+        "apiKey": "${OPENCLAW_GATEWAY_TOKEN}",
+        "models": [
+          { "id": "harvis-llm", "name": "User Configured LLM (set in Settings)" }
+        ]
+      }
+    }
+  },
+  "tools": {
+    "elevated": {
+      "enabled": true
+    },
+    "exec": {
+      "host": "gateway"
+    }
+  },
+  "agents": {
+    "defaults": {
+      "elevatedDefault": "full",
+      "timeoutSeconds": 600,
+      "model": {
+        "primary": "harvis-proxy/harvis-llm"
+      },
+      "subagents": {
+        "runTimeoutSeconds": 600,
+        "announceTimeoutMs": 180000,
+        "maxSpawnDepth": 2,
+        "maxChildrenPerAgent": 5,
+        "maxConcurrent": 8
+      }
+    },
+    "list": [
+      {
+        "id": "main",
+        "default": true,
+        "model": {
+          "primary": "harvis-proxy/kimi-k2.5"
+        }
+      },
+      {
+        "id": "planner",
+        "model": {
+          "primary": "harvis-proxy/nvidia-kimi"
+        },
+        "skills": ["harvis-planner", "harvis-coding", "harvis-github", "harvis-rag", "harvis-research", "harvis-document"]
+      },
+      {
+        "id": "kimi",
+        "model": {
+          "primary": "harvis-proxy/kimi-k2.5"
+        },
+        "subagents": {
+          "model": "harvis-proxy/kimi-k2.5"
+        },
+        "skills": ["harvis-coding"]
+      },
+      {
+        "id": "gpt-oss",
+        "model": {
+          "primary": "harvis-proxy/gpt-oss:120b"
+        }
+      }
+    ]
+  },
+  "skills": {
+    "load": {
+      "extraDirs": ["/skills"]
+    }
+  },
+  "channels": {
+    "discord": {
+      "token": "${DISCORD_BOT_TOKEN}",
+      "allowedChannels": [],
+      "allowDMs": true,
+      "mentionOnly": true
+    }
+  }
+}

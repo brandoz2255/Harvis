@@ -124,8 +124,14 @@ python_back_end/whisper_models/
 **/*.safetensors
 **/*.ckpt
 
-# openclaw directory
+# openclaw directory (image is pre-built, not tracked)
 openclaw/
+# ...but track our local config and skills placeholder
+!openclaw/config/
+!openclaw/config/openclaw.json
+!openclaw/config/exec-approvals.json
+!openclaw/skills/
+!openclaw/skills/.gitkeep
 
 # OpenCode repo clone (embedded git repo - not tracked)
 opencode/

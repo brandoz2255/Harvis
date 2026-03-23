@@ -22,6 +22,7 @@ services:
           memory: 30G
     networks:
       - ollama-n8n-network
+      - openclaw-internal
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
       interval: 30s
@@ -138,6 +139,7 @@ services:
           memory: 15G
     networks:
       - ollama-n8n-network
+      - openclaw-internal
 
   # Next.js Frontend (New UI)
   # REBUILD TIPS:
@@ -260,11 +262,120 @@ services:
           memory: 512M
     networks:
       - ollama-n8n-network
+      - openclaw-internal
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U pguser -d database"]
       interval: 10s
       timeout: 5s
       retries: 5
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # OpenClaw Agent Gateway
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # DB schema init — runs once per stack start (idempotent CREATE IF NOT EXISTS)
+  openclaw-db-init:
+    image: postgres:15-alpine
+    container_name: harvis-openclaw-db-init
+    restart: "no"
+    command: >
+      sh -c "
+        echo 'Waiting for PostgreSQL...' &&
+        until pg_isready -h pgsql -U pguser -d database; do
+          echo 'PostgreSQL not ready, retrying in 2s...'; sleep 2;
+        done &&
+        echo 'Creating OpenClaw tables...' &&
+        psql postgresql://pguser:pgpassword@pgsql:5432/database <<'SQL'
+          CREATE TABLE IF NOT EXISTS openclaw_sessions (
+            id           SERIAL PRIMARY KEY,
+            session_key  TEXT UNIQUE NOT NULL,
+            agent_id     TEXT NOT NULL,
+            display_name TEXT,
+            model_id     TEXT,
+            created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            tokens_in    INTEGER DEFAULT 0,
+            tokens_out   INTEGER DEFAULT 0,
+            cost_usd     NUMERIC(12, 8) DEFAULT 0,
+            metadata     JSONB DEFAULT '{}'
+          );
+          CREATE TABLE IF NOT EXISTS openclaw_messages (
+            id           SERIAL PRIMARY KEY,
+            session_key  TEXT NOT NULL REFERENCES openclaw_sessions(session_key),
+            msg_id       TEXT NOT NULL,
+            role         TEXT NOT NULL,
+            content      JSONB NOT NULL,
+            metadata     JSONB DEFAULT '{}',
+            created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+          );
+          CREATE INDEX IF NOT EXISTS idx_oc_sessions_agent
+            ON openclaw_sessions(agent_id);
+          CREATE INDEX IF NOT EXISTS idx_oc_sessions_updated
+            ON openclaw_sessions(updated_at);
+          CREATE INDEX IF NOT EXISTS idx_oc_messages_session
+            ON openclaw_messages(session_key, created_at);
+        SQL
+        echo 'OpenClaw schema ready!'
+      "
+    depends_on:
+      pgsql:
+        condition: service_healthy
+    networks:
+      - openclaw-internal
+
+  # OpenClaw agent gateway — isolated agent backend for Harvis Workspaces + Discord.
+  # NO ports exposed to host — only reachable from backend via openclaw-internal.
+  # Discord channel driver connects outbound to Discord gateway (port 443).
+  openclaw:
+    image: dulc3/openclaw:latest
+    container_name: harvis-openclaw
+    restart: unless-stopped
+    user: "1000:1000"
+    environment:
+      HOME: /home/node
+      NODE_ENV: production
+      TERM: xterm-256color
+      OPENCLAW_STATE_DIR: /home/node/.openclaw
+      OPENCLAW_GATEWAY_TOKEN: "${OPENCLAW_GATEWAY_TOKEN}"
+      OLLAMA_API_KEY: "ollama-local"
+      DATABASE_URL: "postgresql://pguser:pgpassword@pgsql:5432/database"
+      DISCORD_BOT_TOKEN: "${DISCORD_BOT_TOKEN:-}"
+      GH_TOKEN: "${HARVIS_GITHUB_TOKEN:-}"
+      GH_USER: "${HARVIS_GITHUB_USER:-}"
+      GH_EMAIL: "${HARVIS_GITHUB_EMAIL:-}"
+    volumes:
+      - openclaw-data:/home/node/.openclaw
+      - ./openclaw/config/openclaw.json:/home/node/.openclaw/openclaw.json:ro
+      - ./openclaw/skills:/skills:ro
+    command:
+      - node
+      - openclaw.mjs
+      - gateway
+      - --bind
+      - lan
+      - --port
+      - "18789"
+      - --allow-unconfigured
+    depends_on:
+      pgsql:
+        condition: service_healthy
+      openclaw-db-init:
+        condition: service_completed_successfully
+      ollama:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 18789 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+    networks:
+      - openclaw-internal
 
   # ═══════════════════════════════════════════════════════════════════════════
   # Open Notebook Services
@@ -365,6 +476,9 @@ services:
 networks:
   ollama-n8n-network:
     external: true
+  openclaw-internal:
+    driver: bridge
+    internal: true
 
 volumes:
   ollama-models:
@@ -379,3 +493,4 @@ volumes:
   tts_models:
   tts_rvc_models:
   tts_rvc_assets:
+  openclaw-data:

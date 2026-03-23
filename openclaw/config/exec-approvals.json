@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "defaults": {
+    "security": "full",
+    "ask": "off",
+    "askFallback": "deny",
+    "autoAllowSkills": true
+  }
+}
