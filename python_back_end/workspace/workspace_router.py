@@ -253,10 +253,10 @@ async def _db_save_event(pool, workspace_id: str, seq: int, event: OpenClawEvent
         return
     try:
         payload: dict = {}
-        for attr in ("content", "tool", "args", "output", "success", "message", "summary"):
-            val = getattr(event, attr, None)
+        for key in ("content", "tool", "args", "output", "success", "message", "summary", "fix_hint"):
+            val = event.data.get(key)
             if val is not None:
-                payload[attr] = val
+                payload[key] = val
 
         async with pool.acquire() as conn:
             await conn.execute(
