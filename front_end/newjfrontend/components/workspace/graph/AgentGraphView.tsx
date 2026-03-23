@@ -19,6 +19,7 @@ import { AgentNode } from './AgentNode';
 import { useAgentData } from '../../../hooks/useAgentData';
 import { useAgentStream } from '../../../hooks/useAgentStream';
 import { useWorkspaceAgentGraph } from '../../../hooks/useWorkspaceAgentGraph';
+import { useOpenClawStore } from '../../../stores/openclawStore';
 import { AgentNodeData } from '../../../types/agent-graph';
 
 const nodeTypes = { agentNode: AgentNode } as unknown as NodeTypes;
@@ -45,6 +46,9 @@ function AgentGraphWorkspaceStore({
   onAgentSelect,
 }: Omit<AgentGraphViewProps, 'mode' | 'token' | 'wsUrl'>) {
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
+  const activeModelLabel = useOpenClawStore(
+    (s) => s.workspaceModelName || s.workspaceModel
+  );
 
   const { nodes: agentNodes, edges: agentEdges, agentCount, runningCount } =
     useWorkspaceAgentGraph();
@@ -92,6 +96,7 @@ function AgentGraphWorkspaceStore({
         <span className={`w-2 h-2 rounded-full ${runningCount > 0 ? 'bg-green-400 animate-pulse' : 'bg-gray-500'}`} />
         {agentCount} {agentCount === 1 ? 'agent' : 'agents'}
         {runningCount > 0 && ` · ${runningCount} running`}
+        {activeModelLabel && ` · ${activeModelLabel}`}
       </div>
       <ReactFlow
         nodes={nodes}

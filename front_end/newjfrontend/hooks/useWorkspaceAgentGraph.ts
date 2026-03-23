@@ -31,12 +31,15 @@ function labelToId(label: string): string {
  */
 export function useWorkspaceAgentGraph(): WorkspaceAgentGraph {
   const logEvents = useOpenClawStore((s) => s.logEvents);
+  const workspaceModel = useOpenClawStore((s) => s.workspaceModel);
+  const workspaceModelName = useOpenClawStore((s) => s.workspaceModelName);
 
   return useMemo(() => {
     const nodeMap = new Map<string, AgentNode>();
     const edgeSet = new Set<string>();
     const edges: AgentConnection[] = [];
     let prevAgentId: string | null = null;
+    const activeModel = workspaceModelName || workspaceModel;
 
     for (const evt of logEvents) {
       const label = evt.agent_label ?? 'Agent';
@@ -50,7 +53,7 @@ export function useWorkspaceAgentGraph(): WorkspaceAgentGraph {
           label,
           type,
           status: 'running',
-          model: 'harvis-proxy/kimi-k2.5',
+          model: activeModel,
           subAgentCount: 0,
           startedAt: new Date(evt.timestamp).toISOString(),
         };
@@ -126,5 +129,5 @@ export function useWorkspaceAgentGraph(): WorkspaceAgentGraph {
     const runningCount = nodes.filter((n) => n.status === 'running').length;
 
     return { nodes, edges, agentCount: nodes.length, runningCount };
-  }, [logEvents]);
+  }, [logEvents, workspaceModel, workspaceModelName]);
 }
