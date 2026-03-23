@@ -48,20 +48,36 @@ spec:
           command: ['sh', '-c']
           args:
             - |
-              DEST=/models-cache/gguf/Qwen3.5-27B.Q4_K_M.gguf
-              if [ -f "$DEST" ]; then
-                echo "✅ GGUF already cached at $DEST, skipping download"
-                exit 0
-              fi
               mkdir -p /models-cache/gguf
-              echo "Downloading Qwen3.5-27B.Q4_K_M.gguf (~16.5GB)..."
               apk add --no-cache curl
-              curl -L --fail --show-error \
-                -H "Authorization: Bearer ${HF_TOKEN}" \
-                -o "$DEST.tmp" \
-                "https://huggingface.co/Jackrong/Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled-GGUF/resolve/main/Qwen3.5-27B.Q4_K_M.gguf"
-              mv "$DEST.tmp" "$DEST"
-              echo "✅ Download complete: $(du -h $DEST | cut -f1)"
+
+              # Main model: Qwen3.5-27B UD-Q4_K_XL (~17.6GB) — unsloth imatrix-optimized
+              DEST=/models-cache/gguf/Qwen3.5-27B-UD-Q4_K_XL.gguf
+              if [ -f "$DEST" ]; then
+                echo "✅ Main GGUF already cached at $DEST, skipping"
+              else
+                echo "Downloading Qwen3.5-27B-UD-Q4_K_XL.gguf (~17.6GB)..."
+                curl -L --fail --show-error \
+                  -H "Authorization: Bearer ${HF_TOKEN}" \
+                  -o "$DEST.tmp" \
+                  "https://huggingface.co/unsloth/Qwen3.5-27B-GGUF/resolve/main/Qwen3.5-27B-UD-Q4_K_XL.gguf"
+                mv "$DEST.tmp" "$DEST"
+                echo "✅ Main model download complete: $(du -h $DEST | cut -f1)"
+              fi
+
+              # Vision projector: F16 (~928MB) — full precision for best visual detail
+              MMPROJ=/models-cache/gguf/Qwen3.5-27B-mmproj-F16.gguf
+              if [ -f "$MMPROJ" ]; then
+                echo "✅ Vision projector already cached at $MMPROJ, skipping"
+              else
+                echo "Downloading mmproj-F16.gguf (~928MB)..."
+                curl -L --fail --show-error \
+                  -H "Authorization: Bearer ${HF_TOKEN}" \
+                  -o "$MMPROJ.tmp" \
+                  "https://huggingface.co/unsloth/Qwen3.5-27B-GGUF/resolve/main/mmproj-F16.gguf"
+                mv "$MMPROJ.tmp" "$MMPROJ"
+                echo "✅ Vision projector download complete: $(du -h $MMPROJ | cut -f1)"
+              fi
           env:
             - name: HF_TOKEN
               valueFrom:
@@ -197,37 +213,36 @@ spec:
             timeoutSeconds: 5
             failureThreshold: 3
 
-        # llama.cpp server — Qwen3.5-27B Q4_K_M on RTX 5090 (32GB)
+        # llama.cpp server — Qwen3.5-27B UD-Q4_K_XL + Vision on RTX 5090 (32GB)
         #
         # Why llama.cpp instead of SGLang:
         #   SGLang blocked by Marlin sm_120 (Blackwell) kernel bug — all INT4/AWQ formats
         #   silently corrupt weights or OOM. fp8 runtime quant uses ~27GB leaving no KV room.
         #   llama.cpp uses its own CUDA GEMM path (not Marlin) → works on sm_120 natively.
-        #   Ollama already confirmed Qwen3.5-27B Q4_K_M works on this GPU via llama.cpp.
         #
-        # Model: Qwen3.5-27B Q4_K_M GGUF
-        #   ~15GB on disk, ~15GB VRAM → leaves ~16GB free for KV + mamba SSM state
+        # Model: unsloth/Qwen3.5-27B-GGUF  UD-Q4_K_XL
+        #   ~17.6GB on disk. Unsloth UD = imatrix-optimized dynamic quantization.
+        #   Significantly better long-context stability and coding vs standard Q4_K_M.
+        #   Base model (no distillation) — native vision support preserved.
+        #   ~17.6GB VRAM → leaves ~14GB free for KV + mamba SSM state.
+        #
+        # Vision: mmproj-F16.gguf (~928MB)
+        #   F16 projector = maximum visual fidelity. Loaded via --mmproj.
+        #   Enables /v1/chat/completions multimodal requests with image_url content blocks.
         #
         # Context: 262144 (262K native max)
-        #   No YaRN — staying within native context avoids RoPE extrapolation CPU overhead.
+        #   No YaRN — staying within native context avoids RoPE extrapolation overhead.
         #   KV for hybrid model — llama.cpp only allocates KV for the 16 full-attention
         #   layers (not the 48 GDN/SSM layers) → efficient KV usage.
-        #   Estimated KV at 262K q4_0: ~1.0GB (vs ~2.0GB at 512K)
+        #   At 262K + q4_0 KV: ~1.0GB — plenty of headroom for a full vibe coding session.
         #
         # --flash-attn: required for long context efficiency on sm_120
-        # -ngl 99: all layers on GPU (model fits at ~15GB, ~16GB headroom remaining)
+        # -ngl 99: all layers on GPU
         # --parallel 1: single slot (single user system, avoids KV multiplication)
         # --cache-type-k q4_0 / --cache-type-v q4_0: quantized KV → minimal KV footprint
         #
-        # Model: Jackrong/Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled-GGUF  Q4_K_M
-        #   Dense 27B (NOT MoE) — repo card: 16.5GB VRAM at Q4_K_M, 29-35 tok/s, 262K ctx.
-        #   SGLang previously OOM'd loading this as qwen2_moe — that was a SGLang mis-detection
-        #   bug, not the model's actual architecture. llama.cpp GGUF loads correctly.
-        #   LLAMA_CACHE env points to PVC so model is cached across pod restarts.
-        #
         # API compatibility: llama-server exposes OpenAI-compatible /v1/chat/completions
-        #   and /v1/completions at port 8080. Backend LLAMA_URL=http://localhost:8080/v1
-        #   already points here — no backend changes needed.
+        #   at port 8080. Backend LLAMA_URL=http://localhost:8080/v1 points here already.
         - name: llama-cpp
           image: ghcr.io/ggml-org/llama.cpp:server-cuda
           imagePullPolicy: Always
@@ -247,7 +262,9 @@ spec:
           args:
             # Model loaded from PVC (downloaded by download-gguf init container)
             - "-m"
-            - "/models-cache/gguf/Qwen3.5-27B.Q4_K_M.gguf"
+            - "/models-cache/gguf/Qwen3.5-27B-UD-Q4_K_XL.gguf"
+            - "--mmproj"
+            - "/models-cache/gguf/Qwen3.5-27B-mmproj-F16.gguf"
             - "--alias"
             - "qwen3.5-27b"
             - "--host"
@@ -256,12 +273,12 @@ spec:
             - "8080"
             # Context and GPU
             - "--ctx-size"
-            - "262144"   # 262K native max — no YaRN needed, avoids extrapolation CPU overhead
+            - "262144"   # 262K native max — no YaRN needed; ~6hr vibe coding session headroom
             - "-ngl"
             - "99"          # all layers on GPU
             - "--flash-attn"
             - "on"
-            # Parallel slots — at native 262K ctx, single slot is fine for this system.
+            # Parallel slots — single user system, single slot avoids KV multiplication
             - "--parallel"
             - "1"
             # KV cache quantization — q4_0 at 262K × 16 attn layers ≈ 1.0GB
@@ -269,9 +286,7 @@ spec:
             - "q4_0"
             - "--cache-type-v"
             - "q4_0"
-            # No --chat-template: use template embedded in GGUF metadata.
-            # Jackrong's distilled model has a custom template — overriding with "qwen"
-            # corrupts conversation structure → hallucinated questions, language switches.
+            # No --chat-template: use template embedded in GGUF metadata (standard qwen3)
           volumeMounts:
             - name: ml-models-cache
               mountPath: /models-cache
