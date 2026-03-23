@@ -84,7 +84,8 @@ async def stream_kimi_workspace(
     """
     if not api_key:
         yield OpenClawEvent("error", {
-            "message": "Kimi K2.5 API key not configured. Please add your Moonshot API key in Settings."
+            "message": "Kimi K2.5 API key not configured. Please add your Moonshot API key in Settings.",
+            "fix_hint": "Add your Moonshot API key in Settings -> Workspace, or set MOONSHOT_API_KEY in your environment.",
         })
         return
 
@@ -108,7 +109,10 @@ async def stream_kimi_workspace(
 
     except Exception as exc:
         logger.error("kimi_workspace: stream error: %s", exc)
-        yield OpenClawEvent("error", {"message": f"Kimi K2.5 error: {exc}"})
+        yield OpenClawEvent("error", {
+            "message": f"Kimi K2.5 error: {exc}",
+            "fix_hint": "Check your API key is valid and Moonshot's API is reachable. See https://platform.moonshot.cn for status.",
+        })
 
 
 async def stream_ollama_cloud_workspace(
@@ -125,7 +129,8 @@ async def stream_ollama_cloud_workspace(
     """
     if not _EXTERNAL_OLLAMA_URL:
         yield OpenClawEvent("error", {
-            "message": "External Ollama URL not configured (EXTERNAL_OLLAMA_URL missing)."
+            "message": "External Ollama URL not configured (EXTERNAL_OLLAMA_URL missing).",
+            "fix_hint": "Set the EXTERNAL_OLLAMA_URL environment variable to your cloud Ollama endpoint.",
         })
         return
 
@@ -151,7 +156,8 @@ async def stream_ollama_cloud_workspace(
                     err = (await resp.aread()).decode(errors="replace")[:200]
                     logger.error("ollama_cloud_workspace: HTTP %s: %s", resp.status_code, err)
                     yield OpenClawEvent("error", {
-                        "message": f"Cloud Ollama error {resp.status_code}: {err}"
+                        "message": f"Cloud Ollama error {resp.status_code}: {err}",
+                        "fix_hint": "Check EXTERNAL_OLLAMA_URL is correct and the model is available on the remote instance.",
                     })
                     return
 
@@ -177,7 +183,10 @@ async def stream_ollama_cloud_workspace(
 
     except Exception as exc:
         logger.error("ollama_cloud_workspace: stream error: %s", exc)
-        yield OpenClawEvent("error", {"message": f"Cloud Ollama error: {exc}"})
+        yield OpenClawEvent("error", {
+            "message": f"Cloud Ollama error: {exc}",
+            "fix_hint": "Check your cloud Ollama instance is running and reachable. Verify EXTERNAL_OLLAMA_URL and EXTERNAL_OLLAMA_API_KEY.",
+        })
 
 
 async def stream_local_ollama_workspace(

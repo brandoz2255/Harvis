@@ -431,7 +431,10 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
         terminal_status = "error"
         final_error = str(exc)
         ws["status"] = "error"
-        err_event = OpenClawEvent("error", {"message": str(exc)})
+        err_event = OpenClawEvent("error", {
+            "message": str(exc),
+            "fix_hint": "An unexpected error occurred in the workspace background task. Check backend logs.",
+        })
         await _db_save_event(pool, workspace_id, seq, err_event)
         await queue.put((seq, err_event))
         seq += 1

@@ -361,7 +361,10 @@ class OpenClawClient:
             self._ws = await self._connect()
         except Exception as e:
             logger.error("[workspace:%s] Failed to connect to OpenClaw: %s", self.workspace_id, e)
-            yield OpenClawEvent("error", {"message": f"Could not connect to workspace backend: {e}"})
+            yield OpenClawEvent("error", {
+                "message": f"Could not connect to workspace backend: {e}",
+                "fix_hint": "The OpenClaw container may not be running. Check `docker compose ps` or `kubectl get pods -n ai-agents`.",
+            })
             return
 
         # ── Post-connect handshake log ────────────────────────────────────────
@@ -492,7 +495,10 @@ class OpenClawClient:
                     if not msg.get("ok"):
                         err = msg.get("error", {}).get("message", "Unknown error")
                         logger.error("[workspace:%s] RPC error: %s", self.workspace_id, err)
-                        yield OpenClawEvent("error", {"message": err})
+                        yield OpenClawEvent("error", {
+                            "message": err,
+                            "fix_hint": "An RPC error occurred in the OpenClaw gateway. Check the OpenClaw container logs.",
+                        })
                         break
                     continue
 
@@ -546,7 +552,10 @@ class OpenClawClient:
 
                     elif state == "error":
                         err = payload.get("errorMessage", "OpenClaw agent error")
-                        yield OpenClawEvent("error", {"message": err})
+                        yield OpenClawEvent("error", {
+                            "message": err,
+                            "fix_hint": "The OpenClaw agent encountered an error. Check model availability and Ollama logs.",
+                        })
                         break
 
                     # "partial" state — OpenClaw sends the FULL accumulated text each
@@ -569,7 +578,10 @@ class OpenClawClient:
 
         except WebSocketException as e:
             logger.error("[workspace:%s] WebSocket error: %s", self.workspace_id, e)
-            yield OpenClawEvent("error", {"message": f"Workspace connection error: {e}"})
+            yield OpenClawEvent("error", {
+                "message": f"Workspace connection error: {e}",
+                "fix_hint": "WebSocket connection to OpenClaw failed. The container may have restarted. Try again.",
+            })
 
         finally:
             await self.close()
