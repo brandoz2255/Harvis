@@ -34,6 +34,7 @@ import time
 import uuid
 from typing import Optional
 
+import httpx as _httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -45,6 +46,136 @@ from .task_detector import detect_workspace_task
 logger = logging.getLogger(__name__)
 
 workspace_router = APIRouter(prefix="/api/workspace", tags=["workspace"])
+
+# ─── Provider probe URLs (read once at module load) ──────────────────────────
+_LOCAL_OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
+_EXTERNAL_OLLAMA_URL = os.getenv("EXTERNAL_OLLAMA_URL", "")
+_EXTERNAL_OLLAMA_API_KEY = os.getenv("EXTERNAL_OLLAMA_API_KEY", "")
+_MOONSHOT_API_KEY = os.getenv("MOONSHOT_API_KEY", "")
+_NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
+
+
+# ─── Provider probe functions ────────────────────────────────────────────────
+
+async def _probe_local_ollama() -> dict:
+    """Ping local Ollama and list available models."""
+    base = _LOCAL_OLLAMA_URL.rstrip("/")
+    tags_url = base.replace("/v1", "") + "/api/tags" if "/v1" in base else f"{base}/api/tags"
+    try:
+        async with _httpx.AsyncClient(timeout=_httpx.Timeout(5.0)) as client:
+            resp = await client.get(tags_url)
+        if resp.status_code == 200:
+            data = resp.json()
+            models = [m["name"] for m in data.get("models", [])]
+            return {
+                "id": "local",
+                "label": "Local Ollama",
+                "status": "online" if models else "online_no_models",
+                "models": models,
+                "reason": None if models else "Ollama is running but no models are pulled. Run: ollama pull <model>",
+            }
+    except Exception as exc:
+        logger.debug("Local Ollama probe failed: %s", exc)
+    return {
+        "id": "local",
+        "label": "Local Ollama",
+        "status": "offline",
+        "models": [],
+        "reason": "Local Ollama is not reachable. Ensure Ollama is running (ollama serve) or the OLLAMA_URL env var is correct.",
+    }
+
+
+async def _probe_kimi(pool, user_id: int) -> dict:
+    """Check Moonshot API key -- per-user DB row first, then env var."""
+    has_key = bool(_MOONSHOT_API_KEY)
+
+    if not has_key and pool:
+        try:
+            from main import get_user_api_key
+            config = await get_user_api_key(pool, user_id, "moonshot")
+            if config and config.get("api_key"):
+                has_key = True
+        except Exception:
+            pass
+
+    if has_key:
+        return {
+            "id": "kimi",
+            "label": "Kimi K2.5",
+            "description": "Moonshot API",
+            "status": "online",
+            "models": ["kimi-k2.5"],
+            "reason": None,
+        }
+    return {
+        "id": "kimi",
+        "label": "Kimi K2.5",
+        "description": "Moonshot API",
+        "status": "no_key",
+        "models": [],
+        "reason": "No Moonshot API key found. Add one in Settings or set MOONSHOT_API_KEY env var.",
+    }
+
+
+def _probe_nvidia() -> dict:
+    """Check NVIDIA NIM API key."""
+    if _NVIDIA_API_KEY:
+        return {
+            "id": "nvidia-kimi",
+            "label": "Kimi K2.5 (NVIDIA NIM)",
+            "description": "NVIDIA NIM",
+            "status": "online",
+            "models": ["nvidia-kimi"],
+            "reason": None,
+        }
+    return {
+        "id": "nvidia-kimi",
+        "label": "Kimi K2.5 (NVIDIA NIM)",
+        "description": "NVIDIA NIM",
+        "status": "no_key",
+        "models": [],
+        "reason": "NVIDIA_API_KEY not configured.",
+    }
+
+
+async def _probe_cloud_ollama() -> dict:
+    """Probe external/cloud Ollama instance."""
+    if not _EXTERNAL_OLLAMA_URL:
+        return {
+            "id": "cloud-ollama",
+            "label": "Cloud Ollama",
+            "status": "offline",
+            "models": [],
+            "reason": "EXTERNAL_OLLAMA_URL not configured.",
+        }
+    try:
+        headers: dict[str, str] = {}
+        if _EXTERNAL_OLLAMA_API_KEY:
+            headers["Authorization"] = f"Bearer {_EXTERNAL_OLLAMA_API_KEY}"
+        async with _httpx.AsyncClient(timeout=_httpx.Timeout(5.0)) as client:
+            resp = await client.get(
+                f"{_EXTERNAL_OLLAMA_URL.rstrip('/')}/api/tags",
+                headers=headers,
+            )
+        if resp.status_code == 200:
+            data = resp.json()
+            models = [m["name"] for m in data.get("models", [])]
+            return {
+                "id": "cloud-ollama",
+                "label": "Cloud Ollama",
+                "status": "online" if models else "online_no_models",
+                "models": models,
+                "reason": None if models else "Cloud Ollama reachable but no models available.",
+            }
+    except Exception as exc:
+        logger.debug("Cloud Ollama probe failed: %s", exc)
+    return {
+        "id": "cloud-ollama",
+        "label": "Cloud Ollama",
+        "status": "offline",
+        "models": [],
+        "reason": f"Could not reach {_EXTERNAL_OLLAMA_URL}. Check EXTERNAL_OLLAMA_URL and network.",
+    }
 
 # ─── In-memory workspace registry ─────────────────────────────────────────────
 # Maps workspace_id → {client, status, task_brief, session_id, ...}
@@ -373,6 +504,24 @@ async def suggest_workspace(
 ):
     suggestion = await detect_workspace_task(req.chat_history)
     return suggestion.to_dict()
+
+
+@workspace_router.get("/providers")
+async def list_providers(
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """
+    Probe all configured LLM providers and return their availability.
+    Called by the frontend on mount to populate the workspace model selector.
+    """
+    pool = getattr(request.app.state, "pg_pool", None)
+    providers = []
+    providers.append(await _probe_local_ollama())
+    providers.append(await _probe_kimi(pool, current_user["id"]))
+    providers.append(_probe_nvidia())
+    providers.append(await _probe_cloud_ollama())
+    return {"providers": providers}
 
 
 @workspace_router.post("/launch")
