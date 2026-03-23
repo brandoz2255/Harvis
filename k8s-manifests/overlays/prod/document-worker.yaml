@@ -59,7 +59,7 @@ spec:
               value: "http://harvis-ai-merged-backend:11434"
 
             - name: BACKEND_URL
-              value: "http://harvis-ai-backend.ai-agents.svc.cluster.local:8000"
+              value: "http://harvis-ai-merged-backend.ai-agents.svc.cluster.local:8000"
 
             # Output directory for generated documents
             - name: ARTIFACT_STORAGE_DIR

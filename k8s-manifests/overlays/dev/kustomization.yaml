@@ -14,7 +14,7 @@ resources:
 # Image tag updated by ci_pipeline.sh dev step — do not edit manually.
 images:
   - name: dulc3/jarvis-backend
-    newTag: dev-1b9e886  # ci: dev image tag
+    newTag: dev-cd4b93b  # ci: dev image tag
 
 commonLabels:
   environment: dev
