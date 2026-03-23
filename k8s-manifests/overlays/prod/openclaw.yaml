@@ -48,7 +48,7 @@ spec:
 ---
 # ConfigMap: openclaw.json config file (mounted read-only)
 # Key security setting: models.mode = "replace" so NO cloud provider fallback exists.
-# channels is intentionally empty — Harvis backend is the only client via WebSocket.
+# channels.discord enables the Discord channel driver — bot responds to @mentions and DMs.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -218,10 +218,10 @@ data:
       },
       "channels": {
         "discord": {
-          "enabled": true,
           "token": "${DISCORD_BOT_TOKEN}",
-          "dmPolicy": "allowlist",
-          "allowFrom": ["783435788431261777"]
+          "allowedChannels": [],
+          "allowDMs": true,
+          "mentionOnly": true
         }
       }
     }
