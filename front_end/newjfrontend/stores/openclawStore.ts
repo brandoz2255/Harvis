@@ -63,7 +63,7 @@ export interface WorkspaceSuggestion {
   task_type_label: string
   task_brief: string
   reason: string
-  model?: 'kimi' | 'nvidia-kimi' | 'qwen3'  // preferred model from LLM signal
+  model?: 'local' | 'kimi' | 'nvidia-kimi' | 'cloud-ollama'  // preferred model from LLM signal
 }
 
 // ─── Kubectl Approval ─────────────────────────────────────────────────────────
@@ -145,7 +145,8 @@ interface OpenClawState {
   suggestion: WorkspaceSuggestion | null
   workspaceId: string | null
   workspaceSessionId: string | null   // persists across launches for same user (resumable)
-  workspaceModel: 'kimi' | 'nvidia-kimi' | 'qwen3'
+  workspaceModel: 'local' | 'kimi' | 'nvidia-kimi' | 'cloud-ollama'
+  workspaceModelName: string
   logEvents: WorkspaceLogEvent[]
   finalSummary: string
   sseAbortController: AbortController | null
@@ -182,7 +183,8 @@ interface OpenClawState {
   setSuggestion: (suggestion: WorkspaceSuggestion | null) => void
   setWorkspaceId: (id: string | null) => void
   setWorkspaceSessionId: (id: string | null) => void
-  setWorkspaceModel: (model: 'kimi' | 'nvidia-kimi' | 'qwen3') => void
+  setWorkspaceModel: (model: 'local' | 'kimi' | 'nvidia-kimi' | 'cloud-ollama') => void
+  setWorkspaceModelName: (name: string) => void
   addLogEvent: (event: Omit<WorkspaceLogEvent, 'id' | 'timestamp'>) => void
   clearLogEvents: () => void
   setFinalSummary: (summary: string) => void
@@ -220,7 +222,8 @@ export const useOpenClawStore = create<OpenClawState>()(
     suggestion: null,
     workspaceId: null,
     workspaceSessionId: null,
-    workspaceModel: 'kimi' as const,
+    workspaceModel: 'local' as const,
+    workspaceModelName: '',
     logEvents: [],
     finalSummary: '',
     sseAbortController: null,
@@ -342,6 +345,8 @@ export const useOpenClawStore = create<OpenClawState>()(
 
     setWorkspaceModel: (model) => set({ workspaceModel: model }),
 
+    setWorkspaceModelName: (name) => set({ workspaceModelName: name }),
+
     addLogEvent: (event) =>
       set((state) => {
         state.logEvents.push({
@@ -367,7 +372,8 @@ export const useOpenClawStore = create<OpenClawState>()(
         state.isChatMinimized = false
         state.suggestion = null
         state.workspaceId = null
-        state.workspaceModel = 'kimi'
+        state.workspaceModel = 'local'
+        state.workspaceModelName = ''
         state.workspaceSessionId = null   // always fresh session on next launch
         state.logEvents = []
         state.finalSummary = ''
