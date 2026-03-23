@@ -1,17 +1,18 @@
 'use client'
 
 import { useState, useEffect, useRef } from 'react'
-import { Zap, X, Loader2, ChevronRight, Cpu } from 'lucide-react'
+import { Zap, X, Loader2, ChevronRight, Cpu, WifiOff, KeyRound } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { useOpenClawStore } from '@/stores/openclawStore'
 import { useChatHistoryStore } from '@/stores/chatHistoryStore'
 import { cn } from '@/lib/utils'
 
-const MODEL_OPTIONS = [
-  { value: 'kimi' as const, label: 'Kimi K2.5', description: 'Moonshot (fast)' },
-  { value: 'nvidia-kimi' as const, label: 'Kimi K2.5 NVIDIA', description: 'NVIDIA NIM (thinking mode)' },
-  { value: 'qwen3' as const, label: 'Qwen3 235B', description: 'Cloud Ollama' },
-]
+interface ProviderOption {
+  value: 'local' | 'kimi' | 'nvidia-kimi' | 'cloud-ollama'
+  label: string
+  description: string
+  status: string
+}
 
 const TASK_TYPE_ICONS: Record<string, string> = {
   code: '⌨️',
@@ -33,7 +34,9 @@ export function WorkspaceSuggestionBanner({ chatHistory }: WorkspaceSuggestionBa
   const {
     suggestion,
     workspaceModel,
+    workspaceModelName,
     setWorkspaceModel,
+    setWorkspaceModelName,
     setSuggestion,
     setWorkspaceId,
     setWorkspaceSessionId,
@@ -50,8 +53,35 @@ export function WorkspaceSuggestionBanner({ chatHistory }: WorkspaceSuggestionBa
   const [launching, setLaunching] = useState(false)
   const [launchError, setLaunchError] = useState<string | null>(null)
   const [countdown, setCountdown] = useState<number | null>(null)
+  const [modelOptions, setModelOptions] = useState<ProviderOption[]>([])
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const hasSetModelRef = useRef(false)
+
+  // Fetch available providers on mount
+  useEffect(() => {
+    const fetchProviders = async () => {
+      try {
+        const token = localStorage.getItem('token') || ''
+        const res = await fetch('/api/workspace/providers', {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        if (res.ok) {
+          const data = await res.json()
+          const opts: ProviderOption[] = (data.providers ?? []).map((p: { id: string; label: string; description?: string; status: string }) => ({
+            value: p.id as ProviderOption['value'],
+            label: p.label,
+            description: p.description || '',
+            status: p.status,
+          }))
+          setModelOptions(opts)
+        }
+      } catch {
+        // Fallback: show local only
+        setModelOptions([{ value: 'local', label: 'Local Ollama', description: 'Local', status: 'online' }])
+      }
+    }
+    fetchProviders()
+  }, [])
 
   // Pre-select model from LLM signal
   useEffect(() => {
@@ -137,13 +167,9 @@ export function WorkspaceSuggestionBanner({ chatHistory }: WorkspaceSuggestionBa
         body: JSON.stringify({
           task_brief: suggestion.task_brief,
           chat_history: chatHistory,
-          // Pass the real chat session UUID so the workspace directory is
-          // deterministic and tied to this conversation (not a random ws-* id).
           session_id: currentSession?.id ?? undefined,
-          agent_id: workspaceModel === 'kimi' ? 'kimi'
-                  : workspaceModel === 'qwen3' ? 'qwen3'
-                  : workspaceModel === 'nvidia-kimi' ? 'nvidia-kimi'
-                  : 'kimi',
+          agent_id: workspaceModel,
+          model_name: workspaceModelName,
         }),
       })
 
@@ -250,12 +276,15 @@ export function WorkspaceSuggestionBanner({ chatHistory }: WorkspaceSuggestionBa
           {suggestion.reason}
         </p>
         {/* Model selector */}
-        <div className="flex items-center gap-1 mt-1.5">
+        <div className="flex items-center gap-1 mt-1.5 flex-wrap">
           <Cpu className="h-3 w-3 text-muted-foreground shrink-0" />
-          {MODEL_OPTIONS.map((opt) => (
+          {modelOptions.filter(opt => opt.status === 'online').map((opt) => (
             <button
               key={opt.value}
-              onClick={() => setWorkspaceModel(opt.value)}
+              onClick={() => {
+                setWorkspaceModel(opt.value)
+                setWorkspaceModelName('')
+              }}
               disabled={launching || countdown !== null}
               title={opt.description}
               className={cn(
@@ -265,6 +294,17 @@ export function WorkspaceSuggestionBanner({ chatHistory }: WorkspaceSuggestionBa
                   : 'text-muted-foreground hover:text-foreground hover:bg-white/5',
               )}
             >
+              {opt.label}
+            </button>
+          ))}
+          {modelOptions.filter(opt => opt.status === 'no_key').map((opt) => (
+            <button
+              key={opt.value}
+              disabled
+              title={`${opt.label}: API key not configured`}
+              className="rounded px-2 py-0.5 text-[10px] font-medium text-muted-foreground/50 cursor-not-allowed flex items-center gap-0.5"
+            >
+              <KeyRound className="h-2.5 w-2.5" />
               {opt.label}
             </button>
           ))}
