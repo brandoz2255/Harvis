@@ -31,7 +31,8 @@
       "ollama-local": {
         "api": "openai-completions",
         "baseUrl": "http://ollama:11434/v1",
-        "apiKey": "ollama-local"
+        "apiKey": "ollama-local",
+        "models": []
       },
       "harvis-proxy": {
         "api": "openai-completions",
@@ -116,10 +117,7 @@
   },
   "channels": {
     "discord": {
-      "token": "${DISCORD_BOT_TOKEN}",
-      "allowedChannels": [],
-      "allowDMs": true,
-      "mentionOnly": true
+      "token": "${DISCORD_BOT_TOKEN}"
     }
   }
 }

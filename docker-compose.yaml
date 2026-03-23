@@ -364,7 +364,7 @@ services:
       ollama:
         condition: service_started
     healthcheck:
-      test: ["CMD-SHELL", "nc -z localhost 18789 || exit 1"]
+      test: ["CMD-SHELL", "node -e \"const n=require('net');const c=n.createConnection(18789,'127.0.0.1');c.on('connect',()=>{c.end();process.exit(0)});c.on('error',()=>process.exit(1))\""]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -376,6 +376,7 @@ services:
           cpus: '1.0'
     networks:
       - openclaw-internal
+      - ollama-n8n-network
 
   # ═══════════════════════════════════════════════════════════════════════════
   # Open Notebook Services
