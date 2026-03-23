@@ -41,6 +41,11 @@ from pydantic import BaseModel
 
 from auth_optimized import get_current_user_optimized
 from .openclaw_client import OpenClawClient, OpenClawEvent
+from .kimi_workspace import (
+    stream_kimi_workspace,
+    stream_ollama_cloud_workspace,
+    stream_local_ollama_workspace,
+)
 from .task_detector import detect_workspace_task
 
 logger = logging.getLogger(__name__)
@@ -177,6 +182,19 @@ async def _probe_cloud_ollama() -> dict:
         "reason": f"Could not reach {_EXTERNAL_OLLAMA_URL}. Check EXTERNAL_OLLAMA_URL and network.",
     }
 
+async def _get_kimi_key(pool, user_id: int) -> str:
+    """Return decrypted Moonshot API key -- DB row first, then env var."""
+    if pool:
+        try:
+            from main import get_user_api_key
+            config = await get_user_api_key(pool, user_id, "moonshot")
+            if config and config.get("api_key"):
+                return config["api_key"]
+        except Exception as exc:
+            logger.debug("Failed to fetch Kimi key from DB: %s", exc)
+    return _MOONSHOT_API_KEY
+
+
 # ─── In-memory workspace registry ─────────────────────────────────────────────
 # Maps workspace_id → {client, status, task_brief, session_id, ...}
 # Safe for replicas=1 (Ollama co-location requirement keeps backend single-replica).
@@ -201,6 +219,7 @@ class LaunchRequest(BaseModel):
     chat_history: list[dict]
     session_id: Optional[str] = None
     agent_id: str = "main"
+    model_name: str = ""
 
 
 class WorkspaceStatus(BaseModel):
@@ -307,6 +326,8 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
     client: OpenClawClient = ws["client"]
     task_brief: str = ws["task_brief"]
     chat_history: list[dict] = ws["chat_history"]
+    agent_id: str = ws.get("agent_id", "main")
+    model_name: str = ws.get("model_name", "")
     queue: asyncio.Queue = _workspace_queues[workspace_id]
 
     seq = 0
@@ -315,8 +336,52 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
     final_summary: Optional[str] = None
     final_error: Optional[str] = None
 
+    # ── Select the event stream based on agent_id ────────────────────────────
+    event_stream = None
+
+    if agent_id == "local":
+        event_stream = stream_local_ollama_workspace(task_brief, chat_history, model=model_name)
+
+    elif agent_id == "kimi":
+        api_key = await _get_kimi_key(pool, ws["user_id"])
+        if api_key:
+            event_stream = stream_kimi_workspace(task_brief, chat_history, api_key)
+        else:
+            logger.warning("No Kimi API key for user %s — falling back to local Ollama", ws["user_id"])
+            fallback_event = OpenClawEvent("log", {
+                "message": "Kimi K2.5 API key not found. Falling back to local Ollama.",
+            })
+            await _db_save_event(pool, workspace_id, seq, fallback_event)
+            await queue.put((seq, fallback_event))
+            seq += 1
+            event_stream = stream_local_ollama_workspace(task_brief, chat_history, model=model_name)
+
+    elif agent_id == "nvidia-kimi":
+        nvidia_key = os.getenv("NVIDIA_API_KEY", "")
+        if nvidia_key:
+            event_stream = stream_kimi_workspace(
+                task_brief, chat_history, nvidia_key,
+                api_url="https://integrate.api.nvidia.com/v1",
+            )
+        else:
+            logger.warning("No NVIDIA API key — falling back to local Ollama")
+            fallback_event = OpenClawEvent("log", {
+                "message": "NVIDIA NIM key not found. Falling back to local Ollama.",
+            })
+            await _db_save_event(pool, workspace_id, seq, fallback_event)
+            await queue.put((seq, fallback_event))
+            seq += 1
+            event_stream = stream_local_ollama_workspace(task_brief, chat_history, model=model_name)
+
+    elif agent_id in ("cloud-ollama", "gpt-oss"):
+        event_stream = stream_ollama_cloud_workspace(task_brief, chat_history, model=model_name or "gpt-oss:120b")
+
+    else:
+        # Default: route through OpenClaw WebSocket
+        event_stream = client.stream(task_brief, chat_history)
+
     try:
-        async for event in client.stream(task_brief, chat_history):
+        async for event in event_stream:
             if event.type == "tool_call":
                 tool_call_count += 1
 
@@ -461,6 +526,7 @@ def _start_workspace(
     user_id: int,
     pool,
     started_epoch: float,
+    model_name: str = "",
 ) -> OpenClawClient:
     """
     Register a workspace in memory, create its queue, and start the background task.
@@ -481,6 +547,7 @@ def _start_workspace(
         "user_id": user_id,
         "started_epoch": started_epoch,
         "agent_id": agent_id,
+        "model_name": model_name,
     }
 
     queue: asyncio.Queue = asyncio.Queue()
@@ -541,7 +608,14 @@ async def launch_workspace(
     session_id = req.session_id or f"ws-{workspace_id}"
     task_brief = _resolve_task_brief(req.task_brief, req.chat_history)
     pool = getattr(request.app.state, "pg_pool", None)
-    agent_id = req.agent_id if req.agent_id in ("main", "kimi", "nvidia-kimi", "gpt-oss", "qwen3") else "main"
+
+    # Normalize agent_id — accept legacy 'qwen3' as alias for 'cloud-ollama'
+    agent_id = req.agent_id
+    if agent_id == "qwen3":
+        agent_id = "cloud-ollama"
+    if agent_id not in ("main", "kimi", "nvidia-kimi", "local", "cloud-ollama", "gpt-oss"):
+        agent_id = "local"
+
     started_epoch = time.monotonic()
 
     _start_workspace(
@@ -553,6 +627,7 @@ async def launch_workspace(
         user_id=current_user["id"],
         pool=pool,
         started_epoch=started_epoch,
+        model_name=req.model_name,
     )
 
     try:
