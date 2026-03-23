@@ -30,6 +30,7 @@ import { HarvisClawMascot } from '@/components/mascots'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useOpenClawStore, type WorkspaceLogEvent, type KubectlPendingCommand } from '@/stores/openclawStore'
+import { ModelSelectorDropdown } from './ModelSelectorDropdown'
 import { cn } from '@/lib/utils'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -1093,10 +1094,7 @@ export function WorkspacePanel({ onContinueInChat }: { onContinueInChat?: (summa
               <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
                 Harvis Workspace Control
               </span>
-              <span className="flex items-center gap-1 text-[10px] font-medium text-muted-foreground bg-muted px-1.5 py-0.5 rounded-full border border-border/50">
-                <Cpu className="h-2.5 w-2.5" />
-                {workspaceModel === 'kimi' ? 'Kimi K2.5' : workspaceModel === 'qwen3' ? 'Qwen3 235B' : 'Local'}
-              </span>
+              <ModelSelectorDropdown />
             </div>
             {/* Prominent task title */}
             <p className="text-sm font-semibold text-foreground leading-tight truncate">{taskBrief}</p>
