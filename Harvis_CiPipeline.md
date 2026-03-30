@@ -320,6 +320,27 @@ kubectl get pods -n ai-agents
 kubectl logs -f deployment/harvis-ai-backend -n ai-agents
 ```
 
+### DATABASE_URL Secret Issues
+
+**Problem:** Pod fails with `CreateContainerConfigError` or DB connection errors
+
+**Solution:**
+```bash
+# Check which secret has DATABASE_URL
+kubectl get secrets -n ai-agents -o json | jq -r '.items[] | select(.data["DATABASE_URL"] != null) | .metadata.name'
+
+# Update secret with correct hostname (postgresql://pguser:pgpassword@harvis-ai-pgsql:5432/database)
+kubectl patch secret harvis-backend-env -n ai-agents -p '{"data":{"DATABASE_URL":"<base64-encoded-url>"}}'
+
+# Restart deployment
+kubectl rollout restart deployment/harvis-ai-mcp-rag -n ai-agents
+```
+
+**Note:** 
+- Service hostname should be `harvis-ai-pgsql:5432` not `pgsql:5432`
+- **Secrets are NOT in git** - they're managed separately in K8s cluster
+- Use `kubectl patch secret` for updates, not git commits
+
 ---
 
 ## Agent-Specific Instructions

@@ -12,7 +12,6 @@ resources:
   - openclaw.yaml
   - llama-embed.yaml
   - mcp-rag-server.yaml
-  - secrets/harvis-backend-env.yaml
 
 # Namespace
 namespace: ai-agents
