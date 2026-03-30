@@ -132,7 +132,6 @@ get_input() {
       COMMIT_MSG="$2"
       shift 2
       ;;
-      ;;
     -p|--push)
       PUSH_IMAGES="yes"
       shift
