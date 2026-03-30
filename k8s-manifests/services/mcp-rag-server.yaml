@@ -37,9 +37,9 @@ spec:
               name: harvis-ai-postgresql-secret
               key: DATABASE_URL
         - name: EMBED_QW3_URL
-          value: "http://10.42.2.5:8080"
+          value: "http://harvis-ai-llama-embed:8082"
         - name: EMBED_NOMIC_URL
-          value: "http://10.42.2.5:8081"
+          value: "http://harvis-ai-llama-embed:8081"
         - name: PYTHONPATH
           value: "/app"
         resources:
