@@ -507,6 +507,37 @@ Common fix categories:
 - Docker networking and configuration
 - Frontend-backend communication errors
 - Voice/Audio processing authentication issues
+- **GPU issues (Xid 69, low power mode on laptops)**
+
+### GPU Xid 69 Error (Laptop Low Power Mode)
+
+**CRITICAL**: When embedding pods fail to schedule on dulc3-top (laptop with GTX 1650 Ti):
+
+**Symptoms**:
+```bash
+kubectl get pods -n ai-agents | grep embed
+# harvis-ai-llama-embed-xxxxx  0/2  Pending
+
+kubectl describe pod harvis-ai-llama-embed-xxxxx -n ai-agents
+# Warning: FailedScheduling: 0/7 nodes are available: 1 Insufficient nvidia.com/gpu
+```
+
+**Root Cause**: Laptop GPU enters low power mode → NVIDIA driver marks GPU as unhealthy (Xid 69 error)
+
+**Quick Fix**: See `fixes/gpu-xid-69-low-power-mode-fix.md` for complete steps:
+
+1. **Set laptop to High Performance power mode**
+2. **Restart GPU device plugin**:
+   ```bash
+   kubectl delete pods -n gpu-operator -l name=nvidia-device-plugin-daemonset
+   kubectl delete pods -n kube-system -l name=nvidia-device-plugin-daemonset
+   ```
+3. **Restart embedding deployment**:
+   ```bash
+   kubectl rollout restart deployment harvis-ai-llama-embed -n ai-agents
+   ```
+
+**Prevention**: Keep laptop on power adapter and in High Performance mode when running GPU workloads.
 
 ### Voice Processing Authentication Fix
 
@@ -885,4 +916,98 @@ For backend authentication, also add to Python backend environment:
 
 - both harvis and claudes skills will be in the skills directory from the root of the project its where u guys will see how i want u guys to do things would be great for what we need in this task and these codes in this project
 - Mainly a bunch of skills.md to tell u how to do things and how i want them done as well as workflows 
-- One possible consideration is vectorizing them so there would not need to read where i just prompt and the vectordb pulls the right skillmd to give to the llm would also be nice for now we will integrate it like this 
+- One possible consideration is vectorizing them so there would not need to read where i just prompt and the vectordb pulls the right skillmd to give to the llm would also be nice for now we will integrate it like this
+
+---
+
+## CI Pipeline for LLM Agents
+
+The `ci_pipeline.sh` script is designed to be agent-friendly with CLI flags for full automation.
+
+### Usage for LLM Agents
+
+**Basic Usage (Interactive - Human Only):**
+```bash
+./ci_pipeline.sh
+```
+
+**Full Automation (LLM Agent Mode):**
+```bash
+./ci_pipeline.sh -f <frontend_version> -b <backend_version> -m "<commit_message>" -p
+```
+
+### CLI Flags Reference
+
+| Flag | Short | Description | Example |
+|------|-------|-------------|---------|
+| `--frontend-version` | `-f` | Frontend image tag | `-f v1.2.3` |
+| `--backend-version` | `-b` | Backend image tag | `-b v1.2.3` |
+| `--commit-msg` | `-m` | Custom commit message | `-m "feat: add MCP RAG server"` |
+| `--push` | `-p` | Push images to Docker Hub | `-p` |
+| `--no-git-push` | `-n` | Skip git commit/push | `-n` |
+| `--debug` | `-d` | Enable debug mode | `-d` |
+| `--dry-run` | | Show what would happen | `--dry-run` |
+| `--yes` | `-y` | Skip all prompts | `-y` |
+| `--help` | `-h` | Show help | `-h` |
+
+### Common Agent Workflows
+
+**Build and Deploy with Custom Version:**
+```bash
+./ci_pipeline.sh -f newest -b newest -m "chore: deploy latest build [ci]" -p
+```
+
+**Build Only (No Push):**
+```bash
+./ci_pipeline.sh -f test -b test -n
+```
+
+**Debug Mode (Verbose Output):**
+```bash
+./ci_pipeline.sh -d -f debug -b debug
+```
+
+**Dry Run (Preview Changes):**
+```bash
+./ci_pipeline.sh -f v1.0.0 -b v1.0.0 --dry-run
+```
+
+### Commit Message Convention
+
+Use conventional commits for meaningful history:
+- `feat:` - New features
+- `fix:` - Bug fixes
+- `chore:` - Maintenance (image updates)
+- `docs:` - Documentation changes
+- `refactor:` - Code refactoring
+
+Example:
+```bash
+./ci_pipeline.sh -f v1.2.3 -b v1.2.3 -m "feat: add MCP RAG server for external AI agents" -p
+```
+
+### Images Built
+
+The pipeline builds these images:
+- `dulc3/jarvis-frontend:<VERSION>`
+- `dulc3/jarvis-backend:<VERSION>`
+- `dulc3/harvis-artifact-executor:<VERSION>`
+- `dulc3/harvis-code-executor:<VERSION>`
+- `dulc3/harvis-document-worker:<VERSION>`
+- `dulc3/harvis-tts-worker:<VERSION>` (tagged from backend)
+- **MCP RAG Server** uses `dulc3/jarvis-backend:<VERSION>` (same as backend)
+
+### ArgoCD Integration
+
+1. Images are pushed to Docker Hub (with `-p` flag)
+2. Kustomization files are updated automatically
+3. Changes are committed and pushed to `main` branch
+4. ArgoCD detects changes and auto-deploys within 3 minutes
+
+### Important Notes for Agents
+
+- **MCP RAG Server**: Uses the same backend image (`dulc3/jarvis-backend`)
+- **OpenClaw**: Managed by separate `ci_openclaw_pipeline.sh` script
+- **Git Push**: Requires SSH keys configured (`~/.ssh/id_ed25519`)
+- **Docker Hub Push**: Requires authenticated Docker session
+- **Debug Mode**: Use `-d` flag for troubleshooting failed builds 
