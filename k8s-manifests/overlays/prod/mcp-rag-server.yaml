@@ -73,6 +73,8 @@ metadata:
   namespace: ai-agents
   labels:
     app: harvis-ai-mcp-rag
+  annotations:
+    metallb.universe.tf/address-pool: local-pool
 spec:
   selector:
     app: harvis-ai-mcp-rag
@@ -81,4 +83,5 @@ spec:
     port: 8000
     targetPort: 8000
     protocol: TCP
-  type: ClusterIP
+  type: LoadBalancer
+  loadBalancerIP: 192.168.10.246
