@@ -61,19 +61,21 @@ class VectorDBClient:
                    1 - (embedding <=> $1::{vector_type}) as similarity
             FROM {collection}
         """
-        params = [embedding, top_k]
 
         if source_filter:
             query += " WHERE source = ANY($2)"
-            params.append(source_filter)
 
-        query += f" ORDER BY embedding <=> $1::{vector_type} LIMIT $2"
+        query += f" ORDER BY embedding <=> $1::{vector_type} LIMIT $3"
 
         try:
             async with self._pool.acquire() as conn:
                 # Convert embedding list to string format for pgvector
                 embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
-                rows = await conn.fetch(query, embedding_str, top_k)
+
+                if source_filter:
+                    rows = await conn.fetch(query, embedding_str, source_filter, top_k)
+                else:
+                    rows = await conn.fetch(query, embedding_str, top_k)
                 return [
                     {
                         "text": row["text"],
