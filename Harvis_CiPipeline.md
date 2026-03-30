@@ -1,7 +1,41 @@
 # CI Pipeline Guide for LLM Agents
 
-**Last Updated:** 2026-03-27  
+**Last Updated:** 2026-03-30  
 **Purpose:** Enable LLM agents (like opencode/Claude Code) to automate the Harvis build and deployment pipeline
+
+---
+
+## ⚠️ IMPORTANT: AI Agents Must Use ci_pipeline.sh
+
+**DO NOT manually run docker commands or git commands.**
+
+AI agents should ALWAYS use `ci_pipeline.sh` for:
+- ✅ Building Docker images
+- ✅ Pushing to Docker Hub
+- ✅ Updating K8s manifests
+- ✅ Committing and pushing to GitHub
+- ✅ Triggering ArgoCD deployments
+
+**Why?**
+- Ensures consistent build process
+- Automatically updates all K8s manifests
+- Maintains proper commit history
+- Triggers ArgoCD sync correctly
+- Handles all dependencies automatically
+
+**❌ DON'T DO THIS:**
+```bash
+# WRONG - Manual docker commands
+docker build -t dulc3/jarvis-backend:test .
+docker push dulc3/jarvis-backend:test
+kubectl apply -f k8s-manifests/...
+```
+
+**✅ DO THIS INSTEAD:**
+```bash
+# RIGHT - Use ci_pipeline.sh
+./ci_pipeline.sh -f test -b test -m "feat: my change" -p
+```
 
 ---
 
