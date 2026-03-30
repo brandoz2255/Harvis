@@ -25,9 +25,12 @@ The Harvis MCP RAG server is a FastAPI service that exposes 5 tools for querying
 |----------|-------|
 | **Service Name** | `harvis-ai-mcp-rag` |
 | **Namespace** | `ai-agents` |
-| **Endpoint** | `http://harvis-ai-mcp-rag.ai-agents.svc.cluster.local:8000/mcp` |
+| **Internal Endpoint** | `http://harvis-ai-mcp-rag.ai-agents.svc.cluster.local:8000/mcp` |
+| **LoadBalancer IP** | `192.168.10.246` |
+| **External Endpoint** | `http://192.168.10.246:8000/mcp` |
 | **Protocol** | JSON-RPC 2.0 |
-| **Image** | `harvis-ai-backend:latest` |
+| **Image** | `dulc3/jarvis-backend:v2.34.10` |
+| **Auth** | None (local network only) |
 
 ---
 
@@ -205,7 +208,7 @@ List all available sources and their document counts.
 ### Apply K8s Manifest
 
 ```bash
-kubectl apply -f k8s-manifests/services/mcp-rag-server.yaml -n ai-agents
+kubectl apply -k k8s-manifests/overlays/prod/
 ```
 
 ### Verify Deployment
@@ -215,16 +218,37 @@ kubectl apply -f k8s-manifests/services/mcp-rag-server.yaml -n ai-agents
 kubectl get pods -n ai-agents | grep mcp-rag
 # Expected: harvis-ai-mcp-rag-xxxxx   1/1   Running
 
+# Check LoadBalancer service
+kubectl get svc harvis-ai-mcp-rag -n ai-agents
+# Expected: LoadBalancer   10.43.x.x   192.168.10.246   8000:xxxxx/TCP
+
 # Check logs
 kubectl logs -f deployment/harvis-ai-mcp-rag -n ai-agents
 # Expected startup:
 # Registered 5 tools: ['search_code', 'search_cyber', 'search_linux', 'search_all', 'get_source_list']
 # VectorDB client initialized
-# Embedding client initialized (qwen3: http://10.42.2.5:8080, nomic: http://10.42.2.5:8081)
+# Embedding client initialized (qwen3: http://harvis-ai-llama-embed:8082, nomic: http://harvis-ai-llama-embed:8081)
 # MCP RAG Server started
 ```
 
-### Port-Forward for Testing
+### External Access Test
+
+From your workstation (local network):
+```bash
+curl http://192.168.10.246:8000/health
+```
+
+Expected:
+```json
+{
+  "status": "healthy",
+  "tools": ["search_code", "search_cyber", "search_linux", "search_all", "get_source_list"],
+  "vectordb_connected": true,
+  "embedding_client_ready": true
+}
+```
+
+### Port-Forward for Testing (Alternative)
 
 ```bash
 kubectl port-forward svc/harvis-ai-mcp-rag 8888:8000 -n ai-agents
@@ -273,7 +297,25 @@ curl -X POST http://localhost:8888/mcp/invoke \
 
 ## opencode Configuration
 
+### Option 1: LoadBalancer (Recommended - External Access)
+
 Add to `~/.config/opencode/opencode.json`:
+
+```json
+{
+  "mcp": {
+    "harvis-rag": {
+      "type": "remote",
+      "url": "http://192.168.10.246:8000/sse",
+      "enabled": true
+    }
+  }
+}
+```
+
+**IMPORTANT**: The URL must include `/sse` suffix - opencode's MCP client expects this path for the HTTP+SSE transport protocol.
+
+### Option 2: Internal K8s (If opencode runs in cluster)
 
 ```json
 {
@@ -288,7 +330,14 @@ Add to `~/.config/opencode/opencode.json`:
 }
 ```
 
-For local testing (with port-forward):
+### Option 3: Port-Forward (Local Testing)
+
+First port-forward:
+```bash
+kubectl port-forward svc/harvis-ai-mcp-rag 8888:8000 -n ai-agents
+```
+
+Then configure:
 ```json
 {
   "mcp": {
@@ -456,5 +505,5 @@ kubectl logs -f deployment/harvis-ai-backend -n ai-agents
 
 ---
 
-**Last Updated:** 2026-03-27  
-**Version:** 1.0.0
+**Last Updated:** 2026-03-31  
+**Version:** 1.0.1 (LoadBalancer exposed via metalLB)

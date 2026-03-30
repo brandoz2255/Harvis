@@ -1,0 +1,11 @@
+{
+  "mcp": {
+    "harvis-rag": {
+      "type": "remote",
+      "url": "http://192.168.10.246:8000/mcp",
+      "enabled": true,
+      "timeout": 30000,
+      "description": "Harvis RAG Vector Database - Search code, docs, and Linux commands"
+    }
+  }
+}

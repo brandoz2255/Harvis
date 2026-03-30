@@ -1010,4 +1010,78 @@ The pipeline builds these images:
 - **OpenClaw**: Managed by separate `ci_openclaw_pipeline.sh` script
 - **Git Push**: Requires SSH keys configured (`~/.ssh/id_ed25519`)
 - **Docker Hub Push**: Requires authenticated Docker session
-- **Debug Mode**: Use `-d` flag for troubleshooting failed builds 
+- **Debug Mode**: Use `-d` flag for troubleshooting failed builds
+
+---
+
+## MCP RAG Server (LoadBalancer)
+
+**Status:** Active (exposed via metalLB LoadBalancer)
+
+The MCP RAG server allows external AI agents (opencode/Claude Code) to query the Harvis vector database for semantic search across code, documentation, and Linux commands.
+
+### Server Details
+
+| Property | Value |
+|----------|-------|
+| **LoadBalancer IP** | `192.168.10.246` |
+| **Port** | `8000` |
+| **Endpoint** | `http://192.168.10.246:8000/mcp` |
+| **Namespace** | `ai-agents` |
+| **Auth** | None (local network only) |
+
+### Available Tools
+
+| Tool | Description | Collection |
+|------|-------------|------------|
+| `search_code` | Search code & tech docs | `local_rag_corpus_code` (2560-dim) |
+| `search_cyber` | Search cybersecurity docs | `local_rag_corpus_docs` (768-dim) |
+| `search_linux` | Search Linux commands | `local_rag_corpus_docs` (Red Hat + Arch) |
+| `search_all` | Cross-collection search | Both collections |
+| `get_source_list` | List sources & counts | Metadata |
+
+### opencode Configuration
+
+Add to `~/.config/opencode/opencode.json`:
+
+```json
+{
+  "mcp": {
+    "harvis-rag": {
+      "type": "remote",
+      "url": "http://192.168.10.246:8000/sse",
+      "enabled": true
+    }
+  }
+}
+```
+
+**IMPORTANT**: The URL must include `/sse` suffix for the HTTP+SSE transport protocol.
+
+### Quick Test
+
+```bash
+# Health check
+curl http://192.168.10.246:8000/health
+
+# Test search
+curl -X POST http://192.168.10.246:8000/mcp/invoke \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":"1","method":"tool.invoke","params":{"name":"search_code","args":{"query":"kubernetes deployment","top_k":3}}}'
+```
+
+### K8s Management
+
+```bash
+# Check status
+kubectl get svc harvis-ai-mcp-rag -n ai-agents
+kubectl get pods -n ai-agents -l app=harvis-ai-mcp-rag
+
+# View logs
+kubectl logs -f deployment/harvis-ai-mcp-rag -n ai-agents
+```
+
+### Related Documentation
+
+- **Full Skill Guide:** `skills/Harvis/harvis-mcp-rag/SKILL.md`
+- **Implementation Details:** `MCP_RAG_SERVER_IMPLEMENTATION.md` 
