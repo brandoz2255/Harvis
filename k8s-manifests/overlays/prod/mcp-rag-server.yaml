@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: harvis-ai-mcp-rag
+  namespace: ai-agents
+  labels:
+    app: harvis-ai-mcp-rag
+    component: mcp-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: harvis-ai-mcp-rag
+  template:
+    metadata:
+      labels:
+        app: harvis-ai-mcp-rag
+        component: mcp-server
+    spec:
+      containers:
+      - name: mcp-rag-server
+        image: harvis-backend
+        imagePullPolicy: Always
+        command:
+          - uvicorn
+          - "mcp_server.app:app"
+          - "--host"
+          - "0.0.0.0"
+          - "--port"
+          - "8000"
+          - "--log-level"
+          - "info"
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: harvis-db-creds
+              key: DATABASE_URL
+        - name: EMBED_QW3_URL
+          value: "http://10.42.2.5:8080"
+        - name: EMBED_NOMIC_URL
+          value: "http://10.42.2.5:8081"
+        - name: PYTHONPATH
+          value: "/app"
+        resources:
+          limits:
+            cpu: "500m"
+            memory: "1Gi"
+          requests:
+            cpu: "100m"
+            memory: "256Mi"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 15
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: harvis-ai-mcp-rag
+  namespace: ai-agents
+  labels:
+    app: harvis-ai-mcp-rag
+spec:
+  selector:
+    app: harvis-ai-mcp-rag
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
+    protocol: TCP
+  type: ClusterIP

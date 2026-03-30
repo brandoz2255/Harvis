@@ -11,6 +11,7 @@ resources:
   - document-worker.yaml
   - openclaw.yaml
   - llama-embed.yaml
+  - mcp-rag-server.yaml
 
 # Namespace
 namespace: ai-agents
@@ -32,6 +33,7 @@ images:
   - name: dulc3/openclaw
     newName: dulc3/openclaw
     newTag: vvv
+
 # Patches for production
 patches:
   - target:
@@ -58,6 +60,13 @@ patches:
       - op: replace
         path: /spec/template/spec/containers/0/image
         value: dulc3/harvis-document-worker:newww
+  - target:
+      kind: Deployment
+      name: harvis-ai-mcp-rag
+    patch: |
+      - op: replace
+        path: /spec/template/spec/containers/0/image
+        value: dulc3/jarvis-backend:newww
 
   # Inject OpenClaw + Kimi K2.5 env vars into the backend container (index 0 = harvis-backend)
   # so the Python orchestrator knows where to find OpenClaw and has the Moonshot API key.
