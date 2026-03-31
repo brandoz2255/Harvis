@@ -29,59 +29,64 @@ import { WorkspacePanel } from "@/components/workspace/WorkspacePanel"
 import { WorkspaceSuggestionBanner } from "@/components/workspace/WorkspaceSuggestionBanner"
 import { useOpenClawStore } from "@/stores/openclawStore"
 
-// Auto-research detection (mirrors backend logic)
+// Auto-research detection (DISABLED - LLM now decides via <web_search> tags)
 // Returns true for queries that need fresh/current information
+// function shouldAutoResearch(message: string): boolean {
+//   const msgLower = message.toLowerCase()
+
+//   // Keywords that indicate need for current/fresh information
+//   const freshnessKeywords = [
+//     "new", "latest", "current", "2026", "2025", "today", "this week",
+//     "recently", "best", "top", "recommend", "compare", "vs", "which should",
+//     "roadmap", "release", "what changed", "update", "version", "trending",
+//     "popular", "modern", "state of the art", "sota"
+//   ]
+
+//   // Keywords that indicate conceptual questions (don't need web search)
+//   const conceptualKeywords = [
+//     "explain", "what is", "how does", "define", "tutorial",
+//     "teach me", "understand", "concept", "basics", "fundamentals"
+//   ]
+
+//   // Explicit research requests always trigger
+//   const explicitResearch = [
+//     "search", "look up", "find sources", "research", "browse",
+//     "check online", "google", "web search"
+//   ]
+
+//   // Check for explicit research request first
+//   for (const keyword of explicitResearch) {
+//     if (msgLower.includes(keyword)) {
+//       console.log(`[AutoResearch] Triggered by explicit keyword: '${keyword}'`)
+//       return true
+//     }
+//   }
+
+//   // Check for conceptual questions (skip research)
+//   for (const keyword of conceptualKeywords) {
+//     if (msgLower.includes(keyword)) {
+//       // But override if freshness is also present
+//       const hasFreshness = freshnessKeywords.some(fk => msgLower.includes(fk))
+//       if (!hasFreshness) {
+//         console.log(`[AutoResearch] Conceptual question, skipping`)
+//         return false
+//       }
+//     }
+//   }
+
+//   // Check for freshness keywords
+//   for (const keyword of freshnessKeywords) {
+//     if (msgLower.includes(keyword)) {
+//       console.log(`[AutoResearch] Triggered by freshness keyword: '${keyword}'`)
+//       return true
+//     }
+//   }
+
+//   return false
+// }
+
+// Stub function - always return false (LLM decides via <web_search> tags)
 function shouldAutoResearch(message: string): boolean {
-  const msgLower = message.toLowerCase()
-
-  // Keywords that indicate need for current/fresh information
-  const freshnessKeywords = [
-    "new", "latest", "current", "2026", "2025", "today", "this week",
-    "recently", "best", "top", "recommend", "compare", "vs", "which should",
-    "roadmap", "release", "what changed", "update", "version", "trending",
-    "popular", "modern", "state of the art", "sota"
-  ]
-
-  // Keywords that indicate conceptual questions (don't need web search)
-  const conceptualKeywords = [
-    "explain", "what is", "how does", "define", "tutorial",
-    "teach me", "understand", "concept", "basics", "fundamentals"
-  ]
-
-  // Explicit research requests always trigger
-  const explicitResearch = [
-    "search", "look up", "find sources", "research", "browse",
-    "check online", "google", "web search"
-  ]
-
-  // Check for explicit research request first
-  for (const keyword of explicitResearch) {
-    if (msgLower.includes(keyword)) {
-      console.log(`[AutoResearch] Triggered by explicit keyword: '${keyword}'`)
-      return true
-    }
-  }
-
-  // Check for conceptual questions (skip research)
-  for (const keyword of conceptualKeywords) {
-    if (msgLower.includes(keyword)) {
-      // But override if freshness is also present
-      const hasFreshness = freshnessKeywords.some(fk => msgLower.includes(fk))
-      if (!hasFreshness) {
-        console.log(`[AutoResearch] Conceptual question, skipping`)
-        return false
-      }
-    }
-  }
-
-  // Check for freshness keywords
-  for (const keyword of freshnessKeywords) {
-    if (msgLower.includes(keyword)) {
-      console.log(`[AutoResearch] Triggered by freshness keyword: '${keyword}'`)
-      return true
-    }
-  }
-
   return false
 }
 

@@ -151,6 +151,21 @@ const SOURCE_CONFIG = {
         color: "text-red-400",
         group: "devops",
     },
+    // Linux documentation sources
+    redhat_docs: {
+        label: "Red Hat Documentation",
+        description: "RHEL administration, OpenShift, Linux system commands",
+        icon: BookOpen,
+        color: "text-red-600",
+        group: "devops",
+    },
+    arch_linux_docs: {
+        label: "Arch Linux Wiki",
+        description: "Arch Wiki - Linux commands, kernel, networking, security",
+        icon: BookOpen,
+        color: "text-blue-400",
+        group: "devops",
+    },
 }
 
 type SourceKey = keyof typeof SOURCE_CONFIG
@@ -447,6 +462,49 @@ export default function SettingsPage() {
                             <div className="grid gap-4 sm:grid-cols-2">
                                 {(Object.keys(SOURCE_CONFIG) as SourceKey[])
                                     .filter((source) => SOURCE_CONFIG[source].group === "containerization")
+                                    .map((source) => {
+                                        const config = SOURCE_CONFIG[source]
+                                        const Icon = config.icon
+                                        const isSelected = selectedSources.has(source)
+                                        const docCount = sourceStats?.indexed_stats[source] || 0
+
+                                        return (
+                                            <button
+                                                key={source}
+                                                onClick={() => toggleSource(source)}
+                                                className={`relative flex flex-col gap-3 rounded-xl border-2 p-5 text-left transition-all hover:scale-[1.02] ${isSelected
+                                                    ? "border-primary bg-primary/10 shadow-lg shadow-primary/20"
+                                                    : "border-border bg-card hover:border-primary/50"
+                                                    }`}
+                                            >
+                                                <div className="flex items-center justify-between">
+                                                    <div className={`p-2 rounded-lg bg-background/50 ${isSelected ? "ring-2 ring-primary/50" : ""}`}>
+                                                        <Icon className={`h-5 w-5 ${config.color}`} />
+                                                    </div>
+                                                    <Checkbox checked={isSelected} className="pointer-events-none" />
+                                                </div>
+                                                <div>
+                                                    <h3 className="font-semibold">{config.label}</h3>
+                                                    <p className="text-xs text-muted-foreground mt-1">{config.description}</p>
+                                                </div>
+                                                <div className="text-xs text-muted-foreground mt-auto pt-2 border-t border-border/50">
+                                                    {docCount} documents
+                                                </div>
+                                            </button>
+                                        )
+                                    })}
+                            </div>
+                        </div>
+
+                        {/* DevOps Group */}
+                        <div className="space-y-4">
+                            <h3 className="text-sm font-medium text-muted-foreground uppercase tracking-wide flex items-center gap-2">
+                                <Container className="h-4 w-4" />
+                                DevOps & Linux
+                            </h3>
+                            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                                {(Object.keys(SOURCE_CONFIG) as SourceKey[])
+                                    .filter((source) => SOURCE_CONFIG[source].group === "devops")
                                     .map((source) => {
                                         const config = SOURCE_CONFIG[source]
                                         const Icon = config.icon

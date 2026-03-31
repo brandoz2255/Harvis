@@ -48,6 +48,225 @@ from vison_models.llm_connector import (
 )
 
 # Import workspace (Harvis Workspaces / OpenClaw integration)
+
+
+def should_auto_research(message: str) -> bool:
+    """
+    Detect if message warrants auto-research based on query relevance.
+    Returns True if the query appears to need current/external information.
+    """
+    message_lower = message.lower().strip()
+
+    # Skip if too short or clearly conversational
+    if len(message_lower) < 10:
+        return False
+
+    # Skip simple greetings and confirmations
+    conversational_patterns = [
+        "^hi",
+        "^hello",
+        "^hey",
+        "^yes",
+        "^no",
+        "^ok",
+        "^thanks",
+        "^thx",
+        "^great",
+        "^cool",
+        "^nice",
+        "^good",
+        "^bad",
+        "^i see",
+        "^got it",
+        "^understand",
+        "^okay",
+        "^sure",
+        "^of course",
+        "^maybe",
+        "^probably",
+        "^definitely",
+        "^i think",
+        "^i believe",
+        "^i feel",
+        "^i want",
+        "^i need",
+        "^can you",
+        "^will you",
+        "^would you",
+        "^could you",
+        "^what do",
+        "^how do",
+        "^why do",
+        "^where do",
+        "^hello",
+        "^hi there",
+        "^good morning",
+        "^good afternoon",
+        "^good evening",
+        "^how are",
+        "^im doing",
+        "^im fine",
+        "^im good",
+        "^im okay",
+        "^im happy",
+        "^im sad",
+        "^help me",
+        "^i need help",
+        "^im stuck",
+        "^im confused",
+        "^thats it",
+        "^thats all",
+        "^thats enough",
+        "^done",
+        "^finished",
+        "^complete",
+        "^end",
+        "^stop",
+    ]
+
+    for pattern in conversational_patterns:
+        if message_lower.startswith(pattern) or re.match(pattern, message_lower):
+            return False
+
+    # Research triggers - queries that likely need external/current info
+    research_triggers = [
+        # Time-sensitive queries
+        "latest",
+        "current",
+        "recent",
+        "new",
+        "updated",
+        "2024",
+        "2025",
+        "2026",
+        "as of",
+        "now",
+        "today",
+        "this year",
+        "this month",
+        "this week",
+        "recently",
+        "currently",
+        "at present",
+        "presently",
+        "up to date",
+        "most recent",
+        "newest",
+        "cutting-edge",
+        "state-of-the-art",
+        # Status/availability queries
+        "is available",
+        "is working",
+        "status",
+        "status of",
+        "what is the status",
+        "can i get",
+        "where to get",
+        "how to get",
+        "where can i find",
+        "what is the price",
+        "how much",
+        "cost",
+        "pricing",
+        "price",
+        "download",
+        "install",
+        "setup",
+        "configure",
+        # Factual/verification queries
+        "who is",
+        "what is",
+        "when is",
+        "where is",
+        "why is",
+        "how does",
+        "explain",
+        "describe",
+        "define",
+        "what does",
+        "how does",
+        "list all",
+        "tell me about",
+        "information about",
+        "details about",
+        "research",
+        "investigate",
+        "look up",
+        "find out",
+        # News and events
+        "news",
+        "update",
+        "announcement",
+        "release",
+        "version",
+        "breaking",
+        "developments",
+        "changes",
+        "recent developments",
+        # Technical/current state
+        "latest version",
+        "current version",
+        "new features",
+        "recent updates",
+        "changelog",
+        "release notes",
+        "what's new",
+        "supported",
+        "compatible",
+        "works with",
+        "integrates with",
+        # Comparison and recommendations (need current data)
+        "compare",
+        "versus",
+        "vs",
+        "better than",
+        "best",
+        "top",
+        "recommend",
+        "recommended",
+        "suggestions",
+        "alternatives",
+        "pros and cons",
+        "advantages",
+        "disadvantages",
+    ]
+
+    # Check if message contains research triggers
+    for trigger in research_triggers:
+        if trigger in message_lower:
+            # Additional check: must be a question or statement seeking info
+            info_seeking_patterns = [
+                "what",
+                "how",
+                "why",
+                "when",
+                "where",
+                "who",
+                "which",
+                "is",
+                "are",
+                "can",
+                "could",
+                "will",
+                "would",
+                "should",
+                "explain",
+                "describe",
+                "tell",
+                "list",
+                "compare",
+                "difference",
+                "best",
+                "latest",
+                "current",
+            ]
+            for pattern in info_seeking_patterns:
+                if pattern in message_lower:
+                    return True
+
+    return False
+
+
 from workspace import workspace_router
 from workspace.model_proxy import model_proxy_router
 from workspace.github_proxy import github_proxy_router
@@ -1557,9 +1776,8 @@ class ApiKeyUpdateRequest(BaseModel):
     is_active: Optional[bool] = None
 
 
-
-
 # ─── Harvis Claw LLM Config Models ───────────────────────────────────────────
+
 
 class OpenClawConfigRequest(BaseModel):
     provider_url: str
@@ -1576,6 +1794,7 @@ class OpenClawConfigResponse(BaseModel):
     is_active: bool
     created_at: datetime
     updated_at: datetime
+
 
 # ─── Harvis Claw LLM Config Models ───────────────────────────────────────────
 # ─── Reasoning Model Helpers --------------------------------------------------
@@ -1629,11 +1848,14 @@ def has_reasoning_content(text: str) -> bool:
 
 
 # ─── Helpers -------------------------------------------------------------------
+# Browser patterns - only match actual navigation commands, NOT search requests
+# Search requests should go through the LLM which can emit <web_search> tags
 BROWSER_PATTERNS = [
-    r"^(?:open|launch|go\s+to|navigate\s+to|take\s+me\s+to|visit)\s+",
-    r"^(?:abre|abrír|navega\s+a|llévame\s+a|visita)\s+",
-    r"^(?:search|look\s+up|google|find)\s+(?:for\s+)?",
-    r"^(?:busca|buscar|encuentra|investigar?)\s+(?:sobre\s+)?",
+    # English navigation commands (must include URL or domain-like pattern)
+    r"^(?:open|launch|go\s+to|navigate\s+to|take\s+me\s+to|visit)\s+(?:https?://|www\.|[a-z]+\.)",
+    # Spanish navigation commands
+    r"^(?:abre|abrír|navega\s+a|llévame\s+a|visita)\s+(?:https?://|www\.|[a-z]+\.)",
+    # Tab commands
     r"^(?:open|create)\s+(?:\d+\s+)?(?:new\s+)?tabs?",
     r"^(?:abre|crea)\s+(?:\d+\s+)?(?:nueva[s]?\s+)?pestaña[s]?",
 ]
@@ -2157,7 +2379,12 @@ async def get_api_key_by_provider(
 
 # ─── Harvis Claw LLM Config Endpoints ─────────────────────────────────────
 
-@app.get("/api/user/openclaw-config", response_model=OpenClawConfigResponse, tags=["openclaw"])
+
+@app.get(
+    "/api/user/openclaw-config",
+    response_model=OpenClawConfigResponse,
+    tags=["openclaw"],
+)
 async def get_openclaw_config(
     request: Request,
     current_user: UserResponse = Depends(get_current_user),
@@ -2200,7 +2427,11 @@ async def get_openclaw_config(
         )
 
 
-@app.post("/api/user/openclaw-config", response_model=OpenClawConfigResponse, tags=["openclaw"])
+@app.post(
+    "/api/user/openclaw-config",
+    response_model=OpenClawConfigResponse,
+    tags=["openclaw"],
+)
 async def save_openclaw_config(
     request: Request,
     config: OpenClawConfigRequest,
@@ -2272,6 +2503,7 @@ async def delete_openclaw_config(
 
 
 # ── Web Search Tool Detection ───────────────────────────────────────────────────
+def should_auto_research(message: str) -> bool:
     """
     Only trigger web research when the user explicitly asks for a search.
     Harvis can also trigger search by emitting <web_search>query</web_search> in its response.
@@ -2298,6 +2530,41 @@ async def delete_openclaw_config(
             return True
 
     return False
+
+
+def parse_web_search_tags(llm_response: str) -> Optional[str]:
+    """
+    Parse <web_search>query</web_search> tags from LLM response.
+
+    Returns the search query if found, None otherwise.
+    This allows the LLM to decide when to trigger web research.
+    """
+    import re
+
+    # Match <web_search>...</web_search> tags
+    pattern = r"<web_search>\s*(.+?)\s*</web_search>"
+    match = re.search(pattern, llm_response, re.IGNORECASE | re.DOTALL)
+
+    if match:
+        query = match.group(1).strip()
+        logger.info(f"🔍 LLM triggered web search via tag: '{query}'")
+        return query
+
+    return None
+
+
+def extract_web_search_context(llm_response: str) -> str:
+    """
+    Extract the LLM response without the <web_search> tags.
+    Returns clean response text for display.
+    """
+    import re
+
+    # Remove <web_search>...</web_search> tags
+    pattern = r"<web_search>\s*.+?\s*</web_search>"
+    clean_response = re.sub(pattern, "", llm_response, flags=re.IGNORECASE | re.DOTALL)
+
+    return clean_response.strip()
 
 
 # ── Local RAG Context Helper ────────────────────────────────────────────────────
@@ -2422,151 +2689,127 @@ async def chat(
                         f"Added {len(attachment_text)} file contents to message"
                     )
 
-            # ── 2. Auto-Research Detection (Perplexity-style) ──────────────────────────────
-            if should_auto_research(req.message):
-                logger.info(
-                    "🔍 Auto-research triggered, redirecting to research pipeline"
-                )
-                yield f"data: {json.dumps({'status': 'researching', 'detail': 'Auto-research triggered, searching the web...'})}\n\n"
-                try:
-                    # Use streaming research agent for live progress updates
-                    analysis = ""
-                    sources = []
-                    videos = []
+            # ── 2. Auto-Research Detection (DISABLED - LLM now decides via <web_search> tags) ──────────────────────
+            # if should_auto_research(req.message):
+            #     logger.info(
+            #         "🔍 Auto-research triggered, redirecting to research pipeline"
+            #     )
+            #     yield f"data: {json.dumps({'status': 'researching', 'detail': 'Auto-research triggered, searching the web...'})}\n\n"
+            #     try:
+            #         # Use streaming research agent for live progress updates
+            #         analysis = ""
+            #         sources = []
+            #         videos = []
 
-                    async for event in async_research_agent_streaming(
-                        current_message_content, req.model
-                    ):
-                        event_type = event.get("type")
+            #         async for event in async_research_agent_streaming(
+            #             current_message_content, req.model
+            #         ):
+            #             event_type = event.get("type")
 
-                        if event_type == "search_query":
-                            # Forward search query to frontend
-                            query = event["query"]
-                            yield f"data: {json.dumps({'status': 'researching', 'detail': f'Searching for: {query}', 'type': 'search_query', 'query': query})}\n\n"
-                            logger.info(
-                                f"[Auto-Research] Streaming search query: {query}"
-                            )
+            #             if event_type == "search_query":
+            #                 query = event["query"]
+            #                 yield f"data: {json.dumps({'status': 'researching', 'detail': f'Searching for: {query}', 'type': 'search_query', 'query': query})}\n\n"
 
-                        elif event_type == "search_result":
-                            # Forward search result to frontend
-                            title = event["title"]
-                            yield f"data: {json.dumps({'status': 'researching', 'detail': f'Found: {title}', 'type': 'search_result', 'title': title, 'url': event['url'], 'domain': event['domain']})}\n\n"
+            #             elif event_type == "search_result":
+            #                 title = event["title"]
+            #                 yield f"data: {json.dumps({'status': 'researching', 'detail': f'Found: {title}', 'type': 'search_result', 'title': title, 'url': event['url'], 'domain': event['domain']})}\n\n"
 
-                        elif event_type == "reading":
-                            # Forward reading progress to frontend
-                            domain = event["domain"]
-                            yield f"data: {json.dumps({'status': 'researching', 'detail': f'Reading {domain}...', 'type': 'reading', 'domain': domain, 'url': event['url']})}\n\n"
+            #             elif event_type == "reading":
+            #                 domain = event["domain"]
+            #                 yield f"data: {json.dumps({'status': 'researching', 'detail': f'Reading {domain}...', 'type': 'reading', 'domain': domain, 'url': event['url']})}\n\n"
 
-                        elif event_type == "analysis":
-                            # Forward analysis progress
-                            yield f"data: {json.dumps({'status': 'researching', 'detail': event.get('detail', 'Analyzing...')})}\n\n"
+            #             elif event_type == "analysis":
+            #                 yield f"data: {json.dumps({'status': 'researching', 'detail': event.get('detail', 'Analyzing...')})}\n\n"
 
-                        elif event_type == "complete":
-                            # Store final result
-                            result_data = event.get("result", {})
-                            analysis = result_data.get("analysis", "")
-                            sources = result_data.get("sources", [])
-                            sources_found = result_data.get("sources_found", 0)
-                            videos = result_data.get("videos", [])
-                            logger.info(
-                                f"[Auto-Research] Streaming research complete. Found {sources_found} sources"
-                            )
+            #             elif event_type == "complete":
+            #                 result_data = event.get("result", {})
+            #                 analysis = result_data.get("analysis", "")
+            #                 sources = result_data.get("sources", [])
+            #                 videos = result_data.get("videos", [])
 
-                        elif event_type == "error":
-                            analysis = (
-                                f"Research Error: {event.get('error', 'Unknown error')}"
-                            )
+            #             elif event_type == "error":
+            #                 analysis = (
+            #                     f"Research Error: {event.get('error', 'Unknown error')}"
+            #                 )
 
-                    if analysis and not analysis.startswith("Research Error:"):
-                        response_data = {
-                            "status": "complete",
-                            "response": analysis,
-                            "history": req.history
-                            + [
-                                {"role": "user", "content": current_message_content},
-                                {"role": "assistant", "content": analysis},
-                            ],
-                            "final_answer": analysis,
-                            "auto_researched": True,
-                            "sources": sources[:5],
-                            "videos": videos[:6],
-                            "session_id": req.session_id,
-                        }
+            #         if analysis and not analysis.startswith("Research Error:"):
+            #             response_data = {
+            #                 "status": "complete",
+            #                 "response": analysis,
+            #                 "history": req.history
+            #                 + [
+            #                     {"role": "user", "content": current_message_content},
+            #                     {"role": "assistant", "content": analysis},
+            #                 ],
+            #                 "final_answer": analysis,
+            #                 "auto_researched": True,
+            #                 "sources": sources[:5],
+            #                 "videos": videos[:6],
+            #                 "session_id": req.session_id,
+            #             }
 
-                        # Handle session creation if needed (e.g. first message)
-                        saved_session_id = req.session_id
-                        try:
-                            # If we have a session ID, verify it
-                            if saved_session_id:
-                                try:
-                                    from uuid import UUID
+            #             # Handle session creation if needed
+            #             saved_session_id = req.session_id
+            #             try:
+            #                 if saved_session_id:
+            #                     try:
+            #                         from uuid import UUID
 
-                                    if isinstance(saved_session_id, str):
-                                        # Just check if it's valid, we don't need the object here
-                                        UUID(saved_session_id)
-                                except ValueError:
-                                    saved_session_id = None
+            #                         UUID(saved_session_id)
+            #                     except ValueError:
+            #                         saved_session_id = None
 
-                            # Create new session if needed
-                            if not saved_session_id:
-                                session = await chat_history_manager.create_session(
-                                    user_id=current_user.id,
-                                    title="New Chat",
-                                    model_used=req.model,
-                                )
-                                saved_session_id = str(session.id)
-                                # Update response data with new session ID
-                                response_data["session_id"] = saved_session_id
+            #                 if not saved_session_id:
+            #                     session = await chat_history_manager.create_session(
+            #                         user_id=current_user.id,
+            #                         title="New Chat",
+            #                         model_used=req.model,
+            #                     )
+            #                     saved_session_id = str(session.id)
+            #                     response_data["session_id"] = saved_session_id
 
-                            # Save user message
-                            await chat_history_manager.add_message(
-                                user_id=current_user.id,
-                                session_id=saved_session_id,
-                                role="user",
-                                content=current_message_content,
-                                model_used=req.model,
-                                input_type="text",
-                            )
+            #                 await chat_history_manager.add_message(
+            #                     user_id=current_user.id,
+            #                     session_id=saved_session_id,
+            #                     role="user",
+            #                     content=current_message_content,
+            #                     model_used=req.model,
+            #                     input_type="text",
+            #                 )
 
-                            # Prepare metadata with sources and videos
-                            research_metadata = {
-                                "sources": sources[:5] if sources else [],
-                                "videos": videos[:6] if videos else [],
-                                "auto_researched": True,
-                            }
+            #                 research_metadata = {
+            #                     "sources": sources[:5] if sources else [],
+            #                     "videos": videos[:6] if videos else [],
+            #                     "auto_researched": True,
+            #                 }
 
-                            # Save assistant message with metadata
-                            asst_msg = await chat_history_manager.add_message(
-                                user_id=current_user.id,
-                                session_id=saved_session_id,
-                                role="assistant",
-                                content=analysis,
-                                model_used=req.model,
-                                input_type="text",
-                                metadata=research_metadata,
-                            )
-                            # Add message ID to response data
-                            response_data["message_id"] = asst_msg.id
-                            logger.info(
-                                f"💾 Saved auto-research messages to session {saved_session_id} (msg_id: {asst_msg.id})"
-                            )
-                            logger.info(
-                                f"💾 Saved auto-research messages to session {saved_session_id}"
-                            )
-                        except Exception as e:
-                            logger.error(
-                                f"Failed to save auto-research to history: {e}"
-                            )
+            #                 asst_msg = await chat_history_manager.add_message(
+            #                     user_id=current_user.id,
+            #                     session_id=saved_session_id,
+            #                     role="assistant",
+            #                     content=analysis,
+            #                     model_used=req.model,
+            #                     input_type="text",
+            #                     metadata=research_metadata,
+            #                 )
+            #                 response_data["message_id"] = asst_msg.id
+            #                 logger.info(
+            #                     f"💾 Saved auto-research messages to session {saved_session_id}"
+            #                 )
+            #             except Exception as e:
+            #                 logger.error(
+            #                     f"Failed to save auto-research to history: {e}"
+            #                 )
 
-                        logger.info(
-                            f"Yielding auto-research response. Analysis length: {len(analysis)} chars. JSON size: {len(json.dumps(response_data))} chars"
-                        )
-                        yield f"data: {json.dumps(response_data)}\n\n"
-                        return
-                except Exception as e:
-                    logger.error(
-                        f"Auto-research failed, falling back to regular chat: {e}"
-                    )
+            #             logger.info(
+            #                 f"Yielding auto-research response. Analysis length: {len(analysis)} chars"
+            #             )
+            #             yield f"data: {json.dumps(response_data)}\n\n"
+            #             return
+            #     except Exception as e:
+            #         logger.error(
+            #             f"Auto-research failed, falling back to regular chat: {e}"
+            #         )
 
             # ── 3. Handle chat session and history ──────────────────────────────────────────
             session_id = req.session_id
@@ -3195,6 +3438,109 @@ async def chat(
                 logger.info(
                     f"✅ Response complete: {len(response_text):,} chars from {chunk_count} chunks"
                 )
+
+                # ── Check for <web_search> tags and execute search ──────────────────────────
+                logger.info(
+                    f"🔍 Checking for web_search tags in response ({len(response_text)} chars): {response_text[:200]}"
+                )
+                web_search_query = parse_web_search_tags(response_text)
+                logger.info(f"🔍 parse_web_search_tags returned: {web_search_query}")
+                if web_search_query:
+                    logger.info(
+                        f"🔍 Web search tag detected, executing search for: '{web_search_query}'"
+                    )
+                    yield f"data: {json.dumps({'status': 'researching', 'detail': 'Searching the web...'})}\n\n"
+
+                    try:
+                        # Execute web search with fallback
+                        from agent_research import (
+                            async_research_agent,
+                            research_agent_instance,
+                        )
+
+                        logger.info(
+                            f"🔍 Attempting enhanced research for: {web_search_query}"
+                        )
+                        research_result = await async_research_agent(
+                            query=web_search_query,
+                            model=req.model,
+                            enable_streaming=False,
+                        )
+
+                        # Check if result is valid
+                        search_analysis = ""
+                        search_sources = []
+
+                        if isinstance(research_result, dict):
+                            search_analysis = research_result.get("analysis", "")
+                            search_sources = research_result.get("sources", [])
+                            success = research_result.get("success", False)
+                        elif isinstance(research_result, str):
+                            # Check if it's an error message
+                            if research_result.startswith("Research failed:"):
+                                logger.warning(
+                                    f"⚠️ Enhanced research failed: {research_result}"
+                                )
+                                search_analysis = ""  # Empty to trigger fallback
+                                success = False
+                            else:
+                                search_analysis = research_result
+                                success = bool(search_analysis)
+                        else:
+                            search_analysis = str(research_result)
+                            success = bool(search_analysis)
+
+                        # Fallback to simpler research if enhanced failed
+                        if not search_analysis or not success:
+                            logger.warning(
+                                "⚠️ Enhanced research failed, falling back to simple research"
+                            )
+                            yield f"data: {json.dumps({'status': 'researching', 'detail': 'Enhanced search failed, using simple search...'})}\n\n"
+
+                            fallback_result = research_agent_instance.research_topic(
+                                topic=web_search_query,
+                                model=req.model,
+                            )
+
+                            if isinstance(fallback_result, dict):
+                                search_analysis = fallback_result.get("analysis", "")
+                                search_sources = fallback_result.get("sources", [])
+                            elif isinstance(fallback_result, str):
+                                search_analysis = fallback_result
+
+                        # Remove the web_search tag from response and prepend search results
+                        clean_response = extract_web_search_context(response_text)
+
+                        if search_analysis and len(search_analysis) > 50:
+                            # Prepend search results to the response
+                            response_text = (
+                                f"Based on my web search:\n\n{search_analysis}"
+                            )
+                            if clean_response:
+                                response_text += f"\n\n{clean_response}"
+
+                            logger.info(
+                                f"✅ Web search completed, added {len(search_analysis)} chars of search results"
+                            )
+                        else:
+                            logger.warning(
+                                f"⚠️ Web search returned insufficient results (only {len(search_analysis) if search_analysis else 0} chars)"
+                            )
+                            response_text = (
+                                clean_response  # Just use clean response without tags
+                            )
+                            # Add a note that search failed
+                            if not clean_response:
+                                response_text = "I attempted to search for information but couldn't find relevant results. Let me know if you'd like me to try a different approach!"
+
+                    except Exception as e:
+                        logger.error(
+                            f"❌ Web search failed with exception: {e}", exc_info=True
+                        )
+                        response_text = extract_web_search_context(response_text)
+                        # Add error message to response
+                        if not response_text:
+                            response_text = f"I encountered an issue while searching: {str(e)[:200]}"
 
                 if req.low_vram and not req.text_only:
                     logger.debug(
@@ -6310,7 +6656,7 @@ async def startup_event():
 
         await init_job_queue()
         logger.info("✅ Job queue initialized on startup")
-        
+
         # Initialize OpenClaw LLM config table
         pool = getattr(app.state, "pg_pool", None)
         if pool:

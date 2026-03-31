@@ -55,27 +55,34 @@ class VectorDBClient:
         is_code_collection = "code" in collection
         vector_type = "halfvec" if is_code_collection else "vector"
 
-        # Build query
-        query = f"""
-            SELECT text, source,
-                   1 - (embedding <=> $1::{vector_type}) as similarity
-            FROM {collection}
-        """
-
+        # Build query - use positional params based on whether filter exists
         if source_filter:
-            query += " WHERE source = ANY($2)"
-
-        query += f" ORDER BY embedding <=> $1::{vector_type} LIMIT $3"
+            # $1 = embedding, $2 = source filter, $3 = limit
+            query = f"""
+                SELECT text, source,
+                       1 - (embedding <=> $1::{vector_type}) as similarity
+                FROM {collection}
+                WHERE source = ANY($2)
+                ORDER BY embedding <=> $1::{vector_type}
+                LIMIT $3
+            """
+            params = [source_filter, top_k]
+        else:
+            # $1 = embedding, $2 = limit
+            query = f"""
+                SELECT text, source,
+                       1 - (embedding <=> $1::{vector_type}) as similarity
+                FROM {collection}
+                ORDER BY embedding <=> $1::{vector_type}
+                LIMIT $2
+            """
+            params = [top_k]
 
         try:
             async with self._pool.acquire() as conn:
                 # Convert embedding list to string format for pgvector
                 embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
-
-                if source_filter:
-                    rows = await conn.fetch(query, embedding_str, source_filter, top_k)
-                else:
-                    rows = await conn.fetch(query, embedding_str, top_k)
+                rows = await conn.fetch(query, embedding_str, *params)
                 return [
                     {
                         "text": row["text"],

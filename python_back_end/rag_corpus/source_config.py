@@ -253,8 +253,9 @@ DEFAULT_SOURCES: Dict[str, SourceConfig] = {
         category=SourceCategory.DEVOPS,
         embedding_tier=EmbeddingTier.STANDARD,
         fetcher_type="generic",
-        base_url="https://wiki.archlinux.org",
-        url_patterns=["/title/", "/wiki/"],
+        base_url="https://wiki.archlinux.org/title/Main_Page",
+        sitemap_url="https://wiki.archlinux.org/sitemap.xml",
+        url_patterns=["wiki.archlinux.org/title/"],
         exclude_patterns=[
             "/Special:",
             "/Talk:",

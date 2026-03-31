@@ -1014,6 +1014,105 @@ The pipeline builds these images:
 
 ---
 
+## LLM-Driven Web Search (Tool Calling)
+
+**Status:** Active - LLM decides when to search via `<web_search>` tags
+
+The Harvis LLM can autonomously trigger web research by emitting `<web_search>query</web_search>` tags in its response. This is more intelligent than keyword-based auto-research because the LLM uses context to decide when searches are truly needed.
+
+### How It Works
+
+1. **LLM decides**: The model analyzes the query and determines if web search is needed
+2. **Emits tag**: If search is required, LLM outputs `<web_search>specific query</web_search>`
+3. **Backend executes**: The chat endpoint parses the tag and runs web research
+4. **Results integrated**: Search results are prepended to the LLM's response
+5. **User sees**: Clean answer with search results + sources
+
+### System Prompt Instructions
+
+The system prompt (`python_back_end/system_prompt.txt`) includes:
+
+```
+For web search (when you need current, real-world, or up-to-date information):
+- You decide when to search — do NOT search for every question, only when the answer requires current/external info.
+- Emit this tag anywhere in your response and the system will execute the search and return results to you:
+  <web_search>your specific search query here</web_search>
+- Good reasons to search: news, current events, latest versions, real-world prices/locations, recent releases.
+- Bad reasons to search: general knowledge, code help, explanations, anything you already know well.
+- Do NOT search just because the user says "update", "new", "best", or "recommend" — use your judgment.
+```
+
+### Implementation
+
+**Parser Functions** (`python_back_end/main.py`):
+
+```python
+def parse_web_search_tags(llm_response: str) -> Optional[str]:
+    """Extract <web_search>query</web_search> tags from LLM response"""
+    import re
+    pattern = r"<web_search>\s*(.+?)\s*</web_search>"
+    match = re.search(pattern, llm_response, re.IGNORECASE | re.DOTALL)
+    return match.group(1).strip() if match else None
+
+def extract_web_search_context(llm_response: str) -> str:
+    """Remove <web_search> tags, return clean response"""
+    import re
+    pattern = r"<web_search>\s*.+?\s*</web_search>"
+    return re.sub(pattern, "", llm_response, flags=re.IGNORECASE | re.DOTALL).strip()
+```
+
+**Execution Flow** (in `/api/chat` endpoint):
+
+1. LLM response received
+2. `parse_web_search_tags()` extracts query if present
+3. If query found → `async_research_agent()` executes search
+4. Results prepended: `"Based on my web search:\n\n{analysis}"`
+5. Clean response (without tags) returned to user
+
+### Examples
+
+**User**: "What's new in Hyprland?"
+
+**LLM Response**:
+```
+<web_search>Hyprland latest features 2025</web_search>
+
+Let me check what's new...
+```
+
+**Backend**: Executes search, gets results, returns:
+
+```
+Based on my web search:
+
+Hyprland 0.43.0 was recently released with:
+- Bug fixes in window management
+- New keyboard shortcuts
+- Performance improvements
+
+Let me check what's new...
+```
+
+### Benefits Over Keyword Detection
+
+| Feature | Keyword Detection | LLM Tool Calling |
+|---------|------------------|------------------|
+| False positives | High ("update repo" → search) | Low (LLM understands context) |
+| Query quality | Generic (user's words) | Optimized (LLM crafts query) |
+| Judgment | None (always triggers) | Smart (LLM decides) |
+| Flexibility | Rigid keyword list | Natural language understanding |
+
+### Fallback: Explicit Keywords
+
+`should_auto_research()` still works for explicit requests:
+- "search for X"
+- "look up Y"
+- "check online Z"
+
+This ensures users can still force searches when needed.
+
+---
+
 ## MCP RAG Server (LoadBalancer)
 
 **Status:** Active (exposed via metalLB LoadBalancer)
