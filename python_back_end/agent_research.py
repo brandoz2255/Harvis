@@ -11,9 +11,10 @@ from research.enhanced_research_agent import get_enhanced_research_agent
 logger = logging.getLogger(__name__)
 
 # Initialize the research agent
+# Use llama-server (localhost:8080) in merged pod, fallback to ollama:11434 for standalone
 research_agent_instance = ResearchAgent(
     search_engine="duckduckgo",  # or "tavily" if API key is available
-    ollama_url=os.getenv("OLLAMA_URL", "http://ollama:11434"),
+    ollama_url=os.getenv("OLLAMA_URL", "http://localhost:8080/v1"),
     default_model="mistral",
     max_search_results=5,
 )
@@ -21,7 +22,7 @@ research_agent_instance = ResearchAgent(
 # Initialize the enhanced research agent for advanced features
 enhanced_research_agent_instance = get_enhanced_research_agent(
     search_engine="duckduckgo",  # or "tavily" if API key is available
-    ollama_url=os.getenv("OLLAMA_URL", "http://ollama:11434"),
+    ollama_url=os.getenv("OLLAMA_URL", "http://localhost:8080/v1"),
     default_model="mistral",
     max_search_results=20,  # Increased for better results
     enable_advanced_features=True,  # Enable advanced pipeline
@@ -55,7 +56,7 @@ class _CloudLLMClient:
     """
 
     def __init__(self, provider: str, api_key: str, model_id: str):
-        self.provider = provider   # "nvidia" | "moonshot"
+        self.provider = provider  # "nvidia" | "moonshot"
         self.api_key = api_key
         self.model_id = model_id
 
@@ -66,6 +67,7 @@ class _CloudLLMClient:
         start = time.time()
         try:
             import httpx
+
             if self.provider == "nvidia":
                 url = "https://integrate.api.nvidia.com/v1/chat/completions"
                 headers = {
@@ -93,7 +95,9 @@ class _CloudLLMClient:
                     "stream": False,
                 }
 
-            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(120.0, connect=10.0)
+            ) as client:
                 resp = await client.post(url, headers=headers, json=payload)
                 resp.raise_for_status()
                 data = resp.json()
@@ -109,6 +113,7 @@ class _CloudLLMClient:
         except Exception as exc:
             logger.error(f"_CloudLLMClient.generate failed ({self.provider}): {exc}")
             from research.llm.ollama_client import ModelResponse
+
             return ModelResponse(
                 content="",
                 model=self.model_id,
@@ -518,7 +523,9 @@ async def async_research_agent_streaming(
                     # Select the right LLM client based on the requested model
                     if model == "nvidia-kimi":
                         if not _nvidia_api_key:
-                            raise Exception("NVIDIA API key not set for research synthesis")
+                            raise Exception(
+                                "NVIDIA API key not set for research synthesis"
+                            )
                         llm_client = _CloudLLMClient(
                             provider="nvidia",
                             api_key=_nvidia_api_key,
@@ -526,9 +533,13 @@ async def async_research_agent_streaming(
                         )
                         synthesis_model = "moonshotai/kimi-k2.5"
                     elif is_moonshot_model(model):
-                        moonshot_key = getattr(enhanced_research_agent_instance, "moonshot_api_key", "")
+                        moonshot_key = getattr(
+                            enhanced_research_agent_instance, "moonshot_api_key", ""
+                        )
                         if not moonshot_key:
-                            raise Exception("Moonshot API key not set for research synthesis")
+                            raise Exception(
+                                "Moonshot API key not set for research synthesis"
+                            )
                         llm_client = _CloudLLMClient(
                             provider="moonshot",
                             api_key=moonshot_key,
