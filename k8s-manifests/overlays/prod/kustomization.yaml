@@ -32,7 +32,7 @@ images:
   #   newTag: unbroken
   - name: dulc3/openclaw
     newName: dulc3/openclaw
-    newTag: vvv
+    newTag: new2
 
 # Patches for production
 patches:
