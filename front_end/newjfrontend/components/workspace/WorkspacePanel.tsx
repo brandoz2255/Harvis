@@ -23,6 +23,13 @@ import {
   MessageSquare,
   ShieldAlert,
   Check,
+  GitBranch,
+  ExternalLink,
+  Trash2,
+  Download,
+  Upload,
+  Lock,
+  Unlock,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -858,6 +865,402 @@ function HistoryTab() {
   )
 }
 
+// ─── GitHub Tab: Connect + Repo Picker + Clone/Sync ─────────────────────────
+
+interface GitHubUser {
+  connected: boolean
+  login?: string
+  name?: string
+  avatar_url?: string
+}
+
+interface GitHubRepoItem {
+  full_name: string
+  owner: string
+  name: string
+  default_branch: string
+  private: boolean
+  description?: string
+  html_url: string
+}
+
+interface ClonedRepo {
+  id: number
+  owner: string
+  repo: string
+  branch: string
+  local_path: string
+  openclaw_path: string
+  last_synced?: string
+}
+
+function GitHubTab() {
+  const [ghUser, setGhUser] = useState<GitHubUser | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [repos, setRepos] = useState<GitHubRepoItem[]>([])
+  const [clonedRepos, setClonedRepos] = useState<ClonedRepo[]>([])
+  const [reposLoading, setReposLoading] = useState(false)
+  const [clonedLoading, setClonedLoading] = useState(false)
+  const [searchFilter, setSearchFilter] = useState('')
+  const [cloningRepo, setCloningRepo] = useState<string | null>(null)
+  const [syncingRepo, setSyncingRepo] = useState<string | null>(null)
+  const [deletingRepo, setDeletingRepo] = useState<number | null>(null)
+  const [showPicker, setShowPicker] = useState(false)
+
+  const getHeaders = useCallback(() => {
+    const token = localStorage.getItem('token')
+    const headers: Record<string, string> = {}
+    if (token) headers['Authorization'] = `Bearer ${token}`
+    return headers
+  }, [])
+
+  const fetchStatus = useCallback(async () => {
+    setLoading(true)
+    try {
+      const res = await fetch('/api/vibecode/github/status', { headers: getHeaders() })
+      if (res.ok) {
+        setGhUser(await res.json())
+      } else {
+        setGhUser({ connected: false })
+      }
+    } catch {
+      setGhUser({ connected: false })
+    } finally {
+      setLoading(false)
+    }
+  }, [getHeaders])
+
+  const fetchClonedRepos = useCallback(async () => {
+    setClonedLoading(true)
+    try {
+      const res = await fetch('/api/workspace/repos', { headers: getHeaders() })
+      if (res.ok) {
+        const data = await res.json()
+        setClonedRepos(data.repos ?? [])
+      }
+    } catch { /* silent */ } finally {
+      setClonedLoading(false)
+    }
+  }, [getHeaders])
+
+  const fetchGitHubRepos = useCallback(async () => {
+    setReposLoading(true)
+    try {
+      const res = await fetch('/api/workspace/user-repos', { headers: getHeaders() })
+      if (res.ok) {
+        const data = await res.json()
+        setRepos(data.repos ?? [])
+      }
+    } catch { /* silent */ } finally {
+      setReposLoading(false)
+    }
+  }, [getHeaders])
+
+  useEffect(() => {
+    fetchStatus()
+    fetchClonedRepos()
+  }, [fetchStatus, fetchClonedRepos])
+
+  const handleConnect = () => {
+    window.location.href = '/api/vibecode/github/start'
+  }
+
+  const handleDisconnect = async () => {
+    try {
+      await fetch('/api/vibecode/github/disconnect', { method: 'POST', headers: getHeaders() })
+      setGhUser({ connected: false })
+      setRepos([])
+    } catch { /* silent */ }
+  }
+
+  const handleClone = async (repo: GitHubRepoItem) => {
+    setCloningRepo(repo.full_name)
+    try {
+      const res = await fetch('/api/workspace/clone-repo', {
+        method: 'POST',
+        headers: { ...getHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ owner: repo.owner, repo: repo.name, branch: repo.default_branch }),
+      })
+      if (res.ok) {
+        await fetchClonedRepos()
+        setShowPicker(false)
+      }
+    } catch { /* silent */ } finally {
+      setCloningRepo(null)
+    }
+  }
+
+  const handleSync = async (repo: ClonedRepo) => {
+    setSyncingRepo(`${repo.owner}/${repo.repo}`)
+    try {
+      await fetch('/api/workspace/sync-repo', {
+        method: 'POST',
+        headers: { ...getHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ owner: repo.owner, repo: repo.repo }),
+      })
+      await fetchClonedRepos()
+    } catch { /* silent */ } finally {
+      setSyncingRepo(null)
+    }
+  }
+
+  const handleDelete = async (repo: ClonedRepo) => {
+    if (!repo.id) return
+    setDeletingRepo(repo.id)
+    try {
+      await fetch(`/api/workspace/repos/${repo.id}`, { method: 'DELETE', headers: getHeaders() })
+      await fetchClonedRepos()
+    } catch { /* silent */ } finally {
+      setDeletingRepo(null)
+    }
+  }
+
+  const filteredRepos = repos.filter(r =>
+    r.full_name.toLowerCase().includes(searchFilter.toLowerCase())
+    || (r.description ?? '').toLowerCase().includes(searchFilter.toLowerCase())
+  )
+
+  const isAlreadyCloned = (repo: GitHubRepoItem) =>
+    clonedRepos.some(c => c.owner === repo.owner && c.repo === repo.name)
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-10 text-muted-foreground">
+        <Loader2 className="h-4 w-4 animate-spin mr-2" />
+        <span className="text-xs">Checking GitHub connection…</span>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Connection Status */}
+      <div className="rounded-lg border border-border p-3 bg-muted/20">
+        {ghUser?.connected ? (
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              {ghUser.avatar_url && (
+                <img src={ghUser.avatar_url} alt="" className="h-7 w-7 rounded-full border border-border" />
+              )}
+              <div>
+                <p className="text-xs font-medium text-foreground">{ghUser.name || ghUser.login}</p>
+                <p className="text-[10px] text-muted-foreground">@{ghUser.login} · Connected</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-1">
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-6 px-2 text-[10px] text-muted-foreground hover:text-foreground"
+                onClick={handleDisconnect}
+              >
+                Disconnect
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <GitBranch className="h-5 w-5 text-muted-foreground" />
+              <div>
+                <p className="text-xs font-medium text-foreground">GitHub Not Connected</p>
+                <p className="text-[10px] text-muted-foreground">Connect to clone repos into workspace</p>
+              </div>
+            </div>
+            <Button
+              size="sm"
+              className="h-7 text-xs gap-1.5 bg-[#238636] hover:bg-[#2ea043] text-white border-0"
+              onClick={handleConnect}
+            >
+              <GitBranch className="h-3 w-3" />
+              Connect GitHub
+            </Button>
+          </div>
+        )}
+      </div>
+
+      {/* Cloned Repos */}
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <h3 className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">
+            Workspace Repos
+          </h3>
+          {ghUser?.connected && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-6 px-2 text-[10px] gap-1 border-violet-500/30 text-violet-300 hover:bg-violet-500/10"
+              onClick={() => { setShowPicker(true); fetchGitHubRepos() }}
+            >
+              <Download className="h-3 w-3" />
+              Clone Repo
+            </Button>
+          )}
+        </div>
+
+        {clonedLoading ? (
+          <div className="flex items-center gap-2 py-4 text-muted-foreground">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            <span className="text-xs">Loading repos…</span>
+          </div>
+        ) : clonedRepos.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-8 text-muted-foreground gap-2">
+            <GitBranch className="h-8 w-8 opacity-30" />
+            <p className="text-xs">No repos cloned yet</p>
+            {ghUser?.connected && (
+              <p className="text-[10px]">Click "Clone Repo" to get started</p>
+            )}
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {clonedRepos.map((repo) => {
+              const key = `${repo.owner}/${repo.repo}`
+              const isSyncing = syncingRepo === key
+              const isDeleting = deletingRepo === repo.id
+              return (
+                <div
+                  key={repo.id}
+                  className="rounded-lg border border-border p-2.5 bg-background/50 hover:border-violet-500/30 transition-colors"
+                >
+                  <div className="flex items-start justify-between">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <GitBranch className="h-3 w-3 text-violet-400 shrink-0" />
+                        <span className="text-xs font-medium text-foreground truncate">{key}</span>
+                        <span className="text-[9px] px-1 py-0.5 rounded bg-muted text-muted-foreground">{repo.branch}</span>
+                      </div>
+                      <p className="text-[10px] text-muted-foreground mt-0.5 font-mono truncate">
+                        {repo.openclaw_path}
+                      </p>
+                      {repo.last_synced && (
+                        <p className="text-[9px] text-muted-foreground/60 mt-0.5">
+                          Synced {formatRelativeTime(repo.last_synced)}
+                        </p>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-0.5 shrink-0 ml-2">
+                      <button
+                        onClick={() => handleSync(repo)}
+                        disabled={isSyncing}
+                        title="Sync (pull latest)"
+                        className="flex items-center justify-center h-6 w-6 rounded hover:bg-muted/50 text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+                      >
+                        {isSyncing ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+                      </button>
+                      <button
+                        onClick={() => handleDelete(repo)}
+                        disabled={isDeleting}
+                        title="Remove from workspace"
+                        className="flex items-center justify-center h-6 w-6 rounded hover:bg-red-500/10 text-muted-foreground hover:text-red-400 transition-colors disabled:opacity-50"
+                      >
+                        {isDeleting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Repo Picker Modal */}
+      {showPicker && (
+        <div className="rounded-lg border border-violet-500/30 bg-card p-3 space-y-2">
+          <div className="flex items-center justify-between">
+            <h3 className="text-[11px] font-semibold text-violet-300 uppercase tracking-wider">
+              Clone a Repository
+            </h3>
+            <button
+              onClick={() => setShowPicker(false)}
+              className="h-5 w-5 rounded flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted/50"
+            >
+              <X className="h-3 w-3" />
+            </button>
+          </div>
+
+          <input
+            type="text"
+            placeholder="Search repos…"
+            className="w-full h-7 px-2 text-xs rounded border border-border bg-background text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:border-violet-500/50"
+            value={searchFilter}
+            onChange={(e) => setSearchFilter(e.target.value)}
+          />
+
+          {reposLoading ? (
+            <div className="flex items-center gap-2 py-4 justify-center text-muted-foreground">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              <span className="text-xs">Loading your repos…</span>
+            </div>
+          ) : (
+            <div className="max-h-64 overflow-y-auto space-y-1">
+              {filteredRepos.map((repo) => {
+                const alreadyCloned = isAlreadyCloned(repo)
+                const isCloning = cloningRepo === repo.full_name
+                return (
+                  <div
+                    key={repo.full_name}
+                    className={cn(
+                      'flex items-center justify-between rounded-md px-2 py-1.5 transition-colors',
+                      alreadyCloned
+                        ? 'bg-green-500/5 border border-green-500/20'
+                        : 'hover:bg-muted/30 border border-transparent'
+                    )}
+                  >
+                    <div className="flex items-center gap-2 min-w-0 flex-1">
+                      {repo.private ? (
+                        <Lock className="h-3 w-3 text-yellow-400 shrink-0" />
+                      ) : (
+                        <Unlock className="h-3 w-3 text-muted-foreground shrink-0" />
+                      )}
+                      <div className="min-w-0">
+                        <p className="text-xs font-medium text-foreground truncate">{repo.full_name}</p>
+                        {repo.description && (
+                          <p className="text-[10px] text-muted-foreground truncate">{repo.description}</p>
+                        )}
+                      </div>
+                    </div>
+                    <div className="shrink-0 ml-2">
+                      {alreadyCloned ? (
+                        <span className="text-[10px] text-green-400 font-medium flex items-center gap-1">
+                          <Check className="h-3 w-3" />
+                          Cloned
+                        </span>
+                      ) : (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-6 px-2 text-[10px] text-violet-300 hover:text-violet-200 hover:bg-violet-500/10"
+                          onClick={() => handleClone(repo)}
+                          disabled={isCloning}
+                        >
+                          {isCloning ? (
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                          ) : (
+                            <>
+                              <Download className="h-3 w-3 mr-1" />
+                              Clone
+                            </>
+                          )}
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                )
+              })}
+              {filteredRepos.length === 0 && !reposLoading && (
+                <p className="text-xs text-muted-foreground text-center py-4">
+                  {searchFilter ? 'No repos match your search' : 'No repos found'}
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ─── Sidebar nav items ──────────────────────────────────────────────────────
 
 import { LayoutDashboard, BookOpen, ScrollText, Network } from 'lucide-react'
@@ -868,6 +1271,7 @@ const SIDEBAR_ITEMS = [
   { key: 'playbooks' as const, icon: BookOpen, label: 'Playbooks' },
   { key: 'logs' as const, icon: ScrollText, label: 'Logs' },
   { key: 'agents' as const, icon: Network, label: 'Agents' },
+  { key: 'github' as const, icon: GitBranch, label: 'GitHub' },
 ]
 
 // ─── AI response text deduplication ──────────────────────────────────────────
@@ -1227,8 +1631,8 @@ export function WorkspacePanel({ onContinueInChat }: { onContinueInChat?: (summa
         {/* Kubectl approval widget — shown whenever there are pending commands */}
         <KubectlApprovalWidget />
 
-        {/* Stats bar — shown on dashboard/logs while there is activity (not on agents tab) */}
-        {activeTab !== 'playbooks' && activeTab !== 'agents' && (logEvents.length > 0 || !isRunning) && (
+        {/* Stats bar — shown on dashboard/logs while there is activity (not on agents/github tab) */}
+        {activeTab !== 'playbooks' && activeTab !== 'agents' && activeTab !== 'github' && (logEvents.length > 0 || !isRunning) && (
           <StatsBar
             elapsedMs={elapsedMs}
             toolCallCount={toolCallCount}
@@ -1383,6 +1787,9 @@ export function WorkspacePanel({ onContinueInChat }: { onContinueInChat?: (summa
 
               {/* ═══ Playbooks ═══ */}
               {activeTab === 'playbooks' && <HistoryTab />}
+
+              {/* ═══ GitHub ═══ */}
+              {activeTab === 'github' && <GitHubTab />}
             </div>
           </ScrollArea>
         </div>

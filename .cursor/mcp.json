@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "harvis-openclaw": {
+      "url": "http://localhost:8000/mcp/invoke",
+      "transport": "http",
+      "description": "Harvis AI OpenClaw workspace — exec commands, read/write files, chat with agent, web search, GitHub repo management",
+      "headers": {
+        "Authorization": "Bearer ***REMOVED***"
+      }
+    }
+  }
+}

@@ -128,6 +128,11 @@ services:
       DISCORD_PREFER_WORKSPACE: "${DISCORD_PREFER_WORKSPACE:-true}"
       # Shared projects volume path inside backend container
       OPENCLAW_PROJECTS_DIR: "/data/openclaw-projects"
+      # GitHub OAuth for repo mounting
+      GITHUB_CLIENT_ID: "${GITHUB_CLIENT_ID:-}"
+      GITHUB_CLIENT_SECRET: "${GITHUB_CLIENT_SECRET:-}"
+      FERNET_KEY: "${FERNET_KEY:-}"
+      OAUTH_REDIRECT_BASE: "http://localhost:9000"
     user: "1001:1001" # Run as appuser for consistent permissions
     volumes:
       - ml-models-cache:/models-cache

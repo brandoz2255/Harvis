@@ -149,7 +149,7 @@ interface OpenClawState {
   // UI State
   isWorkspaceActive: boolean
   isChatMinimized: boolean
-  activeTab: 'dashboard' | 'playbooks' | 'logs' | 'agents'
+  activeTab: 'dashboard' | 'playbooks' | 'logs' | 'agents' | 'github'
   selectedAgentId: string | null
 
   // Harvis Workspace session state
@@ -189,7 +189,7 @@ interface OpenClawState {
 
   setWorkspaceActive: (active: boolean) => void
   setChatMinimized: (minimized: boolean) => void
-  setActiveTab: (tab: 'dashboard' | 'playbooks' | 'logs' | 'agents') => void
+  setActiveTab: (tab: 'dashboard' | 'playbooks' | 'logs' | 'agents' | 'github') => void
   setSelectedAgentId: (id: string | null) => void
 
   // Harvis Workspace actions
