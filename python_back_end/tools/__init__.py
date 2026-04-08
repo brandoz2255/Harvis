@@ -6,5 +6,7 @@ Provides various utility endpoints for external API integrations.
 from .maps import router as maps_router
 from .openclaw_proxy import openclaw_proxy_router, browser_proxy_router
 from .opencode_llm_proxy import opencode_llm_router
+from .discord_proxy import discord_proxy_router
 
-__all__ = ["maps_router", "openclaw_proxy_router", "opencode_llm_router"]
+__all__ = ["maps_router", "openclaw_proxy_router", "opencode_llm_router", "discord_proxy_router"]
+

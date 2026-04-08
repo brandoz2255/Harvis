@@ -217,8 +217,138 @@ data:
         "discord": {
           "token": "${DISCORD_BOT_TOKEN}"
         }
+      },
+      "heartbeat": {
+        "every": "1h",
+        "target": "none",
+        "activeHours": "08:00-22:00",
+        "timezone": "America/Los_Angeles"
       }
     }
+
+---
+# ConfigMap: HEARTBEAT.md — workspace-level heartbeat checklist
+# Mounted at /home/node/.openclaw/workspace/HEARTBEAT.md
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openclaw-heartbeat
+  namespace: ai-agents
+data:
+  HEARTBEAT.md: |
+    # Harvis Development Pulse
+
+    ## Purpose
+
+    Periodic check-in for the Harvis project. Runs hourly during active
+    hours. Scans recent git activity across the Harvis repo, summarizes
+    changes, posts to the #harvis-heartbeat Discord channel.
+
+    ## CRITICAL RESPONSE CONTRACT
+
+    If none of the scripts below produce output, reply with exactly
+    `HEARTBEAT_OK` and nothing else. The gateway drops this reply and
+    stays silent. This prevents heartbeat spam.
+
+    Only produce a real response when a script actually finds something
+    worth reporting.
+
+    ## Checks (run in order)
+
+    ### Check 1 — Recent git activity in the Harvis repo
+
+    Run: `exec /home/node/.openclaw/workspace/scripts/check-git-activity.sh 1`
+
+    The script takes one argument: hours to scan back.
+    - No output → no commits in window → move on
+    - Output block → commits found → format and post to Discord
+
+    If output was produced, format a Discord summary and post via:
+
+    ```bash
+    exec curl -s -X POST http://harvis-ai-merged-backend:8000/api/tools/discord/post \
+      -H "Authorization: Bearer $OPENCLAW_GATEWAY_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d "$(jq -n --arg content \"$SUMMARY\" '{channel: \"heartbeat\", content: $content}')"
+    ```
+
+    ### Check 2 — Workspace run failures in last hour
+
+    Run: `exec /home/node/.openclaw/workspace/scripts/check-workspace-failures.sh 1`
+
+    If output produced, post to `alerts` channel.
+
+    ### Check 3 — Disk usage
+
+    Run: `exec df -h /home/node/.openclaw | tail -1 | awk '{print $5}'`
+
+    If usage > 80%, post to `alerts`.
+
+    ## Decision tree
+
+    1. Run Check 1. Output → format, post to #harvis-heartbeat, mark reported
+    2. Run Check 2. Output → post to #alerts, mark reported
+    3. Run Check 3. Usage > 80% → post to #alerts, mark reported
+    4. NONE reported → reply exactly `HEARTBEAT_OK`
+    5. At least one reported → brief summary like "Posted N updates"
+
+    ## Rules
+
+    - Do NOT ask the user questions. Scheduled task.
+    - Do NOT post empty or "nothing to report" messages.
+    - Do NOT print credentials or tokens.
+    - Do NOT run destructive commands. Checks only read state.
+    - Keep Discord messages under 1800 characters.
+
+---
+# ConfigMap: heartbeat helper scripts (silent-success pattern)
+# Mounted at /home/node/.openclaw/workspace/scripts/ with executable mode
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openclaw-heartbeat-scripts
+  namespace: ai-agents
+data:
+  check-git-activity.sh: |
+    #!/usr/bin/env bash
+    set -euo pipefail
+    HOURS="${1:-1}"
+    REPO_DIR="/home/node/.openclaw/workspace/Harvis"
+    [ -d "$REPO_DIR/.git" ] || exit 0
+    cd "$REPO_DIR"
+    git fetch --all --quiet 2>/dev/null || exit 0
+    COMMITS=$(git log --all --since="${HOURS} hours ago" \
+      --pretty=format:"- %h %s (%an, %ar)" --abbrev-commit 2>/dev/null | head -20)
+    [ -z "$COMMITS" ] && exit 0
+    COMMIT_COUNT=$(echo "$COMMITS" | wc -l)
+    CHANGED_FILES=$(git log --all --since="${HOURS} hours ago" \
+      --name-only --pretty=format: 2>/dev/null | sort -u | grep -v '^$' | head -15)
+    DIFF_STATS=$(git log --all --since="${HOURS} hours ago" \
+      --shortstat --pretty=format: 2>/dev/null | grep -v '^$' | tail -5)
+    cat <<EOF
+    COMMITS_COUNT: $COMMIT_COUNT
+    COMMITS:
+    $COMMITS
+    FILES_CHANGED:
+    $CHANGED_FILES
+    DIFF_STATS:
+    $DIFF_STATS
+    EOF
+
+  check-workspace-failures.sh: |
+    #!/usr/bin/env bash
+    set -euo pipefail
+    HOURS="${1:-1}"
+    BACKEND="${BACKEND_URL:-http://harvis-ai-merged-backend:8000}"
+    RESPONSE=$(curl -s -m 10 \
+      -H "Authorization: Bearer $OPENCLAW_GATEWAY_TOKEN" \
+      "$BACKEND/api/workspace/recent-failures?hours=$HOURS" 2>/dev/null || echo '{}')
+    COUNT=$(echo "$RESPONSE" | jq -r '.count // 0' 2>/dev/null || echo 0)
+    [ "$COUNT" = "0" ] || [ -z "$COUNT" ] && exit 0
+    echo "FAILURE_COUNT: $COUNT"
+    echo ""
+    echo "FAILURES:"
+    echo "$RESPONSE" | jq -r '.failures[] | "- \(.workspace_id): \(.error_message // "unknown" | split("\n")[0])"'
 
 ---
 # NetworkPolicy: Enforce OpenClaw's isolation at the network level.
@@ -731,6 +861,12 @@ spec:
             # Temp storage for Chromium profiles and crash dumps
             - name: chromium-tmp
               mountPath: /tmp/.chromium
+            # Heartbeat workspace files
+            - name: openclaw-heartbeat
+              mountPath: /home/node/.openclaw/workspace/HEARTBEAT.md
+              subPath: HEARTBEAT.md
+            - name: openclaw-heartbeat-scripts
+              mountPath: /home/node/.openclaw/workspace/scripts
 
           # OpenClaw exposes health only as a WebSocket RPC method, not HTTP.
           # tcpSocket probes verify the port is bound and accepting connections.
@@ -781,6 +917,14 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 128Mi
+        # Heartbeat workspace files
+        - name: openclaw-heartbeat
+          configMap:
+            name: openclaw-heartbeat
+        - name: openclaw-heartbeat-scripts
+          configMap:
+            name: openclaw-heartbeat-scripts
+            defaultMode: 0755
 ---
 # Service: ClusterIP only — OpenClaw is never exposed to the host or LoadBalancer.
 # Only reachable within the cluster from the Harvis backend pod.

@@ -74,6 +74,12 @@
       }
     ]
   },
+  "heartbeat": {
+    "every": "1h",
+    "target": "none",
+    "activeHours": "08:00-22:00",
+    "timezone": "America/Los_Angeles"
+  },
   "skills": {
     "load": {
       "extraDirs": ["/skills"]

@@ -120,6 +120,10 @@ services:
       DISCORD_WORKSPACE_MODEL_NAME: "${DISCORD_WORKSPACE_MODEL_NAME:-}"
       DISCORD_WORKSPACE_MAX_WAIT_SECONDS: "${DISCORD_WORKSPACE_MAX_WAIT_SECONDS:-1200}"
       DISCORD_WORKSPACE_ENABLE_INTERACTIVE: "${DISCORD_WORKSPACE_ENABLE_INTERACTIVE:-false}"
+      # Discord channel IDs for heartbeat/alerts proxy
+      DISCORD_HEARTBEAT_CHANNEL_ID: "${DISCORD_HEARTBEAT_CHANNEL_ID:-}"
+      DISCORD_ALERTS_CHANNEL_ID: "${DISCORD_ALERTS_CHANNEL_ID:-}"
+      DISCORD_GENERAL_CHANNEL_ID: "${DISCORD_GENERAL_CHANNEL_ID:-}"
     user: "1001:1001" # Run as appuser for consistent permissions
     volumes:
       - ml-models-cache:/models-cache
@@ -408,6 +412,9 @@ services:
     container_name: harvis-openclaw
     restart: unless-stopped
     user: "1000:1000"
+    # Expose to localhost ONLY for Cursor extension — never 0.0.0.0
+    ports:
+      - "127.0.0.1:18789:18789"
     # Chromium needs shared memory — Docker default 64MB causes tab crashes
     shm_size: '256m'
     tmpfs:
@@ -436,6 +443,9 @@ services:
       - ./openclaw/config/USER.md:/home/node/.openclaw/USER.md:ro
       - ./openclaw/config/AGENT.md:/home/node/.openclaw/AGENT.md:ro
       - ./openclaw/skills:/skills:ro
+      # Heartbeat workspace files
+      - ./openclaw/config/HEARTBEAT.md:/home/node/.openclaw/workspace/HEARTBEAT.md:ro
+      - ./openclaw/scripts:/home/node/.openclaw/workspace/scripts:ro
     command:
       - node
       - openclaw.mjs
