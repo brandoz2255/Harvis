@@ -124,6 +124,10 @@ services:
       DISCORD_HEARTBEAT_CHANNEL_ID: "${DISCORD_HEARTBEAT_CHANNEL_ID:-}"
       DISCORD_ALERTS_CHANNEL_ID: "${DISCORD_ALERTS_CHANNEL_ID:-}"
       DISCORD_GENERAL_CHANNEL_ID: "${DISCORD_GENERAL_CHANNEL_ID:-}"
+      # Workspace routing — send most messages through OpenClaw
+      DISCORD_PREFER_WORKSPACE: "${DISCORD_PREFER_WORKSPACE:-true}"
+      # Shared projects volume path inside backend container
+      OPENCLAW_PROJECTS_DIR: "/data/openclaw-projects"
     user: "1001:1001" # Run as appuser for consistent permissions
     volumes:
       - ml-models-cache:/models-cache
@@ -138,6 +142,7 @@ services:
       - ./python_back_end/notebooks:/app/notebooks:ro
       - ./python_back_end/vibecoding:/app/vibecoding:ro
       - artifact_data:/data/artifacts
+      - openclaw-projects:/data/openclaw-projects
     networks:
       - ollama-n8n-network
       - openclaw-internal
@@ -448,6 +453,8 @@ services:
       # Heartbeat workspace files
       - ./openclaw/config/HEARTBEAT.md:/home/node/.openclaw/workspace/HEARTBEAT.md:ro
       - ./openclaw/scripts:/home/node/.openclaw/workspace/scripts:ro
+      # Shared projects volume — backend writes repos, OpenClaw reads/writes code
+      - openclaw-projects:/home/node/projects
     command:
       - node
       - openclaw.mjs
@@ -598,3 +605,4 @@ volumes:
   tts_rvc_models:
   tts_rvc_assets:
   openclaw-data:
+  openclaw-projects:

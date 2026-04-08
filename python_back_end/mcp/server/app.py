@@ -3,9 +3,11 @@ from pydantic import BaseModel
 from .registry import registry, invoke_tool
 from .auth import require_scopes
 from .tools.os_ops import register_os_ops  # registers tools at import
+from .tools.openclaw_workspace import register_openclaw_workspace
 
-app = FastAPI(title="MCP OS-OPS Server")
+app = FastAPI(title="MCP Harvis Server")
 register_os_ops()
+register_openclaw_workspace()
 
 class RpcRequest(BaseModel):
     jsonrpc: str = "2.0"

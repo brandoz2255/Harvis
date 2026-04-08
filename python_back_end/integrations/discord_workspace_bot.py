@@ -127,6 +127,7 @@ def _discord_workspace_lock(message: discord.Message) -> asyncio.Lock:
 
 _LOCAL_OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
 _FAST_MODEL = os.getenv("DISCORD_FAST_MODEL", "")  # blank = use cfg.model_name or default
+_PREFER_WORKSPACE = os.getenv("DISCORD_PREFER_WORKSPACE", "false").lower() == "true"
 
 # ── Quick regex pre-filter: skip the AI classifier for obviously simple messages ──
 # These patterns strongly indicate the message NEEDS tools/browser/workspace.
@@ -135,15 +136,19 @@ _FAST_MODEL = os.getenv("DISCORD_FAST_MODEL", "")  # blank = use cfg.model_name 
 _WORKSPACE_SIGNALS = re.compile(
     r"(https?://|\.com\b|\.org\b|\.io\b|\.dev\b|\.net\b"
     r"|screenshot|screen\s*shot|browse|open\s+.*website"
-    r"|write\s+(?:a\s+)?(?:file|code|script|program|function)"
-    r"|create\s+(?:a\s+)?(?:file|repo|project|pr|pull\s*request)"
+    r"|write\s+(?:a\s+)?(?:file|code|script|program|function|component|page|api)"
+    r"|create\s+(?:a\s+)?(?:file|repo|project|pr|pull\s*request|component|endpoint|route)"
+    r"|make\s+(?:a\s+)?(?:component|page|api|endpoint|function|class|module)"
+    r"|implement|add\s+(?:a\s+)?(?:feature|button|form|modal|table)"
     r"|run\s+(?:a\s+)?(?:command|script|test|code)"
     r"|search\s+(?:the\s+)?(?:web|internet|google)"
     r"|download|upload|install|deploy|build|compile"
     r"|fix\s+(?:the\s+)?(?:bug|error|issue|code)"
     r"|debug|refactor|merge|commit|push|pull"
     r"|read\s+(?:the\s+)?file|edit\s+(?:the\s+)?file"
-    r"|research\s|analyze\s+(?:the\s+)?(?:code|repo|log))",
+    r"|research\s|analyze\s+(?:the\s+)?(?:code|repo|log)"
+    r"|react|nextjs|next\.js|fastapi|python|typescript|javascript"
+    r"|component|endpoint|router|schema|migration|dockerfile)",
     re.IGNORECASE,
 )
 
@@ -750,10 +755,12 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
                 pref_agent_id = db_agent_id or cfg.agent_id
                 pref_model_name = db_model_name or cfg.model_name
 
-            # ── Quick pre-filter: skip AI classifier for obviously simple messages ──
-            # This saves 2-5s of Ollama classification for greetings, short Qs, etc.
+            # ── Workspace-first mode or standard routing ──
             use_fast_path = False
-            if _is_obviously_simple(content):
+            if _PREFER_WORKSPACE:
+                # In workspace-first mode, only fast-path ultra-short greetings
+                use_fast_path = len(content) < 20 and not _WORKSPACE_SIGNALS.search(content)
+            elif _is_obviously_simple(content):
                 use_fast_path = True
             else:
                 # Dynamic Router: use AI to decide if a workspace is needed

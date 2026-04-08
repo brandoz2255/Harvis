@@ -42,10 +42,13 @@ Workspaces are appropriate when the user wants something that requires:
 - Doing research that requires synthesizing many sources (local only)
 - Any multi-step task that would take more than one response to complete
 
+Workspaces are STRONGLY preferred when the user mentions anything about code,
+programming, components, functions, APIs, or technical implementation — even
+if the request seems simple. Err on the side of suggesting a workspace.
+
 Workspaces are NOT appropriate for:
-- Simple questions or explanations
-- Short factual answers
-- Casual conversation
+- Simple greetings or casual chat (e.g. "hi", "thanks", "how are you")
+- Short factual questions with no coding context (e.g. "what time is it")
 
 Respond with ONLY valid JSON in this exact format:
 {
@@ -56,7 +59,7 @@ Respond with ONLY valid JSON in this exact format:
   "reason": "One sentence explaining why this does or does not need a workspace."
 }
 
-Only set should_suggest = true if confidence >= 0.7."""
+Only set should_suggest = true if confidence >= 0.4."""
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
 FAST_MODEL = os.getenv("DISCORD_FAST_MODEL", "qwen3.5-32k:latest")

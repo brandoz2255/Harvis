@@ -53,6 +53,7 @@ from workspace.model_proxy import model_proxy_router
 from workspace.github_proxy import github_proxy_router
 from workspace.rag_proxy import rag_proxy_router
 from workspace.kubectl_proxy import kubectl_proxy_router
+from workspace.repo_manager import repo_manager_router
 
 # Import tools routers
 from tools import maps_router, openclaw_proxy_router, browser_proxy_router, opencode_llm_router, discord_proxy_router
@@ -1111,6 +1112,9 @@ app.include_router(rag_proxy_router)
 # Both share the same handlers & in-memory approval state.
 app.include_router(kubectl_proxy_router, prefix="/api/kubectl")
 app.include_router(kubectl_proxy_router, prefix="/kubectl")
+
+# Include workspace repo manager (GitHub repo clone/sync/push for OpenClaw workspace)
+app.include_router(repo_manager_router)
 
 # Include Maps proxy (Google Maps API endpoints without exposing API keys)
 app.include_router(maps_router)
