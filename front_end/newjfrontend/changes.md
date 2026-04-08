@@ -1,3 +1,132 @@
+## 2026-03-30: experimental/plugin-merge — Browser Automation, Web Research, Discord Integration, and Model Routing Overhaul
+
+### Overview
+
+Major feature branch merging OpenClaw browser automation (Chromium native), live web research, Discord workspace bot, local Ollama model routing, and workspace progress tracking. 28 files changed across frontend, backend, infrastructure, and skills.
+
+---
+
+### 1. OpenClaw Chromium Browser Integration
+
+**Problem**: OpenClaw's native `browser/*` tools (navigate, screenshot, act) require Chromium in the container, but the base `dulc3/openclaw` image ships without a browser.
+
+**Solution**: Created a layered Docker image `dulc3/openclaw-browser:latest` that extends the base OpenClaw image with Chromium and all required dependencies.
+
+**Files Created/Modified**:
+- `openclaw-browser/Dockerfile` (NEW) — Multi-distro Dockerfile: detects apt-get vs apk, installs Chromium + fonts + libs, sets `CHROME_BIN`/`PUPPETEER_EXECUTABLE_PATH` env vars, smoke-tests binary
+- `docker-compose.yaml` — Updated openclaw service: `image: dulc3/openclaw-browser:latest`, `shm_size: 256m`, `tmpfs: [/tmp/.chromium:size=128m]`, Chromium env vars, memory 2G→3G, cpus 1.0→1.5
+- `k8s-manifests/overlays/prod/openclaw.yaml` — Changed image to `dulc3/openclaw-browser:latest`, added `dshm` (256Mi emptyDir) and `chromium-tmp` (128Mi emptyDir) volumes, added Chromium env vars, bumped resources to 3Gi/1500m, fixed `bashForegroundMs` from 2000→30000 in ConfigMap, added `"browser": {"enabled": true, "headless": true}` config
+- `k8s-manifests/overlays/prod/kustomization.yaml` — Changed image override from `dulc3/openclaw` to `dulc3/openclaw-browser:latest`
+- `ci_openclaw_pipeline.sh` — Added browser image build step, smoke test with Chromium verification, push both base + browser images, kustomize update for both entries
+- `openclaw/config/openclaw.json` — Added `"browser": {"enabled": true, "headless": true, "ssrfPolicy": {"blockPrivateIps": true}}`, bumped `bashForegroundMs` to 30000
+
+**Critical fix**: K8s ConfigMap had `bashForegroundMs: 2000` which killed curl/browser commands in 2 seconds. Changed to 30000ms.
+
+---
+
+### 2. Live Web Research Mode
+
+**Problem**: Users had no way to enable live web research from the chat UI. OpenClaw proxy endpoints lacked rate limiting, domain policies, and audit logging.
+
+**Solution**: Added a "Web Research" toggle button in the frontend with a one-time acknowledgment dialog, and expanded the backend proxy with rate limiting, domain allowlists/denylists, SSRF protection, and full audit logging.
+
+**Files Modified**:
+- `front_end/newjfrontend/components/SearchToggle.tsx` — Complete rewrite: new `ResearchMode` type (`'off' | 'live'`), warning dialog with acknowledgment flow, amber Globe icon when active, session-level acknowledgment state
+- `front_end/newjfrontend/components/chat-input.tsx` — Updated to pass `researchMode` to SearchToggle, wire mode changes to chat request headers
+- `front_end/newjfrontend/app/page.tsx` — Updated workspace model reference from stale `qwen3:latest` to `qwen3.5-32k:latest`
+- `python_back_end/tools/openclaw_proxy.py` — Major expansion (~594 lines added): `browser_proxy_router` for browser tool proxying, `openclaw_tool_audit` table for all tool call auditing, in-memory rate limiting (configurable via env vars), domain allowlist/denylist (`OPENCLAW_WEB_ALLOWLIST`/`OPENCLAW_WEB_DENYLIST`), `_MAX_FETCH_BYTES` limit (2MB), relaxed limits when `X-Live-Web: true` header present (30 searches, 60 fetches per 60s), private-IP/SSRF blocking always enforced
+- `python_back_end/tools/__init__.py` — Added `browser_proxy_router` export
+- `python_back_end/main.py` — Imported and mounted `browser_proxy_router`, added `openclaw_tool_audit` table auto-creation at startup
+- `nginx.conf` — Added proxy routes for `/api/tools/browser/` endpoints
+- `skills/Harvis/harvis-research/SKILL.md` — Updated skill definition for web research agent with proxy endpoint usage
+
+---
+
+### 3. Workspace Progress Tracking & Agent Lifecycle Events
+
+**Problem**: Workspace runs showed no intermediate progress — users saw "Starting workspace" then only the final result, with no visibility into tool calls, sub-agent spawning, or errors.
+
+**Solution**: Enhanced the workspace event system with sub-agent tracking fields, agent lifecycle events, and richer DB persistence.
+
+**Files Modified**:
+- `python_back_end/workspace/workspace_router.py` — Added `_looks_like_browser_task()` heuristic for auto-enabling browser mode (detects URLs, domains, screenshot keywords), added `_db_enable_interactive()` for Tier 3 capability tokens, expanded `_db_save_event()` to persist `run_id`, `agent_label`, `model`, `parent_run_id` fields, added `InteractiveEnableRequest` model, added `enable_interactive`/`live_web` fields to `LaunchRequest`
+- `python_back_end/workspace/openclaw_client.py` — Enhanced WebSocket client with browser hint injection, sub-agent tracking, enriched event parsing
+- `front_end/newjfrontend/stores/openclawStore.ts` — Added `run_id`, `agent_label` fields to `WorkspaceLogEvent` type
+- `front_end/newjfrontend/hooks/useWorkspaceAgentGraph.ts` — Added agent graph tracking from workspace events
+- `front_end/newjfrontend/components/workspace/WorkspacePanel.tsx` — Enhanced timeline rendering with agent lifecycle markers and tool call display
+- `front_end/newjfrontend/components/workspace/WorkspaceSuggestionBanner.tsx` — Added SSE reconnection logic
+- `python_back_end/workspace/workspace_schema.sql` (NEW) — SQL schema for `workspace_web_caps` table (Tier 3 capability tokens)
+- `python_back_end/all_schemas_safe.sql` — Added `workspace_web_caps` and `openclaw_tool_audit` table definitions
+
+---
+
+### 4. Discord Workspace Bot
+
+**Problem**: No Discord integration for workspace tasks. Users couldn't trigger Harvis workspaces from Discord or receive live progress.
+
+**Solution**: Created a Discord bot that bridges workspace launches with live progress updates via DB polling.
+
+**Files Created/Modified**:
+- `python_back_end/integrations/discord_workspace_bot.py` (NEW) — Discord bot with `_TOOL_LABELS` mapping for human-readable progress, `_format_progress_line()` for tool/agent event formatting, `_wait_with_progress()` that polls `workspace_events` from DB and edits Discord message every 2.5s (rate-limit safe), cleans up progress message on completion and sends final result
+- `openclaw/config/openclaw.json` — Channels config for Discord (currently empty, configured in K8s)
+- `openclaw/config/exec-approvals.json` — Updated exec approval rules
+- `docker-compose.yaml` — Added OpenClaw Discord channel configuration in environment
+
+---
+
+### 5. Model Proxy & Local Ollama Routing
+
+**Problem**: Model proxy only routed to Kimi/NVIDIA/external Ollama. Local Ollama models (qwen3.5-32k) couldn't be used, and Ollama's `/v1` endpoint choked on non-standard OpenAI fields (`store`, `reasoning_effort`, `stream_options`).
+
+**Solution**: Added local Ollama fallback routing and request sanitization.
+
+**Files Modified**:
+- `python_back_end/workspace/model_proxy.py` — Added `LOCAL_OLLAMA_URL` env var, local Ollama fallback route (any unmatched model → local Ollama), `OLLAMA_ALLOWED_KEYS` whitelist to strip non-standard fields, `max_completion_tokens → max_tokens` conversion, auto-set `num_ctx: 32768`, enhanced logging with tool names
+- `python_back_end/workspace/kimi_workspace.py` — Added `"reasoning_effort": "none"` to local Ollama payloads so qwen3.5 puts output in `content` field instead of thinking tags
+- `front_end/newjfrontend/components/workspace/ModelSelectorDropdown.tsx` — Updated model selector to show local Ollama models from provider discovery endpoint
+
+---
+
+### 6. Browser Runner Service
+
+**Problem**: Needed a standalone browser automation service for fallback/parallel screenshot tasks.
+
+**Solution**: Created a lightweight Flask/Selenium service with Firefox.
+
+**Files Created**:
+- `browser_runner/app.py` (NEW) — Flask app with `/screenshot` endpoint, Selenium WebDriver with Firefox headless
+- `browser_runner/Dockerfile` (NEW) — Python + Firefox + geckodriver container
+- `browser_runner/requirements.txt` (NEW) — Flask, Selenium, Pillow dependencies
+
+---
+
+### 7. Infrastructure & Backend
+
+**Files Modified**:
+- `python_back_end/Dockerfile` — Added system dependencies for new features
+- `python_back_end/requirements.txt` — Added `trafilatura`, `httpx` dependencies
+- `python_back_end/research/extract/html_trafilatura.py` — Updated HTML extraction with trafilatura library
+- `python_back_end/vibecoding/user_prefs.py` — Added user preferences table columns at startup
+- `python_back_end/main.py` — Auto-creates `user_prefs`, `openclaw_tool_audit`, `workspace_web_caps` tables at startup, fixed default DATABASE_URL from `pgsql-db` to `pgsql`
+- `python_back_end/masterprompt5.md` — Updated system prompt for workspace agent
+
+---
+
+### 8. Skills
+
+**Files Created/Modified**:
+- `skills/Harvis/harvis-research/SKILL.md` — Updated research skill with proxy endpoint instructions and web research workflow
+- `skills/Harvis/harvis-browser/SKILL.md` (NEW) — Browser automation skill definition for OpenClaw agent
+- `python_back_end/Openclaw-files-guide.md` (NEW) — Developer guide for OpenClaw file structure
+
+---
+
+### Status
+
+All changes on `experimental/plugin-merge` branch. Ready for testing and merge review.
+
+---
+
 ## 2026-02-24: Fix OpenClaw K8s Deployment — Full Debug Session
 
 ### Problems Addressed

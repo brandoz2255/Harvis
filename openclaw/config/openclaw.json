@@ -11,12 +11,11 @@
   },
   "commands": {
     "bash": true,
-    "bashForegroundMs": 2000
+    "bashForegroundMs": 30000
   },
   "browser": {
-    "ssrfPolicy": {
-      "hostnameAllowlist": ["backend"]
-    }
+    "enabled": true,
+    "headless": true
   },
   "session": {
     "scope": "per-sender",
@@ -28,28 +27,12 @@
   "models": {
     "mode": "replace",
     "providers": {
-      "ollama-local": {
-        "api": "openai-completions",
-        "baseUrl": "http://ollama:11434/v1",
-        "apiKey": "ollama-local",
-        "models": []
-      },
       "harvis-proxy": {
         "api": "openai-completions",
         "baseUrl": "http://backend:8000/v1",
         "apiKey": "${OPENCLAW_GATEWAY_TOKEN}",
         "models": [
-          { "id": "nvidia-kimi", "name": "Kimi K2.5 (NVIDIA NIM)" },
-          { "id": "kimi-k2.5", "name": "Kimi K2.5 (Moonshot)" },
-          { "id": "gpt-oss:120b", "name": "GPT-OSS 120B (via Harvis proxy)" }
-        ]
-      },
-      "user-config": {
-        "api": "openai-completions",
-        "baseUrl": "http://backend:8000/v1",
-        "apiKey": "${OPENCLAW_GATEWAY_TOKEN}",
-        "models": [
-          { "id": "harvis-llm", "name": "User Configured LLM (set in Settings)" }
+          { "id": "qwen3.5-32k:latest", "name": "Qwen 3.5 9.7B (Local Ollama)" }
         ]
       }
     }
@@ -59,22 +42,26 @@
       "enabled": true
     },
     "exec": {
-      "host": "gateway"
+      "host": "gateway",
+      "security": "full",
+      "ask": "off"
     }
   },
   "agents": {
     "defaults": {
       "elevatedDefault": "full",
-      "timeoutSeconds": 600,
+      "verboseDefault": "full",
+      "timeoutSeconds": 1200,
       "model": {
-        "primary": "harvis-proxy/harvis-llm"
+        "primary": "harvis-proxy/qwen3.5-32k:latest"
       },
       "subagents": {
-        "runTimeoutSeconds": 600,
-        "announceTimeoutMs": 180000,
+        "model": "harvis-proxy/qwen3.5-32k:latest",
+        "runTimeoutSeconds": 1200,
+        "announceTimeoutMs": 30000,
         "maxSpawnDepth": 2,
-        "maxChildrenPerAgent": 5,
-        "maxConcurrent": 8
+        "maxChildrenPerAgent": 6,
+        "maxConcurrent": 6
       }
     },
     "list": [
@@ -82,30 +69,7 @@
         "id": "main",
         "default": true,
         "model": {
-          "primary": "harvis-proxy/kimi-k2.5"
-        }
-      },
-      {
-        "id": "planner",
-        "model": {
-          "primary": "harvis-proxy/nvidia-kimi"
-        },
-        "skills": ["harvis-planner", "harvis-coding", "harvis-github", "harvis-rag", "harvis-research", "harvis-document"]
-      },
-      {
-        "id": "kimi",
-        "model": {
-          "primary": "harvis-proxy/kimi-k2.5"
-        },
-        "subagents": {
-          "model": "harvis-proxy/kimi-k2.5"
-        },
-        "skills": ["harvis-coding"]
-      },
-      {
-        "id": "gpt-oss",
-        "model": {
-          "primary": "harvis-proxy/gpt-oss:120b"
+          "primary": "harvis-proxy/qwen3.5-32k:latest"
         }
       }
     ]
@@ -115,10 +79,5 @@
       "extraDirs": ["/skills"]
     }
   },
-  "channels": {
-    "discord": {
-      "enabled": true,
-      "token": "${DISCORD_BOT_TOKEN}"
-    }
-  }
+  "channels": {}
 }

@@ -58,6 +58,53 @@ logger = logging.getLogger(__name__)
 OPENCLAW_URL = os.getenv("OPENCLAW_URL", "ws://harvis-ai-openclaw:18789")
 OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 
+# Identity files (mounted into backend container).
+# docker-compose mounts ./openclaw/config -> /app/openclaw_config:ro
+_IDENTITY_DIR = os.getenv("HARVIS_OPENCLAW_IDENTITY_DIR", "/app/openclaw_config")
+_IDENTITY_FILES = (
+    ("IDENTITY", "IDENTITY.md"),
+    ("SOUL", "SOUL.md"),
+    ("USER", "USER.md"),
+    ("AGENT", "AGENT.md"),
+)
+_IDENTITY_CACHE: Optional[str] = None
+
+
+def _load_identity_bundle() -> str:
+    """
+    Load Harvis identity + behavior documents and return a single markdown block.
+
+    Injected into every OpenClaw run so the agent is persistent even if OpenClaw
+    session memory resets (or a different sessionKey is used, e.g. Discord).
+    """
+    global _IDENTITY_CACHE
+    # If we previously failed to load (cached empty), try again on subsequent calls.
+    # This matters in Docker when volumes/env are added after the process first started.
+    if _IDENTITY_CACHE:
+        return _IDENTITY_CACHE
+
+    parts: list[str] = []
+    for label, fname in _IDENTITY_FILES:
+        path = os.path.join(_IDENTITY_DIR, fname)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+            if content:
+                parts.append(f"## {label}\n\n{content}\n")
+        except Exception as exc:
+            logger.warning("OpenClaw identity file missing/unreadable: %s (%s)", path, exc)
+
+    if not parts:
+        _IDENTITY_CACHE = ""
+        return ""
+
+    _IDENTITY_CACHE = (
+        "SYSTEM IDENTITY (always follow; do not argue; do not restate):\n\n"
+        + "\n".join(parts)
+        + "\n"
+    )
+    return _IDENTITY_CACHE
+
 # GitHub credentials — either GitHub App (preferred) or legacy PAT.
 # The actual token is never injected into the directive; the skill mints it at runtime.
 # We only check whether GitHub is configured so we know to inject the hint.
@@ -68,6 +115,19 @@ HARVIS_GITHUB_EMAIL = os.getenv("HARVIS_GITHUB_EMAIL", "2995570+HarvisAI[bot]@us
 
 # True when any GitHub auth method is configured
 _GITHUB_CONFIGURED = bool(HARVIS_GITHUB_APP_ID or HARVIS_GITHUB_TOKEN)
+
+
+def _exec_via_bash(shell_one_liner: str) -> str:
+    """
+    Wrap a shell one-liner for OpenClaw `exec` so `$OPENCLAW_GATEWAY_TOKEN` expands.
+
+    Many exec paths invoke argv directly (no shell). A bare
+    `curl ... -H "Authorization: Bearer $OPENCLAW_GATEWAY_TOKEN"` then sends the
+    literal dollar-name string and Harvis returns 401 Invalid proxy token.
+    """
+    escaped = shell_one_liner.replace("\\", "\\\\").replace('"', '\\"')
+    return f'bash --noprofile --norc +H -lc "{escaped}"'
+
 
 # Must match the OpenClaw protocol version (frames.ts PROTOCOL_VERSION = 3)
 PROTOCOL_VERSION = 3
@@ -316,6 +376,7 @@ class OpenClawClient:
                     "platform": "linux",
                     "mode": _CLIENT_MODE,
                 },
+                "caps": ["tool-events"],
                 "role": "operator",
                 "scopes": _CLIENT_SCOPES,
                 "auth": {
@@ -341,6 +402,8 @@ class OpenClawClient:
         self,
         task_message: str,
         chat_history: list[dict],
+        interactive_context: Optional[dict] = None,
+        live_web: bool = False,
     ) -> AsyncGenerator[OpenClawEvent, None]:
         """
         Launch a task on OpenClaw and stream back all events until done.
@@ -410,39 +473,183 @@ class OpenClawClient:
 
             # RAG search hint — always injected so the agent uses local knowledge
             # before writing code or answering questions about the codebase.
+            _rag_curl = (
+                f"curl -s -X POST {_backend_host}/rag/search "
+                f"-H \"Content-Type: application/json\" "
+                f"-H \"Authorization: Bearer $OPENCLAW_GATEWAY_TOKEN\" "
+                f"-H \"X-OpenClaw-SessionKey: {self._session_key}\" "
+                "-d '{\"query\": \"<your search terms>\", \"context_type\": \"code\", \"top_k\": 5}'"
+            )
             rag_hint = (
                 "\nRAG SEARCH (REQUIRED before writing code):\n"
-                "Search the Harvis knowledge base FIRST using:\n"
-                f"  curl -s -X POST {_backend_host}/rag/search \\\n"
-                "    -H 'Content-Type: application/json' \\\n"
-                "    -H \"Authorization: Bearer $OPENCLAW_GATEWAY_TOKEN\" \\\n"
-                "    -d '{\"query\": \"<your search terms>\", \"context_type\": \"code\", \"top_k\": 5}'\n"
+                "Search the Harvis knowledge base FIRST using one `exec` with:\n"
+                f"  {_exec_via_bash(_rag_curl)}\n"
                 "Use context_type 'docs' for architecture/design questions.\n"
-                "Do NOT search the public web. Use this endpoint as your only search tool.\n"
+                "IMPORTANT: Use the bash-wrapped command above so `$OPENCLAW_GATEWAY_TOKEN` expands.\n"
             )
 
+            # Web access hint — tell the agent to CALL exec, not print commands.
+            # Qwen 3.5 copies raw bash as text if we show it as code blocks.
+            _live_hdr = ' -H "X-Live-Web: true"' if live_web else ""
+            _max_r = "10" if live_web else "8"
+            _search_inner = (
+                f"curl -s -X POST {_backend_host}/api/tools/search"
+                f" -H \"Content-Type: application/json\""
+                f" -H \"Authorization: Bearer $OPENCLAW_GATEWAY_TOKEN\""
+                f" -H \"X-OpenClaw-SessionKey: {self._session_key}\""
+                f"{_live_hdr}"
+                f" -d '{{\"query\":\"REPLACE_WITH_QUERY\",\"max_results\":{_max_r}}}'"
+            )
+            _fetch_inner = (
+                f"curl -s -X POST {_backend_host}/api/tools/web-fetch"
+                f" -H \"Content-Type: application/json\""
+                f" -H \"Authorization: Bearer $OPENCLAW_GATEWAY_TOKEN\""
+                f" -H \"X-OpenClaw-SessionKey: {self._session_key}\""
+                f"{_live_hdr}"
+                f" -d '{{\"url\":\"REPLACE_WITH_URL\",\"purpose\":\"research\"}}'"
+            )
+            _search_cmd = _exec_via_bash(_search_inner)
+            _fetch_cmd = _exec_via_bash(_fetch_inner)
+            web_hint = (
+                "\nWEB ACCESS:\n"
+                "You can search the internet and fetch web pages.\n"
+                "IMPORTANT: Call the `exec` tool with these bash-wrapped commands. Do NOT type them as text.\n\n"
+                f"To search: call exec with command: {_search_cmd}\n"
+                f"To fetch a URL: call exec with command: {_fetch_cmd}\n\n"
+                "After exec returns the JSON result, read it and summarize for the user.\n"
+                "The bash wrapper is required so `$OPENCLAW_GATEWAY_TOKEN` expands (otherwise you get Invalid proxy token).\n"
+                "Never output the command as text. Always call exec.\n"
+            )
+
+            # Browser automation hint — injected when interactive_context is provided
+            # with workspace_id and capability_token (from workspace_web_caps table).
+            browser_hint = ""
+            if interactive_context:
+                _bws_id = interactive_context.get("workspace_id", "")
+                _bcap = interactive_context.get("capability_token", "")
+                if _bws_id and _bcap:
+                    _b_base = f"{_backend_host}/api/tools/browser"
+                    _b_auth = (
+                        f"-H \"Content-Type: application/json\" "
+                        f"-H \"Authorization: Bearer $OPENCLAW_GATEWAY_TOKEN\" "
+                        f"-H \"X-OpenClaw-SessionKey: {self._session_key}\""
+                        f"{_live_hdr}"
+                    )
+                    _b_creds = f'"workspace_id":"{_bws_id}","capability_token":"{_bcap}"'
+                    _b_open = (
+                        f"curl -s -X POST {_b_base}/session {_b_auth} "
+                        f"-d '{{{_b_creds},\"headless\":true}}'"
+                    )
+                    _b_nav = (
+                        f"curl -s -X POST {_b_base}/navigate {_b_auth} "
+                        f"-d '{{{_b_creds},\"sessionId\":\"SESSION_ID\",\"url\":\"https://TARGET_URL\"}}'"
+                    )
+                    _b_shot = (
+                        f"curl -s -X POST {_b_base}/screenshot {_b_auth} "
+                        f"-d '{{{_b_creds},\"sessionId\":\"SESSION_ID\"}}'"
+                    )
+                    _b_click = (
+                        f"curl -s -X POST {_b_base}/act {_b_auth} "
+                        f"-d '{{{_b_creds},\"sessionId\":\"SESSION_ID\",\"action\":\"click\",\"selector\":\"CSS_SEL\"}}'"
+                    )
+                    _b_type = (
+                        f"curl -s -X POST {_b_base}/act {_b_auth} "
+                        f"-d '{{{_b_creds},\"sessionId\":\"SESSION_ID\",\"action\":\"type\",\"selector\":\"CSS_SEL\",\"text\":\"VALUE\"}}'"
+                    )
+                    _b_press = (
+                        f"curl -s -X POST {_b_base}/act {_b_auth} "
+                        f"-d '{{{_b_creds},\"sessionId\":\"SESSION_ID\",\"action\":\"press\",\"key\":\"enter\"}}'"
+                    )
+                    _b_close = (
+                        f"curl -s -X POST {_b_base}/close {_b_auth} "
+                        f"-d '{{{_b_creds},\"sessionId\":\"SESSION_ID\"}}'"
+                    )
+                    browser_hint = (
+                        "\nBROWSER AUTOMATION (interactive website access):\n"
+                        "You have a real Firefox browser. Use exec tool with these bash-wrapped curl commands.\n"
+                        "IMPORTANT: Call exec tool. Do NOT type these as text.\n\n"
+                        "CREDENTIALS: Copy the EXACT `workspace_id` and `capability_token` strings from the "
+                        "JSON in this task message into every browser `-d` body. "
+                        "If you alter them, Harvis returns 403 Invalid capability token.\n"
+                        "401 Invalid proxy token means the bash-wrapped Authorization header did not expand "
+                        "`$OPENCLAW_GATEWAY_TOKEN` — use only the provided bash -lc commands.\n\n"
+                        "Each line MUST be run via the bash wrapper so `$OPENCLAW_GATEWAY_TOKEN` expands "
+                        "(otherwise Harvis returns Invalid proxy token).\n"
+                        "DO NOT use the internal `browser` tool for this workflow. "
+                        "Only use `exec` with the /api/tools/browser/* proxy commands below.\n"
+                        "Also keep the X-OpenClaw-SessionKey exactly as provided.\n\n"
+                        f"  Open session:  {_exec_via_bash(_b_open)}\n"
+                        "  -> Returns JSON: {\"sessionId\":\"...\"}\n"
+                        "     Mandatory next step: read that returned `sessionId` value and paste the exact string\n"
+                        "     into subsequent commands in place of SESSION_ID.\n\n"
+                        f"  Navigate:      {_exec_via_bash(_b_nav)}\n"
+                        "  -> URLs MUST be https. Returns page title and final URL.\n\n"
+                        f"  Screenshot:    {_exec_via_bash(_b_shot)}\n"
+                        "  -> Returns artifact_path of the saved screenshot.\n"
+                        "  Then call the `image` tool with `file_path` set to that artifact_path.\n"
+                        "  IMPORTANT: Do NOT call `read` on the artifact_path for screenshot analysis.\n\n"
+                        f"  Click:         {_exec_via_bash(_b_click)}\n\n"
+                        f"  Type text:     {_exec_via_bash(_b_type)}\n\n"
+                        f"  Press key:     {_exec_via_bash(_b_press)}\n\n"
+                        f"  Close session: {_exec_via_bash(_b_close)}\n\n"
+                        "MANDATORY WORKFLOW for this workspace:\n"
+                        "- open session\n"
+                        "- navigate\n"
+                        "- screenshot\n"
+                        "- close session\n\n"
+                        "If you need to interact (click/type/press), do it *after* navigate and then screenshot again if needed.\n"
+                        "Always screenshot after navigating to see the page. Close session when done.\n"
+                    )
+                    logger.info(
+                        "[workspace:%s] Browser hints injected (workspace_id=%s)",
+                        self.workspace_id, _bws_id,
+                    )
+
             # Imperative directive — task first, context last, no asking back.
+            _workdir_init = _exec_via_bash(f"mkdir -p {workdir} && cd {workdir} && pwd")
             directive = (
                 f"WORKSPACE DIRECTORY: {workdir}\n"
-                f"Before doing anything, run: mkdir -p {workdir} && cd {workdir}\n"
+                "MANDATORY WORKDIR INIT:\n"
+                f"Your VERY FIRST action MUST be an `exec` tool call that runs exactly:\n"
+                f"  {_workdir_init}\n"
+                "Do not run `cd` alone; do not run other tools before this.\n"
                 f"All file operations (read, write, exec) MUST happen inside {workdir}.\n"
                 f"{github_hint}"
                 f"{rag_hint}"
+                f"{web_hint}"
+                f"{browser_hint}"
                 f"\nEXECUTE THIS TASK NOW: {last_user_msg}\n\n"
                 "RULES:\n"
-                "- Do NOT ask for clarification or say \"what task\".\n"
-                "- Do NOT describe what you will do — just do it.\n"
-                "- Call your tools (exec, write, read) immediately to complete the task.\n"
-                "- Start with a tool call, not a text response.\n"
+                "- ALWAYS use tool calls (exec, write, read). NEVER type commands as text.\n"
+                "- Start your response with a tool call, not a text message.\n"
+                "- Do NOT ask for clarification. Just do the task.\n"
+                "- Do NOT describe what you will do. Call a tool and do it.\n"
+                "- You CAN access the internet. Call exec with the bash-wrapped curl commands above.\n"
+                "- After exec returns a result, summarize it for the user in plain language.\n"
+                "- For tasks with independent parallel parts (e.g. research + code check, multiple URLs), "
+                "use `sessions_spawn` to delegate sub-agents when available; merge results in your final answer.\n"
+                "- SUB-AGENTS: Spawned workers are internal only. Do NOT repeat Harvis identity, "
+                "Discord/channel setup, or integration boilerplate in sub-agent replies. "
+                "Do NOT describe multiple 'Discord instances' or duplicate the assistant persona — "
+                "one Harvis, one user-facing voice; sub-agents return facts only for the parent to merge.\n"
             )
 
+            identity_bundle = _load_identity_bundle()
             if context_block:
                 full_message = (
-                    f"{directive}\n"
+                    f"{identity_bundle}\n{directive}\n"
                     f"CONTEXT (brief summary of prior conversation — do not reply to this):\n{context_block}"
                 )
             else:
-                full_message = directive
+                full_message = f"{identity_bundle}\n{directive}"
+
+            # Extra guardrail: if the agent asks identity/setup questions, it's not following instructions.
+            # Keep this short and at the top of the task message.
+            full_message = (
+                "DO NOT ask identity/setup questions. You already have your identity and mission. "
+                "You are Harvis.\n\n"
+                + full_message
+            )
 
             # Send the chat message via chat.send.
             req_id = self._next_id()
@@ -490,14 +697,47 @@ class OpenClawClient:
 
                 msg_type = msg.get("type")
 
+                # ── Handle incoming RPC requests from OpenClaw ──────────────
+                if msg_type == "req":
+                    method = msg.get("method", "")
+                    req_id = msg.get("id")
+                    if "approval" in method or "exec" in method:
+                        logger.info(
+                            "[workspace:%s] Auto-approving RPC request: method=%s id=%s",
+                            self.workspace_id, method, req_id,
+                        )
+                        await self._ws.send(json.dumps({
+                            "type": "res",
+                            "id": req_id,
+                            "ok": True,
+                            "result": {"decision": "allow", "approved": True},
+                        }))
+                    else:
+                        logger.warning(
+                            "[workspace:%s] Ignoring unknown RPC request: method=%s",
+                            self.workspace_id, method,
+                        )
+                    continue
+
                 # Ignore acks and other non-event frames
                 if msg_type == "res":
                     if not msg.get("ok"):
                         err = msg.get("error", {}).get("message", "Unknown error")
                         logger.error("[workspace:%s] RPC error: %s", self.workspace_id, err)
+                        # Detect specific error patterns for better hints
+                        if "model" in err.lower() and ("not found" in err.lower() or "404" in err):
+                            hint = (
+                                "The requested model is not available in Ollama. "
+                                "Run: docker exec harvis-ollama ollama list  to see available models. "
+                                "The ollama-model-pull init container should auto-create it on next restart."
+                            )
+                        elif "unknown method" in err.lower():
+                            hint = "OpenClaw protocol mismatch. Check that the OpenClaw image version matches the client."
+                        else:
+                            hint = "An RPC error occurred in the OpenClaw gateway. Check: docker compose logs openclaw --tail 30"
                         yield OpenClawEvent("error", {
                             "message": err,
-                            "fix_hint": "An RPC error occurred in the OpenClaw gateway. Check the OpenClaw container logs.",
+                            "fix_hint": hint,
                         })
                         break
                     continue
@@ -507,6 +747,31 @@ class OpenClawClient:
 
                 event_name = msg.get("event", "")
                 payload = msg.get("payload", {})
+
+                # ── Auto-approve exec tool requests ──────────────────────────
+                # OpenClaw sends an "exec.approval.requested" event when an
+                # agent wants to run a shell command.  We immediately approve
+                # by calling exec.approval.decide so the agent doesn't block
+                # for the 120s timeout.  The Harvis orchestrator controls what
+                # agents can reach at the network layer.
+                if event_name == "exec.approval.requested":
+                    approval_id = payload.get("id")
+                    cmd = payload.get("request", {}).get("command", "?")
+                    logger.info(
+                        "[workspace:%s] Auto-approving exec: id=%s cmd=%s",
+                        self.workspace_id, approval_id, cmd[:120],
+                    )
+                    approve_req_id = self._next_id()
+                    await self._ws.send(json.dumps({
+                        "type": "req",
+                        "id": approve_req_id,
+                        "method": "exec.approval.resolve",
+                        "params": {
+                            "id": approval_id,
+                            "decision": "allow-always",
+                        },
+                    }))
+                    continue
 
                 # Agent events — tool calls and progress log lines
                 if event_name == "agent":
@@ -552,9 +817,22 @@ class OpenClawClient:
 
                     elif state == "error":
                         err = payload.get("errorMessage", "OpenClaw agent error")
+                        err_lower = err.lower()
+                        if "connection error" in err_lower or "fetch failed" in err_lower:
+                            hint = (
+                                "The agent could not reach the model backend. "
+                                "Verify Ollama is running: docker compose ps ollama  "
+                                "and the model exists: docker exec harvis-ollama ollama list"
+                            )
+                        elif "timeout" in err_lower:
+                            hint = "The agent timed out. The model may be overloaded or the task too complex for a single turn."
+                        elif "model" in err_lower:
+                            hint = "Model error — check that qwen3.5-32k:latest exists in Ollama."
+                        else:
+                            hint = "The OpenClaw agent encountered an error. Check: docker compose logs openclaw --tail 30"
                         yield OpenClawEvent("error", {
                             "message": err,
-                            "fix_hint": "The OpenClaw agent encountered an error. Check model availability and Ollama logs.",
+                            "fix_hint": hint,
                         })
                         break
 
@@ -567,7 +845,13 @@ class OpenClawClient:
                         content = message.get("content", [])
                         text = self._extract_text(content)
                         if text:
-                            delta = text[len(self._last_partial_text):]
+                            # OpenClaw should send monotonic cumulative text; if not, reset
+                            # to avoid corrupt deltas (restarts / alternate stream shape).
+                            if self._last_partial_text and not text.startswith(
+                                self._last_partial_text
+                            ):
+                                self._last_partial_text = ""
+                            delta = text[len(self._last_partial_text) :]
                             self._last_partial_text = text
                             if delta:
                                 yield OpenClawEvent("token", {"content": delta})
@@ -715,9 +999,8 @@ class OpenClawClient:
                     }), run_id)
 
         elif stream == "assistant":
-            text = data.get("text", "")
-            if text:
-                yield self._tag(OpenClawEvent("token", {"content": text}), run_id)
+            # Assistant text is streamed via chat `partial` state; emitting here duplicates output.
+            pass
 
         elif stream == "lifecycle":
             phase = data.get("phase", "")
@@ -729,12 +1012,21 @@ class OpenClawClient:
                 }), run_id)
             elif phase == "start":
                 model_hint = data.get("model") or data.get("modelId") or ""
-                model_str = f" ({model_hint})" if model_hint else ""
-                yield self._tag(OpenClawEvent("log", {
-                    "message": f"{label} started{model_str} — waiting for first token…",
+                # Determine parent run_id — first registered run is the parent.
+                parent_run_id: Optional[str] = None
+                if self._run_labels:
+                    first_run = next(iter(self._run_labels))
+                    if first_run != run_id:
+                        parent_run_id = first_run
+                yield self._tag(OpenClawEvent("agent_start", {
+                    "agent_label": label,
+                    "model": model_hint or None,
+                    "parent_run_id": parent_run_id,
+                    "message": f"{label} started" + (f" ({model_hint})" if model_hint else "") + " — waiting for first token…",
                 }), run_id)
             elif phase == "end":
-                yield self._tag(OpenClawEvent("log", {
+                yield self._tag(OpenClawEvent("agent_end", {
+                    "agent_label": label,
                     "message": f"{label} finished",
                 }), run_id)
 

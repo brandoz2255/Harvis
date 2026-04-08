@@ -16,6 +16,8 @@ interface ProviderInfo {
 
 export function ModelSelectorDropdown() {
   const { workspaceModel, workspaceModelName, setWorkspaceModel, setWorkspaceModelName } = useOpenClawStore()
+  const discordExternalWorkspace = useOpenClawStore((s) => s.discordExternalWorkspace)
+  const attachToWorkspaceStream = useOpenClawStore((s) => s.attachToWorkspaceStream)
   const [providers, setProviders] = useState<ProviderInfo[]>([])
   const [isOpen, setIsOpen] = useState(false)
   const [loading, setLoading] = useState(true)
@@ -52,7 +54,57 @@ export function ModelSelectorDropdown() {
     return () => document.removeEventListener('mousedown', handler)
   }, [])
 
-  const autoSelectBestProvider = (providerList: ProviderInfo[]) => {
+  // Map provider_type from DB to workspace model id
+  const providerTypeToModelId = (ptype: string, url?: string): 'local' | 'kimi' | 'nvidia-kimi' | 'cloud-ollama' => {
+    if (ptype === 'ollama' || (url && (url.includes('ollama') || url.includes('localhost')))) return 'local'
+    if (ptype === 'moonshot') return 'kimi'
+    if (ptype === 'nvidia') return 'nvidia-kimi'
+    return 'local'
+  }
+
+  // Map workspace model id to provider_type for DB
+  const modelIdToProviderType = (id: string): string => {
+    switch (id) {
+      case 'kimi': return 'moonshot'
+      case 'nvidia-kimi': return 'nvidia'
+      default: return 'ollama'
+    }
+  }
+
+  // Map workspace model id to provider_url for DB
+  const modelIdToProviderUrl = (id: string): string => {
+    switch (id) {
+      case 'kimi': return 'https://api.moonshot.ai/v1'
+      case 'nvidia-kimi': return 'https://integrate.api.nvidia.com/v1'
+      default: return 'http://ollama:11434'
+    }
+  }
+
+  const autoSelectBestProvider = async (providerList: ProviderInfo[]) => {
+    // First try to load saved preference from DB
+    try {
+      const token = localStorage.getItem('token') || ''
+      const res = await fetch('/api/user/openclaw-config', {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (res.ok) {
+        const saved = await res.json()
+        if (saved?.model_id && saved?.provider_type) {
+          const savedModelId = providerTypeToModelId(saved.provider_type, saved.provider_url)
+          const savedProvider = providerList.find(p => p.id === savedModelId)
+          // Use saved preference if that provider is online and has the model
+          if (savedProvider?.status === 'online') {
+            const hasModel = savedProvider.models.includes(saved.model_id)
+            setWorkspaceModel(savedModelId)
+            setWorkspaceModelName(hasModel ? saved.model_id : savedProvider.models[0] || '')
+            return
+          }
+        }
+      }
+    } catch {
+      // Ignore — fall through to auto-select
+    }
+
     const currentProvider = providerList.find(p => p.id === workspaceModel)
     if (currentProvider?.status === 'online') return
 
@@ -83,26 +135,59 @@ export function ModelSelectorDropdown() {
 
   const handleSelect = (provider: ProviderInfo, modelName?: string) => {
     if (provider.status !== 'online') return
+    const selectedModel = modelName || provider.models[0] || ''
     setWorkspaceModel(provider.id as 'local' | 'kimi' | 'nvidia-kimi' | 'cloud-ollama')
-    setWorkspaceModelName(modelName || provider.models[0] || '')
+    setWorkspaceModelName(selectedModel)
     setIsOpen(false)
+
+    // Persist selection to DB so Discord and future sessions use the same model
+    const token = localStorage.getItem('token') || ''
+    fetch('/api/user/openclaw-config', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        provider_url: modelIdToProviderUrl(provider.id),
+        model_id: selectedModel,
+        provider_type: modelIdToProviderType(provider.id),
+      }),
+    }).catch((err) => console.warn('Failed to persist model selection:', err))
   }
 
   return (
     <div className="relative" ref={dropdownRef}>
-      <button
-        onClick={() => setIsOpen(!isOpen)}
-        className={cn(
-          'flex items-center gap-1.5 text-[10px] font-medium text-muted-foreground',
-          'bg-muted px-2 py-1 rounded-full border border-border/50',
-          'hover:bg-muted/80 hover:border-border transition-colors cursor-pointer',
-        )}
-      >
-        <Cpu className="h-2.5 w-2.5" />
-        <span className="max-w-[120px] truncate">{displayLabel}</span>
-        {currentProvider && statusIcon(currentProvider.status)}
-        <ChevronDown className={cn('h-2.5 w-2.5 transition-transform', isOpen && 'rotate-180')} />
-      </button>
+      <div className="flex items-center gap-1.5">
+        <button
+          onClick={() => setIsOpen(!isOpen)}
+          className={cn(
+            'flex items-center gap-1.5 text-[10px] font-medium text-muted-foreground',
+            'bg-muted px-2 py-1 rounded-full border border-border/50',
+            'hover:bg-muted/80 hover:border-border transition-colors cursor-pointer',
+          )}
+        >
+          <Cpu className="h-2.5 w-2.5" />
+          <span className="max-w-[120px] truncate">{displayLabel}</span>
+          {currentProvider && statusIcon(currentProvider.status)}
+          <ChevronDown className={cn('h-2.5 w-2.5 transition-transform', isOpen && 'rotate-180')} />
+        </button>
+      </div>
+
+      {discordExternalWorkspace && (
+        <button
+          type="button"
+          onClick={() => void attachToWorkspaceStream(discordExternalWorkspace.workspace_id)}
+          className={cn(
+            'absolute top-full right-0 mt-1 px-2 py-1 rounded-md border text-[10px] font-medium',
+            'bg-violet-500/10 border-violet-400/30 text-violet-200 hover:bg-violet-500/20',
+            'animate-pulse',
+          )}
+          title="Open the externally-started workspace"
+        >
+          Discord started a workspace — open
+        </button>
+      )}
 
       {isOpen && (
         <div className={cn(

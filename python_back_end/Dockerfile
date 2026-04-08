@@ -44,6 +44,12 @@ RUN pip wheel --no-cache-dir pkuseg==0.0.25 --no-build-isolation -w /wheels
 # Remove any numpy wheels that got built as dependencies (keep only one version)
 RUN rm -f /wheels/numpy-*.whl
 
+# Remove any PyTorch / CUDA wheels that may have been pulled transitively.
+# PyTorch is already present in the base image; installing a different torch
+# wheel here can downgrade/replace the preinstalled CUDA build.
+RUN rm -f /wheels/torch-*.whl /wheels/torchaudio-*.whl /wheels/torchvision-*.whl \
+  /wheels/nvidia_*.whl /wheels/cuda_*.whl /wheels/triton-*.whl || true
+
 # ---------- Runtime: PyTorch pre-installed, minimal OS deps ----------
 # Use same PyTorch base image for runtime (PyTorch 2.6.0 + CUDA 12.4 + cuDNN 9)
 FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime

@@ -1,1938 +1,1032 @@
-# 🎙️ HARVIS VIVEVoice Integration Master Prompt
+# OpenClaw Provider-Agnostic Workspace — Master Prompt
 
-*For Claude Opus - Complete Implementation Guide*
-
----
-
-## 📋 PROJECT OVERVIEW
-
-### **Objective**
-Integrate VIVEVoice local TTS with voice cloning capabilities into HARVIS AI, providing users with:
-- Professional podcast generation from research notebooks
-- Custom voice cloning (10-second samples)
-- Multi-speaker conversations
-- Automatic content-to-audio pipeline
-- Zero-cost, privacy-first alternative to cloud TTS services
-
-### **Current System Architecture**
-```
-HARVIS AI/
-├── front_end/jfrontend/          # Next.js 14 frontend
-│   ├── app/                       # App router
-│   ├── components/                # React components
-│   └── lib/                       # Utilities
-├── python_back_end/               # FastAPI backend
-│   ├── api/                       # API routes
-│   └── [various modules]
-├── docker-compose.yaml            # Docker orchestration
-└── nginx.conf                     # Routing configuration
-```
-
-### **Integration Points**
-- Open Notebook notebook system (SurrealDB)
-- Existing FastAPI backend
-- Next.js frontend with shadcn/ui
-- Docker deployment stack
-- PostgreSQL + SurrealDB databases
+> **Goal:** Make the OpenClaw workspace run out-of-the-box on ANY system — from a
+> beefy GPU workstation with local Ollama to a mid-tier laptop with only a cloud
+> API key, to a zero-config first-time user. No single variable should be required
+> for the workspace to boot. If no API keys are detected, fall back to local
+> Ollama. Errors must be human-readable and point to a fix.
 
 ---
 
-## 🎯 IMPLEMENTATION PHASES
+## Table of Contents
+
+1. [Architecture Overview](#1-architecture-overview)
+2. [Phase 1 — Backend: Provider Discovery Endpoint](#2-phase-1--backend-provider-discovery-endpoint)
+3. [Phase 2 — Backend: Local Ollama Workspace Stream](#3-phase-2--backend-local-ollama-workspace-stream)
+4. [Phase 3 — Backend: Smart Routing in `_run_workspace_bg`](#4-phase-3--backend-smart-routing-in-_run_workspace_bg)
+5. [Phase 4 — Backend: Actionable Error Events](#5-phase-4--backend-actionable-error-events)
+6. [Phase 5 — Frontend: Model Selector Dropdown (Header Bubble)](#6-phase-5--frontend-model-selector-dropdown-header-bubble)
+7. [Phase 6 — Frontend: Dynamic Suggestion Banner](#7-phase-6--frontend-dynamic-suggestion-banner)
+8. [Phase 7 — Frontend: Agent Graph Label Sync](#8-phase-7--frontend-agent-graph-label-sync)
+9. [Phase 8 — Store & Type Updates](#9-phase-8--store--type-updates)
+10. [Phase 9 — Validation & Testing](#10-phase-9--validation--testing)
+11. [File Change Summary](#11-file-change-summary)
+12. [Non-Goals / Anti-Patterns](#12-non-goals--anti-patterns)
 
 ---
 
-## **PHASE 1: REPOSITORY ANALYSIS & SETUP** (Day 1)
+## 1. Architecture Overview
 
-### **Step 1.1: Clone and Analyze VIVEVoice Repository**
+### Current State
 
-```bash
-# First, examine the official repository
-git clone https://github.com/fixie-ai/ultravox.git
-# OR if different repo:
-# Research and identify the correct VIVEVoice/VoiceChat repository
+The workspace currently has four hardcoded model options in the frontend:
 
-# Analyze structure
-cd ultravox  # or correct repo name
-tree -L 3 -I 'node_modules|__pycache__|*.pyc'
+```
+kimi → Moonshot API (requires MOONSHOT_API_KEY or per-user DB key)
+nvidia-kimi → NVIDIA NIM (requires NVIDIA_API_KEY)
+local → Local Ollama (requires running Ollama instance)
+qwen3 → Cloud Ollama (requires EXTERNAL_OLLAMA_URL)
 ```
 
-**Analysis Checklist:**
-- [ ] Identify model files and weights location
-- [ ] Find inference code and API endpoints
-- [ ] Locate voice cloning implementation
-- [ ] Check multi-speaker support
-- [ ] Review dependencies and requirements
-- [ ] Identify GPU/CPU requirements
-- [ ] Find configuration files
-- [ ] Review license and usage restrictions
+The problem: if no Moonshot API key is configured, the default `kimi` path
+errors out with a cryptic message. There's no runtime discovery of what's
+actually available, and the UI shows model names that may not be reachable.
 
-**Document Findings:**
-```python
-# Create: python_back_end/tts_system/VIVEVOICE_ANALYSIS.md
-"""
-VIVEVoice Repository Analysis
-============================
+### Target State
 
-Repository: [URL]
-Version: [X.X.X]
-License: [License Type]
-
-Key Findings:
-- Model Location: [path]
-- Inference Entry Point: [file/function]
-- Voice Cloning Module: [path]
-- Multi-Speaker Support: [Yes/No - details]
-- Dependencies: [list key packages]
-- GPU Requirements: [VRAM needed]
-
-Integration Strategy:
-[Your analysis of how to integrate]
-"""
 ```
+┌─────────────────────────────────────────────────────────┐
+│                    Frontend                              │
+│                                                         │
+│  ┌─────────────────────────────────────────────────┐   │
+│  │ Model Dropdown (replaces static bubble)          │   │
+│  │ ┌───────────────────────────────────────────┐   │   │
+│  │ │ ▼  qwen2.5:7b (Local Ollama)        ● online│   │   │
+│  │ │    Kimi K2.5 (Moonshot)            ○ no key│   │   │
+│  │ │    Qwen3 235B (Cloud Ollama)       ● online│   │   │
+│  │ └───────────────────────────────────────────┘   │   │
+│  └─────────────────────────────────────────────────┘   │
+│                                                         │
+│  Agents Tab: shows actual model name, not "Kimi"        │
+└───────────────────────┬─────────────────────────────────┘
+                        │ POST /api/workspace/launch
+                        │ { agent_id: "local", model_name: "qwen2.5:7b" }
+                        ▼
+┌─────────────────────────────────────────────────────────┐
+│                    Backend                               │
+│                                                         │
+│  GET /api/workspace/providers                            │
+│  → probes Ollama, checks env vars, returns availability │
+│                                                         │
+│  _run_workspace_bg():                                    │
+│    agent_id == "local"                                   │
+│      → stream_local_ollama_workspace(model_name)        │
+│    agent_id == "kimi" && api_key present                 │
+│      → stream_kimi_workspace(api_key)                   │
+│    agent_id == "kimi" && NO api_key                      │
+│      → auto-fallback to local Ollama + emit warning     │
+│    agent_id == "qwen3"                                   │
+│      → stream_ollama_cloud_workspace()                  │
+│    NOTHING available                                     │
+│      → emit actionable error with setup instructions    │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Key Principles
+
+- **No single dependency.** The workspace must launch with zero env vars if a local Ollama instance is running.
+- **Discovery, not assumption.** A `/providers` endpoint probes what's live and reports it to the frontend.
+- **Fallback chain:** Cloud API → Local Ollama → Actionable error. Never a silent failure.
+- **UI reflects reality.** The model dropdown only shows reachable providers. Unreachable ones are grayed out with a reason.
+- **Errors are fixable.** Every error event includes a `fix_hint` field the frontend can display.
 
 ---
 
-### **Step 1.2: Research Alternative: Check for Existing Integrations**
+## 2. Phase 1 — Backend: Provider Discovery Endpoint
 
-Before proceeding, check if there are existing VIVEVoice/voice cloning integrations:
+### File: `python_back_end/workspace/workspace_router.py`
 
-```bash
-# Search for existing implementations
-# GitHub: "vivevoice python api"
-# GitHub: "voice cloning local tts"
-# Look for: Coqui TTS, Bark, TorToiSe TTS as alternatives
-```
-
-**Decision Matrix:**
-
-| Solution | Quality | Speed | Voice Clone | Multi-Speaker | Local | Complexity |
-|----------|---------|-------|-------------|---------------|-------|------------|
-| VIVEVoice | ⭐⭐⭐⭐⭐ | Fast | 10s sample | Yes (4) | Yes | Medium |
-| Coqui TTS | ⭐⭐⭐⭐ | Fast | Yes | Yes | Yes | Low |
-| Bark | ⭐⭐⭐⭐ | Slow | No | Yes | Yes | Low |
-| TorToiSe | ⭐⭐⭐⭐⭐ | Very Slow | Yes | No | Yes | High |
-
-**Recommendation**: If VIVEVoice repo is unclear or unavailable, use **Coqui TTS** as proven alternative.
-
----
-
-## **PHASE 2: DOCKER INFRASTRUCTURE** (Day 1-2)
-
-### **Step 2.1: Create TTS Service Container**
-
-Create new Docker service for TTS processing:
-
-```dockerfile
-# Create: docker/tts-service/Dockerfile
-FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
-
-# Install Python 3.10
-RUN apt-get update && apt-get install -y \
-    python3.10 \
-    python3-pip \
-    ffmpeg \
-    git \
-    && rm -rf /var/lib/apt/lists/*
-
-# Set working directory
-WORKDIR /app
-
-# Copy requirements
-COPY requirements-tts.txt .
-RUN pip3 install --no-cache-dir -r requirements-tts.txt
-
-# Copy TTS system code
-COPY python_back_end/tts_system /app/tts_system
-
-# Create directories for models and voices
-RUN mkdir -p /app/models /app/voices /app/output
-
-# Expose port for TTS service
-EXPOSE 8001
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s \
-  CMD curl -f http://localhost:8001/health || exit 1
-
-# Run TTS service
-CMD ["python3", "-m", "tts_system.server"]
-```
+Add a new endpoint that probes all available LLM providers at runtime.
 
 ```python
-# Create: docker/tts-service/requirements-tts.txt
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-torch==2.1.0
-torchaudio==2.1.0
-numpy==1.24.3
-scipy==1.11.4
-librosa==0.10.1
-soundfile==0.12.1
-pydantic==2.5.0
-python-multipart==0.0.6
+# ─── Provider Discovery ────────────────────────────────────────────────────────
 
-# Add VIVEVoice/Coqui dependencies
-# [TO BE FILLED BASED ON STEP 1.1 ANALYSIS]
-```
-
----
-
-### **Step 2.2: Update docker-compose.yaml**
-
-```yaml
-# Add to existing docker-compose.yaml
-
-services:
-  # ... existing services (frontend, backend, postgres, etc.)
-
-  tts-service:
-    build:
-      context: .
-      dockerfile: docker/tts-service/Dockerfile
-    container_name: harvis-tts
-    restart: unless-stopped
-    volumes:
-      - ./python_back_end/tts_system:/app/tts_system
-      - tts-models:/app/models          # Persistent model storage
-      - tts-voices:/app/voices          # User voice clones
-      - tts-output:/app/output          # Generated audio
-    environment:
-      - CUDA_VISIBLE_DEVICES=0          # GPU device
-      - TTS_MODEL_PATH=/app/models
-      - VOICE_LIBRARY_PATH=/app/voices
-      - OUTPUT_PATH=/app/output
-      - MAX_AUDIO_LENGTH=3600           # 1 hour max
-      - ENABLE_RVC=true                 # RVC enhancement
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    networks:
-      - harvis-network
-    ports:
-      - "8001:8001"                     # TTS service API
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-volumes:
-  tts-models:
-    driver: local
-  tts-voices:
-    driver: local
-  tts-output:
-    driver: local
-
-# ... existing volumes
-```
-
----
-
-### **Step 2.3: Update Nginx Configuration**
-
-```nginx
-# Add to nginx.conf
-
-# TTS Service Proxy
-location /api/tts/ {
-    proxy_pass http://tts-service:8001/;
-    proxy_http_version 1.1;
-    proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Connection 'upgrade';
-    proxy_set_header Host $host;
-    proxy_cache_bypass $http_upgrade;
+@workspace_router.get("/providers")
+async def list_providers(
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """
+    Probe all configured LLM providers and return their availability.
     
-    # Increase timeouts for long audio generation
-    proxy_read_timeout 600s;
-    proxy_connect_timeout 600s;
-    proxy_send_timeout 600s;
-    
-    # Increase body size for audio uploads
-    client_max_body_size 100M;
-}
+    The frontend calls this on mount and before showing the model selector.
+    Each provider includes: id, label, status ("online"|"offline"|"no_key"),
+    available models (for Ollama), and a reason string if unavailable.
+    """
+    providers = []
+    pool = getattr(request.app.state, "pg_pool", None)
 
-# Audio file serving
-location /audio/ {
-    alias /app/output/;
-    expires 7d;
-    add_header Cache-Control "public, immutable";
-    add_header Access-Control-Allow-Origin *;
-}
+    # 1. Local Ollama
+    local_ollama = await _probe_local_ollama()
+    providers.append(local_ollama)
+
+    # 2. Kimi K2.5 (Moonshot) — check per-user DB key first, then env var
+    kimi_status = await _probe_kimi(pool, current_user["id"])
+    providers.append(kimi_status)
+
+    # 3. NVIDIA Kimi
+    nvidia_status = _probe_nvidia()
+    providers.append(nvidia_status)
+
+    # 4. Cloud Ollama (external)
+    cloud_ollama = await _probe_cloud_ollama()
+    providers.append(cloud_ollama)
+
+    return {"providers": providers}
 ```
 
----
-
-## **PHASE 3: BACKEND TTS SYSTEM** (Day 2-4)
-
-### **Step 3.1: Create TTS System Directory Structure**
-
-```bash
-mkdir -p python_back_end/tts_system/{models,engines,services,utils}
-```
-
-```
-python_back_end/tts_system/
-├── __init__.py
-├── server.py                    # FastAPI TTS service
-├── models/
-│   ├── __init__.py
-│   ├── voice_model.py          # Voice data models
-│   └── podcast_model.py        # Podcast configuration models
-├── engines/
-│   ├── __init__.py
-│   ├── base_engine.py          # Base TTS interface
-│   ├── vivevoice_engine.py     # VIVEVoice implementation
-│   ├── coqui_engine.py         # Coqui TTS fallback
-│   └── rvc_enhancer.py         # RVC post-processing
-├── services/
-│   ├── __init__.py
-│   ├── voice_cloner.py         # Voice cloning service
-│   ├── podcast_generator.py   # Podcast generation service
-│   └── audio_processor.py     # Audio utilities
-└── utils/
-    ├── __init__.py
-    ├── audio_utils.py          # Audio processing helpers
-    └── file_manager.py         # File handling utilities
-```
-
----
-
-### **Step 3.2: Implement Base TTS Engine Interface**
+### Probe Functions (same file, above the endpoint)
 
 ```python
-# python_back_end/tts_system/engines/base_engine.py
-from abc import ABC, abstractmethod
-from typing import Dict, List, Optional, BinaryIO
-from pathlib import Path
+import httpx as _httpx  # if not already imported
 
-class BaseTTSEngine(ABC):
-    """
-    Abstract base class for TTS engines
-    Ensures consistent interface across different implementations
-    """
-    
-    def __init__(self, model_path: Path, device: str = "cuda"):
-        self.model_path = model_path
-        self.device = device
-        self.model = None
-        
-    @abstractmethod
-    async def load_model(self) -> bool:
-        """Load TTS model into memory"""
-        pass
-    
-    @abstractmethod
-    async def clone_voice(
-        self, 
-        audio_sample: BinaryIO, 
-        voice_name: str
-    ) -> Dict[str, any]:
-        """
-        Clone voice from audio sample
-        
-        Args:
-            audio_sample: Audio file (10+ seconds)
-            voice_name: Unique identifier for voice
-            
-        Returns:
-            {
-                "voice_id": str,
-                "voice_name": str,
-                "embedding_path": Path,
-                "sample_duration": float,
-                "quality_score": float
-            }
-        """
-        pass
-    
-    @abstractmethod
-    async def generate_speech(
-        self,
-        text: str,
-        voice_id: str,
-        output_path: Path,
-        **kwargs
-    ) -> Path:
-        """
-        Generate speech from text
-        
-        Args:
-            text: Text to synthesize
-            voice_id: Voice to use
-            output_path: Where to save audio
-            **kwargs: Engine-specific parameters
-            
-        Returns:
-            Path to generated audio file
-        """
-        pass
-    
-    @abstractmethod
-    async def generate_multi_speaker(
-        self,
-        script: List[Dict[str, str]],
-        voice_mapping: Dict[str, str],
-        output_path: Path,
-        **kwargs
-    ) -> Path:
-        """
-        Generate conversation with multiple speakers
-        
-        Args:
-            script: [
-                {"speaker": "speaker_1", "text": "Hello"},
-                {"speaker": "speaker_2", "text": "Hi there"}
-            ]
-            voice_mapping: {"speaker_1": "voice_id_1", ...}
-            output_path: Where to save audio
-            
-        Returns:
-            Path to generated conversation audio
-        """
-        pass
-    
-    @abstractmethod
-    def list_available_voices(self) -> List[Dict[str, any]]:
-        """Return list of available cloned voices"""
-        pass
-    
-    @abstractmethod
-    def get_engine_info(self) -> Dict[str, any]:
-        """Return engine capabilities and status"""
-        pass
-```
+# ─── Ollama probe URLs ─────────────────────────────────────────────────────────
+_LOCAL_OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
+_EXTERNAL_OLLAMA_URL = os.getenv("EXTERNAL_OLLAMA_URL", "")
+_EXTERNAL_OLLAMA_API_KEY = os.getenv("EXTERNAL_OLLAMA_API_KEY", "")
+_MOONSHOT_API_KEY = os.getenv("MOONSHOT_API_KEY", "")
+_NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
 
----
 
-### **Step 3.3: Implement VIVEVoice Engine** 
-
-```python
-# python_back_end/tts_system/engines/vivevoice_engine.py
-import torch
-import torchaudio
-from pathlib import Path
-from typing import Dict, List, Optional, BinaryIO
-import numpy as np
-import logging
-
-from .base_engine import BaseTTSEngine
-from ..utils.audio_utils import (
-    extract_audio_segment,
-    normalize_audio,
-    add_silence_between_segments
-)
-
-logger = logging.getLogger(__name__)
-
-class VIVEVoiceEngine(BaseTTSEngine):
-    """
-    VIVEVoice TTS Engine Implementation
-    
-    NOTE: This is a template - adjust based on actual VIVEVoice API
-    """
-    
-    def __init__(self, model_path: Path, device: str = "cuda"):
-        super().__init__(model_path, device)
-        self.voice_embeddings = {}  # Cache voice embeddings
-        self.sample_rate = 24000    # Adjust based on model
-        
-    async def load_model(self) -> bool:
-        """Load VIVEVoice model"""
-        try:
-            logger.info(f"Loading VIVEVoice model from {self.model_path}")
-            
-            # TODO: Replace with actual VIVEVoice loading
-            # Example structure (adjust based on actual repo):
-            # from vivevoice import VoiceModel
-            # self.model = VoiceModel.from_pretrained(
-            #     self.model_path,
-            #     device=self.device
-            # )
-            
-            # Placeholder for development
-            self.model = self._load_placeholder_model()
-            
-            logger.info("VIVEVoice model loaded successfully")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Failed to load VIVEVoice model: {e}")
-            return False
-    
-    async def clone_voice(
-        self,
-        audio_sample: BinaryIO,
-        voice_name: str
-    ) -> Dict[str, any]:
-        """
-        Clone voice from 10+ second audio sample
-        """
-        try:
-            # Save uploaded audio temporarily
-            temp_audio_path = Path(f"/tmp/{voice_name}_sample.wav")
-            with open(temp_audio_path, "wb") as f:
-                f.write(audio_sample.read())
-            
-            # Load and validate audio
-            waveform, sr = torchaudio.load(temp_audio_path)
-            duration = waveform.shape[1] / sr
-            
-            if duration < 10:
-                raise ValueError(
-                    f"Audio sample too short: {duration:.1f}s. "
-                    "Need at least 10 seconds."
-                )
-            
-            # Extract best 10-second segment (clearest speech)
-            best_segment = extract_audio_segment(
-                waveform, sr, duration=10
-            )
-            
-            # Generate voice embedding
-            # TODO: Replace with actual VIVEVoice voice extraction
-            # voice_embedding = self.model.extract_voice_embedding(
-            #     best_segment, sr
-            # )
-            
-            voice_embedding = self._extract_placeholder_embedding(
-                best_segment
-            )
-            
-            # Save embedding
-            embedding_path = (
-                Path("/app/voices") / f"{voice_name}.pt"
-            )
-            torch.save(voice_embedding, embedding_path)
-            
-            # Cache in memory
-            self.voice_embeddings[voice_name] = voice_embedding
-            
-            logger.info(f"Voice '{voice_name}' cloned successfully")
-            
+async def _probe_local_ollama() -> dict:
+    """Ping local Ollama and list available models."""
+    try:
+        async with _httpx.AsyncClient(timeout=_httpx.Timeout(5.0)) as client:
+            resp = await client.get(f"{_LOCAL_OLLAMA_URL}/api/tags")
+        if resp.status_code == 200:
+            data = resp.json()
+            models = [m["name"] for m in data.get("models", [])]
             return {
-                "voice_id": voice_name,
-                "voice_name": voice_name,
-                "embedding_path": str(embedding_path),
-                "sample_duration": duration,
-                "quality_score": 0.95  # Placeholder
+                "id": "local",
+                "label": "Local Ollama",
+                "status": "online" if models else "online_no_models",
+                "models": models,
+                "reason": None if models else "Ollama is running but no models are pulled. Run: ollama pull <model>",
             }
-            
-        except Exception as e:
-            logger.error(f"Voice cloning failed: {e}")
-            raise
-    
-    async def generate_speech(
-        self,
-        text: str,
-        voice_id: str,
-        output_path: Path,
-        **kwargs
-    ) -> Path:
-        """
-        Generate speech from text using cloned voice
-        """
+    except Exception as exc:
+        logger.debug("Local Ollama probe failed: %s", exc)
+    return {
+        "id": "local",
+        "label": "Local Ollama",
+        "status": "offline",
+        "models": [],
+        "reason": "Local Ollama is not reachable. Ensure Ollama is running (ollama serve) or the OLLAMA_URL env var is correct.",
+    }
+
+
+async def _probe_kimi(pool, user_id: str) -> dict:
+    """Check Moonshot API key — per-user DB row first, then env var."""
+    has_key = bool(_MOONSHOT_API_KEY)
+
+    # Check per-user key in DB
+    if not has_key and pool:
         try:
-            # Load voice embedding
-            if voice_id not in self.voice_embeddings:
-                embedding_path = Path("/app/voices") / f"{voice_id}.pt"
-                self.voice_embeddings[voice_id] = torch.load(
-                    embedding_path
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT moonshot_api_key FROM user_settings WHERE user_id = $1",
+                    user_id,
                 )
-            
-            voice_embedding = self.voice_embeddings[voice_id]
-            
-            # Generate speech
-            # TODO: Replace with actual VIVEVoice synthesis
-            # audio = self.model.synthesize(
-            #     text=text,
-            #     voice_embedding=voice_embedding,
-            #     diffusion_steps=kwargs.get('diffusion_steps', 32),
-            #     temperature=kwargs.get('temperature', 0.7)
-            # )
-            
-            audio = self._generate_placeholder_audio(
-                text, voice_embedding
-            )
-            
-            # Save audio
-            torchaudio.save(
-                output_path,
-                audio,
-                self.sample_rate
-            )
-            
-            logger.info(f"Generated speech: {output_path}")
-            return output_path
-            
-        except Exception as e:
-            logger.error(f"Speech generation failed: {e}")
-            raise
-    
-    async def generate_multi_speaker(
-        self,
-        script: List[Dict[str, str]],
-        voice_mapping: Dict[str, str],
-        output_path: Path,
-        **kwargs
-    ) -> Path:
-        """
-        Generate conversation with multiple speakers
-        """
-        try:
-            audio_segments = []
-            
-            for line in script:
-                speaker = line["speaker"]
-                text = line["text"]
-                voice_id = voice_mapping[speaker]
-                
-                # Generate segment
-                segment_path = Path(f"/tmp/{speaker}_{len(audio_segments)}.wav")
-                await self.generate_speech(
-                    text=text,
-                    voice_id=voice_id,
-                    output_path=segment_path,
-                    **kwargs
-                )
-                
-                # Load segment
-                segment, sr = torchaudio.load(segment_path)
-                audio_segments.append(segment)
-            
-            # Combine segments with natural pauses
-            final_audio = add_silence_between_segments(
-                audio_segments,
-                pause_duration=kwargs.get('pause_duration', 0.5)
-            )
-            
-            # Save final audio
-            torchaudio.save(
-                output_path,
-                final_audio,
-                self.sample_rate
-            )
-            
-            logger.info(f"Generated multi-speaker audio: {output_path}")
-            return output_path
-            
-        except Exception as e:
-            logger.error(f"Multi-speaker generation failed: {e}")
-            raise
-    
-    def list_available_voices(self) -> List[Dict[str, any]]:
-        """List all cloned voices"""
-        voices = []
-        voice_dir = Path("/app/voices")
-        
-        for embedding_file in voice_dir.glob("*.pt"):
-            voice_name = embedding_file.stem
-            voices.append({
-                "voice_id": voice_name,
-                "voice_name": voice_name,
-                "embedding_path": str(embedding_file),
-                "created_at": embedding_file.stat().st_mtime
-            })
-        
-        return voices
-    
-    def get_engine_info(self) -> Dict[str, any]:
-        """Get engine status and capabilities"""
+            if row and row.get("moonshot_api_key"):
+                has_key = True
+        except Exception:
+            pass
+
+    if has_key:
         return {
-            "engine": "VIVEVoice",
-            "version": "1.0.0",  # Get from actual model
-            "device": self.device,
-            "sample_rate": self.sample_rate,
-            "loaded": self.model is not None,
-            "cached_voices": len(self.voice_embeddings),
-            "capabilities": {
-                "voice_cloning": True,
-                "multi_speaker": True,
-                "languages": ["en", "es", "fr", "de", "ja", "zh"],
-                "max_speakers": 4,
-                "min_clone_duration": 10.0
-            }
+            "id": "kimi",
+            "label": "Kimi K2.5",
+            "description": "Moonshot API",
+            "status": "online",
+            "models": ["kimi-k2.5"],
+            "reason": None,
         }
-    
-    # Placeholder methods for development
-    def _load_placeholder_model(self):
-        """Placeholder until actual VIVEVoice implementation"""
-        logger.warning("Using placeholder model - replace with actual VIVEVoice")
-        return {"placeholder": True}
-    
-    def _extract_placeholder_embedding(self, audio):
-        """Placeholder voice embedding"""
-        return torch.randn(256)  # Example embedding dimension
-    
-    def _generate_placeholder_audio(self, text, embedding):
-        """Placeholder audio generation"""
-        # Generate silent audio for testing
-        duration = len(text.split()) * 0.5  # 0.5s per word
-        samples = int(duration * self.sample_rate)
-        return torch.zeros(1, samples)
+    return {
+        "id": "kimi",
+        "label": "Kimi K2.5",
+        "description": "Moonshot API",
+        "status": "no_key",
+        "models": [],
+        "reason": "No Moonshot API key found. Add one in Settings or set MOONSHOT_API_KEY env var.",
+    }
+
+
+def _probe_nvidia() -> dict:
+    """Check NVIDIA NIM API key."""
+    if _NVIDIA_API_KEY:
+        return {
+            "id": "nvidia-kimi",
+            "label": "Kimi K2.5 (NVIDIA NIM)",
+            "description": "NVIDIA NIM",
+            "status": "online",
+            "models": ["nvidia-kimi"],
+            "reason": None,
+        }
+    return {
+        "id": "nvidia-kimi",
+        "label": "Kimi K2.5 (NVIDIA NIM)",
+        "description": "NVIDIA NIM",
+        "status": "no_key",
+        "models": [],
+        "reason": "NVIDIA_API_KEY not configured.",
+    }
+
+
+async def _probe_cloud_ollama() -> dict:
+    """Probe external/cloud Ollama instance."""
+    if not _EXTERNAL_OLLAMA_URL:
+        return {
+            "id": "cloud-ollama",
+            "label": "Cloud Ollama",
+            "status": "offline",
+            "models": [],
+            "reason": "EXTERNAL_OLLAMA_URL not configured.",
+        }
+    try:
+        headers = {}
+        if _EXTERNAL_OLLAMA_API_KEY:
+            headers["Authorization"] = f"Bearer {_EXTERNAL_OLLAMA_API_KEY}"
+        async with _httpx.AsyncClient(timeout=_httpx.Timeout(5.0)) as client:
+            resp = await client.get(
+                f"{_EXTERNAL_OLLAMA_URL.rstrip('/')}/api/tags",
+                headers=headers,
+            )
+        if resp.status_code == 200:
+            data = resp.json()
+            models = [m["name"] for m in data.get("models", [])]
+            return {
+                "id": "cloud-ollama",
+                "label": "Cloud Ollama",
+                "status": "online" if models else "online_no_models",
+                "models": models,
+                "reason": None if models else "Cloud Ollama reachable but no models available.",
+            }
+    except Exception as exc:
+        logger.debug("Cloud Ollama probe failed: %s", exc)
+    return {
+        "id": "cloud-ollama",
+        "label": "Cloud Ollama",
+        "status": "offline",
+        "models": [],
+        "reason": f"Could not reach {_EXTERNAL_OLLAMA_URL}. Check EXTERNAL_OLLAMA_URL and network.",
+    }
 ```
+
+### IMPORTANT: DB Schema Note
+
+The `_probe_kimi` function references `user_settings.moonshot_api_key`. If your
+schema stores the key differently (e.g., encrypted in a different table), adapt
+the query accordingly. The pattern is: check DB first, then fall back to env var.
 
 ---
 
-### **Step 3.4: Implement FastAPI TTS Service**
+## 3. Phase 2 — Backend: Local Ollama Workspace Stream
+
+### File: `python_back_end/workspace/kimi_workspace.py`
+
+Add a new `stream_local_ollama_workspace` function. This is distinct from
+`stream_ollama_cloud_workspace` because it targets the **local** Ollama instance
+(Docker service `ollama:11434` or user's local machine), not the external cloud URL.
 
 ```python
-# python_back_end/tts_system/server.py
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
-from typing import List, Dict, Optional
-from pathlib import Path
-import logging
-import uuid
+# ─── Local Ollama URL (same as chat/research uses) ────────────────────────────
+_LOCAL_OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
 
-from .engines.vivevoice_engine import VIVEVoiceEngine
-from .engines.coqui_engine import CoquiTTSEngine  # Fallback
-from .models.voice_model import VoiceCloneRequest, VoiceInfo
-from .models.podcast_model import PodcastScript, GenerationRequest
-
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Initialize FastAPI
-app = FastAPI(
-    title="HARVIS TTS Service",
-    description="Local Text-to-Speech with Voice Cloning",
-    version="1.0.0"
+_LOCAL_OLLAMA_SYSTEM_PROMPT = (
+    "You are the Harvis Workspace Agent running on a local model. "
+    "You have been given a specific task by the user. "
+    "Execute the task completely and thoroughly. "
+    "Provide a detailed, well-structured response. "
+    "If the task involves analysis, provide step-by-step reasoning. "
+    "If it involves writing or code, provide the complete output. "
+    "Do not ask clarifying questions — make reasonable assumptions and proceed."
 )
 
-# Global engine instance
-tts_engine: Optional[VIVEVoiceEngine] = None
 
-@app.on_event("startup")
-async def startup_event():
-    """Initialize TTS engine on startup"""
-    global tts_engine
-    
-    logger.info("Initializing TTS engine...")
-    
-    try:
-        model_path = Path("/app/models/vivevoice-large")
-        tts_engine = VIVEVoiceEngine(model_path, device="cuda")
-        
-        success = await tts_engine.load_model()
-        
-        if not success:
-            logger.warning("VIVEVoice failed, falling back to Coqui TTS")
-            tts_engine = CoquiTTSEngine(model_path, device="cuda")
-            await tts_engine.load_model()
-        
-        logger.info("TTS engine ready!")
-        
-    except Exception as e:
-        logger.error(f"Failed to initialize TTS engine: {e}")
-        raise
+async def stream_local_ollama_workspace(
+    task_message: str,
+    chat_history: list[dict],
+    model: str = "",
+) -> AsyncGenerator[OpenClawEvent, None]:
+    """
+    Run a workspace task using the LOCAL Ollama instance.
 
-@app.get("/health")
-async def health_check():
-    """Health check endpoint"""
-    return {
-        "status": "healthy",
-        "engine_loaded": tts_engine is not None,
-        "engine_info": tts_engine.get_engine_info() if tts_engine else None
+    If `model` is empty, we auto-detect the first available model.
+    Yields OpenClawEvent objects matching the standard workspace format.
+    """
+    base_url = _LOCAL_OLLAMA_URL.rstrip("/")
+
+    # ── Step 1: Resolve model name ────────────────────────────────────────────
+    if not model:
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
+                resp = await client.get(f"{base_url}/api/tags")
+            if resp.status_code == 200:
+                models = resp.json().get("models", [])
+                if models:
+                    model = models[0]["name"]
+                    yield OpenClawEvent("log", {
+                        "message": f"Auto-selected local model: {model}",
+                    })
+                else:
+                    yield OpenClawEvent("error", {
+                        "message": "Ollama is running but has no models pulled.",
+                        "fix_hint": "Run `ollama pull qwen2.5:7b` (or any model) then retry.",
+                    })
+                    return
+        except Exception as exc:
+            yield OpenClawEvent("error", {
+                "message": f"Cannot reach local Ollama at {base_url}: {exc}",
+                "fix_hint": (
+                    "Ensure Ollama is running (`ollama serve`) and reachable. "
+                    "If running in Docker, check that the `ollama` service is up "
+                    "and OLLAMA_URL is set correctly."
+                ),
+            })
+            return
+
+    # ── Step 2: Build messages ────────────────────────────────────────────────
+    messages = [
+        {"role": "system", "content": _LOCAL_OLLAMA_SYSTEM_PROMPT},
+        {"role": "user", "content": _build_context_message(task_message, chat_history)},
+    ]
+
+    yield OpenClawEvent("log", {
+        "message": f"Starting task on local model: {model}",
+    })
+
+    # ── Step 3: Stream via Ollama's OpenAI-compatible endpoint ────────────────
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": True,
     }
 
-@app.post("/voices/clone")
-async def clone_voice(
-    voice_name: str,
-    audio_sample: UploadFile = File(...)
-):
-    """
-    Clone a voice from audio sample
-    
-    Requires: 10+ seconds of clear speech
-    """
-    if not tts_engine:
-        raise HTTPException(500, "TTS engine not initialized")
-    
+    full_text_parts: list[str] = []
     try:
-        logger.info(f"Cloning voice: {voice_name}")
-        
-        # Clone voice
-        result = await tts_engine.clone_voice(
-            audio_sample.file,
-            voice_name
-        )
-        
-        return {
-            "success": True,
-            "voice": result
-        }
-        
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    except Exception as e:
-        logger.error(f"Voice cloning error: {e}")
-        raise HTTPException(500, f"Voice cloning failed: {e}")
+        async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
+            async with client.stream(
+                "POST",
+                f"{base_url}/v1/chat/completions",
+                json=payload,
+            ) as response:
+                if response.status_code != 200:
+                    body = await response.aread()
+                    yield OpenClawEvent("error", {
+                        "message": f"Ollama returned HTTP {response.status_code}: {body.decode()[:500]}",
+                        "fix_hint": f"Check that model '{model}' is pulled and Ollama has enough memory.",
+                    })
+                    return
 
-@app.get("/voices")
-async def list_voices():
-    """List all available voices"""
-    if not tts_engine:
-        raise HTTPException(500, "TTS engine not initialized")
-    
-    voices = tts_engine.list_available_voices()
-    return {"voices": voices}
+                async for line in response.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    data_str = line[6:].strip()
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data_str)
+                        delta = chunk.get("choices", [{}])[0].get("delta", {})
+                        content = delta.get("content", "")
+                        if content:
+                            full_text_parts.append(content)
+                            yield OpenClawEvent("token", {"content": content})
+                    except json.JSONDecodeError:
+                        continue
 
-@app.delete("/voices/{voice_id}")
-async def delete_voice(voice_id: str):
-    """Delete a cloned voice"""
-    try:
-        embedding_path = Path(f"/app/voices/{voice_id}.pt")
-        
-        if embedding_path.exists():
-            embedding_path.unlink()
-            return {"success": True, "message": f"Voice '{voice_id}' deleted"}
-        else:
-            raise HTTPException(404, f"Voice '{voice_id}' not found")
-            
-    except Exception as e:
-        raise HTTPException(500, str(e))
+        full_text = "".join(full_text_parts)
+        summary = full_text[:500].rstrip() if full_text else "Task completed."
+        yield OpenClawEvent("done", {"summary": summary})
 
-@app.post("/generate/speech")
-async def generate_speech(
-    text: str,
-    voice_id: str,
-    output_filename: Optional[str] = None
-):
-    """Generate speech from text"""
-    if not tts_engine:
-        raise HTTPException(500, "TTS engine not initialized")
-    
-    try:
-        # Generate unique filename
-        if not output_filename:
-            output_filename = f"{uuid.uuid4()}.wav"
-        
-        output_path = Path("/app/output") / output_filename
-        
-        # Generate speech
-        result_path = await tts_engine.generate_speech(
-            text=text,
-            voice_id=voice_id,
-            output_path=output_path
-        )
-        
-        return {
-            "success": True,
-            "audio_file": str(result_path.name),
-            "audio_url": f"/audio/{result_path.name}"
-        }
-        
-    except Exception as e:
-        logger.error(f"Speech generation error: {e}")
-        raise HTTPException(500, str(e))
-
-@app.post("/generate/podcast")
-async def generate_podcast(
-    request: GenerationRequest,
-    background_tasks: BackgroundTasks
-):
-    """
-    Generate multi-speaker podcast
-    
-    Body:
-    {
-        "script": [
-            {"speaker": "host", "text": "Welcome!"},
-            {"speaker": "guest", "text": "Thanks for having me!"}
-        ],
-        "voice_mapping": {
-            "host": "my_voice",
-            "guest": "guest_voice"
-        },
-        "options": {
-            "pause_duration": 0.5,
-            "diffusion_steps": 32
-        }
-    }
-    """
-    if not tts_engine:
-        raise HTTPException(500, "TTS engine not initialized")
-    
-    try:
-        # Generate unique job ID
-        job_id = str(uuid.uuid4())
-        output_filename = f"podcast_{job_id}.wav"
-        output_path = Path("/app/output") / output_filename
-        
-        # Generate podcast (run in background if needed)
-        result_path = await tts_engine.generate_multi_speaker(
-            script=request.script,
-            voice_mapping=request.voice_mapping,
-            output_path=output_path,
-            **request.options
-        )
-        
-        return {
-            "success": True,
-            "job_id": job_id,
-            "audio_file": str(result_path.name),
-            "audio_url": f"/audio/{result_path.name}"
-        }
-        
-    except Exception as e:
-        logger.error(f"Podcast generation error: {e}")
-        raise HTTPException(500, str(e))
-
-@app.get("/audio/{filename}")
-async def get_audio_file(filename: str):
-    """Serve generated audio files"""
-    file_path = Path("/app/output") / filename
-    
-    if not file_path.exists():
-        raise HTTPException(404, "Audio file not found")
-    
-    return FileResponse(
-        file_path,
-        media_type="audio/wav",
-        filename=filename
-    )
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    except httpx.ConnectError as exc:
+        yield OpenClawEvent("error", {
+            "message": f"Connection to local Ollama lost: {exc}",
+            "fix_hint": "Ollama may have crashed or run out of VRAM. Check `ollama logs` and GPU memory.",
+        })
+    except httpx.ReadTimeout:
+        yield OpenClawEvent("error", {
+            "message": "Local Ollama timed out (>5 min). The model may be too large for your hardware.",
+            "fix_hint": "Try a smaller model (e.g., qwen2.5:7b instead of 70b) or increase timeout.",
+        })
+    except Exception as exc:
+        logger.error("local_ollama_workspace: stream error: %s", exc)
+        yield OpenClawEvent("error", {
+            "message": f"Local Ollama error: {exc}",
+            "fix_hint": "Check Ollama logs for details.",
+        })
 ```
 
 ---
 
-## **PHASE 4: FRONTEND UI COMPONENTS** (Day 4-6)
+## 4. Phase 3 — Backend: Smart Routing in `_run_workspace_bg`
 
-### **Step 4.1: Create Voice Management UI**
+### File: `python_back_end/workspace/workspace_router.py`
 
-```typescript
-// front_end/jfrontend/components/notebook/VoiceLibrary.tsx
+Modify `_run_workspace_bg` to support the new `local` agent_id and auto-fallback.
+
+### Changes to `_run_workspace_bg`:
+
+Find the section where `agent_id` dispatches to different stream functions.
+Replace/extend the routing block:
+
+```python
+from .kimi_workspace import (
+    stream_kimi_workspace,
+    stream_ollama_cloud_workspace,
+    stream_local_ollama_workspace,   # NEW import
+)
+
+# Inside _run_workspace_bg, where the stream generator is selected:
+
+agent_id = ws["agent_id"]
+chat_history = ws["chat_history"]
+task_brief = ws["task_brief"]
+model_name = ws.get("model_name", "")  # NEW: specific model name from frontend
+
+if agent_id == "kimi":
+    # Try to get Kimi API key — per-user DB first, then env
+    api_key = await _get_kimi_key(pool, ws["user_id"])
+    if api_key:
+        event_stream = stream_kimi_workspace(task_brief, chat_history, api_key)
+    else:
+        # AUTO-FALLBACK: no Kimi key → try local Ollama instead of erroring
+        logger.warning("No Kimi API key for user %s — falling back to local Ollama", ws["user_id"])
+        fallback_event = OpenClawEvent("log", {
+            "message": "Kimi K2.5 API key not found. Falling back to local Ollama.",
+        })
+        await _push_event(workspace_id, fallback_event, pool, queue)
+        event_stream = stream_local_ollama_workspace(task_brief, chat_history, model_name)
+
+elif agent_id == "nvidia-kimi":
+    api_key = os.getenv("NVIDIA_API_KEY", "")
+    if api_key:
+        event_stream = stream_kimi_workspace(
+            task_brief, chat_history, api_key,
+            api_url="https://integrate.api.nvidia.com/v1",
+        )
+    else:
+        logger.warning("No NVIDIA API key — falling back to local Ollama")
+        fallback_event = OpenClawEvent("log", {
+            "message": "NVIDIA NIM key not found. Falling back to local Ollama.",
+        })
+        await _push_event(workspace_id, fallback_event, pool, queue)
+        event_stream = stream_local_ollama_workspace(task_brief, chat_history, model_name)
+
+elif agent_id in ("qwen3", "gpt-oss"):
+    event_stream = stream_ollama_cloud_workspace(task_brief, chat_history, model=model_name or "gpt-oss:120b")
+
+elif agent_id == "local":
+    # NEW: explicit local Ollama path
+    event_stream = stream_local_ollama_workspace(task_brief, chat_history, model=model_name)
+
+else:
+    # Default: try local Ollama as the universal fallback
+    event_stream = stream_local_ollama_workspace(task_brief, chat_history, model=model_name)
+```
+
+### Helper: `_get_kimi_key`
+
+```python
+async def _get_kimi_key(pool, user_id: str) -> str:
+    """Return decrypted Moonshot API key — DB row first, then env var."""
+    if pool:
+        try:
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT moonshot_api_key FROM user_settings WHERE user_id = $1",
+                    user_id,
+                )
+            if row and row.get("moonshot_api_key"):
+                # If encrypted, decrypt here. For now assume plaintext or already decrypted.
+                return row["moonshot_api_key"]
+        except Exception as exc:
+            logger.debug("Failed to fetch Kimi key from DB: %s", exc)
+    return os.getenv("MOONSHOT_API_KEY", "")
+```
+
+### Update `LaunchRequest` model
+
+Add `model_name` to the launch request so the frontend can pass the specific
+Ollama model the user selected:
+
+```python
+class LaunchRequest(BaseModel):
+    task_brief: str = ""
+    chat_history: list[dict] = []
+    session_id: str = ""
+    agent_id: str = "main"
+    model_name: str = ""   # NEW: e.g. "qwen2.5:7b", "deepseek-r1:14b"
+```
+
+And in `launch_workspace`, pass it through:
+
+```python
+# Inside launch_workspace, add to _start_workspace or ws dict:
+_workspaces[workspace_id]["model_name"] = req.model_name
+```
+
+### Update `_start_workspace`
+
+Extend the workspace dict:
+
+```python
+_workspaces[workspace_id] = {
+    "client": client,
+    "status": "running",
+    "task_brief": task_brief,
+    "session_id": session_id,
+    "chat_history": chat_history,
+    "user_id": user_id,
+    "started_epoch": started_epoch,
+    "agent_id": agent_id,
+    "model_name": model_name,  # NEW
+}
+```
+
+---
+
+## 5. Phase 4 — Backend: Actionable Error Events
+
+### Pattern: Every `OpenClawEvent("error", ...)` MUST include `fix_hint`
+
+This is already demonstrated in the local Ollama streamer above. Apply the same
+pattern to ALL error paths across:
+
+- `kimi_workspace.py` — add `fix_hint` to the "API key not configured" error
+- `workspace_router.py` — add `fix_hint` to launch validation errors
+- `openclaw_client.py` — add `fix_hint` to WebSocket connection failures
+
+Example fixes for existing code:
+
+```python
+# kimi_workspace.py — existing error, add fix_hint:
+yield OpenClawEvent("error", {
+    "message": "Kimi K2.5 API key not configured.",
+    "fix_hint": "Add your Moonshot API key in Settings → Workspace, or set MOONSHOT_API_KEY in your environment.",
+})
+
+# kimi_workspace.py — stream error:
+yield OpenClawEvent("error", {
+    "message": f"Kimi K2.5 error: {exc}",
+    "fix_hint": "Check your API key is valid and Moonshot's API is reachable. See https://platform.moonshot.cn for status.",
+})
+
+# openclaw_client.py — connection failure:
+yield OpenClawEvent("error", {
+    "message": f"Could not connect to workspace backend: {e}",
+    "fix_hint": "The OpenClaw container may not be running. Check `docker compose ps` or `kubectl get pods -n ai-agents`.",
+})
+```
+
+---
+
+## 6. Phase 5 — Frontend: Model Selector Dropdown (Header Bubble)
+
+### File: `front_end/newjfrontend/components/workspace/WorkspacePanel.tsx`
+
+**Replace** the static model badge in the header with an interactive dropdown.
+The current code shows a static `<span>` with `Kimi K2.5` / `Local` text.
+Replace it with a dropdown that:
+
+1. Fetches available providers from `GET /api/workspace/providers` on mount
+2. Shows the currently selected model with a chevron
+3. Dropdown items show: model label + status indicator (green dot = online, gray = offline, amber = no key)
+4. Selecting a new model updates `openclawStore.workspaceModel` and `openclawStore.workspaceModelName`
+5. Disabled items show their `reason` as a tooltip
+
+### Implementation:
+
+```tsx
+// NEW component: ModelSelectorDropdown.tsx
+// Place in: front_end/newjfrontend/components/workspace/ModelSelectorDropdown.tsx
+
 'use client'
 
-import { useState, useEffect } from 'react'
-import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
-import { Mic, Upload, Trash2, Play, Pause } from 'lucide-react'
-import { useToast } from '@/components/ui/use-toast'
+import React, { useEffect, useState, useRef } from 'react'
+import { ChevronDown, Cpu, Wifi, WifiOff, KeyRound } from 'lucide-react'
+import { useOpenClawStore } from '@/stores/openclawStore'
+import { cn } from '@/lib/utils'
 
-interface Voice {
-  voice_id: string
-  voice_name: string
-  created_at: number
-  embedding_path: string
+interface ProviderInfo {
+  id: string
+  label: string
+  description?: string
+  status: 'online' | 'offline' | 'no_key' | 'online_no_models'
+  models: string[]
+  reason: string | null
 }
 
-export function VoiceLibrary() {
-  const [voices, setVoices] = useState<Voice[]>([])
+export function ModelSelectorDropdown() {
+  const { workspaceModel, workspaceModelName, setWorkspaceModel, setWorkspaceModelName } = useOpenClawStore()
+  const [providers, setProviders] = useState<ProviderInfo[]>([])
+  const [isOpen, setIsOpen] = useState(false)
   const [loading, setLoading] = useState(true)
-  const [cloning, setCloning] = useState(false)
-  const { toast } = useToast()
-  
-  // Fetch available voices
+  const dropdownRef = useRef<HTMLDivElement>(null)
+
+  // Fetch providers on mount
   useEffect(() => {
-    fetchVoices()
-  }, [])
-  
-  const fetchVoices = async () => {
-    try {
-      const response = await fetch('/api/tts/voices')
-      const data = await response.json()
-      setVoices(data.voices)
-    } catch (error) {
-      console.error('Failed to fetch voices:', error)
-    } finally {
-      setLoading(false)
-    }
-  }
-  
-  const handleVoiceClone = async (voiceName: string, audioFile: File) => {
-    setCloning(true)
-    
-    try {
-      const formData = new FormData()
-      formData.append('audio_sample', audioFile)
-      
-      const response = await fetch(
-        `/api/tts/voices/clone?voice_name=${voiceName}`,
-        {
-          method: 'POST',
-          body: formData
+    const fetchProviders = async () => {
+      try {
+        const token = localStorage.getItem('token') || ''
+        const res = await fetch('/api/workspace/providers', {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        if (res.ok) {
+          const data = await res.json()
+          setProviders(data.providers)
+          // Auto-select first available provider if current selection is unreachable
+          autoSelectBestProvider(data.providers)
         }
-      )
-      
-      if (!response.ok) {
-        throw new Error('Voice cloning failed')
+      } catch (err) {
+        console.error('Failed to fetch providers:', err)
+      } finally {
+        setLoading(false)
       }
-      
-      const result = await response.json()
-      
-      toast({
-        title: '✅ Voice Cloned Successfully!',
-        description: `"${voiceName}" is ready to use in your podcasts.`
-      })
-      
-      // Refresh voice list
-      fetchVoices()
-      
-    } catch (error) {
-      toast({
-        title: '❌ Voice Cloning Failed',
-        description: error.message,
-        variant: 'destructive'
-      })
-    } finally {
-      setCloning(false)
+    }
+    fetchProviders()
+  }, [])
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setIsOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [])
+
+  const autoSelectBestProvider = (providerList: ProviderInfo[]) => {
+    const currentProvider = providerList.find(p => p.id === workspaceModel)
+    if (currentProvider?.status === 'online') return // current selection is fine
+
+    // Priority: local > kimi > cloud-ollama > nvidia-kimi
+    const priority = ['local', 'kimi', 'cloud-ollama', 'nvidia-kimi']
+    for (const id of priority) {
+      const p = providerList.find(prov => prov.id === id)
+      if (p?.status === 'online') {
+        setWorkspaceModel(id as any)
+        if (p.models.length > 0) setWorkspaceModelName(p.models[0])
+        return
+      }
     }
   }
-  
-  const handleDeleteVoice = async (voiceId: string) => {
-    try {
-      await fetch(`/api/tts/voices/${voiceId}`, {
-        method: 'DELETE'
-      })
-      
-      toast({
-        title: 'Voice Deleted',
-        description: `"${voiceId}" has been removed.`
-      })
-      
-      fetchVoices()
-      
-    } catch (error) {
-      toast({
-        title: 'Deletion Failed',
-        description: error.message,
-        variant: 'destructive'
-      })
+
+  const statusIcon = (status: string) => {
+    switch (status) {
+      case 'online': return <span className="w-2 h-2 rounded-full bg-green-400 shrink-0" />
+      case 'no_key': return <KeyRound className="w-3 h-3 text-amber-400 shrink-0" />
+      case 'offline': return <WifiOff className="w-3 h-3 text-red-400 shrink-0" />
+      default: return <span className="w-2 h-2 rounded-full bg-gray-400 shrink-0" />
     }
   }
-  
+
+  // Compute display label
+  const currentProvider = providers.find(p => p.id === workspaceModel)
+  const displayLabel = workspaceModelName
+    ? workspaceModelName
+    : currentProvider?.label ?? workspaceModel
+
+  const handleSelect = (provider: ProviderInfo, modelName?: string) => {
+    if (provider.status !== 'online') return
+    setWorkspaceModel(provider.id as any)
+    setWorkspaceModelName(modelName || provider.models[0] || '')
+    setIsOpen(false)
+  }
+
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex justify-between items-center">
-        <div>
-          <h2 className="text-2xl font-bold">Voice Library</h2>
-          <p className="text-gray-400">
-            Manage your cloned voices for podcast generation
-          </p>
-        </div>
-        
-        <VoiceCloneDialog onClone={handleVoiceClone} />
-      </div>
-      
-      {/* Voice Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {loading ? (
-          <div>Loading voices...</div>
-        ) : voices.length === 0 ? (
-          <Card className="col-span-full">
-            <CardContent className="pt-6 text-center">
-              <Mic className="w-12 h-12 mx-auto mb-4 text-gray-400" />
-              <h3 className="text-lg font-semibold mb-2">No Voices Yet</h3>
-              <p className="text-gray-400 mb-4">
-                Clone your first voice to start generating podcasts
-              </p>
-              <VoiceCloneDialog onClone={handleVoiceClone} />
-            </CardContent>
-          </Card>
-        ) : (
-          voices.map((voice) => (
-            <VoiceCard
-              key={voice.voice_id}
-              voice={voice}
-              onDelete={handleDeleteVoice}
-            />
-          ))
+    <div className="relative" ref={dropdownRef}>
+      <button
+        onClick={() => setIsOpen(!isOpen)}
+        className={cn(
+          'flex items-center gap-1.5 text-[10px] font-medium text-muted-foreground',
+          'bg-muted px-2 py-1 rounded-full border border-border/50',
+          'hover:bg-muted/80 hover:border-border transition-colors cursor-pointer',
         )}
-      </div>
+      >
+        <Cpu className="h-2.5 w-2.5" />
+        <span className="max-w-[120px] truncate">{displayLabel}</span>
+        {currentProvider && statusIcon(currentProvider.status)}
+        <ChevronDown className={cn('h-2.5 w-2.5 transition-transform', isOpen && 'rotate-180')} />
+      </button>
+
+      {isOpen && (
+        <div className={cn(
+          'absolute top-full right-0 mt-1 z-50 min-w-[240px]',
+          'bg-popover border border-border rounded-lg shadow-lg overflow-hidden',
+        )}>
+          {loading ? (
+            <div className="px-3 py-2 text-xs text-muted-foreground">Checking providers…</div>
+          ) : providers.length === 0 ? (
+            <div className="px-3 py-2 text-xs text-muted-foreground">No providers available</div>
+          ) : (
+            providers.map(provider => {
+              const isAvailable = provider.status === 'online'
+              const isSelected = provider.id === workspaceModel
+
+              // For Ollama providers with multiple models, show sub-items
+              if (isAvailable && provider.models.length > 1 && (provider.id === 'local' || provider.id === 'cloud-ollama')) {
+                return (
+                  <div key={provider.id}>
+                    <div className="px-3 py-1.5 text-[10px] font-semibold text-muted-foreground uppercase tracking-wider border-b border-border/50">
+                      {provider.label}
+                    </div>
+                    {provider.models.map(m => (
+                      <button
+                        key={m}
+                        onClick={() => handleSelect(provider, m)}
+                        className={cn(
+                          'w-full flex items-center gap-2 px-3 py-2 text-left text-xs',
+                          'hover:bg-muted/50 transition-colors',
+                          isSelected && workspaceModelName === m && 'bg-violet-500/10 text-violet-300',
+                        )}
+                      >
+                        {statusIcon(provider.status)}
+                        <span className="truncate">{m}</span>
+                      </button>
+                    ))}
+                  </div>
+                )
+              }
+
+              // Single-model providers (Kimi, NVIDIA, etc.)
+              return (
+                <button
+                  key={provider.id}
+                  onClick={() => handleSelect(provider)}
+                  disabled={!isAvailable}
+                  title={provider.reason || undefined}
+                  className={cn(
+                    'w-full flex items-center gap-2 px-3 py-2 text-left text-xs',
+                    'hover:bg-muted/50 transition-colors',
+                    !isAvailable && 'opacity-50 cursor-not-allowed',
+                    isSelected && 'bg-violet-500/10 text-violet-300',
+                  )}
+                >
+                  {statusIcon(provider.status)}
+                  <div className="flex-1 min-w-0">
+                    <div className="truncate font-medium">{provider.label}</div>
+                    {provider.description && (
+                      <div className="text-[10px] text-muted-foreground">{provider.description}</div>
+                    )}
+                    {!isAvailable && provider.reason && (
+                      <div className="text-[10px] text-amber-400/80 mt-0.5">{provider.reason}</div>
+                    )}
+                  </div>
+                </button>
+              )
+            })
+          )}
+        </div>
+      )}
     </div>
   )
 }
-
-function VoiceCloneDialog({ onClone }) {
-  const [open, setOpen] = useState(false)
-  const [voiceName, setVoiceName] = useState('')
-  const [audioFile, setAudioFile] = useState<File | null>(null)
-  const [recording, setRecording] = useState(false)
-  
-  const handleSubmit = async () => {
-    if (!voiceName || !audioFile) {
-      return
-    }
-    
-    await onClone(voiceName, audioFile)
-    
-    // Reset and close
-    setVoiceName('')
-    setAudioFile(null)
-    setOpen(false)
-  }
-  
-  return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>
-        <Button>
-          <Mic className="w-4 h-4 mr-2" />
-          Clone New Voice
-        </Button>
-      </DialogTrigger>
-      
-      <DialogContent className="sm:max-w-[500px]">
-        <DialogHeader>
-          <DialogTitle>Clone a Voice</DialogTitle>
-          <DialogDescription>
-            Upload 10+ seconds of clear speech to clone a voice
-          </DialogDescription>
-        </DialogHeader>
-        
-        <div className="space-y-4 pt-4">
-          {/* Voice Name */}
-          <div>
-            <Label htmlFor="voice-name">Voice Name</Label>
-            <Input
-              id="voice-name"
-              placeholder="e.g., My Voice, Walter White, etc."
-              value={voiceName}
-              onChange={(e) => setVoiceName(e.target.value)}
-            />
-          </div>
-          
-          {/* Audio Upload */}
-          <div>
-            <Label>Audio Sample</Label>
-            <div className="flex gap-2 mt-2">
-              <Button
-                variant="outline"
-                className="flex-1"
-                onClick={() => document.getElementById('audio-upload')?.click()}
-              >
-                <Upload className="w-4 h-4 mr-2" />
-                {audioFile ? audioFile.name : 'Upload Audio'}
-              </Button>
-              
-              <input
-                id="audio-upload"
-                type="file"
-                accept="audio/*"
-                className="hidden"
-                onChange={(e) => setAudioFile(e.target.files?.[0] || null)}
-              />
-              
-              <Button variant="outline">
-                <Mic className="w-4 h-4 mr-2" />
-                Record
-              </Button>
-            </div>
-            
-            {audioFile && (
-              <p className="text-sm text-gray-400 mt-2">
-                Selected: {audioFile.name}
-              </p>
-            )}
-          </div>
-          
-          {/* Submit */}
-          <Button
-            onClick={handleSubmit}
-            disabled={!voiceName || !audioFile}
-            className="w-full"
-          >
-            Clone Voice
-          </Button>
-        </div>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-function VoiceCard({ voice, onDelete }) {
-  const [playing, setPlaying] = useState(false)
-  
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex justify-between items-center">
-          <span className="truncate">{voice.voice_name}</span>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => onDelete(voice.voice_id)}
-          >
-            <Trash2 className="w-4 h-4 text-red-400" />
-          </Button>
-        </CardTitle>
-        <CardDescription>
-          Created {new Date(voice.created_at * 1000).toLocaleDateString()}
-        </CardDescription>
-      </CardHeader>
-      
-      <CardContent>
-        <Button
-          variant="outline"
-          className="w-full"
-          onClick={() => setPlaying(!playing)}
-        >
-          {playing ? (
-            <>
-              <Pause className="w-4 h-4 mr-2" />
-              Pause Sample
-            </>
-          ) : (
-            <>
-              <Play className="w-4 h-4 mr-2" />
-              Play Sample
-            </>
-          )}
-        </Button>
-      </CardContent>
-    </Card>
-  )
-}
 ```
+
+### In `WorkspacePanel.tsx` — Replace the Static Bubble
+
+Find this block in the header:
+
+```tsx
+<span className="flex items-center gap-1 text-[10px] font-medium text-muted-foreground bg-muted px-1.5 py-0.5 rounded-full border border-border/50">
+  <Cpu className="h-2.5 w-2.5" />
+  {workspaceModel === 'kimi' ? 'Kimi K2.5' : workspaceModel === 'qwen3' ? 'Qwen3 235B' : 'Local'}
+</span>
+```
+
+**Replace with:**
+
+```tsx
+import { ModelSelectorDropdown } from './ModelSelectorDropdown'
+
+// ...in the header JSX:
+<ModelSelectorDropdown />
+```
+
+Remove the old static `<span>` entirely. Do NOT keep both — that would be redundant.
 
 ---
 
-### **Step 4.2: Create Podcast Configuration UI**
+## 7. Phase 6 — Frontend: Dynamic Suggestion Banner
 
-```typescript
-// front_end/jfrontend/components/notebook/PodcastGenerator.tsx
-'use client'
+### File: `front_end/newjfrontend/components/workspace/WorkspaceSuggestionBanner.tsx`
 
-import { useState, useEffect } from 'react'
-import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Slider } from '@/components/ui/slider'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { Sparkles, Settings, Users } from 'lucide-react'
+Replace the hardcoded `MODEL_OPTIONS` array with dynamic provider data.
 
-export function PodcastGenerator({ notebookId }: { notebookId: string }) {
-  const [voices, setVoices] = useState([])
-  const [speakerCount, setSpeakerCount] = useState(1)
-  const [voiceConfig, setVoiceConfig] = useState({})
-  const [style, setStyle] = useState('conversational')
-  const [duration, setDuration] = useState(15)
-  
-  useEffect(() => {
-    // Fetch available voices
-    fetch('/api/tts/voices')
-      .then(res => res.json())
-      .then(data => setVoices(data.voices))
-  }, [])
-  
-  const handleGenerate = async () => {
-    // Trigger podcast generation
-    const response = await fetch('/api/notebook/podcast/generate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        notebook_id: notebookId,
-        speaker_count: speakerCount,
-        voice_config: voiceConfig,
-        style: style,
-        target_duration: duration
+### Changes:
+
+1. **Remove** the static `MODEL_OPTIONS` constant at the top of the file.
+
+2. **Add** a `useEffect` that fetches `/api/workspace/providers` and builds the
+   options dynamically:
+
+```tsx
+const [modelOptions, setModelOptions] = useState<Array<{
+  value: string
+  label: string
+  description: string
+  modelName: string  // specific model to pass
+  available: boolean
+}>>([])
+
+useEffect(() => {
+  const fetchProviders = async () => {
+    try {
+      const token = localStorage.getItem('token') || ''
+      const res = await fetch('/api/workspace/providers', {
+        headers: { Authorization: `Bearer ${token}` },
       })
-    })
-    
-    const result = await response.json()
-    // Handle result
+      if (!res.ok) return
+      const data = await res.json()
+      const options = data.providers
+        .map((p: any) => ({
+          value: p.id,
+          label: p.label,
+          description: p.status === 'online'
+            ? (p.models[0] || 'Ready')
+            : (p.reason || 'Unavailable'),
+          modelName: p.models[0] || '',
+          available: p.status === 'online',
+        }))
+        .filter((o: any) => o.available)  // Only show reachable providers
+      setModelOptions(options)
+    } catch { /* silent */ }
   }
-  
-  return (
-    <Card className="p-6">
-      <div className="space-y-6">
-        {/* Header */}
-        <div>
-          <h3 className="text-xl font-bold mb-2">Generate Podcast</h3>
-          <p className="text-gray-400">
-            Convert your research into an engaging audio discussion
-          </p>
-        </div>
-        
-        {/* Configuration Tabs */}
-        <Tabs defaultValue="basic">
-          <TabsList>
-            <TabsTrigger value="basic">Basic</TabsTrigger>
-            <TabsTrigger value="voices">Voices</TabsTrigger>
-            <TabsTrigger value="advanced">Advanced</TabsTrigger>
-          </TabsList>
-          
-          <TabsContent value="basic" className="space-y-4">
-            {/* Speaker Count */}
-            <div>
-              <label className="text-sm font-medium mb-2 block">
-                Number of Speakers
-              </label>
-              <Select
-                value={speakerCount.toString()}
-                onValueChange={(v) => setSpeakerCount(parseInt(v))}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="1">Solo (1 speaker)</SelectItem>
-                  <SelectItem value="2">Dialogue (2 speakers)</SelectItem>
-                  <SelectItem value="3">Panel (3 speakers)</SelectItem>
-                  <SelectItem value="4">Group (4 speakers)</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            
-            {/* Style */}
-            <div>
-              <label className="text-sm font-medium mb-2 block">
-                Podcast Style
-              </label>
-              <Select value={style} onValueChange={setStyle}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="conversational">
-                    Conversational - Friendly discussion
-                  </SelectItem>
-                  <SelectItem value="interview">
-                    Interview - Q&A format
-                  </SelectItem>
-                  <SelectItem value="narrative">
-                    Narrative - Story-telling
-                  </SelectItem>
-                  <SelectItem value="educational">
-                    Educational - Lecture style
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            
-            {/* Duration */}
-            <div>
-              <label className="text-sm font-medium mb-2 block">
-                Target Duration: {duration} minutes
-              </label>
-              <Slider
-                value={[duration]}
-                onValueChange={(v) => setDuration(v[0])}
-                min={5}
-                max={60}
-                step={5}
-              />
-            </div>
-          </TabsContent>
-          
-          <TabsContent value="voices" className="space-y-4">
-            {/* Voice Assignment */}
-            {Array.from({ length: speakerCount }).map((_, i) => (
-              <div key={i}>
-                <label className="text-sm font-medium mb-2 block">
-                  Speaker {i + 1} Voice
-                </label>
-                <Select
-                  value={voiceConfig[`speaker_${i + 1}`]}
-                  onValueChange={(v) => 
-                    setVoiceConfig({
-                      ...voiceConfig,
-                      [`speaker_${i + 1}`]: v
-                    })
-                  }
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select a voice..." />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {voices.map((voice) => (
-                      <SelectItem key={voice.voice_id} value={voice.voice_id}>
-                        {voice.voice_name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            ))}
-            
-            {voices.length === 0 && (
-              <p className="text-sm text-gray-400">
-                No voices available. Clone a voice first in Voice Library.
-              </p>
-            )}
-          </TabsContent>
-          
-          <TabsContent value="advanced" className="space-y-4">
-            {/* Advanced options */}
-            <p className="text-sm text-gray-400">
-              Advanced options coming soon...
-            </p>
-          </TabsContent>
-        </Tabs>
-        
-        {/* Generate Button */}
-        <Button
-          onClick={handleGenerate}
-          disabled={voices.length === 0}
-          className="w-full"
-          size="lg"
-        >
-          <Sparkles className="w-5 h-5 mr-2" />
-          Generate Podcast
-        </Button>
-      </div>
-    </Card>
-  )
-}
+  fetchProviders()
+}, [])
+```
+
+3. **Update** the model selector rendering in the banner to use `modelOptions`
+   instead of the old `MODEL_OPTIONS`.
+
+4. **Update** the launch payload to include `model_name`:
+
+```tsx
+// In the launch fetch body:
+body: JSON.stringify({
+  task_brief: suggestion.task,
+  chat_history: chatHistory,
+  session_id: currentSession?.id ?? undefined,
+  agent_id: workspaceModel,
+  model_name: openclawStore.workspaceModelName,  // NEW
+}),
 ```
 
 ---
 
-## **PHASE 5: INTEGRATION WITH MAIN BACKEND** (Day 6-7)
+## 8. Phase 7 — Frontend: Agent Graph Label Sync
 
-### **Step 5.1: Create API Proxy Routes**
+### File: `front_end/newjfrontend/components/workspace/graph/AgentGraphView.tsx`
 
-```python
-# python_back_end/api/tts_routes.py
-from fastapi import APIRouter, UploadFile, File, HTTPException
-from typing import List, Dict
-import httpx
-import os
+The agent graph currently shows generic labels. Update it to display the actual
+model name from the store.
 
-router = APIRouter(prefix="/api/tts", tags=["tts"])
+In the `AgentGraphWorkspaceStore` component, pull the model name from the store:
 
-TTS_SERVICE_URL = os.getenv("TTS_SERVICE_URL", "http://tts-service:8001")
+```tsx
+const { workspaceModel, workspaceModelName } = useOpenClawStore()
 
-@router.post("/voices/clone")
-async def clone_voice(
-    voice_name: str,
-    audio_sample: UploadFile = File(...)
-):
-    """Proxy to TTS service - Clone voice"""
-    async with httpx.AsyncClient() as client:
-        files = {"audio_sample": (audio_sample.filename, audio_sample.file)}
-        response = await client.post(
-            f"{TTS_SERVICE_URL}/voices/clone",
-            params={"voice_name": voice_name},
-            files=files,
-            timeout=120.0
-        )
-        
-        if response.status_code != 200:
-            raise HTTPException(response.status_code, response.text)
-        
-        return response.json()
-
-@router.get("/voices")
-async def list_voices():
-    """Proxy to TTS service - List voices"""
-    async with httpx.AsyncClient() as client:
-        response = await client.get(f"{TTS_SERVICE_URL}/voices")
-        return response.json()
-
-@router.delete("/voices/{voice_id}")
-async def delete_voice(voice_id: str):
-    """Proxy to TTS service - Delete voice"""
-    async with httpx.AsyncClient() as client:
-        response = await client.delete(
-            f"{TTS_SERVICE_URL}/voices/{voice_id}"
-        )
-        return response.json()
-
-@router.post("/generate/podcast")
-async def generate_podcast(request: Dict):
-    """Proxy to TTS service - Generate podcast"""
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            f"{TTS_SERVICE_URL}/generate/podcast",
-            json=request,
-            timeout=600.0  # 10 minutes
-        )
-        
-        if response.status_code != 200:
-            raise HTTPException(response.status_code, response.text)
-        
-        return response.json()
+// Use workspaceModelName (e.g. "qwen2.5:7b") as the root agent label
+// instead of hardcoded "Kimi K2.5" or "Local"
 ```
 
-```python
-# Add to python_back_end/api/main.py
-from .tts_routes import router as tts_router
+In the graph status bar at the top:
 
-app.include_router(tts_router)
+```tsx
+// Replace:
+// <span>{isConnected ? `Live · ${agentCount} agents` : 'Connecting...'}</span>
+// With:
+<span>
+  {runningCount > 0
+    ? `Live · ${agentCount} agents · ${workspaceModelName || workspaceModel}`
+    : `${agentCount} agents · ${workspaceModelName || workspaceModel}`}
+</span>
 ```
+
+### File: `front_end/newjfrontend/components/workspace/graph/AgentNode.tsx`
+
+If the root agent node displays a model name, ensure it reads from props/store
+rather than using a hardcoded string. The root node label should be
+`workspaceModelName || workspaceModel` — not "Kimi K2.5".
 
 ---
 
-## **PHASE 6: TESTING & VALIDATION** (Day 7-8)
+## 9. Phase 8 — Store & Type Updates
 
-### **Step 6.1: Create Test Suite**
+### File: `front_end/newjfrontend/stores/openclawStore.ts`
 
-```python
-# tests/test_tts_system.py
-import pytest
-import asyncio
-from pathlib import Path
-import torch
-
-from python_back_end.tts_system.engines.vivevoice_engine import VIVEVoiceEngine
-
-@pytest.fixture
-async def tts_engine():
-    """Initialize TTS engine for testing"""
-    engine = VIVEVoiceEngine(
-        model_path=Path("/app/models/vivevoice-large"),
-        device="cuda" if torch.cuda.is_available() else "cpu"
-    )
-    await engine.load_model()
-    return engine
-
-@pytest.mark.asyncio
-async def test_voice_cloning(tts_engine):
-    """Test voice cloning from audio sample"""
-    # Use test audio file
-    test_audio = Path("tests/fixtures/test_voice_10s.wav")
-    
-    result = await tts_engine.clone_voice(
-        audio_sample=open(test_audio, "rb"),
-        voice_name="test_voice"
-    )
-    
-    assert result["voice_id"] == "test_voice"
-    assert result["quality_score"] > 0.8
-    assert Path(result["embedding_path"]).exists()
-
-@pytest.mark.asyncio
-async def test_speech_generation(tts_engine):
-    """Test single-speaker speech generation"""
-    # First clone a voice
-    test_audio = Path("tests/fixtures/test_voice_10s.wav")
-    await tts_engine.clone_voice(
-        audio_sample=open(test_audio, "rb"),
-        voice_name="test_voice"
-    )
-    
-    # Generate speech
-    output_path = Path("/tmp/test_speech.wav")
-    result = await tts_engine.generate_speech(
-        text="This is a test of the speech generation system.",
-        voice_id="test_voice",
-        output_path=output_path
-    )
-    
-    assert result.exists()
-    assert result.stat().st_size > 0
-
-@pytest.mark.asyncio
-async def test_multi_speaker_generation(tts_engine):
-    """Test multi-speaker conversation"""
-    # Clone two voices
-    voice1_audio = Path("tests/fixtures/voice1_10s.wav")
-    voice2_audio = Path("tests/fixtures/voice2_10s.wav")
-    
-    await tts_engine.clone_voice(
-        audio_sample=open(voice1_audio, "rb"),
-        voice_name="speaker_1"
-    )
-    await tts_engine.clone_voice(
-        audio_sample=open(voice2_audio, "rb"),
-        voice_name="speaker_2"
-    )
-    
-    # Generate conversation
-    script = [
-        {"speaker": "speaker_1", "text": "Hello, how are you?"},
-        {"speaker": "speaker_2", "text": "I'm doing great, thanks!"},
-        {"speaker": "speaker_1", "text": "That's wonderful to hear."}
-    ]
-    
-    voice_mapping = {
-        "speaker_1": "speaker_1",
-        "speaker_2": "speaker_2"
-    }
-    
-    output_path = Path("/tmp/test_conversation.wav")
-    result = await tts_engine.generate_multi_speaker(
-        script=script,
-        voice_mapping=voice_mapping,
-        output_path=output_path
-    )
-    
-    assert result.exists()
-    assert result.stat().st_size > 0
-
-def test_list_voices(tts_engine):
-    """Test listing available voices"""
-    voices = tts_engine.list_available_voices()
-    assert isinstance(voices, list)
-
-def test_engine_info(tts_engine):
-    """Test engine information"""
-    info = tts_engine.get_engine_info()
-    
-    assert "engine" in info
-    assert "version" in info
-    assert "capabilities" in info
-    assert info["capabilities"]["voice_cloning"] == True
-    assert info["capabilities"]["multi_speaker"] == True
-```
-
----
-
-## **PHASE 7: DEPLOYMENT & DOCUMENTATION** (Day 8-9)
-
-### **Step 7.1: Create Deployment Guide**
-
-```markdown
-# TTS System Deployment Guide
-
-## Prerequisites
-
-- NVIDIA GPU with 8GB+ VRAM
-- Docker with NVIDIA Container Toolkit
-- 50GB free disk space
-
-## Quick Start
-
-1. **Build and Start Services**
-```bash
-docker-compose up -d --build tts-service
-```
-
-2. **Verify Service is Running**
-```bash
-curl http://localhost:8001/health
-```
-
-3. **Clone Your First Voice**
-```bash
-curl -X POST "http://localhost:8001/voices/clone?voice_name=my_voice" \
-  -F "audio_sample=@my_voice_sample.wav"
-```
-
-4. **Generate Speech**
-```bash
-curl -X POST "http://localhost:8001/generate/speech" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "text": "Hello, this is my cloned voice!",
-    "voice_id": "my_voice"
-  }'
-```
-
-## Configuration
-
-Environment variables in `docker-compose.yaml`:
-
-- `TTS_MODEL_PATH`: Path to VIVEVoice model
-- `VOICE_LIBRARY_PATH`: Where to store voice embeddings
-- `OUTPUT_PATH`: Where to save generated audio
-- `MAX_AUDIO_LENGTH`: Maximum audio duration (seconds)
-- `ENABLE_RVC`: Enable RVC enhancement (true/false)
-
-## Troubleshooting
-
-### Service Won't Start
-- Check GPU availability: `nvidia-smi`
-- Check Docker logs: `docker logs harvis-tts`
-
-### Voice Cloning Fails
-- Ensure audio is 10+ seconds
-- Check audio format (WAV, MP3, M4A supported)
-- Verify audio quality (clear speech, minimal background noise)
-
-### Low Audio Quality
-- Try enabling RVC enhancement
-- Increase diffusion_steps (32-64)
-- Use longer voice samples (30-60 seconds)
-```
-
----
-
-### **Step 7.2: Create User Guide**
-
-```markdown
-# HARVIS Voice Cloning & Podcast Generation Guide
-
-## Getting Started
-
-### 1. Clone Your Voice
-
-1. Go to **Voice Library** in HARVIS
-2. Click **"Clone New Voice"**
-3. Record or upload 10+ seconds of clear speech
-4. Name your voice (e.g., "My Voice")
-5. Click **"Clone Voice"**
-
-⏱️ Takes ~30 seconds
-
-### 2. Clone Character Voices
-
-Want Walter White or Peter Griffin? Here's how:
-
-1. Find a 10-second clip on YouTube
-2. Download the audio
-3. Upload to HARVIS Voice Library
-4. Name it "Walter White"
-5. Done! Now generate podcasts in that voice
-
-### 3. Generate Your First Podcast
-
-1. Go to your **Notebook**
-2. Add research sources (PDFs, videos, etc.)
-3. Click **"Generate Podcast"**
-4. Configure:
-   - **Speakers**: 1-4
-   - **Style**: Conversational, Interview, etc.
-   - **Voices**: Assign voices to each speaker
-5. Click **"Generate"**
-6. Get coffee ☕
-7. Your podcast is ready in 5-10 minutes!
-
-## Advanced Usage
-
-### Multi-Language Podcasts
-
-Clone voices in different languages:
-- French voice → Speaks French
-- Japanese voice → Speaks Japanese
-- Spanish voice → Speaks Spanish
-
-### Character Conversations
-
-Create fun educational content:
-```
-Speaker 1: Your Voice (Teacher)
-Speaker 2: Peter Griffin (Student)
-Topic: Quantum Physics
-```
-
-Result: Peter Griffin learns quantum physics from you!
-
-### Professional Podcasts
-
-```
-Speaker 1: Professional Narrator Voice
-Speaker 2: Your Voice (Expert)
-Style: Interview
-```
-
-Perfect for sharing research!
-
-## Tips for Best Results
-
-✅ **Do:**
-- Use clear audio samples (minimal background noise)
-- Speak naturally in voice samples
-- Use 30-60 second samples for even better quality
-- Test different voices for different content types
-
-❌ **Don't:**
-- Use audio with music/noise
-- Use samples with multiple speakers
-- Rush the voice cloning process
-
-## FAQs
-
-**Q: How many voices can I clone?**
-A: Unlimited! Clone as many as you want.
-
-**Q: Can I share my cloned voices?**
-A: Yes, export voice files and share with your team.
-
-**Q: How accurate is the voice cloning?**
-A: 95%+ accuracy with good quality samples.
-
-**Q: Can I use celebrity voices?**
-A: Technically yes, but use responsibly and legally.
-
-**Q: How long does podcast generation take?**
-A: ~5-10 minutes for 15-minute podcast.
-
-**Q: Does it work offline?**
-A: Yes! 100% local, no internet needed.
-```
-
----
-
-## **PHASE 8: SAFETY & ETHICAL CONSIDERATIONS** (Critical)
-
-### **Step 8.1: Implement Safety Measures**
-
-```python
-# python_back_end/tts_system/safety/content_filter.py
-from typing import Optional
-import re
-
-class ContentSafetyFilter:
-    """
-    Filter inappropriate content before TTS generation
-    """
-    
-    BLOCKED_PATTERNS = [
-        # Add patterns for harmful content
-        r'\b(explicit|harmful|pattern)\b',
-        # Add more as needed
-    ]
-    
-    @staticmethod
-    def check_text(text: str) -> tuple[bool, Optional[str]]:
-        """
-        Check if text is safe for TTS generation
-        
-        Returns:
-            (is_safe: bool, reason: Optional[str])
-        """
-        # Check for blocked patterns
-        for pattern in ContentSafetyFilter.BLOCKED_PATTERNS:
-            if re.search(pattern, text, re.IGNORECASE):
-                return False, "Content contains blocked patterns"
-        
-        # Check length
-        if len(text) > 50000:  # ~10k words
-            return False, "Text too long"
-        
-        return True, None
-    
-    @staticmethod
-    def sanitize_voice_name(name: str) -> str:
-        """Sanitize voice name to prevent injection"""
-        # Remove special characters
-        return re.sub(r'[^a-zA-Z0-9_-]', '', name)
-```
-
-```python
-# Add to server.py
-from .safety.content_filter import ContentSafetyFilter
-
-@router.post("/generate/speech")
-async def generate_speech(text: str, voice_id: str):
-    # Safety check
-    is_safe, reason = ContentSafetyFilter.check_text(text)
-    if not is_safe:
-        raise HTTPException(400, f"Content rejected: {reason}")
-    
-    # Sanitize voice name
-    voice_id = ContentSafetyFilter.sanitize_voice_name(voice_id)
-    
-    # Continue with generation...
-```
-
----
-
-### **Step 8.2: Add Usage Warnings**
+Add `workspaceModelName` to the store:
 
 ```typescript
-// front_end/jfrontend/components/notebook/VoiceCloneWarning.tsx
-export function VoiceCloneWarning() {
-  return (
-    <Alert className="border-yellow-500 bg-yellow-500/10">
-      <AlertTriangle className="h-4 w-4" />
-      <AlertTitle>⚠️ Voice Cloning Ethics</AlertTitle>
-      <AlertDescription>
-        <ul className="list-disc list-inside space-y-1 mt-2">
-          <li>Only clone voices you have permission to use</li>
-          <li>Do not impersonate others for malicious purposes</li>
-          <li>Clearly disclose when content is AI-generated</li>
-          <li>Respect intellectual property and privacy rights</li>
-          <li>Use responsibly and legally in your jurisdiction</li>
-        </ul>
-      </AlertDescription>
-    </Alert>
-  )
+interface OpenClawState {
+  // ... existing fields ...
+  workspaceModel: 'local' | 'kimi' | 'nvidia-kimi' | 'cloud-ollama'  // UPDATED: renamed 'qwen3' → 'cloud-ollama'
+  workspaceModelName: string  // NEW: e.g. "qwen2.5:7b", "kimi-k2.5", "gpt-oss:120b"
+
+  // ... existing actions ...
+  setWorkspaceModel: (model: 'local' | 'kimi' | 'nvidia-kimi' | 'cloud-ollama') => void
+  setWorkspaceModelName: (name: string) => void  // NEW
 }
+```
+
+In the store implementation:
+
+```typescript
+workspaceModelName: '',
+
+setWorkspaceModelName: (name) => set({ workspaceModelName: name }),
+```
+
+### Backward Compatibility Note
+
+The old `qwen3` value maps to `cloud-ollama` in the new scheme. In the
+`launch_workspace` handler and `_run_workspace_bg`, keep `qwen3` as an accepted
+alias:
+
+```python
+# workspace_router.py — launch_workspace:
+agent_id = req.agent_id
+if agent_id == "qwen3":
+    agent_id = "cloud-ollama"  # normalize alias
+if agent_id not in ("main", "kimi", "nvidia-kimi", "local", "cloud-ollama"):
+    agent_id = "local"  # safe default
 ```
 
 ---
 
-## **FINAL CHECKLIST**
+## 10. Phase 9 — Validation & Testing
 
-### **Phase 1: Repository Analysis** ✅
-- [ ] VIVEVoice repo cloned and analyzed
-- [ ] Alternative solutions researched (Coqui TTS, etc.)
-- [ ] Integration strategy documented
-- [ ] Dependencies identified
+### Test Matrix
 
-### **Phase 2: Docker Infrastructure** ✅
-- [ ] TTS service Dockerfile created
-- [ ] docker-compose.yaml updated
-- [ ] nginx.conf updated for TTS routing
-- [ ] Persistent volumes configured
-- [ ] GPU support configured
+| Scenario | Expected Behavior |
+|----------|-------------------|
+| Fresh install, no env vars, Ollama running with qwen2.5:7b | `/providers` returns local=online. Workspace auto-selects it. Tasks run. |
+| Fresh install, no Ollama, no keys | `/providers` returns all offline. Banner shows "No providers available" with setup instructions. |
+| Kimi key in DB, Ollama running | Both shown in dropdown. User can pick either. |
+| Kimi key set, Ollama offline | Kimi shown as online, Local shown as offline (grayed + reason). |
+| User selects Kimi but key is revoked mid-session | Stream emits error with `fix_hint`. Frontend shows it inline. |
+| User selects local, model crashes mid-stream | `ConnectError` caught, error event with fix_hint about VRAM. |
+| Cloud Ollama configured, models available | Shown in dropdown with individual model sub-items. |
+| Launch with `agent_id=kimi`, no key present | Auto-fallback to local Ollama. Log event warns user. |
 
-### **Phase 3: Backend TTS System** ✅
-- [ ] Base TTS engine interface implemented
-- [ ] VIVEVoice engine implemented
-- [ ] Fallback engine implemented (Coqui TTS)
-- [ ] FastAPI TTS service created
-- [ ] API endpoints functional
-- [ ] Voice cloning working
-- [ ] Multi-speaker generation working
+### Manual Smoke Test Procedure
 
-### **Phase 4: Frontend UI** ✅
-- [ ] Voice Library component created
-- [ ] Voice cloning dialog functional
-- [ ] Podcast generator component created
-- [ ] Voice assignment UI working
-- [ ] Configuration options implemented
-
-### **Phase 5: Integration** ✅
-- [ ] API proxy routes created
-- [ ] Frontend connected to backend
-- [ ] Open Notebook integration complete
-- [ ] End-to-end workflow functional
-
-### **Phase 6: Testing** ✅
-- [ ] Unit tests written
-- [ ] Integration tests passing
-- [ ] Manual testing complete
-- [ ] Performance acceptable
-
-### **Phase 7: Deployment** ✅
-- [ ] Deployment guide written
-- [ ] User guide created
-- [ ] Docker build successful
-- [ ] Services running in production
-
-### **Phase 8: Safety** ✅
-- [ ] Content filtering implemented
-- [ ] Usage warnings added
-- [ ] Ethical guidelines documented
-- [ ] Legal disclaimers added
+1. `docker compose up` with only Ollama and backend running (no Moonshot key).
+2. Open Harvis → start a workspace task.
+3. Verify the dropdown shows "Local Ollama" with the auto-detected model.
+4. Verify the Agents tab shows the actual model name.
+5. Kill the Ollama container mid-task → verify the error message includes a fix hint.
+6. Add a Moonshot key in Settings → verify the dropdown updates to show Kimi as available.
+7. Select Kimi → run a task → verify it streams from Moonshot.
 
 ---
 
-## **SUCCESS CRITERIA**
+## 11. File Change Summary
 
-Your implementation is successful when:
+| File | Action | What Changes |
+|------|--------|--------------|
+| `python_back_end/workspace/workspace_router.py` | MODIFY | Add `/providers` endpoint, probe functions, `_get_kimi_key`, `model_name` in `LaunchRequest`, updated routing in `_run_workspace_bg`, `qwen3` alias handling |
+| `python_back_end/workspace/kimi_workspace.py` | MODIFY | Add `stream_local_ollama_workspace()`, add `fix_hint` to all error events |
+| `python_back_end/workspace/openclaw_client.py` | MODIFY | Add `fix_hint` to connection error events |
+| `front_end/.../workspace/ModelSelectorDropdown.tsx` | CREATE | New dropdown component |
+| `front_end/.../workspace/WorkspacePanel.tsx` | MODIFY | Replace static model bubble with `<ModelSelectorDropdown />` |
+| `front_end/.../workspace/WorkspaceSuggestionBanner.tsx` | MODIFY | Remove hardcoded `MODEL_OPTIONS`, fetch from `/providers`, pass `model_name` in launch payload |
+| `front_end/.../workspace/graph/AgentGraphView.tsx` | MODIFY | Show actual model name from store |
+| `front_end/.../workspace/graph/AgentNode.tsx` | MODIFY | Root agent label reads from store, not hardcoded |
+| `front_end/.../stores/openclawStore.ts` | MODIFY | Add `workspaceModelName`, `setWorkspaceModelName`, rename `qwen3` → `cloud-ollama` |
 
-1. ✅ User can clone their voice from 10-second sample
-2. ✅ User can generate single-speaker podcast
-3. ✅ User can generate multi-speaker conversation
-4. ✅ Generated audio quality is high (no robotic sound)
-5. ✅ System runs locally without cloud dependencies
-6. ✅ Integration with Open Notebook notebooks works
-7. ✅ UI is intuitive and user-friendly
-8. ✅ Docker deployment is stable
-9. ✅ Safety measures are in place
-10. ✅ Documentation is complete
+---
+
+## 12. Non-Goals / Anti-Patterns
+
+**DO NOT:**
+
+- ❌ Add a separate settings page for model configuration — the dropdown IS the configuration.
+- ❌ Create redundant provider lists — there is ONE source of truth: the `/providers` endpoint. The frontend does not maintain a second hardcoded list.
+- ❌ Show provider options that are guaranteed unreachable — offline providers are visible but disabled, not hidden (so users know they exist and what to do).
+- ❌ Change the SSE protocol or event format — `OpenClawEvent` stays exactly the same, just with the optional `fix_hint` field added to error data.
+- ❌ Modify the K8s/OpenClaw pod configuration — this prompt is about the Harvis backend + frontend only. The OpenClaw container config is a separate concern.
+- ❌ Add LiteLLM or any new dependency — this uses Ollama's built-in OpenAI-compatible API directly.
+- ❌ Store model selection in the database — it's ephemeral session state in the Zustand store. Users pick on each launch.
+- ❌ Duplicate the Ollama probe logic — `_probe_local_ollama` is the single function that checks Ollama. Both `/providers` and fallback logic use it.
 
 ---
 
-## **NOTES FOR OPUS**
+## Implementation Order
 
-- Replace placeholder VIVEVoice code with actual implementation based on repo analysis
-- If VIVEVoice repo is unclear, use Coqui TTS as proven alternative
-- Test each phase thoroughly before moving to next
-- Document any deviations from this plan
-- Ask for clarification if repo structure differs from assumptions
-- Prioritize safety and ethical usage
-- Keep user experience simple and modular
+Execute phases in this exact order. Each phase is independently testable.
 
-**Good luck, Opus! 🚀**
+```
+Phase 1 → Backend probe functions + /providers endpoint
+Phase 2 → Local Ollama stream function
+Phase 3 → Smart routing + fallback in _run_workspace_bg
+Phase 4 → fix_hint on all error events
+Phase 5 → ModelSelectorDropdown component + WorkspacePanel swap
+Phase 6 → Dynamic suggestion banner
+Phase 7 → Agent graph label sync
+Phase 8 → Store updates
+Phase 9 → Test matrix validation
+```
 
----
+**Commit after each phase.** Each phase should compile and not break existing behavior.

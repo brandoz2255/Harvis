@@ -842,9 +842,15 @@ export function ChatInput({ onSend, isLoading, isResearchMode, selectedModel, se
                   onClick={() => onForceWorkspace(message.trim())}
                   disabled={isLoading}
                   title="Launch Workspace"
-                  className="h-9 w-9 shrink-0 rounded-xl bg-violet-600 text-white hover:bg-violet-500 disabled:opacity-50"
+                  className={cn(
+                    "h-9 w-9 shrink-0 rounded-xl bg-violet-600 text-white hover:bg-violet-500 disabled:opacity-50 relative",
+                    message.trim().length > 0 && !isLoading && "animate-pulse"
+                  )}
                 >
                   <Zap className="h-5 w-5" />
+                  {message.trim().length > 0 && !isLoading && (
+                    <span className="absolute -top-1 -right-1 w-2 h-2 bg-violet-300 rounded-full animate-ping" />
+                  )}
                 </Button>
               )}
               <Button

@@ -20,7 +20,7 @@ except Exception:
 @dataclass
 class HtmlExtractionResult:
     title: str
-    test: str 
+    text: str
     language: Optional[str]
     meta: Dict[str, Any]
 
@@ -85,7 +85,7 @@ def extract_html(url: str, html: Optional[str], user_agent: str, timeout_s: int)
 
         res = _trafilatura_extract(html)
         if not res.text:
-            res = _readability_fallback(html)
+            res = readablity_fallback(html)
 
         return {
             "url": url,

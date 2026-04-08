@@ -1,5 +1,41 @@
 # Recent Changes and Fixes Documentation
 
+## Date: 2026-03-30 — experimental/plugin-merge: Browser Automation, Web Research, Discord Bot, Model Routing
+
+### Summary
+
+Major feature branch with 28 files changed (+3074/-2078 lines) across 8 areas:
+
+1. **OpenClaw Chromium Browser Integration** — New `dulc3/openclaw-browser:latest` layered Docker image with Chromium, updated Docker Compose (shm_size, tmpfs, 3G memory), K8s manifests (emptyDir volumes, browser env vars), CI pipeline (dual-image build+push), fixed `bashForegroundMs` 2000→30000ms in K8s ConfigMap
+2. **Live Web Research Mode** — Frontend SearchToggle rewrite with acknowledgment dialog, backend proxy expansion with rate limiting/domain policy/SSRF protection/audit logging, `X-Live-Web: true` header for relaxed limits
+3. **Workspace Progress Tracking** — `_looks_like_browser_task()` heuristic for auto-browser mode, sub-agent lifecycle events (`run_id`, `agent_label`), Tier 3 capability tokens (`workspace_web_caps` table), enriched DB event persistence
+4. **Discord Workspace Bot** — `discord_workspace_bot.py` with live progress via DB polling (2.5s edits), `_TOOL_LABELS` mapping, `_format_progress_line()` for tool/agent events
+5. **Local Ollama Model Routing** — Fallback route for unmatched models, `OLLAMA_ALLOWED_KEYS` whitelist strips non-standard fields, `reasoning_effort: "none"` for qwen3.5
+6. **Browser Runner Service** — Standalone Flask/Selenium/Firefox container (`browser_runner/`)
+7. **Infrastructure** — Auto-create `user_prefs`/`openclaw_tool_audit`/`workspace_web_caps` tables at startup, fixed DATABASE_URL default `pgsql-db`→`pgsql`, added trafilatura/httpx deps
+8. **Skills** — Updated `harvis-research` SKILL.md, new `harvis-browser` SKILL.md
+
+### Key Files
+
+| Area | Files |
+|------|-------|
+| Browser Docker | `openclaw-browser/Dockerfile`, `docker-compose.yaml`, `k8s-manifests/overlays/prod/openclaw.yaml`, `ci_openclaw_pipeline.sh` |
+| Web Research | `SearchToggle.tsx`, `chat-input.tsx`, `openclaw_proxy.py`, `nginx.conf` |
+| Workspace Progress | `workspace_router.py`, `openclaw_client.py`, `openclawStore.ts`, `useWorkspaceAgentGraph.ts`, `WorkspacePanel.tsx` |
+| Discord | `integrations/discord_workspace_bot.py` |
+| Model Routing | `model_proxy.py`, `kimi_workspace.py`, `ModelSelectorDropdown.tsx` |
+| Backend | `main.py`, `requirements.txt`, `Dockerfile`, `all_schemas_safe.sql` |
+
+### Critical Fixes
+- **K8s bashForegroundMs**: Was 2000ms — killed all curl/browser commands mid-execution. Fixed to 30000ms.
+- **DATABASE_URL default**: Was `pgsql-db` (wrong hostname). Fixed to `pgsql`.
+- **Browser heuristic too narrow**: Discord bot never enabled browser for "screenshot gemini.google.com". Expanded with domain detection + verb matching.
+
+### Status
+All changes on `experimental/plugin-merge` branch. See `front_end/newjfrontend/changes.md` for detailed per-feature breakdown.
+
+---
+
 ## Date: 2026-03-10 — SGLang CUDA OOM fix: bitsandbytes → fp8 + mem-fraction-static 0.50
 
 ### Problem

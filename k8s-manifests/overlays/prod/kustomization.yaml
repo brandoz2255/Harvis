@@ -29,9 +29,9 @@ images:
   # - name: harvis-tts-worker  # REMOVED: TTS/Whisper now runs in main backend
   #   newName: dulc3/harvis-tts-worker
   #   newTag: unbroken
-  - name: dulc3/openclaw
-    newName: dulc3/openclaw
-    newTag: vvv
+  - name: dulc3/openclaw-browser
+    newName: dulc3/openclaw-browser
+    newTag: latest
 # Patches for production
 patches:
   - target:

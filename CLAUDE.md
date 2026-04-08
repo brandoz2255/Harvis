@@ -248,10 +248,30 @@ The swarm endpoint should be added to `python_back_end/main.py` and proxied thro
 | `MOONSHOT_API_KEY` | backend env | Kimi K2.5 API key |
 | `MOONSHOT_BASE_URL` | backend env | `https://api.moonshot.cn/v1` |
 
+### Web Research Button
+
+The frontend has a single **Web Research** toggle button. First click shows a one-time acknowledgment dialog, then enables live web research through OpenClaw. The button turns amber when active.
+
+**How it works:**
+1. User clicks "Chat Mode" → warning dialog (once per session)
+2. User acknowledges → button becomes "Web Research" (amber/Globe icon)
+3. Research requests route to `/api/research-chat` with `live_web: true`
+4. Backend dispatches through OpenClaw workspace with `X-Live-Web: true` headers
+5. OpenClaw uses `exec` + `curl` to search/fetch through backend proxy endpoints
+6. Click again → back to "Chat Mode"
+
+**Backend proxy behavior with `X-Live-Web: true`:**
+- Domain allowlists bypassed (any public domain allowed)
+- Rate limits relaxed (30 searches, 60 fetches per 60s)
+- HTTP URLs allowed for web-fetch (not just HTTPS)
+- Private-IP / localhost blocking always enforced (SSRF protection)
+- All requests audited to `openclaw_tool_audit` table
+
+**Key fix for OpenClaw web access:** `bashForegroundMs` in `openclaw.json` must be >= 30000 (30s). The previous 2000ms timeout killed curl commands before they could complete.
+
 ### What NOT to Do
 
 - **Never** add a `ports:` section to the openclaw service — it must not be reachable from host
-- **Never** enable any search/browse/web tool in OpenClaw's tool config
 - **Never** put `MOONSHOT_API_KEY` or any cloud API key inside OpenClaw's config — those stay in the Harvis orchestrator layer
 - **Never** let OpenClaw's egress rules include anything other than ollama and pgsql
 

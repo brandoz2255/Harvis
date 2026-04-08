@@ -3,6 +3,7 @@ numpy #==1.26.0
 setuptools
 wheel
 Cython
+sympy==1.13.1
 
 # Core FastAPI and web dependencies
 fastapi
@@ -53,6 +54,7 @@ pytest-asyncio
 pytest-mock
 pytest-cov
 httpx
+discord.py>=2.3.0
 responses
 accelerate #==0.34.0
 lxml_html_clean

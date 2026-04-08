@@ -40,6 +40,7 @@ get_input() {
 }
 
 OPENCLAW_DIR="openclaw/openclaw"
+BROWSER_DOCKERFILE="openclaw-browser/Dockerfile"
 
 # ─── Preflight checks ────────────────────────────────────────────────────────
 
@@ -54,6 +55,11 @@ if [ ! -f "$OPENCLAW_DIR/Dockerfile" ]; then
   exit 1
 fi
 
+if [ ! -f "$BROWSER_DOCKERFILE" ]; then
+  log_error "Browser Dockerfile not found at: $BROWSER_DOCKERFILE"
+  exit 1
+fi
+
 if ! command -v docker &>/dev/null; then
   log_error "Docker is not installed or not in PATH."
   exit 1
@@ -63,8 +69,10 @@ fi
 
 OPENCLAW_VERSION=$(get_input "Enter tag for OpenClaw image (e.g., v1.0.0 or latest):" "OpenClaw Version" "latest")
 IMAGE_NAME="dulc3/openclaw:$OPENCLAW_VERSION"
+BROWSER_IMAGE_NAME="dulc3/openclaw-browser:$OPENCLAW_VERSION"
 
-log_info "Building: $IMAGE_NAME"
+log_info "Building: $IMAGE_NAME (base)"
+log_info "Building: $BROWSER_IMAGE_NAME (with Chromium)"
 log_info "Source:   $OPENCLAW_DIR"
 echo ""
 
@@ -98,9 +106,9 @@ log_warn "Note: OpenClaw uses pnpm + Bun for its build. This may take a few minu
 #   - COPY openclaw/...    resolves to openclaw/openclaw/... (the submodule)
 #   - COPY skills/         resolves to openclaw/skills/     (synced from skills/Harvis/ above)
 if docker build -t "$IMAGE_NAME" -f "$OPENCLAW_DIR/Dockerfile" openclaw/; then
-  log_success "OpenClaw built: $IMAGE_NAME"
+  log_success "OpenClaw base built: $IMAGE_NAME"
 else
-  log_error "OpenClaw build failed!"
+  log_error "OpenClaw base build failed!"
   exit 1
 fi
 
@@ -108,6 +116,24 @@ fi
 if [ "$OPENCLAW_VERSION" != "latest" ]; then
   docker tag "$IMAGE_NAME" "dulc3/openclaw:latest"
   log_info "Also tagged as: dulc3/openclaw:latest"
+fi
+
+# ─── Build browser image (extends base with Chromium) ───────────────────────
+
+echo ""
+log_info "Building browser-enabled image: $BROWSER_IMAGE_NAME"
+log_info "Dockerfile: $BROWSER_DOCKERFILE"
+
+if docker build -t "$BROWSER_IMAGE_NAME" -f "$BROWSER_DOCKERFILE" .; then
+  log_success "OpenClaw browser built: $BROWSER_IMAGE_NAME"
+else
+  log_error "OpenClaw browser build failed!"
+  exit 1
+fi
+
+if [ "$OPENCLAW_VERSION" != "latest" ]; then
+  docker tag "$BROWSER_IMAGE_NAME" "dulc3/openclaw-browser:latest"
+  log_info "Also tagged as: dulc3/openclaw-browser:latest"
 fi
 
 # ─── Smoke test (optional but recommended) ───────────────────────────────────
@@ -129,15 +155,18 @@ else
 fi
 
 if [ "$RUN_SMOKE" = true ]; then
-  log_info "Running smoke test — starting container on port 18799 (offset to avoid conflicts)..."
+  log_info "Running smoke test — starting browser container on port 18799..."
 
   CONTAINER_ID=$(docker run -d \
+    --shm-size=256m \
     -e HOME=/home/node \
     -e NODE_ENV=production \
     -e OPENCLAW_GATEWAY_TOKEN=smoke-test-token \
     -e OLLAMA_API_KEY=ollama-local \
+    -e CHROME_BIN=/usr/bin/chromium \
+    -e PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium \
     -p 18799:18789 \
-    "$IMAGE_NAME" \
+    "$BROWSER_IMAGE_NAME" \
     node openclaw.mjs gateway --bind lan --allow-unconfigured 2>/dev/null)
 
   log_info "Container started: $CONTAINER_ID"
@@ -152,6 +181,14 @@ if [ "$RUN_SMOKE" = true ]; then
     docker rm -f "$CONTAINER_ID" > /dev/null 2>&1
     log_error "Smoke test failed. Fix the issue before pushing."
     exit 1
+  fi
+
+  # Verify Chromium is installed
+  log_info "Verifying Chromium installation..."
+  if docker exec "$CONTAINER_ID" chromium --version 2>/dev/null; then
+    log_success "Chromium is installed and accessible."
+  else
+    log_warn "Chromium version check failed (may still work at runtime)."
   fi
 
   docker rm -f "$CONTAINER_ID" > /dev/null 2>&1
@@ -177,6 +214,7 @@ else
 fi
 
 if [ "$PUSH_IMAGE" = true ]; then
+  # Push base image
   log_info "Pushing $IMAGE_NAME..."
   if docker push "$IMAGE_NAME"; then
     log_success "Pushed: $IMAGE_NAME"
@@ -190,11 +228,28 @@ if [ "$PUSH_IMAGE" = true ]; then
     docker push "dulc3/openclaw:latest"
     log_success "Pushed: dulc3/openclaw:latest"
   fi
+
+  # Push browser image
+  log_info "Pushing $BROWSER_IMAGE_NAME..."
+  if docker push "$BROWSER_IMAGE_NAME"; then
+    log_success "Pushed: $BROWSER_IMAGE_NAME"
+  else
+    log_error "Push failed for $BROWSER_IMAGE_NAME"
+    exit 1
+  fi
+
+  if [ "$OPENCLAW_VERSION" != "latest" ]; then
+    log_info "Pushing dulc3/openclaw-browser:latest..."
+    docker push "dulc3/openclaw-browser:latest"
+    log_success "Pushed: dulc3/openclaw-browser:latest"
+  fi
 else
   log_info "Skipping push. To push manually:"
   echo "  docker push $IMAGE_NAME"
+  echo "  docker push $BROWSER_IMAGE_NAME"
   if [ "$OPENCLAW_VERSION" != "latest" ]; then
     echo "  docker push dulc3/openclaw:latest"
+    echo "  docker push dulc3/openclaw-browser:latest"
   fi
 fi
 
@@ -211,11 +266,17 @@ import re
 with open("$KUSTOMIZE_FILE", "r") as f:
     content = f.read()
 
-# Update only the dulc3/openclaw entry — leave all harvis image tags untouched.
+# Update the dulc3/openclaw-browser entry (deployed image) — leave all harvis image tags untouched.
+updated = re.sub(
+    r'(  - name: dulc3/openclaw-browser\n    newName: dulc3/openclaw-browser\n    newTag: )\S+',
+    r'\g<1>$OPENCLAW_VERSION',
+    content
+)
+# Also update base dulc3/openclaw entry if present
 updated = re.sub(
     r'(  - name: dulc3/openclaw\n    newName: dulc3/openclaw\n    newTag: )\S+',
     r'\g<1>$OPENCLAW_VERSION',
-    content
+    updated
 )
 
 with open("$KUSTOMIZE_FILE", "w") as f:
@@ -260,8 +321,9 @@ fi
 echo ""
 echo "=========================================="
 log_success "OpenClaw CI Pipeline Complete!"
-echo "Image:    $IMAGE_NAME"
-echo "Gateway:  ws://harvis-ai-openclaw:18789 (internal K8s)"
+echo "Base image:    $IMAGE_NAME"
+echo "Browser image: $BROWSER_IMAGE_NAME"
+echo "Gateway:       ws://harvis-ai-openclaw:18789 (internal K8s)"
 echo "Health:   http://harvis-ai-openclaw:18789/health"
 echo ""
 echo "ArgoCD will auto-deploy once the push and git push are done."

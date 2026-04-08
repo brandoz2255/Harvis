@@ -82,6 +82,8 @@ export type WorkspaceLogEventType =
   | 'tool_call'
   | 'tool_result'
   | 'log'
+  | 'agent_start'
+  | 'agent_end'
   | 'done'
   | 'cancelled'
   | 'error'
@@ -105,6 +107,9 @@ export interface WorkspaceLogEvent {
   // sub-agent tracking — populated by backend when OpenClaw emits agent events
   run_id?: string
   agent_label?: string  // "Agent" | "Sub-Agent 1" | "Sub-Agent 2" …
+  // agent lifecycle (agent_start / agent_end events)
+  model?: string | null  // model name on agent_start
+  parent_run_id?: string | null  // parent agent's run_id (null for root agent)
 }
 
 export interface Screenshot {
@@ -117,6 +122,12 @@ export interface Screenshot {
   width: number
   height: number
   takenAt: string
+}
+
+/** Server reports a Discord-started workspace; used for UI hint + auto-follow. */
+export interface DiscordExternalWorkspaceHint {
+  workspace_id: string
+  task_brief: string
 }
 
 interface OpenClawState {
@@ -150,6 +161,8 @@ interface OpenClawState {
   logEvents: WorkspaceLogEvent[]
   finalSummary: string
   sseAbortController: AbortController | null
+  /** Non-null while GET /active reports a running Discord workspace for this user. */
+  discordExternalWorkspace: DiscordExternalWorkspaceHint | null
 
   // Kubectl approval state
   kubectlPending: KubectlPendingCommand[]
@@ -190,6 +203,9 @@ interface OpenClawState {
   setFinalSummary: (summary: string) => void
   setSseAbortController: (controller: AbortController | null) => void
   closeWorkspace: () => void
+  setDiscordExternalWorkspace: (hint: DiscordExternalWorkspaceHint | null) => void
+  /** Attach SSE timeline for an existing run (e.g. Discord or manual “open”). */
+  attachToWorkspaceStream: (workspaceId: string) => Promise<void>
 
   // Kubectl approval actions
   setKubectlPending: (pending: KubectlPendingCommand[]) => void
@@ -227,6 +243,7 @@ export const useOpenClawStore = create<OpenClawState>()(
     logEvents: [],
     finalSummary: '',
     sseAbortController: null,
+    discordExternalWorkspace: null,
     kubectlPending: [],
 
     // Instance actions
@@ -362,6 +379,82 @@ export const useOpenClawStore = create<OpenClawState>()(
 
     setSseAbortController: (controller) => set({ sseAbortController: controller }),
 
+    setDiscordExternalWorkspace: (hint) => set({ discordExternalWorkspace: hint }),
+
+    attachToWorkspaceStream: async (workspaceId: string) => {
+      if (typeof window === 'undefined') return
+      const token = localStorage.getItem('token')
+      if (!token || !workspaceId) return
+
+      set((state) => {
+        state.sseAbortController?.abort()
+        state.logEvents = []
+        state.finalSummary = ''
+        state.activeTab = 'dashboard'
+        state.isWorkspaceActive = true
+        state.workspaceId = workspaceId
+        state.workspaceSessionId = `ws-${workspaceId}`
+      })
+
+      const controller = new AbortController()
+      set((state) => {
+        state.sseAbortController = controller
+      })
+
+      get().addLogEvent({
+        type: 'log',
+        message: `Attaching to workspace ${workspaceId}…`,
+        agent_label: 'harvis',
+      })
+
+      let streamRes: Response
+      try {
+        streamRes = await fetch(`/api/workspace/stream/${workspaceId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+          signal: controller.signal,
+        })
+      } catch {
+        get().addLogEvent({ type: 'error', message: 'SSE connection failed.' })
+        return
+      }
+
+      if (!streamRes.body) {
+        get().addLogEvent({ type: 'error', message: 'No SSE stream body returned.' })
+        return
+      }
+
+      const reader = streamRes.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      const readLoop = async () => {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split('\n')
+          buffer = lines.pop() ?? ''
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue
+            try {
+              const event = JSON.parse(line.slice(6))
+              if (event.type === 'stream_end') break
+              if (event.type === 'done') {
+                get().setFinalSummary(event.summary ?? '')
+              }
+              get().addLogEvent(event)
+            } catch {
+              // ignore malformed SSE
+            }
+          }
+        }
+      }
+
+      readLoop().catch(() => {
+        /* stream closed */
+      })
+    },
+
     closeWorkspace: () =>
       set((state) => {
         // Abort any active SSE connection
@@ -372,8 +465,8 @@ export const useOpenClawStore = create<OpenClawState>()(
         state.isChatMinimized = false
         state.suggestion = null
         state.workspaceId = null
-        state.workspaceModel = 'local'
-        state.workspaceModelName = ''
+        // Keep workspaceModel and workspaceModelName — they're persisted to DB
+        // and will be restored on next mount from /api/user/openclaw-config.
         state.workspaceSessionId = null   // always fresh session on next launch
         state.logEvents = []
         state.finalSummary = ''

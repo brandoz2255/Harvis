@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import {
   ReactFlow,
   Background,
@@ -19,6 +19,7 @@ import { AgentNode } from './AgentNode';
 import { useAgentData } from '../../../hooks/useAgentData';
 import { useAgentStream } from '../../../hooks/useAgentStream';
 import { useWorkspaceAgentGraph } from '../../../hooks/useWorkspaceAgentGraph';
+import { usePersistedAgentGraphLayout } from '../../../hooks/usePersistedAgentGraphLayout';
 import { useOpenClawStore } from '../../../stores/openclawStore';
 import { AgentNodeData } from '../../../types/agent-graph';
 
@@ -49,6 +50,8 @@ function AgentGraphWorkspaceStore({
   const activeModelLabel = useOpenClawStore(
     (s) => s.workspaceModelName || s.workspaceModel
   );
+  const workspaceId = useOpenClawStore((s) => s.workspaceId);
+  const graphStorageKey = `harvis-agent-graph-pos:${workspaceId ?? 'none'}`;
 
   const { nodes: agentNodes, edges: agentEdges, agentCount, runningCount } =
     useWorkspaceAgentGraph();
@@ -63,10 +66,14 @@ function AgentGraphWorkspaceStore({
   const [nodes, setNodes, onNodesChange] = useNodesState(initialFlowNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialFlowEdges);
 
-  useEffect(() => {
-    setNodes(initialFlowNodes);
-    setEdges(initialFlowEdges);
-  }, [initialFlowNodes, initialFlowEdges]);
+  const onNodesChangePersist = usePersistedAgentGraphLayout(
+    graphStorageKey,
+    initialFlowNodes,
+    initialFlowEdges,
+    setNodes,
+    setEdges,
+    onNodesChange
+  );
 
   const onNodeClick = useCallback(
     (_: React.MouseEvent, node: Node) => {
@@ -101,7 +108,7 @@ function AgentGraphWorkspaceStore({
       <ReactFlow
         nodes={nodes}
         edges={edges}
-        onNodesChange={onNodesChange}
+        onNodesChange={onNodesChangePersist}
         onEdgesChange={onEdgesChange}
         onNodeClick={onNodeClick}
         onPaneClick={onPaneClick}
@@ -143,10 +150,14 @@ function AgentGraphLiveWs({
   const [nodes, setNodes, onNodesChange] = useNodesState(initialFlowNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialFlowEdges);
 
-  useEffect(() => {
-    setNodes(initialFlowNodes);
-    setEdges(initialFlowEdges);
-  }, [initialFlowNodes, initialFlowEdges]);
+  const onNodesChangePersist = usePersistedAgentGraphLayout(
+    'harvis-agent-graph-pos:live-ws',
+    initialFlowNodes,
+    initialFlowEdges,
+    setNodes,
+    setEdges,
+    onNodesChange
+  );
 
   const onNodeClick = useCallback(
     (_: React.MouseEvent, node: Node) => {
@@ -181,7 +192,7 @@ function AgentGraphLiveWs({
       <ReactFlow
         nodes={nodes}
         edges={edges}
-        onNodesChange={onNodesChange}
+        onNodesChange={onNodesChangePersist}
         onEdgesChange={onEdgesChange}
         onNodeClick={onNodeClick}
         onPaneClick={onPaneClick}

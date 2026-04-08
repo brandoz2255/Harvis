@@ -8,6 +8,7 @@
 
 import React from 'react'
 import { useOpenClawStore } from '@/stores/openclawStore'
+import { useDiscordWorkspaceFollow } from '@/hooks/useDiscordWorkspaceFollow'
 import { cn } from '@/lib/utils'
 
 interface WorkspaceLayoutProps {
@@ -24,6 +25,7 @@ export function WorkspaceLayout({
   className,
 }: WorkspaceLayoutProps) {
   const { isWorkspaceActive, isChatMinimized, setChatMinimized } = useOpenClawStore()
+  useDiscordWorkspaceFollow()
 
   if (!isWorkspaceActive) {
     // Normal chat mode — full width, no split

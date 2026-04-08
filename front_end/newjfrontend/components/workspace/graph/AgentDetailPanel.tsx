@@ -16,6 +16,17 @@ function labelToId(label: string): string {
   return label.toLowerCase().replace(/\s+/g, '-');
 }
 
+/** Match SSE events to React Flow node id (`run-<uuid>` or `lbl-<slug>`). */
+function eventMatchesGraphNode(evt: WorkspaceLogEvent, graphNodeId: string): boolean {
+  if (graphNodeId.startsWith('run-') && evt.run_id) {
+    return graphNodeId === `run-${evt.run_id}`;
+  }
+  if (graphNodeId.startsWith('lbl-')) {
+    return graphNodeId === `lbl-${labelToId(evt.agent_label ?? 'Agent')}`;
+  }
+  return labelToId(evt.agent_label ?? 'Agent') === graphNodeId;
+}
+
 interface FileDiff {
   path: string;
   before: string | null;
@@ -26,7 +37,7 @@ export function AgentDetailPanel({ agentId, logEvents, onClose }: AgentDetailPan
   if (!agentId) return null;
 
   const agentEvents = useMemo(
-    () => logEvents.filter((e) => labelToId(e.agent_label ?? 'Agent') === agentId),
+    () => logEvents.filter((e) => eventMatchesGraphNode(e, agentId)),
     [logEvents, agentId]
   );
 

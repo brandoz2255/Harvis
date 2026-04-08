@@ -38,6 +38,8 @@ NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 EXTERNAL_OLLAMA_URL = os.getenv("EXTERNAL_OLLAMA_URL", "")
 EXTERNAL_OLLAMA_API_KEY = os.getenv("EXTERNAL_OLLAMA_API_KEY", "")
 
+LOCAL_OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
+
 OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
@@ -248,16 +250,18 @@ async def _resolve_route(model_name: str) -> tuple[str, dict, bool, bool, str | 
         }
         return target_url, headers, False, True, "moonshotai/kimi-k2.5"
 
-    if model_name.startswith(_OLLAMA_CLOUD_PREFIXES):
-        if not EXTERNAL_OLLAMA_URL:
-            raise HTTPException(status_code=503, detail="External Ollama URL not configured")
+    if model_name.startswith(_OLLAMA_CLOUD_PREFIXES) and EXTERNAL_OLLAMA_URL:
         target_url = EXTERNAL_OLLAMA_URL.rstrip("/") + "/v1/chat/completions"
         headers = {"Content-Type": "application/json"}
         if EXTERNAL_OLLAMA_API_KEY:
             headers["Authorization"] = f"Bearer {EXTERNAL_OLLAMA_API_KEY}"
         return target_url, headers, False, False, None
 
-    raise HTTPException(status_code=400, detail=f"Unknown model: {model_name}")
+    # Fallback: route to local Ollama (handles any model installed locally)
+    target_url = LOCAL_OLLAMA_URL.rstrip("/") + "/v1/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    logger.info("model_proxy: routing %s to local Ollama at %s", model_name, LOCAL_OLLAMA_URL)
+    return target_url, headers, False, False, None
 
 
 def _filter_messages_for_moonshot(messages: list) -> list:
@@ -341,10 +345,39 @@ async def proxy_chat_completions(
     if is_nvidia and is_streaming:
         headers = {**headers, "Accept": "text/event-stream"}
 
+    # Local Ollama: disable thinking mode so qwen3.5 etc. put output in content,
+    # and ensure the context window is large enough for tool schemas + conversation.
+    is_local_ollama = LOCAL_OLLAMA_URL and target_url.startswith(LOCAL_OLLAMA_URL.rstrip("/"))
+    if is_local_ollama:
+        # Strip non-standard OpenAI fields that confuse Ollama's /v1 endpoint.
+        # Ollama only understands: model, messages, stream, tools, tool_choice,
+        # temperature, top_p, stop, max_tokens, presence_penalty, frequency_penalty.
+        # Fields like store, reasoning_effort, stream_options, max_completion_tokens
+        # cause Ollama to misinterpret the request or ignore tool definitions.
+        OLLAMA_ALLOWED_KEYS = {
+            "model", "messages", "stream", "tools", "tool_choice",
+            "temperature", "top_p", "stop", "max_tokens",
+            "presence_penalty", "frequency_penalty", "seed",
+            "response_format", "options",
+        }
+        # Convert max_completion_tokens → max_tokens (Ollama's name for it)
+        if "max_completion_tokens" in body and "max_tokens" not in body:
+            body["max_tokens"] = body["max_completion_tokens"]
+        body = {k: v for k, v in body.items() if k in OLLAMA_ALLOWED_KEYS}
+        # Ensure context window is large enough for tool schemas + conversation.
+        options = body.get("options", {})
+        if "num_ctx" not in options:
+            options["num_ctx"] = 32768
+        body["options"] = options
+
+    has_tools = "tools" in body and body["tools"]
+    tool_names = [t.get("function", {}).get("name", "?") for t in body.get("tools", [])] if has_tools else []
     logger.info(
-        "model_proxy: model=%s stream=%s → %s",
+        "model_proxy: model=%s stream=%s tools=%s tool_names=%s → %s",
         model_name,
         is_streaming,
+        has_tools,
+        tool_names,
         target_url.split("/v1")[0],
     )
 

@@ -15,7 +15,7 @@ from starlette.websockets import WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
-import uvicorn, os, sys, tempfile, uuid, base64, io, logging, re, requests, random, json, httpx
+import asyncio, uvicorn, os, sys, tempfile, uuid, base64, io, logging, re, requests, random, json, httpx
 from PIL import Image
 
 # Import optimized auth module
@@ -55,7 +55,7 @@ from workspace.rag_proxy import rag_proxy_router
 from workspace.kubectl_proxy import kubectl_proxy_router
 
 # Import tools routers
-from tools import maps_router, openclaw_proxy_router, opencode_llm_router
+from tools import maps_router, openclaw_proxy_router, browser_proxy_router, opencode_llm_router
 
 # Import vibecoding routers
 from vibecoding import (
@@ -110,7 +110,7 @@ import whisper  # Import Whisper
 # ─── Authentication Setup ──────────────────────────────────────────────────────
 SECRET_KEY = os.getenv("JWT_SECRET", "key")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "10080"))  # 7 days
 
 # Temporary logging to verify JWT secret is loaded
 print(f"Backend JWT_SECRET loaded: {SECRET_KEY[:10]}... Length: {len(SECRET_KEY)}")
@@ -502,9 +502,8 @@ async def lifespan(app: FastAPI):
     # Startup: create connection pool
     global db_pool, chat_history_manager
     try:
-        # Fix database hostname: use pgsql-db instead of pgsql
         database_url = os.getenv(
-            "DATABASE_URL", "postgresql://pguser:pgpassword@pgsql-db:5432/database"
+            "DATABASE_URL", "postgresql://pguser:pgpassword@pgsql:5432/database"
         )
         app.state.pg_pool = await asyncpg.create_pool(
             dsn=database_url,
@@ -514,6 +513,96 @@ async def lifespan(app: FastAPI):
             max_inactive_connection_lifetime=300,  # 5 minutes - clean up stale connections
         )
         logger.info("✅ Database connection pool created")
+
+        # Ensure OpenClaw web tool audit + prefs columns exist (idempotent)
+        try:
+            async with app.state.pg_pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS openclaw_tool_audit (
+                      id SERIAL PRIMARY KEY,
+                      ts TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                      session_key TEXT,
+                      tool TEXT NOT NULL,
+                      input JSONB DEFAULT '{}'::jsonb,
+                      output_meta JSONB DEFAULT '{}'::jsonb,
+                      status_code INTEGER,
+                      error TEXT
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_oc_tool_audit_ts ON openclaw_tool_audit(ts DESC);
+                    CREATE INDEX IF NOT EXISTS idx_oc_tool_audit_tool ON openclaw_tool_audit(tool, ts DESC);
+                    """
+                )
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS user_prefs (
+                      id SERIAL PRIMARY KEY,
+                      user_id INTEGER NOT NULL UNIQUE,
+                      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    );
+                    DO $$
+                    BEGIN
+                      IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='user_prefs' AND column_name='theme'
+                      ) THEN
+                        ALTER TABLE user_prefs ADD COLUMN theme TEXT DEFAULT 'dark';
+                      END IF;
+                      IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='user_prefs' AND column_name='left_panel_width'
+                      ) THEN
+                        ALTER TABLE user_prefs ADD COLUMN left_panel_width INTEGER DEFAULT 280;
+                      END IF;
+                      IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='user_prefs' AND column_name='right_panel_width'
+                      ) THEN
+                        ALTER TABLE user_prefs ADD COLUMN right_panel_width INTEGER DEFAULT 384;
+                      END IF;
+                      IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='user_prefs' AND column_name='terminal_height'
+                      ) THEN
+                        ALTER TABLE user_prefs ADD COLUMN terminal_height INTEGER DEFAULT 200;
+                      END IF;
+                      IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='user_prefs' AND column_name='default_model'
+                      ) THEN
+                        ALTER TABLE user_prefs ADD COLUMN default_model VARCHAR(100) DEFAULT 'mistral';
+                      END IF;
+                      IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='user_prefs' AND column_name='font_size'
+                      ) THEN
+                        ALTER TABLE user_prefs ADD COLUMN font_size INTEGER DEFAULT 14;
+                      END IF;
+                      IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='user_prefs' AND column_name='default_web_tier'
+                      ) THEN
+                        ALTER TABLE user_prefs ADD COLUMN default_web_tier TEXT DEFAULT 'tier2';
+                      END IF;
+                    END $$;
+                    """
+                )
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS workspace_web_caps (
+                      workspace_id TEXT PRIMARY KEY,
+                      user_id INTEGER NOT NULL,
+                      interactive_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+                      capability_token TEXT,
+                      expires_at TIMESTAMPTZ,
+                      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_ws_web_caps_user ON workspace_web_caps(user_id, created_at DESC);
+                    """
+                )
+        except Exception as e:
+            logger.warning("⚠️ Failed to init OpenClaw audit/prefs schema: %s", e)
 
         # Initialize ChatHistoryManager
         db_pool = app.state.pg_pool
@@ -627,7 +716,28 @@ async def lifespan(app: FastAPI):
         logger.warning(f"⚠️ Job queue initialization failed: {e}")
         # Don't fail startup if job queue doesn't work
 
+    # Discord → Workspace bridge (optional)
+    try:
+        from integrations.discord_workspace_bot import start_discord_workspace_bot
+
+        req = Request(scope={"type": "http", "app": app})
+        discord_client = start_discord_workspace_bot(req)
+        if discord_client is not None:
+            app.state.discord_client = discord_client
+            logger.info("✅ Discord workspace bot started")
+    except Exception as e:
+        logger.warning(f"⚠️ Discord workspace bot failed to start: {e}")
+
     yield
+
+    # Shutdown: stop Discord bot
+    try:
+        discord_client = getattr(app.state, "discord_client", None)
+        if discord_client is not None:
+            await discord_client.close()
+            logger.info("✅ Discord workspace bot stopped")
+    except Exception as e:
+        logger.warning(f"⚠️ Discord bot shutdown error: {e}")
 
     # Shutdown: close connection pool
     if hasattr(app.state, "pg_pool"):
@@ -719,7 +829,7 @@ async def list_models(
 
     # Fetch from local Ollama (Docker service at http://ollama:11434)
     try:
-        ollama_base = os.getenv("OLLAMA_URL", "http://ollama:11434").rstrip("/")
+        ollama_base = LOCAL_OLLAMA_BASE_URL
         if "/v1" in ollama_base:
             ollama_tags_url = ollama_base.replace("/v1", "") + "/api/tags"
         else:
@@ -745,6 +855,8 @@ async def list_models(
                             "provider": "ollama",
                         }
                     )
+                # Track this model for chat routing back to Ollama
+                LOCAL_OLLAMA_MODELS_CACHE.add(model_name)
             logger.info(f"Added {len(data.get('models', []))} Ollama models from {ollama_tags_url}")
     except Exception as e:
         logger.warning(f"Could not connect to local Ollama: {e}")
@@ -1005,6 +1117,7 @@ app.include_router(maps_router)
 
 # Include OpenClaw tool proxy (web-fetch + document-save — internal service auth)
 app.include_router(openclaw_proxy_router)
+app.include_router(browser_proxy_router)
 
 # Include OpenCode LLM proxy (for OpenCode to use Kimi K2.5)
 app.include_router(opencode_llm_router)
@@ -1035,6 +1148,14 @@ EXTERNAL_OLLAMA_API_KEY = os.getenv("EXTERNAL_OLLAMA_API_KEY", "")
 # Models cache for routing decisions
 # Only models discovered from the external endpoint will be added here
 EXTERNAL_MODELS_CACHE = set()
+
+# Models discovered from the local Ollama Docker service (http://ollama:11434)
+# Used to route chat requests to the native Ollama API instead of vLLM/llama-server
+LOCAL_OLLAMA_MODELS_CACHE = set()
+# OLLAMA_NATIVE_URL points to the actual Ollama Docker service (not vLLM/llama-server).
+# OLLAMA_URL is already used by LOCAL_OLLAMA_URL above (pointing to vLLM), so we use
+# a separate env var to avoid conflicts.
+LOCAL_OLLAMA_BASE_URL = os.getenv("OLLAMA_NATIVE_URL", "http://ollama:11434").rstrip("/")
 
 # ─── Model List Cache (for /api/models endpoint) ─────────────────────────────────
 import time
@@ -1089,6 +1210,7 @@ def make_ollama_request(
     # Check if the model should be routed to the external endpoint
     model_name = payload.get("model", "")
     is_external_model = model_name in EXTERNAL_MODELS_CACHE
+    is_local_ollama_model = model_name in LOCAL_OLLAMA_MODELS_CACHE
 
     if is_external_model and EXTERNAL_OLLAMA_URL and EXTERNAL_OLLAMA_API_KEY:
         # Route to external Ollama (e.g., ollama.example.com)
@@ -1123,26 +1245,47 @@ def make_ollama_request(
             logger.error("❌ External Ollama request failed: %s", e)
             raise
 
-    # Use user settings if provided, otherwise use global defaults
+    # Route to local Ollama Docker service for models discovered from it
+    if is_local_ollama_model:
+        ollama_base = LOCAL_OLLAMA_BASE_URL
+        if "/v1" in ollama_base:
+            ollama_base = ollama_base.replace("/v1", "")
+        url = f"{ollama_base}{endpoint}"
+        try:
+            logger.info("🏠 Using local Ollama (Docker) for %s: %s (stream=%s)", model_name, url, stream)
+            response = requests.post(
+                url, json=payload, timeout=timeout, stream=stream
+            )
+            if response.status_code == 200:
+                logger.info("✅ Local Ollama request successful")
+                return response
+            else:
+                logger.error("❌ Local Ollama returned status %s", response.status_code)
+                response.raise_for_status()
+        except Exception as e:
+            logger.error("❌ Local Ollama request failed: %s", e)
+            raise
+
+    # Use user settings if provided, otherwise use global defaults (vLLM/llama-server)
     if user_settings:
         local_url = user_settings.get("local_url") or LOCAL_OLLAMA_URL
     else:
         local_url = LOCAL_OLLAMA_URL
 
-    # Try local Ollama
+    # Try vLLM/llama-server
     try:
-        logger.info("🏠 Using local Ollama: %s", local_url)
+        logger.info("🏠 Using vLLM/llama-server: %s", local_url)
         response = requests.post(
             f"{local_url}{endpoint}", json=payload, timeout=timeout, stream=stream
         )
         if response.status_code == 200:
-            logger.info("✅ Local Ollama request successful")
+            logger.info("✅ vLLM/llama-server request successful")
             return response
         else:
-            logger.error("❌ Local Ollama returned status %s", response.status_code)
+            logger.error("❌ vLLM/llama-server returned status %s", response.status_code)
             response.raise_for_status()
     except Exception as e:
-        logger.error("❌ Local Ollama request failed: %s", e)
+        logger.error("❌ vLLM/llama-server request failed: %s", e)
         raise
 
 
@@ -1155,8 +1298,12 @@ MAX_RESPONSE_SIZE = int(
 
 async def stream_ollama_chunks(endpoint, payload, timeout=3600):
     """
-    Stream chunks from the local inference backend (vLLM or llama-server).
-    Both backends expose OpenAI-compatible SSE streaming at /v1/chat/completions.
+    Stream chunks from the inference backend (local Ollama, vLLM, or llama-server).
+
+    Routing priority:
+    1. External Ollama (cloud-hosted models in EXTERNAL_MODELS_CACHE)
+    2. Local Ollama Docker service (models in LOCAL_OLLAMA_MODELS_CACHE)
+    3. llama-server / vLLM (everything else)
 
     Yields JSON-encoded bytes in Ollama NDJSON format so existing consumers
     remain unchanged:  {"message": {"content": "..."}, "done": false}
@@ -1166,8 +1313,9 @@ async def stream_ollama_chunks(endpoint, payload, timeout=3600):
     # Routing logic
     model_name = payload.get("model", "")
     is_external_model = model_name in EXTERNAL_MODELS_CACHE
+    is_local_ollama_model = model_name in LOCAL_OLLAMA_MODELS_CACHE
 
-    # Determine URL and headers — external Ollama kept for large cloud-hosted models
+    # ── 1. External Ollama (cloud-hosted models) ──────────────────────────────────
     if is_external_model and EXTERNAL_OLLAMA_URL and EXTERNAL_OLLAMA_API_KEY:
         url = f"{EXTERNAL_OLLAMA_URL}{endpoint}"
         headers = {
@@ -1199,7 +1347,37 @@ async def stream_ollama_chunks(endpoint, payload, timeout=3600):
             raise
         return
 
-    # Local backend: vLLM or llama-server (OpenAI SSE format)
+    # ── 2. Local Ollama Docker service (native Ollama API) ────────────────────────
+    if is_local_ollama_model:
+        # Strip /v1 suffix if present — Ollama uses its own /api/chat endpoint
+        ollama_base = LOCAL_OLLAMA_BASE_URL
+        if "/v1" in ollama_base:
+            ollama_base = ollama_base.replace("/v1", "")
+        url = f"{ollama_base}{endpoint}"
+        logger.info(f"🏠 Using local Ollama for {model_name}: {url}")
+        try:
+            timeout_config = httpx.Timeout(timeout, connect=60.0)
+            async with httpx.AsyncClient(timeout=timeout_config) as client:
+                async with client.stream(
+                    "POST", url, json=payload
+                ) as response:
+                    if response.status_code != 200:
+                        error_text = await response.aread()
+                        raise Exception(
+                            f"Local Ollama error {response.status_code}: {error_text.decode('utf-8', errors='ignore')[:200]}"
+                        )
+                    async for line in response.aiter_lines():
+                        if line:
+                            yield line.encode("utf-8")
+        except httpx.ReadTimeout:
+            logger.error(f"❌ Local Ollama read timeout after {timeout}s")
+            raise Exception("Local Ollama generation timed out")
+        except Exception as e:
+            logger.error(f"❌ Local Ollama stream error: {e}")
+            raise
+        return
+
+    # ── 3. Local backend: vLLM or llama-server (OpenAI SSE format) ────────────────
     # Translate Ollama /api/chat payload → OpenAI /v1/chat/completions payload
     openai_payload = {
         "model": model_name or DEFAULT_MODEL,
@@ -1523,6 +1701,7 @@ class ResearchChatRequest(BaseModel):
     model: str = DEFAULT_MODEL
     session_id: Optional[str] = None  # Chat session ID for history persistence
     enableWebSearch: bool = True
+    live_web: bool = False  # When True, route research through OpenClaw with unrestricted web access
     audio_prompt: Optional[str] = None  # overrides HARVIS_VOICE_PATH if provided
     exaggeration: float = 0.5
     temperature: float = 0.5  # Lower temp = more stable TTS output
@@ -1713,6 +1892,63 @@ async def root() -> FileResponse:
 async def health_check():
     """Lightweight health check for K8s liveness probe - responds immediately"""
     return {"status": "healthy", "timestamp": time.time()}
+
+
+@app.get("/api/health/services", tags=["health"])
+async def health_services():
+    """Check reachability of all backend services (ollama, pgsql, openclaw, browser-runner)."""
+    results: dict = {}
+    overall = "healthy"
+
+    async def _check(name: str, url: str, timeout: float = 5.0):
+        nonlocal overall
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
+                r = await client.get(url)
+            if r.status_code < 400:
+                results[name] = {"status": "up", "code": r.status_code}
+            else:
+                results[name] = {"status": "degraded", "code": r.status_code}
+                overall = "degraded"
+        except Exception as exc:
+            results[name] = {"status": "down", "error": str(exc)[:200]}
+            overall = "degraded"
+
+    # Ollama — use the raw Ollama API, not the vLLM-style /v1 path
+    _ollama_base = os.getenv("OLLAMA_URL", "http://ollama:11434").rstrip("/")
+    # Strip /v1 suffix if present — /api/tags lives on the root Ollama port
+    if _ollama_base.endswith("/v1"):
+        _ollama_base = _ollama_base[:-3]
+
+    # OpenClaw — HTTP health endpoint (WS gateway also serves /health over HTTP)
+    _openclaw_ws = os.getenv("OPENCLAW_URL", "ws://openclaw:18789")
+    _openclaw_http = _openclaw_ws.replace("ws://", "http://").replace("wss://", "https://")
+
+    await asyncio.gather(
+        _check("ollama", f"{_ollama_base}/api/tags"),
+        _check("openclaw", f"{_openclaw_http}/health"),
+        _check("browser-runner", "http://browser-runner:8765/health", timeout=8.0),
+    )
+
+    # Database check — use the existing connection pool (not HTTP)
+    try:
+        pool = app.state.pool if hasattr(app.state, "pool") else None
+        if pool:
+            async with pool.acquire() as conn:
+                await conn.fetchval("SELECT 1")
+            results["database"] = {"status": "up"}
+        else:
+            results["database"] = {"status": "unknown", "error": "no connection pool"}
+            overall = "degraded"
+    except Exception as exc:
+        results["database"] = {"status": "down", "error": str(exc)[:200]}
+        overall = "degraded"
+
+    return {
+        "status": overall,
+        "timestamp": time.time(),
+        "services": results,
+    }
 
 
 # ─── Chat History Endpoints ───────────────────────────────────────────────────────
@@ -2420,6 +2656,27 @@ async def get_local_rag_context(query: str, max_length: int = None) -> str:
         logger.error(f"❌ RAG: Failed to get local RAG context: {e}")
         logger.exception("Full traceback:")
         return ""
+
+
+import re as _re
+
+_RESEARCH_PATTERNS = _re.compile(
+    r"(?i)\b("
+    r"search\s+(for|the\s+web|online|up)|google|look\s+up|find\s+(info|out|me)|"
+    r"research|what\s+is|who\s+is|when\s+did|where\s+is|how\s+does|how\s+do\s+you|"
+    r"latest\s+news|current\s+events|recent\s+developments|"
+    r"explain\s+what|tell\s+me\s+about|give\s+me\s+info|"
+    r"compare\s+\w+\s+and|difference\s+between|pros?\s+and\s+cons"
+    r")\b"
+)
+
+def should_auto_research(message: str) -> bool:
+    """Return True when the message looks like a research/factual query."""
+    if not message or len(message) < 10:
+        return False
+    if message.strip().startswith("/"):
+        return False
+    return bool(_RESEARCH_PATTERNS.search(message))
 
 
 @app.post("/api/chat", tags=["chat"])
@@ -5375,6 +5632,72 @@ async def research_chat(
                 set_research_agent_nvidia_key(nvidia_config["api_key"])
                 logger.info(f"🟢 NVIDIA API key set for research agent")
 
+    # ── Live Web: dispatch through OpenClaw with unrestricted web access ──
+    live_web = getattr(req, "live_web", False)
+    if live_web:
+        from workspace.workspace_router import launch_workspace_internal
+
+        async def stream_live_research():
+            yield f"data: {json.dumps({'status': 'starting', 'message': req.message, 'live_web': True})}\n\n"
+            yield f"data: {json.dumps({'status': 'researching', 'detail': 'OpenClaw live web research active'})}\n\n"
+
+            result = await launch_workspace_internal(
+                request=request,
+                user_id=current_user.id,
+                task_brief=f"LIVE WEB RESEARCH: {req.message}",
+                chat_history=req.history,
+                agent_id="main",
+                session_id=getattr(req, "session_id", None),
+                live_web=True,
+            )
+            ws_id = result["workspace_id"]
+
+            # Stream workspace events as SSE research progress
+            from workspace.workspace_router import _workspaces, _workspace_queues
+            queue = _workspace_queues.get(ws_id)
+            if not queue:
+                yield f"data: {json.dumps({'status': 'error', 'error': 'Failed to start live research workspace'})}\n\n"
+                return
+
+            final_content = ""
+            while True:
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=300)
+                except asyncio.TimeoutError:
+                    yield f"data: {json.dumps({'status': 'error', 'error': 'Live research timed out'})}\n\n"
+                    return
+
+                if item is None:
+                    break
+                seq, event = item
+                if event.type == "token":
+                    token_text = event.data.get("token", "")
+                    final_content += token_text
+                    yield f"data: {json.dumps({'status': 'streaming', 'token': token_text})}\n\n"
+                elif event.type == "tool_call":
+                    tool_name = event.data.get("name", "tool")
+                    yield f"data: {json.dumps({'status': 'researching', 'detail': f'Using {tool_name}...', 'type': 'tool_call'})}\n\n"
+                elif event.type == "log":
+                    msg = event.data.get("message", "")
+                    yield f"data: {json.dumps({'status': 'researching', 'detail': msg})}\n\n"
+                elif event.type in ("done", "error"):
+                    if event.type == "error":
+                        err_msg = event.data.get("message", "Unknown error")
+                        yield f"data: {json.dumps({'status': 'error', 'error': err_msg})}\n\n"
+                        return
+                    summary = event.data.get("summary", "") or final_content
+                    final_content = summary
+                    break
+
+            # Emit final response
+            yield f"data: {json.dumps({'status': 'complete', 'response': final_content, 'sources': [], 'live_web': True})}\n\n"
+
+        return StreamingResponse(
+            stream_live_research(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
     async def stream_research():
         try:
             if not req.message:
@@ -5694,7 +6017,7 @@ async def get_ollama_models():
 
     # Fetch from local Ollama (Docker service at http://ollama:11434)
     try:
-        ollama_base = os.getenv("OLLAMA_URL", "http://ollama:11434").rstrip("/")
+        ollama_base = LOCAL_OLLAMA_BASE_URL
         if "/v1" in ollama_base:
             ollama_tags_url = ollama_base.replace("/v1", "") + "/api/tags"
         else:
@@ -5705,6 +6028,9 @@ async def get_ollama_models():
             models = response.json().get("models", [])
             local_ollama = [m["name"] for m in models]
             ollama_model_names.extend(local_ollama)
+            # Track for chat routing back to Ollama
+            for name in local_ollama:
+                LOCAL_OLLAMA_MODELS_CACHE.add(name)
             logger.info(f"Available models from local Ollama: {local_ollama}")
         else:
             logger.warning(f"Local Ollama returned status {response.status_code}")

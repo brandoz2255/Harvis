@@ -84,14 +84,11 @@ data:
       },
       "commands": {
         "bash": true,
-        "bashForegroundMs": 2000
+        "bashForegroundMs": 30000
       },
       "browser": {
-        "ssrfPolicy": {
-          "hostnameAllowlist": [
-            "harvis-ai-merged-backend"
-          ]
-        }
+        "enabled": true,
+        "headless": true
       },
       "session": {
         "scope": "per-sender",
@@ -600,10 +597,11 @@ spec:
 
       containers:
         - name: openclaw
-          # Build context is openclaw/ (skills baked in) — push to: dulc3/openclaw:latest
-          # docker build -t dulc3/openclaw:latest -f openclaw/openclaw/Dockerfile openclaw/
-          # docker push dulc3/openclaw:latest
-          image: dulc3/openclaw:latest
+          # Browser-enabled image: dulc3/openclaw-browser:latest
+          # Built from openclaw-browser/Dockerfile (extends dulc3/openclaw:latest + Chromium)
+          # docker build -t dulc3/openclaw-browser:latest -f openclaw-browser/Dockerfile .
+          # docker push dulc3/openclaw-browser:latest
+          image: dulc3/openclaw-browser:latest
           imagePullPolicy: Always
           command: ["/home/node/start-opencode.sh"]
 
@@ -697,6 +695,14 @@ spec:
             - name: GIT_ASKPASS
               value: "echo"
 
+            # Chromium discovery — belt-and-suspenders for OpenClaw's native browser tool
+            - name: CHROME_BIN
+              value: /usr/bin/chromium
+            - name: PUPPETEER_EXECUTABLE_PATH
+              value: /usr/bin/chromium
+            - name: PUPPETEER_SKIP_CHROMIUM_DOWNLOAD
+              value: "true"
+
           volumeMounts:
             # PVC for all OpenClaw runtime state (sessions, logs, agent workspaces)
             - name: openclaw-data
@@ -719,6 +725,12 @@ spec:
             - name: python-extra
               mountPath: /python-extra
               readOnly: true
+            # Shared memory for Chromium — prevents tab crashes on heavy pages
+            - name: dshm
+              mountPath: /dev/shm
+            # Temp storage for Chromium profiles and crash dumps
+            - name: chromium-tmp
+              mountPath: /tmp/.chromium
 
           # OpenClaw exposes health only as a WebSocket RPC method, not HTTP.
           # tcpSocket probes verify the port is bound and accepting connections.
@@ -743,8 +755,8 @@ spec:
               memory: 512Mi
               cpu: 250m
             limits:
-              memory: 2Gi
-              cpu: 1000m
+              memory: 3Gi
+              cpu: 1500m
 
       volumes:
         - name: openclaw-data
@@ -759,6 +771,16 @@ spec:
             name: opencode-config
         - name: python-extra
           emptyDir: {}
+        # Shared memory for Chromium (replaces default /dev/shm which is only 64MB)
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 256Mi
+        # Temp storage for Chromium profiles and crash dumps
+        - name: chromium-tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 128Mi
 ---
 # Service: ClusterIP only — OpenClaw is never exposed to the host or LoadBalancer.
 # Only reachable within the cluster from the Harvis backend pod.

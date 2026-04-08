@@ -9,6 +9,7 @@ can forward to the frontend to ask the user for confirmation.
 import json
 import logging
 import os
+import httpx
 from typing import Optional
 
 from moonshot_api import MoonshotClient, MOONSHOT_BASE_URL
@@ -57,6 +58,9 @@ Respond with ONLY valid JSON in this exact format:
 
 Only set should_suggest = true if confidence >= 0.7."""
 
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
+FAST_MODEL = os.getenv("DISCORD_FAST_MODEL", "qwen3.5-32k:latest")
+
 
 class WorkspaceSuggestion:
     def __init__(self, raw: dict):
@@ -76,6 +80,56 @@ class WorkspaceSuggestion:
             "task_brief": self.task_brief,
             "reason": self.reason,
         }
+
+
+async def _detect_workspace_task_ollama(conversation_text: str) -> WorkspaceSuggestion:
+    try:
+        base_url = OLLAMA_URL.rstrip("/")
+        payload = {
+            "model": FAST_MODEL,
+            "messages": [
+                {"role": "system", "content": DETECTOR_SYSTEM_PROMPT},
+                {"role": "user", "content": f"Conversation:\n{conversation_text}"},
+            ],
+            "stream": False,
+            "options": {"num_ctx": 4096, "temperature": 0.1},
+        }
+
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
+            resp = await client.post(f"{base_url}/api/chat", json={
+                "model": FAST_MODEL,
+                "messages": [
+                    {"role": "system", "content": DETECTOR_SYSTEM_PROMPT},
+                    {"role": "user", "content": f"Conversation:\n{conversation_text}"},
+                ],
+                "stream": False,
+                "options": {"num_ctx": 4096, "temperature": 0.1},
+            })
+            
+        if resp.status_code != 200:
+            logger.error("Ollama detection failed: %s", resp.status_code)
+            return WorkspaceSuggestion({"should_suggest": False, "reason": f"Ollama HTTP {resp.status_code}"})
+
+        data = resp.json()
+        raw_response = data.get("message", {}).get("content", "")
+        
+        cleaned = raw_response.strip()
+        if cleaned.startswith("```"):
+            if "```json" in cleaned:
+                cleaned = cleaned.split("```json")[1].split("```")[0]
+            else:
+                cleaned = cleaned.split("```")[1]
+
+        parsed = json.loads(cleaned.strip())
+        suggestion = WorkspaceSuggestion(parsed)
+        logger.info(
+            f"Ollama Workspace detection: should_suggest={suggestion.should_suggest} "
+            f"confidence={suggestion.confidence} type={suggestion.task_type}"
+        )
+        return suggestion
+    except Exception as e:
+        logger.error(f"Ollama Workspace detection error: {e}")
+        return WorkspaceSuggestion({"should_suggest": False, "reason": f"Ollama fallback error: {e}"})
 
 
 WORKSPACE_KEYWORDS = {"workspace", "/workspace"}
@@ -142,10 +196,6 @@ async def detect_workspace_task(chat_history: list[dict]) -> WorkspaceSuggestion
     if override:
         return override
 
-    if not MOONSHOT_API_KEY:
-        logger.warning("MOONSHOT_API_KEY not set — workspace detection disabled")
-        return WorkspaceSuggestion({"should_suggest": False, "reason": "API key not configured"})
-
     # Build a compact representation of recent conversation for the classifier.
     # Cap at last 10 messages to keep the classifier call cheap and fast.
     recent = chat_history[-10:]
@@ -154,6 +204,10 @@ async def detect_workspace_task(chat_history: list[dict]) -> WorkspaceSuggestion
         for m in recent
         if m.get("content")
     )
+
+    if not MOONSHOT_API_KEY:
+        logger.info("MOONSHOT_API_KEY not set — falling back to local Ollama for workspace detection")
+        return await _detect_workspace_task_ollama(conversation_text)
 
     client = MoonshotClient(api_key=MOONSHOT_API_KEY, base_url=MOONSHOT_BASE_URL)
 

@@ -30,6 +30,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import time
 import uuid
 from typing import Optional
@@ -45,6 +46,7 @@ from .kimi_workspace import (
     stream_kimi_workspace,
     stream_ollama_cloud_workspace,
     stream_local_ollama_workspace,
+    stream_parallel_workspace,
 )
 from .task_detector import detect_workspace_task
 
@@ -220,6 +222,14 @@ class LaunchRequest(BaseModel):
     session_id: Optional[str] = None
     agent_id: str = "main"
     model_name: str = ""
+    enable_interactive: bool = False
+    live_web: bool = True  # When True, OpenClaw gets X-Live-Web (broad web + browser navigate)
+    parallel: bool = True   # When True, planner may split task into parallel sub-agents
+
+
+class InteractiveEnableRequest(BaseModel):
+    workspace_id: str
+    ttl_seconds: int = 3600
 
 
 class WorkspaceStatus(BaseModel):
@@ -227,6 +237,52 @@ class WorkspaceStatus(BaseModel):
     status: str
     task_brief: str
     session_id: str
+
+
+def _looks_like_browser_task(task_brief: str, chat_history: list[dict] | None = None) -> bool:
+    """
+    Heuristic: should this workspace default to interactive Tier 3?
+    True when the user is clearly asking to open a URL in a browser / website context.
+    """
+    text_parts: list[str] = [task_brief or ""]
+    if chat_history:
+        for msg in chat_history:
+            if isinstance(msg, dict) and msg.get("role") == "user":
+                content = msg.get("content")
+                if isinstance(content, str):
+                    text_parts.append(content)
+    blob = " ".join(text_parts).lower()
+
+    # Explicit URLs
+    if "http://" in blob or "https://" in blob:
+        return True
+
+    # Bare domain names (e.g. "gemini.google.com", "github.com/repo")
+    if re.search(r'\b[a-z0-9-]+\.[a-z]{2,}(?:\.[a-z]{2,})?(?:/\S*)?', blob):
+        # Must also have a browsing-related verb or keyword to avoid false positives
+        # on mentions of "file.txt" or "model.py"
+        domain_hints = [
+            ".com", ".org", ".net", ".io", ".dev", ".ai", ".co",
+            ".edu", ".gov", ".app", ".me", ".gg",
+        ]
+        if any(h in blob for h in domain_hints):
+            return True
+
+    # Screenshot/browser keywords — expanded verb list
+    keywords = [" browser", "website", "web site", "screenshot", "screen shot", "webpage", "web page"]
+    verbs = [
+        "open ", "go to ", "navigate to ", "visit ", "take ", "capture ",
+        "show ", "check ", "look at ", "browse ", "see ", "view ",
+        "screenshot ", "screencap ",
+    ]
+    if any(k in blob for k in keywords) and any(v in blob for v in verbs):
+        return True
+
+    # "screenshot" or "screen shot" alone is strong enough signal
+    if "screenshot" in blob or "screen shot" in blob:
+        return True
+
+    return False
 
 
 # ─── Database helpers ──────────────────────────────────────────────────────────
@@ -253,10 +309,19 @@ async def _db_save_event(pool, workspace_id: str, seq: int, event: OpenClawEvent
         return
     try:
         payload: dict = {}
-        for key in ("content", "tool", "args", "output", "success", "message", "summary", "fix_hint"):
+        for key in (
+            "content", "tool", "args", "output", "success", "message",
+            "summary", "fix_hint", "model", "parent_run_id",
+            "run_id", "agent_label",
+        ):
             val = event.data.get(key)
             if val is not None:
                 payload[key] = val
+        # Always persist sub-agent tracking fields when present on the event object.
+        if event.run_id and "run_id" not in payload:
+            payload["run_id"] = event.run_id
+        if event.agent_label and "agent_label" not in payload:
+            payload["agent_label"] = event.agent_label
 
         async with pool.acquire() as conn:
             await conn.execute(
@@ -304,6 +369,38 @@ async def _db_complete_run(
         logger.error("DB: failed to complete workspace_run %s: %s", workspace_id, exc)
 
 
+async def _db_enable_interactive(
+    pool,
+    *,
+    workspace_id: str,
+    user_id: int,
+    ttl_seconds: int = 3600,
+) -> str:
+    """Enable Tier 3 for one workspace and return capability token."""
+    if pool is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    ttl = max(300, min(int(ttl_seconds or 3600), 7200))
+    token = secrets.token_urlsafe(32)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO workspace_web_caps(workspace_id, user_id, interactive_enabled, capability_token, expires_at)
+            VALUES ($1, $2, TRUE, $3, NOW() + ($4 * INTERVAL '1 second'))
+            ON CONFLICT (workspace_id) DO UPDATE
+              SET user_id = EXCLUDED.user_id,
+                  interactive_enabled = TRUE,
+                  capability_token = EXCLUDED.capability_token,
+                  expires_at = EXCLUDED.expires_at
+            """,
+            workspace_id,
+            user_id,
+            token,
+            ttl,
+        )
+    return token
+
+
 # ─── Background task ────────────────────────────────────────────────────────────
 
 async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> None:
@@ -338,14 +435,25 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
 
     # ── Select the event stream based on agent_id ────────────────────────────
     event_stream = None
+    use_parallel = ws.get("parallel", True)
 
     if agent_id == "local":
-        event_stream = stream_local_ollama_workspace(task_brief, chat_history, model=model_name)
+        if use_parallel:
+            event_stream = stream_parallel_workspace(
+                task_brief, chat_history, model=model_name, provider="local",
+            )
+        else:
+            event_stream = stream_local_ollama_workspace(task_brief, chat_history, model=model_name)
 
     elif agent_id == "kimi":
         api_key = await _get_kimi_key(pool, ws["user_id"])
         if api_key:
-            event_stream = stream_kimi_workspace(task_brief, chat_history, api_key)
+            if use_parallel:
+                event_stream = stream_parallel_workspace(
+                    task_brief, chat_history, api_key=api_key, provider="kimi",
+                )
+            else:
+                event_stream = stream_kimi_workspace(task_brief, chat_history, api_key)
         else:
             logger.warning("No Kimi API key for user %s — falling back to local Ollama", ws["user_id"])
             fallback_event = OpenClawEvent("log", {
@@ -354,15 +462,26 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
             await _db_save_event(pool, workspace_id, seq, fallback_event)
             await queue.put((seq, fallback_event))
             seq += 1
-            event_stream = stream_local_ollama_workspace(task_brief, chat_history, model=model_name)
+            if use_parallel:
+                event_stream = stream_parallel_workspace(
+                    task_brief, chat_history, model=model_name, provider="local",
+                )
+            else:
+                event_stream = stream_local_ollama_workspace(task_brief, chat_history, model=model_name)
 
     elif agent_id == "nvidia-kimi":
         nvidia_key = os.getenv("NVIDIA_API_KEY", "")
         if nvidia_key:
-            event_stream = stream_kimi_workspace(
-                task_brief, chat_history, nvidia_key,
-                api_url="https://integrate.api.nvidia.com/v1",
-            )
+            if use_parallel:
+                event_stream = stream_parallel_workspace(
+                    task_brief, chat_history, api_key=nvidia_key,
+                    api_url="https://integrate.api.nvidia.com/v1", provider="kimi",
+                )
+            else:
+                event_stream = stream_kimi_workspace(
+                    task_brief, chat_history, nvidia_key,
+                    api_url="https://integrate.api.nvidia.com/v1",
+                )
         else:
             logger.warning("No NVIDIA API key — falling back to local Ollama")
             fallback_event = OpenClawEvent("log", {
@@ -374,11 +493,21 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
             event_stream = stream_local_ollama_workspace(task_brief, chat_history, model=model_name)
 
     elif agent_id in ("cloud-ollama", "gpt-oss"):
-        event_stream = stream_ollama_cloud_workspace(task_brief, chat_history, model=model_name or "gpt-oss:120b")
+        if use_parallel:
+            event_stream = stream_parallel_workspace(
+                task_brief, chat_history, model=model_name or "gpt-oss:120b", provider="cloud-ollama",
+            )
+        else:
+            event_stream = stream_ollama_cloud_workspace(task_brief, chat_history, model=model_name or "gpt-oss:120b")
 
     else:
         # Default: route through OpenClaw WebSocket
-        event_stream = client.stream(task_brief, chat_history)
+        event_stream = client.stream(
+            task_brief,
+            chat_history,
+            interactive_context=ws.get("interactive_context"),
+            live_web=ws.get("live_web", True),
+        )
 
     try:
         async for event in event_stream:
@@ -530,6 +659,9 @@ def _start_workspace(
     pool,
     started_epoch: float,
     model_name: str = "",
+    interactive_context: Optional[dict] = None,
+    live_web: bool = True,
+    parallel: bool = True,
 ) -> OpenClawClient:
     """
     Register a workspace in memory, create its queue, and start the background task.
@@ -551,6 +683,9 @@ def _start_workspace(
         "started_epoch": started_epoch,
         "agent_id": agent_id,
         "model_name": model_name,
+        "interactive_context": interactive_context or None,
+        "live_web": live_web,
+        "parallel": parallel,
     }
 
     queue: asyncio.Queue = asyncio.Queue()
@@ -563,6 +698,92 @@ def _start_workspace(
     _workspace_tasks[workspace_id] = task
 
     return client
+
+
+async def launch_workspace_internal(
+    *,
+    request: Request,
+    user_id: int,
+    task_brief: str,
+    chat_history: list[dict] | None = None,
+    agent_id: str = "main",
+    model_name: str = "",
+    session_id: str | None = None,
+    enable_interactive: bool = False,
+    live_web: bool = True,
+) -> dict:
+    """
+    Launch a workspace run without JWT (internal integrations).
+
+    Intended for trusted server-side integrations (e.g., Discord bot) that already
+    run inside the backend process and can supply an owning user_id.
+    """
+    workspace_id = str(uuid.uuid4())[:8]
+    session_id = session_id or f"ws-{workspace_id}"
+    chat_history = chat_history or []
+    task_brief = _resolve_task_brief(task_brief, chat_history)
+
+    # Auto-enable Tier 3 when the task clearly needs a browser,
+    # unless the caller explicitly disabled it.
+    if not enable_interactive and _looks_like_browser_task(task_brief, chat_history):
+        enable_interactive = True
+
+    pool = getattr(request.app.state, "pg_pool", None)
+    started_epoch = time.monotonic()
+
+    interactive_context: Optional[dict] = None
+    interactive_enabled = False
+    if enable_interactive:
+        try:
+            cap_token = await _db_enable_interactive(
+                pool,
+                workspace_id=workspace_id,
+                user_id=user_id,
+                ttl_seconds=3600,
+            )
+            interactive_context = {
+                "workspace_id": workspace_id,
+                "capability_token": cap_token,
+            }
+            interactive_enabled = True
+        except Exception as exc:
+            logger.warning(
+                "Failed to enable interactive for internal workspace %s: %s",
+                workspace_id,
+                exc,
+            )
+
+    _start_workspace(
+        workspace_id=workspace_id,
+        session_id=session_id,
+        task_brief=task_brief,
+        chat_history=chat_history,
+        agent_id=agent_id,
+        user_id=user_id,
+        pool=pool,
+        started_epoch=started_epoch,
+        model_name=model_name,
+        live_web=live_web,
+        interactive_context=interactive_context,
+    )
+
+    try:
+        await _db_create_run(pool, workspace_id, user_id, session_id, task_brief)
+    except Exception as exc:
+        logger.error("DB: _db_create_run (internal) raised unexpectedly: %s", exc)
+
+    logger.info(
+        "Workspace launched (internal): id=%s user=%s session=%s agent=%s brief=%r",
+        workspace_id, user_id, session_id, agent_id, task_brief,
+    )
+
+    return {
+        "workspace_id": workspace_id,
+        "session_id": session_id,
+        "status": "running",
+        "task_brief": task_brief,
+        "interactive_enabled": interactive_enabled,
+    }
 
 
 # ─── Endpoints ─────────────────────────────────────────────────────────────────
@@ -619,7 +840,31 @@ async def launch_workspace(
     if agent_id not in ("main", "kimi", "nvidia-kimi", "local", "cloud-ollama", "gpt-oss"):
         agent_id = "local"
 
+    # Auto-enable Tier 3 when the task clearly needs a browser,
+    # unless the caller explicitly disabled it.
+    enable_interactive = bool(req.enable_interactive)
+    if not enable_interactive and _looks_like_browser_task(task_brief, req.chat_history):
+        enable_interactive = True
+
     started_epoch = time.monotonic()
+
+    interactive_context: Optional[dict] = None
+    interactive_enabled = False
+    if enable_interactive:
+        try:
+            cap_token = await _db_enable_interactive(
+                pool,
+                workspace_id=workspace_id,
+                user_id=current_user["id"],
+                ttl_seconds=3600,
+            )
+            interactive_context = {
+                "workspace_id": workspace_id,
+                "capability_token": cap_token,
+            }
+            interactive_enabled = True
+        except Exception as exc:
+            logger.warning("Failed to enable interactive for workspace %s: %s", workspace_id, exc)
 
     _start_workspace(
         workspace_id=workspace_id,
@@ -631,6 +876,9 @@ async def launch_workspace(
         pool=pool,
         started_epoch=started_epoch,
         model_name=req.model_name,
+        live_web=req.live_web,
+        interactive_context=interactive_context,
+        parallel=req.parallel,
     )
 
     try:
@@ -639,8 +887,8 @@ async def launch_workspace(
         logger.error("DB: _db_create_run raised unexpectedly: %s", exc)
 
     logger.info(
-        "Workspace launched: id=%s user=%s session=%s agent=%s brief=%r",
-        workspace_id, current_user["id"], session_id, agent_id, task_brief,
+        "Workspace launched: id=%s user=%s session=%s agent=%s parallel=%s brief=%r",
+        workspace_id, current_user["id"], session_id, agent_id, req.parallel, task_brief,
     )
 
     return {
@@ -648,7 +896,46 @@ async def launch_workspace(
         "session_id": session_id,
         "status": "running",
         "task_brief": task_brief,
+        "interactive_enabled": interactive_enabled,
     }
+
+
+@workspace_router.post("/interactive/enable")
+async def enable_workspace_interactive(
+    request: Request,
+    req: InteractiveEnableRequest,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """Explicitly enable Tier 3 interactive browsing for a workspace."""
+    pool = getattr(request.app.state, "pg_pool", None)
+    workspace_id = (req.workspace_id or "").strip()
+    if not workspace_id:
+        raise HTTPException(status_code=400, detail="workspace_id is required")
+
+    ws = _workspaces.get(workspace_id)
+    if ws is not None and int(ws.get("user_id", -1)) != int(current_user["id"]):
+        raise HTTPException(status_code=403, detail="Workspace does not belong to current user")
+    if ws is None and pool is not None:
+        async with pool.acquire() as conn:
+            owner = await conn.fetchval("SELECT user_id FROM workspace_runs WHERE id = $1", workspace_id)
+        if owner is None:
+            raise HTTPException(status_code=404, detail="Workspace not found")
+        if int(owner) != int(current_user["id"]):
+            raise HTTPException(status_code=403, detail="Workspace does not belong to current user")
+
+    cap_token = await _db_enable_interactive(
+        pool,
+        workspace_id=workspace_id,
+        user_id=current_user["id"],
+        ttl_seconds=req.ttl_seconds,
+    )
+    if ws is not None:
+        ws["interactive_context"] = {
+            "workspace_id": workspace_id,
+            "capability_token": cap_token,
+        }
+
+    return {"workspace_id": workspace_id, "interactive_enabled": True}
 
 
 @workspace_router.get("/stream/{workspace_id}")
@@ -999,3 +1286,43 @@ async def get_workspace_events(
     except Exception as exc:
         logger.error("DB: failed to fetch events for workspace %s: %s", workspace_id, exc)
         return {"events": []}
+
+
+@workspace_router.get("/active")
+async def get_active_workspace(
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """
+    Return the latest running workspace for the current user (if any).
+
+    Used for external triggers (e.g., Discord) so the UI can attach to a run that
+    started outside the browser.
+    """
+    pool = getattr(request.app.state, "pg_pool", None)
+    if pool is None:
+        return {"active": None}
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT id, session_id, task_brief, status, started_at
+                FROM workspace_runs
+                WHERE user_id = $1
+                  AND status = 'running'
+                ORDER BY started_at DESC
+                LIMIT 1
+                """,
+                current_user["id"],
+            )
+        if not row:
+            return {"active": None}
+        d = dict(row)
+        d["started_at"] = d["started_at"].isoformat() if d.get("started_at") else None
+        # Identify external source from session_id convention (discord-*)
+        session_id = d.get("session_id") or ""
+        d["source"] = "discord" if session_id.startswith("discord-") else "web"
+        return {"active": d}
+    except Exception as exc:
+        logger.error("DB: failed to fetch active workspace: %s", exc)
+        return {"active": None}

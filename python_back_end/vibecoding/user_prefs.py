@@ -305,6 +305,14 @@ class UserPrefsResponse(BaseModel):
     updated_at: str
 
 
+class WebTierResponse(BaseModel):
+    default_web_tier: str
+
+
+class WebTierUpdate(BaseModel):
+    default_web_tier: str = Field(..., description="off | tier2")
+
+
 # Import dependencies
 from auth_utils import get_current_user
 from fastapi import Request
@@ -393,3 +401,38 @@ async def update_preferences(
     except Exception as e:
         logger.error(f"Error updating user preferences: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to update preferences: {str(e)}")
+
+
+@router.get("/web-tier", response_model=WebTierResponse)
+async def get_default_web_tier(
+    user: Dict = Depends(get_current_user),
+    pool=Depends(get_db_pool),
+):
+    user_id = user.get("user_id") or user.get("id")
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT default_web_tier FROM user_prefs WHERE user_id = $1", user_id)
+        if not row:
+            # Ensure a row exists for the user
+            await conn.execute("INSERT INTO user_prefs(user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING", user_id)
+            row = await conn.fetchrow("SELECT default_web_tier FROM user_prefs WHERE user_id = $1", user_id)
+    tier = (row.get("default_web_tier") if row else None) or "tier2"
+    if tier not in ("off", "tier2"):
+        tier = "tier2"
+    return WebTierResponse(default_web_tier=tier)
+
+
+@router.post("/web-tier", response_model=WebTierResponse)
+async def set_default_web_tier(
+    body: WebTierUpdate,
+    user: Dict = Depends(get_current_user),
+    pool=Depends(get_db_pool),
+):
+    user_id = user.get("user_id") or user.get("id")
+    tier = (body.default_web_tier or "").strip().lower()
+    if tier not in ("off", "tier2"):
+        raise HTTPException(status_code=400, detail="default_web_tier must be 'off' or 'tier2'")
+
+    async with pool.acquire() as conn:
+        await conn.execute("INSERT INTO user_prefs(user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING", user_id)
+        await conn.execute("UPDATE user_prefs SET default_web_tier = $2 WHERE user_id = $1", user_id, tier)
+    return WebTierResponse(default_web_tier=tier)

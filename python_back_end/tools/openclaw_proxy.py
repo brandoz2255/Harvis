@@ -22,6 +22,10 @@ import ipaddress
 import logging
 import os
 import re
+import socket
+import json
+import base64
+import time
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
@@ -36,6 +40,19 @@ OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 # Truncate extracted text to this many characters (~8 000 tokens)
 _MAX_TEXT_CHARS = 32_000
 
+# Maximum raw HTML bytes fetched per request (prevents huge downloads)
+_MAX_FETCH_BYTES = int(os.getenv("OPENCLAW_WEB_FETCH_MAX_BYTES", "2000000"))  # 2MB
+
+# Per-session rate limits (best-effort in-memory)
+_RATE_WINDOW_S = int(os.getenv("OPENCLAW_WEB_RATE_WINDOW_S", "60"))
+_RATE_MAX_SEARCH = int(os.getenv("OPENCLAW_WEB_RATE_MAX_SEARCH", "10"))
+_RATE_MAX_FETCH = int(os.getenv("OPENCLAW_WEB_RATE_MAX_FETCH", "20"))
+_rate_state: Dict[str, Dict[str, List[float]]] = {}  # key -> {"search":[ts], "fetch":[ts]}
+
+# Domain policy
+_ALLOWLIST = [h.strip().lower() for h in os.getenv("OPENCLAW_WEB_ALLOWLIST", "").split(",") if h.strip()]
+_DENYLIST = [h.strip().lower() for h in os.getenv("OPENCLAW_WEB_DENYLIST", "").split(",") if h.strip()]
+
 _PRIVATE_NETWORKS = [
     ipaddress.ip_network("10.0.0.0/8"),
     ipaddress.ip_network("172.16.0.0/12"),
@@ -46,7 +63,42 @@ _PRIVATE_NETWORKS = [
     ipaddress.ip_network("fc00::/7"),          # ULA IPv6
 ]
 
+
+def _ensure_resolved_addresses_public(hostname: str) -> None:
+    """
+    Block IP literals or hostnames whose DNS resolves to private/internal addresses
+    (SSRF / DNS-rebinding protection).
+    """
+    try:
+        addr = ipaddress.ip_address(hostname)
+        for net in _PRIVATE_NETWORKS:
+            if addr in net:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Requests to private/internal address {hostname} are not allowed",
+                )
+    except ValueError:
+        try:
+            infos = socket.getaddrinfo(hostname, None)
+            for info in infos:
+                ip = info[4][0]
+                addr = ipaddress.ip_address(ip)
+                for net in _PRIVATE_NETWORKS:
+                    if addr in net:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"DNS for {hostname} resolved to private/internal address {ip}",
+                        )
+        except HTTPException:
+            raise
+        except Exception:
+            # If DNS fails here, let the downstream fetch/browser surface errors.
+            pass
+
+
 openclaw_proxy_router = APIRouter(prefix="/api/tools", tags=["openclaw-tools"])
+
+browser_proxy_router = APIRouter(prefix="/api/tools/browser", tags=["openclaw-browser"])
 
 
 # ─── Auth ──────────────────────────────────────────────────────────────────────
@@ -62,14 +114,49 @@ def _verify_openclaw_token(authorization: Optional[str]) -> None:
         raise HTTPException(status_code=401, detail="Invalid proxy token")
 
 
+async def _audit(
+    request: Request,
+    *,
+    session_key: str,
+    tool: str,
+    input_obj: Dict[str, Any],
+    status_code: int,
+    output_meta: Optional[Dict[str, Any]] = None,
+    error: Optional[str] = None,
+) -> None:
+    pool = getattr(request.app.state, "pg_pool", None)
+    if pool is None:
+        return
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO openclaw_tool_audit(session_key, tool, input, output_meta, status_code, error)
+                VALUES ($1, $2, $3::jsonb, $4::jsonb, $5, $6)
+                """,
+                session_key,
+                tool,
+                json.dumps(input_obj),
+                json.dumps(output_meta or {}),
+                status_code,
+                error,
+            )
+    except Exception:
+        # Never break the tool call due to logging.
+        return
+
+
 # ─── URL validation ────────────────────────────────────────────────────────────
 
-def _validate_url(url: str) -> None:
+def _validate_url(url: str, *, live_web: bool = False) -> None:
     """
     Reject URLs that point to private/internal addresses.
 
     Allowed: http:// and https:// pointing to routable public IPs.
     Rejected: RFC-1918, loopback, link-local, localhost, other schemes.
+
+    When live_web=True, domain allow/deny lists are skipped (user acknowledged
+    unrestricted access).  Private-IP and localhost checks are ALWAYS enforced.
     """
     try:
         parsed = urlparse(url)
@@ -86,24 +173,428 @@ def _validate_url(url: str) -> None:
     if not hostname:
         raise HTTPException(status_code=400, detail="URL has no hostname")
 
-    # Reject by hostname
+    # Reject by hostname — always enforced regardless of live_web
     lowered = hostname.lower()
     if lowered in ("localhost", "localhost.localdomain"):
         raise HTTPException(status_code=400, detail="Requests to localhost are not allowed")
 
-    # Try to resolve to an IP and check it
-    try:
-        addr = ipaddress.ip_address(hostname)
-        for net in _PRIVATE_NETWORKS:
-            if addr in net:
+    # Domain allow/deny lists (suffix match) — skipped in live_web mode
+    if not live_web:
+        if _DENYLIST:
+            for bad in _DENYLIST:
+                if lowered == bad or lowered.endswith("." + bad):
+                    raise HTTPException(status_code=400, detail=f"Domain '{lowered}' is blocked")
+        if _ALLOWLIST:
+            ok = False
+            for good in _ALLOWLIST:
+                if lowered == good or lowered.endswith("." + good):
+                    ok = True
+                    break
+            if not ok:
+                raise HTTPException(status_code=400, detail=f"Domain '{lowered}' is not allowlisted")
+
+    _ensure_resolved_addresses_public(lowered)
+
+
+def _is_live_web(request: Request) -> bool:
+    """Check if the request has the X-Live-Web header (user-acknowledged unrestricted access)."""
+    return request.headers.get("X-Live-Web", "").lower() in ("true", "1", "yes")
+
+
+# Live web rate limits — relaxed compared to controlled mode
+_RATE_MAX_SEARCH_LIVE = int(os.getenv("OPENCLAW_WEB_RATE_MAX_SEARCH_LIVE", "30"))
+_RATE_MAX_FETCH_LIVE = int(os.getenv("OPENCLAW_WEB_RATE_MAX_FETCH_LIVE", "60"))
+
+
+def _rate_limit(key: str, kind: str, max_events: int) -> None:
+    now = asyncio.get_event_loop().time()
+    bucket = _rate_state.setdefault(key, {}).setdefault(kind, [])
+    # prune
+    cutoff = now - _RATE_WINDOW_S
+    while bucket and bucket[0] < cutoff:
+        bucket.pop(0)
+    if len(bucket) >= max_events:
+        raise HTTPException(status_code=429, detail=f"Rate limit exceeded for {kind}")
+    bucket.append(now)
+
+
+async def _require_interactive(
+    request: Request,
+    *,
+    workspace_id: str,
+    capability_token: str,
+) -> int:
+    """
+    Validate Tier 3 capability token for a specific workspace_id.
+    Returns owning user_id on success.
+    """
+    pool = getattr(request.app.state, "pg_pool", None)
+    if pool is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    if not workspace_id:
+        raise HTTPException(status_code=400, detail="workspace_id is required")
+    if not capability_token:
+        raise HTTPException(status_code=401, detail="Missing capability token")
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT user_id, interactive_enabled, capability_token, expires_at
+            FROM workspace_web_caps
+            WHERE workspace_id = $1
+            """,
+            workspace_id,
+        )
+    if not row:
+        raise HTTPException(status_code=403, detail="Interactive browsing not enabled for this workspace")
+    if not row.get("interactive_enabled"):
+        raise HTTPException(status_code=403, detail="Interactive browsing disabled for this workspace")
+    if (row.get("capability_token") or "") != capability_token:
+        raise HTTPException(status_code=403, detail="Invalid capability token")
+    exp = row.get("expires_at")
+    if exp is not None:
+        # asyncpg returns datetime
+        if exp.timestamp() < time.time():
+            raise HTTPException(status_code=403, detail="Capability token expired")
+    return int(row.get("user_id") or 0)
+
+
+def _validate_browser_url(url: str, *, live_web: bool = False) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        raise HTTPException(status_code=400, detail="Tier 3 browsing requires https URLs")
+    hostname = (parsed.hostname or "").lower()
+    if not hostname:
+        raise HTTPException(status_code=400, detail="URL has no hostname")
+    if hostname in ("localhost", "localhost.localdomain"):
+        raise HTTPException(status_code=400, detail="Requests to localhost are not allowed")
+
+    # With X-Live-Web (workspace live_web), skip hostname allowlist — same policy as web-fetch.
+    # OPENCLAW_BROWSER_ALLOWLIST=* also skips the allowlist (still enforces https + non-private DNS).
+    if not live_web:
+        raw_allow = os.getenv("OPENCLAW_BROWSER_ALLOWLIST", "").strip()
+        if raw_allow != "*":
+            allow = [h.strip().lower() for h in raw_allow.split(",") if h.strip()]
+        else:
+            allow = ["*"]  # sentinel: skip check below
+        if allow != ["*"] and not allow:
+            # Default Tier 3 hosts — broad research set (override with OPENCLAW_BROWSER_ALLOWLIST)
+            allow = [
+                "example.com",
+                "www.example.com",
+                # Google
+                "google.com",
+                "google.dev",
+                "googleapis.com",
+                "gstatic.com",
+                "googleusercontent.com",
+                "gemini.google.com",
+                "ai.google.dev",
+                "blog.google",
+                "chromium.org",
+                # Microsoft / GitHub
+                "github.com",
+                "gist.github.com",
+                "raw.githubusercontent.com",
+                "microsoft.com",
+                "azure.com",
+                "visualstudio.com",
+                "bing.com",
+                "msn.com",
+                # Search & reference
+                "duckduckgo.com",
+                "www.duckduckgo.com",
+                "wikipedia.org",
+                "wikimedia.org",
+                "archive.org",
+                # Social / comms
+                "reddit.com",
+                "x.com",
+                "twitter.com",
+                "linkedin.com",
+                "facebook.com",
+                "instagram.com",
+                "youtube.com",
+                "youtu.be",
+                "discord.com",
+                "slack.com",
+                # News / media
+                "news.ycombinator.com",
+                "ycombinator.com",
+                "bbc.co.uk",
+                "bbc.com",
+                "reuters.com",
+                "nytimes.com",
+                "theguardian.com",
+                "apnews.com",
+                # AI / dev tools
+                "claude.ai",
+                "anthropic.com",
+                "console.anthropic.com",
+                "docs.anthropic.com",
+                "openai.com",
+                "platform.openai.com",
+                "cursor.com",
+                "docs.cursor.com",
+                "httpstat.us",
+                "ollama.com",
+                "huggingface.co",
+                "kaggle.com",
+                "colab.research.google.com",
+                # Docs & learning
+                "stackoverflow.com",
+                "serverfault.com",
+                "superuser.com",
+                "stackexchange.com",
+                "developer.mozilla.org",
+                "docs.python.org",
+                "nodejs.org",
+                "npmjs.com",
+                "pypi.org",
+                "react.dev",
+                "nextjs.org",
+                "tailwindcss.com",
+                "kubernetes.io",
+                "docker.com",
+                "docs.docker.com",
+                # Cloud & infra docs
+                "aws.amazon.com",
+                "cloud.google.com",
+                "docs.aws.amazon.com",
+                # Registries & CDNs (common page assets)
+                "unpkg.com",
+                "jsdelivr.net",
+                "cdn.jsdelivr.net",
+                "cdnjs.cloudflare.com",
+                "cloudflare.com",
+                "fastly.com",
+                # Commerce / general
+                "amazon.com",
+                "apple.com",
+            ]
+        if allow != ["*"]:
+            ok = any(hostname == h or hostname.endswith("." + h) for h in allow)
+            if not ok:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Requests to private/internal address {hostname} are not allowed",
+                    detail=f"Domain '{hostname}' is not allowlisted for interactive browsing",
                 )
-    except ValueError:
-        # Not an IP literal — that's fine, hostname-based URLs pass here.
-        # (DNS resolution happens at fetch time; we can't pre-validate.)
-        pass
+
+    _ensure_resolved_addresses_public(hostname)
+
+
+class BrowserSessionRequest(BaseModel):
+    workspace_id: str
+    capability_token: str
+    headless: bool = True
+
+
+class BrowserNavigateRequest(BaseModel):
+    workspace_id: str
+    capability_token: str
+    sessionId: str
+    url: str
+
+
+class BrowserActRequest(BaseModel):
+    workspace_id: str
+    capability_token: str
+    sessionId: str
+    action: str
+    selector: Optional[str] = None
+    text: Optional[str] = None
+    key: Optional[str] = None
+    timeoutMs: int = 10000
+
+
+class BrowserScreenshotRequest(BaseModel):
+    workspace_id: str
+    capability_token: str
+    sessionId: str
+
+
+class BrowserCloseRequest(BaseModel):
+    workspace_id: str
+    capability_token: str
+    sessionId: str
+
+
+@browser_proxy_router.post("/session")
+async def browser_session(req: BrowserSessionRequest, request: Request) -> Dict[str, Any]:
+    authorization = request.headers.get("Authorization")
+    _verify_openclaw_token(authorization)
+    session_key = request.headers.get("X-OpenClaw-SessionKey", "unknown")
+
+    user_id = await _require_interactive(
+        request, workspace_id=req.workspace_id, capability_token=req.capability_token
+    )
+
+    # First session creation may download geckodriver; allow more time.
+    async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
+        r = await client.post("http://browser-runner:8765/session", json={"headless": bool(req.headless)})
+    if r.status_code != 200:
+        await _audit(
+            request,
+            session_key=session_key,
+            tool="browser/session",
+            input_obj={"workspace_id": req.workspace_id, "headless": bool(req.headless)},
+            status_code=r.status_code,
+            error=r.text[:2000],
+        )
+        raise HTTPException(status_code=502, detail="Browser runner error")
+
+    data = r.json()
+    await _audit(
+        request,
+        session_key=session_key,
+        tool="browser/session",
+        input_obj={"workspace_id": req.workspace_id, "headless": bool(req.headless)},
+        status_code=200,
+        output_meta={"user_id": user_id},
+    )
+    return data
+
+
+@browser_proxy_router.post("/navigate")
+async def browser_navigate(req: BrowserNavigateRequest, request: Request) -> Dict[str, Any]:
+    authorization = request.headers.get("Authorization")
+    _verify_openclaw_token(authorization)
+    session_key = request.headers.get("X-OpenClaw-SessionKey", "unknown")
+    await _require_interactive(request, workspace_id=req.workspace_id, capability_token=req.capability_token)
+    _validate_browser_url(req.url, live_web=_is_live_web(request))
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+        r = await client.post(
+            "http://browser-runner:8765/navigate",
+            json={"sessionId": req.sessionId, "url": req.url},
+        )
+    if r.status_code != 200:
+        await _audit(
+            request,
+            session_key=session_key,
+            tool="browser/navigate",
+            input_obj={"workspace_id": req.workspace_id, "url": req.url},
+            status_code=r.status_code,
+            error=r.text[:2000],
+        )
+        raise HTTPException(status_code=502, detail="Browser runner error")
+
+    data = r.json()
+    await _audit(
+        request,
+        session_key=session_key,
+        tool="browser/navigate",
+        input_obj={"workspace_id": req.workspace_id, "url": req.url},
+        status_code=200,
+        output_meta={"current_url": data.get("url")},
+    )
+    return data
+
+
+@browser_proxy_router.post("/act")
+async def browser_act(req: BrowserActRequest, request: Request) -> Dict[str, Any]:
+    authorization = request.headers.get("Authorization")
+    _verify_openclaw_token(authorization)
+    session_key = request.headers.get("X-OpenClaw-SessionKey", "unknown")
+    await _require_interactive(request, workspace_id=req.workspace_id, capability_token=req.capability_token)
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
+        r = await client.post(
+            "http://browser-runner:8765/act",
+            json={
+                "sessionId": req.sessionId,
+                "action": req.action,
+                "selector": req.selector,
+                "text": req.text,
+                "key": req.key,
+                "timeoutMs": req.timeoutMs,
+            },
+        )
+    if r.status_code != 200:
+        await _audit(
+            request,
+            session_key=session_key,
+            tool="browser/act",
+            input_obj={"workspace_id": req.workspace_id, "action": req.action, "selector": req.selector},
+            status_code=r.status_code,
+            error=r.text[:2000],
+        )
+        raise HTTPException(status_code=502, detail="Browser runner error")
+
+    data = r.json()
+    await _audit(
+        request,
+        session_key=session_key,
+        tool="browser/act",
+        input_obj={"workspace_id": req.workspace_id, "action": req.action, "selector": req.selector},
+        status_code=200,
+    )
+    return data
+
+
+@browser_proxy_router.post("/screenshot")
+async def browser_screenshot(req: BrowserScreenshotRequest, request: Request) -> Dict[str, Any]:
+    authorization = request.headers.get("Authorization")
+    _verify_openclaw_token(authorization)
+    session_key = request.headers.get("X-OpenClaw-SessionKey", "unknown")
+    await _require_interactive(request, workspace_id=req.workspace_id, capability_token=req.capability_token)
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+        r = await client.post("http://browser-runner:8765/screenshot", json={"sessionId": req.sessionId})
+    if r.status_code != 200:
+        await _audit(
+            request,
+            session_key=session_key,
+            tool="browser/screenshot",
+            input_obj={"workspace_id": req.workspace_id},
+            status_code=r.status_code,
+            error=r.text[:2000],
+        )
+        raise HTTPException(status_code=502, detail="Browser runner error")
+
+    png_b64 = (r.json() or {}).get("pngBase64") or ""
+    if not png_b64:
+        raise HTTPException(status_code=502, detail="Browser runner did not return screenshot data")
+
+    # Store as a file artifact (path only; no raw bytes sent to OpenClaw)
+    artifact_dir = os.environ.get("ARTIFACT_STORAGE_DIR", "/data/artifacts")
+    os.makedirs(os.path.join(artifact_dir, "browser"), exist_ok=True)
+    filename = f"{req.workspace_id}-{int(time.time())}.png"
+    rel_path = f"browser/{filename}"
+    abs_path = os.path.join(artifact_dir, rel_path)
+    with open(abs_path, "wb") as f:
+        f.write(base64.b64decode(png_b64))
+
+    await _audit(
+        request,
+        session_key=session_key,
+        tool="browser/screenshot",
+        input_obj={"workspace_id": req.workspace_id},
+        status_code=200,
+        output_meta={"path": rel_path},
+    )
+    return {"artifact_path": rel_path}
+
+
+@browser_proxy_router.post("/close")
+async def browser_close(req: BrowserCloseRequest, request: Request) -> Dict[str, Any]:
+    authorization = request.headers.get("Authorization")
+    _verify_openclaw_token(authorization)
+    session_key = request.headers.get("X-OpenClaw-SessionKey", "unknown")
+    await _require_interactive(request, workspace_id=req.workspace_id, capability_token=req.capability_token)
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
+        r = await client.post("http://browser-runner:8765/close", json={"sessionId": req.sessionId})
+    await _audit(
+        request,
+        session_key=session_key,
+        tool="browser/close",
+        input_obj={"workspace_id": req.workspace_id},
+        status_code=r.status_code,
+    )
+    if r.status_code != 200:
+        raise HTTPException(status_code=502, detail="Browser runner error")
+    return r.json()
 
 
 # ─── Markdown → DOCX sections converter ───────────────────────────────────────
@@ -253,6 +744,12 @@ class WebFetchRequest(BaseModel):
     purpose: str = "research"
 
 
+class WebSearchRequest(BaseModel):
+    query: str
+    max_results: int = 8
+    purpose: str = "research"
+
+
 class DocumentSaveRequest(BaseModel):
     title: str
     content: str           # markdown
@@ -262,6 +759,77 @@ class DocumentSaveRequest(BaseModel):
 
 
 # ─── Endpoints ───────────────────────────────────────────────────────────────
+
+@openclaw_proxy_router.post("/search")
+async def web_search(
+    req: WebSearchRequest,
+    request: Request,
+) -> Dict[str, Any]:
+    """
+    Perform a web search and return structured results only (no page content).
+
+    Auth: Authorization: Bearer <OPENCLAW_GATEWAY_TOKEN>
+    Intended for Tier 2 research: search → pick URLs → use /api/tools/web-fetch.
+    """
+    authorization = request.headers.get("Authorization")
+    _verify_openclaw_token(authorization)
+    session_key = request.headers.get("X-OpenClaw-SessionKey", "unknown")
+    live_web = _is_live_web(request)
+    _rate_limit(session_key, "search", _RATE_MAX_SEARCH_LIVE if live_web else _RATE_MAX_SEARCH)
+
+    query = (req.query or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="Query must not be empty")
+
+    max_results = int(req.max_results or 0)
+    if max_results <= 0:
+        max_results = 10 if live_web else 8
+    max_cap = 25 if live_web else 15
+    if max_results > max_cap:
+        max_results = max_cap
+
+    # Reuse the existing research provider implementation.
+    from research.search.providers.ddg import DDGProvider
+
+    provider = DDGProvider()
+
+    def _run():
+        hits = provider.search([query], max_results=max_results)
+        out: List[Dict[str, Any]] = []
+        for h in hits[:max_results]:
+            out.append(
+                {
+                    "title": getattr(h, "title", "") or "",
+                    "url": getattr(h, "url", "") or "",
+                    "snippet": getattr(h, "snippet", "") or "",
+                    "source": getattr(h, "source", "ddg") or "ddg",
+                }
+            )
+        # Remove empty URLs defensively
+        out = [r for r in out if r.get("url")]
+        return out
+
+    try:
+        results = await asyncio.get_event_loop().run_in_executor(None, _run)
+    except Exception as exc:
+        logger.warning("search: failed query=%r: %s", query, exc)
+        raise HTTPException(status_code=502, detail=f"Search failed: {exc}")
+
+    logger.info("search: query=%r results=%d purpose=%s", query, len(results), req.purpose)
+    await _audit(
+        request,
+        session_key=session_key,
+        tool="search",
+        input_obj={"query": query, "max_results": max_results, "purpose": req.purpose},
+        status_code=200,
+        output_meta={"result_count": len(results)},
+    )
+    return {
+        "query": query,
+        "results": results,
+        "policy": {"tier": "2-live" if live_web else "2"},
+    }
+
 
 @openclaw_proxy_router.post("/web-fetch")
 async def web_fetch(
@@ -276,7 +844,10 @@ async def web_fetch(
     """
     authorization = request.headers.get("Authorization")
     _verify_openclaw_token(authorization)
-    _validate_url(req.url)
+    live_web = _is_live_web(request)
+    _validate_url(req.url, live_web=live_web)
+    session_key = request.headers.get("X-OpenClaw-SessionKey", "unknown")
+    _rate_limit(session_key, "fetch", _RATE_MAX_FETCH_LIVE if live_web else _RATE_MAX_FETCH)
 
     # Import extraction helpers (lazy — keeps startup fast if trafilatura is heavy)
     from research.extract.html_trafilatura import extract_html
@@ -286,16 +857,44 @@ async def web_fetch(
         "+https://github.com/dulc3/harvis-aidev)"
     )
 
+    parsed = urlparse(req.url)
+    if parsed.scheme != "https" and not live_web:
+        raise HTTPException(status_code=400, detail="Tier 2 web-fetch requires https URLs")
+
+    # Fetch HTML ourselves so we can enforce content-type + size caps before extraction.
     try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(20.0),
+            follow_redirects=True,
+            headers={"User-Agent": _USER_AGENT},
+        ) as client:
+            resp = await client.get(req.url)
+            content_type = (resp.headers.get("content-type") or "").lower()
+            if not any(
+                t in content_type
+                for t in ("text/html", "text/plain", "application/json", "application/xhtml+xml")
+            ):
+                raise HTTPException(
+                    status_code=415,
+                    detail=f"Unsupported content-type: {content_type or 'unknown'}",
+                )
+            raw = resp.content or b""
+            if len(raw) > _MAX_FETCH_BYTES:
+                raw = raw[:_MAX_FETCH_BYTES]
+            html = raw.decode(errors="replace")
+
+        # Extract text from fetched content
         result = await asyncio.get_event_loop().run_in_executor(
             None,
             lambda: extract_html(
                 url=req.url,
-                html=None,
+                html=html,
                 user_agent=_USER_AGENT,
                 timeout_s=20,
             ),
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.warning("web-fetch: failed to fetch %s: %s", req.url, exc)
         raise HTTPException(status_code=502, detail=f"Failed to fetch URL: {exc}")
@@ -318,6 +917,15 @@ async def web_fetch(
     logger.info(
         "web-fetch: url=%s title=%r words=%d purpose=%s",
         req.url, title, word_count, req.purpose,
+    )
+
+    await _audit(
+        request,
+        session_key=session_key,
+        tool="web-fetch",
+        input_obj={"url": req.url, "purpose": req.purpose},
+        status_code=200,
+        output_meta={"word_count": word_count, "title": title, "truncated": len(text) >= _MAX_TEXT_CHARS},
     )
 
     return {

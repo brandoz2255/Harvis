@@ -24,10 +24,11 @@ services:
       - ollama-n8n-network
       - openclaw-internal
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      test: ["CMD", "ollama", "list"]
       interval: 30s
       timeout: 10s
-      retries: 3
+      retries: 5
+      start_period: 15s
 
   # Model Downloader (Init Container equivalent)
   model-downloader:
@@ -94,7 +95,7 @@ services:
       HF_HOME: "/models-cache/huggingface"
       TRANSFORMERS_CACHE: "/models-cache/huggingface"
       WHISPER_CACHE: "/models-cache/whisper"
-      UVICORN_WORKERS: "4"
+      UVICORN_WORKERS: "1"
       ENVIRONMENT: "production"
       LOG_LEVEL: "INFO"
       PYTHONUNBUFFERED: "1"
@@ -109,6 +110,16 @@ services:
       MOONSHOT_API_KEY: "${MOONSHOT_API_KEY:-}"
       MOONSHOT_BASE_URL: "${MOONSHOT_BASE_URL:-https://api.moonshot.ai/v1}"
       NVIDIA_API_KEY: "${NVIDIA_API_KEY:-}"
+      # Discord → Workspace bridge (backend-owned Discord bot)
+      DISCORD_BOT_TOKEN: "${DISCORD_BOT_TOKEN:-}"
+      DISCORD_WORKSPACE_ENABLED: "${DISCORD_WORKSPACE_ENABLED:-true}"
+      DISCORD_DEFAULT_USER_ID: "${DISCORD_DEFAULT_USER_ID:-2}"
+      DISCORD_MENTION_ONLY: "${DISCORD_MENTION_ONLY:-true}"
+      DISCORD_ALLOWED_CHANNEL_IDS: "${DISCORD_ALLOWED_CHANNEL_IDS:-}"
+      DISCORD_WORKSPACE_AGENT_ID: "${DISCORD_WORKSPACE_AGENT_ID:-main}"
+      DISCORD_WORKSPACE_MODEL_NAME: "${DISCORD_WORKSPACE_MODEL_NAME:-}"
+      DISCORD_WORKSPACE_MAX_WAIT_SECONDS: "${DISCORD_WORKSPACE_MAX_WAIT_SECONDS:-1200}"
+      DISCORD_WORKSPACE_ENABLE_INTERACTIVE: "${DISCORD_WORKSPACE_ENABLE_INTERACTIVE:-false}"
     user: "1001:1001" # Run as appuser for consistent permissions
     volumes:
       - ml-models-cache:/models-cache
@@ -116,9 +127,14 @@ services:
       - /tmp:/tmp
       - /var/run/docker.sock:/var/run/docker.sock
       - ./python_back_end/main.py:/app/main.py:ro
+      - ./python_back_end/workspace:/app/workspace:ro
+      - ./openclaw/config:/app/openclaw_config:ro
       - ./python_back_end/notebooks:/app/notebooks:ro
       - ./python_back_end/vibecoding:/app/vibecoding:ro
       - artifact_data:/data/artifacts
+    networks:
+      - ollama-n8n-network
+      - openclaw-internal
     depends_on:
       ollama:
         condition: service_started
@@ -128,18 +144,31 @@ services:
         condition: service_completed_successfully
       artifact-init:
         condition: service_completed_successfully
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-        limits:
-          memory: 15G
+      ollama-model-pull:
+        condition: service_completed_successfully
+      openclaw:
+        condition: service_healthy
+      browser-runner:
+        condition: service_started
+
+  # Tier 3 Browser Runner (Firefox sandbox) - internal only
+  browser-runner:
+    build:
+      context: ./browser_runner
+      dockerfile: Dockerfile
+    container_name: harvis-browser-runner
+    restart: unless-stopped
     networks:
-      - ollama-n8n-network
       - openclaw-internal
+      - ollama-n8n-network
+    expose:
+      - "8765"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8765/health || curl -sf http://localhost:8765/docs || exit 0"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
 
   # Next.js Frontend (New UI)
   # REBUILD TIPS:
@@ -254,6 +283,7 @@ services:
       - ./python_back_end/artifacts_schema.sql:/docker-entrypoint-initdb.d/artifacts_schema.sql:ro
       - ./python_back_end/artifacts_build_jobs_schema.sql:/docker-entrypoint-initdb.d/artifacts_build_jobs_schema.sql:ro
       - ./front_end/newjfrontend/db/migrations/001_add_document_jobs.sql:/docker-entrypoint-initdb.d/001_add_document_jobs.sql:ro
+      - ./python_back_end/workspace/workspace_schema.sql:/docker-entrypoint-initdb.d/002_workspace_schema.sql:ro
     ports:
       - "5432:5432"
     deploy:
@@ -268,6 +298,50 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Ollama Model Init — ensures required models exist before agents start
+  # ═══════════════════════════════════════════════════════════════════════════
+  ollama-model-pull:
+    image: curlimages/curl:latest
+    container_name: harvis-ollama-model-pull
+    restart: "no"
+    entrypoint: sh
+    command: >
+      -c "
+        echo '=== Ollama Model Init ===' &&
+        echo 'Waiting for Ollama to be ready...' &&
+        until curl -sf http://ollama:11434/api/tags >/dev/null 2>&1; do
+          echo '  Ollama not ready, retrying in 3s...'; sleep 3;
+        done &&
+        echo 'Ollama is up. Checking for qwen3.5-32k model...' &&
+
+        if curl -sf http://ollama:11434/api/show -d '{\"name\":\"qwen3.5-32k:latest\"}' >/dev/null 2>&1; then
+          echo 'Model qwen3.5-32k:latest already exists — skipping pull.'
+        else
+          echo 'Model qwen3.5-32k:latest not found. Pulling base model qwen3.5...' &&
+          curl -sf http://ollama:11434/api/pull -d '{\"name\":\"qwen3.5:latest\"}' &&
+          echo 'Base model pulled. Creating qwen3.5-32k with 32K context window...' &&
+          curl -sf http://ollama:11434/api/create -d '{
+            \"name\": \"qwen3.5-32k:latest\",
+            \"from\": \"qwen3.5:latest\",
+            \"parameters\": {
+              \"num_ctx\": 32768,
+              \"presence_penalty\": 0.6,
+              \"temperature\": 0.7,
+              \"top_k\": 20,
+              \"top_p\": 0.95
+            }
+          }' &&
+          echo 'Model qwen3.5-32k:latest created successfully!'
+        fi &&
+        echo '=== Model init complete ==='
+      "
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks:
+      - ollama-n8n-network
 
   # ═══════════════════════════════════════════════════════════════════════════
   # OpenClaw Agent Gateway
@@ -327,10 +401,17 @@ services:
   # NO ports exposed to host — only reachable from backend via openclaw-internal.
   # Discord channel driver connects outbound to Discord gateway (port 443).
   openclaw:
-    image: dulc3/openclaw:latest
+    build:
+      context: .
+      dockerfile: openclaw-browser/Dockerfile
+    image: dulc3/openclaw-browser:latest
     container_name: harvis-openclaw
     restart: unless-stopped
     user: "1000:1000"
+    # Chromium needs shared memory — Docker default 64MB causes tab crashes
+    shm_size: '256m'
+    tmpfs:
+      - /tmp/.chromium:size=128m
     environment:
       HOME: /home/node
       NODE_ENV: production
@@ -339,13 +420,21 @@ services:
       OPENCLAW_GATEWAY_TOKEN: "${OPENCLAW_GATEWAY_TOKEN}"
       OLLAMA_API_KEY: "ollama-local"
       DATABASE_URL: "postgresql://pguser:pgpassword@pgsql:5432/database"
-      DISCORD_BOT_TOKEN: "${DISCORD_BOT_TOKEN:-}"
       GH_TOKEN: "${HARVIS_GITHUB_TOKEN:-}"
       GH_USER: "${HARVIS_GITHUB_USER:-}"
       GH_EMAIL: "${HARVIS_GITHUB_EMAIL:-}"
+      # Chromium discovery for OpenClaw's native browser tool
+      CHROME_BIN: /usr/bin/chromium
+      PUPPETEER_EXECUTABLE_PATH: /usr/bin/chromium
+      PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
     volumes:
       - openclaw-data:/home/node/.openclaw
       - ./openclaw/config/openclaw.json:/home/node/.openclaw/openclaw.json:ro
+      - ./openclaw/config/exec-approvals.json:/home/node/.openclaw/exec-approvals.json
+      - ./openclaw/config/IDENTITY.md:/home/node/.openclaw/IDENTITY.md:ro
+      - ./openclaw/config/SOUL.md:/home/node/.openclaw/SOUL.md:ro
+      - ./openclaw/config/USER.md:/home/node/.openclaw/USER.md:ro
+      - ./openclaw/config/AGENT.md:/home/node/.openclaw/AGENT.md:ro
       - ./openclaw/skills:/skills:ro
     command:
       - node
@@ -362,7 +451,9 @@ services:
       openclaw-db-init:
         condition: service_completed_successfully
       ollama:
-        condition: service_started
+        condition: service_healthy
+      ollama-model-pull:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "node -e \"const n=require('net');const c=n.createConnection(18789,'127.0.0.1');c.on('connect',()=>{c.end();process.exit(0)});c.on('error',()=>process.exit(1))\""]
       interval: 30s
@@ -372,8 +463,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2G
-          cpus: '1.0'
+          memory: 4G
+          cpus: '2.0'
     networks:
       - openclaw-internal
       - ollama-n8n-network

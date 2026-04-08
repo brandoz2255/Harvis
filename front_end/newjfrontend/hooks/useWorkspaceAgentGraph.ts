@@ -1,7 +1,7 @@
 'use client';
 
 import { useMemo } from 'react';
-import { useOpenClawStore, WorkspaceLogEvent } from '../stores/openclawStore';
+import { useOpenClawStore, type WorkspaceLogEvent } from '../stores/openclawStore';
 import { AgentNode, AgentConnection, AgentNodeType, AgentStatus } from '../types/agent-graph';
 
 export interface WorkspaceAgentGraph {
@@ -25,6 +25,12 @@ function labelToId(label: string): string {
   return label.toLowerCase().replace(/\s+/g, '-');
 }
 
+/** Stable graph node id: prefer OpenClaw runId so each sub-agent is its own box. */
+function eventNodeId(evt: WorkspaceLogEvent): string {
+  if (evt.run_id) return `run-${evt.run_id}`;
+  return `lbl-${labelToId(evt.agent_label ?? 'Agent')}`;
+}
+
 /**
  * Derives an agent graph from workspace SSE log events stored in openclawStore.
  * No WebSocket required — reads from logEvents already populated by the SSE stream.
@@ -35,93 +41,129 @@ export function useWorkspaceAgentGraph(): WorkspaceAgentGraph {
   const workspaceModelName = useOpenClawStore((s) => s.workspaceModelName);
 
   return useMemo(() => {
+    const activeModel = workspaceModelName || workspaceModel;
     const nodeMap = new Map<string, AgentNode>();
     const edgeSet = new Set<string>();
     const edges: AgentConnection[] = [];
-    let prevAgentId: string | null = null;
-    const activeModel = workspaceModelName || workspaceModel;
+    /** First-seen order of node ids (for fallback edges if parent_run_id is missing). */
+    const nodeOrder: string[] = [];
+
+    function ensureNode(id: string, label: string, ts: number): AgentNode {
+      let n = nodeMap.get(id);
+      if (n) return n;
+      n = {
+        id,
+        label,
+        type: inferAgentType(label),
+        status: 'running',
+        model: activeModel,
+        subAgentCount: 0,
+        startedAt: new Date(ts).toISOString(),
+      };
+      nodeMap.set(id, n);
+      return n;
+    }
 
     for (const evt of logEvents) {
       const label = evt.agent_label ?? 'Agent';
-      const id = labelToId(label);
+      const id = eventNodeId(evt);
 
-      // Ensure node exists
-      if (!nodeMap.has(id)) {
-        const type = inferAgentType(label);
-        const node: AgentNode = {
-          id,
-          label,
-          type,
-          status: 'running',
-          model: activeModel,
-          subAgentCount: 0,
-          startedAt: new Date(evt.timestamp).toISOString(),
-        };
-        nodeMap.set(id, node);
+      const isNew = !nodeMap.has(id);
+      ensureNode(id, label, evt.timestamp);
+      if (isNew) nodeOrder.push(id);
 
-        // Create edge from orchestrator to sub-agent
-        if (prevAgentId && prevAgentId !== id) {
-          const edgeKey = `${prevAgentId}->${id}`;
-          if (!edgeSet.has(edgeKey)) {
-            edgeSet.add(edgeKey);
-            edges.push({
-              source: prevAgentId,
-              target: id,
-              type: 'spawned',
-              createdAt: new Date(evt.timestamp).toISOString(),
-            });
-            // Update parent's subAgentCount
-            const parent = nodeMap.get(prevAgentId);
-            if (parent) {
-              nodeMap.set(prevAgentId, { ...parent, subAgentCount: parent.subAgentCount + 1 });
+      switch (evt.type) {
+        case 'agent_start': {
+          const cur = nodeMap.get(id)!;
+          nodeMap.set(id, {
+            ...cur,
+            status: 'running',
+            model: evt.model ?? cur.model,
+            startedAt: new Date(evt.timestamp).toISOString(),
+          });
+          if (evt.parent_run_id && evt.run_id) {
+            const src = `run-${evt.parent_run_id}`;
+            const tgt = `run-${evt.run_id}`;
+            ensureNode(src, 'Agent', evt.timestamp);
+            const edgeKey = `${src}->${tgt}`;
+            if (!edgeSet.has(edgeKey)) {
+              edgeSet.add(edgeKey);
+              edges.push({
+                source: src,
+                target: tgt,
+                type: 'spawned',
+                createdAt: new Date(evt.timestamp).toISOString(),
+              });
+              const parent = nodeMap.get(src)!;
+              nodeMap.set(src, { ...parent, subAgentCount: parent.subAgentCount + 1 });
             }
           }
+          break;
         }
-
-        // Track last seen agent so sub-agents connect to the orchestrator
-        if (type === 'orchestrator') {
-          prevAgentId = id;
-        } else if (!prevAgentId) {
-          prevAgentId = id;
-        }
-      }
-
-      const node = nodeMap.get(id)!;
-
-      // Update node state based on event type
-      switch (evt.type) {
+        case 'agent_end':
+          nodeMap.set(id, {
+            ...nodeMap.get(id)!,
+            status: 'completed',
+            completedAt: new Date(evt.timestamp).toISOString(),
+          });
+          break;
         case 'tool_call':
           nodeMap.set(id, {
-            ...node,
-            task: evt.tool ? `${evt.tool}(${JSON.stringify(evt.args ?? {}).slice(0, 60)})` : node.task,
+            ...nodeMap.get(id)!,
+            task: evt.tool
+              ? `${evt.tool}(${JSON.stringify(evt.args ?? {}).slice(0, 60)})`
+              : nodeMap.get(id)!.task,
             status: 'running',
           });
           break;
         case 'done':
           nodeMap.set(id, {
-            ...node,
+            ...nodeMap.get(id)!,
             status: 'completed',
             completedAt: new Date(evt.timestamp).toISOString(),
           });
           break;
         case 'error':
           nodeMap.set(id, {
-            ...node,
+            ...nodeMap.get(id)!,
             status: 'error' as AgentStatus,
             completedAt: new Date(evt.timestamp).toISOString(),
           });
           break;
         case 'token':
-          // Increment output token count
           nodeMap.set(id, {
-            ...node,
+            ...nodeMap.get(id)!,
             tokensUsed: {
-              input: node.tokensUsed?.input ?? 0,
-              output: (node.tokensUsed?.output ?? 0) + (evt.content?.length ?? 0),
-              total: (node.tokensUsed?.total ?? 0) + (evt.content?.length ?? 0),
+              input: nodeMap.get(id)!.tokensUsed?.input ?? 0,
+              output: (nodeMap.get(id)!.tokensUsed?.output ?? 0) + (evt.content?.length ?? 0),
+              total: (nodeMap.get(id)!.tokensUsed?.total ?? 0) + (evt.content?.length ?? 0),
             },
           });
           break;
+        default:
+          break;
+      }
+    }
+
+    // If OpenClaw never attached parent_run_id on agent_start, we still show links:
+    // star from the first agent node to every other node (chronological first-seen).
+    if (edges.length === 0 && nodeOrder.length > 1) {
+      const hub = nodeOrder[0];
+      for (let i = 1; i < nodeOrder.length; i++) {
+        const tgt = nodeOrder[i];
+        const edgeKey = `${hub}->${tgt}`;
+        if (edgeSet.has(edgeKey)) continue;
+        edgeSet.add(edgeKey);
+        edges.push({
+          source: hub,
+          target: tgt,
+          type: 'spawned',
+          createdAt: new Date().toISOString(),
+        });
+        const parent = nodeMap.get(hub);
+        if (parent) {
+          nodeMap.set(hub, { ...parent, subAgentCount: parent.subAgentCount + 1 });
+        }
       }
     }
 

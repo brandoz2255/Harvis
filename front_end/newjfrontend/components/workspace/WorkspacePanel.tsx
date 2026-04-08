@@ -295,6 +295,51 @@ function SubAgentHeader({ label }: { label: string }) {
   )
 }
 
+function AgentStartLine({ event }: { event: WorkspaceLogEvent }) {
+  const label = event.agent_label ?? 'Agent'
+  const isSubAgent = label !== 'Agent'
+  return (
+    <div className={cn(
+      'flex items-center gap-2 my-1.5 px-2 py-1.5 rounded-md border',
+      isSubAgent
+        ? 'border-violet-500/30 bg-violet-500/5'
+        : 'border-blue-500/30 bg-blue-500/5',
+    )}>
+      <span className={cn(
+        'relative flex h-2 w-2 shrink-0',
+      )}>
+        <span className={cn(
+          'animate-ping absolute h-2 w-2 rounded-full opacity-75',
+          isSubAgent ? 'bg-violet-400' : 'bg-blue-400',
+        )} />
+        <span className={cn(
+          'relative h-2 w-2 rounded-full',
+          isSubAgent ? 'bg-violet-400' : 'bg-blue-400',
+        )} />
+      </span>
+      <Cpu className={cn('h-3 w-3 shrink-0', isSubAgent ? 'text-violet-400' : 'text-blue-400')} />
+      <span className={cn('text-[11px] font-semibold', isSubAgent ? 'text-violet-300' : 'text-blue-300')}>
+        {label}
+      </span>
+      {event.model && (
+        <span className="text-[9px] text-muted-foreground font-mono">{event.model}</span>
+      )}
+      <span className="text-[10px] text-muted-foreground">started</span>
+    </div>
+  )
+}
+
+function AgentEndLine({ event }: { event: WorkspaceLogEvent }) {
+  const label = event.agent_label ?? 'Agent'
+  return (
+    <div className="flex items-center gap-2 my-1 px-2 py-1 rounded-md border border-green-500/20 bg-green-500/5">
+      <CheckCircle2 className="h-3 w-3 text-green-400 shrink-0" />
+      <span className="text-[11px] font-semibold text-green-300">{label}</span>
+      <span className="text-[10px] text-muted-foreground">finished</span>
+    </div>
+  )
+}
+
 function DoneLine({ event }: { event: WorkspaceLogEvent }) {
   return (
     <div className="flex items-start gap-2 py-1.5 rounded-lg bg-green-500/10 px-3 mt-2">
@@ -334,9 +379,28 @@ function ErrorLine({ event }: { event: WorkspaceLogEvent }) {
 
 // ─── Collapsible AI response block ───────────────────────────────────────────
 
-function CollapsibleTokenBlock({ text }: { text: string }) {
-  const [expanded, setExpanded] = useState(true)
+function CollapsibleTokenBlock({ text, isStreaming }: { text: string; isStreaming?: boolean }) {
+  const charCount = text.length
   const lineCount = text.split('\n').length
+  // Collapse by default for long responses (>500 chars), expand for short/streaming
+  const [expanded, setExpanded] = useState(charCount < 500 || !!isStreaming)
+  const [showFull, setShowFull] = useState(false)
+
+  // Preview: first ~300 chars, trimmed at a word boundary
+  const PREVIEW_LEN = 300
+  const needsTruncation = charCount > PREVIEW_LEN && !showFull
+  const displayText = needsTruncation
+    ? text.slice(0, PREVIEW_LEN).replace(/\s+\S*$/, '') + '...'
+    : text
+
+  // Auto-expand while streaming, collapse when done
+  const prevStreamingRef = useRef(isStreaming)
+  useEffect(() => {
+    if (prevStreamingRef.current && !isStreaming && charCount > 500) {
+      setExpanded(false)
+    }
+    prevStreamingRef.current = isStreaming
+  }, [isStreaming, charCount])
 
   return (
     <div className="rounded-lg border border-border/50 bg-background/50 overflow-hidden mb-2">
@@ -345,16 +409,31 @@ function CollapsibleTokenBlock({ text }: { text: string }) {
         className="flex items-center gap-2 w-full text-left px-3 py-1.5 hover:bg-muted/30 transition-colors"
       >
         <MessageSquare className="h-3 w-3 text-violet-400 shrink-0" />
-        <span className="text-[11px] font-medium text-violet-300">AI Response</span>
-        <span className="text-[10px] text-muted-foreground/50">{lineCount} lines</span>
+        <span className="text-[11px] font-medium text-violet-300">
+          {isStreaming ? 'AI Responding...' : 'AI Response'}
+        </span>
+        <span className="text-[10px] text-muted-foreground/50">
+          {lineCount} lines · {charCount.toLocaleString()} chars
+        </span>
+        {isStreaming && (
+          <Loader2 className="h-3 w-3 text-violet-400 animate-spin shrink-0" />
+        )}
         <span className="flex-1" />
         <ChevronDown className={cn('h-3 w-3 text-muted-foreground/50 transition-transform', expanded && 'rotate-180')} />
       </button>
       {expanded && (
         <div className="border-t border-border/30 px-3 py-2">
-          <div className="font-mono text-xs text-foreground/90 leading-relaxed whitespace-pre-wrap max-h-60 overflow-y-auto">
-            {text}
+          <div className="prose prose-invert prose-xs max-w-none">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayText}</ReactMarkdown>
           </div>
+          {needsTruncation && (
+            <button
+              onClick={(e) => { e.stopPropagation(); setShowFull(true) }}
+              className="mt-1 text-[10px] text-violet-400 hover:text-violet-300 font-medium"
+            >
+              Show full response ({charCount.toLocaleString()} chars)
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -375,6 +454,8 @@ function TimelineEvent({
     switch (type) {
       case 'tool_call': return 'bg-blue-400'
       case 'tool_result': return event.success !== false ? 'bg-green-400' : 'bg-red-400'
+      case 'agent_start': return 'bg-violet-400'
+      case 'agent_end': return 'bg-green-400'
       case 'done': return 'bg-green-400'
       case 'cancelled': return 'bg-orange-400'
       case 'error': return 'bg-red-400'
@@ -409,6 +490,8 @@ function LogEvent({
     case 'tool_call': return <ToolCallLine event={event} stepNumber={toolCallIndex} />
     case 'tool_result': return <ToolResultLine event={event} />
     case 'log': return <LogLine event={event} />
+    case 'agent_start': return <AgentStartLine event={event} />
+    case 'agent_end': return <AgentEndLine event={event} />
     case 'done': return <DoneLine event={event} />
     case 'cancelled': return <CancelledLine />
     case 'error': return <ErrorLine event={event} />
@@ -1000,11 +1083,26 @@ export function WorkspacePanel({ onContinueInChat }: { onContinueInChat?: (summa
   const toolCallCount = logEvents.filter((e) => e.type === 'tool_call').length
   const eventCount = logEvents.filter((e) => e.type !== 'stream_end').length
 
-  // Group consecutive tokens into blocks, then deduplicate
-  const rawTokenBuffer = logEvents
-    .filter((e) => e.type === 'token')
-    .map((e) => e.content ?? '')
-    .join('')
+  // Group consecutive tokens into blocks with frontend-side delta dedup.
+  // If a token event's content starts with the entire previous accumulated text,
+  // it means the backend sent the full text instead of a delta — extract only the new part.
+  const rawTokenBuffer = (() => {
+    let accumulated = ''
+    for (const e of logEvents) {
+      if (e.type !== 'token' || !e.content) continue
+      const c = e.content
+      if (c.length > accumulated.length && c.startsWith(accumulated)) {
+        // Full-text event — extract delta
+        accumulated = c
+      } else if (accumulated.startsWith(c)) {
+        // Duplicate or subset — skip
+      } else {
+        // True delta — append
+        accumulated += c
+      }
+    }
+    return accumulated
+  })()
   const tokenBuffer = deduplicateText(rawTokenBuffer)
 
   // Non-token events for the progress log
@@ -1048,6 +1146,7 @@ export function WorkspacePanel({ onContinueInChat }: { onContinueInChat?: (summa
       // Even if cancel fails, user can still close via X button
     }
   }
+
 
   const taskBrief = currentTask?.description ?? 'Running workspace task…'
 
@@ -1173,7 +1272,7 @@ export function WorkspacePanel({ onContinueInChat }: { onContinueInChat?: (summa
                 <>
                   {/* Collapsible AI response */}
                   {tokenBuffer && (
-                    <CollapsibleTokenBlock text={tokenBuffer} />
+                    <CollapsibleTokenBlock text={tokenBuffer} isStreaming={isRunning} />
                   )}
 
                   {/* Timeline of tool calls, results, logs, terminal events */}
@@ -1184,7 +1283,13 @@ export function WorkspacePanel({ onContinueInChat }: { onContinueInChat?: (summa
 
                       <div className="space-y-1">
                         {(() => {
-                          // Inject SubAgentHeader before the first event from each new sub-agent run.
+                          // Inject SubAgentHeader before the first event from each new sub-agent
+                          // ONLY if there is no agent_start event for that run (backward compat).
+                          const runsWithStart = new Set(
+                            nonTokenEvents
+                              .filter(e => e.type === 'agent_start' && e.run_id)
+                              .map(e => e.run_id!)
+                          )
                           const seenRunIds = new Set<string>()
                           const elements: React.ReactNode[] = []
                           for (const event of nonTokenEvents) {
@@ -1192,13 +1297,15 @@ export function WorkspacePanel({ onContinueInChat }: { onContinueInChat?: (summa
                               event.run_id &&
                               event.agent_label &&
                               event.agent_label !== 'Agent' &&
-                              !seenRunIds.has(event.run_id)
+                              !seenRunIds.has(event.run_id) &&
+                              !runsWithStart.has(event.run_id)
                             ) {
                               seenRunIds.add(event.run_id)
                               elements.push(
                                 <SubAgentHeader key={`header-${event.run_id}`} label={event.agent_label} />
                               )
                             }
+                            if (event.run_id) seenRunIds.add(event.run_id)
                             elements.push(
                               <TimelineEvent
                                 key={event.id}
@@ -1253,7 +1360,7 @@ export function WorkspacePanel({ onContinueInChat }: { onContinueInChat?: (summa
                             second: '2-digit',
                           })}
                         </span>
-                        <span className="uppercase text-violet-400/70 shrink-0 w-14">
+                        <span className="uppercase text-violet-400/70 shrink-0 w-[4.5rem]">
                           {event.type}
                         </span>
                         {event.agent_label && event.agent_label !== 'Agent' && (

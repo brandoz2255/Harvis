@@ -12,7 +12,7 @@ import { Button } from "@/components/ui/button"
 import { Menu, Sparkles } from "lucide-react"
 import { HarvisMascot } from "@/components/mascots"
 import ModelSelector from "@/components/ModelSelector"
-import SearchToggle from "@/components/SearchToggle"
+import SearchToggle, { type ResearchMode } from "@/components/SearchToggle"
 import { useChatHistoryStore } from "@/stores/chatHistoryStore"
 import { apiClient, getAuthHeaders } from "@/lib/api"
 import { useUser } from "@/lib/auth/UserProvider"
@@ -37,7 +37,7 @@ export default function ChatPage() {
   const [selectedModel, setSelectedModel] = useState<string>("")
   const [lowVram, setLowVram] = useState(false)
   const [textOnly, setTextOnly] = useState(false)
-  const [isResearchMode, setIsResearchMode] = useState(false)
+  const [researchMode, setResearchMode] = useState<ResearchMode>('off')
   const [localMessages, setLocalMessages] = useState<Message[]>([])
   const [isLoading, setIsLoading] = useState(false)
   const [workspaceEnabled, setWorkspaceEnabled] = useState(false)
@@ -267,6 +267,18 @@ export default function ChatPage() {
     }
   }, [fetchSessions, user])
 
+  // Safety reset: if AI SDK finishes but isLoading is stuck, reset it.
+  // This prevents the send button from being permanently disabled after one message.
+  useEffect(() => {
+    if (!isAiLoading && isLoading) {
+      // Give a small delay to avoid race conditions with onFinish
+      const timer = setTimeout(() => {
+        setIsLoading(false)
+      }, 500)
+      return () => clearTimeout(timer)
+    }
+  }, [isAiLoading, isLoading])
+
   // Optimized scroll to bottom - only scroll on significant changes, not every token
   useEffect(() => {
     if (skipNextScrollRef.current) {
@@ -338,6 +350,7 @@ export default function ChatPage() {
           session_id: currentSession?.id ?? undefined,
           agent_id: store.workspaceModel,
           model_name: store.workspaceModelName,
+          parallel: true,
         }),
       })
 
@@ -544,7 +557,7 @@ export default function ChatPage() {
       }
       setLocalMessages((prev) => [...prev, userMessage])
 
-      if (isResearchMode || isVisionModel(selectedModel || '')) {
+      if (researchMode !== 'off' || isVisionModel(selectedModel || '')) {
         const placeholderAiMsg: Message = {
           id: assistantId,
           role: 'assistant',
@@ -556,12 +569,18 @@ export default function ChatPage() {
         setLocalMessages((prev) => [...prev, placeholderAiMsg])
       }
 
-      if (!isResearchMode && !isVisionModel(selectedModel || '')) {
+      if (researchMode === 'off' && !isVisionModel(selectedModel || '')) {
         setIsLoading(true)
-        await append({
-          role: 'user',
-          content: messageContent,
-        })
+        try {
+          await append({
+            role: 'user',
+            content: messageContent,
+          })
+        } catch (err) {
+          console.error('AI SDK append error:', err)
+          setIsLoading(false)
+        }
+        // Note: isLoading is reset by onFinish/onError callbacks + safety useEffect
         return;
       }
     }
@@ -580,7 +599,8 @@ export default function ChatPage() {
         throw new Error('Authentication required. Please log in again.')
       }
 
-      const endpoint = isResearchMode ? '/api/research-chat' : '/api/chat'
+      const isResearch = researchMode !== 'off'
+      const endpoint = isResearch ? '/api/research-chat' : '/api/chat'
 
       const requestBody: any = {
         message: messageContent,
@@ -595,11 +615,14 @@ export default function ChatPage() {
         attachments: messageAttachments.length > 0 ? messageAttachments : undefined
       }
 
-      if (isResearchMode) {
+      if (isResearch) {
         requestBody.enableWebSearch = true
         requestBody.exaggeration = 0.5
         requestBody.temperature = 0.8
         requestBody.cfg_weight = 0.5
+      }
+      if (researchMode === 'live') {
+        requestBody.live_web = true
       }
 
       const data = await fetchWithRetry(endpoint, {
@@ -720,7 +743,7 @@ export default function ChatPage() {
     } finally {
       setIsLoading(false)
     }
-  }, [messages, isLoading, selectedModel, isResearchMode, currentSession, lowVram, textOnly, isDuplicateMessage, fetchWithRetry, append, createNewChat])
+  }, [messages, isLoading, selectedModel, researchMode, currentSession, lowVram, textOnly, isDuplicateMessage, fetchWithRetry, append, createNewChat])
 
   // Handle vision messages
   const handleVisionMessage = useCallback(async (prompt: string, imageData: string, attachments: Attachment[], userTempId?: string) => {
@@ -947,8 +970,8 @@ export default function ChatPage() {
                   </div>
                   <div className="ml-auto flex items-center gap-2">
                     <SearchToggle
-                      isResearchMode={isResearchMode}
-                      onToggle={setIsResearchMode}
+                      researchMode={researchMode}
+                      onModeChange={setResearchMode}
                     />
                     <ModelSelector
                       selectedModel={selectedModel}
@@ -1018,7 +1041,7 @@ export default function ChatPage() {
                   <ChatInput
                     onSend={handleSendMessage}
                     isLoading={isLoading}
-                    isResearchMode={isResearchMode}
+                    isResearchMode={researchMode !== 'off'}
                     selectedModel={selectedModel}
                     sessionId={currentSession?.id}
                     onForceWorkspace={handleForceWorkspace}
