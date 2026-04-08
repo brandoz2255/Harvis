@@ -132,6 +132,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./python_back_end/main.py:/app/main.py:ro
       - ./python_back_end/workspace:/app/workspace:ro
+      - ./python_back_end/tools:/app/tools:ro
+      - ./python_back_end/integrations:/app/integrations:ro
       - ./openclaw/config:/app/openclaw_config:ro
       - ./python_back_end/notebooks:/app/notebooks:ro
       - ./python_back_end/vibecoding:/app/vibecoding:ro
