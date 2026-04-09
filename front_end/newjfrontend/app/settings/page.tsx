@@ -135,6 +135,28 @@ const SOURCE_CONFIG = {
         color: "text-purple-500",
         group: "security",
     },
+    // NCAE-specific hardening sources
+    ubuntu_security: {
+        label: "Ubuntu Security",
+        description: "Ubuntu hardening, AppArmor, security updates, NCAE blue team",
+        icon: Shield,
+        color: "text-orange-400",
+        group: "security",
+    },
+    nginx_hardening: {
+        label: "Nginx Hardening",
+        description: "Nginx security config, TLS, headers, web server hardening",
+        icon: Lock,
+        color: "text-blue-400",
+        group: "security",
+    },
+    apache_hardening: {
+        label: "Apache Hardening",
+        description: "Apache security, mod_security, TLS, web server hardening",
+        icon: Lock,
+        color: "text-purple-400",
+        group: "security",
+    },
     // Local sources
     local_docs: {
         label: "Local Engineering Docs",
