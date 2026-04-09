@@ -372,7 +372,7 @@ spec:
       initContainers:
         # 1. Wait for PostgreSQL before starting
         - name: wait-for-db
-          image: busybox:1.36
+          image: busybox:1.36@sha256:b7f3d86d6e84fc17718c48bcde1450807faa2d56704205c697b4bd5df7b9e29f
           command: ["sh", "-c"]
           args:
             - |
@@ -393,7 +393,7 @@ spec:
         # 2. Create OpenClaw tables in the shared PostgreSQL (idempotent)
         # Uses CREATE TABLE IF NOT EXISTS — safe to run on every pod start.
         - name: db-schema-init
-          image: postgres:15-alpine
+          image: postgres:15-alpine@sha256:79e73c0029e3a99b462253bba85352c6e748b93b9ffc5818ac0326cdbed62e76
           command: ["sh", "-c"]
           args:
             - |
@@ -446,7 +446,7 @@ spec:
         # 3. Install python-docx for document generation tools
         # Installs to shared python-extra volume for use by OpenClaw agents.
         - name: install-python-docx
-          image: python:3.11-slim
+          image: python:3.11-slim@sha256:16cb75beff0e104520a4bc4e98b08987b6978b82e37b81b87d786504e17579e7
           command: ["sh", "-c"]
           args:
             - |

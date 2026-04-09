@@ -25,7 +25,7 @@ spec:
         kubernetes.io/hostname: dulc3-os    # RTX 5090 32GB
       initContainers:
         - name: wait-for-db
-          image: busybox:1.36
+          image: busybox:1.36@sha256:b7f3d86d6e84fc17718c48bcde1450807faa2d56704205c697b4bd5df7b9e29f
           command: ['sh', '-c']
           args:
             - |
@@ -44,7 +44,7 @@ spec:
               cpu: 50m
 
         - name: download-gguf
-          image: alpine:3
+          image: alpine:3.21@sha256:22e0ec13c0db6b3e1ba3280e831fc50ba7bffe58e81f31670a64b1afede247bc
           command: ['sh', '-c']
           args:
             - |
@@ -244,7 +244,7 @@ spec:
         # API compatibility: llama-server exposes OpenAI-compatible /v1/chat/completions
         #   at port 8080. Backend LLAMA_URL=http://localhost:8080/v1 points here already.
         - name: llama-cpp
-          image: ghcr.io/ggml-org/llama.cpp:server-cuda
+          image: ghcr.io/ggml-org/llama.cpp:server-cuda@sha256:c12b8a7325a1b5cc1480cb44d026518860f4810c5cf77dc450bdd05d87231062
           imagePullPolicy: Always
           ports:
             - name: llama
