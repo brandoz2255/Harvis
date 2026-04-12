@@ -294,6 +294,12 @@ spec:
             - "q4_0"
             - "--cache-type-v"
             - "q4_0"
+            # Prefix / radix-style KV cache reuse across requests.
+            # Any new request that shares ≥256 leading tokens with a cached slot
+            # (e.g. the Harvis system prompt) reuses those KV entries — zero recompute.
+            # 256 = safe threshold: avoids reuse thrash on tiny shared prefixes.
+            - "--cache-reuse"
+            - "256"
             # No --chat-template: use template embedded in GGUF metadata (standard qwen3)
           volumeMounts:
             - name: ml-models-cache
