@@ -17,6 +17,16 @@ spec:
         app: harvis-ai-mcp-rag
         component: mcp-server
     spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - dulc3-os
+                      - dulc3-top
       containers:
       - name: mcp-rag-server
         image: dulc3/jarvis-backend:latest
