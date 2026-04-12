@@ -278,6 +278,14 @@ spec:
             - "99"          # all layers on GPU
             - "--flash-attn"
             - "on"
+            # Batch sizes — batch-size=4096 (logical queue), ubatch-size=4096 (physical CUDA dispatch)
+            # Larger ubatch = fewer kernel launches = faster prefill on long contexts.
+            # RTX 5090 (32GB) handles 4096 fine with 17.6GB model + ~1GB KV at q4_0.
+            # Going above 8192 gives diminishing returns and risks OOM on very long contexts.
+            - "--batch-size"
+            - "4096"
+            - "--ubatch-size"
+            - "4096"
             # Parallel slots — single user system, single slot avoids KV multiplication
             - "--parallel"
             - "1"
