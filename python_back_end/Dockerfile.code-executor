@@ -1,7 +1,7 @@
 # Code Executor for Document Generation
 # Runs Python code in isolation to generate documents
 
-FROM python:3.11-slim
+FROM python:3.11-slim@sha256:16cb75beff0e104520a4bc4e98b08987b6978b82e37b81b87d786504e17579e7
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \

@@ -1,3 +1,33 @@
+## 2026-03-31: Enable Vision for Qwen3.5 27B (llama.cpp)
+
+### Problem
+Image upload/paste/screenshare UI was disabled when "Qwen3.5 27B (llama.cpp Local)" was selected. The `isVisionModel()` gate in `types/message.ts` pattern-matched against `VL_MODEL_PATTERNS` but `'qwen3.5'` was not in the list, so the image controls stayed grayed out. On the backend, `stream_vision_chat()` had no llama.cpp routing branch — it only handled NVIDIA, Moonshot, and Ollama, so even if the frontend allowed image upload, the backend would have sent the request to Ollama with the wrong payload format.
+
+### Root Cause
+1. `VL_MODEL_PATTERNS` in `front_end/newjfrontend/types/message.ts` lacked `'qwen3.5'`
+2. `stream_vision_chat()` in `python_back_end/main.py` had no `elif` branch for llama.cpp models before the Ollama `else` fallback
+
+### Solution
+
+**Frontend** (`front_end/newjfrontend/types/message.ts`, line 167):
+- Added `'qwen3.5'` to `VL_MODEL_PATTERNS`
+- `isVisionModel('qwen3.5:27b')` now returns `true`, enabling image upload/paste/screenshare buttons
+
+**Backend** (`python_back_end/main.py`, around line 4388):
+- Added `elif req.model.lower().startswith("qwen3.5") or req.model.lower().startswith("qwen3")` branch before the Ollama `else` in `stream_vision_chat()`
+- Builds an OpenAI-compatible `image_url` content block payload
+- POSTs to `LLAMA_URL/chat/completions` (non-streaming, 300s timeout)
+- Logs `🖼️ VISION: Using llama.cpp (...)` for observability
+
+### Files Modified
+- `front_end/newjfrontend/types/message.ts`
+- `python_back_end/main.py`
+
+### Result
+Selecting Qwen3.5 27B unlocks image controls in the UI. Pasting/uploading an image and asking a question routes to llama.cpp via `LLAMA_URL/chat/completions` with the `image_url` multimodal payload that llama.cpp + mmproj expects. Requires rebuild + redeploy of frontend and backend images.
+
+---
+
 ## 2026-02-24: Fix OpenClaw K8s Deployment — Full Debug Session
 
 ### Problems Addressed

@@ -288,9 +288,15 @@ DEFAULT_SOURCES: Dict[str, SourceConfig] = {
         embedding_tier=EmbeddingTier.STANDARD,
         fetcher_type="generic",
         base_url="https://nginx.org/en/docs/",
-        url_patterns=["/en/docs/"],
+        url_patterns=[
+            "nginx.org/en/docs/ngx_",
+            "nginx.org/en/docs/http",
+            "nginx.org/en/docs/stream",
+            "nginx.org/en/docs/mail",
+            "nginx.org/en/docs/install",
+        ],
         rate_limit_delay=0.5,
-        max_pages=100,
+        max_pages=150,
     ),
     "apache_hardening": SourceConfig(
         id="apache_hardening",
@@ -299,10 +305,15 @@ DEFAULT_SOURCES: Dict[str, SourceConfig] = {
         category=SourceCategory.SECURITY,
         embedding_tier=EmbeddingTier.STANDARD,
         fetcher_type="generic",
-        base_url="https://httpd.apache.org/docs/",
-        url_patterns=["/docs/"],
+        base_url="https://httpd.apache.org/docs/2.4/",
+        url_patterns=[
+            "httpd.apache.org/docs/2.4/mod_",
+            "httpd.apache.org/docs/2.4/howto/",
+            "httpd.apache.org/docs/2.4/misc/",
+            "httpd.apache.org/docs/2.4/mod_security/",
+        ],
         rate_limit_delay=0.5,
-        max_pages=100,
+        max_pages=200,
     ),
     # ─── Security/Cyber Sources ───────────────────────────────────────────────
     "mitre_attack": SourceConfig(

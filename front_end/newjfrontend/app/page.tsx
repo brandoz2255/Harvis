@@ -376,12 +376,26 @@ export default function ChatPage() {
           const lowerLog = logMessage.toLowerCase()
           let newStep: any = null
 
-          if (lowerLog.includes('search') || lowerLog.includes('googl')) {
-            newStep = {
-              type: 'search',
-              query: logMessage.replace(/searching for|search/gi, '').trim() || logMessage,
-              resultCount: 0,
-              results: []
+          // Skip generic status messages (not actual search queries)
+          const isStatusMessage = lowerLog.includes('enhanced failed') ||
+            lowerLog.includes('using simple') ||
+            lowerLog.includes('running simple') ||
+            lowerLog.includes('searching the web') ||
+            lowerLog.includes('searching for information') ||
+            lowerLog.includes('web search') ||
+            lowerLog.includes('falling back') ||
+            lowerLog.length < 10 // Skip very short messages
+
+          if (!isStatusMessage && (lowerLog.includes('search') || lowerLog.includes('googl'))) {
+            // Only create search step if there's an actual query (not just status text)
+            const query = logMessage.replace(/searching for|search/gi, '').trim()
+            if (query && query.length > 5) {
+              newStep = {
+                type: 'search',
+                query: query,
+                resultCount: 0,
+                results: []
+              }
             }
           } else if (lowerLog.includes('read') || lowerLog.includes('brow') || lowerLog.includes('access')) {
             newStep = {
@@ -389,7 +403,7 @@ export default function ChatPage() {
               domain: logMessage,
               summary: 'Reading content...'
             }
-          } else {
+          } else if (!isStatusMessage) {
             newStep = {
               type: 'thinking',
               content: logMessage
@@ -743,6 +757,62 @@ export default function ChatPage() {
     await selectSession(id)
     setSidebarOpen(false)
   }, [selectSession, setAiMessages])
+
+  // WebSocket listener for research updates
+  useEffect(() => {
+    if (!user || !currentSession) return
+    
+    const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const wsUrl = `${wsProto}//${window.location.host}/api/jobs/events/research-updates`
+    const ws = new WebSocket(wsUrl)
+    
+    ws.onopen = () => console.log('[Research] WebSocket connected')
+    
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        
+        // Only process updates for current session
+        if (data.session_id !== currentSession?.id) return
+        
+        console.log('[Research] Received update:', data)
+        
+        // Update the research chain for this message
+        const msg = localMessages.find(m => m.id === data.assistant_id || m.tempId === data.assistant_id)
+        if (msg && msg.researchChain) {
+          setLocalMessages(prev => prev.map(m => {
+            if (m.id === data.assistant_id || m.tempId === data.assistant_id) {
+              return {
+                ...m,
+                researchChain: {
+                  ...m.researchChain,
+                  summary: 'Research complete ✅',
+                  steps: [
+                    ...m.researchChain.steps,
+                    { type: 'complete', detail: 'Analysis complete', timestamp: new Date() }
+                  ],
+                  isLoading: false,
+                  analysis: data.analysis,
+                  sources: data.sources,
+                  videos: data.videos || []
+                }
+              }
+            }
+            return m
+          }))
+        }
+      } catch (e) {
+        console.error('[Research] WebSocket message error:', e)
+      }
+    }
+    
+    ws.onerror = (err) => console.error('[Research] WebSocket error:', err)
+    
+    return () => {
+      ws.close()
+      console.log('[Research] WebSocket disconnected')
+    }
+  }, [user, currentSession, localMessages])
 
   const isDuplicateMessage = useCallback((newMessage: Message, existingMessages: Message[]): boolean => {
     const recentMessages = existingMessages.slice(-3)

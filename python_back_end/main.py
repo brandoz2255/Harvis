@@ -1180,7 +1180,7 @@ logger.info("Using device: %s", "cuda" if device == 0 else "cpu")
 # vLLM (qwen3.5:9b, fast agentic) is the primary local inference backend.
 # OLLAMA_URL is kept as the env var name for backwards compatibility;
 # in the merged pod it points to vLLM at port 8001.
-LOCAL_OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:8001/v1")
+LOCAL_OLLAMA_URL = os.getenv("LLAMA_URL", "http://localhost:8080/v1")
 VLLM_URL = os.getenv("VLLM_URL", "http://localhost:8001/v1")  # vLLM — fast, qwen3.5
 LLAMA_URL = os.getenv(
     "LLAMA_URL", "http://localhost:8080/v1"
@@ -3461,20 +3461,70 @@ async def chat(
                         logger.info(
                             f"🔍 Attempting enhanced research for: {web_search_query}"
                         )
-                        research_result = await async_research_agent(
-                            query=web_search_query,
-                            model=req.model,
-                            enable_streaming=False,
-                        )
+                        # Use streaming research for real-time progress updates
+                        try:
+                            from agent_research import async_research_agent_streaming
+
+                            research_result = None
+                            streaming_sources = []
+
+                            async for event in async_research_agent_streaming(
+                                query=web_search_query,
+                                model=req.model,
+                                use_enhanced=True,
+                            ):
+                                if event.get("type") == "search_query":
+                                    # Stream search query to frontend
+                                    detail = "Searching: " + str(event.get("query", ""))
+                                    yield f"data: {json.dumps({'status': 'researching', 'eventType': 'search_query', 'query': event.get('query', ''), 'detail': detail})}\n\n"
+                                elif event.get("type") == "search_result":
+                                    # Stream individual source as it's found
+                                    source = {
+                                        "title": event.get("title", ""),
+                                        "url": event.get("url", ""),
+                                        "domain": event.get("domain", ""),
+                                    }
+                                    streaming_sources.append(source)
+                                    title_preview = (
+                                        source["title"][:50] if source["title"] else ""
+                                    )
+                                    detail = "Found: " + title_preview
+                                    yield f"data: {json.dumps({'status': 'researching', 'eventType': 'search_result', 'title': source['title'], 'url': source['url'], 'domain': source['domain'], 'detail': detail})}\n\n"
+                                elif event.get("type") == "reading":
+                                    # Stream reading progress
+                                    domain = event.get("domain", "")
+                                    detail = "Reading " + domain + "..."
+                                    yield f"data: {json.dumps({'status': 'researching', 'eventType': 'reading', 'domain': domain, 'url': event.get('url', ''), 'detail': detail})}\n\n"
+                                elif event.get("type") == "complete":
+                                    # Final result
+                                    research_result = event.get("result")
+                                    # Send complete status with source count
+                                    yield f"data: {json.dumps({'status': 'complete', 'detail': 'Research complete', 'sources_count': len(streaming_sources)})}\n\n"
+                        except Exception as stream_err:
+                            logger.warning(
+                                f"Streaming research failed, falling back to standard: {stream_err}"
+                            )
+                            research_result = await async_research_agent(
+                                query=web_search_query,
+                                model=req.model,
+                                enable_streaming=False,
+                            )
 
                         # Check if result is valid
                         search_analysis = ""
-                        search_sources = []
+                        search_sources = (
+                            streaming_sources if streaming_sources else []
+                        )  # Use streaming sources if available
+                        search_videos = []  # Initialize for videos
 
                         if isinstance(research_result, dict):
                             search_analysis = research_result.get("analysis", "")
-                            search_sources = research_result.get("sources", [])
-                            success = research_result.get("success", False)
+                            # Only use result sources if streaming didn't get them
+                            if not streaming_sources:
+                                search_sources = research_result.get("sources", [])
+                            search_videos = research_result.get("videos", [])
+                            # research_topic returns dict without "success" key - check if analysis exists instead
+                            success = bool(search_analysis and search_analysis.strip())
                         elif isinstance(research_result, str):
                             # Check if it's an error message
                             if research_result.startswith("Research failed:"):
@@ -3495,7 +3545,8 @@ async def chat(
                             logger.warning(
                                 "⚠️ Enhanced research failed, falling back to simple research"
                             )
-                            yield f"data: {json.dumps({'status': 'researching', 'detail': 'Enhanced search failed, using simple search...'})}\n\n"
+                            # Only send fallback message if fallback actually needed, not just for minimal content
+                            yield f"data: {json.dumps({'status': 'researching', 'detail': 'Running simple research...'})}\n\n"
 
                             fallback_result = research_agent_instance.research_topic(
                                 topic=web_search_query,
@@ -3505,8 +3556,28 @@ async def chat(
                             if isinstance(fallback_result, dict):
                                 search_analysis = fallback_result.get("analysis", "")
                                 search_sources = fallback_result.get("sources", [])
+                                # Also get videos if available
+                                search_videos = fallback_result.get("videos", [])
+                                logger.info(
+                                    f"🔍 Fallback result: analysis={len(search_analysis)} chars, sources={len(search_sources)}, videos={len(search_videos)}"
+                                )
+                                # Check if analysis is valid (not empty)
+                                if not (search_analysis and search_analysis.strip()):
+                                    logger.warning("⚠️ Fallback analysis is empty!")
+                                    search_analysis = ""
                             elif isinstance(fallback_result, str):
-                                search_analysis = fallback_result
+                                search_analysis = (
+                                    fallback_result if fallback_result.strip() else ""
+                                )
+                                search_videos = []
+                            else:
+                                logger.warning(
+                                    f"⚠️ Unexpected fallback_result type: {type(fallback_result)}"
+                                )
+                                search_analysis = (
+                                    str(fallback_result) if fallback_result else ""
+                                )
+                                search_videos = []
 
                         # Remove the web_search tag from response and prepend search results
                         clean_response = extract_web_search_context(response_text)
@@ -3519,9 +3590,41 @@ async def chat(
                             if clean_response:
                                 response_text += f"\n\n{clean_response}"
 
+                            # Yield final research status via SSE (Perplexica-style)
+                            yield f"data: {json.dumps({'status': 'complete', 'detail': 'Research complete', 'analysis': search_analysis[:500], 'sources_count': len(search_sources) if search_sources else 0, 'videos_count': len(search_videos) if search_videos else 0})}\n\n"
+
                             logger.info(
                                 f"✅ Web search completed, added {len(search_analysis)} chars of search results"
                             )
+
+                            # Publish to pg-boss for real-time frontend update
+                            try:
+                                from datetime import datetime
+
+                                if hasattr(request.app.state, "job_queue"):
+                                    await request.app.state.job_queue.send(
+                                        name="research-updates",
+                                        data={
+                                            "session_id": str(session_id)
+                                            if "session_id" in dir()
+                                            else "",
+                                            "assistant_id": assistantId
+                                            if "assistantId" in dir()
+                                            else "",
+                                            "message_id": "",  # Will be set after message is saved
+                                            "analysis": search_analysis,
+                                            "sources": search_sources[:5]
+                                            if "search_sources" in dir()
+                                            else [],
+                                            "completed_at": datetime.now().isoformat(),
+                                        },
+                                        priority=10,  # High priority for real-time updates
+                                    )
+                                    logger.info(
+                                        "📨 Research update published to pg-boss queue"
+                                    )
+                            except Exception as pqe:
+                                logger.warning(f"⚠️ Failed to publish to pg-boss: {pqe}")
                         else:
                             logger.warning(
                                 f"⚠️ Web search returned insufficient results (only {len(search_analysis) if search_analysis else 0} chars)"
@@ -4384,6 +4487,52 @@ async def vision_chat(
                 except Exception as e:
                     logger.error(f"🖼️ VISION: Moonshot request failed: {e}")
                     yield f"data: {json.dumps({'status': 'error', 'error': f'Moonshot vision error: {str(e)}'})}\n\n"
+                    return
+            elif req.model.lower().startswith(
+                "qwen3.5"
+            ) or req.model.lower().startswith("qwen3"):
+                content = [{"type": "text", "text": req.message}]
+                for img_b64 in processed_images:
+                    content.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{img_b64}"},
+                        }
+                    )
+                messages.append({"role": "user", "content": content})
+
+                logger.info(
+                    f"🖼️ VISION: Using llama.cpp ({LLAMA_URL}) for {req.model} with {len(processed_images)} image(s)"
+                )
+                yield f"data: {json.dumps({'status': 'inference', 'detail': f'Analyzing with {req.model} (llama.cpp)...'})}\n\n"
+
+                try:
+                    async with httpx.AsyncClient(
+                        timeout=httpx.Timeout(300.0, connect=10.0)
+                    ) as client:
+                        resp = await client.post(
+                            f"{LLAMA_URL}/chat/completions",
+                            headers={"Content-Type": "application/json"},
+                            json={
+                                "model": req.model,
+                                "messages": messages,
+                                "temperature": 0.7,
+                                "max_tokens": 4096,
+                            },
+                        )
+                    if resp.status_code != 200:
+                        err = resp.text[:300]
+                        logger.error(
+                            f"🖼️ VISION llama.cpp error {resp.status_code}: {err}"
+                        )
+                        yield f"data: {json.dumps({'status': 'error', 'error': f'llama.cpp vision error {resp.status_code}: {err}'})}\n\n"
+                        return
+                    data = resp.json()
+                    response_text = data["choices"][0]["message"]["content"]
+                    logger.info(f"🖼️ VISION llama.cpp: got {len(response_text)} chars")
+                except Exception as e:
+                    logger.error(f"🖼️ VISION llama.cpp exception: {e}")
+                    yield f"data: {json.dumps({'status': 'error', 'error': f'llama.cpp vision error: {str(e)}'})}\n\n"
                     return
             else:
                 # Use Ollama for vision
@@ -6642,6 +6791,71 @@ async def get_job_status(job_id: str):
         raise HTTPException(
             status_code=500, detail=f"Failed to get job status: {str(e)}"
         )
+
+
+@app.websocket("/api/jobs/events/{queue_name}")
+async def job_events_websocket(websocket: WebSocket, queue_name: str):
+    """
+    WebSocket endpoint for real-time job queue events
+
+    Supports queues:
+    - research-updates: Real-time research completion updates
+    - generate-document: Document generation job updates
+
+    Message format:
+    {
+        "session_id": "uuid",
+        "assistant_id": "uuid",
+        "message_id": "uuid",
+        "analysis": "research analysis text",
+        "sources": [...],
+        "videos": [...],
+        "completed_at": "iso timestamp"
+    }
+    """
+    try:
+        from job_queue import get_job_queue
+
+        await websocket.accept()
+        logger.info(f"🔌 WebSocket connected to queue: {queue_name}")
+
+        queue = await get_job_queue()
+
+        # Listen for new jobs in the queue
+        while True:
+            try:
+                # Poll for new messages (simple polling for now)
+                async with queue.pool.acquire() as conn:
+                    # Get latest message from queue
+                    row = await conn.fetchrow(
+                        f"""
+                        SELECT data FROM boss.job
+                        WHERE name = $1 AND state = 'created'
+                        ORDER BY created_at DESC LIMIT 1
+                    """,
+                        queue_name,
+                    )
+
+                if row:
+                    data = json.loads(row["data"]) if row["data"] else {}
+                    await websocket.send_json(data)
+                    logger.info(f"📨 Sent update via WebSocket: {queue_name}")
+
+                # Small delay to prevent busy loop
+                await asyncio.sleep(0.5)
+
+            except Exception as e:
+                logger.error(f"WebSocket poll error: {e}")
+                await asyncio.sleep(1)
+
+    except WebSocketDisconnect:
+        logger.info(f"🔌 WebSocket disconnected: {queue_name}")
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
+        try:
+            await websocket.close()
+        except:
+            pass
 
 
 # ─── Startup and Shutdown Events ─────────────────────────────────────────────

@@ -19,11 +19,12 @@ from moonshot_api import MoonshotClient, is_moonshot_model, get_moonshot_model_i
 
 logger = logging.getLogger(__name__)
 
-# ─── Ollama Configuration with Cloud/Local Fallback ──────────────────────────
+# ─── Llama Server Configuration with Cloud/Local Fallback ──────────────────────────
+# NOTE: We use llama-server (localhost:8080/v1), NOT Ollama
 CLOUD_OLLAMA_URL = os.getenv("EXTERNAL_OLLAMA_URL", "https://ollama.example.com")
 LOCAL_OLLAMA_URL = os.getenv(
-    "OLLAMA_URL", "http://ollama:11434"
-)  # Use environment variable for merged deployment
+    "LLAMA_URL", "http://localhost:8080/v1"
+)  # llama-server in merged pod - NOT ollama:11434
 API_KEY = os.getenv("OLLAMA_API_KEY", "key")
 
 
@@ -151,8 +152,8 @@ class ResearchAgent:
     def __init__(
         self,
         search_engine: str = "duckduckgo",
-        ollama_url: str = "http://ollama:11434",
-        default_model: str = "mistral",
+        ollama_url: str = "http://localhost:8080/v1",  # llama-server, NOT ollama
+        model: str = None,  # REQUIRED - no default
         max_search_results: int = 5,
         moonshot_api_key: str = None,
     ):
@@ -161,14 +162,16 @@ class ResearchAgent:
 
         Args:
             search_engine: Search engine to use ("duckduckgo" or "tavily")
-            ollama_url: Ollama server URL
-            default_model: Default LLM model to use
+            ollama_url: Llama server URL (localhost:8080/v1)
+            model: LLM model to use (REQUIRED - no fallback)
             max_search_results: Maximum number of search results to process
             moonshot_api_key: Optional Moonshot API key for Kimi models
         """
+        if not model:
+            raise ValueError("model parameter is REQUIRED - no hardcoded defaults")
         self.search_engine = search_engine
         self.ollama_url = ollama_url
-        self.default_model = default_model
+        self.model = model  # Use passed model, no fallback
         self.max_search_results = max_search_results
         self.moonshot_api_key = moonshot_api_key
 
@@ -186,13 +189,18 @@ class ResearchAgent:
 
         Args:
             prompt: User prompt
-            model: LLM model to use
+            model: LLM model to use (REQUIRED - overrides self.model if provided)
             system_prompt: System prompt for the LLM
 
         Returns:
             LLM response
         """
-        model = model or self.default_model
+        # Model is REQUIRED - use passed model or self.model (which was set in __init__)
+        actual_model = model if model else self.model
+        if not actual_model:
+            raise ValueError(
+                "model must be provided either as parameter or in __init__"
+            )
 
         # Check if this is a Moonshot model
         if is_moonshot_model(model):
@@ -232,11 +240,24 @@ class ResearchAgent:
 
         try:
             response = make_ollama_request(
-                "/api/chat", payload, timeout=600
+                "/chat/completions", payload, timeout=600
             )  # 10 min for large models
 
             result = response.json()
-            return result.get("message", {}).get("content", "").strip()
+            # DEBUG: Log raw response to see what's coming back
+            logger.info(
+                f"🔍 query_llm raw response keys: {result.keys()}, preview: {str(result)[:200]}"
+            )
+
+            # FIX: Content is in choices[0].message.content, not message.content
+            content = (
+                result.get("choices", [{}])[0]
+                .get("message", {})
+                .get("content", "")
+                .strip()
+            )
+            logger.info(f"🔍 query_llm extracted content: {len(content)} chars")
+            return content
 
         except Exception as e:
             logger.error(f"LLM query failed: {e}")
@@ -283,6 +304,7 @@ class ResearchAgent:
                 logger.error(f"Moonshot async query failed: {e}")
                 return f"Error querying Moonshot: {str(e)}"
 
+        # Handle Ollama models (local/cloud)
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -295,13 +317,22 @@ class ResearchAgent:
         }
 
         try:
-            result = await async_make_ollama_request(
-                "/api/chat", payload, timeout=600
+            response = make_ollama_request(
+                "/chat/completions", payload, timeout=600
             )  # 10 min for large models
-            return result.get("message", {}).get("content", "").strip()
+
+            result = response.json()
+            # FIX: Content is in choices[0].message.content, not message.content
+            content = (
+                result.get("choices", [{}])[0]
+                .get("message", {})
+                .get("content", "")
+                .strip()
+            )
+            return content
 
         except Exception as e:
-            logger.error(f"Async LLM query failed: {e}")
+            logger.error(f"LLM query failed: {e}")
             return f"Error querying LLM: {str(e)}"
 
     def research_topic(
@@ -452,8 +483,18 @@ DO NOT include a Sources section - that's handled separately.
 
         analysis = self.query_llm(research_prompt, model, system_prompt)
 
+        # DEBUG: Log before and after cleanup
+        logger.info(
+            f"🔍 LLM raw response: {len(analysis)} chars, preview: {analysis[:300]}"
+        )
+
         # Post-process to remove template placeholders and clean up
         analysis = self._finalize_research_output(analysis)
+
+        # DEBUG: Log after cleanup
+        logger.info(
+            f"🔍 After _finalize_research_output: {len(analysis)} chars, preview: {analysis[:300]}"
+        )
 
         # Filter and rank sources by quality (Perplexity-style: 3-8 sources)
         raw_sources = search_data.get("search_results", [])
@@ -496,6 +537,10 @@ DO NOT include a Sources section - that's handled separately.
 
         logger.info(
             f"Research completed for topic: {topic} (used {len(quality_sources)}/{len(raw_sources)} sources)"
+        )
+        # DEBUG: Log final result being returned
+        logger.info(
+            f"🔍Returning research result: analysis={len(analysis)} chars, sources_count={len(quality_sources)}, videos={len(videos)}"
         )
         return result
 

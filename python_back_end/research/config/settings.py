@@ -5,20 +5,20 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 # ---------- Feature Flags ----------
-ENABLE_TRAFILATURA = True          # robust HTML extraction
-ENABLE_YOUTUBE = True              # transcript extraction when possible
-ENABLE_PDF = True                  # PDF text + page mapping
-ENABLE_BM25 = True                 # fast lexical rerank
-ENABLE_CROSS_RERANK = False        # plug a cross-encoder later
-ENABLE_QUOTE_BACKS = True          # enforce quote-backed citations
-ENABLE_REQUESTS_CACHE = True       # cache HTTP GETs to speed up repeated runs
+ENABLE_TRAFILATURA = True  # robust HTML extraction
+ENABLE_YOUTUBE = True  # transcript extraction when possible
+ENABLE_PDF = True  # PDF text + page mapping
+ENABLE_BM25 = True  # fast lexical rerank
+ENABLE_CROSS_RERANK = False  # plug a cross-encoder later
+ENABLE_QUOTE_BACKS = True  # enforce quote-backed citations
+ENABLE_REQUESTS_CACHE = True  # cache HTTP GETs to speed up repeated runs
 
 DEFAULT_USER_AGENT = os.getenv(
     "USER_AGENT",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
 )
- 
+
 # ---------- Providers / Keys ----------
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY") or ""
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY") or "key"
@@ -27,38 +27,64 @@ OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY") or "key"
 BING_API_KEY = os.getenv("BING_API_KEY") or ""
 SERPAPI_KEY = os.getenv("SERPAPI_KEY") or ""
 
+
 # ---------- Model Policy ----------
+# NOTE: All models must be passed explicitly - no hardcoded defaults
 @dataclass
 class ModelPolicy:
-    # stage → model name
-    planner: str = os.getenv("LLM_PLANNER_MODEL", "mistral")
-    mapper: str = os.getenv("LLM_MAP_MODEL", "mistral")
-    reducer: str = os.getenv("LLM_REDUCE_MODEL", "mistral")
-    verifier: str = os.getenv("LLM_VERIFY_MODEL", "mistral")
+    # stage → model name (all must be set via env or passed explicitly)
+    planner: str = os.getenv("LLM_PLANNER_MODEL", "")
+    mapper: str = os.getenv("LLM_MAP_MODEL", "")
+    reducer: str = os.getenv("LLM_REDUCE_MODEL", "")
+    verifier: str = os.getenv("LLM_VERIFY_MODEL", "")
+
+    def __post_init__(self):
+        # Validate that models are set
+        if not self.planner:
+            raise ValueError("LLM_PLANNER_MODEL must be set or passed explicitly")
+        if not self.mapper:
+            raise ValueError("LLM_MAP_MODEL must be set or passed explicitly")
+
 
 # ---------- Budgets per depth ----------
 @dataclass
 class DepthBudget:
     max_providers: int
-    max_hits: int            # total search hits to keep (after dedupe)
-    max_extract: int         # how many URLs to fully extract
-    max_chunks: int          # how many chunks to pass to map stage
-    max_map_tokens: int      # rough cap per map call
-    max_reduce_tokens: int   # rough cap for reduce call
+    max_hits: int  # total search hits to keep (after dedupe)
+    max_extract: int  # how many URLs to fully extract
+    max_chunks: int  # how many chunks to pass to map stage
+    max_map_tokens: int  # rough cap per map call
+    max_reduce_tokens: int  # rough cap for reduce call
     request_timeout_s: int
+
 
 DEFAULT_BUDGETS: Dict[str, DepthBudget] = {
     "quick": DepthBudget(
-        max_providers=1, max_hits=6, max_extract=4, max_chunks=12,
-        max_map_tokens=800, max_reduce_tokens=1200, request_timeout_s=15
+        max_providers=1,
+        max_hits=6,
+        max_extract=4,
+        max_chunks=12,
+        max_map_tokens=800,
+        max_reduce_tokens=1200,
+        request_timeout_s=15,
     ),
     "standard": DepthBudget(
-        max_providers=2, max_hits=12, max_extract=8, max_chunks=24,
-        max_map_tokens=1200, max_reduce_tokens=2000, request_timeout_s=20
+        max_providers=2,
+        max_hits=12,
+        max_extract=8,
+        max_chunks=24,
+        max_map_tokens=1200,
+        max_reduce_tokens=2000,
+        request_timeout_s=20,
     ),
     "deep": DepthBudget(
-        max_providers=3, max_hits=20, max_extract=14, max_chunks=40,
-        max_map_tokens=1600, max_reduce_tokens=2600, request_timeout_s=30
+        max_providers=3,
+        max_hits=20,
+        max_extract=14,
+        max_chunks=40,
+        max_map_tokens=1600,
+        max_reduce_tokens=2600,
+        request_timeout_s=30,
     ),
 }
 # ---------- HTTP / Networking ----------
@@ -73,19 +99,34 @@ DEFAULT_SAFESEARCH = os.getenv("SEARCH_SAFESEARCH", "moderate")
 
 # Authority and recency boosts (lightweight scoring hints)
 AUTHORITY_DOMAINS = [
-    "github.com", "arxiv.org", "openai.com", "huggingface.co",
-    "pytorch.org", "tensorflow.org", "scikit-learn.org",
-    "docs.python.org", "nvidia.com", "microsoft.com", "research.google",
-    "deepmind.com", "anthropic.com"
+    "github.com",
+    "arxiv.org",
+    "openai.com",
+    "huggingface.co",
+    "pytorch.org",
+    "tensorflow.org",
+    "scikit-learn.org",
+    "docs.python.org",
+    "nvidia.com",
+    "microsoft.com",
+    "research.google",
+    "deepmind.com",
+    "anthropic.com",
 ]
 RECENT_YEARS = ["2025", "2024", "2023"]
+
 
 # ---------- Root Config ----------
 @dataclass
 class Settings:
     # endpoints
-    cloud_ollama_url: str = os.getenv("CLOUD_OLLAMA_URL", "https://harvis.example.com/ollama")
-    local_ollama_url: str = os.getenv("OLLAMA_URL", "http://ollama:11434")  # Use OLLAMA_URL for consistency with main chat
+    # NOTE: LLAMA_URL is used for llama-server, not Ollama
+    cloud_ollama_url: str = os.getenv(
+        "CLOUD_OLLAMA_URL", "https://harvis.example.com/ollama"
+    )
+    local_ollama_url: str = os.getenv(
+        "LLAMA_URL", "http://localhost:8080/v1"
+    )  # llama-server in merged pod
 
     # keys
     ollama_api_key: str = OLLAMA_API_KEY
@@ -115,6 +156,7 @@ class Settings:
 
     authority_domains: List[str] = field(default_factory=lambda: AUTHORITY_DOMAINS)
     recency_markers: List[str] = field(default_factory=lambda: RECENT_YEARS)
+
 
 def get_settings() -> Settings:
     """

@@ -97,6 +97,7 @@ export interface SearchStep {
     url: string
     domain: string
   }>
+  rewritten?: string // LLM-rewritten query
 }
 
 export interface ReadStep {
@@ -105,7 +106,30 @@ export interface ReadStep {
   summary: string
 }
 
-export type ResearchStep = ThinkingStep | SearchStep | ReadStep
+// Streaming event step (Perplexica-style real-time updates)
+export interface EventStep {
+  type: "event"
+  event: "searching" | "fetching" | "ranking" | "complete" | "error"
+  data: {
+    query?: string
+    url?: string
+    title?: string
+    progress?: number
+    count?: number
+    message?: string
+    rewritten?: boolean
+  }
+}
+
+// Embedding reranking step
+export interface RankingStep {
+  type: "ranking"
+  progress: number
+  query: string
+  resultCount: number
+}
+
+export type ResearchStep = ThinkingStep | SearchStep | ReadStep | EventStep | RankingStep
 
 export interface ResearchChainData {
   summary: string
@@ -164,7 +188,7 @@ export const VL_MODEL_PATTERNS = [
   'vision', 'vl', 'llava', 'bakllava', 'moondream',
   'minicpm-v', 'qwen2-vl', 'qwen-vl', 'cogvlm', 'internvl',
   'phi-3-vision', 'deepseek-vl', 'yi-vl', 'gemma-2-vision',
-  'kimi', 'moonshot'  // Kimi models support vision even without "vl" in name
+  'kimi', 'moonshot', 'qwen3.5'   // Kimi models support vision even without "vl" in name
 ]
 
 export function isVisionModel(modelName: string): boolean {

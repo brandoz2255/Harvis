@@ -321,7 +321,28 @@ else
   log_debug "Would run: docker tag dulc3/jarvis-backend:$BACKEND_VERSION dulc3/harvis-tts-worker:$BACKEND_VERSION"
 fi
 
-# 8. Update Kustomization for ArgoCD
+# 8. Build MemPalace MCP Server
+log_info "Starting MemPalace MCP Server Build..."
+
+MEMPALACE_MCP_DIR="mempalace-mcp"
+
+if [ -d "$MEMPALACE_MCP_DIR" ]; then
+  if [ "$DRY_RUN" != "yes" ]; then
+    if docker build -t dulc3/harvis-mempalace:$BACKEND_VERSION $MEMPALACE_MCP_DIR/; then
+      log_success "MemPalace MCP built successfully with tag: dulc3/harvis-mempalace:$BACKEND_VERSION"
+    else
+      log_error "MemPalace MCP build failed!"
+      exit 1
+    fi
+  else
+    log_debug "Would run: docker build -t dulc3/harvis-mempalace:$BACKEND_VERSION $MEMPALACE_MCP_DIR/"
+  fi
+else
+  log_error "mempalace-mcp directory not found: $MEMPALACE_MCP_DIR"
+  exit 1
+fi
+
+# 9. Update Kustomization for ArgoCD
 log_info "Updating Kustomization for ArgoCD..."
 KUSTOMIZE_FILE="k8s-manifests/overlays/prod/kustomization.yaml"
 
@@ -341,6 +362,7 @@ replacements = [
     (r'(  - name: harvis-backend\n    newName: dulc3/jarvis-backend\n    newTag: )\S+',      r'\g<1>$BACKEND_VERSION'),
     (r'(  - name: harvis-frontend\n    newName: dulc3/jarvis-frontend\n    newTag: )\S+',     r'\g<1>$FRONTEND_VERSION'),
     (r'(  - name: harvis-document-worker\n    newName: dulc3/harvis-document-worker\n    newTag: )\S+', r'\g<1>$BACKEND_VERSION'),
+    (r'(  - name: dulc3/harvis-mempalace\n    newName: dulc3/harvis-mempalace\n    newTag: )\S+', r'\g<1>$BACKEND_VERSION'),
 ]
 
 for pattern, repl in replacements:
@@ -366,6 +388,9 @@ PYEOF
 
     # Update MCP RAG server image references (uses same backend image)
     sed -i "s|dulc3/jarvis-backend:[^ ]*|dulc3/jarvis-backend:$BACKEND_VERSION|g" "$KUSTOMIZE_FILE"
+
+    # Update MemPalace MCP server image references
+    sed -i "s|dulc3/harvis-mempalace:[^ ]*|dulc3/harvis-mempalace:$BACKEND_VERSION|g" "$KUSTOMIZE_FILE"
 
     log_success "Kustomization updated with new image versions"
 
@@ -453,6 +478,7 @@ if [ "$PUSH_CHOICE" = "yes" ]; then
     docker push dulc3/harvis-code-executor:$BACKEND_VERSION && \
     docker push dulc3/harvis-document-worker:$BACKEND_VERSION && \
     docker push dulc3/harvis-tts-worker:$BACKEND_VERSION && \
+    docker push dulc3/harvis-mempalace:$BACKEND_VERSION && \
     log_success "All images pushed successfully!"
   else
     log_debug "Would push images to Docker Hub"
@@ -465,6 +491,7 @@ else
   echo "  docker push dulc3/harvis-code-executor:$BACKEND_VERSION"
   echo "  docker push dulc3/harvis-document-worker:$BACKEND_VERSION"
   echo "  docker push dulc3/harvis-tts-worker:$BACKEND_VERSION"
+  echo "  docker push dulc3/harvis-mempalace:$BACKEND_VERSION"
 fi
 
 # Summary

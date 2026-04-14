@@ -1,5 +1,23 @@
 # Recent Changes and Fixes Documentation
 
+## Date: 2026-03-31 — Enable Vision for Qwen3.5 27B (llama.cpp)
+
+### Problem
+Image controls (upload/paste/screenshare) were disabled when Qwen3.5 27B was selected. `isVisionModel()` checks `VL_MODEL_PATTERNS` and `'qwen3.5'` was missing. Backend `stream_vision_chat()` also had no llama.cpp routing path — it would have fallen through to the Ollama branch and sent the wrong payload format.
+
+### Root Cause
+1. `VL_MODEL_PATTERNS` in `types/message.ts` didn't include `'qwen3.5'`
+2. `stream_vision_chat()` lacked a llama.cpp `elif` branch before the Ollama `else`
+
+### Fix
+- **`front_end/newjfrontend/types/message.ts`**: Added `'qwen3.5'` to `VL_MODEL_PATTERNS`
+- **`python_back_end/main.py`**: Added `elif` for `qwen3.5`/`qwen3` models in `stream_vision_chat()` — builds OpenAI-compatible `image_url` content blocks and POSTs to `LLAMA_URL/chat/completions`
+
+### Result
+Qwen3.5 27B now has full vision support via llama.cpp + mmproj. Requires frontend + backend image rebuild and redeploy.
+
+---
+
 ## Date: 2026-03-10 — SGLang CUDA OOM fix: bitsandbytes → fp8 + mem-fraction-static 0.50
 
 ### Problem

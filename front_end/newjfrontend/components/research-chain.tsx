@@ -9,6 +9,8 @@ import {
     ThinkingStep,
     SearchStep,
     ReadStep,
+    EventStep,
+    RankingStep,
     ResearchStep,
     ResearchChainData
 } from "@/types/message"
@@ -118,6 +120,10 @@ function ResearchStepItem({ step }: { step: ResearchStep }) {
             return <SearchStepComponent step={step} />
         case "read":
             return <ReadStepComponent step={step} />
+        case "event":
+            return <EventStepComponent step={step} />
+        case "ranking":
+            return <RankingStepComponent step={step} />
         default:
             return null
     }
@@ -246,6 +252,80 @@ function ReadStepComponent({ step }: { step: ReadStep }) {
                 <p className="text-sm text-gray-400 leading-relaxed">
                     {step.summary}
                 </p>
+            </div>
+        </div>
+    )
+}
+
+// Perplexica-style streaming event (query rewriting, fetching, ranking)
+function EventStepComponent({ step }: { step: EventStep }) {
+    const { event, data } = step
+    
+    const getEventIcon = () => {
+        switch (event) {
+            case "searching":
+                return <Search className="h-4 w-4 text-blue-400" />
+            case "fetching":
+                return <FileText className="h-4 w-4 text-yellow-400" />
+            case "ranking":
+                return <Globe className="h-4 w-4 text-purple-400" />
+            case "complete":
+                return <Search className="h-4 w-4 text-green-400" />
+            case "error":
+                return <Search className="h-4 w-4 text-red-400" />
+            default:
+                return <Search className="h-4 w-4 text-gray-400" />
+        }
+    }
+    
+    const getEventLabel = () => {
+        switch (event) {
+            case "searching":
+                const label = data.rewritten ? "Rewriting query..." : "Searching..."
+                return data.query ? `"${data.query}"` : label
+            case "fetching":
+                return `Fetching ${data.title?.slice(0, 30)}...`
+            case "ranking":
+                return `Reranking with embeddings (${Math.round((data.progress || 0) * 100)}%)`
+            case "complete":
+                return `Found ${data.count} sources`
+            case "error":
+                return data.message || "Error"
+            default:
+                return event
+        }
+    }
+    
+    return (
+        <div className="flex items-start gap-3">
+            {getEventIcon()}
+            <p className="text-sm text-gray-400">
+                {getEventLabel()}
+            </p>
+        </div>
+    )
+}
+
+// Embedding reranking progress
+function RankingStepComponent({ step }: { step: RankingStep }) {
+    return (
+        <div className="flex items-start gap-3">
+            <Globe className="h-4 w-4 text-purple-400 mt-0.5 shrink-0" />
+            
+            <div className="flex-1 min-w-0">
+                <div className="flex items-center justify-between gap-2 mb-1">
+                    <span className="text-sm text-gray-300">Reranking with embeddings</span>
+                    <span className="text-xs text-gray-500">
+                        {Math.round(step.progress * 100)}%
+                    </span>
+                </div>
+                {/* Progress bar */}
+                <div className="h-1 w-full bg-gray-800 rounded-full overflow-hidden">
+                    <div 
+                        className="h-full bg-purple-500 transition-all duration-300"
+                        style={{ width: `${step.progress * 100}%` }}
+                    />
+                </div>
             </div>
         </div>
     )

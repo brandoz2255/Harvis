@@ -212,6 +212,7 @@ def check_memory_pressure():
             "pressure_level": "unknown",
             "message": "CUDA not available",
             "recommendations": [],
+            "auto_cleanup_suggested": False,
         }
 
     usage_percent = stats["usage_percent"]

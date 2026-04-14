@@ -1,29 +1,26 @@
 # 1. Install dependencies
-FROM node:20-alpine AS deps
+FROM node:20-alpine@sha256:42d1d5b07c84257b55d409f4e6e3be3b55d42867afce975a5648a3f231bf7e81 AS deps
 WORKDIR /app
 
 # Copy package files
-COPY package.json package-lock.json* pnpm-lock.yaml* ./
+COPY package.json package-lock.json ./
 
-# Install dependencies with optimizations
-# Remove corrupted lock file and install fresh
-RUN rm -f package-lock.json && \
-    npm install --only=production --legacy-peer-deps && \
+# Install production dependencies exactly as locked — no floating resolves
+RUN npm ci --omit=dev && \
     npm cache clean --force
 
 # Install dev dependencies in separate stage for building
-FROM node:20-alpine AS deps-dev
+FROM node:20-alpine@sha256:42d1d5b07c84257b55d409f4e6e3be3b55d42867afce975a5648a3f231bf7e81 AS deps-dev
 WORKDIR /app
 
-COPY package.json package-lock.json* pnpm-lock.yaml* ./
+COPY package.json package-lock.json ./
 
-# Remove corrupted lock file and install all dependencies for building
-RUN rm -f package-lock.json && \
-    npm install --legacy-peer-deps && \
+# Install all dependencies exactly as locked
+RUN npm ci && \
     npm cache clean --force
 
 # 2. Build app
-FROM node:20-alpine AS builder
+FROM node:20-alpine@sha256:42d1d5b07c84257b55d409f4e6e3be3b55d42867afce975a5648a3f231bf7e81 AS builder
 WORKDIR /app
 
 # Cache-busting ARG - change this value to force a complete rebuild
@@ -54,7 +51,7 @@ ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
 
 # 3. Run app
-FROM node:20-alpine AS runner
+FROM node:20-alpine@sha256:42d1d5b07c84257b55d409f4e6e3be3b55d42867afce975a5648a3f231bf7e81 AS runner
 WORKDIR /app
 
 # Create non-root user for security

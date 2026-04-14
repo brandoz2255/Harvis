@@ -4,8 +4,9 @@ Web search functionality using LangChain and multiple search engines
 
 import os
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Callable
 from ddgs import DDGS
+import asyncio
 
 try:
     from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -16,11 +17,23 @@ import requests
 from newspaper import Article
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
+import json
 
 # Import YouTube transcript extraction
 from research.extract.youtube import extract_youtube
 
 logger = logging.getLogger(__name__)
+
+
+# Event types for streaming
+class ResearchEvent:
+    """Streaming event types for real-time UI updates"""
+
+    SEARCHING = "searching"
+    FETCHING = "fetching"
+    RANKING = "ranking"
+    COMPLETE = "complete"
+    ERROR = "error"
 
 
 class WebSearchAgent:
@@ -380,6 +393,151 @@ class WebSearchAgent:
         else:
             # Generic optimization - exclude low-quality sources
             return f'{query} -site:pinterest.com -site:facebook.com -site:twitter.com -"search engine"'
+
+    def rewrite_query_for_search(
+        self, query: str, model: str = "qwen2.5-7b", llm_url: str = None
+    ) -> str:
+        """
+        Use LLM to rewrite user question into optimal search keywords.
+        This is Perplexica's query rewriting step.
+
+        Args:
+            query: Original user question/query
+            model: Model to use for rewriting
+            llm_url: Override LLM URL (defaults to LLAMA_URL env var)
+
+        Returns:
+            Optimized search query string
+        """
+        from research.research_agent import make_ollama_request
+
+        llm_url = llm_url or os.getenv("LLAMA_URL", "http://localhost:8080/v1")
+
+        rewrite_prompt = f"""Rewrite this user question into the best possible search query.
+Make it concise (under 50 chars), focused on key terms, and optimized for web search engines.
+
+Original question: {query}
+
+Return ONLY the rewritten search query, nothing else."""
+
+        try:
+            payload = {
+                "model": model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You rewrite user questions into optimal search queries.",
+                    },
+                    {"role": "user", "content": rewrite_prompt},
+                ],
+                "temperature": 0.3,
+                "max_tokens": 50,
+            }
+
+            result = make_ollama_request(
+                "/chat/completions", payload, timeout=15, url=llm_url
+            )
+
+            if result and "choices" in result:
+                rewritten = result["choices"][0]["message"]["content"].strip()
+                logger.info(f"🔄 LLM rewrote query: '{query}' → '{rewritten}'")
+                return rewritten
+
+        except Exception as e:
+            logger.warning(f"LLM query rewrite failed, using fallback: {e}")
+
+        # Fallback to existing heuristic
+        return self._optimize_search_query(query)
+
+    async def rerank_results_with_embeddings(
+        self,
+        results: List[Dict[str, Any]],
+        query: str,
+        model: str = "qwen3-embedding",
+        embed_url: str = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Use embeddings to rerank search results by relevance.
+        This is Perplexica's ranking step.
+
+        Args:
+            results: Raw search results
+            query: Original search query
+            model: Embedding model to use
+            embed_url: Override embedding URL
+
+        Returns:
+            Reranked results with relevance scores
+        """
+        from mcp_server.embedding_client import EmbeddingClient
+
+        embed_url = embed_url or os.getenv("EMBED_QW3_URL", "http://localhost:8082")
+
+        if not results:
+            return results
+
+        try:
+            # Initialize embedding client
+            embed_client = EmbeddingClient(embed_url, embed_url)
+
+            # Get query embedding
+            query_embedding = await embed_client.generate(query, model)
+
+            if not query_embedding:
+                logger.warning(
+                    "Failed to get query embedding, returning original order"
+                )
+                return results
+
+            # Get embeddings for each result's title + snippet
+            reranked = []
+            for result in results:
+                text = f"{result.get('title', '')} {result.get('snippet', '')}"
+                try:
+                    text_embedding = await embed_client.generate(text, model)
+
+                    if text_embedding:
+                        # Cosine similarity
+                        similarity = self._cosine_similarity(
+                            query_embedding, text_embedding
+                        )
+                        reranked.append(
+                            {
+                                "result": result,
+                                "score": similarity,
+                                "query_embedding": query_embedding,
+                            }
+                        )
+                    else:
+                        reranked.append({"result": result, "score": 0.5})
+                except Exception as e:
+                    logger.debug(f"Failed to embed result: {e}")
+                    reranked.append({"result": result, "score": 0.5})
+
+            await embed_client.close()
+
+            # Sort by embedding similarity
+            reranked.sort(key=lambda x: x["score"], reverse=True)
+
+            logger.info(f"📊 Reranked {len(reranked)} results with embeddings")
+            return reranked
+
+        except Exception as e:
+            logger.warning(f"Embedding rerank failed, using original order: {e}")
+            return [{"result": r, "score": 1.0} for r in results]
+
+    def _cosine_similarity(self, a: List[float], b: List[float]) -> float:
+        """Calculate cosine similarity between two vectors"""
+        import math
+
+        dot = sum(x * y for x, y in zip(a, b))
+        norm_a = math.sqrt(sum(x * x for x in a))
+        norm_b = math.sqrt(sum(x * x for x in b))
+
+        if norm_a == 0 or norm_b == 0:
+            return 0.0
+
+        return dot / (norm_a * norm_b)
 
     def _score_and_filter_results(
         self, search_results: List[Dict], original_query: str
@@ -764,6 +922,85 @@ class WebSearchAgent:
         )
 
         return videos
+
+    async def search_web_streaming(
+        self,
+        query: str,
+        num_results: int = None,
+        on_event: Callable[[str, Dict], None] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Streaming web search with real-time event callbacks for UI.
+
+        Args:
+            query: Search query
+            num_results: Number of results
+            on_event: Callback(event_type, data) for real-time updates
+
+        Returns:
+            List of search results
+
+        Event types:
+            - "searching": {"query": str}
+            - "fetching": {"url": str, "title": str}
+            - "ranking": {"progress": float}
+            - "complete": {"count": int}
+            - "error": {"message": str}
+        """
+        max_results = num_results or self.max_results
+
+        # Phase 1: Query rewriting (Perplexica style)
+        if on_event:
+            on_event("searching", {"query": query})
+
+        # Rewrite query with LLM
+        rewritten_query = self.rewrite_query_for_search(query)
+
+        if on_event:
+            on_event("searching", {"query": rewritten_query, "rewritten": True})
+
+        # Phase 2: Search
+        results = self.search_web(rewritten_query, max_results * 2)
+
+        if not results:
+            results = self.search_web(query, max_results * 2)
+            if not results:
+                if on_event:
+                    on_event("error", {"message": "No results found"})
+                return []
+
+        # Phase 3: Fetch content (streaming)
+        results_with_content = []
+        for i, result in enumerate(results[:max_results]):
+            if on_event:
+                on_event(
+                    "fetching",
+                    {"url": result.get("url", ""), "title": result.get("title", "")},
+                )
+
+            content = self._extract_content_sync(result.get("url", ""))
+            if content:
+                result["content"] = content
+            results_with_content.append(result)
+
+        # Phase 4: Rerank with embeddings (Perplexica style)
+        if on_event:
+            on_event("ranking", {"progress": 0.5})
+
+        try:
+            reranked = await self.rerank_results_with_embeddings(
+                results_with_content, rewritten_query
+            )
+            final_results = [r["result"] for r in reranked]
+        except Exception as e:
+            logger.warning(f"Embedding rerank failed: {e}")
+            final_results = results_with_content
+
+        if on_event:
+            on_event("ranking", {"progress": 1.0})
+            on_event("complete", {"count": len(final_results)})
+
+        return final_results[:max_results]
 
 
 class TavilySearchAgent:

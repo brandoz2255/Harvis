@@ -139,3 +139,9 @@ vendor/sglang-H/
 # ==========================================
 k8s-manifests/overlays/prod/openclaw-secret.yaml
 mascot/
+
+# Perplexica - AI search engine (fetched/cloned locally for reference)
+perplexica/
+
+# MemPalace - cloned locally for reference; our wrapper lives in mempalace-mcp/
+mempalace/

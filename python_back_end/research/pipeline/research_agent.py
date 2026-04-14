@@ -7,6 +7,7 @@ to produce comprehensive research responses with proper source attribution.
 
 import asyncio
 import logging
+import os
 import time
 from typing import List, Dict, Optional, Any, Tuple
 from dataclasses import dataclass, field
@@ -124,7 +125,11 @@ class ResearchAgent:
         self.config = config or ResearchConfig()
         
         # Initialize components
-        self.llm_client = OllamaClient()
+        _model = (
+            self.config.synthesis_model
+            or os.getenv("LLM_MODEL", "qwen3.5:27b")
+        )
+        self.llm_client = OllamaClient(model=_model)
         self.cache = get_cache()
         self.ranker = BM25Ranker()
         self.reranker = ReRanker(strategy=self.config.rerank_strategy)

@@ -145,7 +145,7 @@ interface OpenClawState {
   suggestion: WorkspaceSuggestion | null
   workspaceId: string | null
   workspaceSessionId: string | null   // persists across launches for same user (resumable)
-  workspaceModel: 'kimi' | 'nvidia-kimi' | 'qwen3'
+  workspaceModel: 'kimi' | 'nvidia-kimi' | 'qwen3.5-27b'
   logEvents: WorkspaceLogEvent[]
   finalSummary: string
   sseAbortController: AbortController | null
@@ -220,7 +220,7 @@ export const useOpenClawStore = create<OpenClawState>()(
     suggestion: null,
     workspaceId: null,
     workspaceSessionId: null,
-    workspaceModel: 'kimi' as const,
+    workspaceModel: 'qwen3.5-27b' as const,
     logEvents: [],
     finalSummary: '',
     sseAbortController: null,
@@ -366,7 +366,7 @@ export const useOpenClawStore = create<OpenClawState>()(
         state.isChatMinimized = false
         state.suggestion = null
         state.workspaceId = null
-        state.workspaceModel = 'kimi'
+        state.workspaceModel = 'qwen3.5-27b'
         state.workspaceSessionId = null   // always fresh session on next launch
         state.logEvents = []
         state.finalSummary = ''

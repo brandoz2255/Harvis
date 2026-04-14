@@ -11,19 +11,28 @@ from research.enhanced_research_agent import get_enhanced_research_agent
 logger = logging.getLogger(__name__)
 
 # Initialize the research agent
-# Use llama-server (localhost:8080) in merged pod, fallback to ollama:11434 for standalone
+# Use llama-server (localhost:8080/v1) in merged pod
 research_agent_instance = ResearchAgent(
     search_engine="duckduckgo",  # or "tavily" if API key is available
-    ollama_url=os.getenv("OLLAMA_URL", "http://localhost:8080/v1"),
-    default_model="mistral",
+    ollama_url=os.getenv("LLAMA_URL", "http://localhost:8080/v1"),
+    model="mistral",  # Will be overridden by req.model at runtime
     max_search_results=5,
 )
 
 # Initialize the enhanced research agent for advanced features
 enhanced_research_agent_instance = get_enhanced_research_agent(
     search_engine="duckduckgo",  # or "tavily" if API key is available
-    ollama_url=os.getenv("OLLAMA_URL", "http://localhost:8080/v1"),
-    default_model="mistral",
+    ollama_url=os.getenv("LLAMA_URL", "http://localhost:8080/v1"),
+    model="mistral",  # Will be overridden by req.model at runtime
+    max_search_results=20,  # Increased for better results
+    enable_advanced_features=True,  # Enable advanced pipeline
+)
+
+# Initialize the enhanced research agent for advanced features
+enhanced_research_agent_instance = get_enhanced_research_agent(
+    search_engine="duckduckgo",  # or "tavily" if API key is available
+    ollama_url=os.getenv("LLAMA_URL", "http://localhost:8080/v1"),
+    model="mistral",  # Will be overridden by req.model at runtime
     max_search_results=20,  # Increased for better results
     enable_advanced_features=True,  # Enable advanced pipeline
 )

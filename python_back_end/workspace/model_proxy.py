@@ -88,7 +88,7 @@ _KIMI_MODELS = {
 _NVIDIA_MODELS = {"nvidia-kimi"}
 
 # Model prefixes routed to the external/cloud Ollama instance
-_OLLAMA_CLOUD_PREFIXES = ("gpt-oss", "qwen3")
+_OLLAMA_CLOUD_PREFIXES = ("gpt-oss", "qwen3", "qwen3.5")
 
 model_proxy_router = APIRouter(prefix="/v1", tags=["model-proxy"])
 
@@ -113,18 +113,21 @@ _config_cache_ttl = 30  # Cache for 30 seconds
 async def _get_openclaw_config() -> dict | None:
     """Get OpenClaw config from database (cached)."""
     global _openclaw_config_cache, _config_cache_time
-    
+
     import time
     import base64
     from cryptography.fernet import Fernet
-    
+
     # Check cache
-    if _openclaw_config_cache and (time.time() - _config_cache_time) < _config_cache_ttl:
+    if (
+        _openclaw_config_cache
+        and (time.time() - _config_cache_time) < _config_cache_ttl
+    ):
         return _openclaw_config_cache
-    
+
     if not DATABASE_URL:
         return None
-    
+
     try:
         conn = await asyncpg.connect(DATABASE_URL)
         # Ensure table exists (self-heal if startup migration was missed)
@@ -146,10 +149,10 @@ async def _get_openclaw_config() -> dict | None:
             "SELECT provider_url, api_key_encrypted, model_id, provider_type FROM openclaw_llm_config WHERE is_active = TRUE LIMIT 1"
         )
         await conn.close()
-        
+
         if not row:
             return None
-        
+
         # Decrypt API key if present
         api_key = None
         if row["api_key_encrypted"]:
@@ -157,15 +160,18 @@ async def _get_openclaw_config() -> dict | None:
                 # Use same encryption key derivation as main.py
                 import hashlib
                 import os
+
                 secret = os.getenv("JWT_SECRET", "harvis-secret-key")
                 encryption_key = hashlib.sha256(secret.encode()).digest()
                 fernet_key = base64.urlsafe_b64encode(encryption_key)
                 cipher = Fernet(fernet_key)
-                encrypted_bytes = base64.urlsafe_b64decode(row["api_key_encrypted"].encode())
+                encrypted_bytes = base64.urlsafe_b64decode(
+                    row["api_key_encrypted"].encode()
+                )
                 api_key = cipher.decrypt(encrypted_bytes).decode()
             except Exception as e:
                 logger.warning(f"Failed to decrypt OpenClaw API key: {e}")
-        
+
         _openclaw_config_cache = {
             "provider_url": row["provider_url"],
             "api_key": api_key,
@@ -182,41 +188,45 @@ async def _get_openclaw_config() -> dict | None:
 async def _resolve_route(model_name: str) -> tuple[str, dict, bool, bool, str | None]:
     """
     Determine the upstream URL and headers for a given model name.
-    
+
     First checks user-configured OpenClaw settings in database.
     Falls back to legacy hardcoded models if no config found.
     """
     # Try to get user-configured OpenClaw settings
     config = await _get_openclaw_config()
-    
+
     if config:
         # User has configured their own OpenClaw LLM
         provider_url = config["provider_url"].rstrip("/")
         api_key = config["api_key"]
         provider_type = config.get("provider_type", "openai")
-        
+
         # Build headers
         headers = {"Content-Type": "application/json"}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
-        
+
         # Determine if this is a reasoning model (needs special handling)
         is_kimi = provider_type == "moonshot" or "moonshot" in provider_url
         is_nvidia = provider_type == "nvidia" or "nvidia" in provider_url
-        
+
         # Ollama doesn't need special handling
-        is_ollama = provider_type == "ollama" or "ollama" in provider_url or "localhost" in provider_url
-        
+        is_ollama = (
+            provider_type == "ollama"
+            or "ollama" in provider_url
+            or "localhost" in provider_url
+        )
+
         # For Ollama, use /v1/chat/completions endpoint
         if is_ollama:
             target_url = f"{provider_url}/v1/chat/completions"
         else:
             target_url = f"{provider_url}/chat/completions"
-        
+
         logger.info(
             f"model_proxy: using user-configured provider: {provider_type}, url: {provider_url}"
         )
-        
+
         return (
             target_url,
             headers,
@@ -224,13 +234,17 @@ async def _resolve_route(model_name: str) -> tuple[str, dict, bool, bool, str | 
             is_nvidia,
             None,
         )
-    
+
     # Fallback to legacy hardcoded routing
-    logger.info(f"model_proxy: no user config found, using legacy routing for {model_name}")
+    logger.info(
+        f"model_proxy: no user config found, using legacy routing for {model_name}"
+    )
 
     if model_name in _KIMI_MODELS:
         if not MOONSHOT_API_KEY:
-            raise HTTPException(status_code=503, detail="Moonshot API key not configured")
+            raise HTTPException(
+                status_code=503, detail="Moonshot API key not configured"
+            )
         target_url = MOONSHOT_BASE_URL.rstrip("/") + "/chat/completions"
         headers = {
             "Content-Type": "application/json",
@@ -250,7 +264,9 @@ async def _resolve_route(model_name: str) -> tuple[str, dict, bool, bool, str | 
 
     if model_name.startswith(_OLLAMA_CLOUD_PREFIXES):
         if not EXTERNAL_OLLAMA_URL:
-            raise HTTPException(status_code=503, detail="External Ollama URL not configured")
+            raise HTTPException(
+                status_code=503, detail="External Ollama URL not configured"
+            )
         target_url = EXTERNAL_OLLAMA_URL.rstrip("/") + "/v1/chat/completions"
         headers = {"Content-Type": "application/json"}
         if EXTERNAL_OLLAMA_API_KEY:
@@ -313,7 +329,9 @@ async def proxy_chat_completions(
         model_name = model_name.split("/", 1)[1]
         body = {**body, "model": model_name}
 
-    target_url, headers, is_kimi, is_nvidia, upstream_model = await _resolve_route(model_name)
+    target_url, headers, is_kimi, is_nvidia, upstream_model = await _resolve_route(
+        model_name
+    )
 
     # Apply upstream model name override (e.g. nvidia-kimi → moonshotai/kimi-k2.5)
     if upstream_model:

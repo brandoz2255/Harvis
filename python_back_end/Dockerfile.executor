@@ -1,7 +1,7 @@
 # Harvis Artifact Executor Service
 # Builds and runs Next.js apps in isolated containers
 
-FROM node:18-alpine
+FROM node:18-alpine@sha256:929b04d7c782f04f615cf785488fed452b6569f87c73ff666ad553a7554f0006
 
 # Install Python and required packages
 RUN apk add --no-cache \
