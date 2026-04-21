@@ -27,13 +27,17 @@ import time
 import uuid
 from typing import Optional
 
-import websockets
+import websockets.client
+from websockets.client import WebSocketClientProtocol
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
 from fastapi.responses import JSONResponse
 
 from auth_optimized import get_current_user_optimized
+from jwt import decode as jwt_decode
+from jose import JWTError, jwt as jwt_encode
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +48,7 @@ OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 
 PROTOCOL_VERSION = 3
 
-_CLIENT_ID = "gateway-proxy"
+_CLIENT_ID = "gateway-client"
 _CLIENT_MODE = "webchat"
 _CLIENT_SCOPES = ["operator.admin", "operator.approvals", "operator.pairing"]
 
@@ -108,9 +112,9 @@ router = APIRouter()
 
 
 async def _connect_to_openclaw(
-    ws: websockets.WebSocketServerProtocol,
+    ws: WebSocket,
     user_id: int,
-) -> websockets.WebSocketClientProtocol:
+) -> WebSocketClientProtocol:
     """
     Connect to OpenClaw gateway and perform the auth handshake.
 
@@ -118,11 +122,14 @@ async def _connect_to_openclaw(
     """
     while True:
         try:
-            oc_ws = await websockets.connect(
+            oc_ws = await websockets.client.connect(
                 OPENCLAW_URL,
                 ping_interval=20,
                 ping_timeout=10,
                 open_timeout=10,
+                extra_headers={
+                    "Origin": os.getenv("HARVIS_ORIGIN", "https://harvis.dulc3.tech"),
+                },
             )
 
             # Step 1: Receive connect.challenge
@@ -189,7 +196,7 @@ async def _connect_to_openclaw(
             # Retry connection
 
 
-async def _relay(src: websockets.WebSocket, dst: websockets.WebSocket, label: str = ""):
+async def _relay(src: WebSocket, dst: WebSocketClientProtocol, label: str = ""):
     """Relay messages from src to dst."""
     try:
         async for message in src:
@@ -206,70 +213,125 @@ async def _handle_openclaw_ws(
     user_id: int,
 ):
     """Handle a single frontend WebSocket connection."""
-    # Accept the frontend connection
     await ws.accept()
     logger.info("[gateway-proxy] Frontend connected (user=%d)", user_id)
 
-    # Generate a unique session key for this connection
     session_key = f"agent:main:harvis-ui-{uuid.uuid4().hex[:12]}"
+    message_history: list = []
 
-    # Connect to OpenClaw gateway
     oc_ws = await _connect_to_openclaw(ws, user_id)
+    logger.info("[gateway-proxy] OpenClaw connected, starting relays")
 
-    try:
-        # Relay: frontend → OpenClaw
-        async def frontend_to_openclaw():
-            try:
-                async for message in ws:
-                    if isinstance(message, str):
-                        msg = json.loads(message)
-                        # Inject session key into chat.send if needed
-                        if msg.get("method") == "chat.send" and "params" in msg:
-                            if "sessionKey" not in msg["params"]:
-                                msg["params"]["sessionKey"] = session_key
-                                msg["params"]["idempotencyKey"] = msg.get("id", uuid.uuid4().hex)
-                        await oc_ws.send(json.dumps(msg))
-                    elif isinstance(message, bytes):
-                        await oc_ws.send(message)
-            except WebSocketDisconnect:
-                pass
-            except Exception as e:
-                logger.error("[gateway-proxy] frontend→openclaw error: %s", e)
+    async def frontend_to_openclaw():
+        try:
+            while True:
+                data = await ws.receive_text()
+                msg = json.loads(data)
+                if msg.get("method") == "chat.send" and "params" in msg:
+                    if "sessionKey" not in msg["params"]:
+                        msg["params"]["sessionKey"] = session_key
+                        msg["params"]["idempotencyKey"] = msg.get("id", uuid.uuid4().hex)
+                elif msg.get("method") == "chat.history":
+                    await ws.send_json({
+                        "type": "res",
+                        "id": msg["id"],
+                        "ok": True,
+                        "payload": {"messages": message_history}
+                    })
+                    continue
+                logger.debug("[gateway-proxy] FE→OC: %s", msg.get("method", msg.get("type", "?")))
+                await oc_ws.send(json.dumps(msg))
+        except WebSocketDisconnect:
+            logger.info("[gateway-proxy] Frontend disconnected normally")
+        except Exception as e:
+            logger.error("[gateway-proxy] frontend→openclaw error: %s", e, exc_info=True)
 
-        # Relay: OpenClaw → frontend
-        async def openclaw_to_frontend():
-            try:
-                async for message in oc_ws:
-                    msg = json.loads(message)
-
-                    # Inject session key into events if missing
-                    if msg.get("type") == "event" and "sessionKey" not in msg.get("payload", {}):
+    async def openclaw_to_frontend():
+        try:
+            while True:
+                raw = await oc_ws.recv()
+                msg = json.loads(raw)
+                if msg.get("type") == "event":
+                    if "sessionKey" not in msg.get("payload", {}):
                         if msg.get("event") in ("chat", "agent"):
                             msg["payload"]["sessionKey"] = session_key
+                    if msg.get("event") == "chat":
+                        payload = msg.get("payload", {})
+                        if payload.get("type") == "final":
+                            message_history.append({
+                                "role": "assistant",
+                                "content": payload.get("content", []),
+                                "timestamp": payload.get("timestamp", int(time.time() * 1000))
+                            })
+                logger.debug("[gateway-proxy] OC→FE: %s", msg.get("event", msg.get("method", "?")))
+                await ws.send_json(msg)
+        except websockets.exceptions.ConnectionClosed:
+            logger.info("[gateway-proxy] OpenClaw connection closed")
+        except Exception as e:
+            logger.error("[gateway-proxy] openclaw→frontend error: %s", e, exc_info=True)
 
-                    await ws.send_json(msg)
-            except websockets.exceptions.ConnectionClosed:
-                pass
-            except Exception as e:
-                logger.error("[gateway-proxy] openclaw→frontend error: %s", e)
+    done, pending = await asyncio.wait(
+        [asyncio.create_task(frontend_to_openclaw()), asyncio.create_task(openclaw_to_frontend())],
+        return_when=asyncio.FIRST_COMPLETED,
+    )
 
-        # Run both relays concurrently
-        await asyncio.gather(
-            frontend_to_openclaw(),
-            openclaw_to_frontend(),
-        )
-
-    except WebSocketDisconnect:
-        logger.info("[gateway-proxy] Frontend disconnected")
-    except Exception as e:
-        logger.error("[gateway-proxy] Connection error: %s", e)
-    finally:
-        # Close OpenClaw connection
+    for task in pending:
+        task.cancel()
         try:
-            await oc_ws.close()
-        except Exception:
+            await task
+        except asyncio.CancelledError:
             pass
-        logger.info("[gateway-proxy] Connection closed (user=%d, session=%s)", user_id, session_key[:20])
+
+    try:
+        await oc_ws.close()
+    except Exception:
+        pass
+    logger.info("[gateway-proxy] Connection closed (user=%d, session=%s)", user_id, session_key[:20])
+
+
+def _extract_token_from_ws(ws) -> Optional[str]:
+    """Extract JWT token from headers, cookies, or query params."""
+    auth = ws.headers.get("authorization", "")
+    if auth.startswith("Bearer "):
+        return auth[7:]
+    
+    cookie_header = ws.headers.get("cookie", "")
+    for cookie in cookie_header.split(";"):
+        cookie = cookie.strip()
+        if cookie.startswith("auth_token="):
+            return cookie.split("=", 1)[1]
+    
+    query_token = ws.query_params.get("token", "")
+    if query_token:
+        return query_token
+    
+    return None
+
+
+async def _authenticate_ws(ws) -> Optional[dict]:
+    """Authenticate WebSocket connection using token from headers/cookies/query params."""
+    token = _extract_token_from_ws(ws)
+    if not token:
+        return None
+    
+    # Use same default as auth_optimized.py for consistency
+    secret = os.getenv("JWT_SECRET", "key")
+    try:
+        payload = jwt_decode(token, secret, algorithms=["HS256"])
+        user_id = int(payload.get("sub", 0))
+        if user_id == 0:
+            return None
+        
+        from auth_optimized import auth_optimizer
+        user_data = await auth_optimizer.get_user_from_cache_or_db(user_id)
+        if user_data:
+            return user_data
+    except JWTError:
+        pass
+    except Exception as e:
+        logger.warning("[gateway-proxy] Auth error: %s", e)
+    
+    return None
 
 
 @router.websocket("/ws/openclaw")
@@ -281,7 +343,7 @@ async def openclaw_gateway_proxy(ws: WebSocket):
     JSON-RPC frames bidirectionally.
     """
     # Authenticate user
-    user = await get_current_user_optimized(ws)
+    user = await _authenticate_ws(ws)
     if user is None:
         # Auth failed — send error and close
         try:
@@ -292,4 +354,4 @@ async def openclaw_gateway_proxy(ws: WebSocket):
             pass
         return
 
-    await _handle_openclaw_ws(ws, user.id)
+    await _handle_openclaw_ws(ws, user['id'])
