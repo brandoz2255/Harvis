@@ -79,7 +79,8 @@ data:
           "mode": "token"
         },
         "controlUi": {
-          "enabled": false
+          "enabled": false,
+          "allowedOrigins": ["https://harvis.dulc3.tech", "http://localhost:3000"]
         }
       },
       "commands": {
