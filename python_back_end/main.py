@@ -273,6 +273,9 @@ from workspace.github_proxy import github_proxy_router
 from workspace.rag_proxy import rag_proxy_router
 from workspace.kubectl_proxy import kubectl_proxy_router
 
+# Import OpenClaw gateway proxy (WebSocket relay for newjfrontend)
+from openclaw.gateway_proxy import router as openclaw_gateway_proxy_router
+
 # Import tools routers
 from tools import maps_router, openclaw_proxy_router, opencode_llm_router
 
@@ -1166,6 +1169,9 @@ app.include_router(maps_router)
 
 # Include OpenClaw tool proxy (web-fetch + document-save — internal service auth)
 app.include_router(openclaw_proxy_router)
+
+# Include OpenClaw gateway proxy (WebSocket relay for newjfrontend)
+app.include_router(openclaw_gateway_proxy_router)
 
 # Include OpenCode LLM proxy (for OpenCode to use Kimi K2.5)
 app.include_router(opencode_llm_router)

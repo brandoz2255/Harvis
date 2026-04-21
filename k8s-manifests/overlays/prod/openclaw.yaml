@@ -105,45 +105,45 @@ data:
         "providers": {
           "qwen-local": {
             "api": "openai-completions",
-            "baseUrl": "http://harvis-ai-merged-backend:8080/v1",
+            "baseUrl": "http://harvis-ai-merged-backend.ai-agents.svc.cluster.local:8080/v1",
             "apiKey": "qwen-local",
             "models": [
-              { "id": "qwen3.5-27b", "name": "Qwen3.5-27B Claude-distilled (llama.cpp, 262K ctx, RTX 5090)" }
+              { "id": "qwen3.6-35b", "name": "Qwen3.6-35B-A3B MoE (llama.cpp, 262K ctx, RTX 5090)", "input": ["text", "image"] }
             ]
           },
           "vllm-local": {
             "api": "openai-completions",
-            "baseUrl": "http://harvis-ai-merged-backend:8001/v1",
+            "baseUrl": "http://harvis-ai-merged-backend.ai-agents.svc.cluster.local:8001/v1",
             "apiKey": "vllm-local",
             "models": [
-              { "id": "qwen3.5:9b", "name": "Qwen3.5 9B (vLLM, fast agentic, 256K ctx)" }
+              { "id": "qwen3.5:9b", "name": "Qwen3.5 9B (vLLM, fast agentic, 256K ctx)", "input": ["text", "image"] }
             ]
           },
           "llama-local": {
             "api": "openai-completions",
-            "baseUrl": "http://harvis-ai-llama-server:8080/v1",
+            "baseUrl": "http://harvis-ai-llama-server.ai-agents.svc.cluster.local:8080/v1",
             "apiKey": "llama-local",
             "models": [
-              { "id": "deepseek-r1:14b", "name": "DeepSeek R1 14B (llama.cpp, reasoning, dulc3-top)" }
+              { "id": "deepseek-r1:14b", "name": "DeepSeek R1 14B (llama.cpp, reasoning, dulc3-top)", "input": ["text", "image"] }
             ]
           },
           "harvis-proxy": {
             "api": "openai-completions",
-            "baseUrl": "http://harvis-ai-merged-backend:8000/v1",
+            "baseUrl": "http://harvis-ai-merged-backend.ai-agents.svc.cluster.local:8000/v1",
             "apiKey": "${OPENCLAW_GATEWAY_TOKEN}",
             "models": [
-              { "id": "nvidia-kimi", "name": "Kimi K2.5 (NVIDIA NIM)" },
-              { "id": "kimi-k2.5", "name": "Kimi K2.5 (Moonshot)" },
-              { "id": "gpt-oss:120b", "name": "GPT-OSS 120B (via Harvis proxy)" },
-              { "id": "qwen3:235b-a22b-q8_0", "name": "Qwen3 235B (via Harvis proxy)" }
+              { "id": "nvidia-kimi", "name": "Kimi K2.5 (NVIDIA NIM)", "input": ["text", "image"] },
+              { "id": "kimi-k2.5", "name": "Kimi K2.5 (Moonshot)", "input": ["text", "image"] },
+              { "id": "gpt-oss:120b", "name": "GPT-OSS 120B (via Harvis proxy)", "input": ["text", "image"] },
+              { "id": "qwen3:235b-a22b-q8_0", "name": "Qwen3 235B (via Harvis proxy)", "input": ["text", "image"] }
             ]
           },
           "user-config": {
             "api": "openai-completions",
-            "baseUrl": "http://harvis-ai-merged-backend:8000/v1",
+            "baseUrl": "http://harvis-ai-merged-backend.ai-agents.svc.cluster.local:8000/v1",
             "apiKey": "${OPENCLAW_GATEWAY_TOKEN}",
             "models": [
-              { "id": "harvis-llm", "name": "User Configured LLM (set in Settings)" }
+              { "id": "harvis-llm", "name": "User Configured LLM (set in Settings)", "input": ["text", "image"] }
             ]
           }
         }
@@ -179,8 +179,9 @@ data:
             "id": "main",
             "default": true,
             "model": {
-              "primary": "qwen-local/qwen3.5-27b"
-            }
+              "primary": "qwen-local/qwen3.6-35b"
+            },
+            "skills": ["harvis-rag"]
           },
           {
             "id": "deep",
@@ -579,9 +580,8 @@ spec:
                   name: harvis-ai-openclaw-secret
                   key: openclaw-gateway-token
 
-            # Ollama discovery — any non-empty value triggers auto-discovery
-            - name: OLLAMA_API_KEY
-              value: "ollama-local"
+            # OLLAMA_API_KEY removed - using llama.cpp (merged-backend) not Ollama
+             # Any non-empty value here triggers Ollama auto-discovery which fails
 
             # Database URL for session storage
             - name: DATABASE_URL

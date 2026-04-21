@@ -51,30 +51,30 @@ spec:
               mkdir -p /models-cache/gguf
               apk add --no-cache curl
 
-              # Main model: Qwen3.5-27B UD-Q4_K_XL (~17.6GB) — unsloth imatrix-optimized
-              DEST=/models-cache/gguf/Qwen3.5-27B-UD-Q4_K_XL.gguf
+              # Main model: Qwen3.6-35B-A3B UD-Q4_K_XL (~23GB) — unsloth imatrix-optimized MoE
+              DEST=/models-cache/gguf/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf
               if [ -f "$DEST" ]; then
                 echo "✅ Main GGUF already cached at $DEST, skipping"
               else
-                echo "Downloading Qwen3.5-27B-UD-Q4_K_XL.gguf (~17.6GB)..."
+                echo "Downloading Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf (~23GB)..."
                 curl -L --fail --show-error \
                   -H "Authorization: Bearer ${HF_TOKEN}" \
                   -o "$DEST.tmp" \
-                  "https://huggingface.co/unsloth/Qwen3.5-27B-GGUF/resolve/main/Qwen3.5-27B-UD-Q4_K_XL.gguf"
+                  "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
                 mv "$DEST.tmp" "$DEST"
                 echo "✅ Main model download complete: $(du -h $DEST | cut -f1)"
               fi
 
-              # Vision projector: F16 (~928MB) — full precision for best visual detail
-              MMPROJ=/models-cache/gguf/Qwen3.5-27B-mmproj-F16.gguf
+              # Vision projector: F16 (~1.1GB) — full precision for best visual detail
+              MMPROJ=/models-cache/gguf/Qwen3.6-35B-A3B-mmproj-F16.gguf
               if [ -f "$MMPROJ" ]; then
                 echo "✅ Vision projector already cached at $MMPROJ, skipping"
               else
-                echo "Downloading mmproj-F16.gguf (~928MB)..."
+                echo "Downloading Qwen3.6-35B-A3B-mmproj-F16.gguf (~1.1GB)..."
                 curl -L --fail --show-error \
                   -H "Authorization: Bearer ${HF_TOKEN}" \
                   -o "$MMPROJ.tmp" \
-                  "https://huggingface.co/unsloth/Qwen3.5-27B-GGUF/resolve/main/mmproj-F16.gguf"
+                  "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/mmproj-F16.gguf"
                 mv "$MMPROJ.tmp" "$MMPROJ"
                 echo "✅ Vision projector download complete: $(du -h $MMPROJ | cut -f1)"
               fi
@@ -213,32 +213,32 @@ spec:
             timeoutSeconds: 5
             failureThreshold: 3
 
-        # llama.cpp server — Qwen3.5-27B UD-Q4_K_XL + Vision on RTX 5090 (32GB)
+       # llama.cpp server — Qwen3.6-35B-A3B UD-Q4_K_XL + Vision on RTX 5090 (32GB)
         #
         # Why llama.cpp instead of SGLang:
         #   SGLang blocked by Marlin sm_120 (Blackwell) kernel bug — all INT4/AWQ formats
         #   silently corrupt weights or OOM. fp8 runtime quant uses ~27GB leaving no KV room.
         #   llama.cpp uses its own CUDA GEMM path (not Marlin) → works on sm_120 natively.
         #
-        # Model: unsloth/Qwen3.5-27B-GGUF  UD-Q4_K_XL
-        #   ~17.6GB on disk. Unsloth UD = imatrix-optimized dynamic quantization.
-        #   Significantly better long-context stability and coding vs standard Q4_K_M.
+        # Model: unsloth/Qwen3.6-35B-A3B-GGUF UD-Q4_K_XL
+        #   ~23GB on disk. MoE (Mixture of Experts) — only activates 3B params per forward pass.
+        #   UD = unsloth dynamic quantization (imatrix-optimized).
+        #   35B total params but A3B architecture = faster inference than dense 27B.
         #   Base model (no distillation) — native vision support preserved.
-        #   ~17.6GB VRAM → leaves ~14GB free for KV + mamba SSM state.
+        #   ~23GB VRAM → leaves ~9GB free for KV cache.
         #
-        # Vision: mmproj-F16.gguf (~928MB)
+        # Vision: mmproj-F16.gguf (~1.1GB)
         #   F16 projector = maximum visual fidelity. Loaded via --mmproj.
         #   Enables /v1/chat/completions multimodal requests with image_url content blocks.
         #
         # Context: 262144 (262K native max)
-        #   No YaRN — staying within native context avoids RoPE extrapolation overhead.
-        #   KV for hybrid model — llama.cpp only allocates KV for the 16 full-attention
-        #   layers (not the 48 GDN/SSM layers) → efficient KV usage.
-        #   At 262K + q4_0 KV: ~1.0GB — plenty of headroom for a full vibe coding session.
+        #   Full 262K context — KV cache only ~1.3GB due to 10/40 attn layers + 2 KV heads GQA.
+        #   No YaRN needed — staying within native context.
+        #   At 262K + q4_0 KV: ~1.3GB — plenty of headroom with ~9GB free.
         #
         # --flash-attn: required for long context efficiency on sm_120
         # -ngl 99: all layers on GPU
-        # --parallel 1: single slot (single user system, avoids KV multiplication)
+        # --parallel 1: single slot — full 262K context per request
         # --cache-type-k q4_0 / --cache-type-v q4_0: quantized KV → minimal KV footprint
         #
         # API compatibility: llama-server exposes OpenAI-compatible /v1/chat/completions
@@ -260,36 +260,34 @@ spec:
             - name: CUDA_VISIBLE_DEVICES
               value: "0"
           args:
-            # Model loaded from PVC (downloaded by download-gguf init container)
+         # Model loaded from PVC (downloaded by download-gguf init container)
             - "-m"
-            - "/models-cache/gguf/Qwen3.5-27B-UD-Q4_K_XL.gguf"
+            - "/models-cache/gguf/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
             - "--mmproj"
-            - "/models-cache/gguf/Qwen3.5-27B-mmproj-F16.gguf"
+            - "/models-cache/gguf/Qwen3.6-35B-A3B-mmproj-F16.gguf"
             - "--alias"
-            - "qwen3.5-27b"
+            - "qwen3.6-35b"
             - "--host"
             - "0.0.0.0"
             - "--port"
             - "8080"
             # Context and GPU
             - "--ctx-size"
-            - "262144"   # 262K native max — no YaRN needed; ~6hr vibe coding session headroom
+            - "262144"    # Full 262K — KV cache only ~1.3GB due to 10/40 attn layers + 2 KV heads GQA
             - "-ngl"
-            - "99"          # all layers on GPU
+            - "99"        # all layers on GPU
             - "--flash-attn"
             - "on"
-            # Batch sizes — batch-size=4096 (logical queue), ubatch-size=4096 (physical CUDA dispatch)
-            # Larger ubatch = fewer kernel launches = faster prefill on long contexts.
-            # RTX 5090 (32GB) handles 4096 fine with 17.6GB model + ~1GB KV at q4_0.
-            # Going above 8192 gives diminishing returns and risks OOM on very long contexts.
+            # Batch sizes — can push higher since MoE only activates 3B params per forward pass
+            # Prefill throughput benefits from larger ubatch; 5090 has headroom
             - "--batch-size"
             - "4096"
             - "--ubatch-size"
             - "4096"
-            # Parallel slots — single user system, single slot avoids KV multiplication
+            # 1 slot — full 262K context per request, no splitting
             - "--parallel"
             - "1"
-            # KV cache quantization — q4_0 at 262K × 16 attn layers ≈ 1.0GB
+            # KV cache quantization — q4_0 at 262K x 10 attn layers ≈ 1.3GB (vs ~1GB on 3.5)
             - "--cache-type-k"
             - "q4_0"
             - "--cache-type-v"
