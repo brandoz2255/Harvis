@@ -24,10 +24,10 @@ images:
     newTag: v2.34.77s
   - name: harvis-frontend
     newName: dulc3/jarvis-frontend
-    newTag: v2.34.76s
+    newTag: v2.34.77s
   - name: harvis-document-worker
     newName: dulc3/harvis-document-worker
-    newTag: v2.34.76s
+    newTag: v2.34.77s
  # - name: harvis-tts-worker  # REMOVED: TTS/Whisper now runs in main backend
   #   newName: harvis-tts-worker
   #   newTag: unbroken
@@ -36,7 +36,7 @@ images:
     newTag: new3
   - name: dulc3/harvis-mempalace
     newName: dulc3/harvis-mempalace
-    newTag: v2.34.76s
+    newTag: v2.34.77s
 
 # Patches for production
 patches:
