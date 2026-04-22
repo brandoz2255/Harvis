@@ -181,6 +181,30 @@ spec:
         kubernetes.io/hostname: rocky2vm.local
 
       initContainers:
+        # 0. Set up SSH key for host access
+        - name: setup-ssh
+          image: alpine:3.18@sha256:4edbd2bdd5bbf720784ed5137815b22cef3e9ea207c3d67c58086ef762501f81
+          command: ["sh", "-c"]
+          args:
+            - |
+              mkdir -p /ssh/.ssh
+              chmod 700 /ssh/.ssh
+              cp /ssh/harvis_key /ssh/.ssh/id_ed25519
+              chmod 600 /ssh/.ssh/id_ed25519
+              echo "SSH key setup complete"
+          volumeMounts:
+            - name: ssh-key
+              mountPath: /ssh
+            - name: openclaw-data
+              mountPath: /home/node/.openclaw
+          resources:
+            requests:
+              memory: 16Mi
+              cpu: 10m
+            limits:
+              memory: 32Mi
+              cpu: 50m
+
         # 1. Wait for PostgreSQL before starting
         - name: wait-for-db
           image: busybox:1.36@sha256:b7f3d86d6e84fc17718c48bcde1450807faa2d56704205c697b4bd5df7b9e29f
@@ -462,6 +486,10 @@ spec:
             - name: python-extra
               mountPath: /python-extra
               readOnly: true
+            # SSH key for host access
+            - name: ssh-key
+              mountPath: /home/node/.ssh
+              readOnly: true
 
           # OpenClaw exposes health only as a WebSocket RPC method, not HTTP.
           # tcpSocket probes verify the port is bound and accepting connections.
@@ -495,6 +523,12 @@ spec:
             claimName: openclaw-data
         - name: python-extra
           emptyDir: {}
+        - name: ssh-key
+          secret:
+            secretName: openclaw-ssh-key
+            items:
+              - key: harvis_key
+                path: .ssh/id_ed25519
 ---
 # Service: ClusterIP only — OpenClaw is never exposed to the host or LoadBalancer.
 # Only reachable within the cluster from the Harvis backend pod.

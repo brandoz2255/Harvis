@@ -1,0 +1,122 @@
+---
+# SSH key secret — used by OpenClaw to SSH to the host machine (harvis user)
+# Create with:
+#   kubectl create secret generic openclaw-ssh-key \
+#     --from-file=harvis_key=~/.ssh/id_ed25519 \
+#     --namespace=ai-agents
+apiVersion: v1
+kind: Secret
+metadata:
+  name: openclaw-ssh-key
+  namespace: ai-agents
+type: Opaque
+data:
+  harvis_key: ""  # Base64-encoded SSH private key — set via kubectl create secret
+---
+# NetworkPolicy: Enforce OpenClaw's isolation at the network level.
+#
+# INGRESS: Only the Harvis backend pod may connect (port 18789 WebSocket).
+# EGRESS:  Only to pgsql:5432, backend:8001 (vLLM), backend:8080 (llama-server),
+#          github.com:443, discord.com:443, host IP:22 (SSH), and DNS (port 53).
+#
+# This means even if OpenClaw is prompt-injected into calling a web tool,
+# the packet will be dropped at the kernel level before it leaves the node.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: openclaw-isolation
+  namespace: ai-agents
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: openclaw
+  policyTypes:
+    - Ingress
+    - Egress
+
+  ingress:
+    # Only allow connections from the Harvis backend
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: merged-ollama-backend
+      ports:
+        - protocol: TCP
+          port: 18789
+
+  egress:
+    # DNS resolution (CoreDNS runs in kube-system)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+    # PostgreSQL for session storage
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: postgresql
+      ports:
+        - protocol: TCP
+          port: 5432
+
+    # merged-ollama-backend — all ports in one rule:
+    #   8000: Harvis backend proxy (Kimi K2.5, GitHub API proxy)
+    #   8001: vLLM sidecar (qwen3.5:9b, fast agentic)
+    #   8080: llama-cpp sidecar (qwen3.5-27b Claude-distilled, 262K ctx) ← DEFAULT MODEL
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: merged-ollama-backend
+      ports:
+        - protocol: TCP
+          port: 8000
+        - protocol: TCP
+          port: 8001
+        - protocol: TCP
+          port: 8080
+
+    # GitHub HTTPS — required for git clone/push operations.
+    # PR creation is handled by the backend proxy above (no direct API calls
+    # to api.github.com needed from OpenClaw).
+    # IP ranges sourced from https://api.github.com/meta (git field).
+    # Update these if GitHub rotates their CIDRs.
+    - to:
+        - ipBlock:
+            cidr: 140.82.112.0/20   # github.com git HTTPS
+        - ipBlock:
+            cidr: 192.30.252.0/22   # github.com git HTTPS (legacy)
+        - ipBlock:
+            cidr: 185.199.108.0/22  # github assets / CNAME
+      ports:
+        - protocol: TCP
+          port: 443
+
+    # Discord HTTPS/WSS — required for the Discord channel driver to connect to
+    # Discord's gateway and API. Private RFC-1918 ranges excluded so OpenClaw
+    # cannot reach internal cluster services via this rule (they use ports
+    # 8000/11434/5432, not 443).
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+
+    # SSH to host machine (harvis user) — for command execution on the host
+    # Replace 192.168.1.100 with your actual host IP address
+    - to:
+        - ipBlock:
+            cidr: 192.168.1.100/32  # ← CHANGE THIS to your host IP
+      ports:
+        - protocol: TCP
+          port: 22
