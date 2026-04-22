@@ -16,7 +16,7 @@ spec:
   accessModes:
     - ReadWriteOnce
   persistentVolumeReclaimPolicy: Retain
-  storageClassName: ""
+  storageClassName: local-path
   local:
     path: /var/lib/openclaw-data
   nodeAffinity:
