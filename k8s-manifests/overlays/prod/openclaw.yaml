@@ -205,7 +205,32 @@ spec:
               memory: 32Mi
               cpu: 50m
 
-        # 1. Wait for PostgreSQL before starting
+        # 1. Sync config from image to PVC — ensures the baked openclaw.json always
+        # wins over any stale version on the PVC. The PVC mount overlays the image
+        # layer at /home/node/.openclaw so the Dockerfile copy is shadowed at
+        # runtime; this initContainer re-applies it before the gateway starts.
+        - name: sync-config
+          image: dulc3/openclaw:latest
+          imagePullPolicy: Always
+          command: ["sh", "-c"]
+          args:
+            - |
+              echo "Syncing openclaw config from image to PVC..."
+              cp /app/openclaw.json /home/node/.openclaw/openclaw.json
+              chown 1000:1000 /home/node/.openclaw/openclaw.json
+              echo "Config synced."
+          volumeMounts:
+            - name: openclaw-data
+              mountPath: /home/node/.openclaw
+          resources:
+            requests:
+              memory: 16Mi
+              cpu: 10m
+            limits:
+              memory: 32Mi
+              cpu: 50m
+
+        # 2. Wait for PostgreSQL before starting
         - name: wait-for-db
           image: busybox:1.36@sha256:b7f3d86d6e84fc17718c48bcde1450807faa2d56704205c697b4bd5df7b9e29f
           command: ["sh", "-c"]
