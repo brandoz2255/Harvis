@@ -39,7 +39,7 @@ metadata:
 spec:
   accessModes:
     - ReadWriteOnce
-  storageClassName: ""
+  storageClassName: local-path
   volumeName: openclaw-data-rocky2
   resources:
     requests:
@@ -183,7 +183,7 @@ spec:
       initContainers:
         # 0. Set up SSH key for host access
         - name: setup-ssh
-          image: alpine:3.18@sha256:4edbd2bdd5bbf720784ed5137815b22cef3e9ea207c3d67c58086ef762501f81
+          image: alpine:3.18
           command: ["sh", "-c"]
           args:
             - |
