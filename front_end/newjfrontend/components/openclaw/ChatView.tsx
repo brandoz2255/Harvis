@@ -3,7 +3,6 @@
 import { useState, useEffect, useCallback, useRef } from "react"
 import { cn } from "@/lib/utils"
 import {
-  MessageSquare,
   Users,
   Settings2,
   PanelRightOpen,
@@ -52,6 +51,7 @@ export function OpenClawChatView({ className }: OpenClawChatViewProps) {
     showThinking,
     setFocusMode,
     setShowThinking,
+    isThinking,
   } = useChatStore()
 
   const { sessions, activeSessionKey, setActiveSession, loading: sessionsLoading } = useSessionsStore()
@@ -102,9 +102,7 @@ export function OpenClawChatView({ className }: OpenClawChatViewProps) {
       <div className="flex flex-col flex-1 min-w-0">
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-2 border-b">
-          <div className="flex items-center gap-2">
-            <MessageSquare className="h-5 w-5 text-primary" />
-            <span className="font-medium">Chat</span>
+          <div className="flex items-center gap-2 ml-[10%]">
             {!isConnected && (
               <Badge variant="destructive" className="text-xs">
                 Disconnected
@@ -213,6 +211,7 @@ export function OpenClawChatView({ className }: OpenClawChatViewProps) {
             streamRunId={runId}
             thinkingLevel={thinkingLevel}
             isStreaming={!!streamText && !aborting}
+            isThinking={isThinking}
             focusMode={focusMode}
             showThinking={showThinking}
             className="flex-1"

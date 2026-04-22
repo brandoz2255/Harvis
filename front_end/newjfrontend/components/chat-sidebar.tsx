@@ -308,28 +308,10 @@ export function ChatSidebar({
 
   return (
     <>
-      {/* Floating Toggle Button - Always visible at the edge */}
-      <button
-        type="button"
-        onClick={toggleMinimize}
-        className={cn(
-          "fixed z-50 flex h-8 w-8 items-center justify-center rounded-full border border-border bg-background shadow-md transition-all duration-300 ease-in-out hover:bg-accent hover:shadow-lg",
-          isMinimized ? "left-[3.375rem] top-4" : "left-[14.625rem] top-4"
-        )}
-        title={isMinimized ? "Expand sidebar" : "Minimize sidebar"}
-      >
-        {isMinimized ? (
-          <PanelLeftOpen className="h-4 w-4 text-muted-foreground" />
-        ) : (
-          <PanelLeftClose className="h-4 w-4 text-muted-foreground" />
-        )}
-      </button>
-
-      {/* Main Sidebar Container with smooth width transition */}
+      {/* Main Sidebar Container */}
       <div
         className={cn(
-          "flex h-full flex-col border-r border-border bg-sidebar transition-all duration-300 ease-in-out",
-          isMinimized ? "w-16" : "w-72",
+          "flex h-full w-full flex-col bg-sidebar",
           className
         )}
       >

@@ -2,6 +2,7 @@
  * Hook for OpenClaw WebSocket connection lifecycle.
  *
  * Manages connect/disconnect, event subscription, and session switching.
+ * Note: connect() is called by the parent component (page.tsx), not here.
  */
 
 import { useEffect, useCallback, useRef } from "react"
@@ -9,7 +10,7 @@ import { useConnectionStore } from "@/stores/openclawConnectionStore"
 import { useChatStore } from "@/stores/openclawChatStore"
 import { useSessionsStore } from "@/stores/openclawSessionsStore"
 import { useAgentsStore } from "@/stores/openclawAgentsStore"
-import type { NormalizedMessage, MessageGroup, ChatEventPayload, AgentEventPayload } from "@/lib/openclaw/types"
+import type { NormalizedMessage, MessageGroup, ChatEventPayload, AgentEventPayload, ToolsCatalogResult } from "@/lib/openclaw/types"
 
 export function useOpenClawConnection() {
   const connect = useConnectionStore((s) => s.connect)
@@ -42,10 +43,8 @@ export function useOpenClawConnection() {
     }
   }, [])
 
-  // Connect on mount
+  // Subscribe to events when client is available
   useEffect(() => {
-    connect()
-
     if (!client) return
 
     // ─── Chat events ────────────────────────────────────────────────────
@@ -64,8 +63,14 @@ export function useOpenClawConnection() {
         clearStream()
         clearToolStream()
 
-        if (payload.message) {
-          appendMessage(payload.message as NormalizedMessage)
+        if (payload.content) {
+          const assistantMsg: NormalizedMessage = {
+            role: 'assistant',
+            content: payload.content,
+            timestamp: payload.timestamp ?? Date.now(),
+            id: payload.id
+          }
+          appendMessage(assistantMsg)
         }
 
         setChatSending(false)

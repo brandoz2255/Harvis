@@ -117,10 +117,13 @@ export type ChatEventPayload = {
   runId?: string
   sessionKey?: string
   state: "delta" | "final" | "aborted" | "error"
+  id?: string
   message?: NormalizedMessage
+  content?: ChatMessageContentItem[]
   text?: string
   thinking?: string
   thinkingState?: string
+  timestamp?: number
 }
 
 export type AgentEventPayload = {

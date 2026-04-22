@@ -35,14 +35,21 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
   lastError: null,
   hello: null,
 
-  connect: () => {
-    if (get().connected) return
+   connect: () => {
+    const state = get()
+    if (state.connected || state.connecting) return
+    if (state.client && state.client.connected) return
+
+    // Disconnect old client if exists
+    if (state.client) {
+      state.client.disconnect()
+    }
 
     set({ connecting: true, lastError: null })
 
     const client = new OpenClawClient()
-    client.connect()
 
+    // Set up event listeners BEFORE calling connect()
     client.on("connected", () => {
       set({ connected: true, connecting: false, client })
     })
@@ -55,7 +62,16 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
       if (frame.type === "event" && frame.event === "connected") {
         set({ hello: frame.payload })
       }
+      if (frame.type === "event" && frame.event === "connecting" && (frame.payload as any)?.refreshingToken) {
+        set({ connecting: true, lastError: "Refreshing token..." })
+      }
+      if (frame.type === "event" && frame.event === "disconnected" && (frame.payload as any)?.reason === "Token expired") {
+        set({ connecting: true, lastError: "Token expired, refreshing..." })
+      }
     })
+
+    // Now connect - events will be captured
+    client.connect()
 
     set({ client })
   },

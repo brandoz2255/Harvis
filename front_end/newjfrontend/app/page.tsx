@@ -1,6 +1,7 @@
 "use client"
 
-import { useState, useCallback } from "react"
+import { useState, useEffect } from "react"
+import { useRouter } from "next/navigation"
 import { cn } from "@/lib/utils"
 import {
   MessageSquare,
@@ -9,16 +10,13 @@ import {
   Briefcase,
   PanelLeftClose,
   PanelLeftOpen,
-  Sparkles,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import ChatSidebar from "@/components/chat-sidebar"
 import { OpenClawChatView } from "@/components/openclaw/ChatView"
 import { OpenClawSessionsView } from "@/components/openclaw/OpenClawSessionsView"
 import { OpenClawAgentsView } from "@/components/openclaw/OpenClawAgentsView"
-import { WorkspaceLayout } from "@/components/workspace/WorkspaceLayout"
 import { WorkspacePanel } from "@/components/workspace/WorkspacePanel"
-import { useOpenClawStore } from "@/stores/openclawStore"
 import { useUser } from "@/lib/auth/UserProvider"
 import { useConnectionStore } from "@/stores/openclawConnectionStore"
 
@@ -32,39 +30,25 @@ const TABS: { id: Tab; label: string; icon: React.ComponentType<{ className?: st
 ]
 
 export default function ChatPage() {
+  const router = useRouter()
   const { user, isLoading: isAuthLoading } = useUser()
   const [activeTab, setActiveTab] = useState<Tab>("chat")
   const [sidebarOpen, setSidebarOpen] = useState(true)
 
+  useEffect(() => {
+    if (!user && !isAuthLoading) {
+      router.push("/login")
+    }
+  }, [user, isAuthLoading, router])
+
   // Connect to OpenClaw gateway on mount
   const connect = useConnectionStore((s) => s.connect)
-
-  if (isAuthLoading) {
-    return (
-      <div className="flex items-center justify-center h-screen">
-        <div className="flex flex-col items-center gap-3">
-          <Sparkles className="h-8 w-8 text-primary animate-pulse" />
-          <span className="text-sm text-muted-foreground">Loading...</span>
-        </div>
-      </div>
-    )
-  }
-
-  if (!user) {
-    return (
-      <div className="flex items-center justify-center h-screen">
-        <div className="text-center">
-          <h2 className="text-xl font-semibold mb-2">Authentication required</h2>
-          <p className="text-sm text-muted-foreground">Please log in to continue</p>
-        </div>
-      </div>
-    )
-  }
-
-  // Connect to OpenClaw on mount
-  if (!useConnectionStore.getState().connected) {
-    connect()
-  }
+  useEffect(() => {
+    const state = useConnectionStore.getState()
+    if (!state.connected && !state.connecting) {
+      connect()
+    }
+  }, [])
 
   const renderContent = () => {
     switch (activeTab) {

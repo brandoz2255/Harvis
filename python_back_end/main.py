@@ -2200,6 +2200,56 @@ async def _login_with_connection(request: AuthRequest, conn):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+@app.post("/api/auth/refresh-token", tags=["auth"])
+async def refresh_token(app_request: Request):
+    """Refresh an expired JWT to get a new one. Accepts the old (possibly expired) token
+    in Authorization header, cookie, or JSON body. Returns a fresh token with a new expiry."""
+    token = None
+    credentials = None
+    try:
+        credentials = await security.get_authorization_header(app_request)
+    except Exception:
+        pass
+
+    token = app_request.cookies.get("access_token")
+    if token is None and credentials is not None:
+        token = credentials.credentials
+    if token is None:
+        body = await app_request.json()
+        token = body.get("token") or body.get("access_token")
+    if not token:
+        raise HTTPException(status_code=401, detail="No token provided")
+
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM], options={"verify_exp": False})
+        user_id_str = payload.get("sub")
+        if user_id_str is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        user_id = int(user_id_str)
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    pool = getattr(app_request.app.state, "pg_pool", None)
+    if pool:
+        async with pool.acquire() as conn:
+            user = await conn.fetchrow("SELECT id FROM users WHERE id = $1", user_id)
+    else:
+        conn = await asyncpg.connect(DATABASE_URL, timeout=10)
+        try:
+            user = await conn.fetchrow("SELECT id FROM users WHERE id = $1", user_id)
+        finally:
+            await conn.close()
+
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    new_token = create_access_token(
+        data={"sub": str(user_id)}, expires_delta=access_token_expires
+    )
+    return {"access_token": new_token, "token_type": "bearer"}
+
+
 @app.get("/api/auth/me", response_model=UserResponse, tags=["auth"])
 async def get_current_user_info(current_user: UserResponse = Depends(get_current_user)):
     """Get current user info"""

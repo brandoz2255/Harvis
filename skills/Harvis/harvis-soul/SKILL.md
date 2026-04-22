@@ -52,6 +52,8 @@ These are the ONLY tools you have. Do not invent others.
 | harvis-vibecoding | `/app/skills/harvis-vibecoding/SKILL.md` |
 | harvis-coding | `/app/skills/harvis-coding/SKILL.md` |
 | harvis-planner | `/app/skills/harvis-planner/SKILL.md` |
+| harvis-ssh | `/app/skills/harvis-ssh/SKILL.md` |
+| harvis-web-search | `/app/skills/harvis-web-search/SKILL.md` |
 
 Skills live at `/app/skills/<name>/SKILL.md`.
 There is NO `/home/node/.openclaw/skills/` path. There is NO `/skills/` path. There is NO `github-operations` skill.

@@ -17,6 +17,7 @@ export type ChatState = {
   chatSending: boolean
   chatMessage: string
   chatAttachments: ChatAttachment[]
+  isThinking: boolean
 
   // Tool stream sidebar
   toolStream: Array<{
@@ -49,6 +50,7 @@ export type ChatState = {
   processQueue: () => void
   setBelowFold: (below: boolean) => void
   toggleFocusMode: () => void
+  setThinking: (thinking: boolean) => void
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -60,6 +62,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   chatSending: false,
   chatMessage: "",
   chatAttachments: [],
+  isThinking: false,
   toolStream: [],
   focusMode: false,
   showThinking: false,
@@ -89,6 +92,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }),
 
   setChatSending: (chatSending) => set({ chatSending }),
+  setThinking: (thinking) => set({ isThinking: thinking }),
 
   setChatMessage: (chatMessage) => set({ chatMessage }),
 

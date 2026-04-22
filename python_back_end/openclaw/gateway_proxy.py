@@ -49,7 +49,7 @@ OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 PROTOCOL_VERSION = 3
 
 _CLIENT_ID = "gateway-client"
-_CLIENT_MODE = "webchat"
+_CLIENT_MODE = "backend"
 _CLIENT_SCOPES = ["operator.admin", "operator.approvals", "operator.pairing"]
 
 # Ed25519 SPKI DER prefix — strip to get raw 32-byte key
@@ -216,7 +216,8 @@ async def _handle_openclaw_ws(
     await ws.accept()
     logger.info("[gateway-proxy] Frontend connected (user=%d)", user_id)
 
-    session_key = f"agent:main:harvis-ui-{uuid.uuid4().hex[:12]}"
+    # Use persistent session key based on user_id so chat history persists
+    session_key = f"agent:main:harvis-user-{user_id}"
     message_history: list = []
 
     oc_ws = await _connect_to_openclaw(ws, user_id)
@@ -227,6 +228,7 @@ async def _handle_openclaw_ws(
             while True:
                 data = await ws.receive_text()
                 msg = json.loads(data)
+                logger.info(f"[gateway-proxy] FE→OC: {msg.get('method', msg.get('type', '?'))}")
                 if msg.get("method") == "chat.send" and "params" in msg:
                     if "sessionKey" not in msg["params"]:
                         msg["params"]["sessionKey"] = session_key
@@ -251,18 +253,54 @@ async def _handle_openclaw_ws(
             while True:
                 raw = await oc_ws.recv()
                 msg = json.loads(raw)
+                logger.info(f"[gateway-proxy] OC→FE: {msg.get('event', msg.get('method', msg.get('type', '?')))}")
                 if msg.get("type") == "event":
+                    event = msg.get("event")
+                    # Skip agent events (tool calls, file reads, etc.) - only relay chat events
+                    if event != "chat":
+                        logger.debug("[gateway-proxy] OC→FE: skipping %s event", event)
+                        continue
                     if "sessionKey" not in msg.get("payload", {}):
-                        if msg.get("event") in ("chat", "agent"):
-                            msg["payload"]["sessionKey"] = session_key
-                    if msg.get("event") == "chat":
-                        payload = msg.get("payload", {})
-                        if payload.get("type") == "final":
-                            message_history.append({
-                                "role": "assistant",
-                                "content": payload.get("content", []),
-                                "timestamp": payload.get("timestamp", int(time.time() * 1000))
-                            })
+                        msg["payload"]["sessionKey"] = session_key
+                    
+                    # Normalize OpenClaw payload format to frontend expected format
+                    # OpenClaw sends: { state, message: { content: [{text}] } }
+                    # Frontend expects: { state, content: [{type: "text", text}], text }
+                    payload = msg.get("payload", {})
+                    message = payload.get("message")
+                    if message:
+                        # Normalize content array: OpenClaw has [{text}], frontend needs [{type: "text", text}]
+                        raw_content = message.get("content", [])
+                        if isinstance(raw_content, list):
+                            normalized = []
+                            for item in raw_content:
+                                if isinstance(item, dict) and "text" in item:
+                                    normalized.append({
+                                        "type": "text",
+                                        "text": item["text"]
+                                    })
+                                elif isinstance(item, str):
+                                    normalized.append({
+                                        "type": "text",
+                                        "text": item
+                                    })
+                            payload["content"] = normalized
+                            # Also set text field for delta events (streaming text)
+                            if payload.get("state") == "delta":
+                                payload["text"] = "".join(
+                                    item.get("text", "") for item in normalized
+                                )
+                        # Also copy message.id if present
+                        if "id" not in payload and "id" in message:
+                            payload["id"] = message["id"]
+                    
+                    if payload.get("type") == "final":
+                        message_history.append({
+                            "role": "assistant",
+                            "content": payload.get("content", []),
+                            "timestamp": payload.get("timestamp", int(time.time() * 1000))
+                        })
+                # Always relay events and responses to frontend
                 logger.debug("[gateway-proxy] OC→FE: %s", msg.get("event", msg.get("method", "?")))
                 await ws.send_json(msg)
         except websockets.exceptions.ConnectionClosed:
@@ -353,5 +391,27 @@ async def openclaw_gateway_proxy(ws: WebSocket):
         except Exception:
             pass
         return
+
+    # Check if token was expired (user_id from expired JWT would still be valid if decoded with verify_exp=False)
+    token = _extract_token_from_ws(ws)
+    if token:
+        try:
+            from jose import jwt as jwt_decode_jose
+            secret = os.getenv("JWT_SECRET", "key")
+            payload = jwt_decode_jose(token, secret, algorithms=["HS256"], options={"verify_exp": False})
+            if payload.get("exp"):
+                import time
+                if int(time.time()) > payload["exp"]:
+                    # Token expired — send specific error so frontend knows to refresh
+                    await ws.accept()
+                    await ws.send_json({
+                        "type": "error",
+                        "message": "Token expired",
+                        "code": "TOKEN_EXPIRED"
+                    })
+                    await ws.close(code=4002, reason="Token expired")
+                    return
+        except Exception:
+            pass
 
     await _handle_openclaw_ws(ws, user['id'])
