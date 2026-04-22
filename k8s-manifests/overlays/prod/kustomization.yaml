@@ -24,7 +24,7 @@ images:
     newTag: latest
   - name: harvis-frontend
     newName: dulc3/jarvis-frontend
-    newTag: frontend-v2.34.88s
+    newTag: frontend-v2.34.89s
   - name: harvis-document-worker
     newName: dulc3/harvis-document-worker
     newTag: latest
@@ -56,7 +56,7 @@ patches:
     patch: |
       - op: replace
         path: /spec/template/spec/containers/0/image
-        value: dulc3/jarvis-frontend:frontend-v2.34.88s
+        value: dulc3/jarvis-frontend:frontend-v2.34.89s
   - target:
       kind: Deployment
       name: harvis-document-worker
