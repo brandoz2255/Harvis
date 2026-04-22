@@ -218,6 +218,20 @@ spec:
               echo "Syncing openclaw config from image to PVC..."
               cp /app/openclaw.json /home/node/.openclaw/openclaw.json
               chown 1000:1000 /home/node/.openclaw/openclaw.json
+
+              # Always write exec-approvals.json — disables per-command approval prompts.
+              # askFallback: allow means when no approval UI is connected to the socket,
+              # exec auto-allows. Without this, exec blocks for 120s then denies.
+              # Use printf (not heredoc) to avoid indentation issues with leading spaces.
+              printf '{"version":1,"defaults":{"security":"full","ask":"off","askFallback":"full","autoAllowSkills":true},"agents":{}}\n' \
+                > /home/node/.openclaw/exec-approvals.json
+              chmod 644 /home/node/.openclaw/exec-approvals.json
+
+              # Remove stale approval socket from previous pod run.
+              # If this file exists, OpenClaw thinks a UI is connected and sends
+              # approval requests there — gets no response — then denies the exec.
+              # Deleting it before startup forces OpenClaw to use askFallback: allow.
+              rm -f /home/node/.openclaw/exec-approvals.sock
               echo "Config synced."
           volumeMounts:
             - name: openclaw-data
