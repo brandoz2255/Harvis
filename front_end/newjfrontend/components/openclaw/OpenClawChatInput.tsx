@@ -16,6 +16,20 @@ import {
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 
+const SLASH_COMMANDS = [
+  { command: "/new",        description: "Start a new session" },
+  { command: "/compact",    description: "Compact the session context" },
+  { command: "/clear",      description: "Clear session history" },
+  { command: "/status",     description: "Show current status" },
+  { command: "/agents",     description: "List thread-bound agents" },
+  { command: "/approve",    description: "Approve or deny exec requests" },
+  { command: "/activation", description: "Set group activation mode" },
+  { command: "/think",      description: "Set thinking level (off/low/high/max)" },
+  { command: "/verbose",    description: "Toggle verbose mode" },
+  { command: "/model",      description: "Switch model" },
+  { command: "/help",       description: "Show available commands" },
+]
+
 const SUPPORTED_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp']
 
 interface Attachment {
@@ -56,6 +70,13 @@ export function OpenClawChatInput({
   const screenshareIntervalRef = useRef<NodeJS.Timeout | null>(null)
   const screenStreamRef = useRef<MediaStream | null>(null)
   const [showAttachmentMenu, setShowAttachmentMenu] = useState(false)
+  const [slashCmdIndex, setSlashCmdIndex] = useState(0)
+
+  // Filtered slash commands based on current input
+  const slashMatches = value.startsWith("/") && !value.includes(" ")
+    ? SLASH_COMMANDS.filter(c => c.command.startsWith(value.toLowerCase()))
+    : []
+  const showSlashMenu = slashMatches.length > 0
 
   // Auto-resize textarea
   useEffect(() => {
@@ -87,11 +108,37 @@ export function OpenClawChatInput({
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (showSlashMenu) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault()
+        setSlashCmdIndex(i => (i + 1) % slashMatches.length)
+        return
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault()
+        setSlashCmdIndex(i => (i - 1 + slashMatches.length) % slashMatches.length)
+        return
+      }
+      if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
+        e.preventDefault()
+        onChange(slashMatches[slashCmdIndex].command + " ")
+        setSlashCmdIndex(0)
+        textareaRef.current?.focus()
+        return
+      }
+      if (e.key === "Escape") {
+        onChange("")
+        return
+      }
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault()
       handleSubmit()
     }
   }
+
+  // Reset index when matches change
+  useEffect(() => { setSlashCmdIndex(0) }, [value])
 
   // ============== PASTE HANDLING ==============
   const handlePaste = (e: React.ClipboardEvent) => {
@@ -378,6 +425,31 @@ export function OpenClawChatInput({
             </div>
 
             <div className="flex-1 relative">
+              {/* Slash command picker */}
+              {showSlashMenu && (
+                <div className="absolute bottom-full left-0 mb-1 w-72 rounded-lg border border-border bg-card shadow-lg z-50 overflow-hidden">
+                  <div className="px-3 py-1.5 text-xs text-muted-foreground border-b border-border">Commands</div>
+                  {slashMatches.map((cmd, i) => (
+                    <button
+                      key={cmd.command}
+                      type="button"
+                      onMouseDown={(e) => {
+                        e.preventDefault()
+                        onChange(cmd.command + " ")
+                        setSlashCmdIndex(0)
+                        textareaRef.current?.focus()
+                      }}
+                      className={cn(
+                        "flex w-full items-center gap-3 px-3 py-2 text-sm text-left",
+                        i === slashCmdIndex ? "bg-accent text-accent-foreground" : "hover:bg-accent/50"
+                      )}
+                    >
+                      <span className="font-mono text-primary">{cmd.command}</span>
+                      <span className="text-muted-foreground truncate">{cmd.description}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
               <Textarea
                 ref={textareaRef}
                 value={value}

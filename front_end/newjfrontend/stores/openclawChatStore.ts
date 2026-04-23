@@ -77,12 +77,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     })),
 
   updateStream: (text, runId, thinkingLevel) =>
-    set({
-      chatStream: text,
-      chatStreamStartedAt: get().chatStreamStartedAt ?? Date.now(),
-      chatRunId: runId ?? get().chatRunId,
-      chatThinkingLevel: thinkingLevel ?? get().chatThinkingLevel,
-    }),
+    set((state) => ({
+      chatStream: (state.chatStream ?? "") + text,
+      chatStreamStartedAt: state.chatStreamStartedAt ?? Date.now(),
+      chatRunId: runId ?? state.chatRunId,
+      chatThinkingLevel: thinkingLevel ?? state.chatThinkingLevel,
+    })),
 
   clearStream: () =>
     set({

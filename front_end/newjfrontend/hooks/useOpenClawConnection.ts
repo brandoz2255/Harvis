@@ -10,7 +10,7 @@ import { useConnectionStore } from "@/stores/openclawConnectionStore"
 import { useChatStore } from "@/stores/openclawChatStore"
 import { useSessionsStore } from "@/stores/openclawSessionsStore"
 import { useAgentsStore } from "@/stores/openclawAgentsStore"
-import type { NormalizedMessage, MessageGroup, ChatEventPayload, AgentEventPayload, ToolsCatalogResult } from "@/lib/openclaw/types"
+import type { AgentEventPayload, ToolsCatalogResult } from "@/lib/openclaw/types"
 
 export function useOpenClawConnection() {
   const connect = useConnectionStore((s) => s.connect)
@@ -18,13 +18,7 @@ export function useOpenClawConnection() {
   const client = useConnectionStore((s) => s.client)
   const setConnected = useConnectionStore((s) => s.setConnected)
 
-  const setMessages = useChatStore((s) => s.setMessages)
-  const appendMessage = useChatStore((s) => s.appendMessage)
-  const updateStream = useChatStore((s) => s.updateStream)
-  const clearStream = useChatStore((s) => s.clearStream)
   const addToolStreamEntry = useChatStore((s) => s.addToolStreamEntry)
-  const clearToolStream = useChatStore((s) => s.clearToolStream)
-  const setChatSending = useChatStore((s) => s.setChatSending)
 
   const setSessions = useSessionsStore((s) => s.setSessions)
 
@@ -47,62 +41,35 @@ export function useOpenClawConnection() {
   useEffect(() => {
     if (!client) return
 
-    // ─── Chat events ────────────────────────────────────────────────────
-
-    const unsubChat = client.on("chat", (frame) => {
-      const payload = frame.payload as ChatEventPayload
-      if (!payload) return
-
-      if (payload.state === "delta") {
-        updateStream(
-          payload.text ?? "",
-          payload.runId,
-          payload.thinkingState ?? null,
-        )
-      } else if (payload.state === "final") {
-        clearStream()
-        clearToolStream()
-
-        if (payload.content) {
-          const assistantMsg: NormalizedMessage = {
-            role: 'assistant',
-            content: payload.content,
-            timestamp: payload.timestamp ?? Date.now(),
-            id: payload.id
-          }
-          appendMessage(assistantMsg)
-        }
-
-        setChatSending(false)
-      } else if (payload.state === "aborted") {
-        clearStream()
-        clearToolStream()
-        setChatSending(false)
-      } else if (payload.state === "error") {
-        clearStream()
-        clearToolStream()
-        setChatSending(false)
-      }
-    })
+    // NOTE: chat events (delta/final) are handled exclusively by useOpenClawChat.
+    // Do not add a chat listener here — it would cause duplicate messages.
 
     // ─── Agent/tool stream events ───────────────────────────────────────
 
     const unsubAgent = client.on("agent", (frame) => {
       const payload = frame.payload as AgentEventPayload
-      if (!payload) return
+      if (!payload || payload.stream !== "tool") return
 
-      if (payload.name && payload.state === "start") {
+      const data = payload.data ?? {}
+      const name = data.name as string | undefined
+      const toolCallId = (data.toolCallId as string | undefined) ?? `${payload.runId}-${payload.seq}`
+      if (!name) return
+
+      if (data.phase === "start") {
         addToolStreamEntry({
-          toolCallId: payload.toolCallId ?? crypto.randomUUID(),
-          name: payload.name,
-          args: payload.args,
+          toolCallId,
+          name,
+          args: data.args,
           kind: "call",
         })
-      } else if (payload.name && payload.state === "end") {
+      } else if (data.phase === "result") {
+        const result = data.result
         addToolStreamEntry({
-          toolCallId: payload.toolCallId ?? "",
-          name: payload.name,
-          text: payload.text ?? "",
+          toolCallId,
+          name,
+          text: result
+            ? (typeof result === "string" ? result : JSON.stringify(result, null, 2))
+            : "(completed)",
           kind: "result",
         })
       }
@@ -178,7 +145,6 @@ export function useOpenClawConnection() {
     })
 
     return () => {
-      unsubChat()
       unsubAgent()
       unsubSessions()
       unsubAgents()

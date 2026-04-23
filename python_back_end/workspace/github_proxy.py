@@ -51,12 +51,15 @@ HARVIS_COAUTHOR_TRAILER = os.getenv(
     "Co-authored-by: brandoz2255 <124217011+brandoz2255@users.noreply.github.com>",
 )
 
-# Only these repos may receive PRs from this proxy.
-# To add more repos: append "owner/repo-name" to this set.
-_ALLOWED_REPOS = frozenset({
+# Repos explicitly allowed regardless of owner prefix.
+_ALLOWED_REPOS_EXPLICIT = frozenset({
     "dulc3/harvis-aidev",
     "brandoz2255/Harvis",
 })
+
+# Any repo owned by these GitHub accounts is also allowed.
+# This lets Harvis create a new repo and immediately open PRs on it.
+_ALLOWED_OWNERS = frozenset({"dulc3"})
 
 # Only branches matching this prefix may be used as PR heads.
 # This prevents the agent from ever opening a PR from main/master.
@@ -79,12 +82,14 @@ def _verify_openclaw_token(authorization: Optional[str]) -> None:
 
 
 def _validate_repo(repo: str) -> None:
-    if repo not in _ALLOWED_REPOS:
+    """Allow any dulc3/* repo or explicitly listed repos."""
+    owner = repo.split("/")[0] if "/" in repo else ""
+    if repo not in _ALLOWED_REPOS_EXPLICIT and owner not in _ALLOWED_OWNERS:
         logger.warning("github_proxy: rejected PR for disallowed repo %r", repo)
         raise HTTPException(
             status_code=403,
-            detail=f"Repo '{repo}' is not on the Harvis allowed list. "
-                   f"Allowed: {sorted(_ALLOWED_REPOS)}",
+            detail=f"Repo '{repo}' is not allowed. Must be owned by one of "
+                   f"{sorted(_ALLOWED_OWNERS)} or be in {sorted(_ALLOWED_REPOS_EXPLICIT)}.",
         )
 
 

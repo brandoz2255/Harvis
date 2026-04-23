@@ -308,9 +308,12 @@ export class OpenClawClient {
 
   /**
    * Load chat history for the current session.
+   * sessionKey is required by OpenClaw — injected from _sessionId if set.
    */
   async loadChatHistory(limit = 200): Promise<Frame> {
-    return this.request("chat.history", { limit })
+    const params: Record<string, unknown> = { limit }
+    if (this._sessionId) params.sessionKey = this._sessionId
+    return this.request("chat.history", params)
   }
 
   /**

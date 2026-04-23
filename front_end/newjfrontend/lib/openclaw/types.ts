@@ -127,14 +127,12 @@ export type ChatEventPayload = {
 }
 
 export type AgentEventPayload = {
-  runId?: string
-  toolCallId?: string
-  name?: string
-  args?: unknown
-  result?: unknown
-  text?: string
-  state?: "start" | "delta" | "end"
-  seq?: number
+  runId: string
+  seq: number
+  stream: "lifecycle" | "tool" | "assistant" | "error" | string
+  ts: number
+  data: Record<string, unknown>
+  sessionKey?: string
 }
 
 export type ChatAttachment = {

@@ -4,11 +4,11 @@
  * Provides send, abort, history loading, and session switching.
  */
 
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { useConnectionStore } from "@/stores/openclawConnectionStore"
 import { useChatStore } from "@/stores/openclawChatStore"
 import { useSessionsStore } from "@/stores/openclawSessionsStore"
-import type { NormalizedMessage, ChatAttachment } from "@/lib/openclaw/types"
+import type { NormalizedMessage } from "@/lib/openclaw/types"
 
 export function useOpenClawChat() {
   const client = useConnectionStore((s) => s.client)
@@ -29,92 +29,91 @@ export function useOpenClawChat() {
   const setActiveSession = useSessionsStore((s) => s.setActiveSession)
 
   const [aborting, setAborting] = useState(false)
-  const [currentChatUnsubscribe, setCurrentChatUnsubscribe] = useState<(() => void) | null>(null)
 
-  // Clean up chat event listener on unmount
+  // ── Persistent chat event listener ──────────────────────────────────────────
+  // A single listener for the lifetime of the client connection — no per-send
+  // subscribe/unsubscribe. This prevents the useEffect cleanup from killing
+  // in-flight listeners when the user sends a second message before the first
+  // response arrives.
   useEffect(() => {
-    return () => {
-      if (currentChatUnsubscribe) {
-        currentChatUnsubscribe()
-      }
-    }
-  }, [currentChatUnsubscribe])
+    if (!client) return
 
-  /** Send a chat message */
-  const send = useCallback(async (text?: string, attachments?: Array<{ name: string; type: string; data: string }>) => {
-    if (!client || !client.connected) return
+    const unsubscribe = client.on("chat", (frame) => {
+      if (frame.type !== "event" || frame.event !== "chat") return
+      const payload = frame.payload as any
 
-    const message = text ?? chatMessage
-    if (!message.trim()) return
+      if (payload.state === "delta") {
+        // Accumulate delta tokens — don't replace
+        updateStream(payload.text ?? "", payload.runId, payload.thinkingState)
+      } else if (payload.state === "final") {
+        clearStream()
+        setChatSending(false)
+        setThinking(false)
 
-    setChatMessage("")
-    setChatSending(true)
-    setThinking(true)
-    clearStream()
-    clearToolStream()
-
-    // Add user message immediately (with attachments if any)
-    const userMsg: NormalizedMessage = {
-      role: 'user',
-      content: [{ type: 'text', text: message }],
-      timestamp: Date.now(),
-      id: crypto.randomUUID()
-    }
-    appendMessage(userMsg)
-
-    // Subscribe to chat events
-    const unsubscribe = client.on('chat', (frame) => {
-      if (frame.type === 'event' && frame.event === 'chat') {
-        const payload = frame.payload as any
-        if (payload.state === 'delta') {
-          // Update streaming text
-          updateStream(payload.text ?? '', payload.runId, payload.thinkingState)
-        } else if (payload.state === 'final') {
-          // Final response received
-          clearStream()
-          setChatSending(false)
-          setThinking(false)
-          // Normalize content: handle both direct content and message.content format
-          let content = payload.content
-          if (!content && payload.message?.content) {
-            content = payload.message.content
-          }
-          const assistantMsg: NormalizedMessage = {
-            role: 'assistant',
-            content: content ?? [{ type: 'text', text: '' }],
-            timestamp: payload.timestamp ?? Date.now(),
-            id: payload.id
-          }
-          appendMessage(assistantMsg)
-          // Unsubscribe after final
-          unsubscribe()
-          setCurrentChatUnsubscribe(null)
-        } else if (payload.state === 'aborted') {
-          clearStream()
-          setChatSending(false)
-          unsubscribe()
-          setCurrentChatUnsubscribe(null)
-        } else if (payload.state === 'error') {
-          clearStream()
-          setChatSending(false)
-          unsubscribe()
-          setCurrentChatUnsubscribe(null)
+        // Normalize content from either payload.content or payload.message.content
+        let content = payload.content
+        if (!content && payload.message?.content) {
+          content = payload.message.content
         }
+        // Last-resort: reconstruct from the accumulated stream text
+        if (!content || content.length === 0) {
+          const streamText = useChatStore.getState().chatStream
+          if (streamText) {
+            content = [{ type: "text", text: streamText }]
+          }
+        }
+
+        const assistantMsg: NormalizedMessage = {
+          role: "assistant",
+          content: content ?? [{ type: "text", text: "" }],
+          timestamp: payload.timestamp ?? Date.now(),
+          id: payload.id,
+        }
+        appendMessage(assistantMsg)
+      } else if (payload.state === "aborted" || payload.state === "error") {
+        clearStream()
+        setChatSending(false)
+        setThinking(false)
       }
     })
 
-    setCurrentChatUnsubscribe(unsubscribe)
+    return () => unsubscribe()
+  }, [client]) // only re-create when the client instance changes
 
-    try {
-      await client.sendChat(message)
-    } catch (e) {
-      console.error('[OpenClawChat] Failed to send:', e)
-      setChatSending(false)
+  /** Send a chat message */
+  const send = useCallback(
+    async (text?: string, attachments?: Array<{ name: string; type: string; data: string }>) => {
+      if (!client || !client.connected) return
+
+      const message = text ?? chatMessage
+      if (!message.trim()) return
+
+      setChatMessage("")
+      setChatSending(true)
+      setThinking(true)
       clearStream()
-      unsubscribe()
-      setCurrentChatUnsubscribe(null)
-    }
-  }, [client, chatMessage, setChatMessage, setChatSending, clearStream, clearToolStream, appendMessage, updateStream])
+      clearToolStream()
+
+      // Add user message immediately
+      const userMsg: NormalizedMessage = {
+        role: "user",
+        content: [{ type: "text", text: message }],
+        timestamp: Date.now(),
+        id: crypto.randomUUID(),
+      }
+      appendMessage(userMsg)
+
+      try {
+        await client.sendChat(message, attachments)
+      } catch (e) {
+        console.error("[OpenClawChat] Failed to send:", e)
+        setChatSending(false)
+        setThinking(false)
+        clearStream()
+      }
+    },
+    [client, chatMessage, setChatMessage, setChatSending, clearStream, clearToolStream, appendMessage, setThinking],
+  )
 
   /** Abort current run */
   const abort = useCallback(async () => {
@@ -137,9 +136,10 @@ export function useOpenClawChat() {
     try {
       const result = await client.loadChatHistory()
       if (result.type === "res" && result.ok) {
-        const messages = (result.payload as any)?.messages ?? []
-        for (const msg of messages) {
-          appendMessage(msg)
+        const msgs = (result.payload as any)?.messages ?? []
+        if (msgs.length > 0) {
+          // Replace store with history (avoid duplicates on reconnect)
+          setMessages(msgs)
         }
       } else {
         console.warn("[OpenClawChat] History load returned error:", result)
@@ -147,22 +147,25 @@ export function useOpenClawChat() {
     } catch (e) {
       console.warn("[OpenClawChat] Failed to load history:", e)
     }
-  }, [client, appendMessage])
+  }, [client, setMessages])
 
   /** Switch to a different session */
-  const switchSession = useCallback(async (sessionKey: string) => {
-    if (!client || !client.connected) return
+  const switchSession = useCallback(
+    async (sessionKey: string) => {
+      if (!client || !client.connected) return
 
-    client.switchSession(sessionKey)
-    setActiveSession(sessionKey)
+      client.switchSession(sessionKey)
+      setActiveSession(sessionKey)
 
-    // Clear chat and load history for new session
-    useChatStore.getState().setMessages([])
-    clearStream()
-    clearToolStream()
+      // Clear chat and load history for new session
+      useChatStore.getState().setMessages([])
+      clearStream()
+      clearToolStream()
 
-    await loadHistory()
-  }, [client, setActiveSession, loadHistory, clearStream, clearToolStream])
+      await loadHistory()
+    },
+    [client, setActiveSession, loadHistory, clearStream, clearToolStream],
+  )
 
   return {
     send,
