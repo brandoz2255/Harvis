@@ -1,9 +1,8 @@
 ---
 name: harvis-ssh
 description: >
-  SSH access to the harvis user account on the host machine. Gives OpenClaw
-  command-line access to docker, kubectl, git, and the codebase — same
-  capabilities as opencode but via SSH.
+  SSH access to the harvis user account on dulc3-os (10.0.0.2). Gives OpenClaw
+  command-line access to docker, kubectl, git, and the codebase.
 metadata:
   openclaw:
     emoji: "🔑"
@@ -14,67 +13,43 @@ metadata:
 
 # Harvis SSH Skill
 
-Use this skill when OpenClaw needs to execute commands on the host machine
-or access the codebase directly.
+Use this skill when OpenClaw needs to execute commands on dulc3-os.
 
 ## Connection Details
 
 | Property | Value |
 |----------|-------|
-| Host | `host.docker.internal` (Docker) or host IP (K8s) |
+| Host | `10.0.0.2` (dulc3-os) |
 | User | harvis |
-| Auth | SSH key at `/home/node/.ssh/harvis_key` |
-| Workspace | /home/harvis/harvis-workspace/aidev |
+| Auth | SSH key at `/home/node/.ssh/id_ed25519` |
+| KUBECONFIG | `/home/harvis/.kube/config` |
 
 ## SSH Connection
 
 ```bash
-ssh -i /home/node/.ssh/harvis_key -o StrictHostKeyChecking=no harvis@host.docker.internal
+ssh -i /home/node/.ssh/id_ed25519 -o StrictHostKeyChecking=no harvis@10.0.0.2
 ```
 
-For K8s, replace `host.docker.internal` with your host IP (e.g., `192.168.1.100`).
+## Important: Non-interactive Shell Limitation
 
-## SSH Configuration (mount the key!)
+SSH command execution (non-interactive) does NOT source `~/.bashrc` or `~/.bash_profile`.
+For kubectl commands, wrap in `bash -l -c "..."`:
 
-The SSH key must be mounted into the container:
-
-### Docker Compose
-Add to the openclaw service volumes:
-```yaml
-volumes:
-  - ./openclaw/.ssh:/home/node/.ssh:ro
-```
-
-Create the key:
 ```bash
-mkdir -p openclaw/.ssh
-cp ~/.ssh/id_ed25519 openclaw/.ssh/harvis_key
-chmod 600 openclaw/.ssh/harvis_key
-```
+# WRONG — KUBECONFIG won't be set:
+ssh -i /home/node/.ssh/id_ed25519 -o StrictHostKeyChecking=no harvis@10.0.0.2 \
+  "kubectl get pods -n ai-agents"
 
-### K8s Secret
-```bash
-kubectl create secret generic openclaw-ssh-key \
-  --from-file=harvis_key=~/.ssh/id_ed25519 \
-  --namespace=ai-agents
-
-# Then mount in openclaw pod spec:
-# volumes:
-#   - name: ssh-key
-#     secret:
-#       secretName: openclaw-ssh-key
-# containers:
-#   - volumeMounts:
-#       - name: ssh-key
-#         mountPath: /home/node/.ssh/harvis_key
-#         subPath: harvis_key
+# CORRECT — login shell sources .bash_profile:
+ssh -i /home/node/.ssh/id_ed25519 -o StrictHostKeyChecking=no harvis@10.0.0.2 \
+  "bash -l -c 'kubectl get pods -n ai-agents'"
 ```
 
 ## Once Connected
 
 harvis has access to:
 - **docker** — manage containers, images, k8s deployments
-- **kubectl** — manage K8s cluster
+- **kubectl** — manage K8s cluster (requires `bash -l -c` wrapper)
 - **git** — version control (no sudo)
 - **python3, node** — run scripts
 - **vim, nano, code** — edit files
@@ -91,29 +66,36 @@ harvis has access to:
 
 ### Run a docker command
 ```bash
-ssh -i /home/node/.ssh/harvis_key -o StrictHostKeyChecking=no harvis@host.docker.internal \
+ssh -i /home/node/.ssh/id_ed25519 -o StrictHostKeyChecking=no harvis@10.0.0.2 \
   "docker ps --format 'table {{.Names}}\t{{.Status}}'"
+```
+
+### Run kubectl (always use bash -l -c wrapper)
+```bash
+ssh -i /home/node/.ssh/id_ed25519 -o StrictHostKeyChecking=no harvis@10.0.0.2 \
+  "bash -l -c 'kubectl get pods -n ai-agents --no-headers'"
 ```
 
 ### Execute a multi-line script
 ```bash
-ssh -i /home/node/.ssh/harvis_key -o StrictHostKeyChecking=no harvis@host.docker.internal << 'EOF'
-cd /home/harvis/harvis-workspace/aidev
-git status
-ls python_back_end/
-EOF
+ssh -i /home/node/.ssh/id_ed25519 -o StrictHostKeyChecking=no harvis@10.0.0.2 \
+  'bash -l -c "
+    cd /home/harvis/harvis-workspace/aidev
+    git status
+    ls python_back_end/
+  "'
 ```
 
 ### SCP a file to the harvis user
 ```bash
-scp -i /home/node/.ssh/harvis_key -o StrictHostKeyChecking=no myfile.txt \
-  harvis@host.docker.internal:/home/harvis/harvis-workspace/
+scp -i /home/node/.ssh/id_ed25519 -o StrictHostKeyChecking=no myfile.txt \
+  harvis@10.0.0.2:/home/harvis/harvis-workspace/
 ```
 
 ### SCP a file from the harvis user
 ```bash
-scp -i /home/node/.ssh/harvis_key -o StrictHostKeyChecking=no \
-  harvis@host.docker.internal:/home/harvis/harvis-workspace/aidev/output.txt ./
+scp -i /home/node/.ssh/id_ed25519 -o StrictHostKeyChecking=no \
+  harvis@10.0.0.2:/home/harvis/harvis-workspace/aidev/output.txt ./
 ```
 
 ## When to Use SSH vs Direct Tools
@@ -129,15 +111,12 @@ scp -i /home/node/.ssh/harvis_key -o StrictHostKeyChecking=no \
 
 If SSH fails with "Permission denied":
 - Check that the SSH key is added to harvis's authorized_keys
-- Ensure no-port-forwarding is set (allows SSH but blocks port forwarding)
 
 If SSH fails with "Could not resolve hostname":
-- Docker: use `host.docker.internal`
-- K8s: use the host's IP address directly
+- Use the host's IP address directly: `10.0.0.2`
 
 If SSH fails with "connection refused":
 - Check that SSH server is running on the host: `systemctl status sshd`
-- Check that the host IP is reachable from the container/pod
 
 If commands are blocked:
 - harvis has no sudo — this is intentional
