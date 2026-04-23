@@ -181,22 +181,26 @@ spec:
         kubernetes.io/hostname: rocky2vm.local
 
       initContainers:
-        # 0. Set up SSH key for host access
+        # 0. Set up SSH key — copy from secret to emptyDir for correct permissions
+        # Secret mounts are read-only with wrong perms; emptyDir is writable.
         - name: setup-ssh
           image: alpine:3.18
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
           command: ["sh", "-c"]
           args:
             - |
-              mkdir -p /ssh/.ssh
-              chmod 700 /ssh/.ssh
-              cp /ssh/harvis_key /ssh/.ssh/id_ed25519
-              chmod 600 /ssh/.ssh/id_ed25519
-              echo "SSH key setup complete"
+              mkdir -p /ssh-key
+              chmod 700 /ssh-key
+              cp /ssh-secret/id_ed25519 /ssh-key/id_ed25519
+              chmod 600 /ssh-key/id_ed25519
+              echo "SSH key ready ($(wc -c < /ssh-key/id_ed25519) bytes)"
           volumeMounts:
+            - name: ssh-secret-vol
+              mountPath: /ssh-secret
             - name: ssh-key
-              mountPath: /ssh
-            - name: openclaw-data
-              mountPath: /home/node/.openclaw
+              mountPath: /ssh-key
           resources:
             requests:
               memory: 16Mi
@@ -525,12 +529,9 @@ spec:
             - name: python-extra
               mountPath: /python-extra
               readOnly: true
-            # SSH key for host access
+            # SSH key for host access — written by setup-ssh init container
             - name: ssh-key
               mountPath: /home/node/.ssh
-              readOnly: true
-
-          # OpenClaw exposes health only as a WebSocket RPC method, not HTTP.
           # tcpSocket probes verify the port is bound and accepting connections.
           livenessProbe:
             tcpSocket:
@@ -563,11 +564,13 @@ spec:
         - name: python-extra
           emptyDir: {}
         - name: ssh-key
+          emptyDir: {}
+        - name: ssh-secret-vol
           secret:
             secretName: openclaw-ssh-key
             items:
               - key: harvis_key
-                path: .ssh/id_ed25519
+                path: id_ed25519
 ---
 # Service: ClusterIP only — OpenClaw is never exposed to the host or LoadBalancer.
 # Only reachable within the cluster from the Harvis backend pod.

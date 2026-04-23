@@ -112,11 +112,11 @@ spec:
         - protocol: TCP
           port: 443
 
-    # SSH to host machine (harvis user) — for command execution on the host
-    # Replace 192.168.1.100 with your actual host IP address
+    # SSH to host machine (dulc3-os) — for command execution on the host
+    # harvis user with key-based auth
     - to:
         - ipBlock:
-            cidr: 192.168.1.100/32  # ← CHANGE THIS to your host IP
+            cidr: 10.0.0.2/32  # dulc3-os
       ports:
         - protocol: TCP
           port: 22
