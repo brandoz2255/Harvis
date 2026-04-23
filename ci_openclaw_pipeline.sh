@@ -2,10 +2,20 @@
 
 # CI Pipeline for OpenClaw
 # Builds the OpenClaw Docker image from openclaw/openclaw/ and pushes to Docker Hub.
-# Separate from the main ci_pipeline.sh because OpenClaw is an external service
-# (not part of the main Harvis codebase) with its own build toolchain (pnpm/Node 22).
+# Supports both interactive and non-interactive (CI/CD) modes.
+# Separate from ci_pipeline.sh because OpenClaw has its own build toolchain (pnpm/Node 22).
 
 set -e
+
+# ============================================================================
+# CLI ARGUMENTS
+# ============================================================================
+
+OPENCLAW_VERSION="latest"
+PUSH_IMAGE="no"
+RUN_SMOKE="no"
+SKIP_KUBECTL="no"
+DEBUG_MODE="no"
 
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
@@ -18,30 +28,120 @@ log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 log_error()   { echo -e "${RED}[ERROR]${NC} $1"; }
 log_warn()    { echo -e "${YELLOW}[WARN]${NC} $1"; }
 
-get_input() {
-  local prompt="$1"
-  local title="$2"
-  local default_val="$3"
-  local result=""
+show_help() {
+  cat << EOF
+OpenClaw CI Pipeline - Build, Tag, and Deploy
 
-  if command -v whiptail &>/dev/null; then
-    result=$(whiptail --inputbox "$prompt" 10 60 "$default_val" --title "$title" 3>&1 1>&2 2>&3)
-    exit_status=$?
-    if [ $exit_status -ne 0 ]; then
-      log_error "Operation cancelled by user."
-      exit 1
-    fi
-  else
-    echo -e "${GREEN}$title${NC}"
-    read -p "$prompt [$default_val]: " input
-    result="${input:-$default_val}"
-  fi
-  echo "$result"
+USAGE:
+  ./ci_openclaw_pipeline.sh [OPTIONS]
+
+OPTIONS:
+  -v, --version VERSION        OpenClaw image tag (default: latest)
+  -p, --push                   Push image to Docker Hub
+  -s, --smoke                  Run health-check smoke test
+  -k, --kubectl                Apply kustomization manifest after build
+  -y, --yes                    Skip all prompts (non-interactive mode)
+  -d, --debug                  Enable debug mode (verbose output)
+  -h, --help                   Show this help message
+
+EXAMPLES:
+  # Interactive mode (prompts for options)
+  ./ci_openclaw_pipeline.sh
+
+  # Non-interactive build + push
+  ./ci_openclaw_pipeline.sh -v v1.0.0 -p -k -y
+
+  # Build only (no push, no kubectl)
+  ./ci_openclaw_pipeline.sh -v latest
+
+  # Custom SSH key path
+  SSH_KEY_FILE=/path/to/key ./ci_openclaw_pipeline.sh -v latest -k -y
+
+  # Just sync skills and build
+  ./ci_openclaw_pipeline.sh -v latest -y
+
+NOTES:
+  - Image tag: dulc3/openclaw:<VERSION>
+  - With -k flag, applies k8s-manifests/overlays/prod/openclaw.yaml
+  - Also tags and pushes as dulc3/openclaw:latest if version differs
+  - ArgoCD auto-syncs when kustomization.yaml changes on main branch
+  - SSH key secret (openclaw-ssh-key) is auto-updated from SSH_KEY_FILE env var (default: ~/.ssh/id_ed25519)
+  - SSH key enables OpenClaw to SSH into host machines (e.g., dulc3-os at 10.0.0.2)
+EOF
 }
 
-OPENCLAW_DIR="openclaw/openclaw"
+# ============================================================================
+# PARSE CLI ARGUMENTS
+# ============================================================================
 
-# ─── Preflight checks ────────────────────────────────────────────────────────
+INTERACTIVE="yes"
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -v|--version)
+      OPENCLAW_VERSION="$2"
+      shift 2
+      ;;
+    -p|--push)
+      PUSH_IMAGE="yes"
+      shift
+      ;;
+    -s|--smoke)
+      RUN_SMOKE="yes"
+      shift
+      ;;
+    -k|--kubectl)
+      SKIP_KUBECTL="no"
+      shift
+      ;;
+    -y|--yes)
+      INTERACTIVE="no"
+      shift
+      ;;
+    -d|--debug)
+      DEBUG_MODE="yes"
+      set -x
+      shift
+      ;;
+    -h|--help)
+      show_help
+      exit 0
+      ;;
+    *)
+      log_error "Unknown option: $1"
+      show_help
+      exit 1
+      ;;
+  esac
+done
+
+# In non-interactive mode, use sensible defaults
+if [ "$INTERACTIVE" = "no" ]; then
+  PUSH_IMAGE="${PUSH_IMAGE:-no}"
+  RUN_SMOKE="${RUN_SMOKE:-no}"
+else
+  PUSH_IMAGE="${PUSH_IMAGE:-no}"
+  RUN_SMOKE="${RUN_SMOKE:-no}"
+fi
+
+# ============================================================================
+# GET INPUT (interactive mode only)
+# ============================================================================
+
+get_input() {
+  local prompt="$1"
+  local default_val="$2"
+
+  echo -e "${GREEN}Prompt:${NC} $prompt [$default_val]"
+  read -p "> " input
+  echo "${input:-$default_val}"
+}
+
+# ============================================================================
+# PREFLIGHT CHECKS
+# ============================================================================
+
+OPENCLAW_DIR="openclaw/openclaw"
 
 if [ ! -d "$OPENCLAW_DIR" ]; then
   log_error "OpenClaw source not found at: $OPENCLAW_DIR"
@@ -59,29 +159,32 @@ if ! command -v docker &>/dev/null; then
   exit 1
 fi
 
-# ─── Version input ───────────────────────────────────────────────────────────
+# ============================================================================
+# VERSION INPUT
+# ============================================================================
 
-OPENCLAW_VERSION=$(get_input "Enter tag for OpenClaw image (e.g., v1.0.0 or latest):" "OpenClaw Version" "latest")
+if [ "$INTERACTIVE" = "yes" ]; then
+  OPENCLAW_VERSION=$(get_input "Enter tag for OpenClaw image (e.g., v1.0.0 or latest)" "latest")
+fi
+
 IMAGE_NAME="dulc3/openclaw:$OPENCLAW_VERSION"
 
 log_info "Building: $IMAGE_NAME"
 log_info "Source:   $OPENCLAW_DIR"
 echo ""
 
-# ─── Sync skills into build context ──────────────────────────────────────────
-# Source of truth: skills/Harvis/ and skills/Shared/ at the repo root.
-# openclaw/skills/ is the staging area for the Docker build context (gitignored).
+# ============================================================================
+# SYNC SKILLS INTO BUILD CONTEXT
+# ============================================================================
 
 log_info "Syncing skills into Docker build context..."
 mkdir -p openclaw/skills
 
-# Harvis-specific skills
 if [ -d "skills/Harvis" ]; then
   rsync -a --delete skills/Harvis/ openclaw/skills/
   log_info "  Synced skills/Harvis/ → openclaw/skills/"
 fi
 
-# Shared skills (append, don't overwrite Harvis)
 if [ -d "skills/Shared" ]; then
   rsync -a skills/Shared/ openclaw/skills/
   log_info "  Synced skills/Shared/ → openclaw/skills/"
@@ -89,14 +192,13 @@ fi
 
 echo ""
 
-# ─── Build ───────────────────────────────────────────────────────────────────
+# ============================================================================
+# BUILD
+# ============================================================================
 
 log_info "Starting OpenClaw build..."
 log_warn "Note: OpenClaw uses pnpm + Bun for its build. This may take a few minutes on first run."
 
-# Build context is openclaw/ so:
-#   - COPY openclaw/...    resolves to openclaw/openclaw/... (the submodule)
-#   - COPY skills/         resolves to openclaw/skills/     (synced from skills/Harvis/ above)
 if docker build -t "$IMAGE_NAME" -f "$OPENCLAW_DIR/Dockerfile" openclaw/; then
   log_success "OpenClaw built: $IMAGE_NAME"
 else
@@ -104,32 +206,17 @@ else
   exit 1
 fi
 
-# Also tag as latest if a specific version was given
 if [ "$OPENCLAW_VERSION" != "latest" ]; then
   docker tag "$IMAGE_NAME" "dulc3/openclaw:latest"
   log_info "Also tagged as: dulc3/openclaw:latest"
 fi
 
-# ─── Smoke test (optional but recommended) ───────────────────────────────────
+# ============================================================================
+# SMOKE TEST (optional)
+# ============================================================================
 
-echo ""
-if command -v whiptail &>/dev/null; then
-  if whiptail --yesno "Run a quick health-check smoke test before pushing?" 10 60 --title "Smoke Test"; then
-    RUN_SMOKE=true
-  else
-    RUN_SMOKE=false
-  fi
-else
-  read -p "Run a quick smoke test before pushing? (Y/n): " smoke_choice
-  if [[ $smoke_choice =~ ^[Nn]$ ]]; then
-    RUN_SMOKE=false
-  else
-    RUN_SMOKE=true
-  fi
-fi
-
-if [ "$RUN_SMOKE" = true ]; then
-  log_info "Running smoke test — starting container on port 18799 (offset to avoid conflicts)..."
+if [ "$RUN_SMOKE" = "yes" ]; then
+  log_info "Running smoke test — starting container on port 18799..."
 
   CONTAINER_ID=$(docker run -d \
     -e HOME=/home/node \
@@ -158,47 +245,45 @@ if [ "$RUN_SMOKE" = true ]; then
   log_info "Smoke test container removed."
 fi
 
-# ─── Push (BEFORE kustomize git-push so ArgoCD never sees a tag that isn't on Hub yet) ───
+# ============================================================================
+# PUSH TO DOCKER HUB
+# ============================================================================
 
-echo ""
-if command -v whiptail &>/dev/null; then
-  if whiptail --yesno "Push $IMAGE_NAME to Docker Hub?" 10 60 --title "Push Image"; then
-    PUSH_IMAGE=true
-  else
-    PUSH_IMAGE=false
+if [ "$PUSH_IMAGE" = "yes" ]; then
+  echo ""
+  if [ "$INTERACTIVE" = "yes" ]; then
+    read -p "Push $IMAGE_NAME to Docker Hub? (Y/n): " push_choice
+    if [[ $push_choice =~ ^[Nn]$ ]]; then
+      PUSH_IMAGE="no"
+    fi
   fi
-else
-  read -p "Push $IMAGE_NAME to Docker Hub? (Y/n): " push_choice
-  if [[ $push_choice =~ ^[Nn]$ ]]; then
-    PUSH_IMAGE=false
+
+  if [ "$PUSH_IMAGE" = "yes" ]; then
+    log_info "Pushing $IMAGE_NAME..."
+    if docker push "$IMAGE_NAME"; then
+      log_success "Pushed: $IMAGE_NAME"
+    else
+      log_error "Push failed for $IMAGE_NAME"
+      exit 1
+    fi
+
+    if [ "$OPENCLAW_VERSION" != "latest" ]; then
+      log_info "Pushing dulc3/openclaw:latest..."
+      docker push "dulc3/openclaw:latest"
+      log_success "Pushed: dulc3/openclaw:latest"
+    fi
   else
-    PUSH_IMAGE=true
+    log_info "Skipping push. To push manually:"
+    echo "  docker push $IMAGE_NAME"
+    if [ "$OPENCLAW_VERSION" != "latest" ]; then
+      echo "  docker push dulc3/openclaw:latest"
+    fi
   fi
 fi
 
-if [ "$PUSH_IMAGE" = true ]; then
-  log_info "Pushing $IMAGE_NAME..."
-  if docker push "$IMAGE_NAME"; then
-    log_success "Pushed: $IMAGE_NAME"
-  else
-    log_error "Push failed for $IMAGE_NAME"
-    exit 1
-  fi
-
-  if [ "$OPENCLAW_VERSION" != "latest" ]; then
-    log_info "Pushing dulc3/openclaw:latest..."
-    docker push "dulc3/openclaw:latest"
-    log_success "Pushed: dulc3/openclaw:latest"
-  fi
-else
-  log_info "Skipping push. To push manually:"
-  echo "  docker push $IMAGE_NAME"
-  if [ "$OPENCLAW_VERSION" != "latest" ]; then
-    echo "  docker push dulc3/openclaw:latest"
-  fi
-fi
-
-# ─── Update kustomization.yaml (after Docker push so the image exists on Hub) ───
+# ============================================================================
+# UPDATE KUSTOMIZATION.YAML
+# ============================================================================
 
 echo ""
 log_info "Updating kustomization.yaml with new OpenClaw tag..."
@@ -211,7 +296,6 @@ import re
 with open("$KUSTOMIZE_FILE", "r") as f:
     content = f.read()
 
-# Update only the dulc3/openclaw entry — leave all harvis image tags untouched.
 updated = re.sub(
     r'(  - name: dulc3/openclaw\n    newName: dulc3/openclaw\n    newTag: )\S+',
     r'\g<1>$OPENCLAW_VERSION',
@@ -255,7 +339,54 @@ else
   log_warn "Kustomization file not found — update manually: $KUSTOMIZE_FILE"
 fi
 
-# ─── Summary ─────────────────────────────────────────────────────────────────
+# ============================================================================
+# SSH KEY SECRET (host access for OpenClaw)
+# ============================================================================
+
+SSH_KEY_FILE="${SSH_KEY_FILE:-$HOME/.ssh/id_ed25519}"
+
+if [ -f "$SSH_KEY_FILE" ]; then
+  log_info "Updating openclaw-ssh-key secret with $(wc -c < "$SSH_KEY_FILE") bytes from $SSH_KEY_FILE..."
+
+  # Create or update the secret — always refresh to avoid stale/empty keys
+  if kubectl create secret generic openclaw-ssh-key \
+    --from-file=harvis_key="$SSH_KEY_FILE" \
+    --namespace=ai-agents \
+    --dry-run=client -o yaml 2>/dev/null | kubectl apply -f - -n ai-agents 2>&1; then
+    log_success "SSH key secret updated."
+  else
+    log_warn "Failed to update SSH key secret — apply manually:"
+    echo "  kubectl create secret generic openclaw-ssh-key \\"
+    echo "    --from-file=harvis_key=$SSH_KEY_FILE \\"
+    echo "    --namespace=ai-agents --dry-run=client -o yaml | kubectl apply -f -"
+  fi
+else
+  log_warn "SSH key not found at $SSH_KEY_FILE — skipping secret update."
+  log_warn "OpenClaw will not have host access via SSH."
+fi
+
+# ============================================================================
+# APPLY KUBECTL MANIFEST (SSH key mount fix)
+# ============================================================================
+
+if [ "$SKIP_KUBECTL" = "no" ]; then
+  echo ""
+  log_info "Applying OpenClaw K8s manifest (with SSH key mount fixes)..."
+
+  if kubectl apply -f k8s-manifests/overlays/prod/openclaw.yaml 2>&1; then
+    log_success "K8s manifest applied successfully."
+    log_info "Waiting for rollout..."
+    kubectl rollout status deployment/harvis-ai-openclaw -n ai-agents --timeout=120s 2>&1 || true
+    log_success "OpenClaw deployment ready."
+  else
+    log_warn "kubectl apply failed — apply manually:"
+    echo "  kubectl apply -f k8s-manifests/overlays/prod/openclaw.yaml"
+  fi
+fi
+
+# ============================================================================
+# SUMMARY
+# ============================================================================
 
 echo ""
 echo "=========================================="
@@ -264,6 +395,5 @@ echo "Image:    $IMAGE_NAME"
 echo "Gateway:  ws://harvis-ai-openclaw:18789 (internal K8s)"
 echo "Health:   http://harvis-ai-openclaw:18789/health"
 echo ""
-echo "ArgoCD will auto-deploy once the push and git push are done."
 echo "Monitor: kubectl -n ai-agents logs -f deploy/harvis-ai-openclaw"
 echo "=========================================="

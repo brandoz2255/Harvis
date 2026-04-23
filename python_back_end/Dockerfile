@@ -25,6 +25,10 @@ RUN pip install --no-cache-dir -r requirements.txt \
 RUN useradd -m -u 1001 -s /bin/bash appuser
 
 # Copy application code and scripts
+# CACHE_BUST: pass --build-arg CACHE_BUST=$(date +%s) to force code layer rebuild
+# without re-running the slow apt/pip layers above.
+ARG CACHE_BUST=1
+RUN echo "cache bust: $CACHE_BUST"
 WORKDIR /app
 COPY . .
 

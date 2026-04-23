@@ -302,6 +302,8 @@ services:
       - ./openclaw/config/openclaw.json:/home/node/.openclaw/openclaw.json:ro
       # Skills — discovered by openclaw via skills.load.extraDirs: ["/skills"]
       - ./openclaw/skills:/skills:ro
+      # SSH key for accessing the host machine (harvis user)
+      - ./openclaw/.ssh:/home/node/.ssh:ro
     command:
       - node
       - openclaw.mjs
