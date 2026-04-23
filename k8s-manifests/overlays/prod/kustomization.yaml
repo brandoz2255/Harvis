@@ -33,7 +33,7 @@ images:
   #   newTag: unbroken
   - name: dulc3/openclaw
     newName: dulc3/openclaw
-    newTag: 3.5
+    newTag: 3.5s
   - name: dulc3/harvis-mempalace
     newName: dulc3/harvis-mempalace
     newTag: v2.35.5
