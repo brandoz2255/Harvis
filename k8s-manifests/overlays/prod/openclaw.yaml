@@ -1,15 +1,14 @@
 ---
-# Static PersistentVolume pinned to rocky2vm.local.
-# Using a static local PV (not local-path provisioner) so we control exactly
-# which node OpenClaw's data lives on — critical for the security isolation model.
+# Static PersistentVolume pinned to dulc3-os.
+# Moved from rocky2vm.local so OpenClaw runs on the same node as the dev workspace,
+# enabling direct hostPath file access without SSH round-trips.
 # Retain policy: data survives PVC deletion and must be manually cleaned up.
-# Before applying: ensure /var/lib/openclaw-data exists on rocky2vm.local.
-#   kubectl debug node/rocky2vm.local -it --image=busybox -- mkdir -p /host/var/lib/openclaw-data
-#   (or ssh rocky2vm.local "sudo mkdir -p /var/lib/openclaw-data && sudo chown 1000:1000 /var/lib/openclaw-data")
+# Before applying: ensure /var/lib/openclaw-data exists on dulc3-os.
+#   sudo mkdir -p /var/lib/openclaw-data && sudo chown 1000:1000 /var/lib/openclaw-data
 apiVersion: v1
 kind: PersistentVolume
 metadata:
-  name: openclaw-data-rocky2
+  name: openclaw-data-dulc3
 spec:
   capacity:
     storage: 5Gi
@@ -26,7 +25,7 @@ spec:
             - key: kubernetes.io/hostname
               operator: In
               values:
-                - rocky2vm.local
+                - dulc3-os
 
 ---
 # PersistentVolumeClaim — bound explicitly to the static PV above.
@@ -40,7 +39,7 @@ spec:
   accessModes:
     - ReadWriteOnce
   storageClassName: local-path
-  volumeName: openclaw-data-rocky2
+  volumeName: openclaw-data-dulc3
   resources:
     requests:
       storage: 5Gi
@@ -114,6 +113,20 @@ spec:
         - protocol: TCP
           port: 8080
 
+    # K3s API server — allows Harvis to run kubectl natively inside the pod.
+    # 10.43.0.1 = kubernetes.default.svc ClusterIP (in-cluster API endpoint).
+    # 10.0.0.2  = dulc3-os host IP (for kubeconfig using node IP directly).
+    - to:
+        - ipBlock:
+            cidr: 10.43.0.1/32   # kubernetes.default.svc
+        - ipBlock:
+            cidr: 10.0.0.2/32    # dulc3-os host (k3s API on :6443)
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+
     # GitHub HTTPS — required for git clone/push operations.
     # PR creation is handled by the backend proxy above (no direct API calls
     # to api.github.com needed from OpenClaw).
@@ -176,9 +189,9 @@ spec:
         fsGroup: 1000
         runAsNonRoot: true
 
-      # Run OpenClaw on its own dedicated node, isolated from the main Harvis workload
+      # Run OpenClaw on dulc3-os so it can directly access the dev workspace via hostPath
       nodeSelector:
-        kubernetes.io/hostname: rocky2vm.local
+        kubernetes.io/hostname: dulc3-os
 
       initContainers:
         # 0. Set up SSH key — copy from secret to emptyDir for correct permissions
@@ -390,8 +403,9 @@ spec:
               else
                 echo "Cloning harvis-aidev into $WORKSPACE..."
                 mkdir -p "$(dirname $WORKSPACE)"
-                git clone https://github.com/dulc3/harvis-aidev.git "$WORKSPACE"
-                echo "Clone complete."
+                git clone https://github.com/brandoz2255/aidev.git "$WORKSPACE" || \
+                  echo "Clone failed — repo may be private or workspace already mounted at /workspace"
+                echo "Clone step done."
               fi
           env:
             - name: HOME
@@ -532,6 +546,13 @@ spec:
             # SSH key for host access — written by setup-ssh init container
             - name: ssh-key
               mountPath: /home/node/.ssh
+            # Live dev workspace — direct access to dulc3-os GitHub repos.
+            # OpenClaw's native read/write/exec tools work here without SSH.
+            - name: github-workspace
+              mountPath: /workspace
+            # kubeconfig — Harvis can run kubectl natively without SSH
+            - name: kubeconfig
+              mountPath: /home/node/.kube
           # tcpSocket probes verify the port is bound and accepting connections.
           livenessProbe:
             tcpSocket:
@@ -571,6 +592,19 @@ spec:
             items:
               - key: harvis_key
                 path: id_ed25519
+        # Dev workspace — hostPath on dulc3-os pointing at all GitHub repos.
+        # Harvis edits files here natively; no SSH needed for file operations.
+        - name: github-workspace
+          hostPath:
+            path: /home/dulc3/Documents/github
+            type: Directory
+        # kubeconfig — patched copy with server: https://10.0.0.2:6443
+        # (host kubeconfig uses 127.0.0.1 which is unreachable from inside a pod)
+        # Regenerate with: sed 's|127.0.0.1:6443|10.0.0.2:6443|g' ~/.kube/config |
+        #   kubectl create secret generic openclaw-kubeconfig -n ai-agents --from-file=config=/dev/stdin
+        - name: kubeconfig
+          secret:
+            secretName: openclaw-kubeconfig
 ---
 # Service: ClusterIP only — OpenClaw is never exposed to the host or LoadBalancer.
 # Only reachable within the cluster from the Harvis backend pod.
