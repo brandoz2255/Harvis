@@ -207,15 +207,58 @@ async def stream_local_ollama_workspace(
     model: str = "",
 ) -> AsyncGenerator[OpenClawEvent, None]:
     """
-    Run a workspace task using the LOCAL Ollama instance.
-    If `model` is empty, auto-detect the first available model.
-    Yields OpenClawEvent objects matching the standard workspace format.
-    """
-    base_url = _LOCAL_OLLAMA_URL.rstrip("/")
-    if "/v1" in base_url:
-        base_url = base_url.replace("/v1", "")
+    Run a workspace task using a local Ollama instance.
 
-    # Resolve model name
+    Routing: prefers laptop Ollama (`OLLAMA_URL`). If `model` is set and the
+    laptop doesn't have it, falls back to the desktop Ollama
+    (`DESKTOP_OLLAMA_URL`) so models that only exist on the GPU host (e.g.
+    gemma4-26b on the 5080) work transparently when picked from the dropdown.
+    """
+    laptop_base = _LOCAL_OLLAMA_URL.rstrip("/")
+    if "/v1" in laptop_base:
+        laptop_base = laptop_base.replace("/v1", "")
+    desktop_base = (os.getenv("DESKTOP_OLLAMA_URL", "") or "").rstrip("/")
+    if "/v1" in desktop_base:
+        desktop_base = desktop_base.replace("/v1", "")
+
+    async def _has_model(base: str, name: str) -> bool:
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as c:
+                r = await c.get(f"{base}/api/tags")
+            if r.status_code == 200:
+                return any(m.get("name") == name for m in r.json().get("models", []))
+        except Exception:
+            pass
+        return False
+
+    base_url = laptop_base
+    chosen_host = "laptop"
+
+    # If caller named a model that isn't on the laptop, route to the
+    # desktop (when configured). We deliberately do NOT probe the
+    # desktop via /api/tags first — a transient timeout there used to
+    # silently keep us on the laptop and surface a confusing 404 for
+    # a model the user explicitly picked. If the model truly isn't on
+    # the desktop either, the chat call below returns a clean error
+    # from the desktop instead of a misleading laptop 404.
+    if model and desktop_base:
+        try:
+            on_laptop = await _has_model(laptop_base, model)
+        except Exception as exc:
+            logger.warning(
+                "laptop /api/tags check failed: %s — assuming model not on laptop",
+                exc,
+            )
+            on_laptop = False
+        if not on_laptop:
+            base_url = desktop_base
+            chosen_host = "desktop"
+            logger.info(
+                "stream_local_ollama_workspace: model %r not on laptop; routing to desktop %s",
+                model, desktop_base,
+            )
+
+    # Auto-pick a model when caller didn't supply one.
     if not model:
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
@@ -244,6 +287,11 @@ async def stream_local_ollama_workspace(
             })
             return
 
+    if chosen_host == "desktop":
+        yield OpenClawEvent("log", {
+            "message": f"Routing to desktop Ollama (5080) — model {model} not on laptop",
+        })
+
     messages = [
         {"role": "system", "content": _LOCAL_OLLAMA_SYSTEM_PROMPT},
         {"role": "user", "content": _build_context_message(task_message, chat_history)},
@@ -251,16 +299,27 @@ async def stream_local_ollama_workspace(
 
     yield OpenClawEvent("log", {"message": f"Starting task on local model: {model}"})
 
+    # Keep the model resident between calls so the next workspace task
+    # doesn't pay the cold-load tax (huge for big quantized models on
+    # the 5080). -1 = stay loaded indefinitely; "30m" is a safer default
+    # that releases VRAM after idle. Override via OLLAMA_KEEP_ALIVE.
+    keep_alive = os.getenv("OLLAMA_KEEP_ALIVE", "30m")
     payload = {
         "model": model,
         "messages": messages,
         "stream": True,
         "reasoning_effort": "none",
+        "keep_alive": keep_alive,
     }
     full_text_parts: list[str] = []
 
+    # Read timeout has to absorb both cold-load (model paged in from
+    # disk) and prompt-eval on long contexts. 10 min is generous but
+    # the alternative is a confusing "Ollama timed out" while the
+    # model is still warming up.
+    read_timeout = float(os.getenv("OLLAMA_READ_TIMEOUT_SECONDS", "600"))
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(read_timeout, connect=10.0)) as client:
             async with client.stream(
                 "POST",
                 f"{base_url}/v1/chat/completions",
@@ -300,10 +359,29 @@ async def stream_local_ollama_workspace(
             "fix_hint": "Ollama may have crashed or run out of VRAM. Check `ollama logs` and GPU memory.",
         })
     except httpx.ReadTimeout:
-        yield OpenClawEvent("error", {
-            "message": "Local Ollama timed out (>5 min). The model may be too large for your hardware.",
-            "fix_hint": "Try a smaller model (e.g., qwen2.5:7b instead of 70b) or increase timeout.",
-        })
+        # If we got partial tokens before the stall, surface them rather
+        # than throwing the whole turn away.
+        partial = "".join(full_text_parts).rstrip()
+        if partial:
+            yield OpenClawEvent("done", {
+                "summary": (
+                    partial
+                    + "\n\n_(response cut off — Ollama stopped sending tokens; "
+                    "model may be hitting GPU/VRAM limits)_"
+                ),
+            })
+        else:
+            yield OpenClawEvent("error", {
+                "message": (
+                    f"Local Ollama timed out (no tokens in {int(read_timeout)}s). "
+                    "Likely cold-loading a large model or saturating VRAM."
+                ),
+                "fix_hint": (
+                    "If first call after a break: rerun — model should be warm now "
+                    "(keep_alive is set). If repeating: try a smaller model, lower "
+                    "context, or raise OLLAMA_READ_TIMEOUT_SECONDS in .env."
+                ),
+            })
     except Exception as exc:
         logger.error("local_ollama_workspace: stream error: %s", exc)
         yield OpenClawEvent("error", {
@@ -364,11 +442,32 @@ async def _plan_subtasks(
                     parts.append(chunk)
             raw = "".join(parts).strip()
         else:
-            # Local or cloud Ollama
-            base_url = _LOCAL_OLLAMA_URL.rstrip("/")
-            if "/v1" in base_url:
-                base_url = base_url.replace("/v1", "")
+            # Local or cloud Ollama — route to whichever host has the model.
+            laptop_base = _LOCAL_OLLAMA_URL.rstrip("/")
+            if "/v1" in laptop_base:
+                laptop_base = laptop_base.replace("/v1", "")
+            desktop_base = (os.getenv("DESKTOP_OLLAMA_URL", "") or "").rstrip("/")
+            if "/v1" in desktop_base:
+                desktop_base = desktop_base.replace("/v1", "")
+            base_url = laptop_base
             target_model = model or "qwen2.5:7b"
+            if model and desktop_base:
+                # Prefer desktop when laptop doesn't have the requested model.
+                try:
+                    async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as hc_chk:
+                        r = await hc_chk.get(f"{laptop_base}/api/tags")
+                    on_laptop = r.status_code == 200 and any(
+                        m.get("name") == model for m in r.json().get("models", [])
+                    )
+                    if not on_laptop:
+                        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as hc_chk:
+                            r2 = await hc_chk.get(f"{desktop_base}/api/tags")
+                        if r2.status_code == 200 and any(
+                            m.get("name") == model for m in r2.json().get("models", [])
+                        ):
+                            base_url = desktop_base
+                except Exception:
+                    pass
             payload = {
                 "model": target_model,
                 "messages": messages,
@@ -445,10 +544,10 @@ async def _run_subagent_stream(
             event.data["agent_label"] = label
             event.data["run_id"] = run_id
             event.data["parent_run_id"] = parent_run_id
-            if event.event_type == "token":
+            if event.type == "token":
                 full_text_parts.append(event.data.get("content", ""))
             # Don't forward sub-agent's own 'done' — the orchestrator emits the final one
-            if event.event_type not in ("done", "stream_end"):
+            if event.type not in ("done", "stream_end"):
                 await queue.put(event)
 
     except Exception as exc:

@@ -35,10 +35,12 @@ from datetime import datetime, timezone
 from typing import Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, field_validator
 
 from auth_optimized import get_current_user_optimized
+from workspace.capability_check import verify_capability
+from workspace.gateway_auth import resolve_gateway_caller
 
 logger = logging.getLogger(__name__)
 
@@ -92,21 +94,6 @@ kubectl_proxy_router = APIRouter(tags=["kubectl-proxy"])
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
-
-def _verify_openclaw_token(authorization: Optional[str]) -> None:
-    """Authenticate the caller as the OpenClaw pod. Fails closed if token unset."""
-    if not OPENCLAW_GATEWAY_TOKEN:
-        # Explicitly refuse rather than silently allow when the env var is missing.
-        raise HTTPException(
-            status_code=503,
-            detail="kubectl proxy not configured: OPENCLAW_GATEWAY_TOKEN is unset",
-        )
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
-    token = authorization[len("Bearer "):]
-    if token != OPENCLAW_GATEWAY_TOKEN:
-        raise HTTPException(status_code=401, detail="Invalid proxy token")
-
 
 def _sanitize_output(output: str) -> str:
     """Redact secrets, PEM certificates, and JWT tokens from kubectl output."""
@@ -214,6 +201,7 @@ class KubectlResponse(BaseModel):
 @kubectl_proxy_router.post("/exec", response_model=KubectlResponse)
 async def kubectl_exec(
     req: KubectlExecRequest,
+    request: Request,
     authorization: Optional[str] = Header(default=None),
 ):
     """
@@ -224,7 +212,8 @@ async def kubectl_exec(
     This endpoint BLOCKS until the user approves or rejects (max 5 minutes).
     OpenClaw's tool loop is suspended during that window — the agent waits.
     """
-    _verify_openclaw_token(authorization)
+    await resolve_gateway_caller(request, authorization)
+    await verify_capability("kubectl", request, authorization)
 
     is_allowed, is_write = _validate_command(req.command)
     if not is_allowed:
@@ -281,9 +270,9 @@ async def kubectl_exec(
 
 
 @kubectl_proxy_router.get("/health")
-async def kubectl_health(authorization: Optional[str] = Header(default=None)):
+async def kubectl_health(request: Request, authorization: Optional[str] = Header(default=None)):
     """Check kubectl availability. OpenClaw-only endpoint."""
-    _verify_openclaw_token(authorization)
+    await resolve_gateway_caller(request, authorization)
     try:
         result = subprocess.run(
             ["kubectl", "version", "--client"],

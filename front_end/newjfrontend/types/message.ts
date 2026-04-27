@@ -81,6 +81,39 @@ export interface Message {
   }
   researchChain?: ResearchChainData
   artifact?: Artifact // AI-generated document or website artifact
+  workspaceId?: string
+  workspaceStatus?: 'acknowledged' | 'running' | 'completed' | 'error'
+  workspaceEvents?: WorkspaceChatEvent[]
+  workspaceSuggestion?: WorkspaceChatSuggestion
+}
+
+export interface WorkspaceChatEvent {
+  kind:
+    | 'acknowledge'
+    | 'status'
+    | 'tool_call'
+    | 'tool_result'
+    | 'partial'
+    | 'result'
+    | 'error'
+    | 'detected'
+  message?: string
+  toolName?: string
+  args?: Record<string, string>
+  output?: string
+  text?: string
+  finalAnswer?: string
+  durationMs?: number
+  timestamp: number
+}
+
+export interface WorkspaceChatSuggestion {
+  taskBrief: string
+  taskType: string | null
+  taskTypeLabel: string
+  confidence: number
+  confidenceLevel: 'high' | 'medium' | 'low'
+  reason: string
 }
 
 export interface ThinkingStep {

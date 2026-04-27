@@ -33,6 +33,8 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, field_validator
 
 from .github_app_auth import get_installation_token
+from .capability_check import verify_capability
+from .gateway_auth import resolve_gateway_caller
 
 logger = logging.getLogger(__name__)
 
@@ -65,17 +67,6 @@ _ALLOWED_HEAD_PREFIX = "harvis/"
 _GITHUB_API_BASE = "https://api.github.com"
 
 github_proxy_router = APIRouter(prefix="/github", tags=["github-proxy"])
-
-
-def _verify_openclaw_token(authorization: Optional[str]) -> None:
-    """Only the OpenClaw pod (via shared OPENCLAW_GATEWAY_TOKEN) may call this."""
-    if not OPENCLAW_GATEWAY_TOKEN:
-        return  # dev mode
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
-    token = authorization[len("Bearer "):]
-    if token != OPENCLAW_GATEWAY_TOKEN:
-        raise HTTPException(status_code=401, detail="Invalid proxy token")
 
 
 def _validate_repo(repo: str) -> None:
@@ -153,6 +144,7 @@ class CreatePRRequest(BaseModel):
 @github_proxy_router.post("/pulls")
 async def create_pull_request(
     req: CreatePRRequest,
+    request: Request,
     authorization: Optional[str] = Header(default=None),
 ):
     """
@@ -164,7 +156,8 @@ async def create_pull_request(
     - Base branch must be main/master
     - HARVIS_GITHUB_TOKEN used server-side; caller never sees it
     """
-    _verify_openclaw_token(authorization)
+    await resolve_gateway_caller(request, authorization)
+    await verify_capability("github_pr", request, authorization)
     _validate_repo(req.repo)
     _validate_head_branch(req.head)
 
@@ -234,10 +227,11 @@ async def create_pull_request(
 async def list_pull_requests(
     repo: str = "dulc3/harvis-aidev",
     state: str = "open",
+    request: Request = None,
     authorization: Optional[str] = Header(default=None),
 ):
     """List open PRs for the repo (read-only, no token needed — public repo)."""
-    _verify_openclaw_token(authorization)
+    await resolve_gateway_caller(request, authorization)
     _validate_repo(repo)
 
     url = f"{_GITHUB_API_BASE}/repos/{repo}/pulls"
@@ -258,10 +252,11 @@ async def list_pull_requests(
 async def get_pull_request(
     pr_number: int,
     repo: str = "dulc3/harvis-aidev",
+    request: Request = None,
     authorization: Optional[str] = Header(default=None),
 ):
     """Get a specific PR by number (read-only)."""
-    _verify_openclaw_token(authorization)
+    await resolve_gateway_caller(request, authorization)
     _validate_repo(repo)
 
     url = f"{_GITHUB_API_BASE}/repos/{repo}/pulls/{pr_number}"
@@ -295,6 +290,7 @@ class CreateRepoRequest(BaseModel):
 @github_proxy_router.post("/repos")
 async def create_repository(
     req: CreateRepoRequest,
+    request: Request,
     authorization: Optional[str] = Header(default=None),
 ):
     """
@@ -305,7 +301,8 @@ async def create_repository(
 
     Returns the new repo's html_url, clone_url, and full_name on success.
     """
-    _verify_openclaw_token(authorization)
+    await resolve_gateway_caller(request, authorization)
+    await verify_capability("github_repo", request, authorization)
 
     payload = {
         "name": req.name,

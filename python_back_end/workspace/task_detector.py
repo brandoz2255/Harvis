@@ -62,7 +62,10 @@ Respond with ONLY valid JSON in this exact format:
 Only set should_suggest = true if confidence >= 0.4."""
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
-FAST_MODEL = os.getenv("DISCORD_FAST_MODEL", "qwen3.5-32k:latest")
+# Prefer explicit workspace-detector name; DISCORD_FAST_MODEL kept for backward compatibility.
+FAST_MODEL = os.getenv("WORKSPACE_DETECTOR_OLLAMA_MODEL") or os.getenv(
+    "DISCORD_FAST_MODEL", "qwen3.5-32k:latest"
+)
 
 
 class WorkspaceSuggestion:
@@ -74,10 +77,22 @@ class WorkspaceSuggestion:
         self.reason: str = raw.get("reason", "")
         self.task_type_label: str = TASK_TYPES.get(self.task_type or "", "General task")
 
+    @property
+    def confidence_level(self) -> str:
+        """Bucketed confidence: high (>=0.8), medium (>=0.4), low (<0.4 or not a task)."""
+        if not self.should_suggest:
+            return "low"
+        if self.confidence >= 0.8:
+            return "high"
+        if self.confidence >= 0.4:
+            return "medium"
+        return "low"
+
     def to_dict(self) -> dict:
         return {
             "should_suggest": self.should_suggest,
             "confidence": round(self.confidence, 2),
+            "confidence_level": self.confidence_level,
             "task_type": self.task_type,
             "task_type_label": self.task_type_label,
             "task_brief": self.task_brief,
@@ -246,3 +261,21 @@ async def detect_workspace_task(chat_history: list[dict]) -> WorkspaceSuggestion
     except Exception as e:
         logger.error(f"Workspace detection error: {e}")
         return WorkspaceSuggestion({"should_suggest": False, "reason": f"Detection error: {e}"})
+
+
+async def detect_task_intent(
+    message: str,
+    chat_history: list[dict],
+    user_id: int,
+) -> WorkspaceSuggestion:
+    """
+    Wrapper over detect_workspace_task that takes the current user message
+    directly and appends it to chat_history before classification.
+
+    Used by /api/chat to run detection on every incoming message without the
+    caller having to pre-assemble the history list.
+    """
+    history = list(chat_history or [])
+    if message:
+        history.append({"role": "user", "content": message})
+    return await detect_workspace_task(history)

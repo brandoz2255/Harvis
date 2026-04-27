@@ -17,6 +17,8 @@ import { NextRequest } from 'next/server';
 // Use Node.js runtime to access Docker internal network
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+/** Allow long LLM streams (hosting platforms may enforce a lower cap). */
+export const maxDuration = 3600;
 
 // Retry configuration
 const MAX_RETRIES = 3;
@@ -70,9 +72,20 @@ export async function POST(req: NextRequest) {
       const encoder = new TextEncoder();
       const stream = new ReadableStream({
         start(controller) {
-          // Send error in AI SDK format: 3:"error message"\n
+          // Send error + finish frames so useChat clears isLoading (3: alone leaves the client stuck)
           const encodedError = JSON.stringify(errorMessage);
           controller.enqueue(encoder.encode(`3:${encodedError}\n`));
+          const finishEvent = {
+            finishReason: 'error',
+            usage: { promptTokens: 0, completionTokens: 0 },
+            isContinued: false,
+          };
+          controller.enqueue(encoder.encode(`e:${JSON.stringify(finishEvent)}\n`));
+          const finishData = {
+            finishReason: 'error',
+            usage: { promptTokens: 0, completionTokens: 0 },
+          };
+          controller.enqueue(encoder.encode(`d:${JSON.stringify(finishData)}\n`));
           controller.close();
         }
       });
@@ -81,8 +94,9 @@ export async function POST(req: NextRequest) {
         headers: {
           'Content-Type': 'text/plain; charset=utf-8',
           'X-Vercel-AI-Data-Stream': 'v1',
-          'Cache-Control': 'no-cache',
+          'Cache-Control': 'no-cache, no-transform',
           'Connection': 'keep-alive',
+          'X-Accel-Buffering': 'no',
         }
       });
     };
@@ -168,6 +182,7 @@ export async function POST(req: NextRequest) {
     let finalAnswer = '';
     let buffer = '';
     let assistantMessageCreated = false;
+    let workspaceTerminated = false;
     let lastActivity = Date.now();
     const KEEPALIVE_INTERVAL = 15000; // Send keepalive every 15 seconds
 
@@ -182,8 +197,22 @@ export async function POST(req: NextRequest) {
 
         const decoder = new TextDecoder();
         let isClosed = false;
+        let streamFinishSent = false;
         let chunkCount = 0;
         let keepaliveTimer: NodeJS.Timeout | null = null;
+        /** Set once we've forwarded a terminal event to the client (complete / error / workspace_result / workspace_error).
+         *  We cancel the backend reader so the Python worker/session lock is released immediately — otherwise the
+         *  backend can hold the stream open for ~2 minutes and queue the user's next message behind it. */
+        let terminalSent = false;
+        const releaseBackend = () => {
+          if (terminalSent) return;
+          terminalSent = true;
+          try {
+            void reader.cancel().catch(() => { /* backend already closed */ });
+          } catch {
+            /* ignore */
+          }
+        };
 
         // Safe enqueue that handles client disconnection gracefully
         const safeEnqueue = (data: Uint8Array): boolean => {
@@ -197,6 +226,25 @@ export async function POST(req: NextRequest) {
             console.debug('[AI-Chat] Client disconnected, stopping stream');
             return false;
           }
+        };
+
+        /** Required for Vercel AI SDK useChat to end a turn and re-enable send */
+        const sendAiSdkFinish = (finishReason: 'stop' | 'error'): void => {
+          if (streamFinishSent || isClosed) {
+            return;
+          }
+          streamFinishSent = true;
+          const finishEvent = {
+            finishReason,
+            usage: { promptTokens: 0, completionTokens: 0 },
+            isContinued: false,
+          };
+          safeEnqueue(encoder.encode(`e:${JSON.stringify(finishEvent)}\n`));
+          const finishData = {
+            finishReason,
+            usage: { promptTokens: 0, completionTokens: 0 },
+          };
+          safeEnqueue(encoder.encode(`d:${JSON.stringify(finishData)}\n`));
         };
 
         // Safe close that only closes once
@@ -395,24 +443,70 @@ export async function POST(req: NextRequest) {
                     if (!safeEnqueue(encoder.encode(`2:${JSON.stringify([customData])}\n`))) break;
                   }
 
-                  // Finish event (e: prefix) - required before d: finish data
-                  const finishEvent = {
-                    finishReason: 'stop',
-                    usage: { promptTokens: 0, completionTokens: 0 },
-                    isContinued: false
-                  };
-                  if (!safeEnqueue(encoder.encode(`e:${JSON.stringify(finishEvent)}\n`))) break;
-
-                  // Finish data (d: prefix)
-                  const finishData = {
-                    finishReason: 'stop',
-                    usage: { promptTokens: 0, completionTokens: 0 }
-                  };
-                  if (!safeEnqueue(encoder.encode(`d:${JSON.stringify(finishData)}\n`))) break;
+                  sendAiSdkFinish('stop');
+                  releaseBackend();
+                  break;
                 }
                 else if (data.status === 'error') {
                   // Error (3: prefix)
                   if (!safeEnqueue(encoder.encode(`3:${JSON.stringify(data.error || 'Unknown error')}\n`))) break;
+                  sendAiSdkFinish('error');
+                  releaseBackend();
+                  break;
+                }
+                // ── Workspace flow events (auto-launch or medium-confidence suggestion) ──
+                else if (
+                  data.status === 'workspace_suggestion' ||
+                  data.status === 'workspace_detected' ||
+                  data.status === 'workspace_acknowledge' ||
+                  data.status === 'workspace_status' ||
+                  data.status === 'workspace_tool_call' ||
+                  data.status === 'workspace_tool_result' ||
+                  data.status === 'workspace_partial' ||
+                  data.status === 'workspace_result' ||
+                  data.status === 'workspace_error'
+                ) {
+                  // Make sure an assistant message exists so the activity card has somewhere to attach.
+                  if (!assistantMessageCreated) {
+                    if (!safeEnqueue(encoder.encode(`0:" "\n`))) break;
+                    assistantMessageCreated = true;
+                  }
+
+                  // Forward the raw workspace event as custom data. The frontend's
+                  // aiData processor keys these by the latest assistant message id.
+                  const wsEvent = { type: 'workspace_event', event: data };
+                  if (!safeEnqueue(encoder.encode(`2:${JSON.stringify([wsEvent])}\n`))) break;
+
+                  // Stream any human-visible text so the bubble has real content:
+                  //  - workspace_partial.text → ongoing agent reasoning
+                  //  - workspace_result.final_answer → final summary
+                  if (data.status === 'workspace_partial' && typeof data.text === 'string' && data.text) {
+                    const sanitized = data.text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+                    fullText += sanitized;
+                    if (!safeEnqueue(encoder.encode(`0:${JSON.stringify(sanitized)}\n`))) break;
+                  }
+
+                  if (data.status === 'workspace_result') {
+                    const finalText = data.final_answer || data.summary || '';
+                    if (finalText && (!fullText || fullText.trim().length === 0)) {
+                      fullText = finalText;
+                      if (!safeEnqueue(encoder.encode(`0:${JSON.stringify(finalText)}\n`))) break;
+                    }
+                    // Terminal: workspace handler short-circuits /api/chat, no 'complete' event will follow.
+                    sendAiSdkFinish('stop');
+                    workspaceTerminated = true;
+                    releaseBackend();
+                    break;
+                  }
+
+                  if (data.status === 'workspace_error') {
+                    const errMsg = data.message || 'Workspace error';
+                    if (!safeEnqueue(encoder.encode(`3:${JSON.stringify(errMsg)}\n`))) break;
+                    sendAiSdkFinish('error');
+                    workspaceTerminated = true;
+                    releaseBackend();
+                    break;
+                  }
                 }
               } catch (parseError) {
                 if (parseError instanceof SyntaxError) {
@@ -423,36 +517,38 @@ export async function POST(req: NextRequest) {
           }
 
           // If no complete message was received but we have text, send content and finish
-          if (fullText && !finalAnswer && !isClosed) {
+          if (!workspaceTerminated && fullText && !finalAnswer && !isClosed) {
             console.log('[AI-Chat] Sending content and finish for incomplete stream');
 
             // Send the content we collected
             const encodedContent = JSON.stringify(fullText);
             safeEnqueue(encoder.encode(`0:${encodedContent}\n`));
-
-            const finishEvent = {
-              finishReason: 'stop',
-              usage: { promptTokens: 0, completionTokens: 0 },
-              isContinued: false
-            };
-            safeEnqueue(encoder.encode(`e:${JSON.stringify(finishEvent)}\n`));
-
-            const finishData = {
-              finishReason: 'stop',
-              usage: { promptTokens: 0, completionTokens: 0 }
-            };
-            safeEnqueue(encoder.encode(`d:${JSON.stringify(finishData)}\n`));
+            sendAiSdkFinish('stop');
+            releaseBackend();
           }
 
         } catch (e) {
           console.error('[AI-Chat] Stream error:', e);
           if (!isClosed) {
             safeEnqueue(encoder.encode(`3:${JSON.stringify('Stream error: ' + String(e))}\n`));
+            sendAiSdkFinish('error');
           }
+          releaseBackend();
         } finally {
+          // Always release the backend reader so the Python worker/session lock is freed,
+          // even on unexpected exits (client disconnect, thrown errors, etc.).
+          releaseBackend();
           if (keepaliveTimer) {
             clearInterval(keepaliveTimer);
             keepaliveTimer = null;
+          }
+          if (!streamFinishSent && !isClosed) {
+            try {
+              console.warn('[AI-Chat] Emitting fallback finish so useChat can send another message');
+              sendAiSdkFinish('stop');
+            } catch {
+              /* ignore */
+            }
           }
           safeClose();
         }
@@ -464,8 +560,9 @@ export async function POST(req: NextRequest) {
       headers: {
         'Content-Type': 'text/plain; charset=utf-8',
         'X-Vercel-AI-Data-Stream': 'v1',
-        'Cache-Control': 'no-cache',
+        'Cache-Control': 'no-cache, no-transform',
         'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no',
       },
     });
 
@@ -478,6 +575,17 @@ export async function POST(req: NextRequest) {
       start(controller) {
         const encodedError = JSON.stringify(errorMessage);
         controller.enqueue(encoder.encode(`3:${encodedError}\n`));
+        const finishEvent = {
+          finishReason: 'error',
+          usage: { promptTokens: 0, completionTokens: 0 },
+          isContinued: false,
+        };
+        controller.enqueue(encoder.encode(`e:${JSON.stringify(finishEvent)}\n`));
+        const finishData = {
+          finishReason: 'error',
+          usage: { promptTokens: 0, completionTokens: 0 },
+        };
+        controller.enqueue(encoder.encode(`d:${JSON.stringify(finishData)}\n`));
         controller.close();
       }
     });
@@ -486,8 +594,9 @@ export async function POST(req: NextRequest) {
       headers: {
         'Content-Type': 'text/plain; charset=utf-8',
         'X-Vercel-AI-Data-Stream': 'v1',
-        'Cache-Control': 'no-cache',
+        'Cache-Control': 'no-cache, no-transform',
         'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no',
       }
     });
   }

@@ -11,6 +11,17 @@ services:
       - "11434:11434"
     volumes:
       - ollama-models:/root/.ollama
+    environment:
+      # Raise default context so OpenClaw's ~18K-token tool schema + system
+      # prompt isn't truncated to 4096 (which silently dropped all tool defs
+      # and caused the agent to refuse/simulate instead of calling tools).
+      # The /v1/chat/completions OpenAI-compat endpoint does NOT forward the
+      # `options.num_ctx` field, so this env var is the only reliable way
+      # to enlarge the KV cache for every loaded model.
+      OLLAMA_CONTEXT_LENGTH: "32768"
+      # Allow the 35B Qwen3 MoE to stay resident longer between turns so we
+      # don't pay the 45s cold-load penalty on each OpenClaw invocation.
+      OLLAMA_KEEP_ALIVE: "30m"
     deploy:
       resources:
         reservations:
@@ -91,6 +102,9 @@ services:
       DATABASE_URL: "postgresql://pguser:pgpassword@pgsql:5432/database"
       JWT_SECRET: "***REMOVED***"
       OLLAMA_URL: "http://ollama:11434"
+      # Optional desktop-GPU Ollama for the model picker. Surfaces models that
+      # only exist on the desktop (e.g. gemma4-26b on the 5080) in /api/models.
+      DESKTOP_OLLAMA_URL: "${DESKTOP_OLLAMA_URL:-}"
       BACKEND_URL: "http://backend:8000"
       HF_HOME: "/models-cache/huggingface"
       TRANSFORMERS_CACHE: "/models-cache/huggingface"
@@ -104,8 +118,21 @@ services:
       # This avoids needing Docker socket access
       CODE_EXECUTOR_LOCAL: "true"
       # OpenClaw integration
-      OPENCLAW_URL: "ws://openclaw:18789"
-      OPENCLAW_GATEWAY_TOKEN: "${OPENCLAW_GATEWAY_TOKEN}"
+      # OPENCLAW_URL / OPENCLAW_BUNDLED_URL default to the local container.
+      # Override in .env to route to a remote gateway (e.g. desktop GPU box).
+      # If primary fails, the client auto-retries against OPENCLAW_FALLBACK_URL.
+      OPENCLAW_URL: "${OPENCLAW_URL:-ws://openclaw:18789}"
+      OPENCLAW_GATEWAY_TOKEN: "${OPENCLAW_GATEWAY_TOKEN_BUNDLED:-${OPENCLAW_GATEWAY_TOKEN}}"
+      OPENCLAW_GATEWAY_TOKEN_BUNDLED: "${OPENCLAW_GATEWAY_TOKEN_BUNDLED:-${OPENCLAW_GATEWAY_TOKEN}}"
+      OPENCLAW_BUNDLED_URL: "${OPENCLAW_BUNDLED_URL:-ws://openclaw:18789}"
+      OPENCLAW_FALLBACK_URL: "${OPENCLAW_FALLBACK_URL:-ws://openclaw:18789}"
+      OPENCLAW_FALLBACK_TOKEN: "${OPENCLAW_FALLBACK_TOKEN:-${OPENCLAW_GATEWAY_TOKEN_BUNDLED:-${OPENCLAW_GATEWAY_TOKEN}}}"
+      # Host-installed OpenClaw gateway (Discord-facing, runs on host:18790)
+      OPENCLAW_HOST_URL: "${OPENCLAW_HOST_URL:-ws://host.docker.internal:18790}"
+      # Path inside the container to the host's native OpenClaw config
+      # (bind-mounted below). Used by /model Discord command to propagate
+      # model selection to the native BYO OpenClaw gateway.
+      HOST_OPENCLAW_CONFIG: "${HOST_OPENCLAW_CONFIG:-/host-openclaw/openclaw.json}"
       # Cloud AI providers (loaded from .env — never hardcode here)
       MOONSHOT_API_KEY: "${MOONSHOT_API_KEY:-}"
       MOONSHOT_BASE_URL: "${MOONSHOT_BASE_URL:-https://api.moonshot.ai/v1}"
@@ -143,14 +170,22 @@ services:
       - ./python_back_end/workspace:/app/workspace:ro
       - ./python_back_end/tools:/app/tools:ro
       - ./python_back_end/integrations:/app/integrations:ro
-      - ./openclaw/config:/app/openclaw_config:ro
+      - ./openclaw/config:/app/openclaw_config
       - ./python_back_end/notebooks:/app/notebooks:ro
       - ./python_back_end/vibecoding:/app/vibecoding:ro
       - artifact_data:/data/artifacts
       - openclaw-projects:/data/openclaw-projects
+      # Write-through to host's native OpenClaw config so Discord /model
+      # propagates to the BYO gateway. Set HOST_OPENCLAW_CONFIG_HOST_PATH
+      # in .env to override. Requires file to be writable by UID 1001 (appuser)
+      # — chmod 664 and chgrp to a shared group if needed.
+      - "${HOST_OPENCLAW_CONFIG_HOST_PATH:-/home/user/.openclaw}:/host-openclaw:rw"
     networks:
       - ollama-n8n-network
       - openclaw-internal
+    extra_hosts:
+      # Allow backend container to reach host-installed openclaw gateway on :18790
+      - "host.docker.internal:host-gateway"
     depends_on:
       ollama:
         condition: service_started
@@ -160,7 +195,7 @@ services:
         condition: service_completed_successfully
       artifact-init:
         condition: service_completed_successfully
-      ollama-model-pull:
+      ollama-model-check:
         condition: service_completed_successfully
       openclaw:
         condition: service_healthy
@@ -300,6 +335,7 @@ services:
       - ./python_back_end/artifacts_build_jobs_schema.sql:/docker-entrypoint-initdb.d/artifacts_build_jobs_schema.sql:ro
       - ./front_end/newjfrontend/db/migrations/001_add_document_jobs.sql:/docker-entrypoint-initdb.d/001_add_document_jobs.sql:ro
       - ./python_back_end/workspace/workspace_schema.sql:/docker-entrypoint-initdb.d/002_workspace_schema.sql:ro
+      - ./python_back_end/migrations/010_user_openclaw_config.sql:/docker-entrypoint-initdb.d/003_user_openclaw_config.sql:ro
     ports:
       - "5432:5432"
     deploy:
@@ -316,42 +352,38 @@ services:
       retries: 5
 
   # ═══════════════════════════════════════════════════════════════════════════
-  # Ollama Model Init — ensures required models exist before agents start
+  # Ollama Model Check — detection only. Never pulls. Users pull their own models.
   # ═══════════════════════════════════════════════════════════════════════════
-  ollama-model-pull:
+  ollama-model-check:
     image: curlimages/curl:latest
-    container_name: harvis-ollama-model-pull
+    container_name: harvis-ollama-model-check
     restart: "no"
     entrypoint: sh
     command: >
       -c "
-        echo '=== Ollama Model Init ===' &&
-        echo 'Waiting for Ollama to be ready...' &&
-        until curl -sf http://ollama:11434/api/tags >/dev/null 2>&1; do
-          echo '  Ollama not ready, retrying in 3s...'; sleep 3;
+        echo '=== Ollama Model Check (detect-only, no pulls) ===' &&
+        echo 'Waiting up to 30s for Ollama...' &&
+        i=0; until curl -sf http://ollama:11434/api/tags >/dev/null 2>&1 || [ $$i -ge 10 ]; do
+          i=$$((i+1)); echo '  Ollama not ready, retry '$$i'/10...'; sleep 3;
         done &&
-        echo 'Ollama is up. Checking for qwen3.5-32k model...' &&
-
-        if curl -sf http://ollama:11434/api/show -d '{\"name\":\"qwen3.5-32k:latest\"}' >/dev/null 2>&1; then
-          echo 'Model qwen3.5-32k:latest already exists — skipping pull.'
-        else
-          echo 'Model qwen3.5-32k:latest not found. Pulling base model qwen3.5...' &&
-          curl -sf http://ollama:11434/api/pull -d '{\"name\":\"qwen3.5:latest\"}' &&
-          echo 'Base model pulled. Creating qwen3.5-32k with 32K context window...' &&
-          curl -sf http://ollama:11434/api/create -d '{
-            \"name\": \"qwen3.5-32k:latest\",
-            \"from\": \"qwen3.5:latest\",
-            \"parameters\": {
-              \"num_ctx\": 32768,
-              \"presence_penalty\": 0.6,
-              \"temperature\": 0.7,
-              \"top_k\": 20,
-              \"top_p\": 0.95
-            }
-          }' &&
-          echo 'Model qwen3.5-32k:latest created successfully!'
+        if ! curl -sf http://ollama:11434/api/tags >/dev/null 2>&1; then
+          echo 'WARN: Ollama did not respond — skipping model check.'; exit 0;
         fi &&
-        echo '=== Model init complete ==='
+        TAGS=$$(curl -sf http://ollama:11434/api/tags) &&
+        COUNT=$$(echo \"$$TAGS\" | grep -o '\"name\"' | wc -l | tr -d ' ') &&
+        if [ \"$$COUNT\" -gt 0 ]; then
+          echo \"Found $$COUNT model(s) installed in Ollama:\";
+          echo \"$$TAGS\" | tr ',' '\\n' | grep '\"name\"' | sed 's/.*\"name\":\"\\([^\"]*\\)\".*/  - \\1/';
+        else
+          echo '────────────────────────────────────────────────────────';
+          echo 'NOTICE: No models installed in Ollama.';
+          echo 'Harvis will start, but model-backed features will fail until you pull one.';
+          echo 'To install a recommended model, run:';
+          echo '  docker exec harvis-ollama ollama pull qwen2.5:7b';
+          echo 'Or any model of your choice — Harvis auto-detects installed models.';
+          echo '────────────────────────────────────────────────────────';
+        fi &&
+        echo '=== Model check complete ==='
       "
     depends_on:
       ollama:
@@ -436,7 +468,8 @@ services:
       NODE_ENV: production
       TERM: xterm-256color
       OPENCLAW_STATE_DIR: /home/node/.openclaw
-      OPENCLAW_GATEWAY_TOKEN: "${OPENCLAW_GATEWAY_TOKEN}"
+      OPENCLAW_GATEWAY_TOKEN: "${OPENCLAW_GATEWAY_TOKEN_BUNDLED:-${OPENCLAW_GATEWAY_TOKEN}}"
+      OPENCLAW_MODE: "${OPENCLAW_MODE:-bundled}"
       OLLAMA_API_KEY: "ollama-local"
       DATABASE_URL: "postgresql://pguser:pgpassword@pgsql:5432/database"
       GH_TOKEN: "${HARVIS_GITHUB_TOKEN:-}"
@@ -448,16 +481,24 @@ services:
       PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
     volumes:
       - openclaw-data:/home/node/.openclaw
-      - ./openclaw/config/openclaw.json:/home/node/.openclaw/openclaw.json:ro
-      - ./openclaw/config/exec-approvals.json:/home/node/.openclaw/exec-approvals.json
-      - ./openclaw/config/IDENTITY.md:/home/node/.openclaw/IDENTITY.md:ro
-      - ./openclaw/config/SOUL.md:/home/node/.openclaw/SOUL.md:ro
-      - ./openclaw/config/USER.md:/home/node/.openclaw/USER.md:ro
-      - ./openclaw/config/AGENT.md:/home/node/.openclaw/AGENT.md:ro
-      - ./openclaw/skills:/skills:ro
-      # Heartbeat workspace files
-      - ./openclaw/config/HEARTBEAT.md:/home/node/.openclaw/workspace/HEARTBEAT.md:ro
-      - ./openclaw/scripts:/home/node/.openclaw/workspace/scripts:ro
+      # Mode-specific config set (default: bundled)
+      - ./openclaw/config/${OPENCLAW_CONFIG_SET:-bundled}/openclaw.json:/home/node/.openclaw/openclaw.json:ro
+      - ./openclaw/config/${OPENCLAW_CONFIG_SET:-bundled}/exec-approvals.json:/home/node/.openclaw/exec-approvals.json
+      # Shared identity files
+      - ./openclaw/config/shared/IDENTITY.md:/home/node/.openclaw/IDENTITY.md:ro
+      - ./openclaw/config/shared/SOUL.md:/home/node/.openclaw/SOUL.md:ro
+      # Mode-specific identity overrides + skills
+      - ./openclaw/config/${OPENCLAW_CONFIG_SET:-bundled}/USER.md:/home/node/.openclaw/USER.md:ro
+      - ./openclaw/config/${OPENCLAW_CONFIG_SET:-bundled}/AGENT.md:/home/node/.openclaw/AGENT.md:ro
+      # Skills are writable so the agent can edit its own behavior. Identity
+      # files (IDENTITY.md / SOUL.md / USER.md / AGENT.md) are mounted
+      # separately as :ro elsewhere — those stay locked. The agent edits skills
+      # via the existing `exec` tool (e.g. `cat > /skills-shared/harvis-X/SKILL.md`).
+      - ./openclaw/skills/${OPENCLAW_CONFIG_SET:-bundled}:/skills:rw
+      - ./openclaw/skills/shared:/skills-shared:rw
+      # Mode-specific heartbeat workspace files
+      - ./openclaw/config/${OPENCLAW_CONFIG_SET:-bundled}/HEARTBEAT.md:/home/node/.openclaw/workspace/HEARTBEAT.md:ro
+      - ./openclaw/scripts/${OPENCLAW_CONFIG_SET:-bundled}:/home/node/.openclaw/workspace/scripts:ro
       # Shared projects volume — backend writes repos, OpenClaw reads/writes code
       - openclaw-projects:/home/node/projects
     command:
@@ -476,7 +517,7 @@ services:
         condition: service_completed_successfully
       ollama:
         condition: service_healthy
-      ollama-model-pull:
+      ollama-model-check:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "node -e \"const n=require('net');const c=n.createConnection(18789,'127.0.0.1');c.on('connect',()=>{c.end();process.exit(0)});c.on('error',()=>process.exit(1))\""]
@@ -534,8 +575,27 @@ services:
       - open_notebook_data:/app/data
     depends_on:
       - surrealdb
+
+  # MCP bridge for Cursor / VS Code integration
+  harvis-mcp:
+    build:
+      context: ./python_back_end
+      dockerfile: Dockerfile
+    container_name: harvis-mcp
+    restart: unless-stopped
+    entrypoint: ["uvicorn", "mcp.server.app:app", "--host", "0.0.0.0", "--port", "8010"]
+    environment:
+      BACKEND_INTERNAL_URL: "http://backend:8000"
+      OPENCLAW_GATEWAY_TOKEN: "${OPENCLAW_GATEWAY_TOKEN_BUNDLED:-${OPENCLAW_GATEWAY_TOKEN}}"
+      PYTHONPATH: "/app"
+    depends_on:
+      backend:
+        condition: service_started
     networks:
       - ollama-n8n-network
+      - openclaw-internal
+    ports:
+      - "127.0.0.1:8010:8010"
 
   # ═══════════════════════════════════════════════════════════════════════════
   # TTS Service - Voice Cloning & Podcast Generation

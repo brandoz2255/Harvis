@@ -44,19 +44,31 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from typing import AsyncGenerator, Optional
 
 import websockets
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+from cryptography.hazmat.primitives.serialization import (
+    Encoding,
+    NoEncryption,
+    PrivateFormat,
+    PublicFormat,
+)
 from websockets.exceptions import ConnectionClosed, WebSocketException
 
 logger = logging.getLogger(__name__)
 
 OPENCLAW_URL = os.getenv("OPENCLAW_URL", "ws://harvis-ai-openclaw:18789")
 OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
+
+# Optional failover: if connecting to the primary OpenClaw fails, try this URL.
+# Used to keep a remote primary (e.g. desktop GPU box) with the local bundled
+# container as the safety net. Empty string disables fallback.
+OPENCLAW_FALLBACK_URL = os.getenv("OPENCLAW_FALLBACK_URL", "")
+OPENCLAW_FALLBACK_TOKEN = os.getenv("OPENCLAW_FALLBACK_TOKEN", "") or OPENCLAW_GATEWAY_TOKEN
 
 # Identity files (mounted into backend container).
 # docker-compose mounts ./openclaw/config -> /app/openclaw_config:ro
@@ -147,36 +159,89 @@ def _base64url_encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
 
 
-def _generate_device_identity():
-    """Generate a fresh Ed25519 key pair and derive the device ID."""
-    private_key = Ed25519PrivateKey.generate()
+def _derive_identity_from_private_key(private_key: Ed25519PrivateKey):
     public_key = private_key.public_key()
-
     # Export DER-encoded SPKI public key, then strip the 12-byte prefix to get raw 32 bytes
     pub_der = public_key.public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
     if pub_der[: len(_ED25519_SPKI_PREFIX)] == _ED25519_SPKI_PREFIX:
         raw_pub = pub_der[len(_ED25519_SPKI_PREFIX):]
     else:
         raw_pub = pub_der  # fallback (shouldn't happen for Ed25519)
-
     device_id = hashlib.sha256(raw_pub).hexdigest()
     pub_b64url = _base64url_encode(raw_pub)
+    return device_id, pub_b64url
+
+
+# Persistent device identity path.
+# OpenClaw pairs devices by deviceId; a fresh keypair on every backend restart
+# invalidates any prior pairing, forcing the user to re-approve the device via
+# `openclaw devices approve …` after every restart. Persisting the key keeps
+# the pairing valid across restarts.
+_DEVICE_KEY_PATH = os.getenv(
+    "HARVIS_OPENCLAW_DEVICE_KEY",
+    "/data/artifacts/openclaw-device-key.pem",
+)
+
+
+def _load_or_create_device_identity():
+    """Load the persisted Ed25519 private key, or generate + save a new one."""
+    try:
+        if os.path.exists(_DEVICE_KEY_PATH):
+            with open(_DEVICE_KEY_PATH, "rb") as f:
+                pem = f.read()
+            from cryptography.hazmat.primitives.serialization import load_pem_private_key
+            private_key = load_pem_private_key(pem, password=None)
+            if not isinstance(private_key, Ed25519PrivateKey):
+                raise ValueError("Persisted key is not Ed25519")
+            device_id, pub_b64url = _derive_identity_from_private_key(private_key)
+            logger.info(
+                "OpenClaw device identity loaded from %s (deviceId=%s…)",
+                _DEVICE_KEY_PATH, device_id[:16],
+            )
+            return private_key, device_id, pub_b64url
+    except Exception as exc:
+        logger.warning(
+            "Failed to load persisted device key (%s): %s — regenerating",
+            _DEVICE_KEY_PATH, exc,
+        )
+
+    private_key = Ed25519PrivateKey.generate()
+    device_id, pub_b64url = _derive_identity_from_private_key(private_key)
+    try:
+        os.makedirs(os.path.dirname(_DEVICE_KEY_PATH), exist_ok=True)
+        pem_bytes = private_key.private_bytes(
+            encoding=Encoding.PEM,
+            format=PrivateFormat.PKCS8,
+            encryption_algorithm=NoEncryption(),
+        )
+        with open(_DEVICE_KEY_PATH, "wb") as f:
+            f.write(pem_bytes)
+        os.chmod(_DEVICE_KEY_PATH, 0o600)
+        logger.info(
+            "OpenClaw device identity generated + saved to %s (deviceId=%s…). "
+            "Approve once via `openclaw devices approve <request-id>` on the host.",
+            _DEVICE_KEY_PATH, device_id[:16],
+        )
+    except Exception as exc:
+        logger.warning("Failed to persist device key to %s: %s", _DEVICE_KEY_PATH, exc)
     return private_key, device_id, pub_b64url
 
 
-# Module-level device identity — generated once per process startup.
-# OpenClaw's skipPairingForOperatorSharedAuth flag means token-authenticated operator
-# clients with device identity are auto-approved without manual pairing.
-_device_private_key, _device_id, _device_pub_b64url = _generate_device_identity()
-logger.debug("OpenClaw device identity initialized: deviceId=%s...", _device_id[:16])
+# Module-level device identity — loaded or generated once per process startup.
+_device_private_key, _device_id, _device_pub_b64url = _load_or_create_device_identity()
 
 
-def _build_device_params(nonce: str) -> dict:
+def _build_device_params(nonce: str, token: str = "") -> dict:
     """
     Build the signed device identity block for the OpenClaw connect handshake.
 
     Payload format (v2): "v2|deviceId|clientId|clientMode|role|scopes|signedAtMs|token|nonce"
+
+    Args:
+        nonce: Challenge nonce from the server.
+        token: Gateway token to sign with. Falls back to module-level constant.
     """
+    effective_token = token or OPENCLAW_GATEWAY_TOKEN
     signed_at_ms = int(time.time() * 1000)
     scopes_str = ",".join(_CLIENT_SCOPES)
     payload = "|".join([
@@ -187,7 +252,7 @@ def _build_device_params(nonce: str) -> dict:
         "operator",
         scopes_str,
         str(signed_at_ms),
-        OPENCLAW_GATEWAY_TOKEN,
+        effective_token,
         nonce,
     ])
     sig_bytes = _device_private_key.sign(payload.encode("utf-8"))
@@ -202,53 +267,112 @@ def _build_device_params(nonce: str) -> dict:
 
 def _build_context_brief(chat_history: list[dict], current_task: str = "") -> str:
     """
-    Build a compact context string from Harvis chat history.
+    Render recent chat history as an in-order transcript so the agent has real
+    conversational memory (names, prior asks, references like "that image",
+    "the file you just looked at").
 
-    Instead of dumping raw messages (which can be thousands of tokens), this
-    produces a short paragraph covering:
-      - what the user has been working on (last 3 user turns, truncated)
-      - the most recent assistant reply (first 200 chars)
+    Budget: up to ~4000 chars total (~1000 tokens). Comfortably fits inside
+    the 8K num_ctx local models default to while leaving room for tools +
+    system prompt + new task.
 
     The current task itself is excluded — it's already in the directive.
-
     Returns an empty string when there's nothing useful to include.
     """
     if not chat_history:
         return ""
 
-    # Collect the last few user messages, excluding the current task
-    user_turns: list[str] = []
+    MAX_TURNS = 10              # keep the last N turns (user+assistant combined)
+    MAX_CHARS_USER = 500
+    MAX_CHARS_ASSISTANT = 600
+    TOTAL_BUDGET_CHARS = 4000
+
+    # Walk newest → oldest, drop the current task if it's the most recent user turn
+    recent: list[tuple[str, str]] = []  # (role, text) newest-first
+    skipped_current = False
     for m in reversed(chat_history):
-        if m.get("role") != "user":
+        role = m.get("role")
+        if role not in ("user", "assistant"):
             continue
         text = (m.get("content") or "").strip()
-        if not text or text == current_task:
+        if not text:
             continue
-        # Truncate each prior turn to 120 chars so the whole brief stays small
-        user_turns.append(text[:120] + ("…" if len(text) > 120 else ""))
-        if len(user_turns) == 3:
+        if not skipped_current and role == "user" and text == current_task:
+            skipped_current = True
+            continue
+
+        if role == "user":
+            if len(text) > MAX_CHARS_USER:
+                text = text[:MAX_CHARS_USER] + "…"
+        else:  # assistant
+            if len(text) > MAX_CHARS_ASSISTANT:
+                text = text[:MAX_CHARS_ASSISTANT] + "…"
+
+        recent.append((role, text))
+        if len(recent) >= MAX_TURNS:
             break
-    user_turns.reverse()
 
-    # Grab the last assistant reply for result context
-    last_assistant = ""
-    for m in reversed(chat_history):
-        if m.get("role") == "assistant":
-            text = (m.get("content") or "").strip()
-            if text:
-                last_assistant = text[:200] + ("…" if len(text) > 200 else "")
-                break
-
-    if not user_turns and not last_assistant:
+    if not recent:
         return ""
 
-    parts: list[str] = []
-    if user_turns:
-        parts.append("Prior requests: " + " | ".join(user_turns))
-    if last_assistant:
-        parts.append("Last response: " + last_assistant)
+    # Put oldest first so the transcript reads chronologically
+    recent.reverse()
 
-    return "\n".join(parts)
+    lines: list[str] = ["Recent conversation (most recent last):"]
+    used = len(lines[0])
+    for role, text in recent:
+        prefix = "User:" if role == "user" else "You (Harvis):"
+        line = f"{prefix} {text}"
+        if used + len(line) > TOTAL_BUDGET_CHARS:
+            # Budget hit — stop rather than spilling into the tool/system prompt.
+            lines.append("…(earlier turns trimmed to stay within context budget)…")
+            break
+        lines.append(line)
+        used += len(line)
+
+    return "\n".join(lines)
+
+
+_BROWSER_REFUSAL_SIGNALS = (
+    "as a text-based ai",
+    "as a language model",
+    "i do not have direct access to a web browser",
+    "cannot execute the request literally",
+    "cannot take real-time screenshots",
+    "i cannot browse",
+    "simulated screenshot",
+)
+
+
+def _extract_browser_target_url(task_text: str) -> str:
+    """
+    Best-effort URL extraction for browser tasks.
+    Returns an https URL, defaulting to Google when no explicit URL is present.
+    """
+    text = task_text or ""
+    explicit = re.search(r'https?://[^\s)]+', text, re.IGNORECASE)
+    if explicit:
+        return explicit.group(0)
+
+    bare = re.search(r'\b([a-z0-9-]+\.[a-z]{2,}(?:/[^\s)]*)?)\b', text, re.IGNORECASE)
+    if bare:
+        return f"https://{bare.group(1)}"
+
+    return "https://google.com"
+
+
+def _looks_like_browser_or_screenshot_task(task_text: str) -> bool:
+    low = (task_text or "").lower()
+    return (
+        "http://" in low
+        or "https://" in low
+        or ".com" in low
+        or "screenshot" in low
+        or "screen shot" in low
+        or "navigate" in low
+        or "open " in low
+        or "website" in low
+        or "webpage" in low
+    )
 
 
 class OpenClawEvent:
@@ -299,6 +423,9 @@ class OpenClawClient:
         workspace_id: str,
         session_id: Optional[str] = None,
         agent_id: str = "main",
+        gateway_url: Optional[str] = None,
+        gateway_token: Optional[str] = None,
+        workspace_prefix: str = "",
     ):
         self.workspace_id = workspace_id
         # session_id becomes part of the OpenClaw session key.
@@ -308,6 +435,12 @@ class OpenClawClient:
         # agent_id selects which OpenClaw agent handles this session.
         # "main" uses the default local Ollama model configured in openclaw.json.
         self.agent_id = agent_id
+        # Per-instance gateway overrides — enables BYO mode routing.
+        # Falls back to module-level constants when not provided.
+        self.gateway_url = gateway_url or OPENCLAW_URL
+        self.gateway_token = gateway_token or OPENCLAW_GATEWAY_TOKEN
+        # Workspace prefix for filesystem isolation (bundled: "bundled/<uid>/", BYO: "")
+        self.workspace_prefix = workspace_prefix
         self._ws = None
         self._cancelled = asyncio.Event()
         self._request_id = 0
@@ -337,9 +470,33 @@ class OpenClawClient:
         return f"agent:{safe_agent}:{safe_session}"
 
     async def _connect(self):
-        """Open the WebSocket and authenticate via the connect handshake."""
+        """
+        Open the WebSocket and authenticate via the connect handshake.
+
+        Tries `self.gateway_url` first. If that fails with a connection-level
+        error and `OPENCLAW_FALLBACK_URL` is set (and different), retries against
+        the fallback. On fallback success, mutates `self.gateway_url`/token so any
+        later reconnects in the same stream stay on the working endpoint.
+        """
+        try:
+            return await self._connect_to(self.gateway_url, self.gateway_token)
+        except (OSError, asyncio.TimeoutError, ConnectionError, WebSocketException) as primary_exc:
+            fallback_url = OPENCLAW_FALLBACK_URL
+            if not fallback_url or fallback_url == self.gateway_url:
+                raise
+            logger.warning(
+                "[workspace:%s] Primary OpenClaw %s failed (%s) — falling back to %s",
+                self.workspace_id, self.gateway_url, primary_exc, fallback_url,
+            )
+            ws = await self._connect_to(fallback_url, OPENCLAW_FALLBACK_TOKEN or self.gateway_token)
+            self.gateway_url = fallback_url
+            self.gateway_token = OPENCLAW_FALLBACK_TOKEN or self.gateway_token
+            return ws
+
+    async def _connect_to(self, url: str, token: str):
+        """Single-target connect + handshake. Raises on any failure."""
         ws = await websockets.connect(
-            OPENCLAW_URL,
+            url,
             ping_interval=20,
             ping_timeout=10,
             open_timeout=10,
@@ -380,9 +537,9 @@ class OpenClawClient:
                 "role": "operator",
                 "scopes": _CLIENT_SCOPES,
                 "auth": {
-                    "token": OPENCLAW_GATEWAY_TOKEN,
+                    "token": token,
                 },
-                "device": _build_device_params(nonce),
+                "device": _build_device_params(nonce, token),
             },
         }))
 
@@ -395,7 +552,7 @@ class OpenClawClient:
             error_detail = ack.get("error", {}).get("message", str(ack))
             raise ConnectionError(f"OpenClaw connect handshake failed: {error_detail}")
 
-        logger.info("[workspace:%s] Connected and authenticated to OpenClaw", self.workspace_id)
+        logger.info("[workspace:%s] Connected and authenticated to OpenClaw at %s", self.workspace_id, url)
         return ws
 
     async def stream(
@@ -450,9 +607,26 @@ class OpenClawClient:
             # This keeps per-request token cost low regardless of conversation length.
             context_block = _build_context_brief(chat_history, current_task=last_user_msg)
 
-            # Session-scoped workspace directory — isolates file ops per run.
+            # Session-scoped workspace directory.
+            #
+            # The OpenClaw gateway's `exec` and `write` tools run with CWD
+            # /home/node/.openclaw/workspace — that is what `write` treats as
+            # its root. Previously we handed the model an absolute path under
+            # /home/node/workspaces/bundled/<uid>/<session>/, but the `write`
+            # tool does not cooperate with that path: files written relative
+            # to the tool land in /home/node/.openclaw/workspace/, while the
+            # model tried to `cd` into the scoped dir it was told, read its
+            # own file back, and failed (empty dir, file actually elsewhere).
+            #
+            # Fix: place the workdir inside the real exec CWD, so `mkdir`,
+            # `cd`, `write` (which treats relative paths as rooted in
+            # /home/node/.openclaw/workspace) and subsequent `python3 file.py`
+            # all agree on one location.
             safe_session = self.session_id.replace("/", "-").replace(" ", "-")
-            workdir = f"/home/node/workspaces/{safe_session}"
+            _scope_tag = self.workspace_prefix.replace("/", "-").strip("-")
+            _scope_slug = f"{_scope_tag}-" if _scope_tag else ""
+            workdir = f"/home/node/.openclaw/workspace/session-{_scope_slug}{safe_session}"
+            workdir_rel = f"session-{_scope_slug}{safe_session}"
 
             # GitHub availability hint — injected only when the token is configured.
             # The actual token is in $GH_TOKEN env var inside the OpenClaw container.
@@ -470,6 +644,14 @@ class OpenClawClient:
                     f"(POST to {_backend_host}/github/pulls).\n"
                     "Never print any credential values. Never push to main.\n"
                 )
+
+            repo_hint = (
+                "\nREPO MOUNTING (workspace-first routing):\n"
+                "If a GitHub repo is mounted for this user, prefer editing inside "
+                "/home/node/projects/<owner>/<repo> instead of creating detached files.\n"
+                "When repository paths are provided in task context/events, set your "
+                "workdir to that mounted repo and run git operations there.\n"
+            )
 
             # RAG search hint — always injected so the agent uses local knowledge
             # before writing code or answering questions about the codebase.
@@ -567,6 +749,7 @@ class OpenClawClient:
                     browser_hint = (
                         "\nBROWSER AUTOMATION (interactive website access):\n"
                         "You have a real Firefox browser. Use exec tool with these bash-wrapped curl commands.\n"
+                        "Never claim you cannot browse or screenshot websites; you can and must use these tools.\n"
                         "IMPORTANT: Call exec tool. Do NOT type these as text.\n\n"
                         "CREDENTIALS: Copy the EXACT `workspace_id` and `capability_token` strings from the "
                         "JSON in this task message into every browser `-d` body. "
@@ -609,12 +792,21 @@ class OpenClawClient:
             _workdir_init = _exec_via_bash(f"mkdir -p {workdir} && cd {workdir} && pwd")
             directive = (
                 f"WORKSPACE DIRECTORY: {workdir}\n"
+                "FILESYSTEM LAYOUT (IMPORTANT — READ BEFORE USING TOOLS):\n"
+                "- The `exec` tool runs commands with CWD /home/node/.openclaw/workspace\n"
+                "- The `write` tool treats relative paths as rooted at the SAME directory\n"
+                f"- Your session sub-directory is `{workdir_rel}/` under that root\n"
+                f"- Use the RELATIVE form `{workdir_rel}/<filename>` for `write`\n"
+                f"- Use the ABSOLUTE form `{workdir}/<filename>` for `exec`/`python3`\n"
+                "- DO NOT assume any /home/node/workspaces/... path exists — that tree is unrelated to the exec CWD.\n"
+                "\n"
                 "MANDATORY WORKDIR INIT:\n"
                 f"Your VERY FIRST action MUST be an `exec` tool call that runs exactly:\n"
                 f"  {_workdir_init}\n"
                 "Do not run `cd` alone; do not run other tools before this.\n"
                 f"All file operations (read, write, exec) MUST happen inside {workdir}.\n"
                 f"{github_hint}"
+                f"{repo_hint}"
                 f"{rag_hint}"
                 f"{web_hint}"
                 f"{browser_hint}"
@@ -625,13 +817,40 @@ class OpenClawClient:
                 "- Do NOT ask for clarification. Just do the task.\n"
                 "- Do NOT describe what you will do. Call a tool and do it.\n"
                 "- You CAN access the internet. Call exec with the bash-wrapped curl commands above.\n"
-                "- After exec returns a result, summarize it for the user in plain language.\n"
+                "- Never claim browser/screenshot limitations. You have real browser tooling in this workspace.\n"
+                "- If the user asks for a screenshot or website check, execute the browser workflow and provide the artifact.\n"
+                "- After exec returns a result, summarize it clearly; markdown formatting is allowed (bold, bullets, code).\n"
                 "- For tasks with independent parallel parts (e.g. research + code check, multiple URLs), "
                 "use `sessions_spawn` to delegate sub-agents when available; merge results in your final answer.\n"
                 "- SUB-AGENTS: Spawned workers are internal only. Do NOT repeat Harvis identity, "
                 "Discord/channel setup, or integration boilerplate in sub-agent replies. "
                 "Do NOT describe multiple 'Discord instances' or duplicate the assistant persona — "
                 "one Harvis, one user-facing voice; sub-agents return facts only for the parent to merge.\n"
+                "\n"
+                "PYTHON EXECUTION RULES (read before running python3):\n"
+                "- NEVER call `python3 -c '...'` when the code contains any of: `decode`, "
+                "`base64`, `b64decode`, `exec`, `system`, or `eval`. The sandbox will flag "
+                "the command as obfuscated and BLOCK it; you will see `Approval required` "
+                "or `Obfuscated command detected` in the exec output. That means the command "
+                "DID NOT RUN.\n"
+                "- Always: (1) use the `write` tool to save a `.py` file under your "
+                f"session workdir (path form: `{workdir_rel}/<name>.py`), then "
+                f"(2) run it with `exec`: `python3 {workdir}/<name>.py`.\n"
+                "- For binary/decoded output, print using `sys.stdout.buffer.write(...)` or "
+                "`.hex()` — do NOT call `.decode('utf-8')` on bytes you don't know are UTF-8.\n"
+                "- If an exec result mentions `Approval required`, `Obfuscated command detected`, "
+                "or `approval-pending`, treat the command as FAILED and rewrite it as a "
+                "write-then-run script. Do not proceed as if the command succeeded.\n"
+                "\n"
+                "ANSWER CONTRACT:\n"
+                "- Every task MUST end with a human-readable final answer that reports either "
+                "the observed result OR a clear statement of uncertainty.\n"
+                "- NEVER end with `Copy that.`, `Standing by.`, `On it.`, an empty reply, or a "
+                "restatement of the task.\n"
+                "- If you cannot determine the answer after using tools, say: "
+                "\"I could not determine the answer. Blocker: <one-sentence reason>.\" — then stop.\n"
+                "- If you fabricate or guess a flag/answer without tool evidence, that is a "
+                "failure. Prefer honest uncertainty to a hallucinated result.\n"
             )
 
             identity_bundle = _load_identity_bundle()
@@ -679,12 +898,17 @@ class OpenClawClient:
             # Injected once right before the first token so the timeline
             # shows activity during the model warm-up gap.
             _reasoning_logged = False
+            saw_tool_call = False
+            corrective_retry_count = 0
+            looks_visual_task = _looks_like_browser_or_screenshot_task(last_user_msg)
+            target_url = _extract_browser_target_url(last_user_msg)
 
             # Consume events until the chat reaches a terminal state.
             # OpenClaw pushes:
             #   {"type":"res","id":"<req_id>","ok":true}          — send ack (ignore)
             #   {"type":"event","event":"agent","payload":{...}}  — tool/progress events
             #   {"type":"event","event":"chat","payload":{"state":"final"/"error",...}}
+            _oc_frame_count = 0
             async for raw in self._ws:
                 if self._cancelled.is_set():
                     yield OpenClawEvent("cancelled", {"message": "Workspace cancelled by user."})
@@ -696,6 +920,35 @@ class OpenClawClient:
                     continue
 
                 msg_type = msg.get("type")
+
+                # region agent log — trace the first ~20 inbound frames and any chat terminal state
+                _oc_frame_count += 1
+                try:
+                    _ev = msg.get("event", "")
+                    _state = (msg.get("payload") or {}).get("state") if isinstance(msg.get("payload"), dict) else None
+                    if _oc_frame_count <= 20 or _ev == "chat":
+                        import json as _json5, time as _time5, uuid as _uuid5
+                        _log_path = "/tmp/debug-d007eb.log"
+                        with open(_log_path, "a", encoding="utf-8") as _f:
+                            _f.write(_json5.dumps({
+                                "sessionId": "d007eb",
+                                "id": f"log_{int(_time5.time()*1000)}_{_uuid5.uuid4().hex[:8]}",
+                                "timestamp": int(_time5.time()*1000),
+                                "location": "openclaw_client.py:stream:frame",
+                                "message": "oc_inbound_frame",
+                                "data": {
+                                    "workspace_id": self.workspace_id,
+                                    "frame_no": _oc_frame_count,
+                                    "msg_type": msg_type,
+                                    "event": _ev,
+                                    "state": _state,
+                                },
+                                "runId": "run_oc_stream",
+                                "hypothesisId": "H_stall",
+                            }, separators=(",", ":")) + "\n")
+                except Exception:
+                    pass
+                # endregion
 
                 # ── Handle incoming RPC requests from OpenClaw ──────────────
                 if msg_type == "req":
@@ -728,8 +981,8 @@ class OpenClawClient:
                         if "model" in err.lower() and ("not found" in err.lower() or "404" in err):
                             hint = (
                                 "The requested model is not available in Ollama. "
-                                "Run: docker exec harvis-ollama ollama list  to see available models. "
-                                "The ollama-model-pull init container should auto-create it on next restart."
+                                "Run: docker exec harvis-ollama ollama list  to see installed models, "
+                                "then pull one yourself: docker exec harvis-ollama ollama pull <model>"
                             )
                         elif "unknown method" in err.lower():
                             hint = "OpenClaw protocol mismatch. Check that the OpenClaw image version matches the client."
@@ -776,6 +1029,8 @@ class OpenClawClient:
                 # Agent events — tool calls and progress log lines
                 if event_name == "agent":
                     for event in self._handle_agent_event(payload):
+                        if event.type == "tool_call":
+                            saw_tool_call = True
                         # Inject a one-time "Agent generating response…" log just
                         # before the first token so the timeline shows activity
                         # during the model warm-up gap instead of a blank spinner.
@@ -795,6 +1050,49 @@ class OpenClawClient:
                         message = payload.get("message") or {}
                         content = message.get("content", [])
                         text = self._extract_text(content)
+                        if not text.strip() and self._last_partial_text.strip():
+                            # Some gateways close after partial token stream and send an
+                            # empty final payload. Reuse the last partial text so the
+                            # workspace can still emit a usable completion summary.
+                            text = self._last_partial_text
+                        text_lower = text.lower()
+
+                        # If the model responded with a simulated/refusal answer for a
+                        # browser/screenshot task, nudge it once to execute tools for real.
+                        if (
+                            interactive_context
+                            and looks_visual_task
+                            and not saw_tool_call
+                            and corrective_retry_count < 1
+                            and any(sig in text_lower for sig in _BROWSER_REFUSAL_SIGNALS)
+                        ):
+                            corrective_retry_count += 1
+                            self._last_partial_text = ""
+                            yield OpenClawEvent("log", {
+                                "message": "Agent returned a simulated response; forcing real browser execution...",
+                            })
+                            req_id = self._next_id()
+                            correction = (
+                                "CORRECTION: Do NOT simulate. You have a real browser.\n"
+                                "Execute this NOW with tool calls:\n"
+                                "1) open browser session\n"
+                                f"2) navigate to {target_url}\n"
+                                "3) take screenshot\n"
+                                "4) call image tool on artifact_path\n"
+                                "5) close session\n"
+                                "Return the screenshot result and concise findings using markdown."
+                            )
+                            await self._ws.send(json.dumps({
+                                "type": "req",
+                                "id": req_id,
+                                "method": "chat.send",
+                                "params": {
+                                    "sessionKey": self._session_key,
+                                    "message": correction,
+                                    "idempotencyKey": str(uuid.uuid4()),
+                                },
+                            }))
+                            continue
 
                         # Detect sub-agent delegation: the parent agent has handed off
                         # work to a sub-agent and will "auto-announce" the result when
@@ -811,6 +1109,77 @@ class OpenClawClient:
                             # Reset partial tracker for the sub-agent's upcoming stream
                             self._last_partial_text = ""
                             continue  # keep the async-for loop running
+
+                        # Empty final + the agent never even tried to call a
+                        # tool — the most pathological case (model returned a
+                        # totally silent turn). Retry once with a corrective
+                        # prompt before falling through to the user-facing
+                        # "rephrase it" message.
+                        if (
+                            not text.strip()
+                            and not saw_tool_call
+                            and corrective_retry_count < 1
+                        ):
+                            corrective_retry_count += 1
+                            self._last_partial_text = ""
+                            logger.warning(
+                                "[workspace:%s] Empty final + no tool call — retrying with corrective prompt",
+                                self.workspace_id,
+                            )
+                            yield OpenClawEvent("log", {
+                                "message": "Agent returned an empty response; retrying with a clearer instruction…",
+                            })
+                            req_id = self._next_id()
+                            correction = (
+                                "CORRECTION: Your previous response was empty.\n"
+                                "Do NOT return an empty message. Either:\n"
+                                "  • Call the appropriate tool to attempt the task, or\n"
+                                "  • Answer the user directly using markdown.\n\n"
+                                f"USER REQUEST: {last_user_msg}\n\n"
+                                "Respond now."
+                            )
+                            await self._ws.send(json.dumps({
+                                "type": "req",
+                                "id": req_id,
+                                "method": "chat.send",
+                                "params": {
+                                    "sessionKey": self._session_key,
+                                    "message": correction,
+                                    "idempotencyKey": str(uuid.uuid4()),
+                                },
+                            }))
+                            continue
+
+                        # If the final summary is empty (e.g. the model ran a bunch
+                        # of tools and then just replied with nothing, or the sub-agent
+                        # returned an empty message), synthesize a clear fallback so
+                        # the user never sees a blank "Workspace complete".
+                        if not text.strip():
+                            if saw_tool_call:
+                                text = (
+                                    "The agent ran tools for this task but did not "
+                                    "return a written answer. This usually means the "
+                                    "model got stuck in a retry loop or the sandbox "
+                                    "blocked a critical command.\n\n"
+                                    "Next step: re-run the task, or review the tool "
+                                    "output above. If you see `Approval required` or "
+                                    "`Obfuscated command detected`, the command was "
+                                    "blocked — try rephrasing the task to use a file "
+                                    "(`write` then `python3 file.py`) instead of "
+                                    "`python3 -c '...'`."
+                                )
+                            else:
+                                text = (
+                                    "The agent produced no answer and did not call any "
+                                    "tools. If the task requires file or web access, "
+                                    "rephrase it more explicitly (e.g. \"open https://… "
+                                    "and screenshot\", \"read the attached file and "
+                                    "report its contents\")."
+                                )
+                            logger.warning(
+                                "[workspace:%s] Empty final summary — synthesized fallback (saw_tool_call=%s)",
+                                self.workspace_id, saw_tool_call,
+                            )
 
                         yield OpenClawEvent("done", {"summary": text})
                         break
@@ -858,7 +1227,8 @@ class OpenClawClient:
 
         except ConnectionClosed as e:
             logger.warning("[workspace:%s] OpenClaw connection closed: %s", self.workspace_id, e)
-            yield OpenClawEvent("done", {"summary": ""})
+            # If we received partial tokens before close, surface them as final summary.
+            yield OpenClawEvent("done", {"summary": self._last_partial_text or ""})
 
         except WebSocketException as e:
             logger.error("[workspace:%s] WebSocket error: %s", self.workspace_id, e)
@@ -981,6 +1351,28 @@ class OpenClawClient:
                     output = str(result_data)
 
                 success = not data.get("isError", False)
+
+                # Re-classify sandbox "approval pending" / obfuscation warnings as
+                # FAILED tool results. OpenClaw returns these with success=true even
+                # though the command never actually ran, and the model then treats
+                # them as if the command had succeeded. Surfacing them as failures
+                # (plus an explicit log line) makes the model try a different
+                # approach instead of proceeding on a phantom success.
+                _low = output.lower()
+                if (
+                    "approval required" in _low
+                    or "obfuscated command detected" in _low
+                    or "approval-pending" in _low
+                ):
+                    success = False
+                    yield self._tag(OpenClawEvent("log", {
+                        "message": (
+                            "⚠ OpenClaw sandbox blocked the last command "
+                            "(approval-pending / obfuscation). The command DID NOT run. "
+                            "Rewrite it as a `write` → `python3 file.py` sequence."
+                        ),
+                    }), run_id)
+
                 logger.info(
                     "[openclaw] tool_result session=%.12s tool=%s success=%s output=%.80s",
                     self._session_key, tool_name, success, output,
@@ -1054,9 +1446,29 @@ class OpenClawClient:
                     yield self._tag(OpenClawEvent("log", {"message": str(msg)[:500]}), run_id)
 
     def cancel(self):
-        """Signal the stream loop to stop after the current event."""
+        """Signal the stream loop to stop and force-close the websocket so
+        the consumer (``async for raw in self._ws``) unblocks immediately
+        instead of only on the next inbound frame. A long-running LLM turn
+        can otherwise silently hold the loop for minutes."""
         self._cancelled.set()
         logger.info("[workspace:%s] Cancel requested", self.workspace_id)
+        ws = self._ws
+        if ws is not None:
+            try:
+                # websockets.close() is awaitable — schedule it so the cancel
+                # call stays synchronous (matches existing callers). Use
+                # get_running_loop so we don't accidentally create a new loop.
+                loop = asyncio.get_running_loop()
+                loop.create_task(ws.close(code=1000, reason="cancelled"))
+            except RuntimeError:
+                # Called from outside an event loop — nothing we can do, the
+                # _cancelled flag check on the next iteration will still exit.
+                pass
+            except Exception as exc:
+                logger.debug(
+                    "[workspace:%s] ws.close scheduling failed: %s",
+                    self.workspace_id, exc,
+                )
 
     async def close(self):
         ws = self._ws

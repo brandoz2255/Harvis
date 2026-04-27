@@ -43,22 +43,92 @@ interface ChatInputProps {
   onWorkspaceEnabledChange?: (enabled: boolean) => void
 }
 
-// Supported file types for file upload
+// Supported file types for file upload.
+// The map's *values* are what the OS file picker filters by (extension-based,
+// most reliable across browsers). Keys are best-guess MIME types, used by the
+// backend when present but the backend also falls back to extension matching.
 const SUPPORTED_FILE_TYPES = {
+  // Documents
   'application/pdf': '.pdf',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
   'application/msword': '.doc',
+  'application/rtf': '.rtf',
+  // Plain text & docs
   'text/plain': '.txt',
   'text/markdown': '.md',
+  'text/markdown-mdx': '.mdx',
+  'text/x-rst': '.rst',
+  'text/x-asciidoc': '.adoc',
+  'text/x-org': '.org',
+  'application/x-tex': '.tex',
+  // Data formats
   'text/csv': '.csv',
+  'text/tab-separated-values': '.tsv',
   'application/json': '.json',
-  'text/javascript': '.js',
-  'text/typescript': '.ts',
-  'text/x-python': '.py',
-  'text/html': '.html',
-  'text/css': '.css',
+  'application/x-ndjson': '.ndjson',
+  'application/x-jsonlines': '.jsonl',
   'application/xml': '.xml',
   'text/yaml': '.yaml',
+  'text/yaml-yml': '.yml',
+  'application/toml': '.toml',
+  'application/sql': '.sql',
+  'application/graphql': '.graphql',
+  'application/x-graphql': '.gql',
+  'application/x-protobuf': '.proto',
+  // Logs & diffs
+  'text/x-log': '.log',
+  'text/x-diff': '.diff',
+  'text/x-patch': '.patch',
+  // Config / dotfiles
+  'text/ini': '.ini',
+  'text/conf': '.conf',
+  'text/cfg': '.cfg',
+  'text/properties': '.properties',
+  'text/x-env': '.env',
+  // Web languages
+  'text/html': '.html',
+  'text/x-htm': '.htm',
+  'text/css': '.css',
+  'text/x-scss': '.scss',
+  'text/x-sass': '.sass',
+  'text/x-less': '.less',
+  'text/x-vue': '.vue',
+  'text/x-svelte': '.svelte',
+  'text/javascript': '.js',
+  'text/jsx': '.jsx',
+  'text/typescript': '.ts',
+  'text/tsx': '.tsx',
+  // Programming languages
+  'text/x-python': '.py',
+  'text/x-go': '.go',
+  'text/x-rust': '.rs',
+  'text/x-ruby': '.rb',
+  'text/x-php': '.php',
+  'text/x-java': '.java',
+  'text/x-kotlin': '.kt',
+  'text/x-swift': '.swift',
+  'text/x-scala': '.scala',
+  'text/x-dart': '.dart',
+  'text/x-lua': '.lua',
+  'text/x-perl': '.pl',
+  'text/x-r': '.r',
+  'text/x-csharp': '.cs',
+  'text/x-c': '.c',
+  'text/x-h': '.h',
+  'text/x-cpp': '.cpp',
+  'text/x-hpp': '.hpp',
+  'text/x-cc': '.cc',
+  'text/x-objc': '.m',
+  'text/x-objcpp': '.mm',
+  // Shell / scripts
+  'text/x-shellscript': '.sh',
+  'text/x-bash': '.bash',
+  'text/x-zsh': '.zsh',
+  'text/x-fish': '.fish',
+  'text/x-powershell': '.ps1',
+  'text/x-bat': '.bat',
+  // Notebooks
+  'application/x-ipynb+json': '.ipynb',
 }
 
 const SUPPORTED_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp']
@@ -90,6 +160,7 @@ export function ChatInput({ onSend, isLoading, isResearchMode, selectedModel, se
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
 
   const isVL = isVisionModel(selectedModel || '')
+  const sendDisabled = (!message.trim() && attachments.length === 0)
 
   // Load MCP plugins from localStorage
   useEffect(() => {
@@ -117,7 +188,7 @@ export function ChatInput({ onSend, isLoading, isResearchMode, selectedModel, se
   }, [vlModelError])
 
   const handleSend = () => {
-    if ((message.trim() || attachments.length > 0) && !isLoading) {
+    if (message.trim() || attachments.length > 0) {
       // If we have attachments, send as MessageObject
       if (attachments.length > 0) {
         const msgObj: MessageObject = {
@@ -855,7 +926,7 @@ export function ChatInput({ onSend, isLoading, isResearchMode, selectedModel, se
               )}
               <Button
                 onClick={handleSend}
-                disabled={(!message.trim() && attachments.length === 0) || isLoading}
+                disabled={sendDisabled}
                 className="h-9 w-9 shrink-0 rounded-xl bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
               >
                 {isLoading ? (

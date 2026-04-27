@@ -311,13 +311,68 @@ async def proxy_chat_completions(
 
     body = await request.json()
     model_name: str = body.get("model", "")
+    _raw_model = model_name
 
-    # Strip provider prefix that OpenClaw may include (e.g. "harvis-proxy/gpt-oss:120b")
-    if "/" in model_name:
-        model_name = model_name.split("/", 1)[1]
-        body = {**body, "model": model_name}
+    # Strip ONLY the known OpenClaw provider prefix (e.g. "harvis-proxy/…").
+    # Do NOT split on every "/", because legitimate Ollama model names can
+    # contain a namespace segment (e.g. "fredrezones55/Qwen3.6-…:latest").
+    _OPENCLAW_PROVIDER_PREFIXES = ("harvis-proxy/",)
+    for _prefix in _OPENCLAW_PROVIDER_PREFIXES:
+        if model_name.startswith(_prefix):
+            model_name = model_name[len(_prefix):]
+            body = {**body, "model": model_name}
+            break
+
+    # region agent log
+    try:
+        import json as _json, os as _os, time as _time, uuid as _uuid
+        _log_path = "/tmp/debug-d007eb.log"
+        _os.makedirs(_os.path.dirname(_log_path), exist_ok=True)
+        with open(_log_path, "a", encoding="utf-8") as _f:
+            _f.write(_json.dumps({
+                "sessionId": "d007eb",
+                "id": f"log_{int(_time.time()*1000)}_{_uuid.uuid4().hex[:8]}",
+                "timestamp": int(_time.time()*1000),
+                "location": "model_proxy.py:proxy_chat_completions",
+                "message": "model_proxy_received",
+                "data": {"raw_model": _raw_model, "normalized_model": model_name},
+                "runId": "run_model_proxy",
+                "hypothesisId": "H7",
+            }, separators=(",", ":")) + "\n")
+    except Exception:
+        pass
+    # endregion
 
     target_url, headers, is_kimi, is_nvidia, upstream_model = await _resolve_route(model_name)
+
+    # region agent log
+    try:
+        import json as _json, os as _os, time as _time, uuid as _uuid
+        _log_path = "/tmp/debug-d007eb.log"
+        _os.makedirs(_os.path.dirname(_log_path), exist_ok=True)
+        with open(_log_path, "a", encoding="utf-8") as _f:
+            _f.write(_json.dumps({
+                "sessionId": "d007eb",
+                "id": f"log_{int(_time.time()*1000)}_{_uuid.uuid4().hex[:8]}",
+                "timestamp": int(_time.time()*1000),
+                "location": "model_proxy.py:proxy_chat_completions",
+                "message": "model_proxy_route_resolved",
+                "data": {
+                    "model_name": model_name,
+                    "target_url": target_url,
+                    "is_kimi": is_kimi,
+                    "is_nvidia": is_nvidia,
+                    "upstream_model": upstream_model,
+                    "has_auth": "Authorization" in headers,
+                    "has_tools": bool(body.get("tools")),
+                    "stream": bool(body.get("stream")),
+                },
+                "runId": "run_model_proxy",
+                "hypothesisId": "H_stall",
+            }, separators=(",", ":")) + "\n")
+    except Exception:
+        pass
+    # endregion
 
     # Apply upstream model name override (e.g. nvidia-kimi → moonshotai/kimi-k2.5)
     if upstream_model:
@@ -349,25 +404,41 @@ async def proxy_chat_completions(
     # and ensure the context window is large enough for tool schemas + conversation.
     is_local_ollama = LOCAL_OLLAMA_URL and target_url.startswith(LOCAL_OLLAMA_URL.rstrip("/"))
     if is_local_ollama:
-        # Strip non-standard OpenAI fields that confuse Ollama's /v1 endpoint.
-        # Ollama only understands: model, messages, stream, tools, tool_choice,
-        # temperature, top_p, stop, max_tokens, presence_penalty, frequency_penalty.
-        # Fields like store, reasoning_effort, stream_options, max_completion_tokens
-        # cause Ollama to misinterpret the request or ignore tool definitions.
         OLLAMA_ALLOWED_KEYS = {
             "model", "messages", "stream", "tools", "tool_choice",
             "temperature", "top_p", "stop", "max_tokens",
             "presence_penalty", "frequency_penalty", "seed",
             "response_format", "options",
         }
-        # Convert max_completion_tokens → max_tokens (Ollama's name for it)
         if "max_completion_tokens" in body and "max_tokens" not in body:
             body["max_tokens"] = body["max_completion_tokens"]
         body = {k: v for k, v in body.items() if k in OLLAMA_ALLOWED_KEYS}
-        # Ensure context window is large enough for tool schemas + conversation.
+
+        # Per-model defaults. Default num_ctx is 8192; bumped only for models
+        # that are known to benefit (coder/research with long tool schemas).
+        # Previously hardcoded 32768 which consumed far more VRAM than needed
+        # and made small models (gemma4:e2b/e4b) crawl on 8GB GPUs.
         options = body.get("options", {})
-        if "num_ctx" not in options:
-            options["num_ctx"] = 32768
+        mname = (body.get("model") or "").lower()
+
+        if mname.startswith("gemma4"):
+            # Google's published defaults for Gemma 4.
+            options.setdefault("temperature", 1.0)
+            options.setdefault("top_p", 0.95)
+            options.setdefault("top_k", 64)
+            if "gemma4:e2b" in mname:
+                options.setdefault("num_ctx", 4096)
+            elif "gemma4:e4b" in mname:
+                options.setdefault("num_ctx", 8192)
+            else:  # 26b / 31b
+                options.setdefault("num_ctx", 16384)
+        elif mname.startswith("qwen3.5-32k"):
+            options.setdefault("num_ctx", 16384)
+        elif mname.startswith(("qwen3.5", "qwen2.5-coder", "qwen3.6")):
+            options.setdefault("num_ctx", 8192)
+        else:
+            options.setdefault("num_ctx", 8192)
+
         body["options"] = options
 
     has_tools = "tools" in body and body["tools"]
@@ -458,6 +529,28 @@ async def _stream_from_upstream(
             timeout=httpx.Timeout(600.0, connect=10.0)
         ) as client:
             async with client.stream("POST", url, json=body, headers=headers) as resp:
+                # region agent log
+                try:
+                    import json as _json, os as _os, time as _time, uuid as _uuid
+                    _log_path = "/tmp/debug-d007eb.log"
+                    with open(_log_path, "a", encoding="utf-8") as _f:
+                        _f.write(_json.dumps({
+                            "sessionId": "d007eb",
+                            "id": f"log_{int(_time.time()*1000)}_{_uuid.uuid4().hex[:8]}",
+                            "timestamp": int(_time.time()*1000),
+                            "location": "model_proxy.py:_stream_from_upstream:response",
+                            "message": "upstream_stream_opened",
+                            "data": {
+                                "url": url,
+                                "status_code": resp.status_code,
+                                "model_name": model_name,
+                            },
+                            "runId": "run_model_proxy",
+                            "hypothesisId": "H_stall",
+                        }, separators=(",", ":")) + "\n")
+                except Exception:
+                    pass
+                # endregion
                 if resp.status_code != 200:
                     error_body = await resp.aread()
                     error_msg = error_body.decode(errors="replace")[:200]
@@ -466,6 +559,28 @@ async def _stream_from_upstream(
                         resp.status_code,
                         error_msg,
                     )
+                    # region agent log
+                    try:
+                        import json as _json2, os as _os2, time as _time2, uuid as _uuid2
+                        _log_path = "/tmp/debug-d007eb.log"
+                        with open(_log_path, "a", encoding="utf-8") as _f:
+                            _f.write(_json2.dumps({
+                                "sessionId": "d007eb",
+                                "id": f"log_{int(_time2.time()*1000)}_{_uuid2.uuid4().hex[:8]}",
+                                "timestamp": int(_time2.time()*1000),
+                                "location": "model_proxy.py:_stream_from_upstream:error_body",
+                                "message": "upstream_stream_error",
+                                "data": {
+                                    "url": url,
+                                    "status_code": resp.status_code,
+                                    "body_preview": error_msg,
+                                },
+                                "runId": "run_model_proxy",
+                                "hypothesisId": "H_stall",
+                            }, separators=(",", ":")) + "\n")
+                    except Exception:
+                        pass
+                    # endregion
                     error_event = json.dumps(
                         {
                             "error": {
@@ -477,7 +592,88 @@ async def _stream_from_upstream(
                     yield f"data: {error_event}\n\n"
                     return
 
+                _stream_line_count = 0
+                _stream_empty_delta_count = 0
+                _stream_content_delta_count = 0
+                _stream_reasoning_delta_count = 0
+                _stream_tool_call_count = 0
                 async for line in resp.aiter_lines():
+                    _stream_line_count += 1
+                    # region agent log — parse delta structure of every data line
+                    try:
+                        if line.startswith("data: ") and line != "data: [DONE]":
+                            _parsed = json.loads(line[6:])
+                            _choices = _parsed.get("choices") or []
+                            if _choices:
+                                _delta = _choices[0].get("delta") or {}
+                                _c = _delta.get("content")
+                                _rc = _delta.get("reasoning_content")
+                                _tc = _delta.get("tool_calls")
+                                if _c:
+                                    _stream_content_delta_count += 1
+                                if _rc:
+                                    _stream_reasoning_delta_count += 1
+                                if _tc:
+                                    _stream_tool_call_count += 1
+                                if not _c and not _rc and not _tc:
+                                    _stream_empty_delta_count += 1
+                                # Log first content/reasoning/tool deltas + a summary
+                                if (_stream_content_delta_count in (1, 2)
+                                    or _stream_reasoning_delta_count in (1, 2)
+                                    or _stream_tool_call_count in (1, 2)
+                                    or _stream_line_count <= 2
+                                    or _stream_line_count % 100 == 0):
+                                    import json as _json3, time as _time3, uuid as _uuid3
+                                    _log_path = "/tmp/debug-d007eb.log"
+                                    with open(_log_path, "a", encoding="utf-8") as _f:
+                                        _f.write(_json3.dumps({
+                                            "sessionId": "d007eb",
+                                            "id": f"log_{int(_time3.time()*1000)}_{_uuid3.uuid4().hex[:8]}",
+                                            "timestamp": int(_time3.time()*1000),
+                                            "location": "model_proxy.py:_stream_from_upstream:delta",
+                                            "message": "upstream_delta",
+                                            "data": {
+                                                "line_no": _stream_line_count,
+                                                "content_preview": (str(_c)[:200] if _c else None),
+                                                "reasoning_preview": (str(_rc)[:200] if _rc else None),
+                                                "has_tool_calls": bool(_tc),
+                                                "tool_calls_preview": (str(_tc)[:200] if _tc else None),
+                                                "finish_reason": _choices[0].get("finish_reason"),
+                                                "counts": {
+                                                    "content": _stream_content_delta_count,
+                                                    "reasoning": _stream_reasoning_delta_count,
+                                                    "tool": _stream_tool_call_count,
+                                                    "empty": _stream_empty_delta_count,
+                                                },
+                                            },
+                                            "runId": "run_model_proxy",
+                                            "hypothesisId": "H_stall",
+                                        }, separators=(",", ":")) + "\n")
+                        elif line == "data: [DONE]":
+                            import json as _json3b, time as _time3b, uuid as _uuid3b
+                            _log_path = "/tmp/debug-d007eb.log"
+                            with open(_log_path, "a", encoding="utf-8") as _f:
+                                _f.write(_json3b.dumps({
+                                    "sessionId": "d007eb",
+                                    "id": f"log_{int(_time3b.time()*1000)}_{_uuid3b.uuid4().hex[:8]}",
+                                    "timestamp": int(_time3b.time()*1000),
+                                    "location": "model_proxy.py:_stream_from_upstream:done",
+                                    "message": "upstream_stream_done",
+                                    "data": {
+                                        "total_lines": _stream_line_count,
+                                        "counts": {
+                                            "content": _stream_content_delta_count,
+                                            "reasoning": _stream_reasoning_delta_count,
+                                            "tool": _stream_tool_call_count,
+                                            "empty": _stream_empty_delta_count,
+                                        },
+                                    },
+                                    "runId": "run_model_proxy",
+                                    "hypothesisId": "H_stall",
+                                }, separators=(",", ":")) + "\n")
+                    except Exception:
+                        pass
+                    # endregion
                     if line.startswith("data: ") and line != "data: [DONE]":
                         try:
                             chunk = json.loads(line[6:])
@@ -529,6 +725,28 @@ async def _stream_from_upstream(
 
     except Exception as exc:
         logger.error("model_proxy: stream error: %s", exc)
+        # region agent log
+        try:
+            import json as _json4, time as _time4, uuid as _uuid4
+            _log_path = "/tmp/debug-d007eb.log"
+            with open(_log_path, "a", encoding="utf-8") as _f:
+                _f.write(_json4.dumps({
+                    "sessionId": "d007eb",
+                    "id": f"log_{int(_time4.time()*1000)}_{_uuid4.uuid4().hex[:8]}",
+                    "timestamp": int(_time4.time()*1000),
+                    "location": "model_proxy.py:_stream_from_upstream:exception",
+                    "message": "upstream_stream_exception",
+                    "data": {
+                        "url": url,
+                        "exc_type": type(exc).__name__,
+                        "exc_message": str(exc)[:300],
+                    },
+                    "runId": "run_model_proxy",
+                    "hypothesisId": "H_stall",
+                }, separators=(",", ":")) + "\n")
+        except Exception:
+            pass
+        # endregion
         error_event = json.dumps(
             {"error": {"message": str(exc), "type": "proxy_error"}}
         )

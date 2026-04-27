@@ -2,15 +2,12 @@ import type { NextConfig } from "next";
 import path from "path";
 import { copyFileSync, existsSync, mkdirSync } from "fs";
 
-const nextConfig: NextConfig & { eslint?: { ignoreDuringBuilds?: boolean } } = {
+const nextConfig: NextConfig = {
   output: "standalone", // Required for Docker multi-stage build
   serverExternalPackages: [],
   // Don't set BACKEND_URL here - it gets baked at build time!
   // Let it be read from environment at runtime instead
   env: {},
-  eslint: {
-    ignoreDuringBuilds: true,
-  },
   typescript: {
     ignoreBuildErrors: true, // Match old frontend pattern
   },

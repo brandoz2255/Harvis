@@ -32,6 +32,7 @@ from urllib.parse import urlparse
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
+from workspace.gateway_auth import resolve_gateway_caller
 
 logger = logging.getLogger(__name__)
 
@@ -103,15 +104,9 @@ browser_proxy_router = APIRouter(prefix="/api/tools/browser", tags=["openclaw-br
 
 # ─── Auth ──────────────────────────────────────────────────────────────────────
 
-def _verify_openclaw_token(authorization: Optional[str]) -> None:
-    """Only the OpenClaw pod (via shared OPENCLAW_GATEWAY_TOKEN) may call this."""
-    if not OPENCLAW_GATEWAY_TOKEN:
-        return  # dev / test mode — no token configured
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
-    token = authorization[len("Bearer "):]
-    if token != OPENCLAW_GATEWAY_TOKEN:
-        raise HTTPException(status_code=401, detail="Invalid proxy token")
+async def _verify_openclaw_token(request: Request, authorization: Optional[str]) -> None:
+    """Allow bundled token or any verified BYO token."""
+    await resolve_gateway_caller(request, authorization)
 
 
 async def _audit(
@@ -422,7 +417,7 @@ class BrowserCloseRequest(BaseModel):
 @browser_proxy_router.post("/session")
 async def browser_session(req: BrowserSessionRequest, request: Request) -> Dict[str, Any]:
     authorization = request.headers.get("Authorization")
-    _verify_openclaw_token(authorization)
+    await _verify_openclaw_token(request, authorization)
     session_key = request.headers.get("X-OpenClaw-SessionKey", "unknown")
 
     user_id = await _require_interactive(
@@ -458,7 +453,7 @@ async def browser_session(req: BrowserSessionRequest, request: Request) -> Dict[
 @browser_proxy_router.post("/navigate")
 async def browser_navigate(req: BrowserNavigateRequest, request: Request) -> Dict[str, Any]:
     authorization = request.headers.get("Authorization")
-    _verify_openclaw_token(authorization)
+    await _verify_openclaw_token(request, authorization)
     session_key = request.headers.get("X-OpenClaw-SessionKey", "unknown")
     await _require_interactive(request, workspace_id=req.workspace_id, capability_token=req.capability_token)
     _validate_browser_url(req.url, live_web=_is_live_web(request))
@@ -494,7 +489,7 @@ async def browser_navigate(req: BrowserNavigateRequest, request: Request) -> Dic
 @browser_proxy_router.post("/act")
 async def browser_act(req: BrowserActRequest, request: Request) -> Dict[str, Any]:
     authorization = request.headers.get("Authorization")
-    _verify_openclaw_token(authorization)
+    await _verify_openclaw_token(request, authorization)
     session_key = request.headers.get("X-OpenClaw-SessionKey", "unknown")
     await _require_interactive(request, workspace_id=req.workspace_id, capability_token=req.capability_token)
 
@@ -535,7 +530,7 @@ async def browser_act(req: BrowserActRequest, request: Request) -> Dict[str, Any
 @browser_proxy_router.post("/screenshot")
 async def browser_screenshot(req: BrowserScreenshotRequest, request: Request) -> Dict[str, Any]:
     authorization = request.headers.get("Authorization")
-    _verify_openclaw_token(authorization)
+    await _verify_openclaw_token(request, authorization)
     session_key = request.headers.get("X-OpenClaw-SessionKey", "unknown")
     await _require_interactive(request, workspace_id=req.workspace_id, capability_token=req.capability_token)
 
@@ -579,7 +574,7 @@ async def browser_screenshot(req: BrowserScreenshotRequest, request: Request) ->
 @browser_proxy_router.post("/close")
 async def browser_close(req: BrowserCloseRequest, request: Request) -> Dict[str, Any]:
     authorization = request.headers.get("Authorization")
-    _verify_openclaw_token(authorization)
+    await _verify_openclaw_token(request, authorization)
     session_key = request.headers.get("X-OpenClaw-SessionKey", "unknown")
     await _require_interactive(request, workspace_id=req.workspace_id, capability_token=req.capability_token)
 
@@ -772,7 +767,7 @@ async def web_search(
     Intended for Tier 2 research: search → pick URLs → use /api/tools/web-fetch.
     """
     authorization = request.headers.get("Authorization")
-    _verify_openclaw_token(authorization)
+    await _verify_openclaw_token(request, authorization)
     session_key = request.headers.get("X-OpenClaw-SessionKey", "unknown")
     live_web = _is_live_web(request)
     _rate_limit(session_key, "search", _RATE_MAX_SEARCH_LIVE if live_web else _RATE_MAX_SEARCH)
@@ -843,7 +838,7 @@ async def web_fetch(
     Rejects RFC-1918, loopback, localhost.  Strips scripts/styles before extraction.
     """
     authorization = request.headers.get("Authorization")
-    _verify_openclaw_token(authorization)
+    await _verify_openclaw_token(request, authorization)
     live_web = _is_live_web(request)
     _validate_url(req.url, live_web=live_web)
     session_key = request.headers.get("X-OpenClaw-SessionKey", "unknown")
@@ -948,7 +943,7 @@ async def document_save(
     Returns artifact_id and download_url on success.
     """
     authorization = request.headers.get("Authorization")
-    _verify_openclaw_token(authorization)
+    await _verify_openclaw_token(request, authorization)
 
     pool = getattr(request.app.state, "pg_pool", None)
     if pool is None:
@@ -1068,7 +1063,7 @@ async def file_analyze(
     vision, returns JSON structure OpenClaw can use with harvis-document skill.
     """
     authorization = request.headers.get("Authorization")
-    _verify_openclaw_token(authorization)
+    await _verify_openclaw_token(request, authorization)
 
     pool = getattr(request.app.state, "pg_pool", None)
     if pool is None:

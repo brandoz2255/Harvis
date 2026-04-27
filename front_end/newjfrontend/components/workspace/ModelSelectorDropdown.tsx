@@ -177,7 +177,28 @@ export function ModelSelectorDropdown() {
       {discordExternalWorkspace && (
         <button
           type="button"
-          onClick={() => void attachToWorkspaceStream(discordExternalWorkspace.workspace_id)}
+          onClick={() => {
+            // #region agent log
+            try {
+              fetch('http://127.0.0.1:7532/ingest/9269ee65-762c-4e4d-9bef-0cd2be96389e', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'd007eb' },
+                body: JSON.stringify({
+                  sessionId: 'd007eb',
+                  location: 'ModelSelectorDropdown.tsx:discordOpenButton',
+                  message: 'discord_workspace_open_clicked',
+                  data: { workspaceId: discordExternalWorkspace.workspace_id },
+                  runId: 'run_workspace_follow_click',
+                  hypothesisId: 'H_active_orphan',
+                  timestamp: Date.now(),
+                }),
+              }).catch(() => {})
+            } catch {
+              /* ignore */
+            }
+            // #endregion
+            void attachToWorkspaceStream(discordExternalWorkspace.workspace_id)
+          }}
           className={cn(
             'absolute top-full right-0 mt-1 px-2 py-1 rounded-md border text-[10px] font-medium',
             'bg-violet-500/10 border-violet-400/30 text-violet-200 hover:bg-violet-500/20',

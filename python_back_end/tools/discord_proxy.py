@@ -14,8 +14,11 @@ import os
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, field_validator
+
+from workspace.capability_check import verify_capability
+from workspace.gateway_auth import resolve_gateway_caller
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +33,9 @@ DISCORD_CHANNELS: dict[str, str] = {
     "alerts": os.getenv("DISCORD_ALERTS_CHANNEL_ID", ""),
     "general": os.getenv("DISCORD_GENERAL_CHANNEL_ID", ""),
 }
+
+# Admin channels require BYO OpenClaw mode
+_ADMIN_CHANNELS = frozenset({"alerts"})
 
 
 class DiscordPostRequest(BaseModel):
@@ -53,24 +59,20 @@ class DiscordPostRequest(BaseModel):
         return v
 
 
-def _verify_token(authorization: Optional[str]) -> None:
-    """Verify the request carries a valid OPENCLAW_GATEWAY_TOKEN."""
-    if not OPENCLAW_GATEWAY_TOKEN:
-        # No token configured — allow all (dev mode)
-        return
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
-    if authorization[len("Bearer "):] != OPENCLAW_GATEWAY_TOKEN:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-
 @discord_proxy_router.post("/post")
 async def post_to_discord(
     req: DiscordPostRequest,
+    request: Request,
     authorization: Optional[str] = Header(default=None),
 ):
     """Post a message to a named Discord channel via the bot token."""
-    _verify_token(authorization)
+    await resolve_gateway_caller(request, authorization)
+
+    # Channel-level capability gating
+    if req.channel in _ADMIN_CHANNELS:
+        await verify_capability("discord_post_admin", request, authorization)
+    else:
+        await verify_capability("discord_post_public", request, authorization)
 
     if not DISCORD_BOT_TOKEN:
         raise HTTPException(status_code=503, detail="DISCORD_BOT_TOKEN not configured")

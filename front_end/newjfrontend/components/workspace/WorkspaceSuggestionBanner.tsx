@@ -170,7 +170,7 @@ export function WorkspaceSuggestionBanner({ chatHistory }: WorkspaceSuggestionBa
           session_id: currentSession?.id ?? undefined,
           agent_id: workspaceModel,
           model_name: workspaceModelName,
-          enable_interactive: false,
+          enable_interactive: true,
           parallel: true,
         }),
       })

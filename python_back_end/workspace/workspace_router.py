@@ -41,7 +41,16 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from auth_optimized import get_current_user_optimized
-from .openclaw_client import OpenClawClient, OpenClawEvent
+from .openclaw_client import (
+    OpenClawClient,
+    OpenClawEvent,
+    PROTOCOL_VERSION,
+    _CLIENT_ID,
+    _CLIENT_MODE,
+    _CLIENT_SCOPES,
+    _build_device_params,
+)
+from .openclaw_resolver import resolve_openclaw_config
 from .kimi_workspace import (
     stream_kimi_workspace,
     stream_ollama_cloud_workspace,
@@ -53,6 +62,24 @@ from .task_detector import detect_workspace_task
 logger = logging.getLogger(__name__)
 
 workspace_router = APIRouter(prefix="/api/workspace", tags=["workspace"])
+_DEBUG_LOG_PATH = "/home/user/Harvis/.cursor/debug-d007eb.log"
+
+
+def _append_debug_log(location: str, message: str, data: dict, run_id: str, hypothesis_id: str) -> None:
+    try:
+        with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "sessionId": "d007eb",
+                "id": f"log_{int(time.time()*1000)}_{uuid.uuid4().hex[:8]}",
+                "timestamp": int(time.time() * 1000),
+                "location": location,
+                "message": message,
+                "data": data,
+                "runId": run_id,
+                "hypothesisId": hypothesis_id,
+            }, separators=(",", ":")) + "\n")
+    except Exception:
+        pass
 
 # ─── Provider probe URLs (read once at module load) ──────────────────────────
 _LOCAL_OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
@@ -65,24 +92,56 @@ _NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
 # ─── Provider probe functions ────────────────────────────────────────────────
 
 async def _probe_local_ollama() -> dict:
-    """Ping local Ollama and list available models."""
-    base = _LOCAL_OLLAMA_URL.rstrip("/")
-    tags_url = base.replace("/v1", "") + "/api/tags" if "/v1" in base else f"{base}/api/tags"
-    try:
-        async with _httpx.AsyncClient(timeout=_httpx.Timeout(5.0)) as client:
-            resp = await client.get(tags_url)
-        if resp.status_code == 200:
-            data = resp.json()
-            models = [m["name"] for m in data.get("models", [])]
-            return {
-                "id": "local",
-                "label": "Local Ollama",
-                "status": "online" if models else "online_no_models",
-                "models": models,
-                "reason": None if models else "Ollama is running but no models are pulled. Run: ollama pull <model>",
-            }
-    except Exception as exc:
-        logger.debug("Local Ollama probe failed: %s", exc)
+    """Ping local Ollama and list available models.
+
+    Also merges in the desktop Ollama (`DESKTOP_OLLAMA_URL`) so workspace tasks
+    using the "local" provider can see — and select — models that only exist on
+    the GPU host. The actual routing is handled by `stream_local_ollama_workspace`,
+    which transparently sends desktop-only models to the desktop.
+    """
+    async def _fetch_tags(base: str) -> list[str]:
+        if not base:
+            return []
+        b = base.rstrip("/")
+        tags_url = b.replace("/v1", "") + "/api/tags" if "/v1" in b else f"{b}/api/tags"
+        try:
+            async with _httpx.AsyncClient(timeout=_httpx.Timeout(5.0)) as client:
+                resp = await client.get(tags_url)
+            if resp.status_code == 200:
+                return [m.get("name") for m in resp.json().get("models", []) if m.get("name")]
+        except Exception as exc:
+            logger.debug("Ollama probe failed for %s: %s", b, exc)
+        return []
+
+    laptop_models = await _fetch_tags(_LOCAL_OLLAMA_URL)
+    desktop_url = os.getenv("DESKTOP_OLLAMA_URL", "")
+    desktop_models = await _fetch_tags(desktop_url) if desktop_url else []
+
+    # Dedupe: laptop entries first; desktop-only entries appended.
+    seen: set[str] = set(laptop_models)
+    merged = list(laptop_models)
+    for name in desktop_models:
+        if name not in seen:
+            seen.add(name)
+            merged.append(name)
+
+    if merged:
+        return {
+            "id": "local",
+            "label": "Local Ollama" + (" + Desktop 5080" if desktop_models else ""),
+            "status": "online",
+            "models": merged,
+            "reason": None,
+        }
+    if not laptop_models and not desktop_models:
+        # Both unreachable
+        return {
+            "id": "local",
+            "label": "Local Ollama",
+            "status": "offline",
+            "models": [],
+            "reason": "Cannot reach laptop or desktop Ollama.",
+        }
     return {
         "id": "local",
         "label": "Local Ollama",
@@ -202,9 +261,38 @@ async def _get_kimi_key(pool, user_id: int) -> str:
 # Safe for replicas=1 (Ollama co-location requirement keeps backend single-replica).
 _workspaces: dict[str, dict] = {}
 
-# Per-workspace asyncio.Queue for live SSE streaming.
-# Items: (seq: int, event: OpenClawEvent) while running, None when done.
-_workspace_queues: dict[str, asyncio.Queue] = {}
+class WorkspaceLiveBroadcaster:
+    """
+    Fan-out live workspace events to every subscriber (chat bridge, SSE /stream, research, etc.).
+    Replaces a single asyncio.Queue so multiple consumers each receive a full copy of (seq, event)
+    items and the terminal None sentinel — no stolen events.
+    """
+
+    __slots__ = ("_subscribers",)
+
+    def __init__(self) -> None:
+        self._subscribers: list[asyncio.Queue] = []
+
+    def subscribe(self) -> asyncio.Queue:
+        q: asyncio.Queue = asyncio.Queue()
+        self._subscribers.append(q)
+        return q
+
+    def unsubscribe(self, q: asyncio.Queue) -> None:
+        try:
+            self._subscribers.remove(q)
+        except ValueError:
+            pass
+
+    async def put(self, item) -> None:
+        subs = list(self._subscribers)
+        if not subs:
+            return
+        await asyncio.gather(*(q.put(item) for q in subs))
+
+
+# Per-workspace live event fan-out (DB remains authoritative for replay).
+_workspace_broadcasters: dict[str, WorkspaceLiveBroadcaster] = {}
 
 # asyncio.Task references so /cancel can cancel the background task.
 _workspace_tasks: dict[str, asyncio.Task] = {}
@@ -222,9 +310,14 @@ class LaunchRequest(BaseModel):
     session_id: Optional[str] = None
     agent_id: str = "main"
     model_name: str = ""
-    enable_interactive: bool = False
+    enable_interactive: bool = True
     live_web: bool = True  # When True, OpenClaw gets X-Live-Web (broad web + browser navigate)
     parallel: bool = True   # When True, planner may split task into parallel sub-agents
+    # User-uploaded files (images, PDFs, docs). Each entry should carry at least
+    # one of: `url` (e.g. http://backend:8000/api/images/<id>.jpg), `path`
+    # (inside a shared volume), or `file_id` (UUID from POST /api/uploads).
+    # `name` + `mime_type` are optional hints for the agent.
+    attachments: list[dict] = []
 
 
 class InteractiveEnableRequest(BaseModel):
@@ -369,6 +462,27 @@ async def _db_complete_run(
         logger.error("DB: failed to complete workspace_run %s: %s", workspace_id, exc)
 
 
+async def _db_mark_run_orphaned(pool, workspace_id: str, detail: str) -> None:
+    if pool is None:
+        return
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE workspace_runs
+                SET status = 'error',
+                    completed_at = COALESCE(completed_at, NOW()),
+                    error_message = COALESCE(error_message, $2)
+                WHERE id = $1
+                  AND status = 'running'
+                """,
+                workspace_id,
+                detail,
+            )
+    except Exception as exc:
+        logger.error("DB: failed to mark orphaned workspace_run %s: %s", workspace_id, exc)
+
+
 async def _db_enable_interactive(
     pool,
     *,
@@ -412,8 +526,8 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
     sub-agents can finish, long tool calls complete, and every event gets saved
     to the DB.
 
-    Events are also pushed to the per-workspace asyncio.Queue so the currently
-    connected SSE client receives them in near-real-time without polling.
+    Events are also fan-out via WorkspaceLiveBroadcaster so every connected
+    SSE or chat-bridge subscriber receives them in near-real-time without polling.
     """
     ws = _workspaces.get(workspace_id)
     if not ws:
@@ -425,13 +539,14 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
     chat_history: list[dict] = ws["chat_history"]
     agent_id: str = ws.get("agent_id", "main")
     model_name: str = ws.get("model_name", "")
-    queue: asyncio.Queue = _workspace_queues[workspace_id]
+    broadcaster: WorkspaceLiveBroadcaster = _workspace_broadcasters[workspace_id]
 
     seq = 0
     tool_call_count = 0
     terminal_status = "done"
     final_summary: Optional[str] = None
     final_error: Optional[str] = None
+    token_chunks: list[str] = []
 
     # ── Select the event stream based on agent_id ────────────────────────────
     event_stream = None
@@ -460,7 +575,7 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
                 "message": "Kimi K2.5 API key not found. Falling back to local Ollama.",
             })
             await _db_save_event(pool, workspace_id, seq, fallback_event)
-            await queue.put((seq, fallback_event))
+            await broadcaster.put((seq, fallback_event))
             seq += 1
             if use_parallel:
                 event_stream = stream_parallel_workspace(
@@ -488,7 +603,7 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
                 "message": "NVIDIA NIM key not found. Falling back to local Ollama.",
             })
             await _db_save_event(pool, workspace_id, seq, fallback_event)
-            await queue.put((seq, fallback_event))
+            await broadcaster.put((seq, fallback_event))
             seq += 1
             event_stream = stream_local_ollama_workspace(task_brief, chat_history, model=model_name)
 
@@ -513,6 +628,13 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
         async for event in event_stream:
             if event.type == "tool_call":
                 tool_call_count += 1
+            elif event.type == "token":
+                tok = event.data.get("content")
+                if isinstance(tok, str) and tok:
+                    token_chunks.append(tok)
+                    # Bound memory while still preserving recent output for fallback summary.
+                    if len(token_chunks) > 400:
+                        token_chunks = token_chunks[-400:]
 
             # Persist first — DB is the authoritative source for replays
             await _db_save_event(pool, workspace_id, seq, event)
@@ -522,6 +644,10 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
                 ws["status"] = event.type
                 if event.type == "done":
                     raw_summary = event.data.get("summary") or ""
+                    if not raw_summary.strip():
+                        raw_summary = "".join(token_chunks).strip()
+                        if raw_summary:
+                            event.data["summary"] = raw_summary
                     final_summary = raw_summary
                     # Parse structured result from research/document skills
                     structured = _parse_structured_result(raw_summary)
@@ -532,13 +658,13 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
                 elif event.type == "error":
                     final_error = event.data.get("message")
 
-                # Push to live queue AFTER enriching event data
-                await queue.put((seq, event))
+                # Fan-out to live subscribers AFTER enriching event data
+                await broadcaster.put((seq, event))
                 seq += 1
                 break
 
-            # Push to live queue for the active SSE connection
-            await queue.put((seq, event))
+            # Fan-out to all live subscribers (chat bridge, /stream SSE, etc.)
+            await broadcaster.put((seq, event))
             seq += 1
 
         logger.info(
@@ -552,7 +678,7 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
         ws["status"] = "cancelled"
         cancelled_event = OpenClawEvent("cancelled", {"message": "Workspace cancelled."})
         await _db_save_event(pool, workspace_id, seq, cancelled_event)
-        await queue.put((seq, cancelled_event))
+        await broadcaster.put((seq, cancelled_event))
         seq += 1
 
     except Exception as exc:
@@ -565,12 +691,12 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
             "fix_hint": "An unexpected error occurred in the workspace background task. Check backend logs.",
         })
         await _db_save_event(pool, workspace_id, seq, err_event)
-        await queue.put((seq, err_event))
+        await broadcaster.put((seq, err_event))
         seq += 1
 
     finally:
-        # None sentinel signals SSE generator that the stream has ended
-        await queue.put(None)
+        # None sentinel signals each subscriber that the stream has ended
+        await broadcaster.put(None)
 
         await _db_complete_run(
             pool, workspace_id, terminal_status,
@@ -649,7 +775,200 @@ def _resolve_task_brief(brief: str, chat_history: list[dict]) -> str:
     return brief
 
 
-def _start_workspace(
+# Inline-attachment knobs. Defaults sized for an 8K-context model: an 80KB log
+# is roughly 20K tokens, leaving room for the task + reply. Tune via env if
+# upstream models have larger windows.
+_ATTACH_INLINE_MAX_BYTES = int(os.getenv("HARVIS_ATTACH_INLINE_MAX_BYTES", "80000"))
+_ATTACH_DOWNLOAD_HARD_CAP = int(os.getenv("HARVIS_ATTACH_DOWNLOAD_HARD_CAP", str(5 * 1024 * 1024)))
+_ATTACH_HEAD_LINES = int(os.getenv("HARVIS_ATTACH_HEAD_LINES", "200"))
+_ATTACH_TAIL_LINES = int(os.getenv("HARVIS_ATTACH_TAIL_LINES", "200"))
+
+
+def _is_text_like(name: str, mime: str) -> bool:
+    lower_name = name.lower()
+    lower_mime = mime.lower()
+    return (
+        lower_mime.startswith("text/")
+        or "json" in lower_mime
+        or "csv" in lower_mime
+        or "xml" in lower_mime
+        or "yaml" in lower_mime
+        or "toml" in lower_mime
+        or "graphql" in lower_mime
+        or "ipynb" in lower_mime
+        or lower_name.endswith((
+            # Logs / docs
+            ".log", ".txt", ".md", ".mdx", ".rst", ".adoc", ".org", ".tex",
+            # Data
+            ".csv", ".tsv", ".json", ".ndjson", ".jsonl", ".xml",
+            ".yaml", ".yml", ".toml", ".sql", ".graphql", ".gql", ".proto",
+            # Diffs
+            ".diff", ".patch",
+            # Config
+            ".ini", ".conf", ".cfg", ".properties", ".env",
+            # Web
+            ".html", ".htm", ".css", ".scss", ".sass", ".less",
+            ".vue", ".svelte",
+            # Code
+            ".py", ".js", ".ts", ".tsx", ".jsx",
+            ".go", ".rs", ".rb", ".php", ".java", ".kt", ".swift",
+            ".scala", ".dart", ".lua", ".pl", ".r", ".cs",
+            ".c", ".h", ".cpp", ".hpp", ".cc", ".m", ".mm",
+            # Shell
+            ".sh", ".bash", ".zsh", ".fish", ".ps1", ".bat",
+            # Notebooks (treated as text-like — they're JSON)
+            ".ipynb",
+        ))
+    )
+
+
+def _is_image_like(name: str, mime: str) -> bool:
+    lower_name = name.lower()
+    lower_mime = mime.lower()
+    return lower_mime.startswith("image/") or lower_name.endswith(
+        (".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".bmp")
+    )
+
+
+async def _download_text_attachment(url: str) -> Optional[str]:
+    """Fetch up to _ATTACH_DOWNLOAD_HARD_CAP bytes from `url`, return decoded text.
+
+    Returns None on any error (network, decode, oversize). The caller falls back
+    to the URL-only behavior so the agent can still try to fetch it itself.
+    """
+    try:
+        async with _httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            resp = await client.get(url)
+            if resp.status_code != 200:
+                logger.warning(
+                    "_download_text_attachment: HTTP %s for %s", resp.status_code, url[:120]
+                )
+                return None
+            data = resp.content
+            if len(data) > _ATTACH_DOWNLOAD_HARD_CAP:
+                logger.warning(
+                    "_download_text_attachment: %d bytes exceeds hard cap %d, skipping inline",
+                    len(data), _ATTACH_DOWNLOAD_HARD_CAP,
+                )
+                return None
+        # Try utf-8 first, fall back to latin-1 (lossless single-byte mapping).
+        try:
+            return data.decode("utf-8")
+        except UnicodeDecodeError:
+            return data.decode("latin-1", errors="replace")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("_download_text_attachment: failed for %s: %s", url[:120], exc)
+        return None
+
+
+def _format_inlined_text(name: str, content: str) -> tuple[str, bool]:
+    """Build the <<<FILE_BEGIN ... FILE_END>>> block. Returns (block, was_truncated)."""
+    if len(content.encode("utf-8", errors="ignore")) <= _ATTACH_INLINE_MAX_BYTES:
+        return (
+            f"<<<FILE_BEGIN {name}>>>\n{content}\n<<<FILE_END {name}>>>",
+            False,
+        )
+    # Too big — head + tail.
+    lines = content.splitlines()
+    if len(lines) <= _ATTACH_HEAD_LINES + _ATTACH_TAIL_LINES:
+        # Few long lines; fall back to byte-truncate from each end.
+        head_chunk = content[: _ATTACH_INLINE_MAX_BYTES // 2]
+        tail_chunk = content[-_ATTACH_INLINE_MAX_BYTES // 2 :]
+        body = (
+            head_chunk
+            + f"\n\n…[TRUNCATED {len(content) - len(head_chunk) - len(tail_chunk)} bytes]…\n\n"
+            + tail_chunk
+        )
+    else:
+        head = "\n".join(lines[: _ATTACH_HEAD_LINES])
+        tail = "\n".join(lines[-_ATTACH_TAIL_LINES :])
+        skipped = len(lines) - _ATTACH_HEAD_LINES - _ATTACH_TAIL_LINES
+        body = (
+            f"{head}\n…[TRUNCATED {skipped} middle lines — full file at the URL above]…\n{tail}"
+        )
+    return (
+        f"<<<FILE_BEGIN {name} (truncated; full size {len(content)} bytes / {len(lines)} lines)>>>\n"
+        f"{body}\n<<<FILE_END {name}>>>",
+        True,
+    )
+
+
+async def _prepend_attachments(brief: str, attachments: list[dict]) -> str:
+    """Prepend a machine-readable [Attached files] block so the agent can find
+    the user-uploaded image/PDF/etc.
+
+    For text-like attachments with a fetchable URL, the file content is inlined
+    directly into the brief (head+tail if oversize). This makes log/CSV/text
+    analysis dumb-model-proof — even an agent that ignores skills sees the data
+    in its context. The harvis-image skill still owns the image path.
+    """
+    if not attachments:
+        return brief
+    image_like = False
+    text_like = False
+    any_inlined = False
+    listing: list[str] = []
+    inline_blocks: list[str] = []
+
+    for i, a in enumerate(attachments, start=1):
+        if not isinstance(a, dict):
+            continue
+        name = str(a.get("name") or f"file{i}")
+        mime = str(a.get("mime_type") or "application/octet-stream")
+        if _is_image_like(name, mime):
+            image_like = True
+        is_text = _is_text_like(name, mime)
+        if is_text:
+            text_like = True
+
+        loc_parts: list[str] = []
+        if a.get("url"):
+            loc_parts.append(f"url={a['url']}")
+        if a.get("path"):
+            loc_parts.append(f"path={a['path']}")
+        if a.get("file_id"):
+            loc_parts.append(f"file_id={a['file_id']}")
+        loc = " ".join(loc_parts) or "(no location)"
+        listing.append(f"{i}. {name} — {mime} — {loc}")
+
+        # Inline text-like attachments so the agent doesn't need to curl.
+        if is_text and a.get("url"):
+            content = await _download_text_attachment(a["url"])
+            if content is not None:
+                block, _ = _format_inlined_text(name, content)
+                inline_blocks.append(block)
+                any_inlined = True
+
+    lines: list[str] = ["[Attached files from the user]"] + listing
+    if inline_blocks:
+        lines.append("")
+        lines.append("[Inlined file contents — answer directly from these; the data is here]")
+        lines.extend(inline_blocks)
+    lines.append("")
+    lines.append("[Task]")
+    lines.append(brief)
+    lines.append("")
+    lines.append("[Execution rules]")
+    lines.append("- ALWAYS reply in English unless the user explicitly writes to you in another language.")
+    lines.append("- Attached files are part of the task. Inspect them before answering.")
+    if image_like:
+        lines.append("- At least one attached file is an image. Read `/skills-shared/harvis-image/SKILL.md` first, then use tools to inspect the image.")
+    if text_like and any_inlined:
+        lines.append(
+            "- THE FILE CONTENT IS ALREADY HERE. The text between `<<<FILE_BEGIN name>>>` and "
+            "`<<<FILE_END name>>>` markers under [Inlined file contents] above IS the file. "
+            "Treat it as if it were on disk — read it, search it, count it, quote it directly. "
+            "Do NOT say you can't find the file, do NOT ask the user to paste it, do NOT try to "
+            "`ls` or `curl` for it. The answer comes from the inlined block, not from any tool."
+        )
+    elif text_like:
+        lines.append("- At least one attached file is a text/log/data file. Read `/skills-shared/harvis-file/SKILL.md` first, then use tools to extract the answer.")
+    lines.append("- Replies like `Copy that.`, `Standing by.`, `On it.`, or any acknowledgment without tool use or extracted findings are invalid.")
+    lines.append("- If the file is unreadable, ambiguous, or the answer cannot be determined confidently after using tools, say that explicitly and explain the blocker in one sentence. Do not guess.")
+    return "\n".join(lines)
+
+
+async def _start_workspace(
     workspace_id: str,
     session_id: str,
     task_brief: str,
@@ -667,10 +986,21 @@ def _start_workspace(
     Register a workspace in memory, create its queue, and start the background task.
     Returns the OpenClawClient for the /cancel endpoint.
     """
+    # Resolve which OpenClaw instance this user routes to
+    config = await resolve_openclaw_config(pool, user_id)
+
+    logger.info(
+        "workspace launch: user=%s mode=%s url=%s prefix=%r",
+        user_id, config.mode, config.url, config.workspace_prefix,
+    )
+
     client = OpenClawClient(
         workspace_id=workspace_id,
         session_id=session_id,
         agent_id=agent_id,
+        gateway_url=config.url,
+        gateway_token=config.token,
+        workspace_prefix=config.workspace_prefix,
     )
 
     _workspaces[workspace_id] = {
@@ -686,10 +1016,13 @@ def _start_workspace(
         "interactive_context": interactive_context or None,
         "live_web": live_web,
         "parallel": parallel,
+        # Two-mode tracking
+        "mode": config.mode,
+        "allowed_capabilities": config.allowed_capabilities,
     }
 
-    queue: asyncio.Queue = asyncio.Queue()
-    _workspace_queues[workspace_id] = queue
+    broadcaster = WorkspaceLiveBroadcaster()
+    _workspace_broadcasters[workspace_id] = broadcaster
 
     task = asyncio.create_task(
         _run_workspace_bg(workspace_id, pool, started_epoch),
@@ -709,8 +1042,9 @@ async def launch_workspace_internal(
     agent_id: str = "main",
     model_name: str = "",
     session_id: str | None = None,
-    enable_interactive: bool = False,
+    enable_interactive: bool = True,
     live_web: bool = True,
+    attachments: list[dict] | None = None,
 ) -> dict:
     """
     Launch a workspace run without JWT (internal integrations).
@@ -722,11 +1056,22 @@ async def launch_workspace_internal(
     session_id = session_id or f"ws-{workspace_id}"
     chat_history = chat_history or []
     task_brief = _resolve_task_brief(task_brief, chat_history)
+    task_brief = await _prepend_attachments(task_brief, attachments or [])
+    _append_debug_log(
+        "workspace_router.py:launch_workspace_internal",
+        "launch_workspace_attachment_prompt",
+        {
+            "workspace_id": workspace_id,
+            "attachment_count": len(attachments or []),
+            "task_preview": task_brief[:400],
+        },
+        "run_attachment_prompt",
+        "H_attachment_act_first",
+    )
 
-    # Auto-enable Tier 3 when the task clearly needs a browser,
-    # unless the caller explicitly disabled it.
-    if not enable_interactive and _looks_like_browser_task(task_brief, chat_history):
-        enable_interactive = True
+    # Tier 3 interactive browsing is always on for workspace launches.
+    # Keep the arg for backward-compatible callers, but ignore opt-out.
+    enable_interactive = True
 
     pool = getattr(request.app.state, "pg_pool", None)
     started_epoch = time.monotonic()
@@ -753,7 +1098,7 @@ async def launch_workspace_internal(
                 exc,
             )
 
-    _start_workspace(
+    await _start_workspace(
         workspace_id=workspace_id,
         session_id=session_id,
         task_brief=task_brief,
@@ -831,6 +1176,7 @@ async def launch_workspace(
     workspace_id = str(uuid.uuid4())[:8]
     session_id = req.session_id or f"ws-{workspace_id}"
     task_brief = _resolve_task_brief(req.task_brief, req.chat_history)
+    task_brief = await _prepend_attachments(task_brief, req.attachments or [])
     pool = getattr(request.app.state, "pg_pool", None)
 
     # Normalize agent_id — accept legacy 'qwen3' as alias for 'cloud-ollama'
@@ -840,11 +1186,9 @@ async def launch_workspace(
     if agent_id not in ("main", "kimi", "nvidia-kimi", "local", "cloud-ollama", "gpt-oss"):
         agent_id = "local"
 
-    # Auto-enable Tier 3 when the task clearly needs a browser,
-    # unless the caller explicitly disabled it.
-    enable_interactive = bool(req.enable_interactive)
-    if not enable_interactive and _looks_like_browser_task(task_brief, req.chat_history):
-        enable_interactive = True
+    # Tier 3 interactive browsing is always on for workspace launches.
+    # Keep req.enable_interactive for backward-compatible clients.
+    enable_interactive = True
 
     started_epoch = time.monotonic()
 
@@ -866,7 +1210,7 @@ async def launch_workspace(
         except Exception as exc:
             logger.warning("Failed to enable interactive for workspace %s: %s", workspace_id, exc)
 
-    _start_workspace(
+    await _start_workspace(
         workspace_id=workspace_id,
         session_id=session_id,
         task_brief=task_brief,
@@ -951,9 +1295,9 @@ async def stream_workspace(
       order.  This handles reconnection (tab reload, Nginx timeout, etc.) — the
       frontend always gets a complete picture regardless of when it connects.
 
-    Phase 2 — Live queue: New events are consumed from the per-workspace
-      asyncio.Queue as the background task pushes them.  The SSE client
-      receives them in near-real-time.
+    Phase 2 — Live fan-out: This handler subscribes to the per-workspace
+      WorkspaceLiveBroadcaster and receives the same events as the chat bridge
+      and other subscribers, in near-real-time.
 
     If the SSE client disconnects (asyncio.CancelledError), the background task
     is NOT cancelled — sub-agents keep running and events keep accumulating in
@@ -961,6 +1305,13 @@ async def stream_workspace(
     """
     ws = _workspaces.get(workspace_id)
     if not ws:
+        _append_debug_log(
+            "workspace_router.py:stream_workspace",
+            "stream_workspace_missing_in_memory",
+            {"workspace_id": workspace_id, "known_workspaces": list(_workspaces.keys())[:20]},
+            "run_workspace_active_follow",
+            "H_active_orphan",
+        )
         raise HTTPException(status_code=404, detail=f"Workspace {workspace_id} not found")
 
     pool = getattr(request.app.state, "pg_pool", None)
@@ -984,7 +1335,43 @@ async def stream_workspace(
                         )
                     for row in rows:
                         last_seq = row["seq"]
-                        payload = dict(row["payload"])
+                        raw_payload = row["payload"]
+                        # asyncpg returns JSONB as str by default (no global
+                        # type codec is registered); tolerate both forms.
+                        if isinstance(raw_payload, dict):
+                            payload = raw_payload
+                        elif isinstance(raw_payload, str):
+                            try:
+                                parsed = json.loads(raw_payload)
+                                payload = parsed if isinstance(parsed, dict) else {}
+                            except Exception:
+                                payload = {}
+                        else:
+                            payload = {}
+                        # region agent log
+                        try:
+                            import os as _os, time as _time, uuid as _uuid
+                            _log_path = "/tmp/debug-d007eb.log"
+                            _os.makedirs(_os.path.dirname(_log_path), exist_ok=True)
+                            with open(_log_path, "a", encoding="utf-8") as _f:
+                                _f.write(json.dumps({
+                                    "sessionId": "d007eb",
+                                    "id": f"log_{int(_time.time()*1000)}_{_uuid.uuid4().hex[:8]}",
+                                    "timestamp": int(_time.time()*1000),
+                                    "location": "workspace_router.py:stream_workspace:replay",
+                                    "message": "sse_replay_row",
+                                    "data": {
+                                        "workspace_id": workspace_id,
+                                        "seq": last_seq,
+                                        "event_type": row["event_type"],
+                                        "raw_type": type(raw_payload).__name__,
+                                    },
+                                    "runId": "run_sse_replay",
+                                    "hypothesisId": "H8",
+                                }, separators=(",", ":")) + "\n")
+                        except Exception:
+                            pass
+                        # endregion
                         event_data = {"type": row["event_type"], **payload}
                         yield f"data: {json.dumps(event_data)}\n\n"
                         if row["event_type"] in ("done", "cancelled", "error"):
@@ -1001,46 +1388,52 @@ async def stream_workspace(
                 yield 'data: {"type": "stream_end"}\n\n'
                 return
 
-            # ── Phase 2: live events from background task queue ───────────────
-            queue = _workspace_queues.get(workspace_id)
-            if queue is None:
+            # ── Phase 2: live events (subscriber queue — full fan-out from broadcaster) ──
+            broadcaster = _workspace_broadcasters.get(workspace_id)
+            if broadcaster is None:
                 yield 'data: {"type": "stream_end"}\n\n'
                 return
 
-            while True:
-                # Check client disconnect (Nginx / browser navigation)
-                if await request.is_disconnected():
-                    logger.info(
-                        "[workspace:%s] SSE client disconnected — background task continues",
-                        workspace_id,
-                    )
-                    return
+            live_queue = broadcaster.subscribe()
 
-                try:
-                    item = await asyncio.wait_for(queue.get(), timeout=25)
-                except asyncio.TimeoutError:
-                    # Heartbeat SSE comment — keeps Nginx from closing a quiet stream
-                    yield ": ping\n\n"
-                    # Safety: if task ended without a sentinel, break
-                    task = _workspace_tasks.get(workspace_id)
-                    if task and task.done():
+            try:
+                while True:
+                    # Check client disconnect (Nginx / browser navigation)
+                    if await request.is_disconnected():
+                        logger.info(
+                            "[workspace:%s] SSE client disconnected — background task continues",
+                            workspace_id,
+                        )
+                        return
+
+                    try:
+                        item = await asyncio.wait_for(live_queue.get(), timeout=25)
+                    except asyncio.TimeoutError:
+                        # Heartbeat SSE comment — keeps Nginx from closing a quiet stream
+                        yield ": ping\n\n"
+                        # Safety: if task ended without a sentinel, break
+                        task = _workspace_tasks.get(workspace_id)
+                        if task and task.done():
+                            break
+                        continue
+
+                    if item is None:
+                        # Sentinel: background task has ended
                         break
-                    continue
 
-                if item is None:
-                    # Sentinel: background task has ended
-                    break
+                    seq_num, event = item
 
-                seq_num, event = item
+                    # Skip events we already replayed from DB (reconnection case)
+                    if seq_num <= last_seq:
+                        continue
 
-                # Skip events we already replayed from DB (reconnection case)
-                if seq_num <= last_seq:
-                    continue
+                    yield event.to_sse()
 
-                yield event.to_sse()
+                    if event.type in ("done", "cancelled", "error"):
+                        break
 
-                if event.type in ("done", "cancelled", "error"):
-                    break
+            finally:
+                broadcaster.unsubscribe(live_queue)
 
         except asyncio.CancelledError:
             # SSE stream cancelled by client — intentionally do NOT cancel the
@@ -1066,20 +1459,73 @@ async def cancel_workspace(
     workspace_id: str,
     current_user: dict = Depends(get_current_user_optimized),
 ):
-    """Cancel a running workspace. Cancels both the OpenClaw client and the background task."""
+    """Cancel a running workspace. Force-closes the OpenClaw websocket and
+    cancels the background task, then waits briefly for cleanup so the
+    response only returns once the workspace is truly idle."""
     ws = _workspaces.get(workspace_id)
     if not ws:
         raise HTTPException(status_code=404, detail=f"Workspace {workspace_id} not found")
 
-    # Signal OpenClaw client to stop on its next event
-    ws["client"].cancel()
+    # Mark state first so any concurrent handler sees the intent immediately.
+    _workspaces[workspace_id]["status"] = "cancelled"
 
-    # Cancel the background asyncio.Task (raises CancelledError inside _run_workspace_bg)
+    # Signal OpenClaw client: sets cancelled flag AND schedules ws.close() so
+    # the blocked `async for raw in self._ws` unblocks right away.
+    _client_cancel_err: Optional[str] = None
+    try:
+        ws["client"].cancel()
+    except Exception as exc:
+        _client_cancel_err = str(exc)
+        logger.warning("cancel_workspace: client.cancel failed: %s", exc)
+
+    # Cancel the background asyncio.Task (raises CancelledError inside
+    # _run_workspace_bg which writes a terminal 'cancelled' event + cleans up).
     task = _workspace_tasks.get(workspace_id)
+    _task_existed = task is not None
+    _task_was_done = bool(task.done()) if task else True
+    _wait_outcome = "no-task"
     if task and not task.done():
         task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=6.0)
+            _wait_outcome = "completed"
+        except asyncio.CancelledError:
+            _wait_outcome = "cancelled-error"
+        except asyncio.TimeoutError:
+            _wait_outcome = "timeout"
+        except Exception as exc:
+            _wait_outcome = f"error:{exc}"
+            logger.warning(
+                "cancel_workspace: background task raised during cleanup: %s",
+                exc,
+            )
 
-    _workspaces[workspace_id]["status"] = "cancelled"
+    # region agent log
+    try:
+        import json as _json, os as _os, time as _time, uuid as _uuid
+        _log_path = "/tmp/debug-d007eb.log"
+        _os.makedirs(_os.path.dirname(_log_path), exist_ok=True)
+        with open(_log_path, "a", encoding="utf-8") as _f:
+            _f.write(_json.dumps({
+                "sessionId": "d007eb",
+                "id": f"log_{int(_time.time()*1000)}_{_uuid.uuid4().hex[:8]}",
+                "timestamp": int(_time.time()*1000),
+                "location": "workspace_router.py:cancel_workspace",
+                "message": "cancel_workspace_completed",
+                "data": {
+                    "workspace_id": workspace_id,
+                    "user_id": current_user.get("id"),
+                    "task_existed": _task_existed,
+                    "task_was_done": _task_was_done,
+                    "wait_outcome": _wait_outcome,
+                    "client_cancel_err": _client_cancel_err,
+                },
+                "runId": "run_cancel_button",
+                "hypothesisId": "H_cancel",
+            }, separators=(",", ":")) + "\n")
+    except Exception:
+        pass
+    # endregion
 
     logger.info("Workspace cancelled: id=%s user=%s", workspace_id, current_user["id"])
     return {"workspace_id": workspace_id, "status": "cancelled"}
@@ -1174,7 +1620,7 @@ async def rerun_workspace(
     session_id = f"ws-{workspace_id}"
     started_epoch = time.monotonic()
 
-    _start_workspace(
+    await _start_workspace(
         workspace_id=workspace_id,
         session_id=session_id,
         task_brief=task_brief,
@@ -1304,25 +1750,383 @@ async def get_active_workspace(
         return {"active": None}
     try:
         async with pool.acquire() as conn:
-            row = await conn.fetchrow(
+            rows = await conn.fetch(
                 """
                 SELECT id, session_id, task_brief, status, started_at
                 FROM workspace_runs
                 WHERE user_id = $1
                   AND status = 'running'
                 ORDER BY started_at DESC
-                LIMIT 1
+                LIMIT 10
                 """,
                 current_user["id"],
             )
-        if not row:
+        if not rows:
             return {"active": None}
-        d = dict(row)
-        d["started_at"] = d["started_at"].isoformat() if d.get("started_at") else None
-        # Identify external source from session_id convention (discord-*)
-        session_id = d.get("session_id") or ""
-        d["source"] = "discord" if session_id.startswith("discord-") else "web"
-        return {"active": d}
+        for row in rows:
+            d = dict(row)
+            in_memory = d["id"] in _workspaces
+            _append_debug_log(
+                "workspace_router.py:get_active_workspace",
+                "active_workspace_candidate",
+                {
+                    "workspace_id": d["id"],
+                    "session_id": d.get("session_id"),
+                    "status": d.get("status"),
+                    "in_memory": in_memory,
+                },
+                "run_workspace_active_follow",
+                "H_active_orphan",
+            )
+            if not in_memory:
+                await _db_mark_run_orphaned(
+                    pool,
+                    d["id"],
+                    "Workspace was left in running state but no live in-memory task exists.",
+                )
+                continue
+            d["started_at"] = d["started_at"].isoformat() if d.get("started_at") else None
+            session_id = d.get("session_id") or ""
+            d["source"] = "discord" if session_id.startswith("discord-") else "web"
+            return {"active": d}
+        return {"active": None}
     except Exception as exc:
         logger.error("DB: failed to fetch active workspace: %s", exc)
         return {"active": None}
+
+
+# ── BYO OpenClaw config endpoints ────────────────────────────────────────────
+
+class BYOConfigSaveRequest(BaseModel):
+    mode: str = "bundled"         # "bundled" or "byo"
+    byo_url: Optional[str] = None
+    byo_token: Optional[str] = None
+
+
+class BYOConfigVerifyRequest(BaseModel):
+    url: str
+    token: Optional[str] = None
+
+
+@workspace_router.get("/config/openclaw")
+async def get_openclaw_mode_config(
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """Get the current user's OpenClaw mode configuration."""
+    pool = getattr(request.app.state, "pg_pool", None)
+    if not pool:
+        return {
+            "mode": "bundled",
+            "byo_url": None,
+            "byo_verified_at": None,
+            "byo_last_error": None,
+            "byo_token_saved": False,
+        }
+
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT mode, byo_url, byo_verified_at, byo_last_error,
+                       (byo_token_encrypted IS NOT NULL AND length(byo_token_encrypted) > 0) AS byo_token_saved
+                FROM user_openclaw_config
+                WHERE user_id = $1
+                """,
+                current_user["id"],
+            )
+    except Exception as exc:
+        logger.error("get_openclaw_mode_config: DB error for user %s: %s", current_user["id"], exc)
+        return {
+            "mode": "bundled",
+            "byo_url": None,
+            "byo_verified_at": None,
+            "byo_last_error": None,
+            "byo_token_saved": False,
+        }
+
+    if not row:
+        return {
+            "mode": "bundled",
+            "byo_url": None,
+            "byo_verified_at": None,
+            "byo_last_error": None,
+            "byo_token_saved": False,
+        }
+
+    return {
+        "mode": row["mode"],
+        "byo_url": row["byo_url"],
+        "byo_verified_at": row["byo_verified_at"].isoformat() if row["byo_verified_at"] else None,
+        "byo_last_error": row["byo_last_error"],
+        "byo_token_saved": bool(row["byo_token_saved"]),
+    }
+
+
+@workspace_router.post("/config/openclaw")
+async def save_openclaw_mode_config(
+    req: BYOConfigSaveRequest,
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """Save the user's OpenClaw mode configuration."""
+    pool = getattr(request.app.state, "pg_pool", None)
+    if not pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    if req.mode not in ("bundled", "byo"):
+        raise HTTPException(status_code=400, detail="mode must be 'bundled' or 'byo'")
+
+    byo_url = (req.byo_url or "").strip() or None
+    byo_token = (req.byo_token or "").strip()
+
+    if req.mode == "byo" and not byo_url:
+        raise HTTPException(status_code=400, detail="BYO mode requires a gateway URL")
+
+    # Encrypt the BYO token if provided
+    encrypted_token = None
+    if byo_token:
+        from main import encrypt_api_key
+        encrypted_token = encrypt_api_key(byo_token)
+
+    try:
+        async with pool.acquire() as conn:
+            existing_has_token = bool(
+                await conn.fetchval(
+                    """
+                    SELECT (byo_token_encrypted IS NOT NULL AND length(byo_token_encrypted) > 0)
+                    FROM user_openclaw_config
+                    WHERE user_id = $1
+                    """,
+                    current_user["id"],
+                )
+            )
+            if req.mode == "byo" and not encrypted_token and not existing_has_token:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Gateway token is required the first time you configure BYO mode",
+                )
+
+            await conn.execute(
+                """
+                INSERT INTO user_openclaw_config (user_id, mode, byo_url, byo_token_encrypted)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (user_id) DO UPDATE SET
+                    mode = EXCLUDED.mode,
+                    byo_url = COALESCE(EXCLUDED.byo_url, user_openclaw_config.byo_url),
+                    byo_token_encrypted = COALESCE(EXCLUDED.byo_token_encrypted, user_openclaw_config.byo_token_encrypted),
+                    updated_at = NOW()
+                """,
+                current_user["id"],
+                req.mode,
+                byo_url,
+                encrypted_token,
+            )
+            row = await conn.fetchrow(
+                """
+                SELECT mode, byo_url, byo_verified_at, byo_last_error,
+                       (byo_token_encrypted IS NOT NULL AND length(byo_token_encrypted) > 0) AS byo_token_saved
+                FROM user_openclaw_config
+                WHERE user_id = $1
+                """,
+                current_user["id"],
+            )
+        return {
+            "ok": True,
+            "mode": row["mode"] if row else req.mode,
+            "byo_url": row["byo_url"] if row else byo_url,
+            "byo_verified_at": row["byo_verified_at"].isoformat() if row and row["byo_verified_at"] else None,
+            "byo_last_error": row["byo_last_error"] if row else None,
+            "byo_token_saved": bool(row["byo_token_saved"]) if row else bool(encrypted_token),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("save_openclaw_mode_config: DB error for user %s: %s", current_user["id"], exc)
+        raise HTTPException(status_code=500, detail="Failed to save configuration")
+
+
+@workspace_router.post("/config/byo/verify")
+async def verify_byo_config(
+    req: BYOConfigVerifyRequest,
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """
+    Attempt to connect to the user's OpenClaw and verify auth + protocol.
+    Returns ok=true on success, ok=false with error/hint on failure.
+    On success, stores verified timestamp (and token if provided).
+    """
+    import websockets as _ws
+
+    if not req.url.startswith(("ws://", "wss://")):
+        return {"ok": False, "error": "URL must start with ws:// or wss://", "hint": "Use ws://localhost:18789 or similar."}
+
+    token = (req.token or "").strip()
+    if not token:
+        pool = getattr(request.app.state, "pg_pool", None)
+        if pool:
+            try:
+                async with pool.acquire() as conn:
+                    enc = await conn.fetchval(
+                        """
+                        SELECT byo_token_encrypted
+                        FROM user_openclaw_config
+                        WHERE user_id = $1
+                        """,
+                        current_user["id"],
+                    )
+                if enc:
+                    from main import decrypt_api_key
+                    token = decrypt_api_key(enc) or ""
+            except Exception as exc:
+                logger.error("verify_byo_config: failed loading saved token for user %s: %s", current_user["id"], exc)
+        if not token:
+            return {
+                "ok": False,
+                "error": "No gateway token provided",
+                "hint": "Enter your OpenClaw gateway token or save one first.",
+            }
+
+    try:
+        ws = await _ws.connect(
+            req.url,
+            ping_interval=10,
+            ping_timeout=5,
+            open_timeout=10,
+        )
+
+        # Read the challenge
+        import json as _json
+        raw = await asyncio.wait_for(ws.recv(), timeout=10)
+        challenge = _json.loads(raw)
+        if not (challenge.get("type") == "event" and challenge.get("event") == "connect.challenge"):
+            await ws.close()
+            return {"ok": False, "error": "Unexpected response from server", "hint": "This endpoint does not appear to be an OpenClaw gateway."}
+
+        nonce = challenge.get("payload", {}).get("nonce", "")
+        if not nonce:
+            await ws.close()
+            return {"ok": False, "error": "Missing challenge nonce", "hint": "Gateway challenge payload was invalid."}
+
+        req_id = "verify-connect"
+        await ws.send(_json.dumps({
+            "type": "req",
+            "id": req_id,
+            "method": "connect",
+            "params": {
+                "minProtocol": PROTOCOL_VERSION,
+                "maxProtocol": PROTOCOL_VERSION,
+                "client": {
+                    "id": _CLIENT_ID,
+                    "version": "1.0.0",
+                    "platform": "linux",
+                    "mode": _CLIENT_MODE,
+                },
+                "caps": ["tool-events"],
+                "role": "operator",
+                "scopes": _CLIENT_SCOPES,
+                "auth": {"token": token},
+                "device": _build_device_params(nonce, token),
+            },
+        }))
+        ack_raw = await asyncio.wait_for(ws.recv(), timeout=10)
+        ack = _json.loads(ack_raw)
+        if ack.get("type") != "res" or not ack.get("ok"):
+            await ws.close()
+            err_msg = (
+                (ack.get("error") or {}).get("message")
+                or "Gateway rejected connect/auth handshake"
+            )
+            await _set_byo_error(request, current_user["id"], str(err_msg)[:500])
+            return {
+                "ok": False,
+                "error": f"Authentication failed: {err_msg}",
+                "hint": "Check your gateway token and ensure OpenClaw allows operator access.",
+            }
+
+        # Gateway auth + protocol handshake succeeded.
+        await ws.close()
+
+        # Update verification timestamp in DB
+        pool = getattr(request.app.state, "pg_pool", None)
+        if pool:
+            from main import encrypt_api_key
+            encrypted_token = encrypt_api_key(token)
+            try:
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        INSERT INTO user_openclaw_config (user_id, mode, byo_url, byo_token_encrypted, byo_verified_at, byo_last_error)
+                        VALUES ($1, 'byo', $2, $3, NOW(), NULL)
+                        ON CONFLICT (user_id) DO UPDATE SET
+                            byo_url = EXCLUDED.byo_url,
+                            byo_token_encrypted = EXCLUDED.byo_token_encrypted,
+                            byo_verified_at = NOW(),
+                            byo_last_error = NULL,
+                            updated_at = NOW()
+                        """,
+                        current_user["id"],
+                        req.url,
+                        encrypted_token,
+                    )
+            except Exception as exc:
+                logger.error("verify_byo_config: DB update failed for user %s: %s", current_user["id"], exc)
+
+        return {"ok": True, "message": "OpenClaw reachable, auth handshake verified", "byo_token_saved": True}
+
+    except asyncio.TimeoutError:
+        await _set_byo_error(request, current_user["id"], "Connection timed out")
+        return {
+            "ok": False,
+            "error": "Connection timed out",
+            "hint": "Check firewall and port forwarding. WSL users may need to bind to 0.0.0.0.",
+        }
+    except ConnectionRefusedError:
+        await _set_byo_error(request, current_user["id"], "Connection refused")
+        return {
+            "ok": False,
+            "error": "Connection refused",
+            "hint": "OpenClaw is not running at that URL. Check `openclaw gateway status`.",
+        }
+    except Exception as exc:
+        error_msg = str(exc)[:500]
+        await _set_byo_error(request, current_user["id"], error_msg)
+        return {
+            "ok": False,
+            "error": error_msg,
+            "hint": _verification_hint(exc),
+        }
+
+
+def _verification_hint(exc: Exception) -> str:
+    msg = str(exc).lower()
+    if "connection refused" in msg or "econnrefused" in msg:
+        return "OpenClaw is not running at that URL. Check `openclaw gateway status`."
+    if "timeout" in msg:
+        return "Connection timed out. Check firewall and port forwarding."
+    if "401" in msg or "unauthorized" in msg or "invalid token" in msg:
+        return "Gateway token is invalid. Regenerate it and paste the new value."
+    if "handshake" in msg:
+        return "Protocol version mismatch. Update OpenClaw to a compatible version."
+    return "See OpenClaw logs for details."
+
+
+async def _set_byo_error(request, user_id: int, error: str) -> None:
+    pool = getattr(request.app.state, "pg_pool", None)
+    if not pool:
+        return
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE user_openclaw_config
+                SET byo_last_error = $2, updated_at = NOW()
+                WHERE user_id = $1
+                """,
+                user_id,
+                error[:500],
+            )
+    except Exception:
+        pass
+

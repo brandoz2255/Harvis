@@ -98,6 +98,12 @@ async def _get_github_token(pool, user_id: int) -> str:
     return decrypt_token(row["access_token"])
 
 
+def _user_id(user) -> int:
+    if isinstance(user, dict):
+        return int(user.get("id") or user.get("user_id"))
+    return int(getattr(user, "id"))
+
+
 async def _ensure_workspace_repos_table(pool):
     """Create workspace_repos table if it doesn't exist (idempotent)."""
     async with pool.acquire() as conn:
@@ -159,7 +165,8 @@ async def clone_repo(req: CloneRepoRequest, request: Request, user=Depends(get_c
     await _ensure_workspace_repos_table(pool)
 
     # Get user's GitHub token (never sent to OpenClaw)
-    gh_token = await _get_github_token(pool, user.id)
+    uid = _user_id(user)
+    gh_token = await _get_github_token(pool, uid)
 
     repo_path = _repo_dir(req.owner, req.repo)
 
@@ -206,7 +213,7 @@ async def clone_repo(req: CloneRepoRequest, request: Request, user=Depends(get_c
             ON CONFLICT (user_id, owner, repo)
             DO UPDATE SET branch = $4, last_synced = NOW()
             RETURNING id, last_synced
-        """, user.id, req.owner, req.repo, req.branch, repo_path)
+        """, uid, req.owner, req.repo, req.branch, repo_path)
 
     return RepoInfo(
         id=row["id"],
@@ -221,6 +228,7 @@ async def clone_repo(req: CloneRepoRequest, request: Request, user=Depends(get_c
 
 @repo_manager_router.post("/sync-repo", response_model=RepoInfo)
 async def sync_repo(req: SyncRepoRequest, request: Request, user=Depends(get_current_user_optimized)):
+    uid = _user_id(user)
     """Pull latest changes for an already-cloned repo."""
     pool = getattr(request.app.state, "pg_pool", None)
     if not pool:
@@ -232,7 +240,7 @@ async def sync_repo(req: SyncRepoRequest, request: Request, user=Depends(get_cur
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT id, branch, local_path FROM workspace_repos WHERE user_id = $1 AND owner = $2 AND repo = $3",
-            user.id, req.owner, req.repo,
+            uid, req.owner, req.repo,
         )
     if not row:
         raise HTTPException(status_code=404, detail="Repo not found in workspace")
@@ -244,7 +252,7 @@ async def sync_repo(req: SyncRepoRequest, request: Request, user=Depends(get_cur
         raise HTTPException(status_code=404, detail="Repo directory missing — try cloning again")
 
     # Temporarily set authenticated remote
-    gh_token = await _get_github_token(pool, user.id)
+    gh_token = await _get_github_token(pool, uid)
     clone_url = f"https://x-access-token:{gh_token}@github.com/{req.owner}/{req.repo}.git"
     await _run_git(["git", "remote", "set-url", "origin", clone_url], cwd=repo_path)
 
@@ -276,6 +284,7 @@ async def sync_repo(req: SyncRepoRequest, request: Request, user=Depends(get_cur
 
 @repo_manager_router.post("/push-changes")
 async def push_changes(req: PushChangesRequest, request: Request, user=Depends(get_current_user_optimized)):
+    uid = _user_id(user)
     """Commit and push changes OpenClaw made back to GitHub."""
     pool = getattr(request.app.state, "pg_pool", None)
     if not pool:
@@ -285,7 +294,7 @@ async def push_changes(req: PushChangesRequest, request: Request, user=Depends(g
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT local_path FROM workspace_repos WHERE user_id = $1 AND owner = $2 AND repo = $3",
-            user.id, req.owner, req.repo,
+            uid, req.owner, req.repo,
         )
     if not row:
         raise HTTPException(status_code=404, detail="Repo not found in workspace")
@@ -294,7 +303,7 @@ async def push_changes(req: PushChangesRequest, request: Request, user=Depends(g
     if not os.path.isdir(os.path.join(repo_path, ".git")):
         raise HTTPException(status_code=404, detail="Repo directory missing")
 
-    gh_token = await _get_github_token(pool, user.id)
+    gh_token = await _get_github_token(pool, uid)
 
     # Safety: never push to main/master
     if req.branch in ("main", "master"):
@@ -363,6 +372,7 @@ async def push_changes(req: PushChangesRequest, request: Request, user=Depends(g
 
 @repo_manager_router.get("/repos", response_model=RepoListResponse)
 async def list_repos(request: Request, user=Depends(get_current_user_optimized)):
+    uid = _user_id(user)
     """List repos the user has cloned into the workspace."""
     pool = getattr(request.app.state, "pg_pool", None)
     if not pool:
@@ -373,7 +383,7 @@ async def list_repos(request: Request, user=Depends(get_current_user_optimized))
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             "SELECT id, owner, repo, branch, local_path, last_synced FROM workspace_repos WHERE user_id = $1 ORDER BY last_synced DESC",
-            user.id,
+            uid,
         )
 
     repos = []
@@ -398,7 +408,8 @@ async def list_user_github_repos(request: Request, user=Depends(get_current_user
     if not pool:
         raise HTTPException(status_code=500, detail="Database not available")
 
-    gh_token = await _get_github_token(pool, user.id)
+    uid = _user_id(user)
+    gh_token = await _get_github_token(pool, uid)
 
     repos = []
     page = 1
@@ -435,6 +446,7 @@ async def list_user_github_repos(request: Request, user=Depends(get_current_user
 
 @repo_manager_router.delete("/repos/{repo_id}")
 async def delete_repo(repo_id: int, request: Request, user=Depends(get_current_user_optimized)):
+    uid = _user_id(user)
     """Remove a cloned repo from the workspace."""
     pool = getattr(request.app.state, "pg_pool", None)
     if not pool:
@@ -443,7 +455,7 @@ async def delete_repo(repo_id: int, request: Request, user=Depends(get_current_u
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT local_path FROM workspace_repos WHERE id = $1 AND user_id = $2",
-            repo_id, user.id,
+            repo_id, uid,
         )
     if not row:
         raise HTTPException(status_code=404, detail="Repo not found")

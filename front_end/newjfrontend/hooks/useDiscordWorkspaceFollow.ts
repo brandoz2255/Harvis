@@ -24,6 +24,11 @@ export function useDiscordWorkspaceFollow() {
         const res = await fetch('/api/workspace/active', {
           headers: { Authorization: `Bearer ${token}` },
         })
+        if (res.status === 404) {
+          // Backend returned 404 - clear Discord hint to prevent stale UI
+          useOpenClawStore.getState().setDiscordExternalWorkspace(null)
+          return
+        }
         if (!res.ok || cancelled) return
 
         const data = await res.json()

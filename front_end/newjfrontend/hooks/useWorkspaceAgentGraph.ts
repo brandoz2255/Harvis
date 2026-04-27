@@ -85,6 +85,11 @@ export function useWorkspaceAgentGraph(): WorkspaceAgentGraph {
             const src = `run-${evt.parent_run_id}`;
             const tgt = `run-${evt.run_id}`;
             ensureNode(src, 'Agent', evt.timestamp);
+            // Record parent on child so useAgentData can compute hierarchy.
+            const child = nodeMap.get(tgt);
+            if (child && !child.parentId) {
+              nodeMap.set(tgt, { ...child, parentId: src });
+            }
             const edgeKey = `${src}->${tgt}`;
             if (!edgeSet.has(edgeKey)) {
               edgeSet.add(edgeKey);
@@ -163,6 +168,11 @@ export function useWorkspaceAgentGraph(): WorkspaceAgentGraph {
         const parent = nodeMap.get(hub);
         if (parent) {
           nodeMap.set(hub, { ...parent, subAgentCount: parent.subAgentCount + 1 });
+        }
+        // Record fallback parent so layout treats this as a proper tree.
+        const child = nodeMap.get(tgt);
+        if (child && !child.parentId) {
+          nodeMap.set(tgt, { ...child, parentId: hub });
         }
       }
     }

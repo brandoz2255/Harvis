@@ -32,7 +32,11 @@
         "baseUrl": "http://backend:8000/v1",
         "apiKey": "${OPENCLAW_GATEWAY_TOKEN}",
         "models": [
-          { "id": "qwen3.5-32k:latest", "name": "Qwen 3.5 9.7B (Local Ollama)" }
+          { "id": "gemma4:e4b", "name": "Gemma 4 E4B (agentic, local)" },
+          { "id": "gemma4:e2b", "name": "Gemma 4 E2B (fast, subagents)" },
+          { "id": "qwen3.5-32k:latest", "name": "Qwen 3.5 32k (long context)" },
+          { "id": "qwen3.5:latest", "name": "Qwen 3.5 (short context)" },
+          { "id": "llama3.1:8b", "name": "Llama 3.1 8B" }
         ]
       }
     }
@@ -51,17 +55,17 @@
     "defaults": {
       "elevatedDefault": "full",
       "verboseDefault": "full",
-      "timeoutSeconds": 1200,
+      "timeoutSeconds": 600,
       "model": {
-        "primary": "harvis-proxy/qwen3.5-32k:latest"
+        "primary": "harvis-proxy/gemma4:e4b"
       },
       "subagents": {
-        "model": "harvis-proxy/qwen3.5-32k:latest",
-        "runTimeoutSeconds": 1200,
+        "model": "harvis-proxy/gemma4:e2b",
+        "runTimeoutSeconds": 600,
         "announceTimeoutMs": 30000,
         "maxSpawnDepth": 2,
-        "maxChildrenPerAgent": 6,
-        "maxConcurrent": 6
+        "maxChildrenPerAgent": 4,
+        "maxConcurrent": 3
       },
       "heartbeat": {
         "every": "1h",
@@ -73,7 +77,7 @@
         "id": "main",
         "default": true,
         "model": {
-          "primary": "harvis-proxy/qwen3.5-32k:latest"
+          "primary": "harvis-proxy/gemma4:e4b"
         }
       }
     ]

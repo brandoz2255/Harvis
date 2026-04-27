@@ -914,6 +914,34 @@ async def list_models(
     except Exception as e:
         logger.warning(f"Could not connect to vLLM: {e}")
 
+    # Fetch from desktop Ollama (RTX 5080 box) — listed alongside laptop models
+    # so the picker exposes models that only exist on the GPU host. Workspace
+    # tasks routed through OpenClaw will use whichever Ollama instance has the
+    # selected model; fast-path Discord chat needs the model on the laptop too.
+    desktop_ollama_url = os.getenv("DESKTOP_OLLAMA_URL", "")
+    if desktop_ollama_url:
+        try:
+            desk_url = f"{desktop_ollama_url.rstrip('/')}/api/tags"
+            async with httpx.AsyncClient() as client:
+                desk_resp = await client.get(desk_url, timeout=5.0)
+            if desk_resp.status_code == 200:
+                desk_data = desk_resp.json()
+                added = 0
+                for m in desk_data.get("models", []):
+                    model_name = m.get("name", "unknown")
+                    if not any(existing["name"] == model_name for existing in formatted_models):
+                        formatted_models.append({
+                            "name": model_name,
+                            "displayName": f"{model_name.split(':')[0]} (Desktop 5080)",
+                            "size": _parse_model_size(m.get("size")),
+                            "status": "available",
+                            "provider": "ollama-desktop",
+                        })
+                        added += 1
+                logger.info(f"Added {added} desktop-Ollama models from {desk_url}")
+        except Exception as e:
+            logger.warning(f"Could not connect to desktop Ollama at {desktop_ollama_url}: {e}")
+
     # Fetch from external Ollama (if configured) - runs in parallel with above
     if EXTERNAL_OLLAMA_URL and EXTERNAL_OLLAMA_API_KEY:
         try:
@@ -2667,13 +2695,21 @@ async def get_local_rag_context(query: str, max_length: int = None) -> str:
 
 import re as _re
 
+# Auto-research trigger — intentionally narrow. Generic conversational openers like
+# "what is", "tell me about", "find out", "how does", etc. are NOT triggers because
+# they appear constantly in normal chat (including in user-attached file analysis
+# prompts where research would silently steal the request and never display output).
+# To force research, the user can toggle research mode in the UI, or use one of the
+# explicit phrases below.
 _RESEARCH_PATTERNS = _re.compile(
     r"(?i)\b("
-    r"search\s+(for|the\s+web|online|up)|google|look\s+up|find\s+(info|out|me)|"
-    r"research|what\s+is|who\s+is|when\s+did|where\s+is|how\s+does|how\s+do\s+you|"
-    r"latest\s+news|current\s+events|recent\s+developments|"
-    r"explain\s+what|tell\s+me\s+about|give\s+me\s+info|"
-    r"compare\s+\w+\s+and|difference\s+between|pros?\s+and\s+cons"
+    r"search\s+(the\s+web|online)|"
+    r"google\s+(it|this|that|for)|"
+    r"look\s+(it|this|that)\s+up\s+online|"
+    r"research\s+(this|that|for\s+me|the|on)|"
+    r"latest\s+news\s+(on|about|in)|"
+    r"recent\s+(news|developments|articles)\s+(on|about)|"
+    r"web\s+search\s+(for|on)"
     r")\b"
 )
 
@@ -2743,6 +2779,58 @@ async def chat(
                     logger.info(
                         f"Added {len(attachment_text)} file contents to message"
                     )
+
+            # ── 1.5 Workspace detection (high → auto-launch, medium → suggestion) ────────
+            try:
+                from workspace.task_detector import detect_workspace_task
+                detector_history = (req.history or []) + [
+                    {"role": "user", "content": current_message_content}
+                ]
+                suggestion = await detect_workspace_task(detector_history)
+            except Exception as det_exc:
+                logger.warning("Workspace detection failed, falling through: %s", det_exc)
+                suggestion = None
+
+            force_workspace = bool(getattr(req, "force_workspace", False))
+
+            if suggestion is not None and (
+                force_workspace
+                or (suggestion.should_suggest and suggestion.confidence >= 0.8)
+            ):
+                logger.info(
+                    "🚀 Auto-launching workspace from /api/chat (confidence=%.2f, force=%s)",
+                    suggestion.confidence, force_workspace,
+                )
+                yield f"data: {json.dumps({'status': 'workspace_detected', 'confidence': round(suggestion.confidence, 2), 'task_type': suggestion.task_type, 'task_type_label': suggestion.task_type_label})}\n\n"
+                from workspace.chat_bridge import stream_workspace_launch_as_chat
+                pool = getattr(request.app.state, "pg_pool", None)
+                async for line in stream_workspace_launch_as_chat(
+                    message=current_message_content,
+                    history=req.history or [],
+                    user_id=current_user.id,
+                    session_id=req.session_id,
+                    pool=pool,
+                    agent_id="local",
+                    model_name="",
+                    task_brief=suggestion.task_brief or current_message_content,
+                ):
+                    yield line
+                return
+
+            if suggestion is not None and suggestion.should_suggest and suggestion.confidence >= 0.4:
+                logger.info(
+                    "💡 Emitting workspace suggestion (confidence=%.2f, type=%s)",
+                    suggestion.confidence, suggestion.task_type,
+                )
+                yield (
+                    "data: "
+                    + json.dumps({
+                        "status": "workspace_suggestion",
+                        "suggestion": suggestion.to_dict(),
+                    })
+                    + "\n\n"
+                )
+                # Fall through to the normal chat path — user still gets an answer.
 
             # ── 2. Auto-Research Detection (Perplexity-style) ──────────────────────────────
             if should_auto_research(req.message):
@@ -4647,28 +4735,85 @@ async def upload_file(
         "application/pdf",
         "application/vnd.openxmlformats-officedocument.wordprocessingml",
         "application/msword",
+        "application/rtf",
+        # Text & data formats — explicit MIME prefixes (the extension allowlist
+        # below is the real workhorse for non-standard text MIME types).
+        "text/",
+        "application/json",
+        "application/xml",
+        "application/yaml",
+        "application/toml",
+        "application/sql",
+        "application/graphql",
+        "application/x-ndjson",
+        "application/x-jsonlines",
+        "application/x-ipynb",
+        "application/x-protobuf",
     )
 
+    # Extension allowlist for files browsers send as application/octet-stream
+    # (most non-standard text formats hit this path). Keep this list in sync
+    # with SUPPORTED_FILE_TYPES in front_end/.../chat-input.tsx.
+    ALLOWED_EXTENSIONS = {
+        # Documents
+        ".pdf", ".docx", ".doc", ".rtf",
+        # Text & docs
+        ".txt", ".md", ".mdx", ".rst", ".adoc", ".org", ".tex",
+        # Data
+        ".csv", ".tsv", ".json", ".ndjson", ".jsonl", ".xml",
+        ".yaml", ".yml", ".toml", ".sql", ".graphql", ".gql", ".proto",
+        # Logs & diffs
+        ".log", ".diff", ".patch",
+        # Config
+        ".ini", ".conf", ".cfg", ".properties", ".env",
+        # Web
+        ".html", ".htm", ".css", ".scss", ".sass", ".less",
+        ".vue", ".svelte", ".js", ".jsx", ".ts", ".tsx",
+        # Programming
+        ".py", ".go", ".rs", ".rb", ".php", ".java", ".kt", ".swift",
+        ".scala", ".dart", ".lua", ".pl", ".r", ".cs",
+        ".c", ".h", ".cpp", ".hpp", ".cc", ".m", ".mm",
+        # Shell
+        ".sh", ".bash", ".zsh", ".fish", ".ps1", ".bat",
+        # Notebooks & images (images also matched via MIME above)
+        ".ipynb",
+        ".png", ".jpg", ".jpeg", ".gif", ".webp",
+    }
+
     mime_type = file.content_type or "application/octet-stream"
-    if not any(mime_type.startswith(p) for p in ALLOWED_MIME_PREFIXES):
+    filename_lower = (file.filename or "").lower()
+    file_ext = os.path.splitext(filename_lower)[1]
+    mime_ok = any(mime_type.startswith(p) for p in ALLOWED_MIME_PREFIXES)
+    ext_ok = file_ext in ALLOWED_EXTENSIONS
+    if not (mime_ok or ext_ok):
         raise HTTPException(
             status_code=415,
-            detail=f"Unsupported file type: {mime_type}. Allowed: images, PDF, DOCX.",
+            detail=(
+                f"Unsupported file type: {mime_type} ({file_ext or 'no extension'}). "
+                f"Allowed: images, PDF, DOCX, common text/code/config files."
+            ),
         )
 
-    # Derive safe extension from content_type
+    # Derive safe extension. Prefer the actual filename extension when it's
+    # one we recognize; fall back to MIME-based guess for legacy uploads.
     _EXT_MAP = {
         "application/pdf": ".pdf",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
         "application/msword": ".doc",
+        "application/rtf": ".rtf",
         "image/png": ".png",
         "image/jpeg": ".jpg",
         "image/gif": ".gif",
         "image/webp": ".webp",
     }
-    ext = _EXT_MAP.get(mime_type, "")
-    if not ext and mime_type.startswith("image/"):
-        ext = f".{mime_type.split('/')[1]}"
+    if file_ext in ALLOWED_EXTENSIONS:
+        ext = file_ext
+    else:
+        ext = _EXT_MAP.get(mime_type, "")
+        if not ext and mime_type.startswith("image/"):
+            ext = f".{mime_type.split('/')[1]}"
+        elif not ext and mime_type.startswith("text/"):
+            ext = ".txt"
 
     file_id = str(uuid.uuid4())
     stored_path = os.path.join(IMAGES_DIR, f"{file_id}{ext}")
@@ -5660,44 +5805,49 @@ async def research_chat(
             ws_id = result["workspace_id"]
 
             # Stream workspace events as SSE research progress
-            from workspace.workspace_router import _workspaces, _workspace_queues
-            queue = _workspace_queues.get(ws_id)
-            if not queue:
+            from workspace.workspace_router import _workspace_broadcasters
+
+            broadcaster = _workspace_broadcasters.get(ws_id)
+            if not broadcaster:
                 yield f"data: {json.dumps({'status': 'error', 'error': 'Failed to start live research workspace'})}\n\n"
                 return
 
-            final_content = ""
-            while True:
-                try:
-                    item = await asyncio.wait_for(queue.get(), timeout=300)
-                except asyncio.TimeoutError:
-                    yield f"data: {json.dumps({'status': 'error', 'error': 'Live research timed out'})}\n\n"
-                    return
-
-                if item is None:
-                    break
-                seq, event = item
-                if event.type == "token":
-                    token_text = event.data.get("token", "")
-                    final_content += token_text
-                    yield f"data: {json.dumps({'status': 'streaming', 'token': token_text})}\n\n"
-                elif event.type == "tool_call":
-                    tool_name = event.data.get("name", "tool")
-                    yield f"data: {json.dumps({'status': 'researching', 'detail': f'Using {tool_name}...', 'type': 'tool_call'})}\n\n"
-                elif event.type == "log":
-                    msg = event.data.get("message", "")
-                    yield f"data: {json.dumps({'status': 'researching', 'detail': msg})}\n\n"
-                elif event.type in ("done", "error"):
-                    if event.type == "error":
-                        err_msg = event.data.get("message", "Unknown error")
-                        yield f"data: {json.dumps({'status': 'error', 'error': err_msg})}\n\n"
+            live_queue = broadcaster.subscribe()
+            try:
+                final_content = ""
+                while True:
+                    try:
+                        item = await asyncio.wait_for(live_queue.get(), timeout=300)
+                    except asyncio.TimeoutError:
+                        yield f"data: {json.dumps({'status': 'error', 'error': 'Live research timed out'})}\n\n"
                         return
-                    summary = event.data.get("summary", "") or final_content
-                    final_content = summary
-                    break
 
-            # Emit final response
-            yield f"data: {json.dumps({'status': 'complete', 'response': final_content, 'sources': [], 'live_web': True})}\n\n"
+                    if item is None:
+                        break
+                    seq, event = item
+                    if event.type == "token":
+                        token_text = event.data.get("token", "")
+                        final_content += token_text
+                        yield f"data: {json.dumps({'status': 'streaming', 'token': token_text})}\n\n"
+                    elif event.type == "tool_call":
+                        tool_name = event.data.get("name", "tool")
+                        yield f"data: {json.dumps({'status': 'researching', 'detail': f'Using {tool_name}...', 'type': 'tool_call'})}\n\n"
+                    elif event.type == "log":
+                        msg = event.data.get("message", "")
+                        yield f"data: {json.dumps({'status': 'researching', 'detail': msg})}\n\n"
+                    elif event.type in ("done", "error"):
+                        if event.type == "error":
+                            err_msg = event.data.get("message", "Unknown error")
+                            yield f"data: {json.dumps({'status': 'error', 'error': err_msg})}\n\n"
+                            return
+                        summary = event.data.get("summary", "") or final_content
+                        final_content = summary
+                        break
+
+                # Emit final response
+                yield f"data: {json.dumps({'status': 'complete', 'response': final_content, 'sources': [], 'live_web': True})}\n\n"
+            finally:
+                broadcaster.unsubscribe(live_queue)
 
         return StreamingResponse(
             stream_live_research(),

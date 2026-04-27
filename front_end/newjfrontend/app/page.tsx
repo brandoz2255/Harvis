@@ -16,7 +16,7 @@ import SearchToggle, { type ResearchMode } from "@/components/SearchToggle"
 import { useChatHistoryStore } from "@/stores/chatHistoryStore"
 import { apiClient, getAuthHeaders } from "@/lib/api"
 import { useUser } from "@/lib/auth/UserProvider"
-import type { Message, MessageObject, Attachment } from "@/types/message"
+import type { Message, MessageObject, Attachment, WorkspaceChatEvent, WorkspaceChatSuggestion } from "@/types/message"
 import { isVisionModel } from "@/types/message"
 import { useChat } from "@ai-sdk/react"
 // @ts-ignore
@@ -72,8 +72,10 @@ export default function ChatPage() {
   const {
     messages: aiMessages,
     append,
+    stop,
     setMessages: setAiMessages,
     isLoading: isAiLoading,
+    status: aiChatStatus,
     data: aiData
   } = useChat({
     api: '/api/ai-chat',
@@ -94,12 +96,48 @@ export default function ChatPage() {
     }
   })
 
+  const isAiLoadingRef = useRef(false)
+  useEffect(() => {
+    isAiLoadingRef.current = isAiLoading
+  }, [isAiLoading])
+
+  /** Plain /api/ai-chat path: OR local isLoading with useChat busy state.
+   *  - `isLoading` flips true the instant the user clicks send → typing indicator shows immediately
+   *    (no 1–10 s gap waiting for the SDK to see the first stream chunk after backend pre-stream work
+   *    like workspace detection / attachment processing).
+   *  - `isAiLoading` keeps it true through the streaming response.
+   *  - The safety-reset effect below clears local `isLoading` once useChat fires its terminal event,
+   *    so a stuck `onFinish` no longer pins the indicator on permanently. */
+  const isDefaultAiSdkChat =
+    researchMode === "off" && !isVisionModel(selectedModel || "")
+  const isSendBusy = isDefaultAiSdkChat ? (isLoading || isAiLoading) : isLoading
+  /** Tracks whether useChat reported loading at any point since the last reset.
+   *  Lets the safety-reset effect distinguish "pre-stream send-just-clicked" (don't reset)
+   *  from "post-stream and useChat is done" (do reset). */
+  const sawAiLoadingRef = useRef(false)
+  useEffect(() => {
+    if (isAiLoading) sawAiLoadingRef.current = true
+  }, [isAiLoading])
+
+  /** Always-current ref for the send gate — immune to stale useCallback closures */
+  const isSendBusyRef = useRef(false)
+  useEffect(() => {
+    isSendBusyRef.current = isSendBusy
+  }, [isSendBusy])
+
   // Track data in refs to avoid re-renders during streaming
   const audioUrlMapRef = useRef<Map<string, string>>(new Map())
   const searchResultsMapRef = useRef<Map<string, any[]>>(new Map())
   const videosMapRef = useRef<Map<string, any[]>>(new Map())
   const reasoningMapRef = useRef<Map<string, string>>(new Map())
+  const workspaceEventsMapRef = useRef<Map<string, WorkspaceChatEvent[]>>(new Map())
+  const workspaceIdMapRef = useRef<Map<string, string>>(new Map())
+  const workspaceStatusMapRef = useRef<Map<string, 'acknowledged' | 'running' | 'completed' | 'error'>>(new Map())
+  const workspaceSuggestionMapRef = useRef<Map<string, WorkspaceChatSuggestion>>(new Map())
+  /** Dedupe auto-attach to full Workspace panel (SSE) when main chat launches a workspace */
+  const chatAttachedWorkspaceRef = useRef<Set<string>>(new Set())
   const processedDataLengthRef = useRef(0)
+  const [workspaceTick, setWorkspaceTick] = useState(0)
 
   // Track previous aiData length to detect new data
   const prevAiDataLengthRef = useRef(0)
@@ -125,11 +163,79 @@ export default function ChatPage() {
       // Process new data items
       const mappedAudioUrls = new Set(audioUrlMapRef.current.values())
 
+      let workspaceMutated = false
+
       newItems.forEach((data: any) => {
         // Audio URLs
         if (data?.audioPath && !mappedAudioUrls.has(data.audioPath) && lastAssistantId) {
           audioUrlMapRef.current.set(lastAssistantId, data.audioPath)
           mappedAudioUrls.add(data.audioPath)
+        }
+
+        // Workspace events bridged from /api/ai-chat as { type: 'workspace_event', event }
+        if (data?.type === 'workspace_event' && data.event && lastAssistantId) {
+          const ev = data.event
+          const wsId = ev.workspace_id
+          if (wsId) {
+            workspaceIdMapRef.current.set(lastAssistantId, wsId)
+          }
+
+          const list = workspaceEventsMapRef.current.get(lastAssistantId) || []
+
+          const kindMap: Record<string, WorkspaceChatEvent['kind']> = {
+            workspace_detected: 'detected',
+            workspace_acknowledge: 'acknowledge',
+            workspace_status: 'status',
+            workspace_tool_call: 'tool_call',
+            workspace_tool_result: 'tool_result',
+            workspace_partial: 'partial',
+            workspace_result: 'result',
+            workspace_error: 'error',
+          }
+
+          const kind = kindMap[ev.status]
+          if (kind) {
+            const chatEvent: WorkspaceChatEvent = {
+              kind,
+              timestamp: Date.now(),
+              message: ev.message,
+              toolName: ev.tool_name,
+              args: ev.args,
+              output: ev.output,
+              text: ev.text,
+              finalAnswer: ev.final_answer || ev.summary,
+              durationMs: ev.duration_ms,
+            }
+            list.push(chatEvent)
+            workspaceEventsMapRef.current.set(lastAssistantId, list)
+
+            if (kind === 'acknowledge') {
+              workspaceStatusMapRef.current.set(lastAssistantId, 'acknowledged')
+              if (wsId && !chatAttachedWorkspaceRef.current.has(wsId)) {
+                chatAttachedWorkspaceRef.current.add(wsId)
+                void useOpenClawStore.getState().attachToWorkspaceStream(wsId)
+              }
+            } else if (kind === 'result') {
+              workspaceStatusMapRef.current.set(lastAssistantId, 'completed')
+            } else if (kind === 'error') {
+              workspaceStatusMapRef.current.set(lastAssistantId, 'error')
+            } else if (!workspaceStatusMapRef.current.has(lastAssistantId)) {
+              workspaceStatusMapRef.current.set(lastAssistantId, 'running')
+            }
+            workspaceMutated = true
+          } else if (ev.status === 'workspace_suggestion' && ev.suggestion) {
+            const s = ev.suggestion
+            const suggestion: WorkspaceChatSuggestion = {
+              taskBrief: s.task_brief || '',
+              taskType: s.task_type ?? null,
+              taskTypeLabel: s.task_type_label || 'General task',
+              confidence: Number(s.confidence) || 0,
+              confidenceLevel: (s.confidence_level as WorkspaceChatSuggestion['confidenceLevel']) || 'medium',
+              reason: s.reason || '',
+            }
+            workspaceSuggestionMapRef.current.set(lastAssistantId, suggestion)
+            workspaceMutated = true
+          }
         }
 
         // Search results
@@ -141,6 +247,11 @@ export default function ChatPage() {
         // Videos
         if (data?.videos && lastAssistantId && !videosMapRef.current.has(lastAssistantId)) {
           videosMapRef.current.set(lastAssistantId, data.videos)
+        }
+
+        if (workspaceMutated) {
+          setWorkspaceTick(t => t + 1)
+          workspaceMutated = false
         }
 
         // Session ID - sync currentSession when backend creates/returns a session
@@ -187,9 +298,13 @@ export default function ChatPage() {
         videos: videosMapRef.current.get(m.id),
         metadata: m.metadata,
         inputType: m.inputType,
+        workspaceId: workspaceIdMapRef.current.get(m.id),
+        workspaceStatus: workspaceStatusMapRef.current.get(m.id),
+        workspaceEvents: workspaceEventsMapRef.current.get(m.id),
+        workspaceSuggestion: workspaceSuggestionMapRef.current.get(m.id),
       }
     })
-  }, [aiMessages, selectedModel, isAiLoading])
+  }, [aiMessages, selectedModel, isAiLoading, workspaceTick])
 
   // Unified message merging - combines AI SDK messages with local messages
   // This ensures text, vision, voice, and all modes appear together seamlessly
@@ -216,6 +331,13 @@ export default function ChatPage() {
     // Sort by timestamp to maintain chronological order
     return merged.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())
   }, [convertedMessages, localMessages])
+
+  /** Always-current ref for handleSendMessage — avoids recreating the callback on every stream tick,
+   *  which previously churned ChatInput's onSend prop identity and risked stale closures on the send gate. */
+  const messagesRef = useRef<Message[]>([])
+  useEffect(() => {
+    messagesRef.current = messages
+  }, [messages])
 
   // Sync loaded history INTO AI SDK
   useEffect(() => {
@@ -267,17 +389,24 @@ export default function ChatPage() {
     }
   }, [fetchSessions, user])
 
-  // Safety reset: if AI SDK finishes but isLoading is stuck, reset it.
-  // This prevents the send button from being permanently disabled after one message.
+  // Safety reset:
+  //  - Research / vision paths: clear local `isLoading` once useChat reports done.
+  //  - Default AI-SDK path: clear local `isLoading` only AFTER useChat actually streamed at
+  //    least once (sawAiLoadingRef). This avoids racing the just-clicked Send before the SDK
+  //    has even opened the stream, while still preventing a permanently stuck indicator if
+  //    `onFinish` never fires.
   useEffect(() => {
-    if (!isAiLoading && isLoading) {
-      // Give a small delay to avoid race conditions with onFinish
+    const okToReset = isDefaultAiSdkChat
+      ? (sawAiLoadingRef.current && !isAiLoading && isLoading)
+      : (!isAiLoading && isLoading)
+    if (okToReset) {
       const timer = setTimeout(() => {
         setIsLoading(false)
+        if (isDefaultAiSdkChat) sawAiLoadingRef.current = false
       }, 500)
       return () => clearTimeout(timer)
     }
-  }, [isAiLoading, isLoading])
+  }, [isDefaultAiSdkChat, isAiLoading, isLoading])
 
   // Optimized scroll to bottom - only scroll on significant changes, not every token
   useEffect(() => {
@@ -306,8 +435,13 @@ export default function ChatPage() {
       searchResultsMapRef.current.clear()
       videosMapRef.current.clear()
       reasoningMapRef.current.clear()
-    }
-  }, [createNewChat, setAiMessages])
+      workspaceEventsMapRef.current.clear()
+      workspaceIdMapRef.current.clear()
+      workspaceStatusMapRef.current.clear()
+      workspaceSuggestionMapRef.current.clear()
+      chatAttachedWorkspaceRef.current.clear()
+      }
+    }, [createNewChat, setAiMessages])
 
   const handleSelectChat = useCallback(async (id: string) => {
     setAiMessages([])
@@ -316,6 +450,11 @@ export default function ChatPage() {
     searchResultsMapRef.current.clear()
     videosMapRef.current.clear()
     reasoningMapRef.current.clear()
+    workspaceEventsMapRef.current.clear()
+    workspaceIdMapRef.current.clear()
+    workspaceStatusMapRef.current.clear()
+    workspaceSuggestionMapRef.current.clear()
+    chatAttachedWorkspaceRef.current.clear()
     await selectSession(id)
     setSidebarOpen(false)
   }, [selectSession, setAiMessages])
@@ -350,6 +489,7 @@ export default function ChatPage() {
           session_id: currentSession?.id ?? undefined,
           agent_id: store.workspaceModel,
           model_name: store.workspaceModelName,
+          enable_interactive: true,
           parallel: true,
         }),
       })
@@ -518,25 +658,38 @@ export default function ChatPage() {
       messageAttachments = msgObj.attachments || []
 
       if (msgObj.inputType === 'voice') {
-        if (!isDuplicateMessage(msgObj as Message, messages)) {
+        if (!isDuplicateMessage(msgObj as Message, messagesRef.current)) {
           setLocalMessages((prev) => [...prev, msgObj as Message])
         }
         return
       }
 
-      if (!isDuplicateMessage(msgObj as Message, messages)) {
+      if (!isDuplicateMessage(msgObj as Message, messagesRef.current)) {
         setLocalMessages((prev) => [...prev, msgObj as Message])
       }
     }
 
-    if (isLoading) return
+    const isUserTextInput = typeof input === 'string' && messageContent.trim().length > 0
+
+    // Read gate from refs so this check is immune to stale useCallback closures.
+    if (isSendBusyRef.current) {
+      /**
+       * If user sends follow-up while /api/ai-chat is still in streaming state,
+       * stop the old stream and immediately hand over to the new message.
+       */
+      if (isDefaultAiSdkChat && isUserTextInput) {
+        stop()
+      } else {
+        return
+      }
+    }
 
     const hasImages = messageAttachments.some(a => a.type === 'image')
     if (hasImages && isVisionModel(selectedModel || '')) {
       const imageAttachment = messageAttachments.find(a => a.type === 'image')
       if (imageAttachment) {
         // Get the user message that was just added to update its status later
-        const lastMessage = messages[messages.length - 1]
+        const lastMessage = messagesRef.current[messagesRef.current.length - 1]
         const userTempId = lastMessage?.tempId || lastMessage?.id
         await handleVisionMessage(messageContent, imageAttachment.data, messageAttachments, userTempId)
       }
@@ -570,7 +723,6 @@ export default function ChatPage() {
       }
 
       if (researchMode === 'off' && !isVisionModel(selectedModel || '')) {
-        setIsLoading(true)
         try {
           await append({
             role: 'user',
@@ -578,9 +730,7 @@ export default function ChatPage() {
           })
         } catch (err) {
           console.error('AI SDK append error:', err)
-          setIsLoading(false)
         }
-        // Note: isLoading is reset by onFinish/onError callbacks + safety useEffect
         return;
       }
     }
@@ -604,7 +754,7 @@ export default function ChatPage() {
 
       const requestBody: any = {
         message: messageContent,
-        history: messages.map(m => ({
+        history: messagesRef.current.map(m => ({
           role: m.role,
           content: m.content
         })),
@@ -743,7 +893,7 @@ export default function ChatPage() {
     } finally {
       setIsLoading(false)
     }
-  }, [messages, isLoading, selectedModel, researchMode, currentSession, lowVram, textOnly, isDuplicateMessage, fetchWithRetry, append, createNewChat])
+  }, [isDefaultAiSdkChat, selectedModel, researchMode, currentSession, lowVram, textOnly, aiChatStatus, isDuplicateMessage, fetchWithRetry, append, stop, createNewChat])
 
   // Handle vision messages
   const handleVisionMessage = useCallback(async (prompt: string, imageData: string, attachments: Attachment[], userTempId?: string) => {
@@ -894,9 +1044,14 @@ export default function ChatPage() {
         inputType={message.inputType}
         status={message.status}
         metadata={message.metadata}
+        workspaceId={message.workspaceId}
+        workspaceStatus={message.workspaceStatus}
+        workspaceEvents={message.workspaceEvents}
+        workspaceSuggestion={message.workspaceSuggestion}
+        onLaunchWorkspaceSuggestion={launchWorkspaceTask}
       />
     ))
-  }, [messages])
+  }, [messages, launchWorkspaceTask])
 
   if (isAuthLoading) {
     return (
@@ -1016,7 +1171,7 @@ export default function ChatPage() {
                     ) : (
                       messageList
                     )}
-                    {isLoading && messages[messages.length - 1]?.role !== 'assistant' && (
+                    {isSendBusy && messages[messages.length - 1]?.role !== 'assistant' && (
                       <div className="flex items-center gap-4 py-6">
                         <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/20">
                           <Sparkles className="h-4 w-4 animate-pulse text-primary" />
@@ -1040,7 +1195,7 @@ export default function ChatPage() {
                 <div className="sticky bottom-0 z-10 shrink-0 border-t border-border bg-background">
                   <ChatInput
                     onSend={handleSendMessage}
-                    isLoading={isLoading}
+                    isLoading={isSendBusy}
                     isResearchMode={researchMode !== 'off'}
                     selectedModel={selectedModel}
                     sessionId={currentSession?.id}

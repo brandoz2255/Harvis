@@ -28,6 +28,7 @@ from ..core.job_schema import (
 )
 from ..core.models import OpenClawInstance, OpenClawTask, OpenClawEvent
 from .bridge import bridge
+from auth_optimized import get_current_user_optimized
 
 # Create router
 router = APIRouter(prefix="/api/openclaw", tags=["openclaw"])
@@ -43,9 +44,10 @@ async def create_instance(
     name: str,
     vm_type: str = "virtualbox",
     vm_config: Optional[dict] = None,
-    user_id: int = 1,  # TODO: Get from auth
+    current_user: dict = Depends(get_current_user_optimized),
 ):
     """Create a new OpenClaw VM instance."""
+    user_id = current_user["id"]
     instance_id = str(uuid.uuid4())
     bridge_token = str(uuid.uuid4())
 
@@ -77,23 +79,29 @@ async def create_instance(
 
 
 @router.get("/instances", response_model=List[dict])
-async def list_instances(user_id: int = 1):
+async def list_instances(current_user: dict = Depends(get_current_user_optimized)):
     """List all OpenClaw instances for the user."""
-    # TODO: Query from database
+    # TODO: Query from database scoped by current_user["id"]
     return []
 
 
 @router.get("/instances/{instance_id}", response_model=dict)
-async def get_instance(instance_id: str, user_id: int = 1):
+async def get_instance(
+    instance_id: str,
+    current_user: dict = Depends(get_current_user_optimized),
+):
     """Get details of a specific instance."""
-    # TODO: Query from database
+    # TODO: Query from database and verify current_user["id"] owns it
     raise HTTPException(status_code=404, detail="Instance not found")
 
 
 @router.get("/instances/{instance_id}/bridge-config", response_model=dict)
-async def get_bridge_config(instance_id: str, user_id: int = 1):
+async def get_bridge_config(
+    instance_id: str,
+    current_user: dict = Depends(get_current_user_optimized),
+):
     """Get bridge configuration for a VM to connect."""
-    # TODO: Query from database and verify ownership
+    # TODO: Query from database and verify current_user["id"] owns it
 
     # Generate bridge URL
     bridge_url = f"ws://localhost:8000/ws/openclaw/vm/{instance_id}"
@@ -117,13 +125,14 @@ async def create_task(
     request: CreateJobRequest,
     instance_id: Optional[str] = None,
     background_tasks: BackgroundTasks = None,
-    user_id: int = 1,
+    current_user: dict = Depends(get_current_user_optimized),
 ):
     """
     Create and start a new OpenClaw task.
 
     This creates a job and queues it for execution on an available VM.
     """
+    user_id = current_user["id"]
     job_id = str(uuid.uuid4())
 
     # Create job
@@ -156,21 +165,28 @@ async def create_task(
 
 
 @router.get("/tasks", response_model=List[dict])
-async def list_tasks(status: Optional[str] = None, limit: int = 50, user_id: int = 1):
+async def list_tasks(
+    status: Optional[str] = None,
+    limit: int = 50,
+    current_user: dict = Depends(get_current_user_optimized),
+):
     """List OpenClaw tasks for the user."""
-    # TODO: Query from database
+    # TODO: Query from database scoped by current_user["id"]
     return []
 
 
 @router.get("/tasks/{task_id}", response_model=dict)
-async def get_task(task_id: str, user_id: int = 1):
+async def get_task(
+    task_id: str,
+    current_user: dict = Depends(get_current_user_optimized),
+):
     """Get details of a specific task."""
     if task_id not in bridge.jobs:
         raise HTTPException(status_code=404, detail="Task not found")
 
     job = bridge.jobs[task_id]
 
-    # TODO: Verify user owns this job
+    # TODO: Verify current_user["id"] owns this job
 
     return {
         "job": job.dict(),
@@ -181,14 +197,18 @@ async def get_task(task_id: str, user_id: int = 1):
 
 
 @router.post("/tasks/{task_id}/cancel", response_model=dict)
-async def cancel_task(task_id: str, reason: str = "User cancelled", user_id: int = 1):
+async def cancel_task(
+    task_id: str,
+    reason: str = "User cancelled",
+    current_user: dict = Depends(get_current_user_optimized),
+):
     """Cancel a running task."""
     if task_id not in bridge.jobs:
         raise HTTPException(status_code=404, detail="Task not found")
 
     job = bridge.jobs[task_id]
 
-    # TODO: Verify user owns this job
+    # TODO: Verify current_user["id"] owns this job
 
     if not job.is_active:
         raise HTTPException(status_code=400, detail="Task is not active")
@@ -212,13 +232,13 @@ async def approve_action(
     request_id: str,
     approved: bool,
     reason: Optional[str] = None,
-    user_id: int = 1,
+    current_user: dict = Depends(get_current_user_optimized),
 ):
     """Approve or deny an action requiring approval."""
     if task_id not in bridge.jobs:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    # TODO: Verify user owns this job
+    # TODO: Verify current_user["id"] owns this job
 
     success = await bridge.submit_approval_response(request_id, approved, reason)
 
@@ -241,13 +261,13 @@ async def provide_context(
     request_id: str,
     response: str,
     attachments: Optional[List[dict]] = None,
-    user_id: int = 1,
+    current_user: dict = Depends(get_current_user_optimized),
 ):
     """Provide context/clarification for a task."""
     if task_id not in bridge.jobs:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    # TODO: Verify user owns this job
+    # TODO: Verify current_user["id"] owns this job
 
     success = await bridge.submit_context_response(
         request_id, response, attachments or []
@@ -364,21 +384,31 @@ async def task_events_websocket(websocket: WebSocket, task_id: str):
 
 
 @router.get("/tasks/{task_id}/screenshots", response_model=List[dict])
-async def list_screenshots(task_id: str, user_id: int = 1):
+async def list_screenshots(
+    task_id: str,
+    current_user: dict = Depends(get_current_user_optimized),
+):
     """List screenshots for a task."""
-    # TODO: Query from database
+    # TODO: Query from database scoped by current_user["id"]
     return []
 
 
 @router.get("/tasks/{task_id}/screenshots/{screenshot_id}")
-async def get_screenshot(task_id: str, screenshot_id: str, user_id: int = 1):
+async def get_screenshot(
+    task_id: str,
+    screenshot_id: str,
+    current_user: dict = Depends(get_current_user_optimized),
+):
     """Get a specific screenshot."""
-    # TODO: Return screenshot file
+    # TODO: Return screenshot file scoped by current_user["id"]
     raise HTTPException(status_code=404, detail="Screenshot not found")
 
 
 @router.get("/tasks/{task_id}/artifacts", response_model=List[dict])
-async def list_artifacts(task_id: str, user_id: int = 1):
+async def list_artifacts(
+    task_id: str,
+    current_user: dict = Depends(get_current_user_optimized),
+):
     """List artifacts generated by a task."""
     if task_id not in bridge.jobs:
         raise HTTPException(status_code=404, detail="Task not found")

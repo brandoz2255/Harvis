@@ -1,3 +1,145 @@
+## 2026-04-24: Agent ran tools but produced empty answers / wrong answers in workspaces
+
+### Problem
+Discord-launched (and direct) workspace tasks showed the agent writing Python
+scripts and running them, but failing with a cascade of:
+- `sh: 1: cd: can't cd to /home/node/workspaces/bundled/2/discord-…`
+- `python3: can't open file … No such file or directory`
+- `Permission denied` when writing files outside `.openclaw/workspace`
+- `Obfuscated command detected. Approval required` → then agent proceeded as if success
+- `UnicodeDecodeError`, `SyntaxError`, `NameError` inside hand-rolled `python3 -c '…'`
+- Final summary arriving empty (`"summary": ""`), so the UI just said "Workspace complete"
+- Earlier runs hallucinated a made-up flag (`FLAG{HARDSHIP_IS_NOT_THE_BUG}`)
+
+### Root cause
+Three bugs compounded:
+1. **Workspace path lie.** The directive told the agent its workdir was
+   `/home/node/workspaces/bundled/<uid>/<session>/`. But the OpenClaw `exec`
+   and `write` tools actually use `/home/node/.openclaw/workspace/` as their
+   CWD/root. `write` silently wrote to the real root while the agent kept
+   `cd`-ing into an empty legacy dir and losing its own files.
+2. **Obfuscation sandbox phantom successes.** OpenClaw flags `python3 -c '…'`
+   containing `decode|base64|b64decode|exec|system|eval` and returns an
+   `Approval required` string with `success=true`. The agent treated that as
+   a successful result and plowed forward on commands that never ran.
+3. **Empty final summary not surfaced.** The sub-agent completed with an empty
+   message and the parent emitted `done` with `summary: ""`, so the user saw
+   nothing — no answer, no error hint.
+
+### Solution
+- `python_back_end/workspace/openclaw_client.py`
+  - Moved `workdir` to a sub-directory of the real exec CWD:
+    `/home/node/.openclaw/workspace/session-<prefix><session>`.
+    Also passes a `workdir_rel` (`session-…`) to the model so the `write`
+    tool (which treats relative paths as rooted at the exec CWD) and `exec`
+    (which needs absolute paths) both land in the same place.
+  - Rewrote the directive block with explicit "FILESYSTEM LAYOUT",
+    "PYTHON EXECUTION RULES" (no `python3 -c` with decode/base64/exec/eval —
+    always write then run), and "ANSWER CONTRACT" (no acknowledgement-only
+    replies, no hallucinated answers, report uncertainty instead).
+  - In `_handle_agent_event`, when a tool_result output contains
+    `Approval required`, `Obfuscated command detected`, or `approval-pending`,
+    re-classify as `success=false` and emit a visible log line so the agent
+    sees the failure and retries differently.
+  - In the `state == "final"` branch, synthesize a fallback summary when
+    text is empty so the UI never ships a blank "Workspace complete".
+- `openclaw/config/bundled/AGENT.md`, `openclaw/config/AGENT.md`,
+  `openclaw/config/bundled/USER.md`, `openclaw/skills/bundled/harvis-agent/SKILL.md`
+  - Rewrote the "Workspace scope" sections to match the real CWD + relative/absolute
+    path rules, added the Python + obfuscation sandbox guidance, and added the
+    "Answer contract" rules (no "Copy that." / "Standing by." / guessed flags).
+
+### Files Modified
+- `python_back_end/workspace/openclaw_client.py`
+- `openclaw/config/bundled/AGENT.md`
+- `openclaw/config/AGENT.md`
+- `openclaw/config/bundled/USER.md`
+- `openclaw/skills/bundled/harvis-agent/SKILL.md`
+
+### Verification
+Reproduced the same XOR CTF task after restarting `harvis-backend` and
+`harvis-openclaw`. Run `f9a7ad9f` produced:
+- First tool call: `mkdir -p /home/node/.openclaw/workspace/session-bundled-2-fix-verify-xor && cd … && pwd`
+- `write` succeeded at `session-bundled-2-fix-verify-xor/decode_xor.py`
+- `python3 /home/node/.openclaw/workspace/session-bundled-2-fix-verify-xor/decode_xor.py` actually ran
+- `tool_calls=15`, `event_count=46`, `status=done`
+- Non-empty final summary that honestly reports the decoded bytes, admits
+  that most bytes are non-printable, and refuses to fabricate a flag
+
+### Status
+Resolved — workspace agent now uses the correct filesystem, avoids the
+sandbox obfuscation trap, surfaces blocked commands as failures, and always
+produces a human-readable final answer.
+
+---
+
+## 2026-04-22: Sync OpenClaw Main Agent Model with Global Discord Model
+
+### Problem
+Workspace runs on the OpenClaw `main` route could fail with model-not-found errors (example: `gemma4:4b`) when OpenClaw retained a stale default model that did not match current global/user Discord model selection.
+
+### Root Cause
+Discord workspace launches could route to `agent_id=main` while OpenClaw default agent model in native config remained outdated. This produced upstream 404 errors even though Discord had a different active model.
+
+### Solution Applied
+Before launching a Discord workspace with `agent_id=main`, the bot now synchronizes OpenClaw native default model to the effective global/user model (`_model_override` or user preference) using existing `_apply_model_to_native_openclaw()`.
+
+### Files Modified
+- `python_back_end/integrations/discord_workspace_bot.py`
+
+### Result
+Discord workspace runs adapt to the currently selected global model for OpenClaw `main`, avoiding stale hardcoded-model failures.
+
+---
+
+## 2026-04-22: Force Discord Screenshot Tasks Through OpenClaw Main Agent
+
+### Problem
+Discord screenshot requests were sometimes routed to non-OpenClaw workspace agents (`local`/`kimi`) via user model preferences, producing text-only responses instead of real screenshot artifacts.
+
+### Root Cause
+`discord_workspace_bot.py` resolved `pref_agent_id` from DB-backed model preferences and could override `DISCORD_WORKSPACE_AGENT_ID=main`. Visual/screenshot tasks then bypassed OpenClaw browser tooling.
+
+### Solution Applied
+Added visual-task routing protection in Discord bot:
+- Introduced `_VISUAL_TASK_SIGNALS` and `_looks_like_visual_task()`.
+- If a message appears to require screenshots/browser visuals, force `pref_agent_id = "main"` before `launch_workspace_internal()`.
+- Added log line when route is overridden for visibility.
+
+### Files Modified
+- `python_back_end/integrations/discord_workspace_bot.py`
+
+### Result
+Discord screenshot/website-visual tasks now stay on the OpenClaw browser-capable execution path, preventing text-only fallbacks from `local`/`kimi` routes.
+
+---
+
+## 2026-04-22: Harden Discord Screenshot Artifact Delivery
+
+### Problem
+Discord-triggered workspace tasks that took screenshots could finish in OpenClaw, but the Discord bot sometimes failed to attach the screenshot file in the final reply.
+
+### Root Cause
+The Discord artifact lookup logic used narrow path extraction (`browser/*.png` in limited string fields) and a single artifact root path. Valid screenshot paths embedded in nested payload data or alternate image extensions/paths were missed.
+
+### Solution Applied
+Improved screenshot artifact discovery in the Discord integration:
+- Added recursive payload traversal to detect `artifact_path` in nested tool results/log structures.
+- Expanded screenshot filename matching to include `.png`, `.jpg`, `.jpeg`, and `.webp`.
+- Normalized absolute artifact paths into relative `browser/...` paths.
+- Added fallback artifact root probing (`ARTIFACT_STORAGE_DIR`, `/data/artifacts`, `/app/data/artifacts`) while preserving path traversal safeguards.
+
+### Files Modified
+- `python_back_end/integrations/discord_workspace_bot.py`
+  - Added `_extract_artifact_path_from_payload()`.
+  - Expanded `_extract_artifact_path_from_text()` regex coverage.
+  - Hardened `_find_latest_screenshot_file()` for nested payload parsing and multi-root file lookup.
+
+### Result
+Discord workspace runs now more reliably find and upload captured screenshots in the final bot response instead of silently returning text-only output.
+
+---
+
 ## 2026-03-30: experimental/plugin-merge — Browser Automation, Web Research, Discord Integration, and Model Routing Overhaul
 
 ### Overview
@@ -334,5 +476,68 @@ Users can now:
 3. Press Ctrl+V (or Cmd+V) while focused in the chat input
 4. The image immediately appears as an attachment
 5. Type a message and send - the AI will analyze the image
+
+---
+
+## 2026-04-24 10:34 PDT - OpenClaw file-analysis exec allowlist fix
+
+### Problem
+OpenClaw Discord tasks that needed to download and analyze attached files (`auth.log`, `access.log`) stalled after `Connected to OpenClaw gateway (agent: main)` and then either went silent or fabricated answers instead of extracting values from the file.
+
+### Root Cause
+Runtime evidence from the live `harvis-openclaw` container showed `exec failed: exec denied: allowlist miss`. The host-side `openclaw/config/bundled/exec-approvals.json` had been updated, but the running container was still using an older mounted copy with `"agents": {}` until it was restarted. That prevented the `main` agent from using `exec` to run `curl`, `grep`, `awk`, or even setup commands like `mkdir`.
+
+### Solution Applied
+1. Verified the live container was still reading the stale approvals file.
+2. Expanded the `main` agent allowlist in `openclaw/config/bundled/exec-approvals.json` to include the file-analysis command set plus common setup/coreutils (`env`, `mkdir`, `mktemp`, `cp`, `mv`, `rm`, `touch`, `pwd`, `dirname`, `basename`, `tee`).
+3. Restarted `harvis-openclaw` so the container remounted/reloaded the updated approvals file.
+4. Verified inside the live container that `/home/node/.openclaw/exec-approvals.json` now contains the new `main.allowlist`.
+
+### Files Modified
+- `openclaw/config/bundled/exec-approvals.json`
+- `front_end/newjfrontend/changes.md`
+
+### Result / Status
+- OpenClaw now has the live allowlist needed to run attachment download and text-file extraction commands.
+- Previous `exec denied: allowlist miss` failures were confirmed in logs before the restart.
+- Ready for Discord re-test to confirm the next file-analysis task completes end-to-end with concrete answers.
+
+---
+
+## 2026-04-24 11:09 PDT - OpenClaw attachment tasks were acknowledging instead of acting
+
+### Problem
+After the exec allowlist fix, some Discord/OpenClaw attachment tasks still completed with a useless acknowledgment like `Copy that. Standing by.` instead of actually analyzing the attached image or file. The user also reported that the agent should admit uncertainty rather than hallucinate.
+
+### Root Cause
+Runtime evidence showed the latest workspace run finished `done` with `tool_calls = 0` and final summary `Copy that. Standing by.`. That proved the failure was no longer an exec denial; the model was taking a non-executing acknowledgment path. The attachment-bearing task text was not forceful enough about "inspect the attachment first" and the bundled prompts did not explicitly ban acknowledgment-only completions.
+
+### Solution Applied
+1. Updated `python_back_end/workspace/workspace_router.py` so any task with `[Attached files from the user]` gets an `[Execution rules]` block appended that:
+   - forces attachment inspection before answering
+   - routes image attachments to `harvis-image`
+   - routes text/log/data attachments to `harvis-file`
+   - forbids `Copy that` / `Standing by` / acknowledgment-only replies
+   - requires explicit uncertainty instead of guessing when the answer cannot be determined confidently
+2. Added backend debug instrumentation logging the final attachment-augmented prompt preview at launch time.
+3. Hardened bundled prompts/skills:
+   - `openclaw/config/bundled/AGENT.md`
+   - `openclaw/skills/bundled/harvis-agent/SKILL.md`
+   - `openclaw/skills/shared/harvis-image/SKILL.md`
+   - `openclaw/skills/shared/harvis-file/SKILL.md`
+   so attachment tasks must use tools first and must report uncertainty rather than hallucinate.
+
+### Files Modified
+- `python_back_end/workspace/workspace_router.py`
+- `openclaw/config/bundled/AGENT.md`
+- `openclaw/skills/bundled/harvis-agent/SKILL.md`
+- `openclaw/skills/shared/harvis-image/SKILL.md`
+- `openclaw/skills/shared/harvis-file/SKILL.md`
+- `front_end/newjfrontend/changes.md`
+
+### Result / Status
+- Attachment tasks now carry an explicit act-first contract at launch time.
+- Bundled OpenClaw prompts now classify acknowledgment-only replies as invalid completions.
+- Next Discord re-test should show either real tool usage and extracted answers, or a truthful "I couldn't determine it confidently" response instead of hallucinated output.
 
 ---

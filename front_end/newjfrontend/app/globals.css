@@ -89,3 +89,40 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* Agent graph — spawn-in + running cues for React Flow nodes */
+@keyframes agent-spawn-in {
+  0% {
+    transform: scale(0.6);
+    opacity: 0;
+    filter: blur(6px);
+  }
+  60% {
+    transform: scale(1.08);
+    opacity: 1;
+    filter: blur(0);
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes agent-running-glow {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(99, 102, 241, 0);
+  }
+  50% {
+    box-shadow: 0 0 20px 4px rgba(99, 102, 241, 0.35);
+  }
+}
+
+.react-flow__node.agent-spawn-in {
+  animation: agent-spawn-in 650ms cubic-bezier(0.2, 0.9, 0.3, 1.2);
+  transform-origin: center;
+}
+
+.react-flow__node.agent-running > div {
+  animation: agent-running-glow 2.4s ease-in-out infinite;
+  border-radius: 12px;
+}

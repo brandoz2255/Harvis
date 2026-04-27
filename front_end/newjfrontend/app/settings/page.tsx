@@ -411,6 +411,14 @@ export default function SettingsPage() {
                     </Button>
                     <h1 className="text-lg font-semibold">RAG Corpus Settings</h1>
                     <div className="ml-auto flex items-center gap-2">
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-8 text-xs"
+                            onClick={() => router.push("/settings/openclaw")}
+                        >
+                            OpenClaw Mode
+                        </Button>
                         <div className={`flex items-center gap-2 rounded-full px-3 py-1 text-xs ${healthStatus === "healthy" ? "bg-green-500/20 text-green-400" :
                             healthStatus === "degraded" ? "bg-yellow-500/20 text-yellow-400" :
                                 "bg-red-500/20 text-red-400"

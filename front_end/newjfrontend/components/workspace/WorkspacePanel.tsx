@@ -1538,17 +1538,62 @@ export function WorkspacePanel({ onContinueInChat }: { onContinueInChat?: (summa
 
   const handleCancel = async () => {
     if (!workspaceId) return
+    const store = useOpenClawStore.getState()
+    let _cancelStatus: number | null = null
+    let _cancelBody: string = ''
     try {
       const token = localStorage.getItem('token')
       const headers: Record<string, string> = {}
       if (token) headers['Authorization'] = `Bearer ${token}`
-      await fetch(`/api/workspace/cancel/${workspaceId}`, { method: 'POST', headers })
-      // Don't close the panel — let the SSE stream deliver the 'cancelled' event
-      // so the user sees confirmation. They can close with the X button.
+      const res = await fetch(`/api/workspace/cancel/${workspaceId}`, { method: 'POST', headers })
+      _cancelStatus = res.status
+      try { _cancelBody = (await res.clone().text()).slice(0, 300) } catch { /* ignore */ }
     } catch (err) {
       console.error('Workspace cancel failed:', err)
-      // Even if cancel fails, user can still close via X button
+      _cancelBody = String(err).slice(0, 300)
+      // Even if the backend call failed, still reset the UI so the user can
+      // launch another task instead of being stuck on a zombie running panel.
     }
+    // Reset the panel to an idle state regardless of server response — the
+    // backend is now authoritative about the cancel, and the user explicitly
+    // asked to be able to launch another task. We stop the SSE reader, clear
+    // log events, drop the workspace id, and inject a synthetic 'cancelled'
+    // event so the status badge reflects the cancel (isRunning derives from
+    // the last log event's type).
+    try {
+      store.sseAbortController?.abort()
+    } catch {
+      /* ignore */
+    }
+    store.setSseAbortController(null)
+    store.clearLogEvents()
+    store.setFinalSummary('')
+    store.addLogEvent({
+      type: 'cancelled',
+      message: 'Workspace cancelled. Ready for a new task.',
+      agent_label: 'harvis',
+    })
+    store.setWorkspaceId(null)
+    store.setWorkspaceSessionId(null)
+    store.setSuggestion(null)
+
+    // #region agent log
+    try {
+      fetch('http://127.0.0.1:7532/ingest/9269ee65-762c-4e4d-9bef-0cd2be96389e', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'd007eb' },
+        body: JSON.stringify({
+          sessionId: 'd007eb',
+          location: 'WorkspacePanel.tsx:handleCancel',
+          message: 'workspace_cancel_clicked',
+          data: { workspaceId, cancelStatus: _cancelStatus, cancelBody: _cancelBody },
+          runId: 'run_cancel_button',
+          hypothesisId: 'H_cancel',
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {})
+    } catch { /* ignore */ }
+    // #endregion
   }
 
 

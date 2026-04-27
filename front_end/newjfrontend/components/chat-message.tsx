@@ -13,6 +13,10 @@ import {
   User,
   Sparkles,
   ExternalLink,
+  FolderOpen,
+  Loader2,
+  CheckCircle2,
+  XCircle,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { VoicePlayer } from "@/components/voice-player"
@@ -20,7 +24,7 @@ import { AudioWaveform } from "@/components/ui/audio-waveform"
 import { ReasoningPanel } from "@/components/reasoning-panel"
 import { ResearchChain } from "@/components/research-chain"
 import { ArtifactBlock } from "@/components/artifacts"
-import type { Message, VideoResult, ResearchChainData, ResearchStep, Artifact } from "@/types/message"
+import type { Message, VideoResult, ResearchChainData, ResearchStep, Artifact, WorkspaceChatEvent, WorkspaceChatSuggestion } from "@/types/message"
 import { VideoCarousel } from "@/components/video-carousel"
 import { YouTubeEmbed } from "@/components/youtube-embed"
 import ReactMarkdown from "react-markdown"
@@ -115,6 +119,13 @@ interface ChatMessageProps {
   researchChain?: ResearchChainData
   /** AI-generated artifact (document, spreadsheet, website, etc.) */
   artifact?: Artifact
+  /** Harvis Workspace auto-launch — event trace attached to this assistant message */
+  workspaceId?: string
+  workspaceStatus?: 'acknowledged' | 'running' | 'completed' | 'error'
+  workspaceEvents?: WorkspaceChatEvent[]
+  workspaceSuggestion?: WorkspaceChatSuggestion
+  /** Called when user clicks "Launch workspace" on a medium-confidence suggestion */
+  onLaunchWorkspaceSuggestion?: (taskBrief: string) => void
 }
 
 // Language mapping for prism-react-renderer
@@ -189,6 +200,145 @@ function CodeBlock({ code, language }: { code: string; language: string }) {
   )
 }
 
+function WorkspaceActivityCard({
+  workspaceId,
+  workspaceStatus,
+  workspaceEvents,
+}: {
+  workspaceId?: string
+  workspaceStatus?: 'acknowledged' | 'running' | 'completed' | 'error'
+  workspaceEvents?: WorkspaceChatEvent[]
+}) {
+  const [expanded, setExpanded] = useState(true)
+  const events = workspaceEvents || []
+  if (!workspaceId && events.length === 0) return null
+
+  const latest = events[events.length - 1]
+  const headerLine =
+    workspaceStatus === 'completed'
+      ? 'Workspace task completed'
+      : workspaceStatus === 'error'
+        ? 'Workspace task failed'
+        : latest?.message || 'Working in a Harvis Workspace…'
+
+  const Icon =
+    workspaceStatus === 'completed'
+      ? CheckCircle2
+      : workspaceStatus === 'error'
+        ? XCircle
+        : workspaceStatus === 'running' || workspaceStatus === 'acknowledged'
+          ? Loader2
+          : FolderOpen
+
+  const iconClasses = cn(
+    'h-4 w-4 shrink-0',
+    workspaceStatus === 'completed' && 'text-emerald-400',
+    workspaceStatus === 'error' && 'text-rose-400',
+    (workspaceStatus === 'running' || workspaceStatus === 'acknowledged') && 'text-amber-300 animate-spin',
+    !workspaceStatus && 'text-violet-300'
+  )
+
+  return (
+    <div className="mb-3 rounded-xl border border-violet-500/30 bg-gradient-to-br from-slate-900/80 via-slate-900/60 to-violet-950/40 px-3 py-2">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        className="flex w-full items-center gap-2 text-left"
+      >
+        <Icon className={iconClasses} />
+        <span className="text-xs font-medium text-violet-100/90 truncate">
+          {headerLine}
+        </span>
+        {workspaceId && (
+          <span className="ml-auto text-[10px] font-mono text-violet-400/60">
+            ws:{workspaceId.slice(0, 6)}
+          </span>
+        )}
+      </button>
+
+      {expanded && events.length > 0 && (
+        <ol className="mt-2 space-y-1 border-t border-violet-500/20 pt-2">
+          {events.map((ev, i) => {
+            const label = workspaceEventLabel(ev)
+            if (!label) return null
+            return (
+              <li
+                key={`${ev.timestamp}-${i}`}
+                className="flex items-start gap-2 text-xs text-violet-200/80"
+              >
+                <span className="mt-0.5 h-1.5 w-1.5 shrink-0 rounded-full bg-violet-400/60" />
+                <span className="flex-1 break-words">{label}</span>
+              </li>
+            )
+          })}
+        </ol>
+      )}
+    </div>
+  )
+}
+
+function workspaceEventLabel(ev: WorkspaceChatEvent): string | null {
+  switch (ev.kind) {
+    case 'detected':
+      return ev.message || 'Workspace detected — launching…'
+    case 'acknowledge':
+      return ev.message || 'Workspace task acknowledged.'
+    case 'status':
+      return ev.message || null
+    case 'tool_call':
+      return ev.toolName ? `Calling tool: ${ev.toolName}` : 'Tool call'
+    case 'tool_result': {
+      const head = ev.toolName ? `${ev.toolName} →` : 'Result →'
+      const body = (ev.output || '').slice(0, 120).replace(/\s+/g, ' ')
+      return body ? `${head} ${body}` : head
+    }
+    case 'partial':
+      return ev.text ? ev.text.slice(0, 200) : null
+    case 'result':
+      return ev.finalAnswer
+        ? `Done — ${ev.finalAnswer.slice(0, 160)}`
+        : 'Workspace task complete.'
+    case 'error':
+      return ev.message ? `Error: ${ev.message}` : 'Workspace error.'
+    default:
+      return null
+  }
+}
+
+function WorkspaceSuggestionInline({
+  suggestion,
+  onLaunch,
+}: {
+  suggestion: WorkspaceChatSuggestion
+  onLaunch?: (taskBrief: string) => void
+}) {
+  return (
+    <div className="mb-3 rounded-xl border border-amber-500/30 bg-amber-500/5 px-3 py-2">
+      <div className="flex items-start gap-2">
+        <FolderOpen className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" />
+        <div className="flex-1">
+          <div className="text-xs font-medium text-amber-100">
+            Launch this in a Harvis Workspace?
+          </div>
+          <div className="mt-0.5 text-xs text-amber-100/70">
+            {suggestion.taskBrief || suggestion.reason || suggestion.taskTypeLabel}
+          </div>
+          {onLaunch && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => onLaunch(suggestion.taskBrief)}
+              className="mt-1 h-6 px-2 text-[11px] text-amber-200 hover:bg-amber-500/20 hover:text-amber-100"
+            >
+              Launch workspace
+            </Button>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export const ChatMessage = React.memo(function ChatMessage({
   role,
   content,
@@ -206,6 +356,11 @@ export const ChatMessage = React.memo(function ChatMessage({
   metadata,
   researchChain,
   artifact,
+  workspaceId,
+  workspaceStatus,
+  workspaceEvents,
+  workspaceSuggestion,
+  onLaunchWorkspaceSuggestion,
 }: ChatMessageProps) {
   const [copied, setCopied] = useState(false)
   const [showVoice, setShowVoice] = useState(false)
@@ -358,6 +513,23 @@ export const ChatMessage = React.memo(function ChatMessage({
             steps={researchChain.steps}
             isLoading={researchChain.isLoading}
             className="mb-3"
+          />
+        )}
+
+        {/* Workspace suggestion (medium confidence) — inline launcher */}
+        {role === "assistant" && workspaceSuggestion && !workspaceId && (
+          <WorkspaceSuggestionInline
+            suggestion={workspaceSuggestion}
+            onLaunch={onLaunchWorkspaceSuggestion}
+          />
+        )}
+
+        {/* Workspace activity (high confidence auto-launch) — live event trace */}
+        {role === "assistant" && (workspaceId || (workspaceEvents && workspaceEvents.length > 0)) && (
+          <WorkspaceActivityCard
+            workspaceId={workspaceId}
+            workspaceStatus={workspaceStatus}
+            workspaceEvents={workspaceEvents}
           />
         )}
 
@@ -650,6 +822,14 @@ export const ChatMessage = React.memo(function ChatMessage({
     return false // false means "props are different, do re-render"
   }
 
+  // Always re-render while a workspace task is live so the activity card updates
+  if (
+    (nextProps.workspaceStatus === 'running' || nextProps.workspaceStatus === 'acknowledged') ||
+    (prevProps.workspaceStatus === 'running' || prevProps.workspaceStatus === 'acknowledged')
+  ) {
+    return false
+  }
+
   return (
     prevProps.role === nextProps.role &&
     prevProps.content === nextProps.content &&
@@ -660,11 +840,15 @@ export const ChatMessage = React.memo(function ChatMessage({
     prevProps.imageUrls === nextProps.imageUrls &&
     prevProps.inputType === nextProps.inputType &&
     prevProps.searchQuery === nextProps.searchQuery &&
+    prevProps.workspaceId === nextProps.workspaceId &&
+    prevProps.workspaceStatus === nextProps.workspaceStatus &&
     // Deep comparison for arrays
     JSON.stringify(prevProps.searchResults) === JSON.stringify(nextProps.searchResults) &&
     JSON.stringify(prevProps.videos) === JSON.stringify(nextProps.videos) &&
     JSON.stringify(prevProps.codeBlocks) === JSON.stringify(nextProps.codeBlocks) &&
     JSON.stringify(prevProps.metadata) === JSON.stringify(nextProps.metadata) &&
-    JSON.stringify(prevProps.researchChain) === JSON.stringify(nextProps.researchChain)
+    JSON.stringify(prevProps.researchChain) === JSON.stringify(nextProps.researchChain) &&
+    JSON.stringify(prevProps.workspaceEvents) === JSON.stringify(nextProps.workspaceEvents) &&
+    JSON.stringify(prevProps.workspaceSuggestion) === JSON.stringify(nextProps.workspaceSuggestion)
   )
 })
