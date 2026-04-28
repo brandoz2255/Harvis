@@ -1,0 +1,26 @@
+Harvis includes code adapted from third-party open-source projects. This file
+attributes those sources. Each adapted file additionally carries an inline
+header comment naming the upstream source.
+
+----------------------------------------------------------------------
+
+NousResearch / hermes-agent
+  https://github.com/NousResearch/hermes-agent
+  License: MIT (Copyright (c) 2025 Nous Research)
+  Pinned commit at adoption: 8081425a1c095d01db858ea1a574d17c93703f48 (2026-04-27)
+
+  The following Harvis components are adapted from hermes-agent. Files copied
+  in carry a header comment naming the original upstream path.
+
+  - plugins/messaging-gateway/        (sidecar gateway process; from gateway/)
+  - plugins/messaging-gateway/platforms/slack.py   (from gateway/platforms/slack.py)
+  - plugins/messaging-gateway/platforms/discord.py (from gateway/platforms/discord.py)
+  - python_back_end/plugins/messaging/types.py     (Platform/MessageEvent/SendResult shapes
+                                                    inspired by gateway/platforms/base.py)
+  - python_back_end/plugins/messaging/base_adapter.py
+                                                   (thin BasePlatformAdapter; subset of
+                                                    gateway/platforms/base.py:BasePlatformAdapter)
+
+  Adaptation scope: Hermes-internal coupling (AIAgent.interrupt, auto-TTS state,
+  voice modes, gateway.session.SessionStore, gateway.run.GatewayRunner) is
+  removed. Platform-specific transport and protocol logic is preserved.

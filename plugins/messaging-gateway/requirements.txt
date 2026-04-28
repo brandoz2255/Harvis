@@ -1,0 +1,12 @@
+httpx>=0.27,<1
+fastapi>=0.110,<1
+uvicorn[standard]>=0.27,<1
+pydantic>=2.6,<3
+python-dotenv>=1.0,<2
+
+# Slack adapter (Phase 1C). Brings in slack-sdk transitively.
+slack-bolt>=1.18,<2
+aiohttp>=3.9,<4
+
+# Discord adapter (Phase 1D)
+discord.py>=2.3,<3

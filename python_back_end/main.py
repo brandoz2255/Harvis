@@ -717,17 +717,29 @@ async def lifespan(app: FastAPI):
         logger.warning(f"⚠️ Job queue initialization failed: {e}")
         # Don't fail startup if job queue doesn't work
 
-    # Discord → Workspace bridge (optional)
-    try:
-        from integrations.discord_workspace_bot import start_discord_workspace_bot
+    # Discord → Workspace bridge (legacy in-process bot).
+    # Phase 1D introduces the messaging-gateway sidecar (plugins/messaging-gateway/)
+    # which owns Discord going forward. Until operators flip the cutover env var,
+    # this legacy bot remains the active path so existing deploys are unchanged.
+    # When MESSAGING_ENABLED_PLATFORMS includes "discord", set
+    # DISCORD_WORKSPACE_BOT_LEGACY_ENABLED=false to avoid duplicate replies.
+    if os.getenv("DISCORD_WORKSPACE_BOT_LEGACY_ENABLED", "true").lower() == "true":
+        try:
+            from integrations.discord_workspace_bot import start_discord_workspace_bot
 
-        req = Request(scope={"type": "http", "app": app})
-        discord_client = start_discord_workspace_bot(req)
-        if discord_client is not None:
-            app.state.discord_client = discord_client
-            logger.info("✅ Discord workspace bot started")
-    except Exception as e:
-        logger.warning(f"⚠️ Discord workspace bot failed to start: {e}")
+            req = Request(scope={"type": "http", "app": app})
+            discord_client = start_discord_workspace_bot(req)
+            if discord_client is not None:
+                app.state.discord_client = discord_client
+                logger.info("✅ Discord workspace bot started (legacy path)")
+        except Exception as e:
+            logger.warning(f"⚠️ Discord workspace bot failed to start: {e}")
+    else:
+        logger.info(
+            "⏭️  Legacy Discord workspace bot disabled by env "
+            "(DISCORD_WORKSPACE_BOT_LEGACY_ENABLED=false). "
+            "Discord traffic is expected to flow through harvis-messaging-gateway."
+        )
 
     yield
 
@@ -1156,6 +1168,10 @@ app.include_router(opencode_llm_router)
 
 # Include Discord tools proxy (heartbeat → Discord posting, internal service auth)
 app.include_router(discord_proxy_router)
+
+# Include messaging plugin (Phase 1A: gateway-sidecar routes + per-user platform links + audit)
+from plugins.messaging.routes import router as messaging_router
+app.include_router(messaging_router)
 
 # ─── Device & models -----------------------------------------------------------
 device = 0 if torch.cuda.is_available() else -1

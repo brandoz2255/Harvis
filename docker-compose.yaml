@@ -140,6 +140,9 @@ services:
       # Discord → Workspace bridge (backend-owned Discord bot)
       DISCORD_BOT_TOKEN: "${DISCORD_BOT_TOKEN:-}"
       DISCORD_WORKSPACE_ENABLED: "${DISCORD_WORKSPACE_ENABLED:-true}"
+      # Phase 1D cutover toggle — flip to "false" once harvis-messaging-gateway
+      # is handling Discord, to avoid duplicate replies.
+      DISCORD_WORKSPACE_BOT_LEGACY_ENABLED: "${DISCORD_WORKSPACE_BOT_LEGACY_ENABLED:-true}"
       DISCORD_DEFAULT_USER_ID: "${DISCORD_DEFAULT_USER_ID:-2}"
       DISCORD_MENTION_ONLY: "${DISCORD_MENTION_ONLY:-true}"
       DISCORD_ALLOWED_CHANNEL_IDS: "${DISCORD_ALLOWED_CHANNEL_IDS:-}"
@@ -153,6 +156,8 @@ services:
       DISCORD_GENERAL_CHANNEL_ID: "${DISCORD_GENERAL_CHANNEL_ID:-}"
       # Workspace routing — send most messages through OpenClaw
       DISCORD_PREFER_WORKSPACE: "${DISCORD_PREFER_WORKSPACE:-true}"
+      # Messaging gateway sidecar — service-to-service shared secret
+      MESSAGING_GATEWAY_TOKEN: "${MESSAGING_GATEWAY_TOKEN:-}"
       # Shared projects volume path inside backend container
       OPENCLAW_PROJECTS_DIR: "/data/openclaw-projects"
       # GitHub OAuth for repo mounting
@@ -170,6 +175,7 @@ services:
       - ./python_back_end/workspace:/app/workspace:ro
       - ./python_back_end/tools:/app/tools:ro
       - ./python_back_end/integrations:/app/integrations:ro
+      - ./python_back_end/plugins:/app/plugins:ro
       - ./openclaw/config:/app/openclaw_config
       - ./python_back_end/notebooks:/app/notebooks:ro
       - ./python_back_end/vibecoding:/app/vibecoding:ro
@@ -648,6 +654,57 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Messaging Gateway Sidecar (Phase 1B)
+  # ───────────────────────────────────────────────────────────────────────────
+  # Bridges third-party messaging platforms (Slack, Discord, Telegram, Email,
+  # SMS) to the Harvis backend. Runs on ollama-n8n-network ONLY — needs
+  # outbound internet for platform APIs. NEVER joins openclaw-internal.
+  #
+  # Phase 1B ships only the stub adapter (HTTP inject endpoint at :18800,
+  # bound to 127.0.0.1, gated by STUB_ENABLED=true). Real platform adapters
+  # land in Phase 1C (Slack) and Phase 1D (Discord).
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  harvis-messaging-gateway:
+    build:
+      context: ./plugins/messaging-gateway
+      dockerfile: Dockerfile
+    image: harvis-messaging-gateway:local
+    container_name: harvis-messaging-gateway
+    restart: unless-stopped
+    environment:
+      MESSAGING_GATEWAY_TOKEN: "${MESSAGING_GATEWAY_TOKEN:-}"
+      HARVIS_BACKEND_URL: "http://backend:8000"
+      ENABLED_PLATFORMS: "${MESSAGING_ENABLED_PLATFORMS:-stub}"
+      RUN_POLL_INTERVAL_S: "${MESSAGING_RUN_POLL_INTERVAL_S:-2}"
+      RUN_POLL_TIMEOUT_S: "${MESSAGING_RUN_POLL_TIMEOUT_S:-1200}"
+      # Stub adapter (dev/test only — never enable in prod)
+      STUB_ENABLED: "${MESSAGING_STUB_ENABLED:-false}"
+      STUB_PORT: "18800"
+      STUB_TOKEN: "${MESSAGING_STUB_TOKEN:-}"
+      # Slack (Phase 1C)
+      SLACK_BOT_TOKEN: "${SLACK_BOT_TOKEN:-}"
+      SLACK_SIGNING_SECRET: "${SLACK_SIGNING_SECRET:-}"
+      SLACK_APP_TOKEN: "${SLACK_APP_TOKEN:-}"
+      # Discord (Phase 1D — same env vars as the legacy workspace bot, so
+      # cutover doesn't require re-issuing tokens)
+      DISCORD_BOT_TOKEN: "${DISCORD_BOT_TOKEN:-}"
+      DISCORD_DEFAULT_USER_ID: "${DISCORD_DEFAULT_USER_ID:-0}"
+      DISCORD_MENTION_ONLY: "${DISCORD_MENTION_ONLY:-true}"
+      DISCORD_ALLOWED_CHANNEL_IDS: "${DISCORD_ALLOWED_CHANNEL_IDS:-}"
+    volumes:
+      - ./plugins/messaging-gateway:/app:ro
+    # Stub inject port — bound to localhost so only operators on the host
+    # can drive E2E tests. Comment out for prod deploys.
+    ports:
+      - "127.0.0.1:18800:18800"
+    depends_on:
+      backend:
+        condition: service_started
+    networks:
+      - ollama-n8n-network
 
 networks:
   ollama-n8n-network:

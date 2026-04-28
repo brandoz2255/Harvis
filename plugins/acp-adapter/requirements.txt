@@ -1,0 +1,8 @@
+# Agent Client Protocol — same version Hermes pins (verified at acp_registry).
+agent-client-protocol>=0.9.0,<1.0
+
+# Bridge to the Harvis backend (messaging plugin endpoints).
+httpx>=0.27,<1
+
+# Used by the ACP runtime.
+anyio>=4.0,<5
