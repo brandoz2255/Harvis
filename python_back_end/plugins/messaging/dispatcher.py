@@ -245,6 +245,96 @@ async def get_run_status(pool, workspace_id: str) -> Optional[dict]:
         return None
 
 
+async def notify_terminal(
+    request: Request,
+    workspace_id: str,
+) -> dict:
+    """Fire on_session_end + invoke memory.extract_from_session for a workspace run.
+
+    Called by the gateway sidecar exactly once per inbound message after
+    wait_for_terminal returns. The backend re-reads workspace_runs to
+    avoid trusting sidecar-supplied status (the sidecar could be stale).
+    Idempotency is the sidecar's responsibility — backend just no-ops if
+    the run isn't terminal yet.
+
+    Returns a small status dict for diagnostic purposes.
+    """
+    pool = getattr(request.app.state, "pg_pool", None)
+    if pool is None:
+        return {"ok": False, "reason": "no db pool"}
+
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT id, user_id, session_id, status, final_summary, error_message
+                FROM workspace_runs
+                WHERE id = $1
+                """,
+                workspace_id,
+            )
+    except Exception:
+        logger.exception("notify_terminal: workspace_runs lookup failed for %s", workspace_id)
+        return {"ok": False, "reason": "lookup failed"}
+
+    if row is None:
+        return {"ok": False, "reason": "workspace not found"}
+
+    TERMINAL = {"completed", "failed", "error", "cancelled"}
+    if row["status"] not in TERMINAL:
+        return {"ok": False, "reason": f"not terminal: {row['status']}"}
+
+    # Fire on_session_end (observer hook — return values ignored).
+    from ..core.hooks import invoke_hook
+    await invoke_hook(
+        "on_session_end",
+        workspace_id=row["id"],
+        user_id=row["user_id"],
+        session_id=row["session_id"],
+        status=row["status"],
+        final_summary=row["final_summary"],
+        error_message=row["error_message"],
+    )
+
+    # If the run completed and a memory provider is active, give it the
+    # chance to extract long-term memories from the session. Synthetic
+    # message list — providers that want richer context can re-query
+    # workspace_events themselves.
+    extracted_count = 0
+    if row["status"] == "completed":
+        try:
+            from ..memory.manager import get_manager
+            mgr = get_manager()
+            if mgr.provider is None:
+                try:
+                    await mgr.activate(config={"pool": pool})
+                except Exception:
+                    logger.exception("notify_terminal: memory.activate failed")
+            provider = mgr.provider
+            if provider is not None:
+                synthetic = []
+                if row["final_summary"]:
+                    synthetic.append({
+                        "role": "assistant",
+                        "content": row["final_summary"],
+                    })
+                extracted = await provider.extract_from_session(
+                    user_id=row["user_id"],
+                    session_id=row["session_id"] or row["id"],
+                    messages=synthetic,
+                )
+                extracted_count = len(extracted or [])
+        except Exception:
+            logger.exception("notify_terminal: memory extract failed for %s", workspace_id)
+
+    return {
+        "ok": True,
+        "workspace_id": row["id"],
+        "status": row["status"],
+        "extracted_memories": extracted_count,
+    }
+
+
 async def get_run_events(pool, workspace_id: str, since: int, limit: int = 100) -> list[dict]:
     """Return workspace_events rows with seq > ``since``, ordered by seq.
 

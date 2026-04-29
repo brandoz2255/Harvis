@@ -81,6 +81,14 @@ async def _process_inbound(
         )
         return
 
+    # Phase 4B-post — tell the backend the run reached terminal so it
+    # can fire on_session_end + invoke memory provider's
+    # extract_from_session. Best-effort; logs on failure.
+    try:
+        await bridge.notify_terminal(workspace_id)
+    except Exception:
+        logger.exception("[%s] notify_terminal raised", adapter.name)
+
     text = _format_terminal(final)
     await adapter.send_text(
         target=msg.source,

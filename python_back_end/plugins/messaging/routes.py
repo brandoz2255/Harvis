@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 
 from auth_optimized import get_current_user_optimized
 
-from .dispatcher import audit, dispatch_inbound, get_run_events, get_run_status
+from .dispatcher import audit, dispatch_inbound, get_run_events, get_run_status, notify_terminal
 from .types import Direction, MessageEvent, MessageType, Platform, SessionSource
 
 logger = logging.getLogger(__name__)
@@ -140,6 +140,21 @@ async def run_status(
     if info is None:
         raise HTTPException(status_code=404, detail="workspace run not found")
     return {"workspace_id": workspace_id, **info}
+
+
+@router.post("/runs/{workspace_id}/notify-terminal")
+async def run_notify_terminal(
+    workspace_id: str,
+    request: Request,
+    _: None = Depends(require_gateway_token),
+) -> dict:
+    """Fire on_session_end + memory.extract_from_session for a terminal run.
+
+    The gateway sidecar calls this exactly once after wait_for_terminal
+    returns. Backend re-reads workspace_runs (doesn't trust the sidecar's
+    view) and no-ops if the run isn't actually terminal yet.
+    """
+    return await notify_terminal(request, workspace_id)
 
 
 @router.get("/runs/{workspace_id}/events")

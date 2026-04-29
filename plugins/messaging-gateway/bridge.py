@@ -73,6 +73,27 @@ class HarvisBridge:
             error=data.get("error"),
         )
 
+    async def notify_terminal(self, workspace_id: str) -> Optional[dict]:
+        """Tell the backend a run reached terminal status.
+
+        Backend fires on_session_end + invokes memory.extract_from_session.
+        Returns the backend's response dict (or None on transport error).
+        Best-effort — never raises into the caller.
+        """
+        client = self._require_client()
+        try:
+            r = await client.post(f"/api/messaging/runs/{workspace_id}/notify-terminal", json={})
+        except httpx.HTTPError as e:
+            logger.warning("notify_terminal network error for %s: %s", workspace_id, e)
+            return None
+        if r.status_code != 200:
+            logger.warning("notify_terminal non-200 %s for %s: %s", r.status_code, workspace_id, r.text[:200])
+            return None
+        try:
+            return r.json()
+        except Exception:
+            return None
+
     async def get_run_status(self, workspace_id: str) -> Optional[RunStatus]:
         client = self._require_client()
         try:
