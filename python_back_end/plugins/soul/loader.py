@@ -116,6 +116,40 @@ async def clear_soul(pool: asyncpg.Pool, user_id: int) -> bool:
     return True
 
 
+async def enrich_brief_with_persona(
+    pool: asyncpg.Pool,
+    user_id: int,
+    task_brief: str,
+    *,
+    include_default_when_unset: bool = False,
+) -> str:
+    """Prepend per-user SOUL.md to ``task_brief`` if the user has set one.
+
+    By default, only injects when the user has explicitly saved a SOUL.md
+    (so users who haven't opted in see no preamble). Set
+    ``include_default_when_unset=True`` to mirror Hermes's behavior of
+    seeding DEFAULT_SOUL_MD into every dispatch.
+
+    Returns the original ``task_brief`` unchanged if there's nothing to
+    inject.
+    """
+    if pool is None or not task_brief:
+        return task_brief
+
+    soul = await load_soul(pool, user_id)
+    if soul is None or not soul.strip():
+        if not include_default_when_unset:
+            return task_brief
+        soul = DEFAULT_SOUL_MD
+
+    return (
+        "USER PERSONA / CONSTRAINTS (from their SOUL.md — keep in mind throughout):\n"
+        f"{soul.strip()}\n\n"
+        "---\n\n"
+        f"USER MESSAGE: {task_brief}"
+    )
+
+
 async def seed_default_if_missing(pool: asyncpg.Pool, user_id: int) -> bool:
     """Insert DEFAULT_SOUL_MD as the user's SOUL.md only if they have none.
 
