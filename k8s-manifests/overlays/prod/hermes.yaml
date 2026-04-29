@@ -1,0 +1,313 @@
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: hermes-data
+spec:
+  capacity:
+    storage: 5Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-path
+  local:
+    path: /var/lib/hermes-data
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - dulc3-os
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hermes-data
+  namespace: ai-agents
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  volumeName: hermes-data
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: harvis-ai-hermes
+  namespace: ai-agents
+  labels:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: hermes
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: harvis-ai
+      app.kubernetes.io/component: hermes
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: harvis-ai
+        app.kubernetes.io/component: hermes
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        runAsNonRoot: true
+
+      nodeSelector:
+        kubernetes.io/hostname: dulc3-os
+
+      initContainers:
+        - name: setup-ssh
+          image: alpine:3.18
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+          command: ["sh", "-c"]
+          args:
+            - |
+              mkdir -p /ssh-key && chmod 700 /ssh-key
+              cp /ssh-secret/id_ed25519 /ssh-key/id_ed25519 && chmod 600 /ssh-key/id_ed25519
+              echo "SSH key ready"
+          volumeMounts:
+            - name: ssh-secret-vol
+              mountPath: /ssh-secret
+            - name: ssh-key
+              mountPath: /ssh-key
+          resources:
+            requests:
+              memory: 16Mi
+              cpu: 10m
+            limits:
+              memory: 32Mi
+              cpu: 50m
+
+        - name: wait-for-db
+          image: busybox:1.36@sha256:b7f3d86d6e84fc17718c48bcde1450807faa2d56704205c697b4bd5df7b9e29f
+          command: ["sh", "-c"]
+          args:
+            - |
+              echo "Waiting for PostgreSQL..."
+              until nc -z harvis-ai-pgsql 5432; do sleep 2; done
+              echo "PostgreSQL is ready!"
+          resources:
+            requests:
+              memory: 16Mi
+              cpu: 10m
+            limits:
+              memory: 32Mi
+              cpu: 50m
+
+        - name: clone-workspace
+          image: dulc3/hermes:latest
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              WORKSPACE=/home/node/.hermes/workspace/Harvis
+
+              mint_token() {
+                GH_JWT=$(node -e "
+              const {createSign}=require('crypto');
+              const key=(process.env.GH_PRIVATE_KEY||'').replace(/\\\\n/g,'\\n');
+              const appId=process.env.GH_APP_ID;
+              const now=Math.floor(Date.now()/1000);
+              const hdr=Buffer.from(JSON.stringify({alg:'RS256',typ:'JWT'})).toString('base64url');
+              const pld=Buffer.from(JSON.stringify({iat:now-60,exp:now+600,iss:appId})).toString('base64url');
+              const s=hdr+'.'+pld;
+              const sign=createSign('RSA-SHA256');
+              sign.update(s);
+              console.log(s+'.'+sign.sign(key,'base64url'));
+              ")
+                curl -sf -X POST \
+                  -H "Authorization: Bearer $GH_JWT" \
+                  -H "Accept: application/vnd.github+json" \
+                  -H "X-GitHub-Api-Version: 2022-11-28" \
+                  "https://api.github.com/app/installations/${GH_INSTALLATION_ID}/access_tokens" \
+                | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write(JSON.parse(d).token))"
+              }
+
+              git config --global user.name "HarvisAI[bot]"
+              git config --global user.email "2995570+HarvisAI[bot]@users.noreply.github.com"
+              git config --global credential.helper store
+
+              GH_TOKEN=$(mint_token)
+              printf 'https://x-access-token:%s@github.com\n' "$GH_TOKEN" > /home/node/.git-credentials
+              chmod 600 /home/node/.git-credentials
+
+              if [ -d "$WORKSPACE/.git" ]; then
+                echo "Repo already present, pulling latest..."
+                cd "$WORKSPACE"
+                git pull origin main || echo "Pull failed — using existing clone (offline?)"
+              else
+                echo "Cloning harvis-aidev into $WORKSPACE..."
+                mkdir -p "$(dirname $WORKSPACE)"
+                git clone https://github.com/brandoz2255/aidev.git "$WORKSPACE" || \
+                  echo "Clone failed — repo may be private or workspace already mounted at /workspace"
+                echo "Clone step done."
+              fi
+          env:
+            - name: HOME
+              value: /home/node
+            - name: GH_APP_ID
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-hermes-secret
+                  key: harvis-github-app-id
+            - name: GH_INSTALLATION_ID
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-hermes-secret
+                  key: harvis-github-installation-id
+            - name: GH_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-hermes-secret
+                  key: harvis-github-private-key
+          volumeMounts:
+            - name: hermes-data
+              mountPath: /home/node/.hermes
+          resources:
+            requests:
+              memory: 128Mi
+              cpu: 100m
+            limits:
+              memory: 256Mi
+              cpu: 500m
+
+      containers:
+        - name: hermes
+          image: dulc3/hermes:latest
+          imagePullPolicy: Always
+          args: ["gateway"]
+
+          ports:
+            - name: api
+              containerPort: 8642
+              protocol: TCP
+
+          env:
+            - name: HOME
+              value: /home/node
+            - name: HERMES_HOME
+              value: /home/node/.hermes
+            - name: HERMES_GATEWAY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-hermes-secret
+                  key: hermes-gateway-token
+
+            - name: DISCORD_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-hermes-secret
+                  key: discord-bot-token
+
+            - name: GH_APP_ID
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-hermes-secret
+                  key: harvis-github-app-id
+            - name: GH_INSTALLATION_ID
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-hermes-secret
+                  key: harvis-github-installation-id
+            - name: GH_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-hermes-secret
+                  key: harvis-github-private-key
+
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-hermes-secret
+                  key: database-url
+
+            - name: GIT_TERMINAL_PROMPT
+              value: "0"
+            - name: GIT_ASKPASS
+              value: "echo"
+
+          volumeMounts:
+            - name: hermes-data
+              mountPath: /home/node/.hermes
+            - name: ssh-key
+              mountPath: /home/node/.ssh
+            - name: github-workspace
+              mountPath: /workspace
+            - name: kubeconfig
+              mountPath: /home/node/.kube
+
+          livenessProbe:
+            initialDelaySeconds: 120
+            periodSeconds: 60
+            exec:
+              command:
+              - python3
+              - -c
+              - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8642/health")
+
+          readinessProbe:
+            initialDelaySeconds: 90
+            periodSeconds: 30
+            exec:
+              command:
+              - python3
+              - -c
+              - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8642/health")
+
+          resources:
+            requests:
+              memory: 1Gi
+              cpu: 250m
+            limits:
+              memory: 4Gi
+              cpu: 1000m
+
+      volumes:
+        - name: hermes-data
+          persistentVolumeClaim:
+            claimName: hermes-data
+        - name: ssh-key
+          emptyDir: {}
+        - name: ssh-secret-vol
+          secret:
+            secretName: hermes-ssh-key
+            items:
+              - key: harvis_key
+                path: id_ed25519
+        - name: github-workspace
+          hostPath:
+            path: /home/dulc3/Documents/github
+            type: Directory
+        - name: kubeconfig
+          secret:
+            secretName: hermes-kubeconfig
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: harvis-ai-hermes
+  namespace: ai-agents
+  labels:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: hermes
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: hermes
+  ports:
+    - name: api
+      port: 8642
+      targetPort: 8642
+      protocol: TCP
