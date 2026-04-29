@@ -741,6 +741,27 @@ async def lifespan(app: FastAPI):
             "Discord traffic is expected to flow through harvis-messaging-gateway."
         )
 
+    # Phase 3B — discover and load plugins declared via plugin.yaml.
+    # No-op when HARVIS_PLUGINS_ENABLED is unset; the loader fails-open on
+    # any per-plugin import / env-availability error so one broken plugin
+    # never blocks startup.
+    try:
+        from plugins.core.loader import load_all as _load_plugins
+        _loaded = _load_plugins()
+        app.state.loaded_plugins = _loaded
+        _summary = {
+            p.status: 1 + sum(1 for q in _loaded if q.status == p.status and q is not p)
+            for p in _loaded
+        }
+        if _loaded:
+            logger.info(
+                "🔌 plugins discovered: %d (statuses: %s)",
+                len(_loaded),
+                {s: sum(1 for p in _loaded if p.status == s) for s in {p.status for p in _loaded}},
+            )
+    except Exception as e:
+        logger.warning(f"⚠️ Plugin loader failed: {e}")
+
     yield
 
     # Shutdown: stop Discord bot

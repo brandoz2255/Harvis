@@ -1,0 +1,7 @@
+name: audit_log
+version: "0.1.0"
+description: "Logs every inbound messaging dispatch — example plugin demonstrating Phase 3B manifest convention. Observer-only, no behavior change."
+author: Harvis
+requires_env: []
+hooks:
+  - pre_gateway_dispatch
