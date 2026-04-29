@@ -19,6 +19,7 @@ from typing import Optional
 
 from fastapi import Request
 
+from ..core.hooks import invoke_hook
 from .types import Direction, MessageEvent, SessionSource
 
 logger = logging.getLogger(__name__)
@@ -121,6 +122,25 @@ async def dispatch_inbound(
         await audit(pool, event, user_id=user_id, direction=Direction.INBOUND, status="rejected_empty")
         return DispatchResult(ok=False, user_id=user_id, error="empty message")
 
+    # Plugin hook — pre_gateway_dispatch. Phase 3 honors a single action
+    # vocabulary: {"action": "skip", "reason": ...} drops the message;
+    # any other return value (or None) means allow. "rewrite" is reserved
+    # for a later phase since MessageEvent is frozen.
+    hook_results = await invoke_hook(
+        "pre_gateway_dispatch",
+        event=event,
+        user_id=user_id,
+    )
+    for r in hook_results:
+        if isinstance(r, dict) and r.get("action") == "skip":
+            reason = r.get("reason") or "skipped by plugin"
+            await audit(
+                pool, event,
+                user_id=user_id, direction=Direction.INBOUND,
+                status=f"rejected_plugin_skip:{reason[:80]}",
+            )
+            return DispatchResult(ok=False, user_id=user_id, error=reason)
+
     await audit(pool, event, user_id=user_id, direction=Direction.INBOUND, status="accepted")
 
     # Lazy import: keeps the plugin importable in environments where the
@@ -142,9 +162,23 @@ async def dispatch_inbound(
         logger.exception("launch_workspace_internal failed for message %s", event.message_id)
         return DispatchResult(ok=False, user_id=user_id, error=str(e))
 
+    workspace_id = data.get("workspace_id")
+    if workspace_id:
+        # Observer hook — return values ignored. Fire AFTER the workspace
+        # is actually running so plugins can rely on the workspace_id.
+        await invoke_hook(
+            "on_session_start",
+            workspace_id=workspace_id,
+            user_id=user_id,
+            platform=event.source.platform.value,
+            chat_id=event.source.chat_id,
+            thread_id=event.source.thread_id,
+            text=event.text,
+        )
+
     return DispatchResult(
         ok=True,
-        workspace_id=data.get("workspace_id"),
+        workspace_id=workspace_id,
         session_id=data.get("session_id"),
         status=data.get("status"),
         user_id=user_id,
