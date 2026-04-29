@@ -151,19 +151,34 @@ async def dispatch_inbound(
         logger.exception("workspace_router import failed")
         return DispatchResult(ok=False, user_id=user_id, error=f"workspace unavailable: {e}")
 
-    # Phase 7B — Path A: prepend per-user SOUL.md as task_brief preamble
-    # when the user has explicitly set one. Sidesteps the openclaw_client
-    # _load_identity_bundle path (which would touch a pre-session-dirty
-    # file) at the cost of injecting at task-context level rather than
-    # the identity slot. Re-evaluate when openclaw_client lands clean.
+    # Phase 7B + 4B-pre — Path A enrichment: layer per-user SOUL.md and
+    # recalled memories into the task brief preamble. Sidesteps the
+    # openclaw_client _load_identity_bundle path (which would touch a
+    # pre-session-dirty file) at the cost of injecting at task-context
+    # level rather than the identity slot. Both blocks fail-soft: any
+    # storage error logs and falls back to whatever subset succeeded.
     enriched_brief = event.text
     if pool is not None:
+        persona_block = ""
+        recall_block = ""
         try:
-            from ..soul.loader import enrich_brief_with_persona
-            enriched_brief = await enrich_brief_with_persona(pool, user_id, event.text)
+            from ..soul.loader import build_persona_block
+            persona_block = await build_persona_block(pool, user_id)
         except Exception:
-            logger.exception("soul enrichment failed; falling back to raw brief")
-            enriched_brief = event.text
+            logger.exception("soul block build failed")
+        try:
+            from ..memory.preamble import build_recall_block
+            recall_block = await build_recall_block(pool, user_id, event.text)
+        except Exception:
+            logger.exception("memory recall block build failed")
+
+        preamble_parts = [b for b in (persona_block, recall_block) if b]
+        if preamble_parts:
+            enriched_brief = (
+                "\n\n".join(preamble_parts)
+                + "\n\n---\n\n"
+                + f"USER MESSAGE: {event.text}"
+            )
 
     try:
         data = await launch_workspace_internal(
