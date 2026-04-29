@@ -762,7 +762,24 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"⚠️ Plugin loader failed: {e}")
 
+    # Phase 6B — start the cron tick background loop if HARVIS_CRON_ENABLED=true.
+    # Default off so existing deployments are unchanged. Wrapped in try/except so
+    # a broken cron runtime doesn't block backend startup.
+    try:
+        from plugins.cron.runtime import start_cron_tick_loop
+        app.state.cron_tick_task = await start_cron_tick_loop(app)
+    except Exception as e:
+        logger.warning(f"⚠️ Cron tick loop failed to start: {e}")
+        app.state.cron_tick_task = None
+
     yield
+
+    # Shutdown: stop cron tick loop
+    try:
+        from plugins.cron.runtime import stop_cron_tick_loop
+        await stop_cron_tick_loop(getattr(app.state, "cron_tick_task", None))
+    except Exception as e:
+        logger.warning(f"⚠️ Cron tick loop shutdown error: {e}")
 
     # Shutdown: stop Discord bot
     try:
