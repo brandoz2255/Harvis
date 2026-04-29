@@ -1211,6 +1211,15 @@ app.include_router(discord_proxy_router)
 from plugins.messaging.routes import router as messaging_router
 app.include_router(messaging_router)
 
+# Phase-storage CRUD routes — JWT-auth via get_current_user_optimized.
+# Per-user SOUL.md (Phase 7), memory provider (Phase 4), cron jobs (Phase 6).
+from plugins.soul.routes import router as soul_router
+from plugins.memory.routes import router as memory_router
+from plugins.cron.routes import router as cron_router
+app.include_router(soul_router)
+app.include_router(memory_router)
+app.include_router(cron_router)
+
 # ─── Device & models -----------------------------------------------------------
 device = 0 if torch.cuda.is_available() else -1
 logger.info("Using device: %s", "cuda" if device == 0 else "cpu")
