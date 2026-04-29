@@ -198,11 +198,15 @@ spec:
               value: /home/node
             - name: HERMES_HOME
               value: /home/node/.hermes
-            - name: HERMES_GATEWAY_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: harvis-ai-hermes-secret
-                  key: hermes-gateway-token
+          - name: HERMES_GATEWAY_TOKEN
+               valueFrom:
+                 secretKeyRef:
+                   name: harvis-ai-hermes-secret
+                   key: hermes-gateway-token
+             - name: OPENAI_BASE_URL
+               value: "http://harvis-ai-merged-backend.ai-agents.svc.cluster.local:8080/v1"
+             - name: OPENAI_API_KEY
+               value: "qwen-local"
 
             - name: DISCORD_BOT_TOKEN
               valueFrom:
