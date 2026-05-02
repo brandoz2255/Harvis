@@ -14,6 +14,7 @@ from fastapi import Request
 
 from workspace.workspace_router import launch_workspace_internal
 from workspace.task_detector import detect_workspace_task
+from plugins.models.resolver import resolve_default_local_model
 
 logger = logging.getLogger(__name__)
 
@@ -1150,7 +1151,10 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
         if not models:
             await interaction.response.send_message("No models found — is Ollama running?")
             return
-        current = _model_override or _FAST_MODEL or cfg.model_name or "qwen3.5-32k:latest"
+        current = (
+            _model_override or _FAST_MODEL or cfg.model_name
+            or await resolve_default_local_model() or "(no models installed in Ollama)"
+        )
         view = ModelSelectView(models, current)
         await interaction.response.send_message(
             f"**Current model:** `{current}`\nPick a new one:",
@@ -1273,7 +1277,10 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
             if set_model_match:
                 arg = (set_model_match.group(1) or "").strip()
                 models = await _list_ollama_models()
-                current = _model_override or _FAST_MODEL or cfg.model_name or "qwen3.5-32k:latest"
+                current = (
+            _model_override or _FAST_MODEL or cfg.model_name
+            or await resolve_default_local_model() or "(no models installed in Ollama)"
+        )
 
                 if not arg or arg.lower() in {"list", "ls", "?"}:
                     if not models:
@@ -1428,7 +1435,11 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
 
             # ── Fast path: simple questions → direct LLM call, no workspace ──
             if use_fast_path:
-                fast_model = _model_override or _FAST_MODEL or pref_model_name or "qwen3.5-32k:latest"
+                fast_model = (
+                    _model_override or _FAST_MODEL or pref_model_name
+                    or await resolve_default_local_model(pool=pool, user_id=cfg.default_user_id)
+                    or ""
+                )
                 logger.info(
                     "Discord fast-path: model=%s history_turns=%d msg=%r",
                     fast_model, len(prior_history), content[:80],
