@@ -62,10 +62,27 @@ Respond with ONLY valid JSON in this exact format:
 Only set should_suggest = true if confidence >= 0.4."""
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
-# Prefer explicit workspace-detector name; DISCORD_FAST_MODEL kept for backward compatibility.
-FAST_MODEL = os.getenv("WORKSPACE_DETECTOR_OLLAMA_MODEL") or os.getenv(
-    "DISCORD_FAST_MODEL", "qwen3.5-32k:latest"
-)
+# Prefer explicit workspace-detector name; DISCORD_FAST_MODEL kept for backward
+# compatibility. Empty default is intentional — when neither env is set, the
+# detector resolves a model at call time via plugins.models.resolver so the
+# system adapts to whatever's actually installed in Ollama.
+FAST_MODEL = (
+    os.getenv("WORKSPACE_DETECTOR_OLLAMA_MODEL")
+    or os.getenv("DISCORD_FAST_MODEL")
+    or ""
+).strip()
+
+
+async def _resolve_detector_model() -> Optional[str]:
+    """FAST_MODEL when explicitly configured, otherwise the adaptive resolver."""
+    if FAST_MODEL:
+        return FAST_MODEL
+    try:
+        from plugins.models.resolver import resolve_default_local_model
+        return await resolve_default_local_model(ollama_url=OLLAMA_URL)
+    except Exception:
+        logger.exception("task_detector: resolver import/call failed")
+        return None
 
 
 class WorkspaceSuggestion:
@@ -103,8 +120,15 @@ class WorkspaceSuggestion:
 async def _detect_workspace_task_ollama(conversation_text: str) -> WorkspaceSuggestion:
     try:
         base_url = OLLAMA_URL.rstrip("/")
+        model = await _resolve_detector_model()
+        if not model:
+            logger.warning(
+                "task_detector: no local model resolvable (Ollama empty + no env override); "
+                "skipping workspace detection"
+            )
+            return WorkspaceSuggestion({"should_suggest": False, "reason": "no model"})
         payload = {
-            "model": FAST_MODEL,
+            "model": model,
             "messages": [
                 {"role": "system", "content": DETECTOR_SYSTEM_PROMPT},
                 {"role": "user", "content": f"Conversation:\n{conversation_text}"},
@@ -115,7 +139,7 @@ async def _detect_workspace_task_ollama(conversation_text: str) -> WorkspaceSugg
 
         async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
             resp = await client.post(f"{base_url}/api/chat", json={
-                "model": FAST_MODEL,
+                "model": model,
                 "messages": [
                     {"role": "system", "content": DETECTOR_SYSTEM_PROMPT},
                     {"role": "user", "content": f"Conversation:\n{conversation_text}"},
