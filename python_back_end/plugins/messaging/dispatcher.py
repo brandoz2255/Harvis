@@ -226,7 +226,10 @@ async def get_run_status(pool, workspace_id: str) -> Optional[dict]:
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                SELECT status, final_summary, error_message, updated_at
+                SELECT status,
+                       final_summary,
+                       error_message,
+                       COALESCE(completed_at, started_at) AS updated_at
                 FROM workspace_runs
                 WHERE id = $1
                 """,
