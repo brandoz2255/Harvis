@@ -38,38 +38,65 @@ async def build_recall_block(
 ) -> str:
     """Build the recalled-memories preamble block, or '' if none applies.
 
-    Returns an empty string when:
+    Strategy: always pull the user's most-recent N memories so the agent
+    has personal context regardless of whether the query has literal
+    overlap with stored content. When ``query`` is given AND has
+    substring matches, those are prepended (deduped) so query-relevant
+    items appear first. Result is capped at ``limit``.
+
+    Without this fallback, queries like "what is my job" returned an
+    empty block because ILIKE substring matching against
+    "Currently working on the Hermes integration project" finds nothing
+    — even though that memory is exactly the answer.
+
+    Returns "" when:
       - pool is None
       - no provider activates
-      - query is empty
-      - the user has no matching memories
-    Provider exceptions are swallowed (logged); this is best-effort
-    enrichment, never load-bearing.
+      - the user has zero memories
+    Provider exceptions are swallowed; this is best-effort enrichment.
     """
-    if pool is None or not query or not query.strip():
+    if pool is None:
         return ""
 
     provider = await _get_or_activate_provider(pool)
     if provider is None:
         return ""
 
+    # Always-on: most-recent N (no filter)
     try:
-        memories: list[MemoryEntry] = await provider.recall(
-            user_id, query=query, limit=limit,
+        recent: list[MemoryEntry] = await provider.recall(
+            user_id, query=None, limit=limit,
         )
     except Exception:
-        logger.exception("memory: recall failed for user %s", user_id)
+        logger.exception("memory: recent recall failed for user %s", user_id)
+        recent = []
+
+    # Optional: query-substring matches — prepended for prominence
+    matched: list[MemoryEntry] = []
+    if query and query.strip():
+        try:
+            matched = await provider.recall(user_id, query=query, limit=limit)
+        except Exception:
+            logger.exception("memory: query recall failed for user %s", user_id)
+
+    # Combine, dedupe by content, cap at limit
+    seen: set[str] = set()
+    combined: list[MemoryEntry] = []
+    for entry in (matched + recent):
+        if not entry.content:
+            continue
+        key = entry.content.strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        combined.append(entry)
+        if len(combined) >= limit:
+            break
+
+    if not combined:
         return ""
 
-    if not memories:
-        return ""
-
-    bullets = "\n".join(
-        f"• {m.content.strip()}" for m in memories if m.content and m.content.strip()
-    )
-    if not bullets:
-        return ""
-
+    bullets = "\n".join(f"• {e.content.strip()}" for e in combined)
     return (
         "RECENT FACTS THE USER HAS SHARED (from their memory — incorporate when relevant):\n"
         f"{bullets}"
