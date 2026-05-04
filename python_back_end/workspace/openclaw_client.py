@@ -70,6 +70,14 @@ OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 OPENCLAW_FALLBACK_URL = os.getenv("OPENCLAW_FALLBACK_URL", "")
 OPENCLAW_FALLBACK_TOKEN = os.getenv("OPENCLAW_FALLBACK_TOKEN", "") or OPENCLAW_GATEWAY_TOKEN
 
+# HOME directory used by the OpenClaw gateway we're talking to. The dockerized
+# container runs as `node` with HOME=/home/node; a host-installed OpenClaw on
+# host.docker.internal:18790 typically runs as the user (e.g. /home/<you>).
+# Wrong value → mkdir/cd in the model's task brief targets a directory the
+# gateway user cannot create, and the very first tool call fails. Override via
+# OPENCLAW_HOME env var when pointing at a non-default gateway.
+OPENCLAW_HOME = os.getenv("OPENCLAW_HOME", "/home/node").rstrip("/")
+
 # Identity files (mounted into backend container).
 # docker-compose mounts ./openclaw/config -> /app/openclaw_config:ro
 _IDENTITY_DIR = os.getenv("HARVIS_OPENCLAW_IDENTITY_DIR", "/app/openclaw_config")
@@ -630,7 +638,7 @@ class OpenClawClient:
             safe_session = self.session_id.replace("/", "-").replace(" ", "-")
             _scope_tag = self.workspace_prefix.replace("/", "-").strip("-")
             _scope_slug = f"{_scope_tag}-" if _scope_tag else ""
-            workdir = f"/home/node/.openclaw/workspace/session-{_scope_slug}{safe_session}"
+            workdir = f"{OPENCLAW_HOME}/.openclaw/workspace/session-{_scope_slug}{safe_session}"
             workdir_rel = f"session-{_scope_slug}{safe_session}"
 
             # GitHub availability hint — injected only when the token is configured.
@@ -653,7 +661,7 @@ class OpenClawClient:
             repo_hint = (
                 "\nREPO MOUNTING (workspace-first routing):\n"
                 "If a GitHub repo is mounted for this user, prefer editing inside "
-                "/home/node/projects/<owner>/<repo> instead of creating detached files.\n"
+                f"{OPENCLAW_HOME}/projects/<owner>/<repo> instead of creating detached files.\n"
                 "When repository paths are provided in task context/events, set your "
                 "workdir to that mounted repo and run git operations there.\n"
             )
@@ -798,12 +806,12 @@ class OpenClawClient:
             directive = (
                 f"WORKSPACE DIRECTORY: {workdir}\n"
                 "FILESYSTEM LAYOUT (IMPORTANT — READ BEFORE USING TOOLS):\n"
-                "- The `exec` tool runs commands with CWD /home/node/.openclaw/workspace\n"
+                f"- The `exec` tool runs commands with CWD {OPENCLAW_HOME}/.openclaw/workspace\n"
                 "- The `write` tool treats relative paths as rooted at the SAME directory\n"
                 f"- Your session sub-directory is `{workdir_rel}/` under that root\n"
                 f"- Use the RELATIVE form `{workdir_rel}/<filename>` for `write`\n"
                 f"- Use the ABSOLUTE form `{workdir}/<filename>` for `exec`/`python3`\n"
-                "- DO NOT assume any /home/node/workspaces/... path exists — that tree is unrelated to the exec CWD.\n"
+                f"- DO NOT assume any {OPENCLAW_HOME}/workspaces/... path exists — that tree is unrelated to the exec CWD.\n"
                 "\n"
                 "MANDATORY WORKDIR INIT:\n"
                 f"Your VERY FIRST action MUST be an `exec` tool call that runs exactly:\n"
