@@ -430,7 +430,9 @@ def _format_progress_line(event_type: str, payload: dict) -> str | None:
     if event_type == "log":
         msg = (payload.get("message") or "").strip()
         if msg:
-            return f"\u2022 {msg[:120]}"
+            # \ud83d\udcac narrative + [tool] streamed output benefit from a wider cap;
+            # 120 chars cut off useful content right after dividers/banners.
+            return f"\u2022 {msg[:200]}"
         return None
 
     if event_type == "tool_call":

@@ -1422,12 +1422,40 @@ class OpenClawClient:
                     "success": success,
                 }), run_id)
             elif phase == "update":
-                # Partial tool output — emit as log so it shows in the UI
+                # Partial tool output — emit as log so it shows in the UI.
+                # OpenClaw wraps streamed output in a content-block dict
+                # ({'content': [{'type': 'text', 'text': '...'}]}); using
+                # str(...) on that includes ~36 chars of dict wrapper before
+                # the actual text, which combined with Discord's 120-char log
+                # truncation chops the meaty content. Extract text properly
+                # and strip leading divider/whitespace noise so the FIRST
+                # visible character is informative.
                 partial = data.get("partialResult")
                 if partial:
-                    yield self._tag(OpenClawEvent("log", {
-                        "message": f"[{tool_name}] {str(partial)[:500]}",
-                    }), run_id)
+                    text = ""
+                    if isinstance(partial, dict):
+                        content = partial.get("content")
+                        if isinstance(content, list):
+                            text = self._extract_text(content)
+                        elif "text" in partial:
+                            text = str(partial.get("text") or "")
+                        elif "output" in partial:
+                            text = str(partial.get("output") or "")
+                    elif isinstance(partial, str):
+                        text = partial
+                    if not text:
+                        text = str(partial)
+                    # Strip leading whitespace and lines that are pure
+                    # ASCII separators (=, -, _, *, #) so previews skip
+                    # banner-divider lines and start at real content.
+                    lines = text.lstrip().splitlines()
+                    while lines and not lines[0].strip(" =-_*#\t"):
+                        lines.pop(0)
+                    cleaned = "\n".join(lines).strip()
+                    if cleaned:
+                        yield self._tag(OpenClawEvent("log", {
+                            "message": f"[{tool_name}] {cleaned[:500]}",
+                        }), run_id)
 
         elif stream == "assistant":
             # Assistant text is streamed via chat `partial` state; emitting here duplicates output.
