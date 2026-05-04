@@ -143,20 +143,9 @@ async def dispatch_inbound(
 
     await audit(pool, event, user_id=user_id, direction=Direction.INBOUND, status="accepted")
 
-    # Lazy import: keeps the plugin importable in environments where the
-    # workspace stack is not installed (unit tests, lightweight runs).
-    try:
-        from workspace.workspace_router import launch_workspace_internal  # type: ignore
-    except Exception as e:
-        logger.exception("workspace_router import failed")
-        return DispatchResult(ok=False, user_id=user_id, error=f"workspace unavailable: {e}")
-
     # Phase 7B + 4B-pre — Path A enrichment: layer per-user SOUL.md and
-    # recalled memories into the task brief preamble. Sidesteps the
-    # openclaw_client _load_identity_bundle path (which would touch a
-    # pre-session-dirty file) at the cost of injecting at task-context
-    # level rather than the identity slot. Both blocks fail-soft: any
-    # storage error logs and falls back to whatever subset succeeded.
+    # recalled memories into the task brief preamble. Both blocks fail-soft:
+    # any storage error logs and falls back to whatever subset succeeded.
     enriched_brief = event.text
     if pool is not None:
         persona_block = ""
@@ -179,6 +168,63 @@ async def dispatch_inbound(
                 + "\n\n---\n\n"
                 + f"USER MESSAGE: {event.text}"
             )
+
+    # Fast-path: chat-like messages bypass the workspace agent (which is
+    # prompted to ALWAYS call tools and confuses itself on simple Q&A).
+    # Insert a 'running' workspace_runs row, spawn the LLM call as a
+    # background task, return the workspace_id immediately so the gateway
+    # sidecar's HTTP timeout never trips on slow model latency. The bg
+    # task flips the row to 'completed' (or 'failed') when the LLM
+    # returns; sidecar's existing poll loop handles the wait.
+    try:
+        from .fast_path import (
+            finish_fast_path_run,
+            record_running_run,
+            should_use_fast_path,
+        )
+        use_fast = await should_use_fast_path(event.text)
+    except Exception:
+        logger.exception("fast_path classifier failed; defaulting to workspace path")
+        use_fast = False
+
+    if use_fast:
+        import asyncio as _asyncio
+        logger.info("messaging dispatch: fast-path for user %s msg=%r", user_id, (event.text or "")[:80])
+        session_id = f"fast-sess-{event.message_id[:12]}"
+        workspace_id = await record_running_run(
+            pool, user_id=user_id, session_id=session_id, task_brief=enriched_brief,
+        )
+        if workspace_id:
+            _asyncio.create_task(
+                finish_fast_path_run(pool, workspace_id=workspace_id, enriched_brief=enriched_brief),
+                name=f"fast_path:{workspace_id}",
+            )
+            await invoke_hook(
+                "on_session_start",
+                workspace_id=workspace_id,
+                user_id=user_id,
+                platform=event.source.platform.value,
+                chat_id=event.source.chat_id,
+                thread_id=event.source.thread_id,
+                text=event.text,
+            )
+            return DispatchResult(
+                ok=True,
+                workspace_id=workspace_id,
+                session_id=session_id,
+                status="running",
+                user_id=user_id,
+            )
+        # Insert failed (DB issue) — fall through to workspace path.
+        logger.warning("fast_path: running-row insert failed; falling through to workspace agent")
+
+    # Lazy import: keeps the plugin importable in environments where the
+    # workspace stack is not installed (unit tests, lightweight runs).
+    try:
+        from workspace.workspace_router import launch_workspace_internal  # type: ignore
+    except Exception as e:
+        logger.exception("workspace_router import failed")
+        return DispatchResult(ok=False, user_id=user_id, error=f"workspace unavailable: {e}")
 
     try:
         data = await launch_workspace_internal(
