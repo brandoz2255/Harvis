@@ -877,7 +877,22 @@ def _rewrite_openclaw_config_sync(path: str, model: str, provider: str) -> tuple
     providers = cfg.setdefault("models", {}).setdefault("providers", {})
     prov = providers.get(provider)
     if isinstance(prov, dict):
-        prov["models"] = [{"id": model, "name": model}]
+        # Additive merge — preserve the user's existing models list rather
+        # than replacing it with a single-element list. The previous
+        # `prov["models"] = [{...}]` form silently truncated BYO configs
+        # from "qwen3.5, llama3.1:8b, gpt-oss, gemma4:e4b, gemma4:e2b, ..."
+        # down to one entry on every /model call, which made subsequent
+        # `/model <other>` selections fail because the chosen model was no
+        # longer in the providers list.
+        existing = prov.get("models")
+        if isinstance(existing, list):
+            if not any(
+                isinstance(m, dict) and m.get("id") == model
+                for m in existing
+            ):
+                existing.append({"id": model, "name": model})
+        else:
+            prov["models"] = [{"id": model, "name": model}]
 
     after = json.dumps(cfg, sort_keys=True)
     if before == after:
