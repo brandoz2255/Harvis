@@ -574,6 +574,11 @@ class OpenClawClient:
         """
         # Reset per-stream state
         self._last_partial_text = ""
+        # _narrative_cut: index into _last_partial_text marking where the
+        # last "narrative" (text the model emitted before a tool call) was
+        # already surfaced as a log event. Anything past this index is fresh
+        # narrative awaiting the next tool_call to flush as a "💬 ..." line.
+        self._narrative_cut = 0
         self._run_labels = {}
         self._sub_agent_counter = 0
 
@@ -813,9 +818,13 @@ class OpenClawClient:
                 f"\nEXECUTE THIS TASK NOW: {last_user_msg}\n\n"
                 "RULES:\n"
                 "- ALWAYS use tool calls (exec, write, read). NEVER type commands as text.\n"
-                "- Start your response with a tool call, not a text message.\n"
-                "- Do NOT ask for clarification. Just do the task.\n"
-                "- Do NOT describe what you will do. Call a tool and do it.\n"
+                "- Begin EVERY tool call with one short sentence (under 25 words) "
+                "stating what you are about to do and why, then immediately call "
+                "the tool. Example: \"Writing the helper script first.\" → write tool "
+                "call. The user sees these as 💬 progress notes — keep them concrete "
+                "and free of filler like \"Let me\" or \"I'll now\".\n"
+                "- Do NOT ask for clarification. Just narrate one line, then act.\n"
+                "- Do NOT pre-plan in long paragraphs. One sentence, then a tool.\n"
                 "- You CAN access the internet. Call exec with the bash-wrapped curl commands above.\n"
                 "- Never claim browser/screenshot limitations. You have real browser tooling in this workspace.\n"
                 "- If the user asks for a screenshot or website check, execute the browser workflow and provide the artifact.\n"
@@ -1068,6 +1077,7 @@ class OpenClawClient:
                         ):
                             corrective_retry_count += 1
                             self._last_partial_text = ""
+                            self._narrative_cut = 0
                             yield OpenClawEvent("log", {
                                 "message": "Agent returned a simulated response; forcing real browser execution...",
                             })
@@ -1108,6 +1118,7 @@ class OpenClawClient:
                             yield OpenClawEvent("log", {"message": "Sub-agent working — waiting for result…"})
                             # Reset partial tracker for the sub-agent's upcoming stream
                             self._last_partial_text = ""
+                            self._narrative_cut = 0
                             continue  # keep the async-for loop running
 
                         # Empty final + the agent never even tried to call a
@@ -1122,6 +1133,7 @@ class OpenClawClient:
                         ):
                             corrective_retry_count += 1
                             self._last_partial_text = ""
+                            self._narrative_cut = 0
                             logger.warning(
                                 "[workspace:%s] Empty final + no tool call — retrying with corrective prompt",
                                 self.workspace_id,
@@ -1220,6 +1232,7 @@ class OpenClawClient:
                                 self._last_partial_text
                             ):
                                 self._last_partial_text = ""
+                                self._narrative_cut = 0
                             delta = text[len(self._last_partial_text) :]
                             self._last_partial_text = text
                             if delta:
@@ -1329,6 +1342,20 @@ class OpenClawClient:
                     "[openclaw] tool_call  session=%.12s tool=%s args=%.80s",
                     self._session_key, tool_name, str(tool_args),
                 )
+                # Flush any narrative the model emitted between the last tool
+                # call and this one as a 💬 log event. The directive in the
+                # task brief asks the model to prefix every tool call with a
+                # short "what I'm about to do" sentence; this surfaces it as
+                # a progress line to Discord/UI without bloating the chat
+                # bubble. Skip near-empty narratives so we don't spam logs
+                # when the model goes straight to the next tool.
+                narrative = self._last_partial_text[self._narrative_cut:].strip()
+                if narrative and len(narrative) > 5:
+                    snippet = narrative if len(narrative) <= 280 else narrative[:277] + "…"
+                    yield self._tag(OpenClawEvent("log", {
+                        "message": f"💬 {snippet}",
+                    }), run_id)
+                self._narrative_cut = len(self._last_partial_text)
                 yield self._tag(OpenClawEvent("tool_call", {
                     "tool": tool_name,
                     "args": tool_args,
