@@ -368,6 +368,95 @@ def _extract_browser_target_url(task_text: str) -> str:
     return "https://google.com"
 
 
+def _synthesize_narrative(tool_name: str, tool_args: dict) -> str:
+    """Generate a basic 💬 line from a tool call's args when the model
+    didn't emit its own reasoning text.
+
+    Smaller / more terse models (granite4.1, qwen-coder, llama3.1) often
+    chain tool calls without any commentary in between, leaving the user
+    with a wall of "Running command" lines and no visibility into WHY
+    each call is happening. This synthesizes a one-line reason from the
+    most informative part of the tool args.
+    """
+    if not isinstance(tool_args, dict):
+        tool_args = {}
+
+    if tool_name in ("exec", "harvis-terminal", "shell", "bash"):
+        cmd = (tool_args.get("preview") or tool_args.get("command") or "").strip()
+        if not cmd:
+            return f"Running {tool_name}"
+        # Recognize common shapes for nicer summaries.
+        low = cmd.lower()
+        if "cracker.py" in low:
+            # Pull the hash arg (first non-flag positional after cracker.py).
+            parts = cmd.split()
+            try:
+                idx = next(i for i, p in enumerate(parts) if p.endswith("cracker.py"))
+                for p in parts[idx + 1:]:
+                    if not p.startswith("-"):
+                        h = p.strip(",;\"'")
+                        return f"Cracking hash {h[:14]}…" if len(h) > 14 else f"Cracking hash {h}"
+            except (StopIteration, IndexError):
+                pass
+            return "Running cracker.py"
+        if low.startswith(("mkdir ", "mkdir\t")):
+            return "Setting up workspace dir"
+        if low.startswith(("ls ", "ls\t", "ls\n")) or low == "ls":
+            return "Listing files"
+        if low.startswith(("cat ", "head ", "tail ", "less ", "more ")):
+            return f"Reading {cmd.split(maxsplit=1)[1][:50]}" if " " in cmd else "Reading file"
+        if low.startswith(("grep ", "rg ", "ripgrep ")):
+            return f"Searching: {cmd[:60]}"
+        if low.startswith(("python3 ", "python ")):
+            # Strip the python prefix and surface the script
+            tail = cmd.split(maxsplit=1)[1] if " " in cmd else cmd
+            return f"Running python: {tail[:60]}{'…' if len(tail) > 60 else ''}"
+        if low.startswith(("curl ", "wget ", "http")):
+            return f"HTTP: {cmd[:60]}{'…' if len(cmd) > 60 else ''}"
+        if low.startswith("git "):
+            return f"Git: {cmd[:60]}{'…' if len(cmd) > 60 else ''}"
+        # Generic fallback
+        cmd_short = cmd if len(cmd) <= 80 else cmd[:77] + "…"
+        return f"Running: {cmd_short}"
+
+    if tool_name == "write":
+        path = tool_args.get("path") or tool_args.get("file_path") or ""
+        if path:
+            short = path if len(path) <= 50 else "…" + path[-47:]
+            return f"Writing {short}"
+        return "Writing file"
+
+    if tool_name == "read":
+        path = tool_args.get("path") or tool_args.get("file_path") or ""
+        if path:
+            short = path if len(path) <= 50 else "…" + path[-47:]
+            return f"Reading {short}"
+        return "Reading file"
+
+    if tool_name == "edit":
+        path = tool_args.get("path") or tool_args.get("file_path") or ""
+        if path:
+            short = path if len(path) <= 50 else "…" + path[-47:]
+            return f"Editing {short}"
+        return "Editing file"
+
+    if tool_name == "image":
+        return "Analyzing image"
+
+    if tool_name in ("memory_search", "memory_search_unified"):
+        q = tool_args.get("query") or tool_args.get("q") or ""
+        return f"Memory search: {q[:60]}" if q else "Searching memory"
+
+    if tool_name == "memory_store":
+        return "Saving to memory"
+
+    if tool_name in ("local_rag", "rag_search"):
+        q = tool_args.get("query") or tool_args.get("q") or ""
+        return f"RAG: {q[:60]}" if q else "Searching local knowledge"
+
+    return f"Using {tool_name}"
+
+
 def _looks_like_browser_or_screenshot_task(task_text: str) -> bool:
     low = (task_text or "").lower()
     return (
@@ -1414,11 +1503,22 @@ class OpenClawClient:
                 # task brief asks the model to prefix every tool call with a
                 # short "what I'm about to do" sentence; this surfaces it as
                 # a progress line to Discord/UI without bloating the chat
-                # bubble. Skip near-empty narratives so we don't spam logs
-                # when the model goes straight to the next tool.
+                # bubble.
+                #
+                # Some models (granite4.1, qwen-coder, smaller llamas) chain
+                # tool calls back-to-back without emitting any commentary
+                # text between them — they prefer terse tool-only sequences.
+                # In that case the narrative is empty, and Discord just sees
+                # a wall of "Running command" with no visibility into WHY
+                # each call is happening. Synthesize a basic 💬 line from
+                # the tool args themselves as a fallback so the user always
+                # sees one-sentence reasoning per step.
                 narrative = self._last_partial_text[self._narrative_cut:].strip()
                 if narrative and len(narrative) > 5:
                     snippet = narrative if len(narrative) <= 280 else narrative[:277] + "…"
+                else:
+                    snippet = _synthesize_narrative(tool_name, tool_args)
+                if snippet:
                     yield self._tag(OpenClawEvent("log", {
                         "message": f"💬 {snippet}",
                     }), run_id)
