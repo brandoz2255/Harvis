@@ -922,23 +922,19 @@ class OpenClawClient:
                     "not in memory.\n"
                     "DO NOT write your own hashing/cracking python script — the skill "
                     "already has a verified one.\n"
-                    "DO NOT try to download rockyou.txt or any wordlist via curl/web_fetch "
-                    "— rockyou.txt is already bundled at "
-                    f"{_hcdir}/wordlists/rockyou.txt (14M entries, full breach list); "
-                    "use it via --wordlist. If it ever isn't there, fall through to "
-                    "--online (md5 only) and stop — DO NOT fetch from the internet.\n"
-                    "For EACH hash the user gave, run via the `exec` tool:\n"
-                    f"  python3 {_hcdir}/cracker.py <HASH> "
-                    f"--wordlist {_hcdir}/wordlists/top1k.txt "
-                    f"--wordlist {_hcdir}/wordlists/rockyou.txt --online\n"
-                    "Order matters: top1k.txt runs first (sub-second commons), then "
-                    "rockyou.txt (seconds-to-minutes long tail). Stop at the first "
-                    "verified hit per hash.\n"
-                    "The script returns JSON with a `verified` boolean. Only report a "
-                    "plaintext if `verified=true`. If `verified=false` after all tiers, "
-                    'say "not cracked" and list the tiers tried — never invent a '
-                    'plaintext, never guess "password"/"qwerty"/"123456" without the '
-                    "tool confirming.\n"
+                    "DO NOT try to download rockyou.txt — it's already bundled and "
+                    "auto-loaded by cracker.py.\n"
+                    "For EACH hash the user gave, run EXACTLY this via the `exec` tool "
+                    "(no flags to add or remove — auto-loads top1k.txt then rockyou.txt "
+                    "from wordlists/ next to the script):\n"
+                    f"  python3 {_hcdir}/cracker.py <HASH> --online\n"
+                    "Stop at the first verified hit per hash.\n"
+                    "The script returns JSON with a `verified` boolean and "
+                    "`tiers_tried` listing every wordlist + lookup attempted. "
+                    "Only report a plaintext if `verified=true`. If `verified=false` "
+                    'after all tiers, say "not cracked" and copy the `tiers_tried` '
+                    'list verbatim — never invent a plaintext, never guess '
+                    '"password"/"qwerty"/"123456" without the tool confirming.\n"'
                 )
 
             # ---- decode skill detection ----
