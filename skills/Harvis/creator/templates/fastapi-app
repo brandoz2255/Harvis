@@ -1,0 +1,22 @@
+"""{{ description }} — minimal FastAPI scaffold."""
+
+from __future__ import annotations
+
+from fastapi import FastAPI
+from pydantic import BaseModel
+
+app = FastAPI(title="{{ name }}")
+
+
+class Echo(BaseModel):
+    payload: dict | None = None
+
+
+@app.get("/health")
+async def health() -> dict:
+    return {"ok": True, "service": "{{ name }}"}
+
+
+@app.post("/echo")
+async def echo(req: Echo) -> dict:
+    return {"received": req.payload or {}}

@@ -1,0 +1,27 @@
+"""
+{{ description }}
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+
+
+def run(args) -> int:
+    # TODO: implement {{ name }}
+    result = {"name": "{{ name }}", "ok": True}
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="{{ description }}")
+    # ap.add_argument("--example", help="...")
+    args = ap.parse_args()
+    return run(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

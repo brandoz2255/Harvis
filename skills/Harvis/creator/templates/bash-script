@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# {{ description }}
+set -euo pipefail
+IFS=$'\n\t'
+
+# TODO: implement {{ name }}
+echo "hello from {{ name }}"

@@ -1037,6 +1037,47 @@ class OpenClawClient:
                     "hash-cracking.\n"
                 )
 
+            # ---- creator skill detection ----
+            # "create/write/make me a script", "scaffold a flask app", etc.
+            _CREATOR_VERB_RE = re.compile(
+                r"\b("
+                r"(?:create|write|make|generate|scaffold)\s+(?:me\s+)?(?:a\s+|an\s+)?"
+                r"(?:python\s+)?(?:script|cli|file|dockerfile|flask\s+app|fastapi"
+                r"|github\s+action|gitignore|tool|helper|program|workflow)"
+                r"|set up (?:a|the)?\s*gitignore"
+                r"|write\s+a\s+\w+\s+(?:that|to)\s+\w+"  # "write a python that crack..."
+                r")\b",
+                re.IGNORECASE,
+            )
+            _creator_signal = bool(_CREATOR_VERB_RE.search(last_user_msg or ""))
+            creator_hint = ""
+            if _creator_signal:
+                _crdir = f"{OPENCLAW_HOME}/.openclaw/workspace/skills/creator"
+                creator_hint = (
+                    "\nFILE-CREATION TASK DETECTED. The user wants you to "
+                    "create a script / file / scaffold.\n"
+                    "Use the `creator` skill so the output gets auto-verified "
+                    "(py_compile / json.load / bash -n / yaml.safe_load) "
+                    "before you tell the user it's done.\n\n"
+                    "Two paths:\n"
+                    "  (a) For common shapes — use a template:\n"
+                    f"      python3 {_crdir}/creator.py scaffold "
+                    f"<template> --out {workdir}/<filename> "
+                    "--vars name=<short> description=\"<what it does>\"\n"
+                    f"      Templates available: python-cli, python-script, "
+                    "bash-script, dockerfile, flask-app, fastapi-app, "
+                    "github-action, gitignore-python\n"
+                    "  (b) For arbitrary content — write + auto-verify:\n"
+                    f"      cat <<'EOF' | python3 {_crdir}/creator.py "
+                    f"write {workdir}/<filename> --stdin\n"
+                    "      <your code here>\n"
+                    "      EOF\n\n"
+                    "BOTH paths return JSON with `syntax_ok: true|false`. "
+                    "DO NOT tell the user 'I created the script' unless "
+                    "`syntax_ok: true`. If false, copy the `errors` verbatim "
+                    "and either fix-and-rewrite or report the parser complaint.\n"
+                )
+
             # ---- rejection / "try again" detection ----
             # When the user says "that's wrong / incorrect / try again" after
             # a prior answer, the model otherwise just paraphrases its earlier
@@ -1124,6 +1165,7 @@ class OpenClawClient:
                 f"{decode_hint}"
                 f"{crypto_hint}"
                 f"{forensics_hint}"
+                f"{creator_hint}"
                 f"{retry_hint}"
                 f"\nEXECUTE THIS TASK NOW: {last_user_msg}\n\n"
                 "RULES:\n"
