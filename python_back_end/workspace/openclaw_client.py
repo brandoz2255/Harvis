@@ -923,17 +923,22 @@ class OpenClawClient:
                     "DO NOT write your own hashing/cracking python script — the skill "
                     "already has a verified one.\n"
                     "DO NOT try to download rockyou.txt or any wordlist via curl/web_fetch "
-                    "— those URLs 404. The bundled top1k.txt has the well-known commons "
-                    "(password, kirkles, emilybffl, …); fall through to --online for md5 "
-                    "if it misses.\n"
+                    "— rockyou.txt is already bundled at "
+                    f"{_hcdir}/wordlists/rockyou.txt (14M entries, full breach list); "
+                    "use it via --wordlist. If it ever isn't there, fall through to "
+                    "--online (md5 only) and stop — DO NOT fetch from the internet.\n"
                     "For EACH hash the user gave, run via the `exec` tool:\n"
                     f"  python3 {_hcdir}/cracker.py <HASH> "
-                    f"--wordlist {_hcdir}/wordlists/top1k.txt --online\n"
+                    f"--wordlist {_hcdir}/wordlists/top1k.txt "
+                    f"--wordlist {_hcdir}/wordlists/rockyou.txt --online\n"
+                    "Order matters: top1k.txt runs first (sub-second commons), then "
+                    "rockyou.txt (seconds-to-minutes long tail). Stop at the first "
+                    "verified hit per hash.\n"
                     "The script returns JSON with a `verified` boolean. Only report a "
-                    "plaintext if `verified=true`. If `verified=false`, say "
-                    '"not cracked" and list the tiers tried — never invent a plaintext, '
-                    'never guess "password"/"qwerty"/"123456" without the tool '
-                    "confirming.\n"
+                    "plaintext if `verified=true`. If `verified=false` after all tiers, "
+                    'say "not cracked" and list the tiers tried — never invent a '
+                    'plaintext, never guess "password"/"qwerty"/"123456" without the '
+                    "tool confirming.\n"
                 )
 
             # Imperative directive — task first, context last, no asking back.
