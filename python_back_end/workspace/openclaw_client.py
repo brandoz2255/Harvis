@@ -941,6 +941,106 @@ class OpenClawClient:
                     "tool confirming.\n"
                 )
 
+            # ---- decode skill detection ----
+            # Long encoded blobs (base64, hex, binary, morse, etc.) and verbs
+            # like "decode this" / "what does this say". Per-skill detection
+            # mirrors the hash-cracking pattern. Avoid false-positives on
+            # the hash list itself: if hash-cracking already fired AND the
+            # blob also looks hex, prefer hash-cracking (already covered).
+            _DECODE_VERB_RE = re.compile(
+                r"\b(decode|decrypt this|what does this say|encoded|base64|"
+                r"base32|hex(?:adecimal)? to|binary to|morse|cipher(?: ?text)?)\b",
+                re.IGNORECASE,
+            )
+            _BASE64_BLOB_RE = re.compile(r"\b[A-Za-z0-9+/]{20,}={0,2}\b")
+            _BINARY_BLOB_RE = re.compile(r"(?:[01]{8}\s*){4,}")
+            _MORSE_BLOB_RE = re.compile(r"(?:[\.\-]{1,6}[\s/]+){4,}[\.\-]{1,6}")
+            _decode_signal = (
+                bool(_DECODE_VERB_RE.search(last_user_msg or ""))
+                or bool(_BASE64_BLOB_RE.search(last_user_msg or ""))
+                or bool(_BINARY_BLOB_RE.search(last_user_msg or ""))
+                or bool(_MORSE_BLOB_RE.search(last_user_msg or ""))
+            )
+            decode_hint = ""
+            if _decode_signal and not _detected_hashes:
+                _decdir = f"{OPENCLAW_HOME}/.openclaw/workspace/skills/decode"
+                decode_hint = (
+                    "\nDECODE TASK DETECTED. The user pasted an encoded blob "
+                    "or asked to decode/decrypt without supplying a key.\n"
+                    "DO NOT decode by sight. Even ROT13 trips small models.\n"
+                    "DO NOT call memory_search.\n"
+                    "Run via the `exec` tool:\n"
+                    f"  python3 {_decdir}/decoder.py \"<encoded blob>\"\n"
+                    "Returns JSON with ranked candidates (lower score = more "
+                    "English-like). Tries base64/base32/hex/binary/url/rot/atbash/"
+                    "morse/ascii-decimal — pick the candidate whose plaintext "
+                    "linguistically matches what the user is looking for.\n"
+                )
+
+            # ---- classical-crypto skill detection ----
+            _CRYPTO_VERB_RE = re.compile(
+                r"\b(caesar|vigen[eè]re|atbash|shift cipher|rotation cipher|"
+                r"classical cipher|substitution cipher)\b",
+                re.IGNORECASE,
+            )
+            _crypto_signal = bool(_CRYPTO_VERB_RE.search(last_user_msg or ""))
+            crypto_hint = ""
+            if _crypto_signal:
+                _ccdir = f"{OPENCLAW_HOME}/.openclaw/workspace/skills/classical-crypto"
+                crypto_hint = (
+                    "\nCLASSICAL-CIPHER TASK DETECTED. The user mentioned a "
+                    "classical cipher (Caesar / Vigenere / Atbash / shift / "
+                    "rotation).\n"
+                    "DO NOT solve by inspection. Even simple Caesar shifts "
+                    "trip small models on novel text.\n"
+                    "Run via the `exec` tool:\n"
+                    f"  python3 {_ccdir}/cipher.py \"<ciphertext>\"\n"
+                    "Auto-solves Caesar (brute 26 shifts), Atbash, and "
+                    "Vigenere (auto key-length 2..12 via index of coincidence). "
+                    "Returns JSON with candidates ranked by chi-squared score; "
+                    "pick the most-English-likely. For known-key Vigenere add "
+                    "`--cipher vigenere --key <KEY>`.\n"
+                )
+
+            # ---- forensics-basics skill detection ----
+            _FORENSICS_VERB_RE = re.compile(
+                r"\b(strings|exiftool|binwalk|hexdump|metadata|"
+                r"what'?s in (?:this|the) file|find the flag|hidden data|"
+                r"forensics?|analyze (?:this )?(?:file|image|binary|archive))\b",
+                re.IGNORECASE,
+            )
+            # File-path pattern: a path that ends with a known forensics-relevant
+            # extension. Avoid matching cracker.py / cipher.py / decoder.py
+            # invocations (those go to other skills).
+            _FILE_PATH_RE = re.compile(
+                r"(?:/[\w./-]+|\b[\w./-]+)\.(?:png|jpg|jpeg|gif|bmp|tiff|webp|"
+                r"zip|tar|tar\.gz|tgz|7z|rar|bin|exe|dll|so|elf|pcap|pcapng|"
+                r"docx?|pdf|xlsx?|pptx?|wav|mp3|mp4|mov|avi)\b",
+                re.IGNORECASE,
+            )
+            _forensics_signal = (
+                bool(_FORENSICS_VERB_RE.search(last_user_msg or ""))
+                or bool(_FILE_PATH_RE.search(last_user_msg or ""))
+            )
+            forensics_hint = ""
+            if _forensics_signal:
+                _fbdir = f"{OPENCLAW_HOME}/.openclaw/workspace/skills/forensics-basics"
+                forensics_hint = (
+                    "\nFILE-FORENSICS TASK DETECTED. The user wants to inspect "
+                    "a file (find a flag, pull metadata, look for embedded "
+                    "data).\n"
+                    "DO NOT speculate about file contents. Every claim must "
+                    "come from the analyzer's JSON output.\n"
+                    "Run via the `exec` tool:\n"
+                    f"  python3 {_fbdir}/analyze.py /path/to/file\n"
+                    "Wraps file/strings/exiftool/binwalk/xxd. Hunts for "
+                    "flag{}, CTF{}, HTB{}, picoCTF{}, NCAE{} patterns plus "
+                    "URLs/emails/base64/hashes inside `findings`. Drill into "
+                    "`tools.*` for raw output if needed. If a finding is a "
+                    "base64 blob, pipe to the decode skill; if a hash, pipe to "
+                    "hash-cracking.\n"
+                )
+
             # Imperative directive — task first, context last, no asking back.
             _workdir_init = _exec_via_bash(f"mkdir -p {workdir} && cd {workdir} && pwd")
             directive = (
@@ -964,6 +1064,9 @@ class OpenClawClient:
                 f"{web_hint}"
                 f"{browser_hint}"
                 f"{hash_hint}"
+                f"{decode_hint}"
+                f"{crypto_hint}"
+                f"{forensics_hint}"
                 f"\nEXECUTE THIS TASK NOW: {last_user_msg}\n\n"
                 "RULES:\n"
                 "- ALWAYS use tool calls (exec, write, read). NEVER type commands as text.\n"
