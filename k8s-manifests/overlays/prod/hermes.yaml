@@ -45,6 +45,11 @@ metadata:
     app.kubernetes.io/component: hermes
 spec:
   replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       app.kubernetes.io/name: harvis-ai
@@ -106,7 +111,7 @@ spec:
               cpu: 50m
 
         - name: clone-workspace
-          image: dulc3/hermes:latest
+          image: dulc3/hermes:v0.11.3
           command: ["sh", "-c"]
           args:
             - |
@@ -184,7 +189,7 @@ spec:
 
       containers:
         - name: hermes
-          image: dulc3/hermes:latest
+          image: dulc3/hermes:v0.11.3
           imagePullPolicy: Always
           args: ["gateway"]
 
@@ -198,15 +203,15 @@ spec:
               value: /home/node
             - name: HERMES_HOME
               value: /home/node/.hermes
-          - name: HERMES_GATEWAY_TOKEN
-               valueFrom:
-                 secretKeyRef:
-                   name: harvis-ai-hermes-secret
-                   key: hermes-gateway-token
-             - name: OPENAI_BASE_URL
-               value: "http://harvis-ai-merged-backend.ai-agents.svc.cluster.local:8080/v1"
-             - name: OPENAI_API_KEY
-               value: "qwen-local"
+            - name: HERMES_GATEWAY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-hermes-secret
+                  key: hermes-gateway-token
+            - name: OPENAI_BASE_URL
+              value: "http://harvis-ai-merged-backend.ai-agents.svc.cluster.local:8080/v1"
+            - name: OPENAI_API_KEY
+              value: "qwen-local"
 
             - name: DISCORD_BOT_TOKEN
               valueFrom:
@@ -236,6 +241,13 @@ spec:
                   name: harvis-ai-hermes-secret
                   key: database-url
 
+            - name: API_SERVER_HOST
+              value: "0.0.0.0"
+            - name: API_SERVER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-hermes-secret
+                  key: hermes-gateway-token
             - name: GIT_TERMINAL_PROMPT
               value: "0"
             - name: GIT_ASKPASS
@@ -252,22 +264,24 @@ spec:
               mountPath: /home/node/.kube
 
           livenessProbe:
-            initialDelaySeconds: 120
-            periodSeconds: 60
-            exec:
-              command:
-              - python3
-              - -c
-              - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8642/health")
+              initialDelaySeconds: 600
+              periodSeconds: 60
+              failureThreshold: 10
+              exec:
+                command:
+                - python3
+                - -c
+                - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8642/health")
 
           readinessProbe:
-            initialDelaySeconds: 90
-            periodSeconds: 30
-            exec:
-              command:
-              - python3
-              - -c
-              - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8642/health")
+              initialDelaySeconds: 10
+              periodSeconds: 5
+              failureThreshold: 30
+              exec:
+                command:
+                - python3
+                - -c
+                - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8642/health")
 
           resources:
             requests:
