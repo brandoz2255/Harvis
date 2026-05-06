@@ -39,7 +39,7 @@ images:
     newTag: v20260426-opencode
   - name: dulc3/hermes
     newName: dulc3/hermes
-    newTag: v0.11.2
+    newTag: v0.11.3
   - name: dulc3/harvis-mempalace
     newName: dulc3/harvis-mempalace
     newTag: latestv1
