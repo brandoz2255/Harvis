@@ -716,10 +716,17 @@ class OpenClawClient:
                 "Never output the command as text. Always call exec.\n"
             )
 
-            # Browser automation hint — injected when interactive_context is provided
-            # with workspace_id and capability_token (from workspace_web_caps table).
+            # Browser automation hint — only injected when (1) interactive_context
+            # is provided AND (2) the task actually looks browser/visual. Without
+            # the visual-task gate, every task brief got 35 lines of curl-based
+            # browser-session examples. Small models then echoed those examples
+            # as text instead of running them, and even llama3.1:8b would
+            # hallucinate browser calls for unrelated tasks (hash-cracking,
+            # file edits, etc.). Visual-task heuristic is below at
+            # _looks_like_browser_or_screenshot_task.
             browser_hint = ""
-            if interactive_context:
+            looks_visual_task_for_hint = _looks_like_browser_or_screenshot_task(last_user_msg)
+            if interactive_context and looks_visual_task_for_hint:
                 _bws_id = interactive_context.get("workspace_id", "")
                 _bcap = interactive_context.get("capability_token", "")
                 if _bws_id and _bcap:
@@ -801,6 +808,45 @@ class OpenClawClient:
                         self.workspace_id, _bws_id,
                     )
 
+            # Hash detection — small/medium local models (gemma4:e4b, even
+            # llama3.1:8b) don't auto-discover skills via TOOLS.md, so they
+            # default to memory_search or hand-rolled python on hash-crack
+            # tasks. Inline the cracker.py invocation in the prompt so the
+            # tool is unmissable regardless of model.
+            _HASH_HEX_RE = re.compile(
+                r"\b[a-f0-9]{32}\b|\b[a-f0-9]{40}\b|\b[a-f0-9]{56}\b"
+                r"|\b[a-f0-9]{64}\b|\b[a-f0-9]{96}\b|\b[a-f0-9]{128}\b",
+                re.IGNORECASE,
+            )
+            _HASH_SALTED_RE = re.compile(r"\$(?:1|2[abxy]?|5|6|argon2)\$", re.IGNORECASE)
+            _detected_hashes = (
+                _HASH_HEX_RE.findall(last_user_msg or "")
+                + _HASH_SALTED_RE.findall(last_user_msg or "")
+            )
+            hash_hint = ""
+            if _detected_hashes:
+                _hcdir = f"{OPENCLAW_HOME}/.openclaw/workspace/skills/hash-cracking"
+                hash_hint = (
+                    "\nHASH-CRACKING DETECTED. The user provided one or more password "
+                    "hashes. The hash-cracking skill is installed and you must use it.\n"
+                    "DO NOT call memory_search — hashes are one-way, the plaintext is "
+                    "not in memory.\n"
+                    "DO NOT write your own hashing/cracking python script — the skill "
+                    "already has a verified one.\n"
+                    "DO NOT try to download rockyou.txt or any wordlist via curl/web_fetch "
+                    "— those URLs 404. The bundled top1k.txt has the well-known commons "
+                    "(password, kirkles, emilybffl, …); fall through to --online for md5 "
+                    "if it misses.\n"
+                    "For EACH hash the user gave, run via the `exec` tool:\n"
+                    f"  python3 {_hcdir}/cracker.py <HASH> "
+                    f"--wordlist {_hcdir}/wordlists/top1k.txt --online\n"
+                    "The script returns JSON with a `verified` boolean. Only report a "
+                    "plaintext if `verified=true`. If `verified=false`, say "
+                    '"not cracked" and list the tiers tried — never invent a plaintext, '
+                    'never guess "password"/"qwerty"/"123456" without the tool '
+                    "confirming.\n"
+                )
+
             # Imperative directive — task first, context last, no asking back.
             _workdir_init = _exec_via_bash(f"mkdir -p {workdir} && cd {workdir} && pwd")
             directive = (
@@ -823,6 +869,7 @@ class OpenClawClient:
                 f"{rag_hint}"
                 f"{web_hint}"
                 f"{browser_hint}"
+                f"{hash_hint}"
                 f"\nEXECUTE THIS TASK NOW: {last_user_msg}\n\n"
                 "RULES:\n"
                 "- ALWAYS use tool calls (exec, write, read). NEVER type commands as text.\n"
