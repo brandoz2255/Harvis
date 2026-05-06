@@ -1037,6 +1037,67 @@ class OpenClawClient:
                     "hash-cracking.\n"
                 )
 
+            # ---- rejection / "try again" detection ----
+            # When the user says "that's wrong / incorrect / try again" after
+            # a prior answer, the model otherwise just paraphrases its earlier
+            # response (the prior tool output is still in conversation context
+            # and the model treats it as authoritative, skipping a real retry).
+            # Inject an explicit "PRIOR-ANSWER-REJECTED" block that forces the
+            # model to discard prior tool output and re-run from scratch with
+            # alternate strategies.
+            _REJECTION_RE = re.compile(
+                r"\b("
+                r"(?:that'?s|that is)\s+(?:wrong|incorrect|not (?:right|correct))"
+                r"|(?:wrong|incorrect)\s+answer"
+                r"|try again"
+                r"|do (?:it|this) (?:again|over|differently)"
+                r"|(?:previous|last)\s+(?:answer|response)\s+(?:was\s+)?"
+                r"(?:wrong|incorrect|bad|off|mistaken)"
+                r"|(?:not (?:right|correct)|wrong|incorrect)\s*[\.\!\?]?\s*$"
+                r"|fix (?:this|it|that)"
+                r"|are you sure"
+                r"|that('?s|\s+is)?\s+still\s+(?:wrong|incorrect)"
+                r")\b",
+                re.IGNORECASE,
+            )
+            _retry_signal = bool(_REJECTION_RE.search(last_user_msg or ""))
+            retry_hint = ""
+            if _retry_signal:
+                retry_hint = (
+                    "\nPRIOR-ANSWER-REJECTED. The user is telling you your "
+                    "previous response was wrong. Do not paraphrase, defend, "
+                    "or re-explain that earlier answer.\n"
+                    "Required behavior:\n"
+                    "1. Discard the prior tool output that's in your context. "
+                    "Treat it as untrusted — it produced a wrong answer.\n"
+                    "2. RE-RUN every relevant tool from scratch with the "
+                    "current user message as the only source of truth. Do "
+                    "NOT skip the tool call because you 'already know' the "
+                    "answer — you don't.\n"
+                    "3. Try alternate strategies the previous attempt missed:\n"
+                    "   - For hash-cracking: try `--algo ntlm` (32-hex could "
+                    "be NTLM, not MD5); try without the algo hint to let "
+                    "identify_hash pick; ensure cracker.py auto-loads BOTH "
+                    "top1k.txt AND rockyou.txt (it does by default — "
+                    "`tiers_tried` in the JSON proves it).\n"
+                    "   - For decode: try `--all` to see every candidate, "
+                    "not just the top 5; consider that the input might be a "
+                    "double encoding (base64 of hex of …).\n"
+                    "   - For classical-crypto: try `--cipher vigenere` "
+                    "explicitly if Caesar brute didn't surface a clean "
+                    "result; if the user supplied a key, use it.\n"
+                    "   - For forensics: try `--no-binwalk` if it stalled; "
+                    "consider that the flag might be in a different format "
+                    "(CTF{}/HTB{}/picoCTF{}/NCAE{}).\n"
+                    "4. If after a fresh tool run the result is genuinely "
+                    "the same, say so EXPLICITLY: \"Re-ran from scratch; "
+                    "tool reports verified=false across tiers X, Y, Z. The "
+                    "underlying answer hasn't changed.\" Then ask the user "
+                    "for new context (different algorithm? different hash "
+                    "list? expected plaintext shape?). Do NOT just retype "
+                    "the previous response.\n"
+                )
+
             # Imperative directive — task first, context last, no asking back.
             _workdir_init = _exec_via_bash(f"mkdir -p {workdir} && cd {workdir} && pwd")
             directive = (
@@ -1063,6 +1124,7 @@ class OpenClawClient:
                 f"{decode_hint}"
                 f"{crypto_hint}"
                 f"{forensics_hint}"
+                f"{retry_hint}"
                 f"\nEXECUTE THIS TASK NOW: {last_user_msg}\n\n"
                 "RULES:\n"
                 "- ALWAYS use tool calls (exec, write, read). NEVER type commands as text.\n"
