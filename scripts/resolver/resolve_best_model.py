@@ -195,91 +195,139 @@ def list_pulled_models(feedback: dict) -> list[dict]:
     return out
 
 
-def score_models(models: list[dict], vram_gb: float | None) -> list[dict]:
-    """Score and sort. Higher score = better. Ineligible (over budget) gets -inf.
+def estimate_kv_cache_gb(disk_gb: float, num_ctx: int, num_parallel: int = 1,
+                         kv_cache_type: str = "f16") -> float:
+    """Rough KV-cache cost estimate.
 
-    Eligibility rules (data-driven, no hardcoded names):
-      • Skip models with size_gb == 0 — these are cloud/remote (e.g. *:cloud);
-        not real local-inference options.
-      • "Fits" if disk_size <= vram_gb (lenient): Ollama can spill 10-20 % to
-        CPU at marginal sizes without major slowdown. We only want to reject
-        models that are catastrophically over (≥ 2x VRAM) — those produce
-        the multi-minute first-token latencies that drove this whole script.
+    Real KV cost is num_layers × num_kv_heads × head_dim × 2 (K+V) × bytes ×
+    num_ctx × num_parallel. We don't have those metadata for every model, so
+    fall back on a heuristic: ~3 % of disk size per 1K of effective context,
+    scaled by parallel multiplier. f16 baseline; q8_0 halves it.
+    """
+    bytes_per_elem = {"f16": 2.0, "q8_0": 1.0, "q4_0": 0.5}.get(kv_cache_type, 2.0)
+    eff_ctx = num_ctx * max(1, num_parallel)
+    # Coefficient calibrated against observed ~5 GB Q4 8B at 4K f16 → ~0.3 GB cache
+    cache_gb = disk_gb * 0.03 * (eff_ctx / 1024) * (bytes_per_elem / 2.0)
+    return cache_gb
 
-    Scoring (when fit):
-      • Tools-capable → +100 (huge weight; agentic workloads need it)
-      • "Comfort margin" — smaller models load faster + leave headroom for
-        KV cache. Score by (vram - size) / vram, up to +30.
-      • Recency (mtime) tiebreaker → up to +10
+
+def score_models(models: list[dict], vram_gb: float | None,
+                 num_ctx: int = 4096, num_parallel: int = 1,
+                 kv_cache_type: str = "f16") -> list[dict]:
+    """Score and rank — NEVER hard-rejects. Aligns with HARVIS goal #3
+    ("big models allowed to try, even if slow"): low scores rank to bottom
+    but stay in the list so the user can override.
+
+    Effective-size priority for the scoring ESTIMATE (not the same as
+    blacklist criteria — there is no blacklist anymore):
+      1. Currently-loaded runtime size from /api/ps (most accurate)
+      2. Historical peak observed in past resolver runs (peak_runtime_gb) —
+         used as an UPPER BOUND HINT, not gospel. A 38 GB peak observed at
+         num_ctx=131K does NOT mean the model needs 38 GB at num_ctx=4K.
+         When user passes a smaller num_ctx, we recompute the KV-cache
+         estimate and surface that as the operating point.
+      3. Disk × 1.2 + KV-cache estimate at the requested num_ctx/parallel/
+         kv_cache_type.
+
+    Score components (all positive contributions):
+      • Tools-capable                                    +100
+      • Comfort margin (effective ≤ vram)                up to +30
+      • Recency tiebreaker (newer = higher)              up to +10
+      • Soft penalty for over-budget (smooth, not -inf)  up to -40
+      • Soft penalty per past failure (still allowed)    -10 each
+      • Cloud/remote models (size 0)                     -100
+                                                          (low rank, still listed)
+
+    `reason` field carries the operating-point math so the user can
+    override safely: "needs ~12.4G at num_ctx=4K, num_parallel=1; vram=8G;
+    will spill ~4G to CPU".
     """
     if vram_gb:
-        hard_max_gb = 2.0 * vram_gb
         comfort_gb = vram_gb
     else:
-        hard_max_gb = 64.0
-        comfort_gb = 16.0
+        comfort_gb = 16.0  # CPU-only assumption
     scored: list[dict] = []
     for m in models:
-        # Effective size priority:
-        #   1. Currently-loaded runtime size from /api/ps (most accurate)
-        #   2. Historical peak observed in past resolver runs (peak_runtime_gb)
-        #   3. Disk × 1.3 (typical Q4 weights + small KV cache estimate)
         disk_gb = m["size_gb"]
         runtime_gb = m.get("runtime_size_gb")
         peak_gb = m.get("peak_runtime_gb")
+
+        # Compute KV-cache estimate at the *requested* operating point
+        kv_estimate_gb = (
+            estimate_kv_cache_gb(disk_gb, num_ctx, num_parallel, kv_cache_type)
+            if disk_gb > 0 else 0.0
+        )
+
+        # Best estimate of effective runtime size
         if runtime_gb and runtime_gb > 0:
             effective_gb = runtime_gb
             estimate_source = f"loaded now ({runtime_gb:.1f}G)"
-        elif peak_gb and peak_gb > 0:
-            effective_gb = peak_gb
-            estimate_source = f"past peak ({peak_gb:.1f}G)"
+        elif disk_gb > 0:
+            # Disk × 1.2 covers weights load overhead; add KV at requested ctx
+            effective_gb = disk_gb * 1.2 + kv_estimate_gb
+            estimate_source = (
+                f"weights {disk_gb*1.2:.1f}G + KV {kv_estimate_gb:.1f}G "
+                f"@ ctx={num_ctx//1024}K×{num_parallel} {kv_cache_type}"
+            )
         else:
-            effective_gb = disk_gb * 1.3
-            estimate_source = "est: disk×1.3"
+            effective_gb = 0.0
+            estimate_source = "cloud/remote (size 0)"
 
-        # Skip cloud/remote models — they don't run on the host gateway
-        if disk_gb <= 0.001:
-            scored.append({
-                **m, "effective_gb": 0, "score": float("-inf"), "fits": False,
-                "budget_gb": comfort_gb,
-                "reason": "cloud/remote (no local size)",
-                "estimate_source": estimate_source,
-            })
-            continue
-        if effective_gb > hard_max_gb:
-            scored.append({
-                **m, "effective_gb": effective_gb, "score": float("-inf"),
-                "fits": False, "budget_gb": comfort_gb,
-                "reason": f"too large ({effective_gb:.1f}G estimated > {hard_max_gb:.1f}G hard max)",
-                "estimate_source": estimate_source,
-            })
-            continue
+        # ---- scoring (no hard rejects — everything stays in the ranked list) ----
         s = 0.0
-        if m["supports_tools"]:
-            s += 100.0
-        # Comfort score uses effective_gb (runtime estimate), not disk size
-        if comfort_gb > 0:
-            comfort_ratio = max(0.0, (comfort_gb - effective_gb) / comfort_gb)
-            s += 30.0 * comfort_ratio
-            if effective_gb > comfort_gb:
-                penalty = 20.0 * min(2.0, (effective_gb - comfort_gb) / comfort_gb)
-                s -= penalty
-        if m.get("modified_at"):
-            recency_rank = sorted(models, key=lambda x: x.get("modified_at") or "").index(m) / max(1, len(models) - 1)
-            s += 10.0 * recency_rank
-        # Failure-count penalty — every recorded failure for this model on
-        # this host knocks 50 points off. After 2 failures the model is
-        # almost certainly going to lose to fresher candidates.
-        fc = int(m.get("failure_count", 0))
-        if fc > 0:
-            s -= 50.0 * fc
+        if disk_gb <= 0.001:
+            # Cloud / remote models can't run on the host gateway, so they
+            # rank low — but we keep them in the output so the user knows
+            # they exist and can route to them via cloud-Ollama.
+            s -= 100.0
+            reason = "cloud/remote (size 0) — not local-runnable, but listed"
+        else:
+            if m["supports_tools"]:
+                s += 100.0
+            if comfort_gb > 0:
+                # Linear comfort bonus: full +30 if effective fits comfortably,
+                # 0 at exactly comfort_gb, smooth penalty as we go over.
+                comfort_ratio = max(-2.0,
+                                    (comfort_gb - effective_gb) / comfort_gb)
+                s += 30.0 * max(0.0, comfort_ratio)
+                if effective_gb > comfort_gb:
+                    over_ratio = min(3.0, (effective_gb - comfort_gb) / comfort_gb)
+                    s -= 40.0 * over_ratio  # was hard-reject; now soft penalty
+            if m.get("modified_at"):
+                recency_rank = (
+                    sorted(models, key=lambda x: x.get("modified_at") or "")
+                    .index(m) / max(1, len(models) - 1)
+                )
+                s += 10.0 * recency_rank
+            # Failure penalty — softer than the old -50; user can still pick
+            # a previously-failed model if they want to retry with new tuning.
+            fc = int(m.get("failure_count", 0))
+            if fc > 0:
+                s -= 10.0 * fc
+
+            # Reason text — operating-point math + caveat
+            if effective_gb <= comfort_gb:
+                reason = f"comfortable @ ctx={num_ctx//1024}K (~{effective_gb:.1f}G / {comfort_gb:.1f}G VRAM)"
+            elif effective_gb <= 1.5 * comfort_gb:
+                reason = f"tight @ ctx={num_ctx//1024}K (~{effective_gb:.1f}G; ~{effective_gb-comfort_gb:.1f}G CPU spill expected)"
+            elif effective_gb <= 3.0 * comfort_gb:
+                reason = f"will spill heavily @ ctx={num_ctx//1024}K (~{effective_gb:.1f}G needed; CPU-bound, slow)"
+            else:
+                reason = f"way over budget @ ctx={num_ctx//1024}K (~{effective_gb:.1f}G; consider lower ctx or smaller model)"
+            if peak_gb and peak_gb > effective_gb * 1.5:
+                reason += (f"  ⚠ past peak {peak_gb:.1f}G observed (likely from "
+                           f"larger num_ctx); not blacklisted — try lower ctx")
+            if fc > 0:
+                reason += f"  ⚠ {fc} prior failure(s)"
+
         scored.append({
-            **m, "effective_gb": round(effective_gb, 1), "score": round(s, 2),
-            "fits": True, "budget_gb": comfort_gb,
-            "reason": (
-                f"fit + comfortable" if effective_gb <= comfort_gb else
-                f"fit but tight (CPU spill expected)"
-            ) + (f"  ⚠ {fc} prior failure(s)" if fc else ""),
+            **m,
+            "effective_gb": round(effective_gb, 1),
+            "kv_estimate_gb": round(kv_estimate_gb, 2),
+            "score": round(s, 2),
+            "fits": effective_gb <= comfort_gb,  # informational only
+            "budget_gb": comfort_gb,
+            "reason": reason,
             "estimate_source": estimate_source,
         })
     scored.sort(key=lambda x: x["score"], reverse=True)
@@ -317,6 +365,19 @@ def main() -> int:
     ap.add_argument("--config", default="~/.openclaw/openclaw.json")
     ap.add_argument("--vram-gb", type=float, default=None,
                     help="Override detected VRAM (GB)")
+    ap.add_argument("--num-ctx", type=int, default=4096,
+                    help="Operating-point context window the resolver should "
+                         "score against (default: 4096; matches the Modelfile "
+                         "default for 8 GB hosts). Bigger num_ctx = bigger KV "
+                         "cache = bigger effective memory.")
+    ap.add_argument("--num-parallel", type=int, default=1,
+                    help="OLLAMA_NUM_PARALLEL value (default: 1). Ollama's "
+                         "adaptive default is up to 4 — multiplies effective "
+                         "context. Match this to your Ollama env config.")
+    ap.add_argument("--kv-cache-type", choices=["f16", "q8_0", "q4_0"],
+                    default="f16",
+                    help="OLLAMA_KV_CACHE_TYPE (default: f16). q8_0 halves "
+                         "KV memory with no quality loss for tool-calling.")
     ap.add_argument("--mark-failed", metavar="MODEL",
                     help="Increment the failure_count for <MODEL> in feedback "
                          "(use after a timeout/OOM observed for that model). "
@@ -353,15 +414,21 @@ def main() -> int:
     if not models:
         print("No models found in Ollama. Pull one with `ollama pull <name>` first.", file=sys.stderr)
         return 1
-    scored = score_models(models, vram)
-    fit = [m for m in scored if m["fits"]]
-    primary = fit[0]["name"] if fit else None
-    fallbacks = [m["name"] for m in fit[1:3]]  # next 2 best
+    scored = score_models(models, vram, num_ctx=args.num_ctx,
+                          num_parallel=args.num_parallel,
+                          kv_cache_type=args.kv_cache_type)
+    # Top-ranked is primary regardless of "fits" — even an over-budget model
+    # is allowed if the user has nothing else (per HARVIS goal #3: rank, don't
+    # reject). "fits" is informational only now.
+    eligible = [m for m in scored if m["score"] > float("-inf")
+                and m["size_gb"] > 0.001]
+    primary = eligible[0]["name"] if eligible else None
+    fallbacks = [m["name"] for m in eligible[1:3]]
 
     if args.json:
         print(json.dumps({
             "vram_gb": vram,
-            "budget_gb": fit[0]["budget_gb"] if fit else None,
+            "budget_gb": eligible[0]["budget_gb"] if fit else None,
             "primary": primary,
             "fallbacks": fallbacks,
             "ranked": [{
@@ -378,8 +445,8 @@ def main() -> int:
         }, indent=2))
     else:
         print(f"GPU VRAM detected:    {vram:.1f} GB" if vram else "GPU VRAM:             (none — CPU mode)")
-        if fit:
-            print(f"Comfort budget:       {fit[0]['budget_gb']:.1f} GB    Hard max: {2 * fit[0]['budget_gb']:.1f} GB")
+        if eligible:
+            print(f"Comfort budget:       {eligible[0]['budget_gb']:.1f} GB    Hard max: {2 * eligible[0]['budget_gb']:.1f} GB")
         print()
         print(f"  {'name':38s}  {'disk':>5s}  {'eff':>5s}  {'ctx':>5s}  tools  {'score':>6s}  reason")
         print(f"  {'-' * 38}  {'-' * 5}  {'-' * 5}  {'-' * 5}  -----  {'-' * 6}  ------")
