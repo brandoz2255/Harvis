@@ -146,10 +146,14 @@ async def dispatch_inbound(
     # Phase 7B + 4B-pre — Path A enrichment: layer per-user SOUL.md and
     # recalled memories into the task brief preamble. Both blocks fail-soft:
     # any storage error logs and falls back to whatever subset succeeded.
+    # The two blocks are hoisted to outer scope so the fast-path branch
+    # below can pass them as separate SYSTEM-role context (see
+    # _compose_fast_path_system_prompt). Workspace path keeps the legacy
+    # "preamble + USER MESSAGE" smush in enriched_brief.
+    persona_block = ""
+    recall_block = ""
     enriched_brief = event.text
     if pool is not None:
-        persona_block = ""
-        recall_block = ""
         try:
             from ..soul.loader import build_persona_block
             persona_block = await build_persona_block(pool, user_id)
@@ -195,8 +199,20 @@ async def dispatch_inbound(
             pool, user_id=user_id, session_id=session_id, task_brief=enriched_brief,
         )
         if workspace_id:
+            # Pass persona + recall as SEPARATE blocks so the fast-path
+            # routes them into the SYSTEM role (authoritative ground truth)
+            # rather than burying them inside the user message. The user
+            # message in this branch is just event.text — the model sees
+            # PERSONA and RECENT FACTS as system context above its own
+            # base prompt.
             _asyncio.create_task(
-                finish_fast_path_run(pool, workspace_id=workspace_id, enriched_brief=enriched_brief),
+                finish_fast_path_run(
+                    pool,
+                    workspace_id=workspace_id,
+                    enriched_brief=event.text,
+                    persona_block=persona_block,
+                    recall_block=recall_block,
+                ),
                 name=f"fast_path:{workspace_id}",
             )
             await invoke_hook(

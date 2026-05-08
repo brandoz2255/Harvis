@@ -50,19 +50,51 @@ _WORKSPACE_SIGNALS = re.compile(
 )
 
 
-_FAST_PATH_SYSTEM_PROMPT = (
-    "You are Harvis, a helpful AI assistant. Give concise, direct answers. "
-    "You DO have access to recent conversation context (it's in this prompt) — "
-    "use it. If the user just told you a fact about themselves (name, "
-    "preference, project), remember it for follow-up questions.\n"
+_FAST_PATH_SYSTEM_PROMPT_BASE = (
+    "You are Harvis, a helpful AI assistant. Give concise, direct answers.\n"
     "\n"
     "You are running in CONVERSATIONAL mode for this turn: no tools, no web, "
     "no file access, no code execution. If the user actually needs tools "
     "(web search, file read, run code, analyze an attached image), say so "
     "briefly and ask them to rephrase as a workspace task. Do NOT invent "
     "tool output. Do NOT say \"as an AI I can't\" — just route them to the "
-    "workspace if they need it."
+    "workspace if they need it.\n"
+    "\n"
+    "MEMORY: When PERSONA or RECENT FACTS sections appear above this one, "
+    "treat them as ground truth about the user. If the user asks \"what do "
+    "you remember\", \"what's the last thing you remember\", \"what do you "
+    "know about me\", \"do you remember X\", or any similar memory "
+    "question, your reply MUST quote from those sections — do NOT answer "
+    "as if you have no memory. If those sections are absent or empty, say "
+    "so honestly (\"I don't have anything saved for you yet — tell me a "
+    "fact and I'll remember it\") instead of fabricating."
 )
+
+# Backwards-compat alias for callers that import the constant directly.
+_FAST_PATH_SYSTEM_PROMPT = _FAST_PATH_SYSTEM_PROMPT_BASE
+
+
+def _compose_fast_path_system_prompt(
+    persona_block: str = "",
+    recall_block: str = "",
+) -> str:
+    """Build the system prompt for fast-path with persona + recall context.
+
+    Persona and recall live in the SYSTEM role (not the user role) so the
+    model treats them as authoritative ground truth, not as something the
+    user said to inspect. Same recall data the workspace path uses — the
+    dispatcher builds it once and passes it to both paths.
+    """
+    parts: list[str] = []
+    if persona_block and persona_block.strip():
+        parts.append(
+            "PERSONA (your saved instructions for this user):\n"
+            + persona_block.strip()
+        )
+    if recall_block and recall_block.strip():
+        parts.append(recall_block.strip())
+    parts.append(_FAST_PATH_SYSTEM_PROMPT_BASE)
+    return "\n\n".join(parts)
 
 
 async def should_use_fast_path(text: str) -> bool:
@@ -99,7 +131,9 @@ async def direct_llm_reply(
     *,
     ollama_url: Optional[str] = None,
     model_name: Optional[str] = None,
-    system_prompt: str = _FAST_PATH_SYSTEM_PROMPT,
+    system_prompt: Optional[str] = None,
+    persona_block: str = "",
+    recall_block: str = "",
     timeout_s: Optional[float] = None,
 ) -> Optional[str]:
     """Single Ollama call (no tools), returns the model's reply or None.
@@ -130,6 +164,18 @@ async def direct_llm_reply(
             timeout_s = float(os.getenv("HARVIS_FAST_PATH_TIMEOUT_S", "600"))
         except ValueError:
             timeout_s = 600.0
+
+    # Compose the system prompt: caller-provided system_prompt wins; otherwise
+    # inject persona + recall blocks (if any) into the SYSTEM role using the
+    # default fast-path scaffold. Memory and persona belong in system, not
+    # user — that's why the workspace path injects them as preamble blocks
+    # and why the model treats them as authoritative there. Same data, same
+    # role, same authority for fast-path now.
+    if system_prompt is None:
+        system_prompt = _compose_fast_path_system_prompt(
+            persona_block=persona_block,
+            recall_block=recall_block,
+        )
 
     payload = {
         "model": model,
@@ -235,6 +281,8 @@ async def finish_fast_path_run(
     *,
     workspace_id: str,
     enriched_brief: str,
+    persona_block: str = "",
+    recall_block: str = "",
     ollama_url: Optional[str] = None,
 ) -> None:
     """Fire-and-forget body: run the LLM call, then mark the row terminal.
@@ -243,9 +291,19 @@ async def finish_fast_path_run(
     the request handler. Exceptions are caught and converted to a failed
     status so the sidecar's polling pipeline always sees a terminal
     state instead of hanging.
+
+    persona_block + recall_block are the same SOUL.md persona and Hermes-
+    derived memory recall blocks the workspace path receives. They land in
+    the SYSTEM role (via direct_llm_reply) so memory questions get
+    authoritative context, not buried-in-the-user-message context.
     """
     try:
-        answer = await direct_llm_reply(enriched_brief, ollama_url=ollama_url)
+        answer = await direct_llm_reply(
+            enriched_brief,
+            ollama_url=ollama_url,
+            persona_block=persona_block,
+            recall_block=recall_block,
+        )
     except Exception as exc:
         logger.exception("fast_path background LLM call raised")
         await mark_run_terminal(
