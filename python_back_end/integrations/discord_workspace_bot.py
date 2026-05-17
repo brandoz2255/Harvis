@@ -191,10 +191,17 @@ _WORKSPACE_SIGNALS = re.compile(
 
 
 _VISUAL_TASK_SIGNALS = re.compile(
+    # Visual intent ONLY — explicit screenshot / page-render words.
+    # Previously this also matched bare URLs and TLDs, which silently forced
+    # `agent_id="main"` for ANY prompt mentioning a link (including our own
+    # skill example URLs), overriding the user's `/model` pick. Removed the
+    # URL/TLD matches; only kick into the OpenClaw browser path when the user
+    # actually asks to see something.
     r"(screenshot|screen\s*shot|screencap|capture\s+screen|"
     r"show\s+me\s+the\s+page|take\s+(?:a\s+)?picture\s+of\s+the\s+page|"
     r"website\s+screenshot|webpage\s+screenshot|"
-    r"https?://|\.com\b|\.org\b|\.io\b|\.dev\b|\.net\b)",
+    r"open\s+(?:the\s+)?(?:url|website|page|browser)|"
+    r"navigate\s+to\s+http|render\s+(?:the\s+)?page)",
     re.IGNORECASE,
 )
 
@@ -220,6 +227,61 @@ def _is_obviously_simple(text: str) -> bool:
     return False
 
 
+_DISCORD_MEMORY_META_RE = re.compile(
+    r"\b(how far back can you see|what (?:is )?my job|what am i|who am i|"
+    r"what did i (?:say|tell you)|do you remember|remember what)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_discord_memory_meta_chat(text: str) -> bool:
+    """Personal-memory and capability questions should stay in chat mode.
+
+    `DISCORD_PREFER_WORKSPACE=true` intentionally sends many prompts through
+    OpenClaw, but identity/memory questions are better answered from recent
+    Discord turns. Sending them to workspace tends to trigger the Harvis
+    identity prompt instead of answering the user's actual question.
+    """
+    return bool(_DISCORD_MEMORY_META_RE.search(text or ""))
+
+
+def _direct_discord_memory_reply(
+    content: str,
+    prior_history: list[dict],
+    history_turns: int,
+) -> str:
+    low = (content or "").lower().strip()
+
+    if "how far back can you see" in low:
+        return (
+            f"I can use the recent Discord turns included with this message "
+            f"(configured for up to {history_turns} bot/user messages from this channel). "
+            "I cannot see your whole Discord history unless it is included in that recent context."
+        )
+
+    asks_job = "job" in low or low in {"what am i", "who am i"}
+    if not asks_job:
+        return ""
+
+    for turn in reversed(prior_history or []):
+        if turn.get("role") != "user":
+            continue
+        text = (turn.get("content") or "").strip()
+        match = re.search(
+            r"\b(?:i am|i'm|im|my job is|i work as)\s+(?:a|an)?\s*([a-z][a-z\s-]{1,80})",
+            text,
+            re.IGNORECASE,
+        )
+        if not match:
+            continue
+        job = match.group(1).strip(" .,!?:;").lower()
+        if job in {"fire fighter", "firefighter"}:
+            job = "firefighter"
+        return f"Based on what you told me previously, you are a {job}."
+
+    return "I do not see your job in the recent Discord context I was given."
+
+
 def _discord_openclaw_session_id(message: discord.Message) -> str:
     """
     One OpenClaw session per Discord channel (or thread) + user.
@@ -231,6 +293,19 @@ def _discord_openclaw_session_id(message: discord.Message) -> str:
     """
     chan_id = getattr(message.channel, "id", "dm")
     return f"discord-{chan_id}-{message.author.id}"
+
+
+# Substrings that identify our own failure-fallback bot messages. These must
+# be filtered out of the assistant-role history before we hand it to the
+# agent, otherwise the model sees its own past "produced no answer" turns
+# and rationally continues the pattern. (See: 2026-05-11 Discord debug —
+# Hermes-3 emitted `Executing the command to open a terminal:` then stopped
+# because the recent-history slot read like a string of empty bot turns.)
+_BOT_FALLBACK_SIGNALS: tuple[str, ...] = (
+    "produced no answer and did not call any tools",
+    "If the task requires file or web access, rephrase it more explicitly",
+    "I cannot see your whole Discord history",
+)
 
 
 async def _fetch_discord_chat_history(
@@ -245,6 +320,10 @@ async def _fetch_discord_chat_history(
     user and the bot are included; other humans in a shared channel are filtered
     out so cross-talk doesn't poison the prompt. The triggering message itself
     is excluded (it becomes the new user turn in `task_brief`).
+
+    Bot fallback strings (`_BOT_FALLBACK_SIGNALS`) are filtered out of the
+    assistant-role history so the model doesn't condition on its own past
+    failure messages and replay them.
     """
     try:
         history_chan = message.channel
@@ -276,6 +355,12 @@ async def _fetch_discord_chat_history(
             if bot_id is not None:
                 text = re.sub(rf"<@!?{bot_id}>", "", text).strip()
             if not text:
+                continue
+            # Drop our own fallback/error messages from the assistant history
+            # so the model doesn't condition on them. User messages are kept
+            # verbatim — they're the actual intent the agent should serve.
+            if role == "assistant" and any(sig in text for sig in _BOT_FALLBACK_SIGNALS):
+                logger.debug("Discord history: dropped bot-fallback turn (%d chars)", len(text))
                 continue
             if len(text) > max_chars_per_msg:
                 text = text[:max_chars_per_msg] + "…"
@@ -316,6 +401,9 @@ async def _fast_llm_reply(
                 "just told you a fact about themselves (name, job, preference), "
                 "remember it for follow-up questions. Never say 'I don't have "
                 "memory' when prior turns are in your context.\n"
+                "If the user asks what you can see or how far back you can see, "
+                "answer only about the recent Discord context included in this "
+                "request. Do not pivot to the user's previous topic.\n"
                 "\n"
                 "You are running in CONVERSATIONAL mode: no tools, no web, no "
                 "file access, no code execution. If the user asks for something "
@@ -422,7 +510,11 @@ _TOOL_LABELS: dict[str, str] = {
     "browser/screenshot": "Taking screenshot",
     "browser/act": "Interacting with page",
     "browser/close": "Closing browser",
+    "harvis-terminal": "Harvis terminal",
 }
+
+# Tools whose `args.command` should be shown inline next to the call banner.
+_TOOLS_WITH_INLINE_CMD = {"exec", "harvis-terminal"}
 
 
 def _format_progress_line(event_type: str, payload: dict) -> str | None:
@@ -438,21 +530,35 @@ def _format_progress_line(event_type: str, payload: dict) -> str | None:
     if event_type == "tool_call":
         tool = payload.get("tool", "unknown")
         label = _TOOL_LABELS.get(tool, f"Using {tool}")
-        # Show inline command preview for exec
-        if tool == "exec":
-            cmd = (payload.get("args") or {}).get("command", "")
+        emoji = "\U0001f4bb" if tool == "harvis-terminal" else "\u2699\ufe0f"
+        if tool in _TOOLS_WITH_INLINE_CMD:
+            args = payload.get("args") or {}
+            cmd = args.get("preview") or args.get("command", "")
             if cmd:
                 cmd_short = cmd[:80] + ("\u2026" if len(cmd) > 80 else "")
-                return f"\u2699\ufe0f {label}: `{cmd_short}`"
-        return f"\u2699\ufe0f {label}"
+                return f"{emoji} {label}: `{cmd_short}`"
+        return f"{emoji} {label}"
 
     if event_type == "tool_result":
         success = payload.get("success", True)
         tool = payload.get("tool", "")
+        label = _TOOL_LABELS.get(tool, tool or "Tool")
+        if tool == "harvis-terminal":
+            output = payload.get("output") or {}
+            exit_code = output.get("exit_code")
+            duration_ms = output.get("duration_ms")
+            suffix_parts: list[str] = []
+            if exit_code is not None:
+                suffix_parts.append(f"exit={exit_code}")
+            if duration_ms is not None:
+                suffix_parts.append(f"{duration_ms}ms")
+            suffix = f" ({', '.join(suffix_parts)})" if suffix_parts else ""
+            if success:
+                return f"\u2705 {label} complete{suffix}"
+            return f"\u274c {label} failed{suffix}"
         if success:
-            return f"\u2705 {_TOOL_LABELS.get(tool, tool or 'Tool')} complete"
-        else:
-            return f"\u274c {_TOOL_LABELS.get(tool, tool or 'Tool')} failed"
+            return f"\u2705 {label} complete"
+        return f"\u274c {label} failed"
 
     if event_type == "agent_start":
         label = payload.get("agent_label", "Agent")
@@ -1109,34 +1215,44 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
     tree = app_commands.CommandTree(client)
 
     async def _list_ollama_models() -> list[str]:
-        """Fetch model names from local + desktop Ollama (deduped, laptop first).
+        """Fetch model names from local + desktop Ollama in PARALLEL (deduped).
 
-        DESKTOP_OLLAMA_URL is read at call time so any change to .env takes
-        effect on the next /model invocation without a bot restart (after the
-        backend container is recreated).
+        Discord autocomplete has a hard ~3s deadline; this used to call the
+        two endpoints sequentially with a 5s timeout each, which made the
+        autocomplete fail with `Unknown interaction (10062)` whenever the
+        desktop was unreachable. Parallel + tight timeout caps the worst case
+        at ~1.5s.
         """
-        names: list[str] = []
-        seen: set[str] = set()
+        results_per_host: list[list[str]] = [[], []]
 
-        async def _fetch(base_url: str, label: str):
+        async def _fetch(base_url: str, label: str, idx: int, timeout_s: float):
+            if not base_url:
+                return
             base = base_url.rstrip("/")
             tags_url = base.replace("/v1", "") + "/api/tags" if "/v1" in base else f"{base}/api/tags"
             try:
-                async with httpx.AsyncClient(timeout=5.0) as c:
+                async with httpx.AsyncClient(timeout=timeout_s) as c:
                     resp = await c.get(tags_url)
                 if resp.status_code == 200:
-                    for m in resp.json().get("models", []):
-                        n = m.get("name")
-                        if n and n not in seen:
-                            seen.add(n)
-                            names.append(n)
+                    results_per_host[idx] = [
+                        m["name"] for m in resp.json().get("models", []) if m.get("name")
+                    ]
             except Exception as e:
                 logger.warning("Failed to list Ollama models from %s: %s", label, e)
 
-        await _fetch(_LOCAL_OLLAMA_URL, "laptop")
         desktop_url = os.getenv("DESKTOP_OLLAMA_URL", "")
-        if desktop_url:
-            await _fetch(desktop_url, "desktop")
+        await asyncio.gather(
+            _fetch(_LOCAL_OLLAMA_URL, "laptop", 0, 2.5),
+            _fetch(desktop_url, "desktop", 1, 1.5),
+        )
+        # Laptop entries first; dedupe across hosts.
+        names: list[str] = []
+        seen: set[str] = set()
+        for host_models in results_per_host:
+            for n in host_models:
+                if n not in seen:
+                    seen.add(n)
+                    names.append(n)
         return names
 
     class ModelSelectMenu(discord.ui.Select):
@@ -1357,18 +1473,24 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
 
             pref_agent_id = cfg.agent_id
             pref_model_name = cfg.model_name
-            if _model_override:
-                # `/model` and `setmodel` always pick from Ollama's tag list
-                # (laptop or desktop), so route via the "local" agent so
-                # `stream_local_ollama_workspace` honours the picked model.
-                # Otherwise the workspace silently runs on desktop OpenClaw's
-                # configured default and your `/model` choice is ignored.
-                pref_agent_id = "local"
-                pref_model_name = _model_override
-            elif pool:
+            if pool:
                 db_agent_id, db_model_name = await _get_user_model_preference(pool, cfg.default_user_id)
                 pref_agent_id = db_agent_id or cfg.agent_id
                 pref_model_name = db_model_name or cfg.model_name
+            # When `/model` was used in this process, surface the in-memory
+            # override so subsequent on_message calls reflect it immediately
+            # (the DB row is fresh, but the local cache may be stale for ~30s).
+            if _model_override:
+                pref_model_name = _model_override
+            # Phase 3 (model_proxy auto): prefer agent=main so the workspace
+            # runs through OpenClaw on the desktop, which gives full tool-calling
+            # + skill loading. The desktop's default model is `harvis-proxy/auto`,
+            # which the model_proxy resolves to the user's saved DB pick on every
+            # request — so the picked model actually runs WITH tools.
+            # Override DB's `agent=local` ONLY when the user has set a real
+            # workspace model preference; that local path is text-only.
+            if pref_model_name and pref_agent_id == "local":
+                pref_agent_id = "main"
             # region agent log
             _debug_log(
                 "discord_workspace_bot.py:on_message:pref_resolution",
@@ -1429,6 +1551,17 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
                 )
                 prior_history = []
 
+            memory_meta_reply = _direct_discord_memory_reply(
+                content, prior_history, cfg.history_turns
+            )
+            if memory_meta_reply:
+                logger.info(
+                    "Discord memory/meta direct reply: history_turns=%d msg=%r",
+                    len(prior_history), content[:80],
+                )
+                await _send_long_message(message.channel, memory_meta_reply)
+                return
+
             # ── Workspace-first mode or standard routing ──
             use_fast_path = False
             if discord_attachments:
@@ -1438,7 +1571,13 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
                 use_fast_path = False
             elif _PREFER_WORKSPACE:
                 # In workspace-first mode, only fast-path ultra-short greetings
-                use_fast_path = len(content) < 20 and not _WORKSPACE_SIGNALS.search(content)
+                # plus Discord memory/meta questions. Those rely on recent
+                # channel context and should not go through the OpenClaw
+                # workspace identity prompt.
+                use_fast_path = (
+                    _looks_like_discord_memory_meta_chat(content)
+                    or (len(content) < 20 and not _WORKSPACE_SIGNALS.search(content))
+                )
             elif _is_obviously_simple(content):
                 use_fast_path = True
             else:
