@@ -47,7 +47,8 @@ import os
 import re
 import time
 import uuid
-from typing import AsyncGenerator, Optional
+from collections import deque
+from typing import AsyncGenerator, Deque, Optional, Tuple
 
 import websockets
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -385,10 +386,8 @@ def _synthesize_narrative(tool_name: str, tool_args: dict) -> str:
         cmd = (tool_args.get("preview") or tool_args.get("command") or "").strip()
         if not cmd:
             return f"Running {tool_name}"
-        # Recognize common shapes for nicer summaries.
         low = cmd.lower()
         if "cracker.py" in low:
-            # Pull the hash arg (first non-flag positional after cracker.py).
             parts = cmd.split()
             try:
                 idx = next(i for i, p in enumerate(parts) if p.endswith("cracker.py"))
@@ -408,14 +407,12 @@ def _synthesize_narrative(tool_name: str, tool_args: dict) -> str:
         if low.startswith(("grep ", "rg ", "ripgrep ")):
             return f"Searching: {cmd[:60]}"
         if low.startswith(("python3 ", "python ")):
-            # Strip the python prefix and surface the script
             tail = cmd.split(maxsplit=1)[1] if " " in cmd else cmd
             return f"Running python: {tail[:60]}{'…' if len(tail) > 60 else ''}"
         if low.startswith(("curl ", "wget ", "http")):
             return f"HTTP: {cmd[:60]}{'…' if len(cmd) > 60 else ''}"
         if low.startswith("git "):
             return f"Git: {cmd[:60]}{'…' if len(cmd) > 60 else ''}"
-        # Generic fallback
         cmd_short = cmd if len(cmd) <= 80 else cmd[:77] + "…"
         return f"Running: {cmd_short}"
 
@@ -469,6 +466,79 @@ def _looks_like_browser_or_screenshot_task(task_text: str) -> bool:
         or "open " in low
         or "website" in low
         or "webpage" in low
+    )
+
+
+def _looks_like_terminal_execution_task(task_text: str) -> bool:
+    low = (task_text or "").lower()
+    if (
+        "terminal" in low
+        or "run " in low
+        or "execute" in low
+        or "stdout" in low
+        or "python3" in low
+        or ".py" in low
+        or "decode" in low
+        or "encoded" in low
+        or "decrypt" in low
+        or "encrypted" in low
+        or "crack" in low
+        or "hash" in low
+        or "rockyou" in low
+        or "wordlist" in low
+        or "base64" in low
+        or "number bases" in low
+        or "password dump" in low
+        or "password dumps" in low
+    ):
+        return True
+    if re.search(r"\b0x[0-9a-f]{6,}\b", low) is not None:
+        return True
+    if re.search(r"\b[01]{8}(?:\s+[01]{8}){2,}\b", low) is not None:
+        return True
+    # Two or more lines that look like md5 / sha1 / sha256 hashes -> CTF crack task.
+    hash_lines = re.findall(r"(?m)^[a-f0-9]{32,64}$", low)
+    if len(hash_lines) >= 2:
+        return True
+    return False
+
+
+def _looks_like_pasted_code_or_command(text: str) -> bool:
+    low = (text or "").lower()
+    return (
+        "```python" in low
+        or "```sh" in low
+        or "```bash" in low
+        or "python3 " in low
+        or "import base64" in low
+        or "import binascii" in low
+        or "def decode_" in low
+        or "/home/node/.openclaw/workspace/" in low
+    )
+
+
+def _looks_like_memory_echo(text: str) -> bool:
+    """Detect the model returning a stale memory line instead of doing the task.
+
+    Symptoms: very short final answer that looks like a previous chat reply
+    (`you're a firefighter`, `yo what's next`, `got it`, `standing by`).
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+    if len(stripped) > 200:
+        return False
+    low = stripped.lower()
+    return (
+        "you're a firefighter" in low
+        or "you are a firefighter" in low
+        or "yo, what's next" in low
+        or "yo what's next" in low
+        or "what's next" == low
+        or "got it" == low
+        or "standing by" in low
+        or "copy that" in low
+        or "on it" == low
     )
 
 
@@ -699,11 +769,17 @@ class OpenClawClient:
             # Lead with the task directive; context is only appended as reference.
 
             # Extract the last user message — it's the most specific, actionable request.
-            last_user_msg = next(
-                (m["content"] for m in reversed(chat_history)
-                 if m.get("role") == "user" and isinstance(m.get("content"), str) and m["content"].strip()),
-                task_message,
-            )
+            # Always prefer the explicit `task_message` (the new task brief) over the
+            # final entry of chat_history. Earlier we walked chat_history first, but
+            # that meant a stale prior user line (e.g. "what is my job") was treated
+            # as the current request when the new task came in via task_brief.
+            last_user_msg = (task_message or "").strip()
+            if not last_user_msg:
+                last_user_msg = next(
+                    (m["content"] for m in reversed(chat_history)
+                     if m.get("role") == "user" and isinstance(m.get("content"), str) and m["content"].strip()),
+                    task_message,
+                )
 
             # Build a compact context brief instead of dumping raw history.
             # This keeps per-request token cost low regardless of conversation length.
@@ -897,6 +973,72 @@ class OpenClawClient:
                         self.workspace_id, _bws_id,
                     )
 
+            # ── Harvis dedicated terminal hint ─────────────────────────────────
+            # Small models (Hermes-3-8B etc.) bail on dense bootstrap sections.
+            # Keep this tiny: one sentence + ONE concrete `exec` template the
+            # model can mimic verbatim. The bare `exec` tool stays available
+            # and is fine for one-shot work — this hint is only for cases
+            # where /workspace persistence helps.
+            #
+            # Backend URL reachable from the agent's exec context depends on
+            # WHERE openclaw is running:
+            #   • host-BYO  (gateway = ws://host.docker.internal:…) → host
+            #     bash; needs http://localhost:8000 (backend's published port).
+            #   • dockerized openclaw fallback → container on openclaw-internal;
+            #     needs http://backend:8000 (docker DNS).
+            # Explicit override always wins: HARVIS_TERMINAL_AGENT_URL.
+            _explicit = (os.getenv("HARVIS_TERMINAL_AGENT_URL") or "").strip()
+            if _explicit:
+                _term_agent_base = _explicit.rstrip("/")
+            elif "host.docker.internal" in (self.gateway_url or ""):
+                _term_agent_base = "http://localhost:8000"
+            else:
+                _term_agent_base = "http://backend:8000"
+            _term_exec_url = (
+                f"{_term_agent_base}/api/tools/terminal/{self.workspace_id}/exec"
+            )
+            _term_first_call = _exec_via_bash(
+                f"curl -sS -X POST {_term_exec_url} "
+                "-H \"Authorization: Bearer $OPENCLAW_GATEWAY_TOKEN\" "
+                "-H \"Content-Type: application/json\" "
+                "-d '{\"cmd\":\"echo hi > /workspace/hi.txt && cat /workspace/hi.txt\"}'"
+            )
+            terminal_hint = (
+                "\nHARVIS PERSISTENT SHELL (optional): an ubuntu container with "
+                "a persistent /workspace lives at "
+                f"{_term_exec_url}. To use it, call `exec` with: {_term_first_call}\n"
+                "Files in /workspace survive across calls. Skip this for one-shot work.\n"
+            )
+
+            memory_hint = (
+                "\nWORKSPACE MEMORY + CALLBACKS:\n"
+                f"- Current OpenClaw callback/session key: `{self._session_key}`\n"
+                f"- Legacy workspace/session slug: `{workdir_rel}`\n"
+                "- Use the callback/session key above for `sessions_history`. "
+                "Do NOT use the legacy slug as a session key.\n"
+                "- `WORKSPACE MEMORY` below is BACKGROUND CONTEXT ONLY. Do NOT "
+                "answer with it unless the current user request is explicitly a "
+                "memory/identity follow-up (e.g. `what is my job`, `what am I`, "
+                "`what did I just say`, `do you understand what you just "
+                "outputted`).\n"
+                "- The CURRENT user request below `EXECUTE THIS TASK NOW:` is "
+                "ALWAYS more important than `WORKSPACE MEMORY`. If the new task "
+                "is solve / decode / decrypt / crack / search / fetch / write / "
+                "screenshot / browse, you MUST do that task using tools, even if "
+                "the memory contains a prior chat answer.\n"
+                "- Never reuse a prior assistant answer (e.g. `You're a "
+                "firefighter.`, `Yo, what's next?`) as the response to a new task. "
+                "Treat the memory as read-only background.\n"
+                "- For memory-only follow-ups, answer from `WORKSPACE MEMORY` "
+                "first; do NOT read `AGENTS.md`, `AGENT.md`, `USER.md`, or files "
+                "inside the workspace directory to answer those.\n"
+                "- If you need persistent memory beyond the provided context, you may "
+                "try `memory_search` / `memory_get`; if unavailable or empty, fall "
+                "back to `WORKSPACE MEMORY` and say what context was missing.\n"
+            )
+
+            _workdir_init = _exec_via_bash(f"mkdir -p {workdir} && cd {workdir} && pwd")
+
             # Hash detection — small/medium local models (gemma4:e4b, even
             # llama3.1:8b) don't auto-discover skills via TOOLS.md, so they
             # default to memory_search or hand-rolled python on hash-crack
@@ -938,11 +1080,6 @@ class OpenClawClient:
                 )
 
             # ---- decode skill detection ----
-            # Long encoded blobs (base64, hex, binary, morse, etc.) and verbs
-            # like "decode this" / "what does this say". Per-skill detection
-            # mirrors the hash-cracking pattern. Avoid false-positives on
-            # the hash list itself: if hash-cracking already fired AND the
-            # blob also looks hex, prefer hash-cracking (already covered).
             _DECODE_VERB_RE = re.compile(
                 r"\b(decode|decrypt this|what does this say|encoded|base64|"
                 r"base32|hex(?:adecimal)? to|binary to|morse|cipher(?: ?text)?)\b",
@@ -1005,9 +1142,6 @@ class OpenClawClient:
                 r"forensics?|analyze (?:this )?(?:file|image|binary|archive))\b",
                 re.IGNORECASE,
             )
-            # File-path pattern: a path that ends with a known forensics-relevant
-            # extension. Avoid matching cracker.py / cipher.py / decoder.py
-            # invocations (those go to other skills).
             _FILE_PATH_RE = re.compile(
                 r"(?:/[\w./-]+|\b[\w./-]+)\.(?:png|jpg|jpeg|gif|bmp|tiff|webp|"
                 r"zip|tar|tar\.gz|tgz|7z|rar|bin|exe|dll|so|elf|pcap|pcapng|"
@@ -1038,14 +1172,13 @@ class OpenClawClient:
                 )
 
             # ---- creator skill detection ----
-            # "create/write/make me a script", "scaffold a flask app", etc.
             _CREATOR_VERB_RE = re.compile(
                 r"\b("
                 r"(?:create|write|make|generate|scaffold)\s+(?:me\s+)?(?:a\s+|an\s+)?"
                 r"(?:python\s+)?(?:script|cli|file|dockerfile|flask\s+app|fastapi"
                 r"|github\s+action|gitignore|tool|helper|program|workflow)"
                 r"|set up (?:a|the)?\s*gitignore"
-                r"|write\s+a\s+\w+\s+(?:that|to)\s+\w+"  # "write a python that crack..."
+                r"|write\s+a\s+\w+\s+(?:that|to)\s+\w+"
                 r")\b",
                 re.IGNORECASE,
             )
@@ -1079,13 +1212,6 @@ class OpenClawClient:
                 )
 
             # ---- rejection / "try again" detection ----
-            # When the user says "that's wrong / incorrect / try again" after
-            # a prior answer, the model otherwise just paraphrases its earlier
-            # response (the prior tool output is still in conversation context
-            # and the model treats it as authoritative, skipping a real retry).
-            # Inject an explicit "PRIOR-ANSWER-REJECTED" block that forces the
-            # model to discard prior tool output and re-run from scratch with
-            # alternate strategies.
             _REJECTION_RE = re.compile(
                 r"\b("
                 r"(?:that'?s|that is)\s+(?:wrong|incorrect|not (?:right|correct))"
@@ -1140,7 +1266,11 @@ class OpenClawClient:
                 )
 
             # Imperative directive — task first, context last, no asking back.
-            _workdir_init = _exec_via_bash(f"mkdir -p {workdir} && cd {workdir} && pwd")
+            # NOTE: The previous "MANDATORY WORKDIR INIT" step ate small models'
+            # only useful turn — they ran the mkdir, saw success=true, and
+            # stopped without doing the actual task. We now bundle the workdir
+            # bootstrap into the same first command as the task by recommending
+            # the agent prefix its python3/curl with `mkdir -p {workdir} && `.
             directive = (
                 f"WORKSPACE DIRECTORY: {workdir}\n"
                 "FILESYSTEM LAYOUT (IMPORTANT — READ BEFORE USING TOOLS):\n"
@@ -1150,17 +1280,18 @@ class OpenClawClient:
                 f"- Use the RELATIVE form `{workdir_rel}/<filename>` for `write`\n"
                 f"- Use the ABSOLUTE form `{workdir}/<filename>` for `exec`/`python3`\n"
                 f"- DO NOT assume any {OPENCLAW_HOME}/workspaces/... path exists — that tree is unrelated to the exec CWD.\n"
-                "\n"
-                "MANDATORY WORKDIR INIT:\n"
-                f"Your VERY FIRST action MUST be an `exec` tool call that runs exactly:\n"
-                f"  {_workdir_init}\n"
-                "Do not run `cd` alone; do not run other tools before this.\n"
-                f"All file operations (read, write, exec) MUST happen inside {workdir}.\n"
+                f"- The directory `{workdir}` may not exist yet. Prefix your first "
+                f"`exec` shell command with `mkdir -p {workdir} && cd {workdir} && ` "
+                "so the workdir is created in the SAME turn that does real work. "
+                "Do NOT spend a separate tool call just to mkdir — that wastes your "
+                "first turn and small models tend to stop after it.\n"
                 f"{github_hint}"
                 f"{repo_hint}"
                 f"{rag_hint}"
                 f"{web_hint}"
                 f"{browser_hint}"
+                f"{terminal_hint}"
+                f"{memory_hint}"
                 f"{hash_hint}"
                 f"{decode_hint}"
                 f"{crypto_hint}"
@@ -1184,6 +1315,12 @@ class OpenClawClient:
                 "Keep them concrete (mention the actual file/url/error/value "
                 "you saw) and free of filler like \"Let me\", \"I'll now\", "
                 "\"Great\", or \"Okay\".\n"
+                "- DO NOT stop after a single setup/probe tool call. A `mkdir`, `pwd`, "
+                "`uname`, or other workdir-init step is NOT the task. After it returns, "
+                "make another tool call to do the actual work. The task is only complete "
+                "when you have produced a final user-facing answer.\n"
+                "- If you include a code block or terminal command in the final answer without first running it, "
+                "the task is incomplete. Commands in text do not execute.\n"
                 "- Do NOT ask for clarification. Just narrate one line, then act.\n"
                 "- Do NOT pre-plan in long paragraphs. One sentence, then a tool.\n"
                 "- Do NOT chain tools silently. Even if you already know the next "
@@ -1222,8 +1359,14 @@ class OpenClawClient:
                 "restatement of the task.\n"
                 "- If you cannot determine the answer after using tools, say: "
                 "\"I could not determine the answer. Blocker: <one-sentence reason>.\" — then stop.\n"
-                "- If you fabricate or guess a flag/answer without tool evidence, that is a "
-                "failure. Prefer honest uncertainty to a hallucinated result.\n"
+                "- DO NOT decline a task because the input 'looks wrong' or 'needs verification' "
+                "without first running the decode/parse yourself. Encoded strings (hex, base64, "
+                "binary) are NORMAL inputs — try to decode them, then report what you got.\n"
+                "- When you have tool output containing the answer, restate the relevant lines "
+                "in your reply. Re-deriving from memory introduces errors; quoting the tool is safer.\n"
+                "- After decoding, scan each result for a second layer (a base64-looking trailing "
+                "chunk like `XYZ=`, a `0x...` prefix, a long 0/1 run). If you see one, decode it "
+                "too — nested encodings are common in CTFs.\n"
                 "\n"
                 "TONE & STYLE:\n"
                 "- Your responses should be short and concise. The user reads diffs and tool "
@@ -1270,10 +1413,16 @@ class OpenClawClient:
             if context_block:
                 full_message = (
                     f"{identity_bundle}\n{directive}\n"
-                    f"CONTEXT (brief summary of prior conversation — do not reply to this):\n{context_block}"
+                    "WORKSPACE MEMORY (background context — DO NOT use to answer "
+                    "the current task unless that task is itself a memory or "
+                    "identity follow-up):\n"
+                    f"{context_block}"
                 )
             else:
-                full_message = f"{identity_bundle}\n{directive}"
+                full_message = (
+                    f"{identity_bundle}\n{directive}\n"
+                    "WORKSPACE MEMORY: No recent conversation was provided with this launch."
+                )
 
             # Extra guardrail: if the agent asks identity/setup questions, it's not following instructions.
             # Keep this short and at the top of the task message.
@@ -1312,8 +1461,17 @@ class OpenClawClient:
             # shows activity during the model warm-up gap.
             _reasoning_logged = False
             saw_tool_call = False
+            saw_executing_tool_call = False
             corrective_retry_count = 0
+            # Loop guard: small ring of (tool, args_signature) for the most
+            # recent tool calls. If the most recent N entries are identical,
+            # we abort the run instead of letting the model spin forever on
+            # an empty-output command (e.g. `bash -lc 'cd <bad-dir> && bash'`
+            # returning "" and the model retrying the same call).
+            _LOOP_GUARD_N = 3
+            _recent_tool_calls: Deque[Tuple[str, str]] = deque(maxlen=_LOOP_GUARD_N)
             looks_visual_task = _looks_like_browser_or_screenshot_task(last_user_msg)
+            looks_terminal_task = _looks_like_terminal_execution_task(last_user_msg)
             target_url = _extract_browser_target_url(last_user_msg)
 
             # Consume events until the chat reaches a terminal state.
@@ -1444,6 +1602,56 @@ class OpenClawClient:
                     for event in self._handle_agent_event(payload):
                         if event.type == "tool_call":
                             saw_tool_call = True
+                            tool_name = (event.data or {}).get("tool", "")
+                            # Loop guard — record (tool, args) and abort if
+                            # the last N tool calls are identical.
+                            _args_sig = json.dumps(
+                                (event.data or {}).get("args", {}),
+                                sort_keys=True, default=str,
+                            )[:512]
+                            _recent_tool_calls.append((tool_name, _args_sig))
+                            if (
+                                len(_recent_tool_calls) >= _LOOP_GUARD_N
+                                and all(
+                                    item == _recent_tool_calls[0]
+                                    for item in _recent_tool_calls
+                                )
+                            ):
+                                logger.warning(
+                                    "[workspace:%s] Tool-call loop detected — "
+                                    "same call repeated %d times: tool=%s args=%.120s",
+                                    self.workspace_id, _LOOP_GUARD_N,
+                                    tool_name, _args_sig,
+                                )
+                                yield event  # surface this last call to the UI
+                                yield OpenClawEvent("error", {
+                                    "message": (
+                                        f"Aborting: agent repeated the same `{tool_name}` "
+                                        f"call {_LOOP_GUARD_N} times with no progress. "
+                                        "Refine your request — try giving an explicit "
+                                        "command or filename so the model has somewhere "
+                                        "to go."
+                                    ),
+                                })
+                                self._cancelled.set()
+                                break
+                            # Retrieval-only tools (memory/session lookups) don't
+                            # count as "actually doing the task" — they're pure
+                            # context fetches. Tracking executing tool calls
+                            # separately lets the corrective retry still fire
+                            # when the model's only tool use was a memory probe
+                            # followed by a stale chat-style answer.
+                            retrieval_only = tool_name in {
+                                "memory_search",
+                                "memory_get",
+                                "sessions_history",
+                                "sessions_list",
+                                "sessions_send",
+                                "session_status",
+                                "agents_list",
+                            }
+                            if not retrieval_only:
+                                saw_executing_tool_call = True
                         # Inject a one-time "Agent generating response…" log just
                         # before the first token so the timeline shows activity
                         # during the model warm-up gap instead of a blank spinner.
@@ -1524,6 +1732,64 @@ class OpenClawClient:
                             self._last_partial_text = ""
                             self._narrative_cut = 0
                             continue  # keep the async-for loop running
+
+                        # Some models "solve" terminal tasks by pasting a Python
+                        # file and a shell command into the final response, or by
+                        # echoing a stale memory line, instead of invoking the
+                        # write/exec tools. Either way: the file never exists and
+                        # the command never ran. Retry once with an explicit
+                        # tool-only correction.
+                        pasted_code = _looks_like_pasted_code_or_command(text)
+                        memory_echo = _looks_like_memory_echo(text)
+                        if (
+                            looks_terminal_task
+                            and not saw_executing_tool_call
+                            and corrective_retry_count < 1
+                            and (pasted_code or memory_echo)
+                        ):
+                            corrective_retry_count += 1
+                            self._last_partial_text = ""
+                            self._narrative_cut = 0
+                            failure_kind = "pasted code/command" if pasted_code else "stale memory echo"
+                            logger.warning(
+                                "[workspace:%s] Terminal task returned %s with no tool calls — retrying",
+                                self.workspace_id, failure_kind,
+                            )
+                            yield OpenClawEvent("log", {
+                                "message": (
+                                    "Agent did not run the task ("
+                                    + failure_kind
+                                    + "); forcing real terminal execution…"
+                                ),
+                            })
+                            req_id = self._next_id()
+                            correction = (
+                                "CORRECTION: Your previous response did not actually run the task. "
+                                + ("It pasted code or a shell command as text. "
+                                   if pasted_code else
+                                   "It reused a previous chat answer instead of doing the new task. ")
+                                + "That did NOT create a file and did NOT execute anything.\n\n"
+                                "You must now use tool calls only:\n"
+                                f"1) Call `exec` exactly: {_workdir_init}\n"
+                                f"2) If Python is needed, call `write` to create `{workdir_rel}/solve.py`\n"
+                                f"3) Call `exec` to run: python3 {workdir}/solve.py\n"
+                                "4) Report the exact observed stdout or the exact blocker.\n\n"
+                                "Do not include a code block or shell command as plain text until after the "
+                                "tool call has executed and returned output. Ignore prior chat memory "
+                                "for this task — the user request below is the only goal.\n\n"
+                                f"USER REQUEST: {last_user_msg}\n"
+                            )
+                            await self._ws.send(json.dumps({
+                                "type": "req",
+                                "id": req_id,
+                                "method": "chat.send",
+                                "params": {
+                                    "sessionKey": self._session_key,
+                                    "message": correction,
+                                    "idempotencyKey": str(uuid.uuid4()),
+                                },
+                            }))
+                            continue
 
                         # Empty final + the agent never even tried to call a
                         # tool — the most pathological case (model returned a
@@ -1747,20 +2013,15 @@ class OpenClawClient:
                     self._session_key, tool_name, str(tool_args),
                 )
                 # Flush any narrative the model emitted between the last tool
-                # call and this one as a 💬 log event. The directive in the
-                # task brief asks the model to prefix every tool call with a
-                # short "what I'm about to do" sentence; this surfaces it as
-                # a progress line to Discord/UI without bloating the chat
-                # bubble.
+                # call and this one as a 💬 log event. The directive asks the
+                # model to prefix every tool call with a short reason; this
+                # surfaces it as a progress line.
                 #
                 # Some models (granite4.1, qwen-coder, smaller llamas) chain
-                # tool calls back-to-back without emitting any commentary
-                # text between them — they prefer terse tool-only sequences.
-                # In that case the narrative is empty, and Discord just sees
-                # a wall of "Running command" with no visibility into WHY
-                # each call is happening. Synthesize a basic 💬 line from
-                # the tool args themselves as a fallback so the user always
-                # sees one-sentence reasoning per step.
+                # tool calls back-to-back without commentary text — Discord
+                # then sees only "Running command" lines. When narrative is
+                # empty, fall back to _synthesize_narrative on the tool args
+                # so the user always gets one-sentence reasoning per step.
                 narrative = self._last_partial_text[self._narrative_cut:].strip()
                 if narrative and len(narrative) > 5:
                     snippet = narrative if len(narrative) <= 280 else narrative[:277] + "…"
