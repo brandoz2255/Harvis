@@ -451,6 +451,20 @@ def _synthesize_narrative(tool_name: str, tool_args: dict) -> str:
         q = tool_args.get("query") or tool_args.get("q") or ""
         return f"RAG: {q[:60]}" if q else "Searching local knowledge"
 
+    if tool_name == "web_search":
+        q = (tool_args.get("query") or tool_args.get("q") or "").strip()
+        if q:
+            short = q if len(q) <= 80 else q[:77] + "…"
+            return f"Web search: \"{short}\""
+        return "Searching the web"
+
+    if tool_name == "web_fetch":
+        url = (tool_args.get("url") or tool_args.get("href") or "").strip()
+        if url:
+            short = url if len(url) <= 80 else url[:77] + "…"
+            return f"Fetching {short}"
+        return "Fetching URL"
+
     return f"Using {tool_name}"
 
 
@@ -763,6 +777,27 @@ class OpenClawClient:
         yield OpenClawEvent("log", {
             "message": f"Connected to OpenClaw gateway (agent: {self.agent_id})",
         })
+
+        # ── Pick HOME for THIS connected gateway ──────────────────────────────
+        # The module-level OPENCLAW_HOME (env-configured, e.g. /home/user
+        # for host BYO mode) is WRONG when we fell back to the dockerized
+        # openclaw container (HOME=/home/node inside it). Rebind locally so
+        # all directive `mkdir`/`cd`/path hints below target a writable dir.
+        # Heuristic: localhost / host.docker.internal / 127.0.0.1 → host BYO
+        # (use env value). Anything else → container service name → /home/node.
+        try:
+            from urllib.parse import urlparse
+            _host = (urlparse(self.gateway_url).hostname or "").lower()
+            if _host in ("localhost", "host.docker.internal", "127.0.0.1", "::1"):
+                OPENCLAW_HOME = os.getenv("OPENCLAW_HOME", "/home/node").rstrip("/")
+            else:
+                OPENCLAW_HOME = "/home/node"
+        except Exception:
+            OPENCLAW_HOME = os.getenv("OPENCLAW_HOME", "/home/node").rstrip("/")
+        logger.info(
+            "[workspace:%s] Resolved OPENCLAW_HOME=%s for gateway %s",
+            self.workspace_id, OPENCLAW_HOME, self.gateway_url,
+        )
 
         try:
             # Build an imperative message that forces the agent to execute immediately.
@@ -1301,20 +1336,31 @@ class OpenClawClient:
                 f"\nEXECUTE THIS TASK NOW: {last_user_msg}\n\n"
                 "RULES:\n"
                 "- ALWAYS use tool calls (exec, write, read). NEVER type commands as text.\n"
-                "- NARRATE BETWEEN TOOLS. Every tool call AND every tool result "
-                "must be wrapped in one short sentence (under 25 words):\n"
-                "    (a) BEFORE a tool call: state what you are about to do and "
-                "why, then immediately call the tool.\n"
-                "        Example: \"Writing the helper script first.\" → write "
-                "tool call.\n"
-                "    (b) AFTER a tool result: state what you observed and what "
-                "you'll do next, then call the next tool (or end if done).\n"
-                "        Example: \"Got a 200 with the JSON I expected — now "
+                "- NARRATE BETWEEN TOOLS. The user sees ONLY your prose between "
+                "tool calls — they do NOT see your tool arguments. Every tool "
+                "call must be preceded by one sentence (under 25 words) that "
+                "names BOTH the action AND its purpose for the current task:\n"
+                "    (a) BEFORE a tool call: name the action + WHY it serves "
+                "the user's task, then immediately call the tool.\n"
+                "        GOOD: \"Writing a Python script to brute-force "
+                "SKY-HQNT-NNNN against the 5 MD5 hashes.\" → write tool call.\n"
+                "        GOOD: \"Running the cracker now to check all 10,000 "
+                "candidates.\" → exec tool call.\n"
+                "        BAD:  \"Writing the helper script first.\" (says WHAT, "
+                "not WHY — user has no idea what helper or what task).\n"
+                "        BAD:  \"Running python.\" (mechanical; user already "
+                "knows from the tool args).\n"
+                "    (b) AFTER a tool result: state what you observed (concrete "
+                "value, error, count) and what you'll do next.\n"
+                "        GOOD: \"Got a 200 with the JSON I expected — now "
                 "parsing it for the price field.\" → exec tool call.\n"
-                "  The user sees these as 💬 progress notes between tool calls. "
-                "Keep them concrete (mention the actual file/url/error/value "
-                "you saw) and free of filler like \"Let me\", \"I'll now\", "
-                "\"Great\", or \"Okay\".\n"
+                "        GOOD: \"Cracker found 3 of 5 hashes; rerunning with "
+                "wider digit range for the remaining 2.\" → exec tool call.\n"
+                "  Keep narrations concrete (mention the actual file / hash / "
+                "URL / count / error you saw) and free of filler like \"Let me\", "
+                "\"I'll now\", \"Great\", or \"Okay\". The user is reading these "
+                "as live status updates — they need to know WHY each step is "
+                "happening, not just that python is being run.\n"
                 "- DO NOT stop after a single setup/probe tool call. A `mkdir`, `pwd`, "
                 "`uname`, or other workdir-init step is NOT the task. After it returns, "
                 "make another tool call to do the actual work. The task is only complete "
