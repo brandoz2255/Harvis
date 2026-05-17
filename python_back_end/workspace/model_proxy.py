@@ -209,16 +209,47 @@ async def _resolve_route(model_name: str) -> tuple[str, dict, bool, bool, str | 
         # Ollama doesn't need special handling
         is_ollama = provider_type == "ollama" or "ollama" in provider_url or "localhost" in provider_url
         
-        # For Ollama, use /v1/chat/completions endpoint
+        # For Ollama, smart-route by model availability — the DB-saved
+        # provider_url is "http://ollama:11434" (laptop) by default, but the
+        # user might pick a model that only exists on the desktop. Probe both.
         if is_ollama:
-            target_url = f"{provider_url}/v1/chat/completions"
+            laptop_base = provider_url
+            desktop_base = (os.getenv("DESKTOP_OLLAMA_URL", "") or "").rstrip("/")
+            chosen_base = laptop_base
+            chosen_host = "laptop"
+            if model_name and desktop_base and desktop_base != laptop_base:
+                try:
+                    lt = laptop_base.replace("/v1", "") + "/api/tags"
+                    async with httpx.AsyncClient(timeout=httpx.Timeout(4.0)) as hc:
+                        r = await hc.get(lt)
+                    on_laptop = r.status_code == 200 and any(
+                        m.get("name") == model_name for m in r.json().get("models", [])
+                    )
+                    if not on_laptop:
+                        dt = desktop_base.replace("/v1", "") + "/api/tags"
+                        async with httpx.AsyncClient(timeout=httpx.Timeout(4.0)) as hc:
+                            r2 = await hc.get(dt)
+                        if r2.status_code == 200 and any(
+                            m.get("name") == model_name for m in r2.json().get("models", [])
+                        ):
+                            chosen_base = desktop_base
+                            chosen_host = "desktop"
+                except Exception as exc:
+                    logger.warning("model_proxy DB-path probe failed: %s", exc)
+            if "/v1" in chosen_base:
+                target_url = chosen_base + "/chat/completions"
+            else:
+                target_url = chosen_base + "/v1/chat/completions"
+            logger.info(
+                "model_proxy: DB-cfg ollama → %s (host=%s, model=%s)",
+                chosen_base, chosen_host, model_name,
+            )
         else:
             target_url = f"{provider_url}/chat/completions"
-        
-        logger.info(
-            f"model_proxy: using user-configured provider: {provider_type}, url: {provider_url}"
-        )
-        
+            logger.info(
+                f"model_proxy: using user-configured provider: {provider_type}, url: {provider_url}"
+            )
+
         return (
             target_url,
             headers,
@@ -257,10 +288,40 @@ async def _resolve_route(model_name: str) -> tuple[str, dict, bool, bool, str | 
             headers["Authorization"] = f"Bearer {EXTERNAL_OLLAMA_API_KEY}"
         return target_url, headers, False, False, None
 
-    # Fallback: route to local Ollama (handles any model installed locally)
-    target_url = LOCAL_OLLAMA_URL.rstrip("/") + "/v1/chat/completions"
+    # Fallback: route to local Ollama (handles any model installed locally).
+    # When a model isn't on the laptop, transparently fall through to the
+    # desktop's Ollama (DESKTOP_OLLAMA_URL) so models pulled there work too.
+    laptop_url = LOCAL_OLLAMA_URL.rstrip("/")
+    desktop_url = (os.getenv("DESKTOP_OLLAMA_URL", "") or "").rstrip("/")
+    target_base = laptop_url
+    chosen = "laptop"
+
+    if model_name and desktop_url:
+        try:
+            laptop_tags = laptop_url.replace("/v1", "") + "/api/tags"
+            async with httpx.AsyncClient(timeout=httpx.Timeout(4.0)) as hc:
+                r = await hc.get(laptop_tags)
+            on_laptop = r.status_code == 200 and any(
+                m.get("name") == model_name for m in r.json().get("models", [])
+            )
+            if not on_laptop:
+                desktop_tags = desktop_url.replace("/v1", "") + "/api/tags"
+                async with httpx.AsyncClient(timeout=httpx.Timeout(4.0)) as hc:
+                    r2 = await hc.get(desktop_tags)
+                if r2.status_code == 200 and any(
+                    m.get("name") == model_name for m in r2.json().get("models", [])
+                ):
+                    target_base = desktop_url
+                    chosen = "desktop"
+        except Exception as exc:
+            logger.warning("model_proxy: model-availability probe failed: %s", exc)
+
+    if "/v1" in target_base:
+        target_url = target_base + "/chat/completions"
+    else:
+        target_url = target_base + "/v1/chat/completions"
     headers = {"Content-Type": "application/json"}
-    logger.info("model_proxy: routing %s to local Ollama at %s", model_name, LOCAL_OLLAMA_URL)
+    logger.info("model_proxy: routing %s to %s Ollama at %s", model_name, chosen, target_base)
     return target_url, headers, False, False, None
 
 
@@ -322,6 +383,52 @@ async def proxy_chat_completions(
             model_name = model_name[len(_prefix):]
             body = {**body, "model": model_name}
             break
+
+    # ── Dynamic model resolution (Phase 3 routing) ────────────────────────
+    # When OpenClaw sends `model=auto` (or `default`/`user-pref`), look up
+    # the user's most recently picked model from the openclaw_llm_config
+    # table and substitute it. This lets desktop OpenClaw's config stay as
+    # `harvis-proxy/auto` permanently — the user's `/model` pick takes effect
+    # on every request without rewriting the desktop config file.
+    _AUTO_SENTINELS = {"auto", "default", "user-pref", "dynamic"}
+    if model_name in _AUTO_SENTINELS:
+        cfg = await _get_openclaw_config()
+        # Configurable safety net: a model known to be on the laptop ollama,
+        # used when the user has no saved pick AND when the saved pick can't
+        # be served (laptop missing it + desktop unreachable). Default is
+        # qwen3.5:latest because it fits 8GB VRAM with usable context AND
+        # has reliable tool-calling.
+        fallback = os.getenv("HARVIS_AUTO_MODEL_FALLBACK", "qwen3.5:latest")
+        resolved = (cfg or {}).get("model_id") or fallback
+
+        # Check if the resolved model is actually reachable. Probe laptop
+        # first (the path we'll use), then desktop. If neither has it, swap
+        # in the fallback so the request doesn't 404 mid-task.
+        async def _ollama_has(base_url: str, name: str) -> bool:
+            try:
+                tags = base_url.rstrip("/").replace("/v1", "") + "/api/tags"
+                async with httpx.AsyncClient(timeout=httpx.Timeout(3.0)) as hc:
+                    r = await hc.get(tags)
+                if r.status_code == 200:
+                    return any(m.get("name") == name for m in r.json().get("models", []))
+            except Exception:
+                pass
+            return False
+
+        laptop = LOCAL_OLLAMA_URL.rstrip("/")
+        desktop = (os.getenv("DESKTOP_OLLAMA_URL", "") or "").rstrip("/")
+        if resolved != fallback:
+            on_laptop = await _ollama_has(laptop, resolved)
+            on_desktop = (await _ollama_has(desktop, resolved)) if desktop else False
+            if not (on_laptop or on_desktop):
+                logger.warning(
+                    "model_proxy: resolved %r unreachable on laptop/desktop — using fallback %r",
+                    resolved, fallback,
+                )
+                resolved = fallback
+        logger.info("model_proxy: auto-routing %r → %r", model_name, resolved)
+        model_name = resolved
+        body = {**body, "model": model_name}
 
     # region agent log
     try:
