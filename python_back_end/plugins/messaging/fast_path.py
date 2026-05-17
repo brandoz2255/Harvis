@@ -78,13 +78,7 @@ def _compose_fast_path_system_prompt(
     persona_block: str = "",
     recall_block: str = "",
 ) -> str:
-    """Build the system prompt for fast-path with persona + recall context.
-
-    Persona and recall live in the SYSTEM role (not the user role) so the
-    model treats them as authoritative ground truth, not as something the
-    user said to inspect. Same recall data the workspace path uses — the
-    dispatcher builds it once and passes it to both paths.
-    """
+    """Build the system prompt for fast-path with persona + recall context."""
     parts: list[str] = []
     if persona_block and persona_block.strip():
         parts.append(
@@ -165,12 +159,8 @@ async def direct_llm_reply(
         except ValueError:
             timeout_s = 600.0
 
-    # Compose the system prompt: caller-provided system_prompt wins; otherwise
-    # inject persona + recall blocks (if any) into the SYSTEM role using the
-    # default fast-path scaffold. Memory and persona belong in system, not
-    # user — that's why the workspace path injects them as preamble blocks
-    # and why the model treats them as authoritative there. Same data, same
-    # role, same authority for fast-path now.
+    # Compose system prompt: caller-provided wins; otherwise inject persona +
+    # recall blocks (if any) into the SYSTEM role using the default scaffold.
     if system_prompt is None:
         system_prompt = _compose_fast_path_system_prompt(
             persona_block=persona_block,
@@ -287,15 +277,9 @@ async def finish_fast_path_run(
 ) -> None:
     """Fire-and-forget body: run the LLM call, then mark the row terminal.
 
-    Called from asyncio.create_task in the dispatcher; never awaited by
-    the request handler. Exceptions are caught and converted to a failed
-    status so the sidecar's polling pipeline always sees a terminal
-    state instead of hanging.
-
-    persona_block + recall_block are the same SOUL.md persona and Hermes-
-    derived memory recall blocks the workspace path receives. They land in
-    the SYSTEM role (via direct_llm_reply) so memory questions get
-    authoritative context, not buried-in-the-user-message context.
+    persona_block + recall_block are routed through direct_llm_reply into
+    the SYSTEM role so memory questions get authoritative context (matches
+    the workspace path, which gets the same data via task brief preamble).
     """
     try:
         answer = await direct_llm_reply(
