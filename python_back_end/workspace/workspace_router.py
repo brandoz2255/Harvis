@@ -1454,6 +1454,79 @@ async def stream_workspace(
     )
 
 
+async def cancel_workspace_internal(
+    workspace_id: str,
+    *,
+    audit_actor: str = "internal",
+) -> dict:
+    """Cancel a running workspace from non-HTTP contexts (Discord bot, etc.).
+
+    Same effect as POST /cancel/{workspace_id}: marks status, signals the
+    OpenClaw client cancel flag (which schedules ws.close() so the blocked
+    async-for unblocks), cancels the background asyncio.Task, and waits up
+    to 6s for cleanup so callers can report a truly-idle workspace.
+
+    Returns one of:
+      {"status": "cancelled", "workspace_id": ..., "wait_outcome": ...}
+      {"status": "not_found", "workspace_id": ...}
+      {"status": "already_terminal", "current": "done|cancelled|error", "workspace_id": ...}
+    """
+    ws = _workspaces.get(workspace_id)
+    if not ws:
+        return {"status": "not_found", "workspace_id": workspace_id}
+
+    current = ws.get("status")
+    if current in ("done", "cancelled", "error"):
+        return {
+            "status": "already_terminal",
+            "current": current,
+            "workspace_id": workspace_id,
+        }
+
+    # Mark state first so any concurrent handler sees the intent immediately.
+    _workspaces[workspace_id]["status"] = "cancelled"
+
+    client_cancel_err: Optional[str] = None
+    try:
+        ws["client"].cancel()
+    except Exception as exc:
+        client_cancel_err = str(exc)
+        logger.warning("cancel_workspace_internal: client.cancel failed: %s", exc)
+
+    task = _workspace_tasks.get(workspace_id)
+    task_existed = task is not None
+    task_was_done = bool(task.done()) if task else True
+    wait_outcome = "no-task"
+    if task and not task.done():
+        task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=6.0)
+            wait_outcome = "completed"
+        except asyncio.CancelledError:
+            wait_outcome = "cancelled-error"
+        except asyncio.TimeoutError:
+            wait_outcome = "timeout"
+        except Exception as exc:
+            wait_outcome = f"error:{exc}"
+            logger.warning(
+                "cancel_workspace_internal: background task raised during cleanup: %s",
+                exc,
+            )
+
+    logger.info(
+        "Workspace cancelled (internal): id=%s actor=%s outcome=%s",
+        workspace_id, audit_actor, wait_outcome,
+    )
+    return {
+        "status": "cancelled",
+        "workspace_id": workspace_id,
+        "wait_outcome": wait_outcome,
+        "task_existed": task_existed,
+        "task_was_done": task_was_done,
+        "client_cancel_err": client_cancel_err,
+    }
+
+
 @workspace_router.post("/cancel/{workspace_id}")
 async def cancel_workspace(
     workspace_id: str,
@@ -1462,43 +1535,17 @@ async def cancel_workspace(
     """Cancel a running workspace. Force-closes the OpenClaw websocket and
     cancels the background task, then waits briefly for cleanup so the
     response only returns once the workspace is truly idle."""
-    ws = _workspaces.get(workspace_id)
-    if not ws:
+    result = await cancel_workspace_internal(
+        workspace_id,
+        audit_actor=f"user:{current_user.get('id')}",
+    )
+    if result["status"] == "not_found":
         raise HTTPException(status_code=404, detail=f"Workspace {workspace_id} not found")
 
-    # Mark state first so any concurrent handler sees the intent immediately.
-    _workspaces[workspace_id]["status"] = "cancelled"
-
-    # Signal OpenClaw client: sets cancelled flag AND schedules ws.close() so
-    # the blocked `async for raw in self._ws` unblocks right away.
-    _client_cancel_err: Optional[str] = None
-    try:
-        ws["client"].cancel()
-    except Exception as exc:
-        _client_cancel_err = str(exc)
-        logger.warning("cancel_workspace: client.cancel failed: %s", exc)
-
-    # Cancel the background asyncio.Task (raises CancelledError inside
-    # _run_workspace_bg which writes a terminal 'cancelled' event + cleans up).
-    task = _workspace_tasks.get(workspace_id)
-    _task_existed = task is not None
-    _task_was_done = bool(task.done()) if task else True
-    _wait_outcome = "no-task"
-    if task and not task.done():
-        task.cancel()
-        try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=6.0)
-            _wait_outcome = "completed"
-        except asyncio.CancelledError:
-            _wait_outcome = "cancelled-error"
-        except asyncio.TimeoutError:
-            _wait_outcome = "timeout"
-        except Exception as exc:
-            _wait_outcome = f"error:{exc}"
-            logger.warning(
-                "cancel_workspace: background task raised during cleanup: %s",
-                exc,
-            )
+    _client_cancel_err = result.get("client_cancel_err")
+    _task_existed = result.get("task_existed", False)
+    _task_was_done = result.get("task_was_done", True)
+    _wait_outcome = result.get("wait_outcome", "n/a")
 
     # region agent log
     try:
@@ -1527,8 +1574,7 @@ async def cancel_workspace(
         pass
     # endregion
 
-    logger.info("Workspace cancelled: id=%s user=%s", workspace_id, current_user["id"])
-    return {"workspace_id": workspace_id, "status": "cancelled"}
+    return {"workspace_id": workspace_id, "status": result["status"]}
 
 
 @workspace_router.get("/status/{workspace_id}", response_model=WorkspaceStatus)

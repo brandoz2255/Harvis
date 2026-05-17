@@ -12,7 +12,7 @@ from discord import app_commands
 import httpx
 from fastapi import Request
 
-from workspace.workspace_router import launch_workspace_internal
+from workspace.workspace_router import launch_workspace_internal, cancel_workspace_internal
 from workspace.task_detector import detect_workspace_task
 from plugins.models.resolver import resolve_default_local_model
 
@@ -76,7 +76,11 @@ def load_discord_workspace_config() -> DiscordWorkspaceConfig:
     allowed_channel_ids = _parse_int_set(os.getenv("DISCORD_ALLOWED_CHANNEL_IDS", ""))
     agent_id = os.getenv("DISCORD_WORKSPACE_AGENT_ID", "main").strip() or "main"
     model_name = os.getenv("DISCORD_WORKSPACE_MODEL_NAME", "").strip()
-    max_wait_seconds = int(os.getenv("DISCORD_WORKSPACE_MAX_WAIT_SECONDS", "1200"))
+    # Default 600s (10 min). Prior default was 1200s but users routinely waited
+    # the full 20 min on stuck runs because the timeout merely *reported* failure
+    # — the agent kept burning compute. Both timeout paths now call
+    # cancel_workspace_internal so the underlying task actually stops.
+    max_wait_seconds = int(os.getenv("DISCORD_WORKSPACE_MAX_WAIT_SECONDS", "600"))
     enable_interactive = os.getenv("DISCORD_WORKSPACE_ENABLE_INTERACTIVE", "false").lower() == "true"
     history_turns = max(0, int(os.getenv("DISCORD_WORKSPACE_HISTORY_TURNS", "10")))
     return DiscordWorkspaceConfig(
@@ -495,6 +499,13 @@ async def _wait_for_workspace_completion(
         else:
             await asyncio.sleep(2.0)
 
+    # Timeout reached — stop the underlying agent before returning the error.
+    # Without this, the OpenClaw run keeps burning compute until manually
+    # cancelled (see workspace 37408f92 which ran 1441s vs the 1200s timeout).
+    try:
+        await cancel_workspace_internal(workspace_id, audit_actor="discord:timeout")
+    except Exception as exc:
+        logger.warning("Auto-cancel on timeout failed for %s: %s", workspace_id, exc)
     return ("error", None, f"Timed out after {timeout_s}s waiting for workspace completion")
 
 
@@ -511,10 +522,30 @@ _TOOL_LABELS: dict[str, str] = {
     "browser/act": "Interacting with page",
     "browser/close": "Closing browser",
     "harvis-terminal": "Harvis terminal",
+    "web_search": "Web search",
+    "web_fetch": "Fetching",
+    "memory_search": "Memory search",
+    "memory_search_unified": "Memory search",
+    "memory_store": "Saving memory",
+    "memory_get": "Recalling memory",
+    "local_rag": "RAG search",
+    "rag_search": "RAG search",
 }
 
 # Tools whose `args.command` should be shown inline next to the call banner.
 _TOOLS_WITH_INLINE_CMD = {"exec", "harvis-terminal"}
+
+# Tools whose primary argument should be shown inline (in quotes for queries,
+# bare for URLs/paths). Maps tool name → arg-key tuple (first match wins).
+_TOOLS_WITH_INLINE_ARG: dict[str, tuple[str, ...]] = {
+    "web_search": ("query", "q"),
+    "web_fetch": ("url", "href"),
+    "memory_search": ("query", "q"),
+    "memory_search_unified": ("query", "q"),
+    "memory_get": ("key", "name"),
+    "local_rag": ("query", "q"),
+    "rag_search": ("query", "q"),
+}
 
 
 def _format_progress_line(event_type: str, payload: dict) -> str | None:
@@ -531,12 +562,21 @@ def _format_progress_line(event_type: str, payload: dict) -> str | None:
         tool = payload.get("tool", "unknown")
         label = _TOOL_LABELS.get(tool, f"Using {tool}")
         emoji = "\U0001f4bb" if tool == "harvis-terminal" else "\u2699\ufe0f"
+        args = payload.get("args") or {}
         if tool in _TOOLS_WITH_INLINE_CMD:
-            args = payload.get("args") or {}
             cmd = args.get("preview") or args.get("command", "")
             if cmd:
                 cmd_short = cmd[:80] + ("\u2026" if len(cmd) > 80 else "")
                 return f"{emoji} {label}: `{cmd_short}`"
+        if tool in _TOOLS_WITH_INLINE_ARG:
+            for k in _TOOLS_WITH_INLINE_ARG[tool]:
+                val = (args.get(k) or "").strip() if isinstance(args.get(k), str) else ""
+                if val:
+                    val_short = val if len(val) <= 90 else val[:87] + "\u2026"
+                    # Queries get quoted, URLs/paths stay bare for clickability.
+                    if k in ("query", "q"):
+                        return f"{emoji} {label}: \"{val_short}\""
+                    return f"{emoji} {label}: {val_short}"
         return f"{emoji} {label}"
 
     if event_type == "tool_result":
@@ -670,6 +710,11 @@ async def _wait_with_progress(
         else:
             await asyncio.sleep(2.0)
 
+    # Timeout reached — auto-cancel so the agent doesn't keep running silently.
+    try:
+        await cancel_workspace_internal(workspace_id, audit_actor="discord:timeout-progress")
+    except Exception as exc:
+        logger.warning("Auto-cancel on progress-timeout failed for %s: %s", workspace_id, exc)
     return ("error", None, f"Timed out after {timeout_s}s waiting for workspace completion")
 
 
@@ -1189,6 +1234,15 @@ async def _persist_model_selection(
 # bare form (no arg) which prints the current model + available list.
 _SET_MODEL_RE = re.compile(r"^\s*set[-_ ]?model(?:\s+(.+?))?\s*$", re.IGNORECASE)
 
+# `@bot cancel` / `stop` / `abort` (with optional one-word qualifier like
+# "it", "this", "task", "workspace") — terminates the user's most recent
+# running workspace in the current Discord session. Single-word commands
+# only; longer messages (e.g. "cancel my dinner plans") do NOT match.
+_CANCEL_RE = re.compile(
+    r"^\s*(cancel|stop|abort|kill)(\s+(it|this|that|task|workspace|run))?\s*[.!?]*\s*$",
+    re.IGNORECASE,
+)
+
 
 def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
     """
@@ -1404,6 +1458,64 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
             )
 
             pool = getattr(app_request.app.state, "pg_pool", None)
+
+            # ── `@bot cancel` / `stop` / `abort` text command ──
+            # Terminates the user's most recent RUNNING workspace in this
+            # Discord session. Reports back the outcome (cancelled / nothing
+            # running / already done). Returns early before any new workspace
+            # launch happens.
+            if _CANCEL_RE.match(content):
+                session_id_for_cancel = _discord_openclaw_session_id(message)
+                if not pool:
+                    await message.channel.send("Cancel unavailable: backend DB pool not ready.")
+                    return
+                try:
+                    async with pool.acquire() as conn:
+                        row = await conn.fetchrow(
+                            "SELECT id FROM workspace_runs "
+                            "WHERE session_id = $1 AND status = 'running' "
+                            "ORDER BY started_at DESC LIMIT 1",
+                            session_id_for_cancel,
+                        )
+                except Exception as exc:
+                    logger.exception("Cancel: DB lookup failed: %s", exc)
+                    await message.channel.send(f"Cancel failed at DB lookup: {exc}")
+                    return
+
+                if not row:
+                    await message.channel.send("No running workspace to cancel for this session.")
+                    return
+
+                ws_id = row["id"]
+                try:
+                    from workspace.workspace_router import cancel_workspace_internal
+                    result = await cancel_workspace_internal(
+                        ws_id,
+                        audit_actor=f"discord:{message.author.id}",
+                    )
+                except Exception as exc:
+                    logger.exception("Cancel: internal call failed: %s", exc)
+                    await message.channel.send(f"Cancel failed: {exc}")
+                    return
+
+                short = ws_id[:8]
+                if result["status"] == "cancelled":
+                    outcome = result.get("wait_outcome", "ok")
+                    await message.channel.send(
+                        f"Cancelled workspace `{short}` ({outcome})."
+                    )
+                elif result["status"] == "already_terminal":
+                    await message.channel.send(
+                        f"Workspace `{short}` is already {result.get('current')}."
+                    )
+                else:
+                    # not_found — DB said running but in-memory dict didn't have it
+                    # (probably backend restart between launch and now).
+                    await message.channel.send(
+                        f"Workspace `{short}` not tracked in memory — likely stale row. "
+                        f"Use POST /api/workspace/cancel if you need to force-close server-side."
+                    )
+                return
 
             # ── `@bot set-model <name>` text command ──
             set_model_match = _SET_MODEL_RE.match(content)
