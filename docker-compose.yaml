@@ -105,6 +105,18 @@ services:
       # Optional desktop-GPU Ollama for the model picker. Surfaces models that
       # only exist on the desktop (e.g. gemma4-26b on the 5080) in /api/models.
       DESKTOP_OLLAMA_URL: "${DESKTOP_OLLAMA_URL:-}"
+      # Per-workspace ephemeral Docker terminal (Phase 2). Default ON — the
+      # backend probes docker.sock + network at startup and gates the
+      # /api/tools/terminal/<wsid>/exec endpoint on the result. Set
+      # HARVIS_TERMINAL_ENABLED=false to force-disable as a kill-switch.
+      HARVIS_TERMINAL_ENABLED: "${HARVIS_TERMINAL_ENABLED:-true}"
+      HARVIS_TERMINAL_IMAGE: "${HARVIS_TERMINAL_IMAGE:-ubuntu:24.04}"
+      HARVIS_TERMINAL_NETWORK: "${HARVIS_TERMINAL_NETWORK:-harvis_openclaw-internal}"
+      HARVIS_TERMINAL_MEM: "${HARVIS_TERMINAL_MEM:-512m}"
+      HARVIS_TERMINAL_CPUS: "${HARVIS_TERMINAL_CPUS:-1.0}"
+      HARVIS_TERMINAL_DEFAULT_TIMEOUT_S: "${HARVIS_TERMINAL_DEFAULT_TIMEOUT_S:-30}"
+      HARVIS_TERMINAL_MAX_TIMEOUT_S: "${HARVIS_TERMINAL_MAX_TIMEOUT_S:-600}"
+      HARVIS_TERMINAL_IDLE_TIMEOUT_S: "${HARVIS_TERMINAL_IDLE_TIMEOUT_S:-1800}"
       BACKEND_URL: "http://backend:8000"
       HF_HOME: "/models-cache/huggingface"
       TRANSFORMERS_CACHE: "/models-cache/huggingface"

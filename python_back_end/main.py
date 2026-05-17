@@ -54,6 +54,7 @@ from workspace.github_proxy import github_proxy_router
 from workspace.rag_proxy import rag_proxy_router
 from workspace.kubectl_proxy import kubectl_proxy_router
 from workspace.repo_manager import repo_manager_router
+from workspace.terminal_routes import router as workspace_terminal_router
 
 # Import tools routers
 from tools import maps_router, openclaw_proxy_router, browser_proxy_router, opencode_llm_router, discord_proxy_router
@@ -741,6 +742,27 @@ async def lifespan(app: FastAPI):
             "Discord traffic is expected to flow through harvis-messaging-gateway."
         )
 
+    # Per-workspace terminal — startup readiness probe (option 2: auto-detect).
+    # Default-on; the env var is a kill-switch. Logs a clear reason if it can't
+    # actually run so the operator knows without poking the health endpoint.
+    try:
+        from workspace.terminal_container import terminal_status as _term_status
+        ts = await _term_status(force_probe=True)
+        if ts["available"]:
+            logger.info(
+                "✅ Workspace terminal ready (image=%s, network=%s)",
+                ts["probe"]["base_image"], ts["probe"]["network"],
+            )
+        elif ts["enabled"]:
+            logger.warning(
+                "⚠️ Workspace terminal not ready: %s",
+                ts["reason"],
+            )
+        else:
+            logger.info("⏭️  Workspace terminal disabled by HARVIS_TERMINAL_ENABLED=false")
+    except Exception as e:
+        logger.warning(f"⚠️ Workspace terminal readiness probe failed: {e}")
+
     # Phase 3B — discover and load plugins declared via plugin.yaml.
     # No-op when HARVIS_PLUGINS_ENABLED is unset; the loader fails-open on
     # any per-plugin import / env-availability error so one broken plugin
@@ -1173,6 +1195,10 @@ app.include_router(artifact_router)
 
 # Include workspace router (Harvis Workspaces — OpenClaw agent integration)
 app.include_router(workspace_router)
+# Include workspace terminal router — per-session dockerized shell that lives
+# on openclaw-internal so the agent can `curl` it for `exec` calls. Persistent
+# named volume per workspace_id (see workspace/terminal_container.py).
+app.include_router(workspace_terminal_router)
 # Include model proxy (OpenAI-compat endpoint for OpenClaw → Moonshot forwarding)
 # OpenClaw calls http://harvis-ai-merged-backend:8000/v1/chat/completions
 # so that the Moonshot API key never leaves the backend pod.
