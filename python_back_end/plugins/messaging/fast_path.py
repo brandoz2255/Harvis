@@ -49,6 +49,22 @@ _WORKSPACE_SIGNALS = re.compile(
     re.IGNORECASE,
 )
 
+# Meta-questions about the agent itself ("what model are you running",
+# "who are you", "what skills do you have"). The LLM-based detector's
+# system prompt has an explicit "err on the side of suggesting a
+# workspace" bias and tends to mis-route these as workspace tasks
+# (especially when they mention technical nouns like "model"). Short-
+# circuit them to fast-path before the LLM call so identity/state
+# questions get answered from the SYSTEM prompt's persona context
+# instead of triggering an empty workspace turn that emits the
+# "produced no answer" fallback.
+_META_QUESTION = re.compile(
+    r"^\s*(what(?:'s|\s+is|\s+are)?|who|are|do|tell\s+me|how)\s+.{0,30}\b"
+    r"(you|your|yourself|model|name|persona|identity|skill|capab|"
+    r"memor|remember|purpose|tool|self|robot|harvis)\b",
+    re.IGNORECASE,
+)
+
 
 _FAST_PATH_SYSTEM_PROMPT_BASE = (
     "You are Harvis, a helpful AI assistant. Give concise, direct answers.\n"
@@ -98,8 +114,9 @@ async def should_use_fast_path(text: str) -> bool:
       1. Empty / whitespace-only → False (let the dispatcher reject).
       2. Short message (< 20 chars) without workspace signal regex → True.
       3. Workspace signal regex matches → False (probably a real task).
-      4. Workspace task detector → False if it says should_suggest=True.
-      5. Otherwise → True (chat-like).
+      4. Meta-question regex matches → True (asking about the agent itself).
+      5. Workspace task detector → False if it says should_suggest=True.
+      6. Otherwise → True (chat-like).
     """
     body = (text or "").strip()
     if not body:
@@ -110,6 +127,9 @@ async def should_use_fast_path(text: str) -> bool:
 
     if _WORKSPACE_SIGNALS.search(body):
         return False
+
+    if _META_QUESTION.search(body):
+        return True
 
     try:
         from workspace.task_detector import detect_workspace_task  # type: ignore
