@@ -663,11 +663,12 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
                         if raw_summary:
                             event.data["summary"] = raw_summary
 
-                    # Validator pass — catch fabricated hash-cracking claims
-                    # before they reach the user. Deterministic: recomputes
-                    # md5/sha1/sha256 of any claimed plaintext and checks
-                    # against hashes in the task brief. Suppresses misleading
-                    # answers regardless of which way the model rolled.
+                    # Validator passes — catch fabricated claims before they
+                    # reach the user. Two layers:
+                    #   1. Hash-specific: recomputes md5/sha1/sha256 of claimed
+                    #      plaintexts against hashes in the brief.
+                    #   2. General CTF: catches zero-tool_call process claims
+                    #      for any skill (decode, crypto, forensics, hash).
                     try:
                         validated, was_fabricated = _validate_hash_claims(
                             task_brief, raw_summary,
@@ -688,6 +689,27 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
                             "letting original summary through: %s",
                             workspace_id, exc,
                         )
+                    # Layer 2: general CTF process-claim validator
+                    if not event.data.get("_validator_replaced"):
+                        try:
+                            validated2, was_fab2 = _validate_ctf_process_claims(
+                                task_brief, raw_summary,
+                                tool_call_count=executing_tool_call_count,
+                            )
+                            if was_fab2:
+                                logger.warning(
+                                    "[workspace:%s] CTF process-claim fabrication "
+                                    "caught. Original (first 300 chars): %r",
+                                    workspace_id, raw_summary[:300],
+                                )
+                                raw_summary = validated2
+                                event.data["summary"] = validated2
+                                event.data["_validator_replaced"] = True
+                        except Exception as exc:
+                            logger.exception(
+                                "[workspace:%s] CTF process-claim validator "
+                                "crashed: %s", workspace_id, exc,
+                            )
 
                     final_summary = raw_summary
                     # Parse structured result from research/document skills
@@ -1016,6 +1038,91 @@ def _validate_hash_claims(
         f"Target hash(es): `{fabricated_hash_list}`",
         "",
         tail,
+    ]
+    return "\n".join(replacement_lines), True
+
+
+def _validate_ctf_process_claims(
+    task_brief: str,
+    summary: str,
+    *,
+    tool_call_count: int = 0,
+) -> tuple[str, bool]:
+    """Catch fabricated process claims for CTF skills (decode, crypto, forensics).
+
+    Complements _validate_hash_claims (which handles hash-specific verification).
+    This validator catches the general case: the model claims to have run a
+    CTF skill tool (decoder.py, cipher.py, analyze.py) but tool_call_count is 0.
+
+    Only fires when:
+    1. The task brief matches a CTF skill pattern (decode/crypto/forensics keywords)
+    2. tool_call_count == 0
+    3. The summary contains process-claim language ("I ran", "the tool returned", etc.)
+
+    Does NOT fire for hash tasks (those are handled by _validate_hash_claims).
+    """
+    import re
+
+    if not summary or not task_brief or tool_call_count > 0:
+        return summary, False
+
+    # Skip if this is a hash task — _validate_hash_claims handles those.
+    _hash_re = re.compile(
+        r"\b[a-f0-9]{32}\b|\b[a-f0-9]{40}\b|\b[a-f0-9]{64}\b", re.IGNORECASE
+    )
+    if _hash_re.search(task_brief):
+        return summary, False
+
+    # Detect if the brief is a CTF skill task
+    _ctf_brief_re = re.compile(
+        r"\b(decode|decrypt|base64|base32|hex(?:adecimal)?|binary|morse"
+        r"|caesar|vigen[eè]re|atbash|shift\s+cipher|rotation\s+cipher"
+        r"|cipher(?:\s*text)?"
+        r"|forensics?|exiftool|binwalk|strings|metadata"
+        r"|find\s+(?:the\s+)?flag|hidden\s+data|embedded"
+        r"|analyze\s+(?:this\s+)?(?:file|image|binary|archive))\b",
+        re.IGNORECASE,
+    )
+    if not _ctf_brief_re.search(task_brief):
+        return summary, False
+
+    # Check for process claims in the summary
+    _process_re = re.compile(
+        r"\b("
+        r"I\s+(?:ran|executed|used|attempted|applied|tried)\s+(?:the\s+)?(?:tool|skill|script|decoder|cipher|analyz)"
+        r"|(?:ran|executed|used)\s+(?:the\s+)?(?:decode|cipher|forensic|analyz)"
+        r"|the\s+(?:tool|decoder|cipher|script|analyzer)\s+(?:reported|returned|confirmed|showed|found)"
+        r"|after\s+(?:running|executing|analyzing)"
+        r"|all\s+(?:methods?|encodings?|ciphers?|shifts?)\s+(?:were\s+)?(?:tried|attempted|tested)"
+        r"|candidates?\s+(?:were\s+)?(?:found|returned|generated)"
+        r"|no\s+(?:candidates?|matches?|results?)\s+(?:were\s+)?(?:found|returned)"
+        r"|verified\s*[:=]\s*(?:true|false)"
+        r"|score\s*[:=]\s*\d"
+        r")\b",
+        re.IGNORECASE,
+    )
+    if not _process_re.search(summary):
+        return summary, False
+
+    # Determine which skill type for the message
+    _skill_type = "CTF skill"
+    if re.search(r"\b(decode|base64|base32|hex|binary|morse)\b", task_brief, re.I):
+        _skill_type = "decode"
+    elif re.search(r"\b(caesar|vigen|atbash|cipher)\b", task_brief, re.I):
+        _skill_type = "classical-crypto"
+    elif re.search(r"\b(forensic|exiftool|binwalk|flag|metadata)\b", task_brief, re.I):
+        _skill_type = "forensics"
+
+    replacement_lines = [
+        f"**{_skill_type.title()} analysis was not performed.**",
+        "",
+        "The agent described running the skill tool but made **zero tool "
+        "calls** during this run — the process narrative is fabricated. "
+        "No `exec` was invoked.",
+        "",
+        "Please re-run the request. The model must use the `exec` tool to "
+        "call the appropriate skill script — describing the process in text "
+        "is not the same as executing it.",
     ]
     return "\n".join(replacement_lines), True
 

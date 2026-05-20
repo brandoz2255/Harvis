@@ -616,16 +616,26 @@ async def proxy_chat_completions(
             _num_ctx, _client_wanted_stream, model_name,
         )
 
-        # ── Scope-gated forced tool_choice for hash-cracking tasks ───────
+        # ── Scope-gated forced tool_choice for CTF / skill tasks ─────────
         # Under tool_choice=auto, granite4.1:8b (and similar small models)
-        # sometimes refuses to call exec when the user adds themed hints,
-        # fabricating a "ran all tiers" narrative instead.  Force the FIRST
-        # model call to emit an exec tool_call when messages contain hex
-        # hashes.  Only on the first call (no tool-role messages yet) — on
-        # subsequent calls the model already has tool results and should
-        # decide normally (call more tools or respond).
-        _hash_force_re = re.compile(
-            r"\b[a-f0-9]{32}\b|\b[a-f0-9]{40}\b|\b[a-f0-9]{64}\b",
+        # sometimes refuses to call exec — fabricating a "ran all tiers"
+        # narrative instead.  Force the FIRST model call to emit an exec
+        # tool_call when messages match CTF patterns (hashes, encoded
+        # blobs, cipher keywords, forensics keywords).  Only on the first
+        # call (no tool-role messages yet) — subsequent calls stay auto.
+        _ctf_force_re = re.compile(
+            # Hex hashes (MD5/SHA1/SHA256)
+            r"\b[a-f0-9]{32}\b|\b[a-f0-9]{40}\b|\b[a-f0-9]{64}\b"
+            # Base64 blobs (20+ chars)
+            r"|(?<!\w)[A-Za-z0-9+/]{20,}={0,2}(?!\w)"
+            # Binary blobs (4+ octets)
+            r"|(?:[01]{8}\s*){4,}"
+            # Decode / crypto / forensics action words
+            r"|\b(?:decode|decrypt|crack|caesar|vigen[eè]re|atbash"
+            r"|shift\s+cipher|rotation\s+cipher|classical\s+cipher"
+            r"|find\s+the\s+flag|exiftool|binwalk|strings\s+output"
+            r"|forensics?|analyze\s+(?:this\s+)?(?:file|image|binary)"
+            r"|what\s+does\s+this\s+say|morse)\b",
             re.IGNORECASE,
         )
         _msgs = body.get("messages") or []
@@ -639,13 +649,13 @@ async def proxy_chat_completions(
                 (t.get("function") or {}).get("name") == "exec"
                 for t in body.get("tools") or []
             )
-            if _hash_force_re.search(_all_text) and _has_exec_tool:
+            if _ctf_force_re.search(_all_text) and _has_exec_tool:
                 body["tool_choice"] = {
                     "type": "function",
                     "function": {"name": "exec"},
                 }
                 logger.info(
-                    "model_proxy: hash-task detected on first call — "
+                    "model_proxy: CTF-task detected on first call — "
                     "forcing tool_choice=exec"
                 )
 

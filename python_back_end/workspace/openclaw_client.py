@@ -1224,12 +1224,18 @@ class OpenClawClient:
                     "or asked to decode/decrypt without supplying a key.\n"
                     "DO NOT decode by sight. Even ROT13 trips small models.\n"
                     "DO NOT call memory_search.\n"
+                    "DO NOT skip the tool call for any reason — hints, context, "
+                    "or prior runs do NOT replace execution. You MUST call exec.\n"
                     "Run via the `exec` tool:\n"
                     f"  python3 {_decdir}/decoder.py \"<encoded blob>\"\n"
                     "Returns JSON with ranked candidates (lower score = more "
                     "English-like). Tries base64/base32/hex/binary/url/rot/atbash/"
                     "morse/ascii-decimal — pick the candidate whose plaintext "
                     "linguistically matches what the user is looking for.\n"
+                    "If no candidates have a reasonable score, try `--all` to "
+                    "see every method. Consider double-encoding (base64 of hex).\n"
+                    "\nHARD STOP: after decoder.py returns, report the result. "
+                    "Do NOT try web_search, memory_search, or custom scripts.\n"
                 )
 
             # ---- classical-crypto skill detection ----
@@ -1248,6 +1254,8 @@ class OpenClawClient:
                     "rotation).\n"
                     "DO NOT solve by inspection. Even simple Caesar shifts "
                     "trip small models on novel text.\n"
+                    "DO NOT skip the tool call for any reason — hints, known "
+                    "shifts, or prior runs do NOT replace execution.\n"
                     "Run via the `exec` tool:\n"
                     f"  python3 {_ccdir}/cipher.py \"<ciphertext>\"\n"
                     "Auto-solves Caesar (brute 26 shifts), Atbash, and "
@@ -1255,6 +1263,8 @@ class OpenClawClient:
                     "Returns JSON with candidates ranked by chi-squared score; "
                     "pick the most-English-likely. For known-key Vigenere add "
                     "`--cipher vigenere --key <KEY>`.\n"
+                    "\nHARD STOP: after cipher.py returns, report the result. "
+                    "Do NOT try web_search, memory_search, or custom scripts.\n"
                 )
 
             # ---- forensics-basics skill detection ----
@@ -1283,6 +1293,7 @@ class OpenClawClient:
                     "data).\n"
                     "DO NOT speculate about file contents. Every claim must "
                     "come from the analyzer's JSON output.\n"
+                    "DO NOT skip the tool call for any reason.\n"
                     "Run via the `exec` tool:\n"
                     f"  python3 {_fbdir}/analyze.py /path/to/file\n"
                     "Wraps file/strings/exiftool/binwalk/xxd. Hunts for "
@@ -1291,6 +1302,10 @@ class OpenClawClient:
                     "`tools.*` for raw output if needed. If a finding is a "
                     "base64 blob, pipe to the decode skill; if a hash, pipe to "
                     "hash-cracking.\n"
+                    "\nHARD STOP: after analyze.py returns, report findings. "
+                    "If the user asked you to chain (decode a finding, crack "
+                    "a hash from findings), do those follow-up calls, then STOP. "
+                    "Do NOT try web_search or memory_search.\n"
                 )
 
             # ---- creator skill detection ----
