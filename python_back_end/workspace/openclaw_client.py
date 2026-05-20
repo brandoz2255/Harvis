@@ -1137,6 +1137,11 @@ class OpenClawClient:
                     "auto-loaded by cracker.py.\n"
                     "DO NOT answer from memory even if you recognize the hash. "
                     "Recognition is not verification. You MUST call exec.\n"
+                    "DO NOT skip tool calls because the user provided a hint, theme, "
+                    "or extra context. Hints narrow your search space — they do NOT "
+                    "replace execution. You MUST still call exec with cracker.py for "
+                    "every new message containing a hash, even if a previous run already "
+                    "tried it. Each message is a fresh attempt.\n"
                     "\nTIERED APPROACH — run each tier via `exec`, stop at first verified hit:\n"
                     f"  Tier 1: python3 {_hcdir}/cracker.py <HASH> --online\n"
                     "    (tries online lookup + bundled top1k.txt + rockyou.txt)\n"
@@ -1151,12 +1156,28 @@ class OpenClawClient:
                     "https://raw.githubusercontent.com/danielmiessler/SecLists/master/"
                     "Passwords/Common-Credentials/100k-most-used-passwords-NCSC.txt\n"
                     f"    python3 {_hcdir}/cracker.py <HASH> --wordlist=/tmp/100k.txt\n"
+                    "\nTHEMED HINT (optional Tier 4): if the user provides a theme, "
+                    "category, or hint (e.g. 'pokemon', 'cities', 'movies'), "
+                    "generate a small themed wordlist via exec (e.g. "
+                    "`echo -e 'pikachu\\ncharizard\\ngroudon...' > /tmp/themed.txt`) "
+                    "then run: python3 {hcdir}/cracker.py <HASH> "
+                    "--wordlist=/tmp/themed.txt\n"
+                    "Include 20-50 entries covering common variations (lowercase, "
+                    "capitalized, with numbers). This is Tier 4 — run it AFTER "
+                    "Tiers 1-3, not instead of them.\n"
                     "\nThe script returns JSON with a `verified` boolean and "
                     "`tiers_tried` listing every wordlist + lookup attempted. "
-                    "Only report a plaintext if `verified=true`. If `verified=false` "
-                    'after all tiers, say "not cracked" and copy the `tiers_tried` '
-                    "list verbatim — never invent a plaintext, never guess "
-                    '"password"/"qwerty"/"123456" without the tool confirming.\n'
+                    "Only report a plaintext if `verified=true`.\n"
+                    "\nHARD STOP: after completing all applicable tiers (1-3, "
+                    "plus Tier 4 if the user gave a hint), STOP IMMEDIATELY. "
+                    "Do NOT try additional approaches — no web_search, no "
+                    "memory_search, no downloading extra wordlists, no writing "
+                    "custom scripts. Report the result as-is: if `verified=false` "
+                    'after all tiers, say "not cracked" and list the `tiers_tried` '
+                    "verbatim. Never invent a plaintext, never guess "
+                    '"password"/"qwerty"/"123456" without the tool confirming.\n'.format(
+                        hcdir=_hcdir
+                    )
                 )
                 _debug400831(
                     "openclaw_client.py:stream:hash_hint",

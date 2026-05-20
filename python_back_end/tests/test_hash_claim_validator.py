@@ -174,6 +174,85 @@ def test_wrong_plaintext_with_tools():
     assert was_fab, "Wrong plaintext even with tool calls should be caught"
 
 
+# ── Process-claim fabrication tests (groudon regression 2026-05-20) ──────────
+
+HASH_GROUDON = hashlib.md5(b"groudon").hexdigest()
+
+
+def test_zero_tool_process_claim_ran_skill():
+    """Model says 'I ran the hash-cracking skill' with 0 tool calls."""
+    summary = (
+        f"I ran the Harvis hash-cracking skill on {HASH_GROUDON}, "
+        "applying all supported tiers (online lookup, 10k, 100k). "
+        "None matched. verified: false."
+    )
+    _, was_fab = _validate_hash_claims(
+        f"crack {HASH_GROUDON}", summary, tool_call_count=0,
+    )
+    assert was_fab, "Fabricated 'I ran the skill' with 0 tools should be caught"
+
+
+def test_zero_tool_process_claim_tool_reported():
+    """Model says 'the tool reported verified: false' with 0 tool calls."""
+    summary = (
+        f"The cracking tool confirmed it after exhausting its built-in "
+        f"wordlists for hash {HASH_GROUDON}. No matching candidate exists."
+    )
+    _, was_fab = _validate_hash_claims(
+        f"crack {HASH_GROUDON}", summary, tool_call_count=0,
+    )
+    assert was_fab, "Fabricated 'tool confirmed' with 0 tools should be caught"
+
+
+def test_zero_tool_process_claim_after_exhausting():
+    """Model says 'after exhausting every wordlist' with 0 tool calls."""
+    summary = (
+        f"Hash {HASH_GROUDON}: verified: false after exhausting every "
+        "available wordlist and online lookup."
+    )
+    _, was_fab = _validate_hash_claims(
+        f"crack {HASH_GROUDON}", summary, tool_call_count=0,
+    )
+    assert was_fab, "'after exhausting' with 0 tools should be caught"
+
+
+def test_zero_tool_process_claim_none_matched():
+    """Model says 'none of these attempts matched' with 0 tool calls."""
+    summary = (
+        f"I attempted to crack {HASH_GROUDON} using all supported tiers. "
+        "None of these attempts matched the hash."
+    )
+    _, was_fab = _validate_hash_claims(
+        f"crack {HASH_GROUDON}", summary, tool_call_count=0,
+    )
+    assert was_fab, "'none of these attempts matched' with 0 tools should be caught"
+
+
+def test_real_negative_result_with_tools():
+    """Genuine 'not cracked' with real tool calls should NOT be flagged."""
+    summary = (
+        f"I ran the Harvis hash-cracking skill on {HASH_GROUDON}, "
+        "applying all supported tiers. None matched. verified: false "
+        "after exhausting every wordlist."
+    )
+    _, was_fab = _validate_hash_claims(
+        f"crack {HASH_GROUDON}", summary, tool_call_count=5,
+    )
+    assert not was_fab, "Real negative result with tool calls should NOT be flagged"
+
+
+def test_honest_failure_no_process_claim():
+    """Model honestly says it couldn't crack without claiming it ran tools."""
+    summary = (
+        "I could not determine the plaintext for the provided hash. "
+        "The hash does not appear in common password databases."
+    )
+    _, was_fab = _validate_hash_claims(
+        f"crack {HASH_GROUDON}", summary, tool_call_count=0,
+    )
+    assert not was_fab, "Honest 'could not determine' without process claims should pass"
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

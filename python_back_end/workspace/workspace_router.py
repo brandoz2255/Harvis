@@ -831,6 +831,45 @@ def _validate_hash_claims(
         ]
         return "\n".join(replacement_lines), True
 
+    # ── Pre-check: zero-tool_call fabricated PROCESS claims ─────────────
+    # Catches the case where the model claims to have *run* tools (even
+    # reporting a negative result like "verified: false") but emitted zero
+    # tool_calls. This is subtler than the success-signal check above —
+    # the model says "I ran the cracker and it failed" without ever calling
+    # exec. The response SOUNDS honest ("not cracked") but the process
+    # description is fabricated. Groudon regression (2026-05-20).
+    process_claim_re = re.compile(
+        r"\b("
+        r"I\s+(?:ran|executed|used|attempted|applied|tried)\s+(?:the\s+)?(?:hash|crack|tool|skill|script|cracker)"
+        r"|(?:ran|executed|used)\s+(?:the\s+)?(?:Harvis\s+)?hash.?crack"
+        r"|applying\s+all\s+(?:supported\s+)?tiers"
+        r"|all\s+(?:supported\s+)?tiers?\s+(?:were\s+)?(?:tried|attempted|exhausted|run)"
+        r"|the\s+(?:tool|cracker|script)\s+(?:reported|returned|confirmed|showed)"
+        r"|after\s+exhausting\s+(?:every|all|its)"
+        r"|all\s+attempts\s+returned"
+        r"|verified\s*[:=]\s*false\s+after"
+        r"|cracking\s+(?:tool|skill|script)\s+confirmed"
+        r"|none\s+of\s+these\s+attempts\s+matched"
+        r")\b",
+        re.IGNORECASE,
+    )
+    if tool_call_count == 0 and process_claim_re.search(summary):
+        replacement_lines = [
+            "**Hash cracking was not performed.**",
+            "",
+            "The agent described running crack attempts but made **zero tool "
+            "calls** during this run — the process narrative is fabricated. "
+            "No exec tool was invoked, so no wordlist or online lookup was "
+            "actually tried.",
+            "",
+            f"Target hash(es): `{target_hashes}`",
+            "",
+            "Please re-run the request. The model must use the `exec` tool to "
+            "call cracker.py — describing the process in text is not the same "
+            "as executing it.",
+        ]
+        return "\n".join(replacement_lines), True
+
     # ── Stray-hash check ──────────────────────────────────────────────
     # If the summary references a hex hash that does NOT appear in the
     # task_brief, the model is answering a DIFFERENT question (likely

@@ -21,6 +21,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 
 import asyncpg
 import httpx
@@ -614,6 +615,39 @@ async def proxy_chat_completions(
             "model_proxy: ollama route — num_ctx=%d think=false stream=false (client_wants_stream=%s) for %s",
             _num_ctx, _client_wanted_stream, model_name,
         )
+
+        # ── Scope-gated forced tool_choice for hash-cracking tasks ───────
+        # Under tool_choice=auto, granite4.1:8b (and similar small models)
+        # sometimes refuses to call exec when the user adds themed hints,
+        # fabricating a "ran all tiers" narrative instead.  Force the FIRST
+        # model call to emit an exec tool_call when messages contain hex
+        # hashes.  Only on the first call (no tool-role messages yet) — on
+        # subsequent calls the model already has tool results and should
+        # decide normally (call more tools or respond).
+        _hash_force_re = re.compile(
+            r"\b[a-f0-9]{32}\b|\b[a-f0-9]{40}\b|\b[a-f0-9]{64}\b",
+            re.IGNORECASE,
+        )
+        _msgs = body.get("messages") or []
+        _has_tool_results = any(m.get("role") == "tool" for m in _msgs)
+        if not _has_tool_results:
+            _all_text = " ".join(
+                m.get("content", "") for m in _msgs
+                if isinstance(m.get("content"), str)
+            )
+            _has_exec_tool = any(
+                (t.get("function") or {}).get("name") == "exec"
+                for t in body.get("tools") or []
+            )
+            if _hash_force_re.search(_all_text) and _has_exec_tool:
+                body["tool_choice"] = {
+                    "type": "function",
+                    "function": {"name": "exec"},
+                }
+                logger.info(
+                    "model_proxy: hash-task detected on first call — "
+                    "forcing tool_choice=exec"
+                )
 
     if is_streaming:
         # Ask Kimi/NVIDIA to include usage in the final SSE chunk
