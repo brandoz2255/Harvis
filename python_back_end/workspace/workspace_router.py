@@ -543,6 +543,17 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
 
     seq = 0
     tool_call_count = 0
+    executing_tool_call_count = 0
+    _RETRIEVAL_ONLY_TOOLS = {
+        "memory_search",
+        "memory_search_unified",
+        "memory_get",
+        "sessions_history",
+        "sessions_list",
+        "sessions_send",
+        "session_status",
+        "agents_list",
+    }
     terminal_status = "done"
     final_summary: Optional[str] = None
     final_error: Optional[str] = None
@@ -628,6 +639,9 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
         async for event in event_stream:
             if event.type == "tool_call":
                 tool_call_count += 1
+                _tname = (event.data or {}).get("tool", "")
+                if _tname not in _RETRIEVAL_ONLY_TOOLS:
+                    executing_tool_call_count += 1
             elif event.type == "token":
                 tok = event.data.get("content")
                 if isinstance(tok, str) and tok:
@@ -648,6 +662,33 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
                         raw_summary = "".join(token_chunks).strip()
                         if raw_summary:
                             event.data["summary"] = raw_summary
+
+                    # Validator pass — catch fabricated hash-cracking claims
+                    # before they reach the user. Deterministic: recomputes
+                    # md5/sha1/sha256 of any claimed plaintext and checks
+                    # against hashes in the task brief. Suppresses misleading
+                    # answers regardless of which way the model rolled.
+                    try:
+                        validated, was_fabricated = _validate_hash_claims(
+                            task_brief, raw_summary,
+                            tool_call_count=executing_tool_call_count,
+                        )
+                        if was_fabricated:
+                            logger.warning(
+                                "[workspace:%s] Hash-claim fabrication caught + "
+                                "replaced. Original summary (first 300 chars): %r",
+                                workspace_id, raw_summary[:300],
+                            )
+                            raw_summary = validated
+                            event.data["summary"] = validated
+                            event.data["_validator_replaced"] = True
+                    except Exception as exc:
+                        logger.exception(
+                            "[workspace:%s] Hash-claim validator crashed; "
+                            "letting original summary through: %s",
+                            workspace_id, exc,
+                        )
+
                     final_summary = raw_summary
                     # Parse structured result from research/document skills
                     structured = _parse_structured_result(raw_summary)
@@ -706,6 +747,239 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
 
 
 # ─── Helpers ───────────────────────────────────────────────────────────────────
+
+def _validate_hash_claims(
+    task_brief: str,
+    summary: str,
+    *,
+    tool_call_count: int = 0,
+) -> tuple[str, bool]:
+    """Catch fabricated plaintext claims for hashes that appear in the task brief.
+
+    Small open-weight models (qwen3:14b, hermes-4) sometimes claim a verified
+    plaintext for a hash even when their tool calls returned `verified: false`,
+    or invent a fake JSON tool response in their text. This validator catches
+    those by recomputing md5/sha1/sha256 of any claimed plaintext and
+    comparing against the hashes in the task brief.
+
+    `tool_call_count` is the number of **executing** tool_call events (caller
+    excludes memory_search / sessions_history / etc.). If a "verified / cracked /
+    matches" claim appears with zero such calls, the run is fabricated by
+    construction — no exec happened, so no hash could have been computed.
+    Caught deterministically below.
+
+    Returns (possibly_rewritten_summary, was_fabricated). If was_fabricated is
+    True, the summary has been replaced with honest-failure text — the caller
+    should use the new summary for both the SSE event and DB persistence.
+
+    Rationale: industry-standard "tool receipts" mitigation pattern (NABAOS).
+    All directive-based fabrication-mitigation is probabilistic; this is
+    deterministic.
+    """
+    import hashlib
+    import re
+
+    if not summary or not task_brief:
+        return summary, False
+
+    # Find hex hash candidates in the brief (MD5=32, SHA1=40, SHA224=56,
+    # SHA256=64, SHA384=96, SHA512=128). Word-boundary anchored.
+    hash_re = re.compile(r"\b([a-f0-9]{32}|[a-f0-9]{40}|[a-f0-9]{56}|[a-f0-9]{64}|[a-f0-9]{96}|[a-f0-9]{128})\b", re.IGNORECASE)
+    target_hashes = list({h.lower() for h in hash_re.findall(task_brief)})
+    if not target_hashes:
+        return summary, False
+
+    # ── Pre-check: zero-tool_call crack-success claims ────────────────────
+    # If the run made NO real tool calls but the response narrates a
+    # "cracked / verified / matched" outcome, the response is fabricated by
+    # construction. No exec happened, so no hash could have been computed,
+    # so any matches-claim is invented. Catch this deterministically before
+    # we even bother pattern-matching plaintexts.
+    success_signal_re = re.compile(
+        r"\b("
+        r"verified[\s:]+(?:via|with|by|using|true)"
+        r"|verified\s*[:=]\s*true"
+        r"|cracked\s+(?:with|via|using|by|the\s+hash|successfully)"
+        r"|plaintext[\s\S]{0,60}?matches"
+        r"|matches\s+(?:the\s+)?target\s+hash"
+        r"|hash\s+(?:was\s+)?cracked"
+        r"|successfully\s+cracked"
+        r"|tiers?_tried"
+        # Channel 2 regression patterns (2026-05-19)
+        r"|corresponds\s+to\s+(?:the\s+)?plaintext"
+        r"|no\s+additional\s+tool\s+calls\s+(?:were\s+)?needed"
+        r"|directly\s+computing\s+hashlib"
+        r"|running\s+this\s+in\s+python\s+gives"
+        r"|I\s+verified\s+by\s+running"
+        r")\b",
+        re.IGNORECASE,
+    )
+    if tool_call_count == 0 and success_signal_re.search(summary):
+        replacement_lines = [
+            "**Could not determine plaintext for the provided hash(es).**",
+            "",
+            "The agent narrated a successful crack but made **zero tool calls** "
+            "during this run — meaning no hash was actually computed or compared. "
+            "The output is hallucinated text, not a real result. Suppressing it.",
+            "",
+            f"Target hash(es): `{target_hashes}`",
+            "",
+            "Re-run the workspace; the model must emit real `exec` tool calls "
+            "(not narrate them in prose). If the agent keeps text-narrating "
+            "tool calls instead of emitting them through the tool channel, "
+            "swap to a model with stronger tool-use compliance.",
+        ]
+        return "\n".join(replacement_lines), True
+
+    # ── Stray-hash check ──────────────────────────────────────────────
+    # If the summary references a hex hash that does NOT appear in the
+    # task_brief, the model is answering a DIFFERENT question (likely
+    # pulled from session memory or chat history contamination). This
+    # catches the Channel 2 regression where the brief had 1c885e...
+    # but the model answered about 5d4140... from a prior turn.
+    summary_hashes = {h.lower() for h in hash_re.findall(summary)}
+    stray_hashes = summary_hashes - set(target_hashes)
+    if stray_hashes and not summary_hashes.intersection(target_hashes):
+        replacement_lines = [
+            "**Could not determine plaintext for the provided hash(es).**",
+            "",
+            "The agent's response referenced hash(es) "
+            f"`{sorted(stray_hashes)[:3]}` which do NOT appear in the "
+            f"original request. The target was `{target_hashes}`. "
+            "This is a cross-contamination artifact — the model answered "
+            "a different question (likely from a prior conversation turn). "
+            "Suppressing.",
+            "",
+            "Re-run the workspace; the model should only address the "
+            "hash(es) in the current request.",
+        ]
+        return "\n".join(replacement_lines), True
+
+    _FALSE_POSITIVE_PLAINTEXT = frozenset({
+        # English prose after "plaintext is …" ("known to cryptographers", etc.)
+        "known",
+        "unknown",
+        "unavailable",
+        "uncertain",
+        "undetermined",
+        "unclear",
+        "possible",
+        "possibly",
+        "unlikely",
+        "likely",
+        "still",
+        "not",
+        "yet",
+        "never",
+        "being",
+        "currently",
+        "presently",
+        "simply",
+    })
+
+    # Patterns where the agent claims a specific plaintext.
+    # Pull candidates from any of these shapes.
+    claim_patterns = [
+        # "the plaintext is `m3w`" / "plaintext is m3w" / "plaintext: m3w"
+        r"plaintext(?:\s+is|\s*[=:])\s*[`'\"\*]+\s*([A-Za-z0-9_\-\.!@#\$%]+)\s*[`'\"\*]+",
+        # Reject adjunct capture: "plaintext is known to analysts ..." → not a password literal
+        r"plaintext(?:\s+is|\s*[=:])\s+([A-Za-z0-9_\-\.!@#\$%]+)\b(?!\s+to\b)",
+        # "plaintext "password" matches" / "plaintext `m3w` matches" — no is/=/: between
+        r"plaintext\s+[`'\"\*]+\s*([A-Za-z0-9_\-\.!@#\$%]+)\s*[`'\"\*]+\s*(?:matches|matched|=|:|hashes\s+to)",
+        # "corresponds to `m3w`" / "corresponds to **m3w**"
+        r"corresponds to\s+[`'\"\*]+\s*([A-Za-z0-9_\-\.!@#\$%]+)\s*[`'\"\*]+",
+        # "Answer: m3w" / "Final answer: m3w" — only when followed by a short token
+        r"(?:^|\n)(?:Final\s+)?Answer\s*[:\-]\s*[`'\"\*]*\s*([A-Za-z0-9_\-\.!@#\$%]{1,32})\s*[`'\"\*]*\s*(?:$|\n|\.)",
+        # JSON-shaped fake tool response: "plaintext": "m3w"
+        r'"plaintext"\s*:\s*"([A-Za-z0-9_\-\.!@#\$%]+)"',
+        # "verified plaintext X" / "X (lowercase)" form
+        r"verified plaintext[\s:]+[`'\"\*]*([A-Za-z0-9_\-\.!@#\$%]+)[`'\"\*]*",
+        # Python hashlib call narrated in prose: `md5("password")` / md5('hello')
+        r"(?:md5|sha1|sha256|sha512)\s*\(\s*[`'\"]([A-Za-z0-9_\-\.!@#\$%]+)[`'\"]",
+        # "Cracked with X tier ... plaintext Y" / "cracked: plaintext"
+        r"[Cc]racked\b[^\.\n]{0,80}?plaintext[\s:]+[`'\"\*]*([A-Za-z0-9_\-\.!@#\$%]+)[`'\"\*]*",
+        # "matched: X" / "match: X" in cracker-output-mirroring contexts
+        r"(?:^|\s)matched?\s*[:=]\s*[`'\"\*]+\s*([A-Za-z0-9_\-\.!@#\$%]+)\s*[`'\"\*]+",
+    ]
+
+    claimed: set[str] = set()
+    for pat in claim_patterns:
+        for m in re.finditer(pat, summary, re.IGNORECASE | re.MULTILINE):
+            cand = (m.group(1) or "").strip().strip("'\"`*.,")
+            if not cand or len(cand) > 64:
+                continue
+            low = cand.lower()
+            junk = _FALSE_POSITIVE_PLAINTEXT | {
+                "null", "none", "verified", "false", "true", "unknown",
+                "n/a", "na", "nil", "undefined", "x", "y", "value",
+                "string", "any", "tbd", "todo", "unverified",
+            }
+            if low in junk:
+                continue
+            claimed.add(cand)
+
+    if not claimed:
+        return summary, False
+
+    # For each target hash, check if any claimed plaintext genuinely hashes to it
+    algo_by_len = {
+        32:  hashlib.md5,
+        40:  hashlib.sha1,
+        56:  hashlib.sha224,
+        64:  hashlib.sha256,
+        96:  hashlib.sha384,
+        128: hashlib.sha512,
+    }
+
+    any_verified = False
+    fabricated_hash_list: list[str] = []
+    for h in target_hashes:
+        algo = algo_by_len.get(len(h))
+        if algo is None:
+            continue
+        matched_for_this_hash = False
+        for cand in claimed:
+            computed = algo(cand.encode("utf-8")).hexdigest().lower()
+            if computed == h:
+                matched_for_this_hash = True
+                any_verified = True
+                break
+        if not matched_for_this_hash:
+            fabricated_hash_list.append(h)
+
+    # If at least one claim is genuine, let the response through (don't punish
+    # a real crack just because the model also mentioned an unrelated string).
+    if any_verified:
+        return summary, False
+
+    # Every target hash had claims that don't verify. Replace.
+    if tool_call_count > 0:
+        tail = (
+            "The agent did run tools, but the plaintext token(s) extracted from its "
+            "answer do not hash to the target — this is often a false positive from "
+            "English prose (e.g. “known”, “unknown”) or a wrong guess. Prefer the "
+            "cracker JSON (`verified`, `tiers_tried`) in the original response when "
+            "available."
+        )
+    else:
+        tail = (
+            "Either the cracker tool returned `verified: false`, or the agent skipped "
+            "the verification step. No reliable answer is available from this run."
+        )
+    replacement_lines = [
+        "**Could not determine plaintext for the provided hash(es).**",
+        "",
+        "The agent produced an answer that did not pass verification: it claimed "
+        f"plaintext(s) `{sorted(claimed)}` but md5/sha1/sha256 of these does NOT "
+        "match the target hash(es). The claim has been suppressed because it "
+        "would otherwise be misleading.",
+        "",
+        f"Target hash(es): `{fabricated_hash_list}`",
+        "",
+        tail,
+    ]
+    return "\n".join(replacement_lines), True
+
 
 def _parse_structured_result(summary: str) -> Optional[dict]:
     """

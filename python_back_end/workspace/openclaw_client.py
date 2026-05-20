@@ -62,6 +62,31 @@ from websockets.exceptions import ConnectionClosed, WebSocketException
 
 logger = logging.getLogger(__name__)
 
+
+def _debug400831(location: str, message: str, data: dict, run_id: str, hypothesis_id: str) -> None:
+    # region agent log
+    try:
+        import json as _json
+        import time as _time
+        from pathlib import Path as _Path
+
+        payload = {
+            "sessionId": "400831",
+            "runId": run_id,
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(_time.time() * 1000),
+        }
+        p = _Path("/home/user/Harvis/.cursor/debug-400831.log")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("a", encoding="utf-8") as f:
+            f.write(_json.dumps(payload, separators=(",", ":")) + "\n")
+    except Exception:
+        pass
+    # endregion
+
 OPENCLAW_URL = os.getenv("OPENCLAW_URL", "ws://harvis-ai-openclaw:18789")
 OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 
@@ -778,25 +803,34 @@ class OpenClawClient:
             "message": f"Connected to OpenClaw gateway (agent: {self.agent_id})",
         })
 
-        # ── Pick HOME for THIS connected gateway ──────────────────────────────
-        # The module-level OPENCLAW_HOME (env-configured, e.g. /home/user
-        # for host BYO mode) is WRONG when we fell back to the dockerized
-        # openclaw container (HOME=/home/node inside it). Rebind locally so
-        # all directive `mkdir`/`cd`/path hints below target a writable dir.
-        # Heuristic: localhost / host.docker.internal / 127.0.0.1 → host BYO
-        # (use env value). Anything else → container service name → /home/node.
+        # ── Pick HOME + SKILLS_BASE for THIS connected gateway ───────────────
+        # Two different things resolve based on which gateway we landed on:
+        #   - OPENCLAW_HOME: the writable workspace root the agent can mkdir/cd
+        #     into. host BYO → user home (e.g. /home/user); dockerized
+        #     openclaw → /home/node (container HOME).
+        #   - SKILLS_BASE: where the harvis CTF skills actually live. host BYO
+        #     loads from ~/.openclaw/skills (per openclaw.json extraDirs);
+        #     dockerized container mounts them at /skills-shared (per the
+        #     docker-compose volume mount). The hash-crack/decode/etc hints
+        #     below construct cracker.py paths using SKILLS_BASE so the model
+        #     gets a path that ACTUALLY exists on its side.
+        # Heuristic: localhost / host.docker.internal / 127.0.0.1 → host BYO.
         try:
             from urllib.parse import urlparse
             _host = (urlparse(self.gateway_url).hostname or "").lower()
-            if _host in ("localhost", "host.docker.internal", "127.0.0.1", "::1"):
-                OPENCLAW_HOME = os.getenv("OPENCLAW_HOME", "/home/node").rstrip("/")
-            else:
-                OPENCLAW_HOME = "/home/node"
+            _is_host_byo = _host in ("localhost", "host.docker.internal", "127.0.0.1", "::1")
         except Exception:
+            _is_host_byo = False
+
+        if _is_host_byo:
             OPENCLAW_HOME = os.getenv("OPENCLAW_HOME", "/home/node").rstrip("/")
+            SKILLS_BASE = f"{OPENCLAW_HOME}/.openclaw/skills"
+        else:
+            OPENCLAW_HOME = "/home/node"
+            SKILLS_BASE = "/skills-shared"
         logger.info(
-            "[workspace:%s] Resolved OPENCLAW_HOME=%s for gateway %s",
-            self.workspace_id, OPENCLAW_HOME, self.gateway_url,
+            "[workspace:%s] Resolved OPENCLAW_HOME=%s SKILLS_BASE=%s for gateway %s",
+            self.workspace_id, OPENCLAW_HOME, SKILLS_BASE, self.gateway_url,
         )
 
         try:
@@ -1091,7 +1125,7 @@ class OpenClawClient:
             )
             hash_hint = ""
             if _detected_hashes:
-                _hcdir = f"{OPENCLAW_HOME}/.openclaw/workspace/skills/hash-cracking"
+                _hcdir = f"{SKILLS_BASE}/hash-cracking"
                 hash_hint = (
                     "\nHASH-CRACKING DETECTED. The user provided one or more password "
                     "hashes. The hash-cracking skill is installed and you must use it.\n"
@@ -1101,17 +1135,49 @@ class OpenClawClient:
                     "already has a verified one.\n"
                     "DO NOT try to download rockyou.txt — it's already bundled and "
                     "auto-loaded by cracker.py.\n"
-                    "For EACH hash the user gave, run EXACTLY this via the `exec` tool "
-                    "(no flags to add or remove — auto-loads top1k.txt then rockyou.txt "
-                    "from wordlists/ next to the script):\n"
-                    f"  python3 {_hcdir}/cracker.py <HASH> --online\n"
-                    "Stop at the first verified hit per hash.\n"
-                    "The script returns JSON with a `verified` boolean and "
+                    "DO NOT answer from memory even if you recognize the hash. "
+                    "Recognition is not verification. You MUST call exec.\n"
+                    "\nTIERED APPROACH — run each tier via `exec`, stop at first verified hit:\n"
+                    f"  Tier 1: python3 {_hcdir}/cracker.py <HASH> --online\n"
+                    "    (tries online lookup + bundled top1k.txt + rockyou.txt)\n"
+                    "  Tier 2 (if Tier 1 returns verified=false): fetch SecLists "
+                    "top-10k and retry:\n"
+                    "    curl -sSL -o /tmp/top10k.txt "
+                    "https://raw.githubusercontent.com/danielmiessler/SecLists/master/"
+                    "Passwords/Common-Credentials/10k-most-common.txt\n"
+                    f"    python3 {_hcdir}/cracker.py <HASH> --wordlist=/tmp/top10k.txt\n"
+                    "  Tier 3 (if still uncracked): fetch 100k passwords:\n"
+                    "    curl -sSL -o /tmp/100k.txt "
+                    "https://raw.githubusercontent.com/danielmiessler/SecLists/master/"
+                    "Passwords/Common-Credentials/100k-most-used-passwords-NCSC.txt\n"
+                    f"    python3 {_hcdir}/cracker.py <HASH> --wordlist=/tmp/100k.txt\n"
+                    "\nThe script returns JSON with a `verified` boolean and "
                     "`tiers_tried` listing every wordlist + lookup attempted. "
                     "Only report a plaintext if `verified=true`. If `verified=false` "
                     'after all tiers, say "not cracked" and copy the `tiers_tried` '
-                    'list verbatim — never invent a plaintext, never guess '
-                    '"password"/"qwerty"/"123456" without the tool confirming.\n"'
+                    "list verbatim — never invent a plaintext, never guess "
+                    '"password"/"qwerty"/"123456" without the tool confirming.\n'
+                )
+                _debug400831(
+                    "openclaw_client.py:stream:hash_hint",
+                    "hash_hint_built",
+                    {
+                        "workspace_id": self.workspace_id,
+                        "detected_hashes": _detected_hashes[:3],
+                        "tier2_marker": "10k-most-common.txt" in hash_hint,
+                        "tier3_marker": "100k-most-used-passwords-NCSC.txt" in hash_hint,
+                        "forbid_memory_marker": "DO NOT answer from memory" in hash_hint,
+                    },
+                    "run_hash_issue",
+                    "H1",
+                )
+                logger.warning(
+                    "[DBG400831][H1] hash_hint_built workspace=%s hashes=%s tier2=%s tier3=%s mem_forbid=%s",
+                    self.workspace_id,
+                    _detected_hashes[:3],
+                    "10k-most-common.txt" in hash_hint,
+                    "100k-most-used-passwords-NCSC.txt" in hash_hint,
+                    "DO NOT answer from memory" in hash_hint,
                 )
 
             # ---- decode skill detection ----
@@ -1131,7 +1197,7 @@ class OpenClawClient:
             )
             decode_hint = ""
             if _decode_signal and not _detected_hashes:
-                _decdir = f"{OPENCLAW_HOME}/.openclaw/workspace/skills/decode"
+                _decdir = f"{SKILLS_BASE}/decode"
                 decode_hint = (
                     "\nDECODE TASK DETECTED. The user pasted an encoded blob "
                     "or asked to decode/decrypt without supplying a key.\n"
@@ -1154,7 +1220,7 @@ class OpenClawClient:
             _crypto_signal = bool(_CRYPTO_VERB_RE.search(last_user_msg or ""))
             crypto_hint = ""
             if _crypto_signal:
-                _ccdir = f"{OPENCLAW_HOME}/.openclaw/workspace/skills/classical-crypto"
+                _ccdir = f"{SKILLS_BASE}/classical-crypto"
                 crypto_hint = (
                     "\nCLASSICAL-CIPHER TASK DETECTED. The user mentioned a "
                     "classical cipher (Caesar / Vigenere / Atbash / shift / "
@@ -1189,7 +1255,7 @@ class OpenClawClient:
             )
             forensics_hint = ""
             if _forensics_signal:
-                _fbdir = f"{OPENCLAW_HOME}/.openclaw/workspace/skills/forensics-basics"
+                _fbdir = f"{SKILLS_BASE}/forensics-basics"
                 forensics_hint = (
                     "\nFILE-FORENSICS TASK DETECTED. The user wants to inspect "
                     "a file (find a flag, pull metadata, look for embedded "
@@ -1220,7 +1286,7 @@ class OpenClawClient:
             _creator_signal = bool(_CREATOR_VERB_RE.search(last_user_msg or ""))
             creator_hint = ""
             if _creator_signal:
-                _crdir = f"{OPENCLAW_HOME}/.openclaw/workspace/skills/creator"
+                _crdir = f"{SKILLS_BASE}/creator"
                 creator_hint = (
                     "\nFILE-CREATION TASK DETECTED. The user wants you to "
                     "create a script / file / scaffold.\n"
@@ -1477,6 +1543,33 @@ class OpenClawClient:
                 "You are Harvis.\n\n"
                 + full_message
             )
+            _is_hash_task = bool(_detected_hashes)
+            if _is_hash_task:
+                _debug400831(
+                    "openclaw_client.py:stream:full_message",
+                    "hash_prompt_dispatched",
+                    {
+                        "workspace_id": self.workspace_id,
+                        "session_key": self._session_key[:48],
+                        "has_hash_hint": "HASH-CRACKING DETECTED." in full_message,
+                        "has_tier2": "10k-most-common.txt" in full_message,
+                        "has_tier3": "100k-most-used-passwords-NCSC.txt" in full_message,
+                        "has_stop_asking_back": "Don't ask the user for confirmation" in full_message,
+                        "mentions_web_search": "web_search" in full_message.lower(),
+                    },
+                    "run_hash_issue",
+                    "H2",
+                )
+                logger.warning(
+                    "[DBG400831][H2] hash_prompt_dispatched workspace=%s skey=%s has_hint=%s has_t2=%s has_t3=%s stop_asking=%s has_web_search=%s",
+                    self.workspace_id,
+                    self._session_key[:48],
+                    "HASH-CRACKING DETECTED." in full_message,
+                    "10k-most-common.txt" in full_message,
+                    "100k-most-used-passwords-NCSC.txt" in full_message,
+                    "Don't ask the user for confirmation" in full_message,
+                    "web_search" in full_message.lower(),
+                )
 
             # Send the chat message via chat.send.
             req_id = self._next_id()
@@ -2126,6 +2219,28 @@ class OpenClawClient:
                     "[openclaw] tool_result session=%.12s tool=%s success=%s output=%.80s",
                     self._session_key, tool_name, success, output,
                 )
+                if tool_name == "exec" and (
+                    "\"verified\": false" in output.lower()
+                    or "verified=false" in output.lower()
+                    or "tiers_tried" in output.lower()
+                ):
+                    _debug400831(
+                        "openclaw_client.py:_handle_agent_event:tool_result",
+                        "hash_exec_result_seen",
+                        {
+                            "workspace_id": self.workspace_id,
+                            "success": success,
+                            "snippet": output[:280],
+                        },
+                        "run_hash_issue",
+                        "H3",
+                    )
+                    logger.warning(
+                        "[DBG400831][H3] hash_exec_result_seen workspace=%s success=%s output=%.280s",
+                        self.workspace_id,
+                        success,
+                        output,
+                    )
                 yield self._tag(OpenClawEvent("tool_result", {
                     "tool": tool_name,
                     "output": output[:2000],  # cap output length

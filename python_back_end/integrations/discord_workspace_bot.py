@@ -189,7 +189,12 @@ _WORKSPACE_SIGNALS = re.compile(
     r"|read\s+(?:the\s+)?file|edit\s+(?:the\s+)?file"
     r"|analyze\s+(?:the\s+)?(?:code|repo|log|image|picture|photo|screenshot)"
     r"|react|nextjs|next\.js|fastapi|python|typescript|javascript"
-    r"|component|endpoint|router|schema|migration|dockerfile)",
+    r"|component|endpoint|router|schema|migration|dockerfile"
+    # Hash/decode/crypto tasks MUST go through workspace (tools + validator).
+    # Without this, a bare hash like "5d41402abc4b2a76b9719d911017c592"
+    # could hit fast-path if PREFER_WORKSPACE is ever turned off.
+    r"|crack|brute.?force|\b[a-f0-9]{32}\b|\b[a-f0-9]{40}\b|\b[a-f0-9]{64}\b"
+    r"|decode|decrypt|cipher)",
     re.IGNORECASE,
 )
 
@@ -286,7 +291,17 @@ def _direct_discord_memory_reply(
     return "I do not see your job in the recent Discord context I was given."
 
 
-def _discord_openclaw_session_id(message: discord.Message) -> str:
+_TOOL_TASK_SIGNALS = re.compile(
+    r"\b[a-f0-9]{32}\b|\b[a-f0-9]{40}\b|\b[a-f0-9]{64}\b|\b[a-f0-9]{128}\b"
+    r"|\$(?:1|2[abxy]?|5|6|argon2)\$"
+    r"|crack|hash|decode|decrypt|brute.?force",
+    re.IGNORECASE,
+)
+
+
+def _discord_openclaw_session_id(
+    message: discord.Message, *, fresh: bool = False,
+) -> str:
     """
     One OpenClaw session per Discord channel (or thread) + user.
 
@@ -294,28 +309,60 @@ def _discord_openclaw_session_id(message: discord.Message) -> str:
     like a brand-new Discord/OpenClaw context. That encouraged the model to
     re-introduce "Discord" / identity boilerplate and treat sub-agent spawns as
     separate integrations. Reusing the same session keeps a single logical instance.
+
+    When *fresh* is True the message.id is appended so the session starts with no
+    prior turns. Used for tool-dependent tasks (hash cracking, decode) where prior
+    OpenClaw session memory bleeds old answers into the new prompt and causes the
+    model to skip tool calls.
     """
     chan_id = getattr(message.channel, "id", "dm")
-    return f"discord-{chan_id}-{message.author.id}"
+    base = f"discord-{chan_id}-{message.author.id}"
+    if fresh:
+        return f"{base}-{message.id}"
+    return base
 
 
-# Substrings that identify our own failure-fallback bot messages. These must
-# be filtered out of the assistant-role history before we hand it to the
-# agent, otherwise the model sees its own past "produced no answer" turns
-# and rationally continues the pattern. (See: 2026-05-11 Discord debug —
-# Hermes-3 emitted `Executing the command to open a terminal:` then stopped
-# because the recent-history slot read like a string of empty bot turns.)
+# Substrings that identify bot messages we MUST strip from the assistant-role
+# history before handing it to the agent. Two failure modes covered:
+#
+#   1. Failure-fallback turns — "produced no answer", etc. (the original
+#      reason this filter exists). Without filtering, the model sees a string
+#      of empty bot turns and rationally continues the pattern.
+#
+#   2. Fabrication-shaped turns — phrases that the Tool Result Honesty HARD
+#      RULES in AGENTS.md explicitly forbid the model from emitting. If a
+#      prior turn ALREADY broke that rule (because the directive wasn't yet
+#      injected, or the model lost a roll against history), keeping that
+#      turn in history will train the next turn to repeat the same
+#      fabrication. Verified live on 2026-05-18: side-by-side same-prompt
+#      test, a fresh channel honestly refused the hash; the contaminated
+#      channel parroted the prior "Answer: mew" + "This was confirmed by
+#      directly computing hashlib.md5..." verbatim despite the directive
+#      being in the system prompt. Filtering kills the poisoning feedback
+#      loop.
 _BOT_FALLBACK_SIGNALS: tuple[str, ...] = (
+    # Original failure-fallback patterns.
     "produced no answer and did not call any tools",
     "If the task requires file or web access, rephrase it more explicitly",
     "I cannot see your whole Discord history",
+    # Fabrication-shaped patterns. Any prior bot turn containing these
+    # already violated the Tool Result Honesty directive — don't feed it
+    # back into the next turn's context.
+    "directly computing hashlib.md5",
+    "directly computing `hashlib.md5",
+    "This was confirmed by directly computing",
+    "Direct computation shows",
+    "Running this in Python gives",
+    "I verified by running",
+    "does not override the cryptographic verification",
+    "mathematically tied to",
 )
 
 
 async def _fetch_discord_chat_history(
     client: discord.Client,
     message: discord.Message,
-    limit: int = 20,
+    limit: int = 0,
     max_chars_per_msg: int = 1500,
 ) -> list[dict]:
     """Pull recent messages from the same channel/DM so the agent has context.
@@ -537,6 +584,67 @@ _TOOLS_WITH_INLINE_CMD = {"exec", "harvis-terminal"}
 
 # Tools whose primary argument should be shown inline (in quotes for queries,
 # bare for URLs/paths). Maps tool name → arg-key tuple (first match wins).
+class CancelWorkspaceView(discord.ui.View):
+    """Discord cancel button attached to the progress message of a running
+    workspace. Clicking calls cancel_workspace_internal — same code path as
+    the `@bot cancel` text command and the HTTP /cancel endpoint.
+
+    Only the user who launched the task can click. Other clicks get a quiet
+    ephemeral notice. The view's own timeout auto-disables the button after
+    the workspace timeout + a small margin, matching the run lifecycle.
+    """
+
+    def __init__(self, workspace_id: str, author_id: int, *, timeout: float = 700.0):
+        super().__init__(timeout=timeout)
+        self.workspace_id = workspace_id
+        self.author_id = author_id
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger, emoji="⛔")
+    async def cancel_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "Only the user who started this task can cancel it.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            result = await cancel_workspace_internal(
+                self.workspace_id,
+                audit_actor=f"discord:button:{interaction.user.id}",
+            )
+        except Exception as exc:
+            logger.exception("Cancel button: internal call failed: %s", exc)
+            await interaction.response.send_message(
+                f"Cancel failed: {exc}",
+                ephemeral=True,
+            )
+            return
+
+        # Reflect outcome on the button itself and disable it.
+        button.disabled = True
+        status = result.get("status")
+        if status == "cancelled":
+            button.label = "Cancelled"
+            button.emoji = "\U0001f6d1"
+            button.style = discord.ButtonStyle.secondary
+        elif status == "already_terminal":
+            button.label = f"Already {result.get('current', 'done')}"
+            button.style = discord.ButtonStyle.secondary
+        else:
+            button.label = "Not tracked"
+            button.style = discord.ButtonStyle.secondary
+        try:
+            await interaction.response.edit_message(view=self)
+        except discord.HTTPException:
+            # Message may have been edited / dismissed — best-effort only.
+            pass
+
+
 _TOOLS_WITH_INLINE_ARG: dict[str, tuple[str, ...]] = {
     "web_search": ("query", "q"),
     "web_fetch": ("url", "href"),
@@ -902,6 +1010,7 @@ async def _best_workspace_message(
     latest_detail: str | None = None
     latest_log: str | None = None
     done_summary: str | None = None
+    validator_replaced: bool = False
 
     for row in rows:
         event_type = row.get("event_type")
@@ -921,6 +1030,8 @@ async def _best_workspace_message(
             s = str(payload.get("summary") or "").strip()
             if s:
                 done_summary = s
+            if payload.get("_validator_replaced"):
+                validator_replaced = True
 
         elif event_type == "tool_result" and latest_detail is None:
             output = str(payload.get("output") or "")
@@ -933,6 +1044,13 @@ async def _best_workspace_message(
             if msg:
                 detail = _extract_detail_from_text(msg)
                 latest_log = detail or msg
+
+    # If the validator replaced the summary (fabrication caught), the done
+    # event's rewritten summary is the ONLY safe text. The streamed tokens
+    # contain the original fabrication — sending those to Discord would
+    # bypass the validator entirely.
+    if validator_replaced and done_summary:
+        return done_summary
 
     # Prefer the full concatenated token stream (the actual LLM output)
     full_tokens = "".join(token_parts).strip()
@@ -1471,11 +1589,14 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
                     return
                 try:
                     async with pool.acquire() as conn:
+                        # Use prefix match (LIKE) because tool-dependent tasks
+                        # append message.id to the session_id for isolation.
+                        # The base session_id is always the prefix.
                         row = await conn.fetchrow(
                             "SELECT id FROM workspace_runs "
-                            "WHERE session_id = $1 AND status = 'running' "
+                            "WHERE session_id LIKE $1 AND status = 'running' "
                             "ORDER BY started_at DESC LIMIT 1",
-                            session_id_for_cancel,
+                            session_id_for_cancel + "%",
                         )
                 except Exception as exc:
                     logger.exception("Cancel: DB lookup failed: %s", exc)
@@ -1731,7 +1852,19 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
                 return
 
             async with lock:
-                session_id = _discord_openclaw_session_id(message)
+                # Tool-dependent tasks (hash cracking, decode) get a fresh
+                # OpenClaw session so prior turns don't bleed old answers
+                # into the prompt, causing the model to skip tool calls.
+                needs_fresh_session = bool(_TOOL_TASK_SIGNALS.search(content))
+                session_id = _discord_openclaw_session_id(
+                    message, fresh=needs_fresh_session,
+                )
+                if needs_fresh_session:
+                    logger.info(
+                        "Discord: using fresh session for tool-dependent task "
+                        "(session_id=%s msg=%r)",
+                        session_id, content[:80],
+                    )
 
                 # Keep OpenClaw main-agent model aligned with the current global/user model.
                 # Without this, OpenClaw may retain a stale default (e.g. gemma4:4b) and fail
@@ -1797,6 +1930,24 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
                     attachments=discord_attachments,
                 )
                 workspace_id = data["workspace_id"]
+
+                # Attach a Cancel button to the progress message now that we
+                # have a workspace_id. Same code path as the @bot cancel text
+                # command. Timeout = workspace timeout + 60s margin so the
+                # button outlives the run.
+                try:
+                    _cancel_view = CancelWorkspaceView(
+                        workspace_id,
+                        message.author.id,
+                        timeout=float(cfg.max_wait_seconds + 60),
+                    )
+                    await progress_msg.edit(view=_cancel_view)
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to attach cancel button to progress msg for %s: %s",
+                        workspace_id, exc,
+                    )
+
                 # region agent log
                 _debug_log(
                     "discord_workspace_bot.py:on_message:launch_result",

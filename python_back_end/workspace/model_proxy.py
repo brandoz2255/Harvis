@@ -559,6 +559,62 @@ async def proxy_chat_completions(
         target_url.split("/v1")[0],
     )
 
+    # ── Cap Ollama context to keep KV cache fitting on the dev-box GPU ────
+    # Must match OLLAMA_CONTEXT_LENGTH in docker-compose.yaml (24576).
+    # 24576 fits the ~20K workspace prompt (system + tool schemas +
+    # hash/decode skill hints) plus ~4.5K generation headroom.  The old
+    # 16384 silently truncated hash_hint, preventing tool-calling.
+    # Override via HARVIS_OLLAMA_NUM_CTX env (e.g. "8192" on tinier GPUs,
+    # "32768" on a 24GB+ GPU).  Note: Ollama's OAI-compat endpoint may
+    # ignore per-request options.num_ctx — the OLLAMA_CONTEXT_LENGTH env
+    # var on the ollama container is the authoritative lever.
+    _is_ollama_route = ":11434" in target_url or "ollama" in target_url.lower()
+    # Remember what the CLIENT asked for. The upstream call is forced
+    # non-streaming for Ollama (see below), but the response back to the
+    # client must match the format it expects. If client asked stream=true
+    # and we returned plain JSON, OpenClaw's openai-completions SDK times
+    # out waiting for SSE chunks → "produced no answer".
+    _client_wanted_stream = bool(body.get("stream", False)) and _is_ollama_route
+    if _is_ollama_route:
+        try:
+            _num_ctx = int(os.getenv("HARVIS_OLLAMA_NUM_CTX", "24576"))
+        except ValueError:
+            _num_ctx = 24576
+        # think=false: qwen3 (and other thinking-capable models) default to
+        # chain-of-thought which produces text responses ("Here's how I would
+        # call the tool…") instead of actual tool_call events when the
+        # request includes a `tools` array. OpenClaw's `thinkingDefault: off`
+        # doesn't propagate through the /v1/chat/completions OpenAI-compat
+        # endpoint, so inject it here.
+        #
+        # stream=false UPSTREAM: even when OpenClaw asks for stream=true, the
+        # upstream OAI-compat path drops tool_call deltas — verified via
+        # /tmp/debug-d007eb.log showing upstream_stream_done with tool=1 but
+        # final response empty. Forcing non-streaming upstream gives us a
+        # complete `message.tool_calls` array to work with.
+        #
+        # SSE re-wrap DOWNSTREAM (below): when the client asked for streaming
+        # we MUST return SSE-shaped chunks. OpenClaw's openai-completions
+        # adapter doesn't gracefully handle non-streaming JSON when it sent
+        # stream=true → it just waits forever. So we synthesize OAI streaming
+        # chunks from the non-streamed response.
+        body = {
+            **body,
+            "stream": False,
+            "options": {
+                **(body.get("options") or {}),
+                "num_ctx": _num_ctx,
+                "think": False,
+            },
+        }
+        # Take the non-streaming code path for the upstream call. The
+        # client-wanted-stream flag above triggers SSE re-wrap on return.
+        is_streaming = False
+        logger.info(
+            "model_proxy: ollama route — num_ctx=%d think=false stream=false (client_wants_stream=%s) for %s",
+            _num_ctx, _client_wanted_stream, model_name,
+        )
+
     if is_streaming:
         # Ask Kimi/NVIDIA to include usage in the final SSE chunk
         if is_kimi or is_nvidia:
@@ -604,6 +660,110 @@ async def proxy_chat_completions(
                     rate_in, rate_out = _OLLAMA_COST_PER_M, _OLLAMA_COST_PER_M
                 cost = (ti * rate_in + to_ * rate_out) / 1_000_000
                 asyncio.create_task(_log_usage(model_name, ti, to_, cost))
+
+            # If client asked stream=true but we forced non-streaming upstream
+            # (Ollama tool_call delta drop fix), re-wrap the complete response
+            # as OAI streaming SSE chunks. Order matters — most OAI SDKs read
+            # role first, then content/tool_calls deltas, then finish_reason.
+            if _client_wanted_stream:
+                import json as _json_sse
+                import time as _time_sse
+
+                async def _sse_wrap_response(payload: dict):
+                    completion_id = payload.get("id") or f"chatcmpl-{int(_time_sse.time())}"
+                    created = payload.get("created") or int(_time_sse.time())
+                    rmodel = payload.get("model") or model_name
+                    choices = payload.get("choices") or []
+                    if not choices:
+                        yield "data: [DONE]\n\n"
+                        return
+                    choice = choices[0]
+                    message = choice.get("message") or {}
+                    finish_reason = choice.get("finish_reason")
+                    base = {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": rmodel,
+                    }
+                    # 1) role chunk
+                    yield (
+                        "data: "
+                        + _json_sse.dumps({
+                            **base,
+                            "choices": [{
+                                "index": 0,
+                                "delta": {"role": message.get("role") or "assistant"},
+                                "finish_reason": None,
+                            }],
+                        })
+                        + "\n\n"
+                    )
+                    # 2) content chunk (omit if empty — some SDKs treat empty content as a signal)
+                    content = message.get("content") or ""
+                    if content:
+                        yield (
+                            "data: "
+                            + _json_sse.dumps({
+                                **base,
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {"content": content},
+                                    "finish_reason": None,
+                                }],
+                            })
+                            + "\n\n"
+                        )
+                    # 3) tool_calls chunk
+                    tool_calls = message.get("tool_calls") or []
+                    if tool_calls:
+                        # Ensure each tool_call has the `index` field most SDKs require
+                        # for streaming-delta accumulation.
+                        normalized_tcs = []
+                        for i, tc in enumerate(tool_calls):
+                            ntc = dict(tc)
+                            ntc.setdefault("index", i)
+                            normalized_tcs.append(ntc)
+                        yield (
+                            "data: "
+                            + _json_sse.dumps({
+                                **base,
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {"tool_calls": normalized_tcs},
+                                    "finish_reason": None,
+                                }],
+                            })
+                            + "\n\n"
+                        )
+                    # 4) final chunk with finish_reason
+                    yield (
+                        "data: "
+                        + _json_sse.dumps({
+                            **base,
+                            "choices": [{
+                                "index": 0,
+                                "delta": {},
+                                "finish_reason": finish_reason,
+                            }],
+                        })
+                        + "\n\n"
+                    )
+                    # 5) done sentinel
+                    yield "data: [DONE]\n\n"
+
+                logger.info(
+                    "model_proxy: SSE-wrapping non-streamed Ollama response "
+                    "(tool_calls=%d, finish_reason=%s)",
+                    len((data.get("choices") or [{}])[0].get("message", {}).get("tool_calls") or []),
+                    (data.get("choices") or [{}])[0].get("finish_reason"),
+                )
+                return StreamingResponse(
+                    _sse_wrap_response(data),
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                )
+
             return data
     except httpx.TimeoutException:
         raise HTTPException(status_code=504, detail="Upstream API request timed out")
