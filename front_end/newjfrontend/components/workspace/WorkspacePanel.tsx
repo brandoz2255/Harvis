@@ -1430,7 +1430,20 @@ export function WorkspacePanel({ onContinueInChat }: { onContinueInChat?: (summa
   const isError = lastEvent?.type === 'error'
   const isRunning = !isDone && !isCancelled && !isError
 
-  // Compute current phase for the stats bar
+  // Compute current phase for the stats bar.
+  // State machine:
+  //   0 events                              → 'connecting' (waiting for SSE handshake)
+  //   any event but no agent_start yet      → 'connecting' (gateway up, model still loading)
+  //   agent_start arrived, no tool_call yet → 'thinking'   (model is prefilling / generating)
+  //   tool_call seen                        → 'executing'  (real work in flight)
+  //   done/error/cancelled                  → terminal state
+  //
+  // Prior version only flipped past 'connecting' on tool_call/token events,
+  // so during the 1-3 min prefill window the badge stayed yellow even though
+  // the model was actively generating. This treats agent_start as the moment
+  // we transition from "connecting" → "thinking", since at that point the
+  // OpenClaw run is alive and producing tokens (even if the user can't see
+  // them yet because the first tool_call hasn't fired).
   const phase: Phase = isDone
     ? 'done'
     : isError
@@ -1439,7 +1452,7 @@ export function WorkspacePanel({ onContinueInChat }: { onContinueInChat?: (summa
         ? 'cancelled'
         : logEvents.some(e => e.type === 'tool_call')
           ? 'executing'
-          : logEvents.some(e => e.type === 'token')
+          : logEvents.some(e => e.type === 'token' || e.type === 'agent_start')
             ? 'thinking'
             : 'connecting'
 
@@ -1781,7 +1794,13 @@ export function WorkspacePanel({ onContinueInChat }: { onContinueInChat?: (summa
                           <span className="relative h-2 w-2 rounded-full bg-violet-400" />
                         </span>
                         <span className="text-xs text-muted-foreground">
-                          {logEvents.length === 0 ? 'Connecting to workspace…' : 'Agent is working…'}
+                          {logEvents.length === 0
+                            ? 'Connecting to workspace…'
+                            : logEvents.some(e => e.type === 'tool_call')
+                              ? 'Agent is executing…'
+                              : logEvents.some(e => e.type === 'agent_start')
+                                ? 'Agent is thinking…'
+                                : 'Connected, model loading…'}
                         </span>
                       </div>
                     </div>

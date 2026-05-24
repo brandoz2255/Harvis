@@ -73,6 +73,82 @@ produces a human-readable final answer.
 
 ---
 
+## 2026-05-04 10:31 PDT - OpenClaw workspace memory and callback guidance
+
+### Problem
+OpenClaw workspace runs for conversational follow-ups could misuse workspace paths as memory/session identifiers. In workspace `91a26d67`, the model tried to read `AGENTS.md` from the per-session filesystem directory and then called `sessions_history` with `session-bundled-...`, which is a filesystem slug, not an OpenClaw session key. Both tools failed, and the final answer fell back to generic Harvis identity text instead of answering from Discord context.
+
+### Root Cause
+The backend appended recent conversation under a vague context heading and did not expose the valid OpenClaw callback/session key clearly. The static bundled agent docs also described workspace filesystem scope but did not distinguish filesystem slugs from callback/session keys or explain that recent Discord context is injected as memory.
+
+### Solution Applied
+1. Added a `WORKSPACE MEMORY + CALLBACKS` section to the runtime OpenClaw directive.
+2. Exposed the exact current OpenClaw callback/session key (`agent:<agent>:<session>`) for `sessions_history`.
+3. Labeled the filesystem slug as legacy path-only scope, not a session history key.
+4. Reframed the recent chat block as `WORKSPACE MEMORY` and instructed models to answer user-memory follow-ups from it before trying tools.
+5. Updated bundled/generic OpenClaw agent docs and the bundled Harvis agent skill with the same memory/callback rules.
+
+### Files Modified
+- `python_back_end/workspace/openclaw_client.py`
+- `openclaw/config/bundled/AGENT.md`
+- `openclaw/config/AGENT.md`
+- `openclaw/skills/bundled/harvis-agent/SKILL.md`
+- `front_end/newjfrontend/changes.md`
+
+### Result / Status
+- Restarted `backend` and `openclaw`.
+- Verified with workspace `67138185`: the model answered `You're a firefighter.` from provided workspace memory with no failed `read` or `sessions_history` calls.
+
+---
+
+## 2026-05-04 10:12 PDT - Discord memory questions routed to chat instead of workspace
+
+### Problem
+Discord questions like `what is my job` and `how far back can you see` were sometimes answered with generic Harvis identity text or unrelated topic pivots instead of using recent Discord context. Example failure: the bot responded with its own identity when asked for the user's job, even though the user had recently said they were a fire fighter.
+
+### Root Cause
+`DISCORD_PREFER_WORKSPACE=true` made the Discord bot route most non-tiny prompts through OpenClaw. The generic `_WORKSPACE_SIGNALS` regex also matched `what is...` questions, so personal-memory questions entered the workspace path where the Harvis identity/system prompt could overpower the actual question.
+
+### Solution Applied
+1. Added Discord memory/meta detection for questions like `what is my job`, `what am I`, `who am I`, `what did I tell you`, `do you remember`, and `how far back can you see`.
+2. Added a direct recent-history answer path for job/identity questions, including normalization of `fire fighter` to `firefighter`.
+3. Added a direct capability answer for `how far back can you see`, based on the configured recent Discord history window.
+4. Updated the fast-chat system prompt so memory/capability questions answer from recent Discord context and do not pivot to prior topics.
+
+### Files Modified
+- `python_back_end/integrations/discord_workspace_bot.py`
+- `front_end/newjfrontend/changes.md`
+
+### Result / Status
+- Verified helper output for the provided conversation: `Based on what you told me previously, you are a firefighter.`
+- Backend restarted so the Discord bot is running the updated handler.
+
+---
+
+## 2026-04-27 11:45 PDT - OpenClaw terminal tasks pasted code instead of executing it
+
+### Problem
+Discord/OpenClaw terminal tasks for encoded password dumps could complete with a Python script and a `python3 /home/node/.../decode_p.py` command pasted into the final answer, but with `tool_calls = 0`. The file did not exist in the OpenClaw container, so the command the user saw was never actually executed.
+
+### Root Cause
+The model treated the terminal request as a code-writing answer instead of an execution task. Harvis accepted the final text as `done` because it was non-empty, even though there were no `write` or `exec` tool events.
+
+### Solution Applied
+1. Added terminal-task detection for run/execute/stdout/Python/decode/base64/number-base prompts.
+2. Added detection for no-tool final answers that contain pasted code fences, Python imports, `python3` commands, or OpenClaw workspace paths.
+3. Added a one-time corrective retry that tells the agent the previous code/command was plain text and forces real `write` + `exec` tool calls.
+4. Strengthened the runtime directive: commands included in final text without a successful tool call are now explicitly classified as incomplete.
+
+### Files Modified
+- `python_back_end/workspace/openclaw_client.py`
+- `front_end/newjfrontend/changes.md`
+
+### Result / Status
+- Verified with workspace `63ac9c07`: the retest completed with `tool_calls = 2` (`write` + `exec`) and decoded the values from actual stdout.
+- Observed decoded outputs: `scorpion`, `scribble`, and `securelybG9sbGlwb3A=`.
+
+---
+
 ## 2026-04-22: Sync OpenClaw Main Agent Model with Global Discord Model
 
 ### Problem
@@ -541,3 +617,68 @@ Runtime evidence showed the latest workspace run finished `done` with `tool_call
 - Next Discord re-test should show either real tool usage and extracted answers, or a truthful "I couldn't determine it confidently" response instead of hallucinated output.
 
 ---
+
+## 2026-05-04: Workspace memory was overriding new tasks ("you're a firefighter" reply to a CTF prompt)
+
+### Problem
+After enabling `WORKSPACE MEMORY` for Discord, the bundled agent began
+treating pinned conversation memory as the answer to whatever the user
+asked next. Repro: with prior history `i am a fire fighter` /
+`You're a firefighter.`, the user sent a hash-cracking task
+("solve these MD5s, rockyou breach"). The agent replied:
+
+> You're a firefighter. Yo, what's next?
+
+with `tool_calls=0`. Subsequent turn called only `memory_search` and
+echoed `You are a firefighter.` again — never engaged the new task.
+
+### Root cause
+1. The runtime directive treated `WORKSPACE MEMORY` as authoritative for
+   user facts, but did not say *the current user request always
+   overrides it*. The model used the most recent assistant reply as the
+   template for its next answer.
+2. `last_user_msg` in `openclaw_client.stream` was computed from the
+   tail of `chat_history` first, not from the new `task_brief`. That
+   meant the terminal-task / corrective-retry detector ran against the
+   stale prior message ("what is my job") instead of the rockyou prompt,
+   so `_looks_like_terminal_execution_task` returned False and the
+   retry block was skipped.
+3. The corrective retry guard required `not saw_tool_call`. A retrieval
+   tool like `memory_search` would flip that flag, blocking the retry
+   even when the model had done no real work.
+
+### Solution
+`python_back_end/workspace/openclaw_client.py`:
+- Demoted `WORKSPACE MEMORY` in the directive: it is BACKGROUND CONTEXT
+  ONLY. The current user request is always more important; the agent
+  must not reuse a prior chat answer (e.g. "You're a firefighter.",
+  "Yo, what's next?") for a new task. The `WORKSPACE MEMORY` block in
+  the prompt was relabeled accordingly.
+- Made `last_user_msg` prefer the explicit `task_message` (task brief)
+  over the chat history tail, so terminal-task detection runs against
+  the actual current request.
+- Extended `_looks_like_terminal_execution_task` to recognize
+  CTF/cracking prompts: `decrypt`, `crack`, `hash`, `rockyou`,
+  `wordlist`, plus auto-detect 2+ lines of MD5/SHA hex strings.
+- Added `_looks_like_memory_echo` to detect short stale-memory replies
+  ("you're a firefighter", "yo what's next", "got it", "standing by",
+  etc.) and treat them as a failure signal for the retry block.
+- Tracked `saw_executing_tool_call` separately from `saw_tool_call`.
+  Retrieval-only tools (`memory_search`, `memory_get`,
+  `sessions_history`, `sessions_list`, `sessions_send`,
+  `session_status`, `agents_list`) no longer satisfy the "agent did
+  real work" check, so a memory probe followed by a stale chat reply
+  now triggers the corrective retry.
+- Strengthened the corrective-retry prompt to say "Ignore prior chat
+  memory for this task — the user request below is the only goal."
+
+### Result
+Verified by relaunching the same rockyou prompt (workspace `8c381552`)
+with the firefighter chat history pinned in memory. The agent:
+1. Wrote `analyze_hashes.py` via the `write` tool.
+2. Ran it via `exec` and observed the actual hex output.
+3. Returned a candid summary explaining the strings are hex digests and
+   that cracking them needs brute force / dictionary attacks beyond a
+   single script — instead of echoing memory.
+
+`tool_calls=2`, `event_count=10`, no failed tool calls, no memory echo.
