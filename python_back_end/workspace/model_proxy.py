@@ -631,17 +631,6 @@ async def proxy_chat_completions(
             options.setdefault("num_ctx", 16384)
         elif mname.startswith(("qwen3.5", "qwen2.5-coder", "qwen3.6")):
             options.setdefault("num_ctx", 8192)
-        elif mname.startswith("hermes4"):
-            # Ollama 0.24.0's chat template for hermes4:14b-q5 doesn't treat
-            # `</s>` as a hard stop — model keeps generating past EOS and
-            # regurgitates system-prompt content (~2K extra tokens per turn).
-            # Explicit stop tokens + a completion-length cap fix it.
-            options.setdefault(
-                "stop",
-                ["</s>", "<|im_end|>", "<|eot_id|>", "<|end_of_turn|>"],
-            )
-            options.setdefault("num_predict", 1024)
-            options.setdefault("num_ctx", 16384)
         else:
             options.setdefault("num_ctx", 8192)
 
