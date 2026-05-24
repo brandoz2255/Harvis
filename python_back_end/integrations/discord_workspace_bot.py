@@ -298,6 +298,42 @@ _TOOL_TASK_SIGNALS = re.compile(
     re.IGNORECASE,
 )
 
+# Discord embeds timestamps like "12:35:40 am" or "1:05 PM" when users paste
+# multi-line content.  These leak into the task brief and confuse the model.
+_DISCORD_TIME_ONLY_LINE = re.compile(
+    r"^\s*\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm)?\s*$", re.IGNORECASE | re.MULTILINE,
+)
+_DISCORD_LEADING_TIME = re.compile(
+    r"^\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm)?\s+", re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _strip_discord_timestamp_noise(text: str) -> str:
+    """Remove stray Discord timestamps from user content."""
+    # First pass: drop lines that are *only* a timestamp
+    text = _DISCORD_TIME_ONLY_LINE.sub("", text)
+    # Second pass: strip leading timestamp prefix from remaining lines
+    text = _DISCORD_LEADING_TIME.sub("", text)
+    # Collapse multiple blank lines left behind
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text
+
+
+_reset_epochs: dict[tuple[object, int], int] = {}
+"""Per-(channel, user) timestamp set by `@bot reset-context`. The value
+is an int unix-time so the suffix is unique across backend restarts (a
+plain counter would re-use the same suffix after rebuild and OpenClaw's
+persistent session-file lookup would find the prior contaminated session).
+The epoch is folded into the OpenClaw session_id so the next message starts
+a brand-new OpenClaw session."""
+
+_reset_pending: set[tuple[object, int]] = set()
+"""Per-(channel, user) tuples that have been reset but haven't yet
+consumed their reset (i.e. no new message has arrived since). The first
+message after `reset-context` gets `prior_history=[]` injected so prior
+Discord-fetched turns don't leak in alongside the wiped OpenClaw session.
+Cleared automatically when consumed."""
+
 
 def _discord_openclaw_session_id(
     message: discord.Message, *, fresh: bool = False,
@@ -314,9 +350,18 @@ def _discord_openclaw_session_id(
     prior turns. Used for tool-dependent tasks (hash cracking, decode) where prior
     OpenClaw session memory bleeds old answers into the new prompt and causes the
     model to skip tool calls.
+
+    A non-zero reset-epoch is also folded in, so `@bot reset-context` cleanly
+    pivots the channel onto a new OpenClaw session without restarting anything.
     """
     chan_id = getattr(message.channel, "id", "dm")
     base = f"discord-{chan_id}-{message.author.id}"
+    epoch = _reset_epochs.get((chan_id, message.author.id), 0)
+    if epoch:
+        # `-r<unix-ts>` — unique across backend rebuilds. A counter-style
+        # `-e<N>` collides with the prior contaminated session file after
+        # a rebuild resets the in-memory counter back to 0.
+        base = f"{base}-r{epoch}"
     if fresh:
         return f"{base}-{message.id}"
     return base
@@ -1361,6 +1406,16 @@ _CANCEL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# `@bot reset-context` / `reset context` / `clear context` / `fresh session` —
+# bumps the per-(channel, user) reset epoch so the next message starts a brand
+# new OpenClaw session, dropping prior assistant turns that may have anchored
+# the model on a wrong answer. Single-line commands only.
+_RESET_CTX_RE = re.compile(
+    r"^\s*(reset|clear|fresh|new)[\s-]+(context|session|history|chat|memory)"
+    r"\s*[.!?]*\s*$",
+    re.IGNORECASE,
+)
+
 
 def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
     """
@@ -1536,6 +1591,7 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
                     return
 
             content = (message.content or "").strip()
+            content = _strip_discord_timestamp_noise(content)
 
             # Extract Discord attachments (images, PDFs, etc.) so the agent can
             # actually process what the user sent. Each becomes {url, name, mime_type}.
@@ -1576,6 +1632,34 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
             )
 
             pool = getattr(app_request.app.state, "pg_pool", None)
+
+            # ── `@bot reset-context` / `clear-session` text command ──
+            # Bumps the per-(channel, user) reset epoch so the next message
+            # starts a brand-new OpenClaw session. Used to recover when prior
+            # assistant turns in the session have anchored the model on a wrong
+            # answer (the model becomes self-consistent with its own past).
+            if _RESET_CTX_RE.match(content):
+                import time as _time_mod
+                chan_id = getattr(message.channel, "id", "dm")
+                key = (chan_id, message.author.id)
+                # Unix-timestamp epoch — guarantees unique session_id across
+                # backend restarts. A counter would collide with a prior
+                # session file after the in-memory counter resets to 0 on
+                # rebuild.
+                _reset_epochs[key] = int(_time_mod.time())
+                _reset_pending.add(key)
+                new_epoch = _reset_epochs[key]
+                logger.warning(
+                    "Discord reset-context: channel=%s user=%s epoch_ts=%d "
+                    "(also dropping Discord chat-history on next message)",
+                    chan_id, message.author.id, new_epoch,
+                )
+                await message.channel.send(
+                    f"Context reset. Next message will start a fresh "
+                    f"OpenClaw session AND drop Discord chat history — "
+                    f"the model will see only your next message, nothing prior."
+                )
+                return
 
             # ── `@bot cancel` / `stop` / `abort` text command ──
             # Terminates the user's most recent RUNNING workspace in this
@@ -1768,6 +1852,23 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
             prior_history = await _fetch_discord_chat_history(
                 client, message, limit=cfg.history_turns
             )
+
+            # ── Reset-context drain ─────────────────────────────────────────
+            # If `@bot reset-context` ran since the user's last message, drop
+            # Discord-fetched history on this turn. Without this, OpenClaw
+            # would get a fresh session (good) but the message brief would
+            # still embed prior turns via chat_history (bad), defeating the
+            # reset.
+            _chan_id_for_reset = getattr(message.channel, "id", "dm")
+            _reset_key = (_chan_id_for_reset, message.author.id)
+            if _reset_key in _reset_pending:
+                logger.info(
+                    "Discord: dropped %d prior history turns because reset-context "
+                    "was issued (consuming the pending reset).",
+                    len(prior_history),
+                )
+                prior_history = []
+                _reset_pending.discard(_reset_key)
 
             # ── Attachment-fresh policy ────────────────────────────────────
             # When the user attaches a file, drop the channel chat history.

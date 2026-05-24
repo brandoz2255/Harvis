@@ -41,6 +41,26 @@ EXTERNAL_OLLAMA_API_KEY = os.getenv("EXTERNAL_OLLAMA_API_KEY", "")
 
 LOCAL_OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
 
+# Models that should prefer the desktop/rig Ollama when present, even if the
+# laptop also has them. Reason: gemma4:e4b's 9 GiB image exceeds the laptop's
+# 8GB VRAM → CPU offload → unusably slow. The rig's RTX 5080 (16GB) runs it
+# at native speed. Add other GPU-heavy model families to this list via the
+# HARVIS_DESKTOP_PREFERRED_MODELS env (comma-separated prefixes).
+_DESKTOP_PREFERRED_PREFIXES = tuple(
+    p.strip().lower()
+    for p in os.getenv("HARVIS_DESKTOP_PREFERRED_MODELS", "gemma4").split(",")
+    if p.strip()
+)
+
+
+def _prefers_desktop(model_name: str) -> bool:
+    """Return True if the model is in the desktop-preferred list."""
+    if not model_name:
+        return False
+    name = model_name.lower()
+    return any(name.startswith(p) for p in _DESKTOP_PREFERRED_PREFIXES)
+
+
 OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
@@ -218,7 +238,30 @@ async def _resolve_route(model_name: str) -> tuple[str, dict, bool, bool, str | 
             desktop_base = (os.getenv("DESKTOP_OLLAMA_URL", "") or "").rstrip("/")
             chosen_base = laptop_base
             chosen_host = "laptop"
-            if model_name and desktop_base and desktop_base != laptop_base:
+
+            # Desktop-preferred path: GPU-heavy models (e.g. gemma4) route to
+            # the rig if available there, even when the laptop also has them.
+            # Avoids CPU offload on the laptop's 8GB VRAM.
+            if _prefers_desktop(model_name) and desktop_base and desktop_base != laptop_base:
+                try:
+                    dt = desktop_base.replace("/v1", "") + "/api/tags"
+                    async with httpx.AsyncClient(timeout=httpx.Timeout(4.0)) as hc:
+                        r = await hc.get(dt)
+                    if r.status_code == 200 and any(
+                        m.get("name") == model_name for m in r.json().get("models", [])
+                    ):
+                        chosen_base = desktop_base
+                        chosen_host = "desktop"
+                        logger.info(
+                            "model_proxy: %s is desktop-preferred — routing to rig",
+                            model_name,
+                        )
+                except Exception as exc:
+                    logger.warning("model_proxy: desktop-preference probe failed: %s", exc)
+
+            # Original laptop-first probe (only runs if desktop-preference
+            # didn't already route to desktop).
+            if chosen_host == "laptop" and model_name and desktop_base and desktop_base != laptop_base:
                 try:
                     lt = laptop_base.replace("/v1", "") + "/api/tags"
                     async with httpx.AsyncClient(timeout=httpx.Timeout(4.0)) as hc:
@@ -297,7 +340,29 @@ async def _resolve_route(model_name: str) -> tuple[str, dict, bool, bool, str | 
     target_base = laptop_url
     chosen = "laptop"
 
-    if model_name and desktop_url:
+    # Desktop-preferred path: GPU-heavy models (e.g. gemma4) route to the rig
+    # if available there, even when the laptop also has them. Avoids CPU
+    # offload on the laptop's 8GB VRAM.
+    if _prefers_desktop(model_name) and desktop_url:
+        try:
+            desktop_tags = desktop_url.replace("/v1", "") + "/api/tags"
+            async with httpx.AsyncClient(timeout=httpx.Timeout(4.0)) as hc:
+                r = await hc.get(desktop_tags)
+            if r.status_code == 200 and any(
+                m.get("name") == model_name for m in r.json().get("models", [])
+            ):
+                target_base = desktop_url
+                chosen = "desktop"
+                logger.info(
+                    "model_proxy: %s is desktop-preferred — routing to rig",
+                    model_name,
+                )
+        except Exception as exc:
+            logger.warning("model_proxy: desktop-preference probe failed: %s", exc)
+
+    # Original laptop-first probe (only runs if desktop-preference didn't
+    # already route to desktop).
+    if chosen == "laptop" and model_name and desktop_url:
         try:
             laptop_tags = laptop_url.replace("/v1", "") + "/api/tags"
             async with httpx.AsyncClient(timeout=httpx.Timeout(4.0)) as hc:
@@ -372,6 +437,28 @@ async def proxy_chat_completions(
     _verify_token(authorization)
 
     body = await request.json()
+
+    # ── Token budget instrumentation ──────────────────────────────────────
+    # Log char-level breakdown on every request so we can see exactly what
+    # OpenClaw sends.  The ÷4 estimate is a rough proxy; the real ground
+    # truth (prompt_tokens) is logged after the Ollama response arrives.
+    _budget_msgs = body.get("messages", [])
+    _budget_tools = body.get("tools", [])
+    _system_chars = sum(len(m.get("content", "") or "") for m in _budget_msgs if m.get("role") == "system")
+    _user_chars = sum(len(m.get("content", "") or "") for m in _budget_msgs if m.get("role") == "user")
+    _tool_chars = sum(len(m.get("content", "") or "") for m in _budget_msgs if m.get("role") == "tool")
+    _asst_chars = sum(len(m.get("content", "") or "") for m in _budget_msgs if m.get("role") == "assistant")
+    _schema_chars = len(json.dumps(_budget_tools)) if _budget_tools else 0
+    _total_chars = _system_chars + _user_chars + _tool_chars + _asst_chars + _schema_chars
+    logger.warning(
+        "model_proxy: BUDGET msgs=%d system=%dc user=%dc tool_result=%dc asst=%dc "
+        "schema=%dc total_chars=%dc (~%d tok est) tools=%d model=%s",
+        len(_budget_msgs), _system_chars, _user_chars, _tool_chars, _asst_chars,
+        _schema_chars, _total_chars, _total_chars // 4,
+        len(_budget_tools), body.get("model", ""),
+    )
+    # ─────────────────────────────────────────────────────────────────────
+
     model_name: str = body.get("model", "")
     _raw_model = model_name
 
@@ -544,6 +631,17 @@ async def proxy_chat_completions(
             options.setdefault("num_ctx", 16384)
         elif mname.startswith(("qwen3.5", "qwen2.5-coder", "qwen3.6")):
             options.setdefault("num_ctx", 8192)
+        elif mname.startswith("hermes4"):
+            # Ollama 0.24.0's chat template for hermes4:14b-q5 doesn't treat
+            # `</s>` as a hard stop — model keeps generating past EOS and
+            # regurgitates system-prompt content (~2K extra tokens per turn).
+            # Explicit stop tokens + a completion-length cap fix it.
+            options.setdefault(
+                "stop",
+                ["</s>", "<|im_end|>", "<|eot_id|>", "<|end_of_turn|>"],
+            )
+            options.setdefault("num_predict", 1024)
+            options.setdefault("num_ctx", 16384)
         else:
             options.setdefault("num_ctx", 8192)
 
@@ -649,7 +747,12 @@ async def proxy_chat_completions(
                 (t.get("function") or {}).get("name") == "exec"
                 for t in body.get("tools") or []
             )
-            if _ctf_force_re.search(_all_text) and _has_exec_tool:
+            # Don't force exec when CodeAct hint is present — the model
+            # needs to emit `write` first (save crack.py), then `exec`.
+            _CODEACT_MARKER = "First call MUST be write"
+            _has_codeact = _CODEACT_MARKER in _all_text
+
+            if _ctf_force_re.search(_all_text) and _has_exec_tool and not _has_codeact:
                 body["tool_choice"] = {
                     "type": "function",
                     "function": {"name": "exec"},
@@ -657,6 +760,11 @@ async def proxy_chat_completions(
                 logger.info(
                     "model_proxy: CTF-task detected on first call — "
                     "forcing tool_choice=exec"
+                )
+            elif _has_codeact:
+                logger.info(
+                    "model_proxy: CodeAct marker found — skipping forced "
+                    "tool_choice, model will emit write then exec"
                 )
 
     if is_streaming:
@@ -704,6 +812,15 @@ async def proxy_chat_completions(
                     rate_in, rate_out = _OLLAMA_COST_PER_M, _OLLAMA_COST_PER_M
                 cost = (ti * rate_in + to_ * rate_out) / 1_000_000
                 asyncio.create_task(_log_usage(model_name, ti, to_, cost))
+
+            # ── Actual token ground truth (compare vs BUDGET char estimate) ──
+            _pt = usage.get("prompt_tokens", 0)
+            _ct = usage.get("completion_tokens", 0)
+            if _pt or _ct:
+                logger.warning(
+                    "model_proxy: ACTUAL prompt_tokens=%d completion_tokens=%d total=%d",
+                    _pt, _ct, _pt + _ct,
+                )
 
             # If client asked stream=true but we forced non-streaming upstream
             # (Ollama tool_call delta drop fix), re-wrap the complete response

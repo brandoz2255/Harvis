@@ -253,6 +253,135 @@ def test_honest_failure_no_process_claim():
     assert not was_fab, "Honest 'could not determine' without process claims should pass"
 
 
+def test_hedged_guess_caught_with_tools():
+    """Hedged-language guess caught even when real tool calls happened
+    (granite4.1:8b regression 2026-05-23). Model ran the cracker, got
+    verified=false, then guessed 'charizard' for the basculin hash."""
+    brief = "54c10b9736b70e75c6e505f340b6e2f1 crack this hash"
+    summary = (
+        "The hash 54c10b9736b70e75c6e505f340b6e2f1 could not be verified "
+        "by the cracker using the SecLists wordlist or Pokemon name "
+        "candidates. Based on the hint, the intended answer might be "
+        "'charizard' (a common Pokemon name), but the automated cracker "
+        "did not confirm it."
+    )
+    result, was_fab = _validate_hash_claims(brief, summary, tool_call_count=2)
+    assert was_fab, (
+        "Hedged 'intended answer might be charizard' must be caught — "
+        "md5(charizard) != target. Got:\n" + result
+    )
+    assert "Could not determine plaintext" in result
+
+
+def test_plaintext_might_be_hedge_caught():
+    """Variant: 'plaintext might be X'."""
+    brief = f"crack {HASH_GROUDON}"
+    summary = (
+        f"Cracker returned verified:false for {HASH_GROUDON}. "
+        "The plaintext might be 'rayquaza' based on the theme."
+    )
+    result, was_fab = _validate_hash_claims(brief, summary, tool_call_count=3)
+    assert was_fab, (
+        "'plaintext might be rayquaza' must be caught — wrong hash. "
+        "Got:\n" + result
+    )
+
+
+def test_might_be_password_caught():
+    """Variant: 'might be the password X'."""
+    brief = f"crack {HASH_GROUDON}"
+    summary = (
+        f"After running the cracker on {HASH_GROUDON}, no match. "
+        "It might be the password 'kyogre' given the theme."
+    )
+    result, was_fab = _validate_hash_claims(brief, summary, tool_call_count=2)
+    assert was_fab, (
+        "'might be the password kyogre' must be caught. Got:\n" + result
+    )
+
+
+def test_honest_unverified_passes():
+    """Honest 'unverified' with no hedged guess must NOT be flagged."""
+    brief = f"crack {HASH_GROUDON}"
+    summary = (
+        f"The hash {HASH_GROUDON} returned verified:false. "
+        "Unverified. No matching plaintext found in any tried wordlist."
+    )
+    _, was_fab = _validate_hash_claims(brief, summary, tool_call_count=3)
+    assert not was_fab, (
+        "Honest 'unverified' with no guess must pass through unchanged."
+    )
+
+
+def test_basculin_markdown_bold_passes():
+    """Regression: a real crack reported as 'verified plaintext is:\\n\\n**basculin**'
+    must pass through. Greedy regex used to grab 'is' as plaintext and falsely
+    suppress (basculin 2026-05-23 false positive)."""
+    # md5("basculin") == 54c10b9736b70e75c6e505f340b6e2f1
+    brief = "54c10b9736b70e75c6e505f340b6e2f1 — crack this Pokemon-themed hash"
+    summary = (
+        "The hash `54c10b9736b70e75c6e505f340b6e2f1` was successfully cracked "
+        "using a Pokemon-themed wordlist. The verified plaintext is:\n\n"
+        "**basculin**\n\n"
+        "This matches the hash algorithm (MD5) and was found via the "
+        "`pokemon.txt` wordlist derived from Pokemon species names."
+    )
+    result, was_fab = _validate_hash_claims(brief, summary, tool_call_count=2)
+    assert not was_fab, (
+        "Real crack with markdown-bolded plaintext must pass through. "
+        "Got:\n" + result
+    )
+    # Original summary should be returned unchanged.
+    assert "basculin" in result and "successfully cracked" in result
+
+
+def test_likely_quoted_guess_caught():
+    """User-requested hedged pattern: 'likely 'charizard'' must be caught
+    (md5(charizard) != target)."""
+    brief = f"crack {HASH_GROUDON}"
+    summary = (
+        f"The hash {HASH_GROUDON} did not match common passwords. "
+        "It is likely 'charizard' based on the Pokemon hint."
+    )
+    result, was_fab = _validate_hash_claims(brief, summary, tool_call_count=2)
+    assert was_fab, (
+        "Quoted 'likely charizard' must be caught — md5(charizard) != target. "
+        "Got:\n" + result
+    )
+
+
+def test_likely_quoted_real_match_passes():
+    """Quoted 'likely X' where X IS the real plaintext must pass via
+    any_verified short-circuit. e.g. 'likely \"basculin\"' where basculin
+    actually hashes to the target."""
+    brief = "54c10b9736b70e75c6e505f340b6e2f1 — crack this"
+    summary = (
+        "After running the cracker, the plaintext is likely 'basculin' "
+        "(verified via md5)."
+    )
+    _, was_fab = _validate_hash_claims(brief, summary, tool_call_count=2)
+    assert not was_fab, (
+        "Quoted 'likely basculin' with real hash match must pass "
+        "via any_verified."
+    )
+
+
+def test_generic_might_be_no_false_positive():
+    """Generic prose with 'might be' but no plaintext/answer/password
+    noun must NOT trigger the new hedged-guess patterns."""
+    brief = f"crack {HASH_GROUDON}"
+    summary = (
+        f"For hash {HASH_GROUDON}, no result. The hash might be in a "
+        "private database we don't have access to, or the wordlist "
+        "might be too small."
+    )
+    _, was_fab = _validate_hash_claims(brief, summary, tool_call_count=2)
+    assert not was_fab, (
+        "Generic 'might be in a database/wordlist might be' must not "
+        "false-positive — no plaintext/answer/password noun in pattern."
+    )
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
