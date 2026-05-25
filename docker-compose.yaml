@@ -508,8 +508,24 @@ services:
     volumes:
       - openclaw-data:/home/node/.openclaw
       # Mode-specific config set (default: bundled)
-      - ./openclaw/config/${OPENCLAW_CONFIG_SET:-bundled}/openclaw.json:/home/node/.openclaw/openclaw.json:ro
-      - ./openclaw/config/${OPENCLAW_CONFIG_SET:-bundled}/exec-approvals.json:/home/node/.openclaw/exec-approvals.json
+      # RW so `openclaw plugins install/enable` can update the config via
+      # atomic rename. The host file lives in the repo so writes are visible
+      # in git status and reversible. Was :ro pre-2026-05-24 — flipped when
+      # B7 (custom MCP tool plugins) needed OpenClaw to register installs.
+      - ./openclaw/config/${OPENCLAW_CONFIG_SET:-bundled}/openclaw.json:/home/node/.openclaw/openclaw.json:rw
+      # NOTE: exec-approvals.json bind mount removed 2026-05-24 (B7/v4 work).
+      # OpenClaw v2026.5.x rewrites this file on every exec via atomic
+      # temp-file-rename (write tmp, rename tmp → target). Linux refuses to
+      # rename over a single-file bind mount with EBUSY because the inode
+      # is pinned by the mount — every exec fails. Same root cause as the
+      # openclaw.json case above, but :rw doesn't help here because the
+      # failure is on the rename, not the open-for-write.
+      # The file now lives in the openclaw-data volume only. On a fresh
+      # volume, OpenClaw v4 creates the file with library defaults; if
+      # the defaults need tightening (ask: "off", askFallback: "allow"),
+      # seed via `docker exec harvis-openclaw bash -c 'cat > ... <<EOF'`
+      # after first boot. Tonight's volume already carries a populated
+      # copy from earlier sessions.
       # Shared identity files
       - ./openclaw/config/shared/IDENTITY.md:/home/node/.openclaw/IDENTITY.md:ro
       - ./openclaw/config/shared/SOUL.md:/home/node/.openclaw/SOUL.md:ro
@@ -527,9 +543,18 @@ services:
       - ./openclaw/scripts/${OPENCLAW_CONFIG_SET:-bundled}:/home/node/.openclaw/workspace/scripts:ro
       # Shared projects volume — backend writes repos, OpenClaw reads/writes code
       - openclaw-projects:/home/node/projects
+      # Local OpenClaw tool plugins (built artifacts + manifest) — installed
+      # via `openclaw plugins install --link /openclaw-plugins/<id>`. Path is
+      # stable across rebuilds because it lives in the repo. RW so the
+      # container can `npm install` runtime deps (typebox) alongside dist/.
+      - ./openclaw/plugins:/openclaw-plugins:rw
+    # OpenClaw is npm-installed globally in the image (see
+    # openclaw-browser/Dockerfile). The `openclaw` binary is on PATH; the
+    # prior `node openclaw.mjs ...` form only worked when openclaw.mjs was
+    # in PWD, which required the dulc3/openclaw base image's filesystem
+    # layout. Now we invoke the CLI directly.
     command:
-      - node
-      - openclaw.mjs
+      - openclaw
       - gateway
       - --bind
       - lan

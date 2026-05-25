@@ -175,8 +175,12 @@ def _exec_via_bash(shell_one_liner: str) -> str:
     return f'bash --noprofile --norc +H -lc "{escaped}"'
 
 
-# Must match the OpenClaw protocol version (frames.ts PROTOCOL_VERSION = 3)
-PROTOCOL_VERSION = 3
+# Must match the OpenClaw protocol version (frames.ts PROTOCOL_VERSION).
+# v3 → OpenClaw v2026.2.23 and earlier
+# v4 → OpenClaw v2026.5.17+ (bumped during B7 upgrade work, 2026-05-24).
+# OpenClaw rejects mismatched protocols at WS handshake — see openclaw logs
+# for "protocol mismatch ... expected=N probeMin=N" to confirm the version.
+PROTOCOL_VERSION = 4
 
 # Ed25519 SPKI DER prefix (12 bytes) — strip this to get the raw 32-byte key
 _ED25519_SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")
@@ -554,6 +558,47 @@ def _looks_like_pasted_code_or_command(text: str) -> bool:
         or "def decode_" in low
         or "/home/node/.openclaw/workspace/" in low
     )
+
+
+_HASH_HEX_TASK_RE = re.compile(
+    # MD5 (32) / SHA1 (40) / SHA224 (56) / SHA256 (64) hex strings, ≥2 = a
+    # hash-cracking brief. Conservative: require word boundaries so we
+    # don't false-fire on long random-looking strings inside chat history.
+    r"\b[a-f0-9]{32,64}\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_hash_task(text: str) -> bool:
+    """True if the user message contains ≥2 hash-shaped hex strings."""
+    if not text:
+        return False
+    return len(_HASH_HEX_TASK_RE.findall(text)) >= 2
+
+
+# C1: when hermes4 enters narration mode for a hash task, the final chat
+# message often contains regurgitated system-prompt fragments OR fake
+# `{"name":"write",...}` JSON pasted as text instead of emitted via the
+# tool_call channel. These signals tell us the model didn't actually run
+# the cracker even though it talked like it did.
+_HASH_NARRATION_REGURGITATION_RE = re.compile(
+    r"\bHASH-CRACKING TASK\b"
+    r"|\bRESPONSE FORMAT — READ THIS FIRST\b"
+    r"|\bREQUIRED SEQUENCE\b"
+    r"|\bMUST be write \(saving crack\.py\)\b"
+    r"|\bCALL 1 \(write\)\b"
+    r"|```(?:json)?\s*\{\s*\"name\"\s*:\s*\"(?:write|exec)\""
+    r"|`write`\s+(?:tool[_ ]?call|the\s+script)"
+    r"|I[' ]ll\s+(?:write|create|save)\s+(?:the\s+)?(?:python\s+)?script",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_hash_narration_regurgitation(text: str) -> bool:
+    """True if `text` contains hash-CodeAct hint regurgitation or fake tool JSON."""
+    if not text:
+        return False
+    return _HASH_NARRATION_REGURGITATION_RE.search(text) is not None
 
 
 def _looks_like_memory_echo(text: str) -> bool:
@@ -1193,30 +1238,41 @@ class OpenClawClient:
                 # baking a pre-built wordlist would be *answering* and is
                 # the user's hard "no".
                 if _is_pokemon_theme:
+                    # FLAT tier-3 block: no nested `with-inside-with-inside-for`
+                    # because both hermes4 and qwen3:14b collapse nested indent
+                    # to single-space, breaking the script (verified 2026-05-25
+                    # workspace 31da2e56). All statements live inside the
+                    # `if remaining:` body at one indent level — no deep
+                    # nesting for the model to misalign. Cache check is
+                    # dropped entirely: a prior corrupted /tmp/pokemon.txt
+                    # (1025 empty newlines from an indent-collapse-era run)
+                    # passed `getsize > 0` and poisoned every subsequent test.
+                    # PokeAPI fetch is <1s, fully reliable — re-fetching
+                    # every run is cheaper than the cache poisoning risk.
+                    # NB: comments stripped to bare minimum (no em-dashes,
+                    # no multi-line wrap, no Unicode arrows). Models keep
+                    # mangling long comments — dropping the `#` prefix on
+                    # wrapped lines and copying U+2014 em-dash into source,
+                    # which Python rejects as invalid character. One-line
+                    # tag-style comment only.
                     _tier3_block = (
-                        "\n# Tier 3 — themed: pokemon → fetch from PokeAPI\n"
-                        "# Use /pokemon-species (canonical base names like\n"
-                        "# 'basculin'), NOT /pokemon (returns form-variants\n"
-                        "# like 'basculin-red-striped').\n"
+                        "\n# Tier 3: pokemon from PokeAPI\n"
                         "remaining = [h for h in hashes if h not in results]\n"
                         "if remaining:\n"
                         "    wl = '/tmp/pokemon.txt'\n"
-                        "    if not os.path.exists(wl):\n"
-                        "        req = urllib.request.Request(\n"
-                        "            'https://pokeapi.co/api/v2/pokemon-species?"
-                        "limit=2000',\n"
-                        "            headers={'User-Agent': 'Mozilla/5.0'})\n"
-                        "        with urllib.request.urlopen(req, "
-                        "timeout=15) as r:\n"
-                        "            data = json.loads(r.read())\n"
-                        "        with open(wl, 'w') as f:\n"
-                        "            for p in data['results']:\n"
-                        "                n = p['name']\n"
-                        "                f.write(n + '\\n')\n"
-                        "                f.write(n.capitalize() + '\\n')\n"
-                        "                if '-' in n:\n"
-                        "                    f.write(n.replace('-', '') + "
-                        "'\\n')\n"
+                        "    req = urllib.request.Request("
+                        "'https://pokeapi.co/api/v2/pokemon-species?limit=2000', "
+                        "headers={'User-Agent': 'Mozilla/5.0'})\n"
+                        "    resp = urllib.request.urlopen(req, timeout=20)\n"
+                        "    data = json.loads(resp.read())\n"
+                        "    resp.close()\n"
+                        "    f = open(wl, 'w')\n"
+                        "    for p in data['results']:\n"
+                        "        n = p['name']\n"
+                        "        print(n, file=f)\n"
+                        "        print(n.capitalize(), file=f)\n"
+                        "        print(n.replace('-', ''), file=f)\n"
+                        "    f.close()\n"
                         "    for h in remaining:\n"
                         "        out = try_cracker(h, wordlist=wl)\n"
                         "        if out.get('verified'): results[h] = out\n"
@@ -1245,9 +1301,9 @@ class OpenClawClient:
                     "\nHASH-CRACKING TASK.\n"
                     f"Hashes to crack ({_n_hashes}):\n{_hash_list_str}\n"
                     "\nRESPONSE FORMAT — READ THIS FIRST:\n"
-                    "Your next reply MUST be a real `write` tool_call.\n"
+                    "Your next reply MUST be a real `exec` tool_call.\n"
                     "Do NOT type the script as response text.\n"
-                    "Do NOT type ```json {\"name\":\"write\",...}``` blocks "
+                    "Do NOT type ```json {\"name\":\"exec\",...}``` blocks "
                     "as response text — those don't execute.\n"
                     "Tool calls go through the TOOL CHANNEL, not the chat "
                     "channel. If your reply contains a code block, you have "
@@ -1257,20 +1313,24 @@ class OpenClawClient:
                     "Bundled standard wordlists (fresh-Kali baseline): "
                     "top1k.txt, top10k.txt, top100k.txt — auto-tried when "
                     "you call cracker.py WITHOUT a --wordlist= flag. For "
-                    "themed/topic-specific lists (e.g. Pokemon), your script "
+                    "themed/topic-specific lists (e.g. Pokemon), the script "
                     "must fetch the source itself (no pre-baked themed lists).\n"
                     "Cracker output is JSON: {hash, algo, plaintext, method, "
                     "verified, tiers_tried}.\n"
-                    "\nREQUIRED SEQUENCE (exactly 2 tool_calls, in order):\n"
-                    f"  1) write  →  saves a tiered script to "
-                    f"{workdir_rel}/crack.py\n"
-                    f"  2) exec   →  runs `python3 {workdir}/crack.py`\n"
+                    "\nREQUIRED SEQUENCE (exactly 1 tool_call to start):\n"
+                    "  1) exec  →  runs a Python script INLINED via bash "
+                    "heredoc. No separate `write` call. No file created.\n"
                     "Then a final assistant message summarizing only the "
                     "hashes the cracker actually verified.\n"
-                    "\nTHE SCRIPT — content for the `write` tool's `content` "
-                    f"arg.  Substitute the placeholder so `hashes` contains "
-                    f"all {_n_hashes} hashes from the task above:\n"
+                    "\nTHE COMMAND — value for the `exec` tool's `command` "
+                    f"field. Substitute the placeholder so `hashes` contains "
+                    f"all {_n_hashes} hashes from the task above. Use the "
+                    "QUOTED heredoc delimiter (`<<'PYEOF_HARVIS_END'`) so "
+                    "bash does NOT expand $vars or backticks inside the "
+                    "Python body. The closing `PYEOF_HARVIS_END` must be on "
+                    "its own line at column 0.\n"
                     "\n```\n"
+                    "python3 <<'PYEOF_HARVIS_END'\n"
                     "import subprocess, json, os, urllib.request\n"
                     "\n"
                     f"hashes = {_hash_list_example}\n"
@@ -1288,10 +1348,7 @@ class OpenClawClient:
                     "\n"
                     "results = {}\n"
                     "\n"
-                    "# Tier 1 — bundled wordlists (top1k/10k/100k) + online "
-                    "lookup in a single call.\n"
-                    "# cracker.py auto-discovers bundled wordlists when "
-                    "no --wordlist= flag is passed.\n"
+                    "# Tier 1: bundled wordlists + online lookup\n"
                     "for h in hashes:\n"
                     "    out = try_cracker(h, use_online=True)\n"
                     "    if out.get('verified'): results[h] = out\n"
@@ -1303,23 +1360,49 @@ class OpenClawClient:
                     "        results[h] = {'verified': False}\n"
                     "\n"
                     "print(json.dumps(results, indent=2))\n"
+                    "PYEOF_HARVIS_END\n"
                     "```\n"
                     "\nWRONG (your reply must NOT look like this):\n"
-                    "  **Step 1** ```json {\"name\":\"write\", "
-                    "\"arguments\":{...}} ```\n"
-                    "  **Step 2** ```json {\"name\":\"exec\", ...} ```\n"
+                    "  ```json {\"name\":\"exec\", \"arguments\":{...}} ```\n"
                     "  (Then narrating fake results)\n"
                     "\nRIGHT:\n"
-                    "  Emit an actual `write` tool_call now with the script "
-                    "content. After it returns, emit an actual `exec` "
-                    f"tool_call running `python3 {workdir}/crack.py`. After "
-                    "exec returns, summarize only hashes where the cracker "
-                    "reported verified=true.\n"
+                    "  Emit an actual `exec` tool_call now whose `command` "
+                    "argument is the entire `python3 <<'PYEOF_HARVIS_END' "
+                    "... PYEOF_HARVIS_END` block above as ONE multi-line "
+                    "string. After exec returns JSON, summarize only the "
+                    "hashes where the cracker reported verified=true.\n"
                     "\nRules:\n"
-                    "- First call MUST be write (saving crack.py). Second "
-                    "call MUST be exec (running it). No other calls between "
-                    "them. (This marker also tells the proxy to NOT force "
-                    "tool_choice=exec on the first turn.)\n"
+                    "- ONE exec tool_call to start. The script is inlined in "
+                    "the heredoc — there is no separate write step. No other "
+                    "tool calls between this exec and your final summary.\n"
+                    "- If exec returns a Python error (SyntaxError, "
+                    "IndentationError, NameError, etc.): DO NOT stop and ask "
+                    "the user for permission to fix. DO NOT explain the bug "
+                    "in prose. Immediately emit a fresh `exec` tool_call "
+                    "with the corrected heredoc body. You are authorized to "
+                    "iterate up to 3 retry cycles without asking. Only stop "
+                    "iterating when exec returns valid JSON from cracker.py "
+                    "or you've burned 3 cycles.\n"
+                    "- If exec returns valid JSON but EVERY hash is "
+                    "verified=false (0/N cracked): DO NOT stop and ask "
+                    "permission to try more variants. Immediately emit a "
+                    "fresh `exec` tool_call that BROADENS the wordlist with "
+                    "common password-mangling patterns before running the "
+                    "cracker again. Specifically generate variants such as: "
+                    "name+digits ('charizard1' through 'charizard999', plus "
+                    "'charizard123', 'charizard2024', etc.), name+symbol "
+                    "('charizard!', 'charizard@', 'charizard#'), leetspeak "
+                    "('ch4riz4rd', 'charizard0' for o→0, 'char1zard' for "
+                    "i→1, 's' → '$'), and capitalized variants. Append "
+                    "these to the wordlist file then call the cracker again "
+                    "for the remaining hashes. You are authorized to use "
+                    "the same 3-cycle budget for this. Only stop when at "
+                    "least 1 hash verifies OR you've burned 3 cycles total.\n"
+                    "- INDENTATION: use exactly 4 spaces per nesting level. "
+                    "Nested blocks (with-inside-if, for-inside-with, etc.) "
+                    "get 8 spaces, 12 spaces, etc. Do NOT collapse nested "
+                    "blocks to the same indent level — Python will raise "
+                    "IndentationError. Match the template above exactly.\n"
                     "- Do NOT answer from memory. Only report plaintexts the "
                     "cracker actually verified.\n"
                     "- If exec output shows verified:false for a hash, say "
@@ -1789,10 +1872,19 @@ class OpenClawClient:
 
             # Extra guardrail: if the agent asks identity/setup questions, it's not following instructions.
             # Keep this short and at the top of the task message.
+            # Append a sentinel-bracketed copy of the actual user task at the
+            # END so model_proxy can scope CTF-detection to just the user's
+            # query (not the 20K-char directive bundle full of skill-hint
+            # keywords like "crack" / "decrypt" / "decode" that false-positive
+            # the regex). Markers added 2026-05-25 after MCQ #1 retest
+            # showed CTF-detect still firing post-user-role scope fix.
             full_message = (
                 "DO NOT ask identity/setup questions. You already have your identity and mission. "
                 "You are Harvis.\n\n"
                 + full_message
+                + "\n\n<!-- HARVIS_USER_TASK_BEGIN -->\n"
+                + (last_user_msg or "")
+                + "\n<!-- HARVIS_USER_TASK_END -->\n"
             )
             _is_hash_task = bool(_detected_hashes)
             if _is_hash_task:
@@ -1853,6 +1945,24 @@ class OpenClawClient:
             saw_tool_call = False
             saw_executing_tool_call = False
             corrective_retry_count = 0
+            # C1.3: Retry-in-flight tracking. When a corrective retry is
+            # sent, the model may take several seconds to produce its
+            # response and OpenClaw may emit intermediate "empty final"
+            # events before tool_calls actually flow. Without this guard,
+            # Harvis prematurely synthesizes the "no answer" fallback and
+            # closes the WS, leaving in-flight retry tool_calls with
+            # nowhere to land (verified 2026-05-25 workspace 59fcc99c:
+            # 18 tool_calls fired AFTER WebSocket closed).
+            #
+            # Flag is set by either retry branch (hash-narration or
+            # generic empty+no-tools). On subsequent empty finals we
+            # check `monotonic() - retry_started_at` against the
+            # timeout; if under, we `continue` the loop and keep
+            # listening. Sliding window: any agent tool_call event
+            # arriving extends the timer by resetting it.
+            retry_in_flight = False
+            retry_started_at: Optional[float] = None
+            _RETRY_TIMEOUT_S = 45.0
             # Loop guard: small ring of (tool, args_signature) for the most
             # recent tool calls. If the most recent N entries are identical,
             # we abort the run instead of letting the model spin forever on
@@ -1862,6 +1972,7 @@ class OpenClawClient:
             _recent_tool_calls: Deque[Tuple[str, str]] = deque(maxlen=_LOOP_GUARD_N)
             looks_visual_task = _looks_like_browser_or_screenshot_task(last_user_msg)
             looks_terminal_task = _looks_like_terminal_execution_task(last_user_msg)
+            looks_hash_task = _looks_like_hash_task(last_user_msg)
             target_url = _extract_browser_target_url(last_user_msg)
 
             # Consume events until the chat reaches a terminal state.
@@ -1992,7 +2103,24 @@ class OpenClawClient:
                     for event in self._handle_agent_event(payload):
                         if event.type == "tool_call":
                             saw_tool_call = True
+                            # Sliding-window: a tool_call from the retry's
+                            # stream proves the model is still working —
+                            # extend the retry-in-flight timer.
+                            if retry_in_flight:
+                                retry_started_at = (
+                                    asyncio.get_event_loop().time()
+                                )
                             tool_name = (event.data or {}).get("tool", "")
+                            # C1 diagnostic: log runId on every tool start so
+                            # we can correlate retry-stream tool events with
+                            # the parent workspace if they ever diverge.
+                            logger.info(
+                                "[workspace:%s] [DBG runId] agent tool_call "
+                                "runId=%s tool=%s",
+                                self.workspace_id,
+                                getattr(event, "run_id", None) or "?",
+                                tool_name,
+                            )
                             # Loop guard — record (tool, args) and abort if
                             # the last N tool calls are identical.
                             _args_sig = json.dumps(
@@ -2066,6 +2194,65 @@ class OpenClawClient:
                             # empty final payload. Reuse the last partial text so the
                             # workspace can still emit a usable completion summary.
                             text = self._last_partial_text
+
+                        # C1 fix: when the chat final carries `message.tool_calls`
+                        # we must treat the turn as having called tools, even
+                        # if no agent-stream `tool_call` event was emitted for
+                        # them. This happens after the corrective retry —
+                        # OpenClaw assigns retry tool events to a different
+                        # runId (or doesn't mirror them on the agent stream),
+                        # so the original loop's `saw_tool_call` never flips.
+                        # Without this, a retry can produce N tool_calls and
+                        # still close as "no tools called" → user sees fallback.
+                        _final_tool_calls = message.get("tool_calls") or []
+                        _final_run_id = (
+                            payload.get("runId")
+                            or message.get("runId")
+                            or "?"
+                        )
+                        logger.info(
+                            "[workspace:%s] [DBG runId] chat final runId=%s "
+                            "final_tool_calls=%d text_chars=%d retry=%d",
+                            self.workspace_id,
+                            _final_run_id,
+                            len(_final_tool_calls),
+                            len(text),
+                            corrective_retry_count,
+                        )
+                        if _final_tool_calls:
+                            saw_tool_call = True
+                            # Mirror the retrieval-only filter used on the
+                            # agent stream so the "executing" flag stays a
+                            # meaningful signal.
+                            _RETRIEVAL_ONLY = {
+                                "memory_search", "memory_get",
+                                "sessions_history", "sessions_list",
+                                "sessions_send", "session_status",
+                                "agents_list",
+                            }
+                            for _tc in _final_tool_calls:
+                                _tc_name = (
+                                    (_tc.get("function") or {}).get("name")
+                                    or _tc.get("name")
+                                    or ""
+                                )
+                                if _tc_name and _tc_name not in _RETRIEVAL_ONLY:
+                                    saw_executing_tool_call = True
+                                    break
+                            logger.info(
+                                "[workspace:%s] [DBG runId] chat-final "
+                                "tool_calls recovered: saw_tool_call=True "
+                                "saw_executing=%s names=%s",
+                                self.workspace_id,
+                                saw_executing_tool_call,
+                                [
+                                    (tc.get("function") or {}).get("name")
+                                    or tc.get("name")
+                                    or "?"
+                                    for tc in _final_tool_calls
+                                ][:6],
+                            )
+
                         text_lower = text.lower()
 
                         # If the model responded with a simulated/refusal answer for a
@@ -2078,6 +2265,11 @@ class OpenClawClient:
                             and any(sig in text_lower for sig in _BROWSER_REFUSAL_SIGNALS)
                         ):
                             corrective_retry_count += 1
+                            # C1.3: arm the retry-in-flight guard so the next
+                            # empty final doesn't trigger premature fallback
+                            # synthesis. See state-vars block ~line 1905.
+                            retry_in_flight = True
+                            retry_started_at = asyncio.get_event_loop().time()
                             self._last_partial_text = ""
                             self._narrative_cut = 0
                             yield OpenClawEvent("log", {
@@ -2138,6 +2330,11 @@ class OpenClawClient:
                             and (pasted_code or memory_echo)
                         ):
                             corrective_retry_count += 1
+                            # C1.3: arm the retry-in-flight guard so the next
+                            # empty final doesn't trigger premature fallback
+                            # synthesis. See state-vars block ~line 1905.
+                            retry_in_flight = True
+                            retry_started_at = asyncio.get_event_loop().time()
                             self._last_partial_text = ""
                             self._narrative_cut = 0
                             failure_kind = "pasted code/command" if pasted_code else "stale memory echo"
@@ -2181,6 +2378,79 @@ class OpenClawClient:
                             }))
                             continue
 
+                        # C1: hash-narration retry. When hermes4 enters
+                        # narration mode on a hash task — talks about the
+                        # script, regurgitates HASH-CRACKING markers from
+                        # the system prompt, or pastes fake {"name":"write"}
+                        # JSON as text — the tool never actually ran. Retry
+                        # once with an explicit tool-only correction.
+                        hash_narration = _looks_like_hash_narration_regurgitation(text)
+                        if (
+                            looks_hash_task
+                            and not saw_executing_tool_call
+                            and corrective_retry_count < 1
+                            and (hash_narration or not text.strip())
+                        ):
+                            corrective_retry_count += 1
+                            # C1.3: arm the retry-in-flight guard so the next
+                            # empty final doesn't trigger premature fallback
+                            # synthesis. See state-vars block ~line 1905.
+                            retry_in_flight = True
+                            retry_started_at = asyncio.get_event_loop().time()
+                            self._last_partial_text = ""
+                            self._narrative_cut = 0
+                            failure_kind = (
+                                "narration regurgitation"
+                                if hash_narration else "empty final"
+                            )
+                            logger.warning(
+                                "[workspace:%s] Hash task returned %s with no "
+                                "executing tool call — retrying with tool-only "
+                                "directive",
+                                self.workspace_id, failure_kind,
+                            )
+                            yield OpenClawEvent("log", {
+                                "message": (
+                                    "Agent did not actually run the cracker ("
+                                    + failure_kind
+                                    + "); forcing tool execution…"
+                                ),
+                            })
+                            req_id = self._next_id()
+                            correction = (
+                                "CORRECTION: Your previous response did NOT "
+                                "actually run the cracker. Talking about the "
+                                "script, restating the task, or pasting "
+                                "{\"name\":\"write\",...} JSON does not call "
+                                "the tool — it must come through the tool "
+                                "channel.\n\n"
+                                "Now do this with REAL tool calls:\n"
+                                "1) Call `write` to save the crack.py script "
+                                "(the few-shot in your system prompt shows "
+                                "the exact shape).\n"
+                                "2) Call `exec` to run `python3 <path>/crack.py`.\n"
+                                "3) Read the JSON output and report only the "
+                                "hashes the cracker returned with "
+                                "verified=true. Say \"unverified\" for the "
+                                "rest — do NOT guess plaintexts.\n\n"
+                                "Do not write any prose before the first "
+                                "tool_call. Do not paste JSON tool-call "
+                                "objects in text — emit them through the "
+                                "tool channel.\n\n"
+                                f"USER REQUEST: {last_user_msg}\n"
+                            )
+                            await self._ws.send(json.dumps({
+                                "type": "req",
+                                "id": req_id,
+                                "method": "chat.send",
+                                "params": {
+                                    "sessionKey": self._session_key,
+                                    "message": correction,
+                                    "idempotencyKey": str(uuid.uuid4()),
+                                },
+                            }))
+                            continue
+
                         # Empty final + the agent never even tried to call a
                         # tool — the most pathological case (model returned a
                         # totally silent turn). Retry once with a corrective
@@ -2192,6 +2462,11 @@ class OpenClawClient:
                             and corrective_retry_count < 1
                         ):
                             corrective_retry_count += 1
+                            # C1.3: arm the retry-in-flight guard so the next
+                            # empty final doesn't trigger premature fallback
+                            # synthesis. See state-vars block ~line 1905.
+                            retry_in_flight = True
+                            retry_started_at = asyncio.get_event_loop().time()
                             self._last_partial_text = ""
                             self._narrative_cut = 0
                             logger.warning(
@@ -2221,6 +2496,47 @@ class OpenClawClient:
                                 },
                             }))
                             continue
+
+                        # C1.3: if a corrective retry was just sent, the
+                        # model may still be generating. OpenClaw can emit
+                        # an "empty final" as an intermediate event before
+                        # tool_calls actually flow. Don't synthesize the
+                        # fallback prematurely — keep listening for events
+                        # until either a non-empty final/tool_call arrives
+                        # OR the bounded timeout elapses. Sliding window:
+                        # the agent-event handler resets `retry_started_at`
+                        # on every fresh tool_call so we don't time out
+                        # while the model is actively making progress.
+                        if (
+                            retry_in_flight
+                            and not text.strip()
+                            and not saw_tool_call
+                        ):
+                            _now = asyncio.get_event_loop().time()
+                            _elapsed = (
+                                _now - retry_started_at
+                                if retry_started_at is not None
+                                else 0.0
+                            )
+                            if _elapsed < _RETRY_TIMEOUT_S:
+                                logger.info(
+                                    "[workspace:%s] [DBG retry-in-flight] "
+                                    "empty final after corrective, "
+                                    "elapsed=%.1fs < %.0fs — keep listening",
+                                    self.workspace_id,
+                                    _elapsed, _RETRY_TIMEOUT_S,
+                                )
+                                continue
+                            # Timeout exceeded — fall through to fallback
+                            # synthesis with the existing logic.
+                            logger.warning(
+                                "[workspace:%s] [DBG retry-in-flight] "
+                                "timeout reached (%.1fs ≥ %.0fs) — "
+                                "synthesizing fallback",
+                                self.workspace_id,
+                                _elapsed, _RETRY_TIMEOUT_S,
+                            )
+                            retry_in_flight = False
 
                         # If the final summary is empty (e.g. the model ran a bunch
                         # of tools and then just replied with nothing, or the sub-agent

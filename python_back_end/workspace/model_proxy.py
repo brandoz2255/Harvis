@@ -391,6 +391,302 @@ async def _resolve_route(model_name: str) -> tuple[str, dict, bool, bool, str | 
     return target_url, headers, False, False, None
 
 
+def _smart_decode_code_escapes(s: str) -> tuple[str, int]:
+    """
+    Decode `\\n`, `\\r\\n`, `\\t`, `\\r` escape sequences in a code-content
+    string, BUT only when they appear OUTSIDE string literals.
+
+    Why this care: hermes4 (and possibly other models) over-escape multi-line
+    content in tool_call args — when JSON-encoding the file-write `content`
+    field, they sometimes emit `\\\\n` (escaped backslash + n) instead of
+    `\\n` (escape for newline), so after json.loads the value contains a
+    literal `\\n` (backslash + n, 2 chars) where a real newline belongs.
+    Putting that into a .py file produces invalid Python.
+
+    BUT: the same content legitimately contains `\\n` INSIDE string literals
+    where the model intended Python's `\\n` escape sequence (e.g.
+    `f.write(n + '\\n')`). Those must be preserved as-is — turning them into
+    real newlines breaks the string literal.
+
+    So we walk the content tracking quote state, only replacing escape
+    sequences that appear outside `'...'` and `"..."`. Triple-quoted strings
+    aren't fully tracked but are rare in LLM-generated code; if encountered
+    we err on the side of preservation (treat first `'''` as opening a long
+    single-quote span that won't close until we see another `'`).
+
+    Returns (decoded_string, num_replacements). num_replacements > 0 signals
+    the over-escape pattern was present.
+    """
+    out: list[str] = []
+    i = 0
+    n_len = len(s)
+    in_str: str | None = None  # None, "'", or '"'
+    replacements = 0
+
+    while i < n_len:
+        c = s[i]
+        if in_str is None:
+            if c == "'" or c == '"':
+                in_str = c
+                out.append(c)
+                i += 1
+            elif c == "\\" and i + 1 < n_len:
+                nxt = s[i + 1]
+                if nxt == "n":
+                    out.append("\n")
+                    i += 2
+                    replacements += 1
+                elif nxt == "t":
+                    out.append("\t")
+                    i += 2
+                    replacements += 1
+                elif nxt == "r":
+                    # Check for \r\n
+                    if i + 2 < n_len and s[i + 2] == "n":
+                        # Actually `\r\n` is "\\r\\n" in the source. We see
+                        # `\`, `r` here; the next `\` is at i+2... wait, no:
+                        # `\r\n` as literal chars is `\`, `r`, `\`, `n` (4
+                        # chars). After reading `\r`, the next chars are `\n`.
+                        # But i+2 here is the char AFTER `r`, which would be
+                        # `\` if it's the `\r\n` sequence.
+                        pass  # handled below
+                    if i + 3 < n_len and s[i + 2] == "\\" and s[i + 3] == "n":
+                        out.append("\n")
+                        i += 4
+                        replacements += 1
+                    else:
+                        out.append("\r")
+                        i += 2
+                        replacements += 1
+                else:
+                    # Unknown escape — preserve verbatim
+                    out.append(c)
+                    i += 1
+            else:
+                out.append(c)
+                i += 1
+        else:
+            # Inside a string literal. Preserve everything including
+            # `\\n`, `\\'`, etc. so Python's parser handles them normally.
+            if c == "\\" and i + 1 < n_len:
+                # Preserve escape sequence verbatim (e.g. `\\n`, `\\'`)
+                out.append(c)
+                out.append(s[i + 1])
+                i += 2
+            elif c == in_str:
+                in_str = None
+                out.append(c)
+                i += 1
+            else:
+                out.append(c)
+                i += 1
+
+    return "".join(out), replacements
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# hermes4 emits tool_calls as markdown ```json``` blocks inside the text
+# content instead of through the OpenAI `tool_calls` field. Ollama doesn't
+# recognize this as a tool call → tool_calls=null, finish_reason=stop,
+# downstream OpenClaw never executes anything. The model IS trying to act
+# — we rescue the embedded JSON and lift it into a proper tool_calls list.
+#
+# Pattern (verified 2026-05-25 from agent session jsonl):
+#   ```json
+#   {"name":"write","arguments":{"path":"...","content":"..."}}
+#   ```
+# OR sometimes without language fence:
+#   ```
+#   {"name":"exec","arguments":{"command":"..."}}
+#   ```
+#
+# We detect any fenced block whose JSON has both `name` and `arguments`,
+# extract it as a tool_call, and strip the block from the text content.
+# Idempotent — once rescued, no more fenced JSON tool_call shapes survive.
+# ──────────────────────────────────────────────────────────────────────────
+
+_RESCUE_TOOL_CALL_MD_RE = re.compile(
+    r"```(?:json|tool_call)?\s*"
+    r"(?P<body>\{(?:[^{}]|\{[^{}]*\})*\})"  # one level of brace nesting
+    r"\s*```",
+    re.DOTALL,
+)
+
+
+def _rescue_text_tool_calls(message: dict) -> tuple[dict, int]:
+    """
+    Scan `message["content"]` for markdown JSON blocks that look like
+    tool_calls and lift them into `message["tool_calls"]`. Strips the
+    rescued blocks from the text content so the model's prose still
+    flows.
+
+    Returns (updated_message, num_rescued). num_rescued > 0 means the
+    response should be treated as a tool-calls response downstream
+    (caller may also want to flip finish_reason).
+    """
+    try:
+        content = message.get("content")
+        if not isinstance(content, str) or "```" not in content:
+            return message, 0
+
+        rescued: list[dict] = []
+        new_content_parts: list[str] = []
+        last_end = 0
+
+        for m in _RESCUE_TOOL_CALL_MD_RE.finditer(content):
+            body = m.group("body")
+            try:
+                obj = json.loads(body)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            name = obj.get("name")
+            args = obj.get("arguments")
+            if not isinstance(name, str) or args is None:
+                continue
+
+            # OpenAI spec: arguments must be a JSON-encoded string. Some
+            # rescued forms emit args as a dict; re-encode if so.
+            if isinstance(args, dict):
+                args_str = json.dumps(args)
+            elif isinstance(args, str):
+                # Validate it's at least parseable JSON; if not, keep as-is.
+                try:
+                    json.loads(args)
+                    args_str = args
+                except json.JSONDecodeError:
+                    args_str = args
+            else:
+                args_str = json.dumps(args)
+
+            rescued.append({
+                "id": f"call_rescued_{len(rescued)}",
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": args_str,
+                },
+            })
+            # Keep prose around the block but drop the block itself.
+            new_content_parts.append(content[last_end:m.start()])
+            last_end = m.end()
+
+        if not rescued:
+            return message, 0
+
+        new_content_parts.append(content[last_end:])
+        new_content = "".join(new_content_parts).strip()
+
+        # Merge rescued into any existing tool_calls. Preserve existing
+        # entries first (server-issued ones win in case of weirdness).
+        existing_tool_calls = message.get("tool_calls") or []
+        merged_tool_calls = list(existing_tool_calls)
+        for tc in rescued:
+            tc_with_index = dict(tc)
+            tc_with_index["index"] = len(merged_tool_calls)
+            merged_tool_calls.append(tc_with_index)
+
+        new_message = dict(message)
+        new_message["content"] = new_content
+        new_message["tool_calls"] = merged_tool_calls
+        logger.warning(
+            "model_proxy: rescued %d tool_call(s) from markdown JSON in "
+            "content — names=%s (hermes4-style markdown-tool-call fix)",
+            len(rescued),
+            [tc["function"]["name"] for tc in rescued],
+        )
+        return new_message, len(rescued)
+    except Exception as e:
+        logger.warning("model_proxy: text tool_call rescue failed: %s", e)
+        return message, 0
+
+
+def _normalize_file_write_tool_args(tc: dict) -> dict:
+    """
+    Fix over-escaped multi-line content in file-write tool_call args.
+
+    Symptom (hermes4:14b-q5 and others): the `content` field for `write` /
+    `edit` arrives with literal `\\n` characters where real newlines should
+    be, because the model emitted JSON args with `\\\\n` instead of `\\n`.
+    After json.loads, those become literal 2-char backslash-n sequences
+    that the downstream `write` tool puts verbatim into the file → broken
+    Python / JSON / etc → exec fails with SyntaxError → model (in
+    narration-mode after seeing the error) doesn't recover.
+
+    Strategy: for known file-writing tool names, parse the JSON `arguments`,
+    run `_smart_decode_code_escapes` on content-shaped fields (which decodes
+    escape sequences ONLY outside string literals — preserving legitimate
+    `'\\n'` etc.), re-serialize.
+
+    Discovered 2026-05-24 during the B7/v4 push-through when hermes4
+    produced `hashes = [\\n 'a532443f...\\n ...,\\n]\\` in crack.py instead
+    of real newlines, causing every exec to die with SyntaxError. First
+    naive fix was too aggressive and broke `f.write(n + '\\n')`-style
+    legitimate escapes inside string literals — hence the string-aware
+    decoder above.
+    """
+    try:
+        fn = tc.get("function") or {}
+        name = fn.get("name", "")
+        # File-writing tools (`write`/`edit`/etc) carry multi-line bodies
+        # in `content`/`code`/`text`/etc. `exec` carries multi-line shell
+        # commands (heredoc bodies) in `command`. Both can suffer the
+        # over-escape leak: model emits `\\n` (escaped backslash + n)
+        # where the bash heredoc / Python source needs real newlines.
+        # Added `exec`/`command` 2026-05-25 when the hash_hint moved to
+        # a single-exec heredoc one-shot pattern.
+        if name not in (
+            "write", "edit", "file_write", "create_file", "fs_write",
+            "exec",
+        ):
+            return tc
+
+        args_raw = fn.get("arguments")
+        if isinstance(args_raw, dict):
+            args = args_raw
+        elif isinstance(args_raw, str):
+            try:
+                args = json.loads(args_raw)
+            except json.JSONDecodeError:
+                return tc
+        else:
+            return tc
+        if not isinstance(args, dict):
+            return tc
+
+        changed = False
+        for field in ("content", "code", "text", "body", "data", "command"):
+            val = args.get(field)
+            if not isinstance(val, str):
+                continue
+            # Quick detect — if no literal backslash-letter pairs exist, skip.
+            if "\\n" not in val and "\\t" not in val and "\\r" not in val:
+                continue
+            fixed, n_repl = _smart_decode_code_escapes(val)
+            if n_repl > 0 and fixed != val:
+                args[field] = fixed
+                changed = True
+                logger.warning(
+                    "model_proxy: normalized over-escaped %s in tool_call name=%s "
+                    "(hermes4-style escape leak fix: %d escape(s) outside strings, "
+                    "%d → %d chars)",
+                    field, name, n_repl, len(val), len(fixed),
+                )
+
+        if not changed:
+            return tc
+
+        new_tc = dict(tc)
+        new_fn = dict(fn)
+        new_fn["arguments"] = json.dumps(args)
+        new_tc["function"] = new_fn
+        return new_tc
+    except Exception as e:
+        logger.warning("model_proxy: tool_call escape-normalize failed: %s", e)
+        return tc
+
+
 def _filter_messages_for_moonshot(messages: list) -> list:
     """Filter out tool/function messages and empty content for Moonshot API."""
     filtered = []
@@ -419,6 +715,99 @@ def _filter_messages_for_moonshot(messages: list) -> list:
 
         filtered.append(msg)
     return filtered
+
+
+# Debug session 400831 — NDJSON for CodeAct / tool_choice diagnosis
+_DEBUG400831_LOG = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+    ".cursor",
+    "debug-400831.log",
+)
+
+# Phrases Harvis embeds in hash CodeAct hints (openclaw_client.py). OpenClaw may
+# truncate or split full_message; match any surviving fragment in proxy _all_text.
+_CODEACT_MARKERS: tuple[str, ...] = (
+    "First call MUST be write",
+    "CALL 1: write",
+    "CALL 1 (write)",
+    "MUST be write (saving crack.py)",
+    "First write the script, then exec",
+    "write the script, then exec",
+    "save crack.py",
+    "HASH-CRACKING TASK",
+    "HASH-CRACKING DETECTED",
+    "RESPONSE FORMAT — READ THIS FIRST",
+    "REQUIRED SEQUENCE (exactly 2 tool_calls",
+    "Your next reply MUST be a real `write` tool_call",
+    "THE SCRIPT — content for the `write`",
+    "tool_choice=exec on the first turn",
+)
+
+
+def _flatten_message_content(content: object) -> str:
+    """Join string or OpenAI-style multimodal content blocks into searchable text."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "text":
+                    parts.append(str(block.get("text") or ""))
+                elif "text" in block:
+                    parts.append(str(block.get("text") or ""))
+            elif isinstance(block, str):
+                parts.append(block)
+        return " ".join(parts)
+    if content is None:
+        return ""
+    return str(content)
+
+
+def _messages_to_search_text(msgs: list) -> tuple[str, list[dict]]:
+    """Build proxy search text + per-message shape metadata for H1 diagnostics."""
+    chunks: list[str] = []
+    meta: list[dict] = []
+    for m in msgs:
+        raw = m.get("content")
+        flat = _flatten_message_content(raw)
+        chunks.append(flat)
+        meta.append({
+            "role": m.get("role"),
+            "content_type": type(raw).__name__,
+            "chars": len(flat),
+        })
+    return " ".join(chunks), meta
+
+
+def _codeact_markers_matched(text: str) -> list[str]:
+    return [p for p in _CODEACT_MARKERS if p in text]
+
+
+def _debug400831_toolchoice(
+    *,
+    hypothesis_id: str,
+    message: str,
+    data: dict,
+) -> None:
+    # region agent log
+    try:
+        import time as _time
+        import uuid as _uuid
+        payload = {
+            "sessionId": "400831",
+            "hypothesisId": hypothesis_id,
+            "location": "model_proxy.py:tool_choice",
+            "message": message,
+            "data": data,
+            "timestamp": int(_time.time() * 1000),
+            "id": f"log_{int(_time.time() * 1000)}_{_uuid.uuid4().hex[:8]}",
+        }
+        with open(_DEBUG400831_LOG, "a", encoding="utf-8") as _f:
+            _f.write(json.dumps(payload, separators=(",", ":")) + "\n")
+    except Exception:
+        pass
+    # endregion
 
 
 @model_proxy_router.post("/chat/completions")
@@ -739,20 +1128,69 @@ async def proxy_chat_completions(
         _msgs = body.get("messages") or []
         _has_tool_results = any(m.get("role") == "tool" for m in _msgs)
         if not _has_tool_results:
-            _all_text = " ".join(
-                m.get("content", "") for m in _msgs
-                if isinstance(m.get("content"), str)
-            )
+            _all_text, _msg_meta = _messages_to_search_text(_msgs)
             _has_exec_tool = any(
                 (t.get("function") or {}).get("name") == "exec"
                 for t in body.get("tools") or []
             )
-            # Don't force exec when CodeAct hint is present — the model
-            # needs to emit `write` first (save crack.py), then `exec`.
-            _CODEACT_MARKER = "First call MUST be write"
-            _has_codeact = _CODEACT_MARKER in _all_text
+            _matched_markers = _codeact_markers_matched(_all_text)
+            _has_codeact = bool(_matched_markers)
 
-            if _ctf_force_re.search(_all_text) and _has_exec_tool and not _has_codeact:
+            # CTF detection MUST scope to the user's ACTUAL query, not
+            # Harvis's full directive bundle (which includes 20K chars of
+            # skill hints containing keywords like "crack" / "decrypt" /
+            # "decode" that false-positive the regex). Harvis wraps the
+            # real user task in HARVIS_USER_TASK_BEGIN/END sentinels at
+            # the tail of full_message — extract content between those.
+            # Falls back to full user-role content if markers absent
+            # (defensive: older Harvis builds, sub-agent retries, etc.).
+            #
+            # CodeAct marker check is unaffected: markers live in the
+            # directive by design and remain matched against _all_text.
+            _user_text = " ".join(
+                _flatten_message_content(m.get("content"))
+                for m in _msgs
+                if m.get("role") == "user"
+            )
+            _task_match = re.search(
+                r"<!--\s*HARVIS_USER_TASK_BEGIN\s*-->(.*?)<!--\s*HARVIS_USER_TASK_END\s*-->",
+                _user_text,
+                re.DOTALL,
+            )
+            _ctf_scope_text = _task_match.group(1) if _task_match else _user_text
+            _ctf_hit = _ctf_force_re.search(_ctf_scope_text) is not None
+            if _ctf_hit:
+                _dbg_data = {
+                    "model": model_name,
+                    "len_all_text": len(_all_text),
+                    "msg_meta": _msg_meta,
+                    "has_codeact": _has_codeact,
+                    "matched_markers": _matched_markers,
+                    "head_300": _all_text[:300].replace("\n", " | "),
+                    "tail_300": _all_text[-300:].replace("\n", " | "),
+                }
+                _debug400831_toolchoice(
+                    hypothesis_id="H1",
+                    message="ctf_first_turn_toolchoice",
+                    data=_dbg_data,
+                )
+                if not _has_codeact:
+                    logger.warning(
+                        "model_proxy: [DBG H1] CTF hit but CodeAct miss — "
+                        "len(_all_text)=%d roles=%s meta=%s head=%r tail=%r",
+                        len(_all_text),
+                        [m.get("role") for m in _msgs],
+                        _msg_meta,
+                        _all_text[:300].replace("\n", " | "),
+                        _all_text[-300:].replace("\n", " | "),
+                    )
+                else:
+                    logger.info(
+                        "model_proxy: [DBG H1] CTF + CodeAct hit — markers=%s",
+                        _matched_markers[:5],
+                    )
+
+            if _ctf_hit and _has_exec_tool and not _has_codeact:
                 body["tool_choice"] = {
                     "type": "function",
                     "function": {"name": "exec"},
@@ -761,10 +1199,94 @@ async def proxy_chat_completions(
                     "model_proxy: CTF-task detected on first call — "
                     "forcing tool_choice=exec"
                 )
+            elif _has_codeact and _ctf_hit:
+                # CodeAct + CTF: with the 2026-05-25 heredoc one-shot
+                # rewrite, the hash flow uses ONE exec call (no separate
+                # write). All current CodeAct CTF flows want `exec` as
+                # the action tool — pin it directly instead of letting
+                # `tool_choice="required"` route to some other tool the
+                # model picks (memory_search, etc.). Matches the
+                # non-CodeAct CTF branch above.
+                #
+                # Earlier rationale (required-based) was for the
+                # write-first pattern that's now retired:
+                # 2026-05-24 workspace 0d408b45 narrated 1087 tokens with
+                # tool_calls=0. The current diagnosis is that "required"
+                # gives hermes4 too much choice — it can satisfy "any
+                # tool" by emitting a no-op-style call or just thinking
+                # silently. Pinning exec removes the ambiguity.
+                body["tool_choice"] = {
+                    "type": "function",
+                    "function": {"name": "exec"},
+                }
+                logger.info(
+                    "model_proxy: CodeAct + CTF marker — forcing "
+                    "tool_choice=exec (heredoc one-shot path)"
+                )
             elif _has_codeact:
                 logger.info(
-                    "model_proxy: CodeAct marker found — skipping forced "
-                    "tool_choice, model will emit write then exec"
+                    "model_proxy: CodeAct marker found (non-CTF) — leaving "
+                    "tool_choice=auto"
+                )
+
+            # ── MCQ-shape detection: force web_search ──────────────────
+            # MCQ scenario questions (Which/What X? A / B / C / D) trip
+            # training-data confidence: qwen3 confidently answers from
+            # memory on OWASP/security MCQs and ignores the WEB ACCESS
+            # hint that says "use web_search freely on scenarios."
+            # Pinning tool_choice=web_search forces the call. Diagnostic
+            # log fires unconditionally so we always see which boolean
+            # failed when MCQ-force does NOT trigger.
+            _has_web_search_tool = any(
+                (t.get("function") or {}).get("name") == "web_search"
+                for t in body.get("tools") or []
+            )
+            _mcq_force_re = re.compile(
+                r"\b(?:Which|What|Where|When|Who)\b"
+                r".+?\?"           # question mark
+                r".*?\s/\s.*?\s/\s",  # at least 2 ` / ` separators
+                re.IGNORECASE | re.DOTALL,
+            )
+            _mcq_regex_match = bool(_mcq_force_re.search(_ctf_scope_text or ""))
+            _existing_tool_choice = body.get("tool_choice")
+
+            logger.warning(
+                "MCQ diagnostic: tool_choice_present=%s "
+                "tool_choice_value=%r "
+                "has_web_search_tool=%s scope_len=%s regex_match=%s "
+                "scope_preview=%r",
+                "tool_choice" in body,
+                _existing_tool_choice,
+                _has_web_search_tool,
+                len(_ctf_scope_text or ""),
+                _mcq_regex_match,
+                (_ctf_scope_text or "")[:300],
+            )
+
+            # Diagnostic 2026-05-25 (workspace 1108dc09) showed
+            # `tool_choice_present=True` even though no upstream forcing
+            # log fired — OpenClaw or the OAI client populates
+            # `tool_choice` with "auto" (or None) as the default. Skipping
+            # ONLY when the existing value is `None`, "auto", or "none"
+            # lets the MCQ-force override these "no real preference"
+            # defaults while still respecting any real upstream pin.
+            _weak_tool_choice = _existing_tool_choice in (
+                None, "", "auto", "none",
+            )
+            if (
+                _weak_tool_choice
+                and not _ctf_hit
+                and _has_web_search_tool
+                and _mcq_regex_match
+            ):
+                body["tool_choice"] = {
+                    "type": "function",
+                    "function": {"name": "web_search"},
+                }
+                logger.info(
+                    "model_proxy: MCQ-scenario detected on first call — "
+                    "forcing tool_choice=web_search (was %r)",
+                    _existing_tool_choice,
                 )
 
     if is_streaming:
@@ -800,6 +1322,42 @@ async def proxy_chat_completions(
                     status_code=502, detail=f"Upstream API error: {resp.status_code}"
                 )
             data = resp.json()
+
+            # ── Rescue tool_calls embedded as markdown JSON in content ────
+            # hermes4 sometimes emits `{"name":"write","arguments":{...}}`
+            # inside a ```json``` fence in the text content instead of
+            # through the OpenAI `tool_calls` field. Lift those into a
+            # proper tool_calls list before downstream processing so
+            # OpenClaw actually executes them.
+            try:
+                _choices = data.get("choices") or []
+                if _choices:
+                    _choice0 = _choices[0]
+                    _msg = _choice0.get("message") or {}
+                    _new_msg, _n_rescued = _rescue_text_tool_calls(_msg)
+                    if _n_rescued > 0:
+                        _choice0["message"] = _new_msg
+                        # Flip finish_reason so downstream agent loops
+                        # treat this as a tool-calls turn, not a stop.
+                        _choice0["finish_reason"] = "tool_calls"
+            except Exception as _e:
+                logger.warning("model_proxy: text tool_call rescue hook failed: %s", _e)
+
+            # ── Tool-call escape leak normalization (hermes4 fix) ─────────
+            # See `_normalize_file_write_tool_args` docstring. Applies in-place
+            # to data so both the SSE re-wrap and the non-streaming return
+            # branches downstream see the fixed args. No-op when no tool_calls
+            # or when args are already clean.
+            try:
+                _choices = data.get("choices") or []
+                if _choices:
+                    _msg = _choices[0].get("message") or {}
+                    _tcs = _msg.get("tool_calls")
+                    if _tcs:
+                        _msg["tool_calls"] = [_normalize_file_write_tool_args(_t) for _t in _tcs]
+            except Exception as _e:
+                logger.warning("model_proxy: post-response tool_call normalize hook failed: %s", _e)
+
             usage = data.get("usage", {})
             if usage:
                 ti = usage.get("prompt_tokens", 0)
