@@ -1229,22 +1229,29 @@ async def proxy_chat_completions(
                     "tool_choice=auto"
                 )
 
-            # ── MCQ-shape detection: force web_search ──────────────────
-            # MCQ scenario questions (Which/What X? A / B / C / D) trip
-            # training-data confidence: qwen3 confidently answers from
-            # memory on OWASP/security MCQs and ignores the WEB ACCESS
-            # hint that says "use web_search freely on scenarios."
-            # Pinning tool_choice=web_search forces the call. Diagnostic
-            # log fires unconditionally so we always see which boolean
-            # failed when MCQ-force does NOT trigger.
+            # ── MCQ-shape diagnostic (no forcing) ──────────────────────
+            # 2026-05-25 substrate test: `tool_choice="required"` AND
+            # `tool_choice={fn: web_search}` are both silently IGNORED
+            # by Ollama for gemma4:e4b (and hermes4:14b-q5 earlier) at
+            # any prompt complexity beyond the trivial probe. Pinning
+            # web_search actively BROKE the gemma4 MCQ #1 path that
+            # worked voluntarily at auto — model emitted memory_search
+            # instead because Ollama ignored the pin and gemma's own
+            # tool-selection prior favored memory for "scenario"-shaped
+            # queries.
+            #
+            # Conclusion (per the advisor decision table): revert to
+            # auto for MCQ-shape requests. Keep the diagnostic log so
+            # we can see whether the regex still fires correctly and
+            # what tool_choice the upstream actually set. No pinning.
             _has_web_search_tool = any(
                 (t.get("function") or {}).get("name") == "web_search"
                 for t in body.get("tools") or []
             )
             _mcq_force_re = re.compile(
                 r"\b(?:Which|What|Where|When|Who)\b"
-                r".+?\?"           # question mark
-                r".*?\s/\s.*?\s/\s",  # at least 2 ` / ` separators
+                r".+?\?"
+                r".*?\s/\s.*?\s/\s",
                 re.IGNORECASE | re.DOTALL,
             )
             _mcq_regex_match = bool(_mcq_force_re.search(_ctf_scope_text or ""))
@@ -1262,32 +1269,6 @@ async def proxy_chat_completions(
                 _mcq_regex_match,
                 (_ctf_scope_text or "")[:300],
             )
-
-            # Diagnostic 2026-05-25 (workspace 1108dc09) showed
-            # `tool_choice_present=True` even though no upstream forcing
-            # log fired — OpenClaw or the OAI client populates
-            # `tool_choice` with "auto" (or None) as the default. Skipping
-            # ONLY when the existing value is `None`, "auto", or "none"
-            # lets the MCQ-force override these "no real preference"
-            # defaults while still respecting any real upstream pin.
-            _weak_tool_choice = _existing_tool_choice in (
-                None, "", "auto", "none",
-            )
-            if (
-                _weak_tool_choice
-                and not _ctf_hit
-                and _has_web_search_tool
-                and _mcq_regex_match
-            ):
-                body["tool_choice"] = {
-                    "type": "function",
-                    "function": {"name": "web_search"},
-                }
-                logger.info(
-                    "model_proxy: MCQ-scenario detected on first call — "
-                    "forcing tool_choice=web_search (was %r)",
-                    _existing_tool_choice,
-                )
 
     if is_streaming:
         # Ask Kimi/NVIDIA to include usage in the final SSE chunk
