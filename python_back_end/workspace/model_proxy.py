@@ -810,6 +810,90 @@ def _debug400831_toolchoice(
     # endregion
 
 
+# ── Gemma diagnostic: capture request + response for diff vs bare-Ollama ─────
+# Default OFF. Flip via env when you need to compare what Harvis actually
+# sends to Ollama against a baseline curl payload. Writes to /tmp/ as a triple
+# matching the baseline shape (request.json / response.json / metadata.txt) so
+# the diff side already knows the layout.
+_CAPTURE_REQUESTS = (
+    os.getenv("HARVIS_CAPTURE_REQUESTS", "false").lower() in ("1", "true", "yes")
+)
+_CAPTURE_MODEL_FILTER = os.getenv("HARVIS_CAPTURE_MODEL_FILTER", "").strip().lower()
+_CAPTURE_DIR = os.getenv("HARVIS_CAPTURE_DIR", "/tmp/harvis-diagnostics")
+
+
+def _capture_request_artifact(body: dict, total_chars: int, target_url: str | None) -> str | None:
+    """If capture is enabled and the model matches the filter, write request.json
+    + metadata.txt (request half) under a fresh per-capture dir. Returns the dir
+    path so the caller can write response.json later. Failures swallow silently
+    — diagnostics must never affect proxy behavior."""
+    if not _CAPTURE_REQUESTS:
+        return None
+    try:
+        import time as _t
+        model = (body.get("model") or "").lower()
+        if _CAPTURE_MODEL_FILTER and _CAPTURE_MODEL_FILTER not in model:
+            return None
+        model_safe = re.sub(r"[^A-Za-z0-9._-]", "_", model or "unknown")
+        ts_ms = int(_t.time() * 1000)
+        capture_dir = os.path.join(_CAPTURE_DIR, f"{model_safe}-{ts_ms}")
+        os.makedirs(capture_dir, exist_ok=True)
+        with open(os.path.join(capture_dir, "request.json"), "w", encoding="utf-8") as f:
+            json.dump(body, f, indent=2, ensure_ascii=False)
+        with open(os.path.join(capture_dir, "metadata.txt"), "w", encoding="utf-8") as f:
+            f.write(
+                f"timestamp_ms: {ts_ms}\n"
+                f"model: {body.get('model')}\n"
+                f"target_url: {target_url or ''}\n"
+                f"num_messages: {len(body.get('messages', []))}\n"
+                f"num_tools: {len(body.get('tools', []))}\n"
+                f"tool_choice: {body.get('tool_choice')!r}\n"
+                f"temperature: {body.get('temperature')!r}\n"
+                f"top_p: {body.get('top_p')!r}\n"
+                f"top_k: {body.get('top_k')!r}\n"
+                f"num_predict: {body.get('num_predict') or (body.get('options') or {}).get('num_predict')!r}\n"
+                f"num_ctx: {(body.get('options') or {}).get('num_ctx')!r}\n"
+                f"think: {body.get('think')!r}\n"
+                f"stream: {body.get('stream')!r}\n"
+                f"total_chars (BUDGET): {total_chars}\n"
+                f"\n# reproduce: curl <target_url> -H 'Content-Type: application/json' "
+                f"-d @request.json\n"
+            )
+        logger.warning("model_proxy: CAPTURE request → %s", capture_dir)
+        return capture_dir
+    except Exception as _exc:
+        logger.warning("model_proxy: CAPTURE request write failed: %s", _exc)
+        return None
+
+
+def _capture_response_artifact(capture_dir: str, data: dict) -> None:
+    """Append response.json to the capture dir and tack final fields onto
+    metadata.txt. Same swallow-failures contract."""
+    if not capture_dir:
+        return
+    try:
+        with open(os.path.join(capture_dir, "response.json"), "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        usage = data.get("usage") or {}
+        choices = data.get("choices") or []
+        choice0 = choices[0] if choices else {}
+        msg = choice0.get("message") or {}
+        tcs = msg.get("tool_calls") or []
+        with open(os.path.join(capture_dir, "metadata.txt"), "a", encoding="utf-8") as f:
+            f.write(
+                f"\n# ── response ──\n"
+                f"prompt_tokens: {usage.get('prompt_tokens')}\n"
+                f"completion_tokens: {usage.get('completion_tokens')}\n"
+                f"finish_reason: {choice0.get('finish_reason')!r}\n"
+                f"tool_calls_count: {len(tcs)}\n"
+                f"tool_call_names: {[t.get('function', {}).get('name') for t in tcs]}\n"
+                f"content_len: {len(msg.get('content') or '')}\n"
+            )
+        logger.warning("model_proxy: CAPTURE response → %s", capture_dir)
+    except Exception as _exc:
+        logger.warning("model_proxy: CAPTURE response write failed: %s", _exc)
+
+
 @model_proxy_router.post("/chat/completions")
 async def proxy_chat_completions(
     request: Request,
@@ -847,6 +931,9 @@ async def proxy_chat_completions(
         len(_budget_tools), body.get("model", ""),
     )
     # ─────────────────────────────────────────────────────────────────────
+
+    # Diagnostic capture (env-gated; target_url not known yet so passed None).
+    _capture_dir = _capture_request_artifact(body, _total_chars, target_url=None)
 
     model_name: str = body.get("model", "")
     _raw_model = model_name
@@ -1303,6 +1390,12 @@ async def proxy_chat_completions(
                     status_code=502, detail=f"Upstream API error: {resp.status_code}"
                 )
             data = resp.json()
+
+            # Diagnostic capture: pair the request artifact with the raw
+            # response BEFORE any of our middleware rewrites (rescue,
+            # normalize) touch it — otherwise the diff vs bare-Ollama would
+            # show our edits rather than what Ollama actually returned.
+            _capture_response_artifact(_capture_dir, data)
 
             # ── Rescue tool_calls embedded as markdown JSON in content ────
             # hermes4 sometimes emits `{"name":"write","arguments":{...}}`
