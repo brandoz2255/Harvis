@@ -1277,38 +1277,31 @@ async def proxy_chat_completions(
                         _matched_markers[:5],
                     )
 
+            # Forcing tool_choice REMOVED 2026-05-27. The branches below preserve
+            # detection (and diagnostic logging) but no longer assign tool_choice.
+            # Three converging signals retired the forcing layer:
+            #   1. c8dc50b — MCQ-force pin broke gemma4's working auto path
+            #      (Ollama silently ignored the pin and gemma's prior favored
+            #      memory_search for scenario-shape queries).
+            #   2. [[ollama-tool-choice-ceiling]] — forcing is silently ignored
+            #      at production complexity for gemma4 + hermes4. Memory's
+            #      pro-keep argument was diagnostic value; we preserve that by
+            #      keeping detection-only.
+            #   3. 2026-05-27 substrate test on batiai/qwen3.6-27b:iq3-16k —
+            #      both auto AND pin produced empty completion (26/29 tokens
+            #      vanished to thinking-channel). Forcing didn't help; for
+            #      some quants it appears to actively break the chat-template
+            #      decoder. Regression-gated by qwen3:14b hash retest on the
+            #      auto path; see commit message for verdict.
             if _ctf_hit and _has_exec_tool and not _has_codeact:
-                body["tool_choice"] = {
-                    "type": "function",
-                    "function": {"name": "exec"},
-                }
                 logger.info(
                     "model_proxy: CTF-task detected on first call — "
-                    "forcing tool_choice=exec"
+                    "auto preserved (forcing removed 2026-05-27)"
                 )
             elif _has_codeact and _ctf_hit:
-                # CodeAct + CTF: with the 2026-05-25 heredoc one-shot
-                # rewrite, the hash flow uses ONE exec call (no separate
-                # write). All current CodeAct CTF flows want `exec` as
-                # the action tool — pin it directly instead of letting
-                # `tool_choice="required"` route to some other tool the
-                # model picks (memory_search, etc.). Matches the
-                # non-CodeAct CTF branch above.
-                #
-                # Earlier rationale (required-based) was for the
-                # write-first pattern that's now retired:
-                # 2026-05-24 workspace 0d408b45 narrated 1087 tokens with
-                # tool_calls=0. The current diagnosis is that "required"
-                # gives hermes4 too much choice — it can satisfy "any
-                # tool" by emitting a no-op-style call or just thinking
-                # silently. Pinning exec removes the ambiguity.
-                body["tool_choice"] = {
-                    "type": "function",
-                    "function": {"name": "exec"},
-                }
                 logger.info(
-                    "model_proxy: CodeAct + CTF marker — forcing "
-                    "tool_choice=exec (heredoc one-shot path)"
+                    "model_proxy: CodeAct + CTF marker detected — "
+                    "auto preserved (forcing removed 2026-05-27)"
                 )
             elif _has_codeact:
                 logger.info(
