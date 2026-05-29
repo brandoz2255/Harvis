@@ -99,3 +99,8 @@ Estimate: 30 min substrate sweep + 30 min two additional MCQs + 30 min analysis 
 Both scopes are now drafted. User reads, accepts, modifies, or rejects EACH independently. Neither implementation begins until the corresponding scope has explicit go.
 
 If you want to modify a scope: name the specific question (1/2/3/4) and the change. Do not start implementing under "I'll figure out X in flight" — that's the failure mode the gate exists to prevent.
+
+## Gate decision (2026-05-25)
+
+- **Scope 1 (model-routing failure-driven escalation): APPROVED.** Fits goals (gemma4 + qwen3 covering task surface without user cognitive load), preserves selection/toggle philosophy, single-flag rollback. Implement.
+- **Scope 2 (reasoning-override investigation): REJECTED in current form.** Best-case outcome is "now I know," not "now Harvis works better." Phase 2A's single data point is enough to act on for tonight: **reasoning-override accepted as best-effort for high-prior MCQs.** Investigation deferred to a future session when there's a specific need to revisit. No code change tonight.
