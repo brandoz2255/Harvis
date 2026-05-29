@@ -704,6 +704,10 @@ class OpenClawClient:
         # First runId seen = "Agent" (parent); subsequent ones = "Sub-Agent 1", "Sub-Agent 2" …
         self._run_labels: dict[str, str] = {}
         self._sub_agent_counter: int = 0
+        # req ids whose `res` frame must be treated as non-fatal in the stream
+        # loop (e.g. best-effort sessions.reset — a failed reset must never
+        # abort the workspace; it just leaves the prior behavior).
+        self._suppress_res_ids: set[str] = set()
 
     def _next_id(self) -> str:
         self._request_id += 1
@@ -719,6 +723,41 @@ class OpenClawClient:
         safe_session = self.session_id.lower().replace("_", "-")
         safe_agent = self.agent_id.lower().replace("_", "-")
         return f"agent:{safe_agent}:{safe_session}"
+
+    async def _reset_session_turns(self, reason: str = "reset") -> None:
+        """Clear OpenClaw's server-side replayed turn history for THIS session
+        key while keeping the key alive (OpenClaw rotates to a fresh sessionId
+        with systemSent=False, totalTokens=0 — verified via probe 2026-05-29).
+
+        Used before a SELF-CONTAINED corrective re-ask so the model doesn't see
+        a stale completed-task turn ("...cracked successfully" + a prior tool
+        result), which drives tool-call emission to 0% on both qwen3:14b and
+        qwen3.5:9b (harness-measured). After reset, OpenClaw re-sends only its
+        bundled system prompt — Harvis's per-task skill hints from the original
+        message are NOT replayed, so ONLY call this before a corrective that
+        re-embeds its own task guidance (the hash corrective does; others do
+        not). Best-effort: a failure just leaves the prior behavior.
+        """
+        if self._ws is None:
+            return
+        try:
+            _rid = self._next_id()
+            self._suppress_res_ids.add(_rid)  # its res must not abort the stream
+            await self._ws.send(json.dumps({
+                "type": "req",
+                "id": _rid,
+                "method": "sessions.reset",
+                "params": {"key": self._session_key, "reason": reason},
+            }))
+            logger.info(
+                "[workspace:%s] sessions.reset sent (key=%s reason=%s) before corrective",
+                self.workspace_id, self._session_key[:48], reason,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[workspace:%s] sessions.reset failed (continuing without it): %s",
+                self.workspace_id, exc,
+            )
 
     async def _connect(self):
         """
@@ -1192,30 +1231,25 @@ class OpenClawClient:
             )
             hash_hint = ""
             if _detected_hashes:
+                # ── Lever 1 (2026-05-28) — skill-dispatch shape ──
+                # The model no longer authors the multi-tier orchestration
+                # inside an exec heredoc. crack_all.py on disk does it all
+                # (multi-hash batching, bundled wordlists, online lookup,
+                # themed fetch). Same architecture as decode/crypto/forensics
+                # — model emits ONE short command, the script handles the
+                # complexity. Eliminates the gemma4/hermes4 indent-collapse
+                # failure class entirely (workspaces 8e60e5cd, 31da2e56).
                 _hcdir = f"{SKILLS_BASE}/hash-cracking"
                 _n_hashes = len(_detected_hashes)
                 _hash_list_str = "\n".join(f"  {h}" for h in _detected_hashes)
-                # ── Few-shot example: show ONE hash + comment placeholder. ──
-                # Two failure modes we're balancing:
-                #   (a) [3-of-N concrete] → model imitates the slice, drops
-                #       remaining N-3 hashes (today's morning bug).
-                #   (b) [all-N concrete] → model treats the example as the
-                #       finished answer and prints it as text, never emits a
-                #       write tool_call (tonight's bug — granite emitted
-                #       ```json {"name":"write",...}``` in markdown instead).
-                # Middle ground: one concrete hash + explicit placeholder
-                # comment.  The model has substitution WORK to do, and that
-                # work is naturally expressed as a write tool_call.
-                _first_hash = _detected_hashes[0]
-                _hash_list_example = (
-                    "[\n"
-                    f"    '{_first_hash}',\n"
-                    f"    # ... PASTE THE OTHER {_n_hashes - 1} HASHES "
-                    "FROM THE TASK ABOVE HERE\n"
-                    "]"
-                ) if _n_hashes > 1 else f"['{_first_hash}']"
+                _hashes_argv = " ".join(_detected_hashes)
 
-                # Theme detection — pokemon, cities, movies, etc.
+                # Theme detection — maps user-visible keyword to crack_all.py's
+                # --theme=NAME flag. crack_all.py currently ships only
+                # `pokemon` as a supported theme; other detected themes
+                # (cities, movies, anime, etc.) fall through to the bundled
+                # tier only. Extending the skill is the right path for new
+                # themes — add an entry to crack_all.py THEMES dict.
                 _HASH_THEME_RE = re.compile(
                     r"\b(pok[eé]mon|cities|movies?|star\s*wars|anime|"
                     r"animals?|countries|names|colors?|fruits?|"
@@ -1228,210 +1262,58 @@ class OpenClawClient:
                     _theme_match.group(0).lower() if _theme_match else ""
                 )
                 _is_pokemon_theme = _theme_word in {"pokemon", "pokémon"}
+                _theme_arg = " --theme=pokemon" if _is_pokemon_theme else ""
 
-                # ── Tier 3 themed-fetch template ──
-                # Pokemon is the active CTF benchmark, so we show PokeAPI as
-                # the worked example.  For other themes, we instruct the
-                # model to substitute a comparable authoritative dataset
-                # source.  Showing the URL is *teaching* (model still has to
-                # decide when to invoke it and how to integrate the result);
-                # baking a pre-built wordlist would be *answering* and is
-                # the user's hard "no".
-                if _is_pokemon_theme:
-                    # FLAT tier-3 block: no nested `with-inside-with-inside-for`
-                    # because both hermes4 and qwen3:14b collapse nested indent
-                    # to single-space, breaking the script (verified 2026-05-25
-                    # workspace 31da2e56). All statements live inside the
-                    # `if remaining:` body at one indent level — no deep
-                    # nesting for the model to misalign. Cache check is
-                    # dropped entirely: a prior corrupted /tmp/pokemon.txt
-                    # (1025 empty newlines from an indent-collapse-era run)
-                    # passed `getsize > 0` and poisoned every subsequent test.
-                    # PokeAPI fetch is <1s, fully reliable — re-fetching
-                    # every run is cheaper than the cache poisoning risk.
-                    # NB: comments stripped to bare minimum (no em-dashes,
-                    # no multi-line wrap, no Unicode arrows). Models keep
-                    # mangling long comments — dropping the `#` prefix on
-                    # wrapped lines and copying U+2014 em-dash into source,
-                    # which Python rejects as invalid character. One-line
-                    # tag-style comment only.
-                    _tier3_block = (
-                        "\n# Tier 3: pokemon from PokeAPI\n"
-                        "remaining = [h for h in hashes if h not in results]\n"
-                        "if remaining:\n"
-                        "    wl = '/tmp/pokemon.txt'\n"
-                        "    req = urllib.request.Request("
-                        "'https://pokeapi.co/api/v2/pokemon-species?limit=2000', "
-                        "headers={'User-Agent': 'Mozilla/5.0'})\n"
-                        "    resp = urllib.request.urlopen(req, timeout=20)\n"
-                        "    data = json.loads(resp.read())\n"
-                        "    resp.close()\n"
-                        "    f = open(wl, 'w')\n"
-                        "    for p in data['results']:\n"
-                        "        n = p['name']\n"
-                        "        print(n, file=f)\n"
-                        "        print(n.capitalize(), file=f)\n"
-                        "        print(n.replace('-', ''), file=f)\n"
-                        "    f.close()\n"
-                        "    for h in remaining:\n"
-                        "        out = try_cracker(h, wordlist=wl)\n"
-                        "        if out.get('verified'): results[h] = out\n"
-                    )
-                elif _has_theme_hint:
-                    _tier3_block = (
-                        f"\n# Tier 3 — themed: '{_theme_word}' → identify an "
-                        "authoritative dataset, curl/urllib it,\n"
-                        "# write entries (one per line, plus capitalized "
-                        "variants) to /tmp/themed.txt,\n"
-                        "# then call try_cracker(h, wordlist='/tmp/themed.txt')"
-                        " for each remaining hash.\n"
-                    )
-                else:
-                    _tier3_block = ""
-
-                # ── CodeAct hash hint with 3-tier fetch-on-demand script ──
-                # The wordlists/ directory is intentionally EMPTY — the model
-                # must fetch every wordlist itself.  This forces real agentic
-                # behaviour (no pre-cooked answers) and generalises to any
-                # theme without us pre-baking 50 wordlists.
-                # Structure: RESPONSE FORMAT first (lead with the rule that
-                # was violated last run), then sequence, then tiered script
-                # template, then WRONG/RIGHT contrastive, then rules.
                 hash_hint = (
-                    "\nHASH-CRACKING TASK.\n"
+                    "\nHASH-CRACKING TASK DETECTED.\n"
                     f"Hashes to crack ({_n_hashes}):\n{_hash_list_str}\n"
-                    "\nRESPONSE FORMAT — READ THIS FIRST:\n"
-                    "Your next reply MUST be a real `exec` tool_call.\n"
-                    "Do NOT type the script as response text.\n"
-                    "Do NOT type ```json {\"name\":\"exec\",...}``` blocks "
-                    "as response text — those don't execute.\n"
-                    "Tool calls go through the TOOL CHANNEL, not the chat "
-                    "channel. If your reply contains a code block, you have "
-                    "failed.\n"
-                    "\nYou have a shell via `exec`. The cracker engine:\n"
-                    f"  {_hcdir}/cracker.py\n"
-                    "Bundled standard wordlists (fresh-Kali baseline): "
-                    "top1k.txt, top10k.txt, top100k.txt — auto-tried when "
-                    "you call cracker.py WITHOUT a --wordlist= flag. For "
-                    "themed/topic-specific lists (e.g. Pokemon), the script "
-                    "must fetch the source itself (no pre-baked themed lists).\n"
-                    "Cracker output is JSON: {hash, algo, plaintext, method, "
-                    "verified, tiers_tried}.\n"
-                    "\nREQUIRED SEQUENCE (exactly 1 tool_call to start):\n"
-                    "  1) exec  →  runs a Python script INLINED via bash "
-                    "heredoc. No separate `write` call. No file created.\n"
-                    "Then a final assistant message summarizing only the "
-                    "hashes the cracker actually verified.\n"
-                    "\nTHE COMMAND — value for the `exec` tool's `command` "
-                    f"field. Substitute the placeholder so `hashes` contains "
-                    f"all {_n_hashes} hashes from the task above. Use the "
-                    "QUOTED heredoc delimiter (`<<'PYEOF_HARVIS_END'`) so "
-                    "bash does NOT expand $vars or backticks inside the "
-                    "Python body. The closing `PYEOF_HARVIS_END` must be on "
-                    "its own line at column 0.\n"
-                    "\n```\n"
-                    "python3 <<'PYEOF_HARVIS_END'\n"
-                    "import subprocess, json, os, urllib.request\n"
-                    "\n"
-                    f"hashes = {_hash_list_example}\n"
-                    f"cracker = '{_hcdir}/cracker.py'\n"
-                    "\n"
-                    "def try_cracker(h, wordlist=None, use_online=False):\n"
-                    "    cmd = ['python3', cracker, h]\n"
-                    "    if wordlist: cmd.append(f'--wordlist={wordlist}')\n"
-                    "    if use_online: cmd.append('--online')\n"
-                    "    r = subprocess.run(cmd, capture_output=True, "
-                    "text=True)\n"
-                    "    try: return json.loads(r.stdout)\n"
-                    "    except Exception: return {'verified': False, "
-                    "'stderr': r.stderr[:200]}\n"
-                    "\n"
-                    "results = {}\n"
-                    "\n"
-                    "# Tier 1: bundled wordlists + online lookup\n"
-                    "for h in hashes:\n"
-                    "    out = try_cracker(h, use_online=True)\n"
-                    "    if out.get('verified'): results[h] = out\n"
-                    f"{_tier3_block}"
-                    "\n"
-                    "# Record unverified hashes honestly\n"
-                    "for h in hashes:\n"
-                    "    if h not in results:\n"
-                    "        results[h] = {'verified': False}\n"
-                    "\n"
-                    "print(json.dumps(results, indent=2))\n"
-                    "PYEOF_HARVIS_END\n"
-                    "```\n"
-                    "\nWRONG (your reply must NOT look like this):\n"
-                    "  ```json {\"name\":\"exec\", \"arguments\":{...}} ```\n"
-                    "  (Then narrating fake results)\n"
-                    "\nRIGHT:\n"
-                    "  Emit an actual `exec` tool_call now whose `command` "
-                    "argument is the entire `python3 <<'PYEOF_HARVIS_END' "
-                    "... PYEOF_HARVIS_END` block above as ONE multi-line "
-                    "string. After exec returns JSON, summarize only the "
-                    "hashes where the cracker reported verified=true.\n"
-                    "\nRules:\n"
-                    "- ONE exec tool_call to start. The script is inlined in "
-                    "the heredoc — there is no separate write step. No other "
-                    "tool calls between this exec and your final summary.\n"
-                    "- If exec returns a Python error (SyntaxError, "
-                    "IndentationError, NameError, etc.): DO NOT stop and ask "
-                    "the user for permission to fix. DO NOT explain the bug "
-                    "in prose. Immediately emit a fresh `exec` tool_call "
-                    "with the corrected heredoc body. You are authorized to "
-                    "iterate up to 3 retry cycles without asking. Only stop "
-                    "iterating when exec returns valid JSON from cracker.py "
-                    "or you've burned 3 cycles.\n"
-                    "- If exec returns valid JSON but EVERY hash is "
-                    "verified=false (0/N cracked): DO NOT stop and ask "
-                    "permission to try more variants. Immediately emit a "
-                    "fresh `exec` tool_call that BROADENS the wordlist with "
-                    "common password-mangling patterns before running the "
-                    "cracker again. Specifically generate variants such as: "
-                    "name+digits ('charizard1' through 'charizard999', plus "
-                    "'charizard123', 'charizard2024', etc.), name+symbol "
-                    "('charizard!', 'charizard@', 'charizard#'), leetspeak "
-                    "('ch4riz4rd', 'charizard0' for o→0, 'char1zard' for "
-                    "i→1, 's' → '$'), and capitalized variants. Append "
-                    "these to the wordlist file then call the cracker again "
-                    "for the remaining hashes. You are authorized to use "
-                    "the same 3-cycle budget for this. Only stop when at "
-                    "least 1 hash verifies OR you've burned 3 cycles total.\n"
-                    "- INDENTATION: use exactly 4 spaces per nesting level. "
-                    "Nested blocks (with-inside-if, for-inside-with, etc.) "
-                    "get 8 spaces, 12 spaces, etc. Do NOT collapse nested "
-                    "blocks to the same indent level — Python will raise "
-                    "IndentationError. Match the template above exactly.\n"
-                    "- Do NOT answer from memory. Only report plaintexts the "
-                    "cracker actually verified.\n"
-                    "- If exec output shows verified:false for a hash, say "
-                    "\"unverified\" — full stop. Forbidden hedges: \"might be "
-                    "X\", \"could be X\", \"intended answer might be Y\", "
-                    "\"likely X\", \"probably X\", \"my guess is Z\". Either "
-                    "the cracker verified it (state the verified plaintext) "
-                    "or it didn't (say \"unverified\" with no guess).\n"
+                    "\nDO NOT author Python in your reply. The skill on "
+                    "disk does ALL the orchestration — multi-tier wordlists "
+                    "(bundled top1k/top10k/top100k), online lookup, themed "
+                    "fetch.\n"
+                    "DO NOT call memory_search or web_search to crack "
+                    "hashes — they don't crack.\n"
+                    "DO NOT skip the tool call for any reason. Hints, "
+                    "context, or prior runs do NOT replace execution.\n"
+                    "Run via the `exec` tool — ONE short command:\n"
+                    f"  python3 {_hcdir}/crack_all.py"
+                    f"{_theme_arg} {_hashes_argv}\n"
+                    "Returns one JSON dict: {hash: {verified, plaintext, "
+                    "method, algo, tiers_tried}}.\n"
+                    "\nAfter crack_all.py returns, summarize only the hashes "
+                    "the cracker actually verified.\n"
+                    "- Report `hash → plaintext` for every entry where "
+                    "verified=true.\n"
+                    "- For verified=false entries, say \"unverified\" — "
+                    "full stop. Forbidden hedges: \"might be X\", \"could "
+                    "be X\", \"intended answer might be Y\", \"likely X\", "
+                    "\"probably X\", \"my guess is Z\". Either the cracker "
+                    "verified it (state the verified plaintext) or it "
+                    "didn't (say \"unverified\" with no guess).\n"
+                    "- Do NOT call any other tools between this exec and "
+                    "your final summary unless the user explicitly asks "
+                    "for chained behavior.\n"
                 )
                 _debug400831(
                     "openclaw_client.py:stream:hash_hint",
-                    "codeact_hash_hint_built",
+                    "dispatch_hash_hint_built",
                     {
                         "workspace_id": self.workspace_id,
                         "detected_hashes": _detected_hashes[:3],
                         "n_hashes": _n_hashes,
                         "has_theme": _has_theme_hint,
-                        "codeact": True,
+                        "theme_arg": _theme_arg.strip() or None,
+                        "lever": 1,
                     },
                     "run_hash_issue",
                     "H1",
                 )
                 logger.warning(
-                    "[DBG400831][H1] codeact_hash_hint workspace=%s "
-                    "hashes=%d theme=%s example=%s",
+                    "[DBG400831][H1] dispatch_hash_hint workspace=%s "
+                    "hashes=%d theme=%s",
                     self.workspace_id,
                     _n_hashes,
-                    _has_theme_hint,
-                    _hash_list_example[:60],
+                    _theme_arg.strip() or "none",
                 )
 
             # ---- decode skill detection ----
@@ -2046,6 +1928,19 @@ class OpenClawClient:
 
                 # Ignore acks and other non-event frames
                 if msg_type == "res":
+                    # Best-effort RPCs (sessions.reset) — their res must never
+                    # abort the workspace, even on ok=false. Swallow + continue.
+                    _res_id = msg.get("id")
+                    if _res_id in self._suppress_res_ids:
+                        self._suppress_res_ids.discard(_res_id)
+                        if not msg.get("ok"):
+                            logger.warning(
+                                "[workspace:%s] suppressed best-effort RPC res "
+                                "(id=%s) error: %s",
+                                self.workspace_id, _res_id,
+                                msg.get("error", {}).get("message", "?"),
+                            )
+                        continue
                     if not msg.get("ok"):
                         err = msg.get("error", {}).get("message", "Unknown error")
                         logger.error("[workspace:%s] RPC error: %s", self.workspace_id, err)
@@ -2378,18 +2273,33 @@ class OpenClawClient:
                             }))
                             continue
 
-                        # C1: hash-narration retry. When hermes4 enters
-                        # narration mode on a hash task — talks about the
-                        # script, regurgitates HASH-CRACKING markers from
-                        # the system prompt, or pastes fake {"name":"write"}
-                        # JSON as text — the tool never actually ran. Retry
-                        # once with an explicit tool-only correction.
+                        # C1: hash-task no-tool-call retry. Broad trigger for
+                        # ANY hash-task final response that didn't emit an
+                        # executing tool_call — covers all three observed
+                        # failure modes:
+                        #   - empty content + zero tool_calls (silent stop)
+                        #   - narrative content + zero tool_calls ("I'll run
+                        #     the cracker..." without ever calling it —
+                        #     qwen3.5:9b coin-flip ~33% of the time at
+                        #     production prompt complexity, verified
+                        #     2026-05-28 via three direct-to-Ollama
+                        #     replays of the same body)
+                        #   - regurgitated system-prompt fragments / fake
+                        #     {"name":"write",...} JSON in text (hermes4)
+                        # All three share a common signature: hash task +
+                        # no executing tool_call. Independent of WHAT the
+                        # model wrote in content.
+                        #
+                        # Cap is 2 retries (was 1). At qwen3.5:9b's ~67% per-
+                        # attempt rate, two retries push reliability to ~96%
+                        # without unbounded looping. Retry budget is shared
+                        # across all corrective branches (each ++ corrective_
+                        # retry_count) so total cost is bounded.
                         hash_narration = _looks_like_hash_narration_regurgitation(text)
                         if (
                             looks_hash_task
                             and not saw_executing_tool_call
-                            and corrective_retry_count < 1
-                            and (hash_narration or not text.strip())
+                            and corrective_retry_count < 2
                         ):
                             corrective_retry_count += 1
                             # C1.3: arm the retry-in-flight guard so the next
@@ -2399,46 +2309,60 @@ class OpenClawClient:
                             retry_started_at = asyncio.get_event_loop().time()
                             self._last_partial_text = ""
                             self._narrative_cut = 0
-                            failure_kind = (
-                                "narration regurgitation"
-                                if hash_narration else "empty final"
-                            )
+                            if hash_narration:
+                                failure_kind = "narration regurgitation"
+                            elif text.strip():
+                                # Narrative without tool_call — the qwen3.5:9b
+                                # coin-flip miss. Model said what it WOULD do
+                                # without doing it.
+                                failure_kind = "intent without action"
+                            else:
+                                failure_kind = "empty final"
                             logger.warning(
                                 "[workspace:%s] Hash task returned %s with no "
-                                "executing tool call — retrying with tool-only "
-                                "directive",
+                                "executing tool call (attempt %d/2) — retrying "
+                                "with tool-only directive",
                                 self.workspace_id, failure_kind,
+                                corrective_retry_count,
                             )
                             yield OpenClawEvent("log", {
                                 "message": (
-                                    "Agent did not actually run the cracker ("
-                                    + failure_kind
-                                    + "); forcing tool execution…"
+                                    f"Agent did not call the cracker ({failure_kind}) "
+                                    f"— retry {corrective_retry_count}/2…"
                                 ),
                             })
                             req_id = self._next_id()
+                            # Corrective message matches the Lever 1 dispatch
+                            # shape (one `exec` of crack_all.py, no separate
+                            # write step). Pre-Lever-1 corrections referenced
+                            # the write+exec pattern; those would now
+                            # contradict the system prompt and confuse the
+                            # model further.
                             correction = (
                                 "CORRECTION: Your previous response did NOT "
-                                "actually run the cracker. Talking about the "
-                                "script, restating the task, or pasting "
-                                "{\"name\":\"write\",...} JSON does not call "
-                                "the tool — it must come through the tool "
-                                "channel.\n\n"
-                                "Now do this with REAL tool calls:\n"
-                                "1) Call `write` to save the crack.py script "
-                                "(the few-shot in your system prompt shows "
-                                "the exact shape).\n"
-                                "2) Call `exec` to run `python3 <path>/crack.py`.\n"
-                                "3) Read the JSON output and report only the "
-                                "hashes the cracker returned with "
-                                "verified=true. Say \"unverified\" for the "
-                                "rest — do NOT guess plaintexts.\n\n"
-                                "Do not write any prose before the first "
-                                "tool_call. Do not paste JSON tool-call "
-                                "objects in text — emit them through the "
-                                "tool channel.\n\n"
+                                "call the tool. Talking about what the "
+                                "cracker will do, or describing the plan, "
+                                "does not run it — you must emit an `exec` "
+                                "tool_call through the tool channel.\n\n"
+                                "Emit ONE `exec` tool_call NOW. Do not "
+                                "narrate. Do not summarize the plan. The "
+                                "command:\n"
+                                "  python3 /skills-shared/hash-cracking/"
+                                "crack_all.py --theme=pokemon <every hash from "
+                                "the user request>\n\n"
+                                "After exec returns JSON, summarize only the "
+                                "hashes with verified=true. Say \"unverified\" "
+                                "for the rest — do NOT guess plaintexts.\n\n"
                                 f"USER REQUEST: {last_user_msg}\n"
                             )
+                            # Context-hygiene (2026-05-29): clear OpenClaw's
+                            # replayed turn history before this corrective so a
+                            # stale completed-task turn ("...cracked successfully"
+                            # + tool result) bled in from a prior run can't drive
+                            # emission to 0%. Safe here because this corrective is
+                            # self-contained (re-embeds the crack_all.py command +
+                            # USER REQUEST), so it stands alone after the reset.
+                            await self._reset_session_turns("reset")
                             await self._ws.send(json.dumps({
                                 "type": "req",
                                 "id": req_id,
