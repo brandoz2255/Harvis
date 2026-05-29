@@ -1410,6 +1410,54 @@ async def proxy_chat_completions(
             except Exception as _e:
                 logger.warning("model_proxy: text tool_call rescue hook failed: %s", _e)
 
+            # ── Reasoning → content hoist (qwen3.5:9b post-tool-result fix) ─
+            # Thinking-capable models sometimes route the final answer into
+            # `message.reasoning` instead of `message.content` on post-tool-
+            # result turns, even when `think: false` is set. Verified
+            # 2026-05-28 workspace 660ad588 on qwen3.5:9b: complete cracker
+            # summary (5/5 verified plaintexts as markdown table) landed in
+            # `reasoning`, content was empty, finish_reason=stop. Without
+            # this hoist, openclaw_client's empty-final fallback synthesizes
+            # a generic "no answer" message and the real result is lost.
+            #
+            # Same class as older hermes4 "missing 1000 tokens" pattern —
+            # chat-template routing the model's actual output into the
+            # chain-of-thought channel. The rescue is bounded: we only fire
+            # when content is genuinely empty AND there are no tool_calls
+            # (so we don't trample real CoT on normal answered turns) AND
+            # finish_reason=stop (not tool_calls — that's the tool_call
+            # rescue's job above). When all three hold, the reasoning text
+            # IS the answer.
+            try:
+                _choices = data.get("choices") or []
+                if _choices:
+                    _choice0 = _choices[0]
+                    _msg = _choice0.get("message") or {}
+                    _content = (_msg.get("content") or "").strip()
+                    _reasoning = (
+                        _msg.get("reasoning")
+                        or _msg.get("reasoning_content")
+                        or ""
+                    ).strip()
+                    _tcs = _msg.get("tool_calls") or []
+                    _fr = _choice0.get("finish_reason")
+                    if (
+                        _fr == "stop"
+                        and not _content
+                        and _reasoning
+                        and not _tcs
+                    ):
+                        _msg["content"] = _reasoning
+                        logger.warning(
+                            "model_proxy: reasoning→content hoist (%d chars) "
+                            "— model %s put final answer in reasoning channel",
+                            len(_reasoning), model_name,
+                        )
+            except Exception as _e:
+                logger.warning(
+                    "model_proxy: reasoning→content hoist hook failed: %s", _e,
+                )
+
             # ── Tool-call escape leak normalization (hermes4 fix) ─────────
             # See `_normalize_file_write_tool_args` docstring. Applies in-place
             # to data so both the SSE re-wrap and the non-streaming return
