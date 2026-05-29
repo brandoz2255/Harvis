@@ -103,6 +103,33 @@ _model_override: str = ""  # when set, overrides cfg.model_name everywhere
 
 _model_pref_cache: dict[int, tuple[float, str, str]] = {}
 
+
+# ── Scope 1: failure-driven escalation between paired models ─────────────────
+# Per docs/handoffs/2026-05-25-phase3-scopes.md. Default OFF; flip via env
+# after smoke tests confirm escalation latency stays under 2 min.
+_ESCALATE_ON_FAILURE = (
+    os.getenv("HARVIS_ESCALATE_ON_FAILURE", "false").lower() in ("1", "true", "yes")
+)
+
+# Symmetric pairing. Failure-driven (NOT capability-detection — see
+# [[no-keyword-model-routing]]). qwen3 covers hash/CodeAct, gemma4 covers
+# MCQ/decode/crypto/conversational (see [[model-task-pairing]]).
+_ESCALATION_PAIRS: dict[str, str] = {
+    "qwen3:14b": "gemma4:e4b",
+    "gemma4:e4b": "qwen3:14b",
+}
+
+# Fabrication banners emitted by workspace_router._validate_hash_claims /
+# _validate_ctf_process_claims when the model narrates fake tool calls.
+# Pure output-side detection; never inspects the task brief (that would
+# reintroduce keyword routing through the back door, killing Scope 1).
+_ESCALATION_FAILURE_PATTERNS: tuple[str, ...] = (
+    "could not determine plaintext for the provided hash",
+    "hash cracking was not performed",
+    "the agent narrated a successful crack but made",
+    "the agent described running crack attempts but made",
+)
+
 async def _get_user_model_preference(pool, user_id: int) -> tuple[str, str]:
     """Return (agent_id, model_name) matching the user's saved preference."""
     now = time.monotonic()
@@ -1258,6 +1285,24 @@ async def _wait_openclaw_ready(host: str = "openclaw", port: int = 18789, total_
     return False
 
 
+def _looks_like_escalation_worthy_failure(
+    status: str, summary: str | None, err: str | None
+) -> tuple[bool, str]:
+    """Return (escalate, reason). Reason is a short label for logging/notice.
+
+    Pure output-side detection: workspace terminal-status errors, plus the
+    fabrication banners the hash/CTF validators inject when a model narrates
+    tool calls instead of emitting them. Never inspects the task brief.
+    """
+    if status == "error":
+        return True, "workspace_error"
+    text = ((summary or "") + " " + (err or "")).lower()
+    for pat in _ESCALATION_FAILURE_PATTERNS:
+        if pat in text:
+            return True, pat[:48]
+    return False, ""
+
+
 async def _apply_model_to_native_openclaw(model: str) -> str:
     """Rewrite every reachable OpenClaw config (host BYO + bundled) so the
     native gateway picks up the current global/user model. Returns a short
@@ -1966,6 +2011,24 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
                         "(session_id=%s msg=%r)",
                         session_id, content[:80],
                     )
+                    # Context-hygiene (2026-05-29): a fresh-session tool task
+                    # also drops rendered chat history. The fresh sessionId
+                    # already clears OpenClaw's STRUCTURED replay; this also
+                    # strips the ~4000-char `_build_context_brief` text block,
+                    # which can carry a prior "...cracked successfully" reply
+                    # that mildly suppresses tool-call emission (harness:
+                    # 88% vs 100% clean). Mirrors the attachment-fresh policy
+                    # below. Safe because the tool brief is self-contained:
+                    # `_TOOL_TASK_SIGNALS` only matched because the hashes/
+                    # ciphertext are in THIS message, so dropping prior chat
+                    # loses nothing the task needs.
+                    if prior_history:
+                        logger.info(
+                            "Discord: dropped %d prior history turns for "
+                            "fresh tool task (rendered-context hygiene).",
+                            len(prior_history),
+                        )
+                        prior_history = []
 
                 # Keep OpenClaw main-agent model aligned with the current global/user model.
                 # Without this, OpenClaw may retain a stale default (e.g. gemma4:4b) and fail
@@ -2072,12 +2135,140 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
                 except discord.HTTPException:
                     pass
 
+                # ── Scope 1: failure-driven escalation between paired models ──
+                # Single retry on the alternate model with reset-context
+                # semantics (fresh session, dropped history). Off by default;
+                # flip HARVIS_ESCALATE_ON_FAILURE=true after smoke tests pass.
+                escalation_note: str | None = None
+                if (
+                    _ESCALATE_ON_FAILURE
+                    and effective_model_name in _ESCALATION_PAIRS
+                ):
+                    should_escalate, escalation_reason = (
+                        _looks_like_escalation_worthy_failure(status, summary, err)
+                    )
+                    if should_escalate:
+                        alternate_model = _ESCALATION_PAIRS[effective_model_name]
+                        logger.warning(
+                            "[workspace:%s] Escalating from %s -> %s (reason=%s)",
+                            workspace_id, effective_model_name,
+                            alternate_model, escalation_reason,
+                        )
+                        # region agent log
+                        _debug_log(
+                            "discord_workspace_bot.py:on_message:escalation_trigger",
+                            "model_escalation_trigger",
+                            {
+                                "from_model": effective_model_name,
+                                "to_model": alternate_model,
+                                "reason": escalation_reason,
+                                "original_workspace_id": workspace_id,
+                                "original_status": status,
+                            },
+                            "run_escalation",
+                            "H_scope1",
+                        )
+                        # endregion
+                        try:
+                            await message.channel.send(
+                                f"⤴ Default model `{effective_model_name}` couldn't "
+                                f"complete ({escalation_reason}); retrying on "
+                                f"`{alternate_model}` with fresh context…"
+                            )
+                        except discord.HTTPException:
+                            pass
+
+                        # Heavyweight swap: for the OpenClaw 'main' route this
+                        # restarts the openclaw container so the alternate
+                        # becomes the active default. For 'local' / 'kimi' /
+                        # 'nvidia-kimi' / 'cloud-ollama', the model_name arg
+                        # below drives selection directly.
+                        if pref_agent_id == "main":
+                            try:
+                                await _apply_model_to_native_openclaw(alternate_model)
+                            except Exception as exc:
+                                logger.warning(
+                                    "Escalation: failed to apply alternate %s "
+                                    "to openclaw config: %s",
+                                    alternate_model, exc,
+                                )
+
+                        # Reset-context semantics: fresh session_id + empty
+                        # history. Alternate sees the task cold so the failed
+                        # default's narrative cannot poison the retry.
+                        escalation_session_id = f"{session_id}-esc-{workspace_id}"
+                        try:
+                            escalation_progress_msg = await message.channel.send(
+                                f"**Re-launching on `{alternate_model}`…**\n"
+                                f"⏳ Starting workspace…"
+                            )
+                        except discord.HTTPException:
+                            escalation_progress_msg = None
+
+                        esc_data = await launch_workspace_internal(
+                            request=app_request,
+                            user_id=cfg.default_user_id,
+                            task_brief=content,
+                            chat_history=[],
+                            agent_id=pref_agent_id,
+                            model_name=alternate_model,
+                            session_id=escalation_session_id,
+                            enable_interactive=cfg.enable_interactive,
+                            attachments=discord_attachments,
+                        )
+                        esc_workspace_id = esc_data["workspace_id"]
+
+                        if escalation_progress_msg is not None:
+                            esc_status, esc_summary, esc_err = await _wait_with_progress(
+                                request=app_request,
+                                workspace_id=esc_workspace_id,
+                                timeout_s=cfg.max_wait_seconds,
+                                progress_msg=escalation_progress_msg,
+                            )
+                            try:
+                                await escalation_progress_msg.delete()
+                            except discord.HTTPException:
+                                pass
+                        else:
+                            esc_status, esc_summary, esc_err = (
+                                await _wait_for_workspace_completion(
+                                    request=app_request,
+                                    workspace_id=esc_workspace_id,
+                                    timeout_s=cfg.max_wait_seconds,
+                                )
+                            )
+
+                        # Replace original results with the escalation outcome.
+                        # No chaining: even if alternate also failed, we surface
+                        # its output (per scope: "return alternate's output with
+                        # a 'neither model succeeded' wrapper").
+                        original_model_for_note = effective_model_name
+                        workspace_id = esc_workspace_id
+                        status = esc_status
+                        summary = esc_summary
+                        err = esc_err
+                        if esc_status == "done":
+                            escalation_note = (
+                                f"\n\n_⤴ Escalated to `{alternate_model}` "
+                                f"after `{original_model_for_note}` failed "
+                                f"({escalation_reason})._"
+                            )
+                        else:
+                            escalation_note = (
+                                f"\n\n_⤴ Escalated to `{alternate_model}` "
+                                f"after `{original_model_for_note}` failed "
+                                f"({escalation_reason}); alternate also failed "
+                                f"(status={esc_status})._"
+                            )
+
                 if status == "done":
                     msg = await _best_workspace_message(
                         request=app_request,
                         workspace_id=workspace_id,
                         final_summary=summary,
                     )
+                    if escalation_note:
+                        msg = (msg or "Done.") + escalation_note
                     screenshot_abs, screenshot_rel = await _find_latest_screenshot_file(
                         request=app_request,
                         workspace_id=workspace_id,
@@ -2101,9 +2292,13 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
                 elif status == "cancelled":
                     await message.channel.send(f"Workspace `{workspace_id}` was cancelled.")
                 else:
-                    await message.channel.send(
-                        f"Workspace `{workspace_id}` failed: {((err or 'Unknown error')[:1800])}"
+                    failure_msg = (
+                        f"Workspace `{workspace_id}` failed: "
+                        f"{((err or 'Unknown error')[:1800])}"
                     )
+                    if escalation_note:
+                        failure_msg += escalation_note
+                    await message.channel.send(failure_msg)
 
         except Exception as exc:
             logger.exception("Discord workspace bot error: %s", exc)
