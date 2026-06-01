@@ -1,0 +1,19 @@
+{
+	"name": "Harvis",
+	"short_name": "Harvis",
+	"description": "Harvis — self-hosted AI assistant",
+	"start_url": "/",
+	"scope": "/",
+	"display": "standalone",
+	"background_color": "#0d0d0d",
+	"theme_color": "#0d0d0d",
+	"orientation": "any",
+	"icons": [
+		{
+			"src": "/favicon.png",
+			"type": "image/png",
+			"sizes": "any",
+			"purpose": "any"
+		}
+	]
+}

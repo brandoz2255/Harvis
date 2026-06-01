@@ -603,6 +603,11 @@ async def lifespan(app: FastAPI):
                     CREATE INDEX IF NOT EXISTS idx_ws_web_caps_user ON workspace_web_caps(user_id, created_at DESC);
                     """
                 )
+                # OWUI-compat chat persistence (the forked OpenWebUI frontend
+                # stores its full chat blob as JSONB; see owui_compat/persistence.py).
+                from owui_compat import CREATE_OWUI_CHATS_SQL
+
+                await conn.execute(CREATE_OWUI_CHATS_SQL)
         except Exception as e:
             logger.warning("⚠️ Failed to init OpenClaw audit/prefs schema: %s", e)
 
@@ -831,7 +836,10 @@ app = FastAPI(lifespan=lifespan)
 
 
 # ─── Models Endpoint ──────────────────────────────────────────────────────────
-@app.get("/api/models", tags=["models"])
+# NOTE: native shape is `{"models": [...]}`. The OWUI-compat facade owns the bare
+# `GET /api/models` (OWUI shape `{"data": [...]}`) and calls list_models() in-process
+# to translate. This route is renamed to /native so the facade can claim the bare path.
+@app.get("/api/models/native", tags=["models"])
 async def list_models(
     request: Request, current_user: UserResponse = Depends(get_current_user)
 ):
@@ -2400,6 +2408,31 @@ async def get_current_user_info(current_user: UserResponse = Depends(get_current
 async def get_authentication_stats():
     """Get authentication performance statistics"""
     return get_auth_stats()
+
+
+# ─── OpenWebUI-compatibility facade ───────────────────────────────────────────
+# Lets the forked OpenWebUI frontend run against this backend. Registered HERE
+# (after the auth helpers above are defined) so the facade can reuse them via
+# dependency injection without import cycles. All routes are additive EXCEPT
+# GET /api/models — Harvis's native `{models:[...]}` shape now lives at
+# /api/models/native; the facade serves /api/models in OWUI's `{data:[...]}` shape.
+from owui_compat import OwuiDeps, create_owui_router
+
+app.include_router(
+    create_owui_router(
+        OwuiDeps(
+            get_current_user=get_current_user,
+            list_models=list_models,
+            signup_with_connection=_signup_with_connection,
+            signup_request_cls=SignupRequest,
+            verify_password=verify_password,
+            create_access_token=create_access_token,
+            access_token_expire_minutes=ACCESS_TOKEN_EXPIRE_MINUTES,
+            secret_key=SECRET_KEY,
+            algorithm=ALGORITHM,
+        )
+    )
+)
 
 
 # ─── API Key Management Endpoints ─────────────────────────────────────────────

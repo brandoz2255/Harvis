@@ -908,9 +908,19 @@ async def proxy_chat_completions(
     Supports both streaming (stream=true) and non-streaming responses.
     """
     _verify_token(authorization)
-
     body = await request.json()
+    return await execute_chat_completion(request, body)
 
+
+async def execute_chat_completion(request: Request, body: dict):
+    """Post-auth chat-completion pipeline: model routing, streaming, SSE-wrap.
+
+    Extracted from ``proxy_chat_completions`` so in-process callers that have
+    already authenticated the user by other means can reuse the full model-
+    routing brain without the shared-gateway-token check. The OWUI-compat
+    facade (``owui_compat/``) validates a user JWT via ``get_current_user`` and
+    then calls this directly with an already-translated OpenAI body.
+    """
     # ── Token budget instrumentation ──────────────────────────────────────
     # Log char-level breakdown on every request so we can see exactly what
     # OpenClaw sends.  The ÷4 estimate is a rough proxy; the real ground
