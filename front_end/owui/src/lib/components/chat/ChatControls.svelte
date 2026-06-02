@@ -1,5 +1,5 @@
 <script context="module" lang="ts">
-	let savedTab: 'controls' | 'files' | 'overview' = 'controls';
+	let savedTab: 'controls' | 'files' | 'overview' | 'activity' = 'controls';
 </script>
 
 <script lang="ts">
@@ -14,6 +14,7 @@
 		terminalServers,
 		mobile,
 		showControls,
+		workspaceControlsTab,
 		showCallOverlay,
 		showArtifacts,
 		showEmbeds,
@@ -27,6 +28,7 @@
 	import { toast } from 'svelte-sonner';
 
 	import Controls from './Controls/Controls.svelte';
+	import WorkspaceActivity from './WorkspaceActivity.svelte';
 	import CallOverlay from './MessageInput/CallOverlay.svelte';
 	import Drawer from '../common/Drawer.svelte';
 	import Artifacts from './Artifacts.svelte';
@@ -78,6 +80,14 @@
 				($user?.permissions?.features?.direct_tool_servers ?? true))) ||
 		(codeInterpreterEnabled && $config?.code?.interpreter_engine !== 'jupyter');
 	$: showOverviewTab = hasMessages;
+	$: showActivityTab = $user?.role === 'admin' || ($user?.permissions?.chat?.controls ?? true);
+	$: if (!showActivityTab && activeTab === 'activity') activeTab = 'controls';
+
+	// The in-chat WorkspaceRunCard requests the Activity tab via this store.
+	$: if ($workspaceControlsTab) {
+		activeTab = $workspaceControlsTab as typeof activeTab;
+		workspaceControlsTab.set(null);
+	}
 
 	// Tab fallback: if active tab becomes hidden, switch to next available
 	$: if (!showOverviewTab && activeTab === 'overview') activeTab = 'controls';
@@ -338,6 +348,17 @@
 										{$i18n.t('Overview')}
 									</button>
 								{/if}
+								{#if showActivityTab}
+									<button
+										class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
+										'activity'
+											? 'bg-gray-100 dark:bg-gray-800 font-medium text-gray-900 dark:text-white'
+											: 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'}"
+										on:click={() => (activeTab = 'activity')}
+									>
+										{$i18n.t('Activity')}
+									</button>
+								{/if}
 							</div>
 							<button
 								class="p-1 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition text-gray-500 dark:text-gray-400"
@@ -373,6 +394,8 @@
 									}}
 									onClose={() => showControls.set(false)}
 								/>
+							{:else if activeTab === 'activity'}
+								<WorkspaceActivity />
 							{:else if activeTab === 'files' && $selectedTerminalId}
 								<FileNav onAttach={handleTerminalAttach} {chatId} />
 							{:else if activeTab === 'files' && codeInterpreterEnabled}

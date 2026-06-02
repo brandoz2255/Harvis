@@ -61,6 +61,10 @@ def build_config() -> dict:
             "enable_direct_connections": False,
             "enable_channels": False,
             "enable_notes": False,
+            # Harvis: gates the Agent Studio / Vibe Code sidebar pins + /harvis routes.
+            "enable_harvis_studio": _env_bool("HARVIS_OWUI_ENABLE_STUDIO", True),
+            # P1.5: opt-in run-level approval gate for workspace tasks (default OFF).
+            "enable_harvis_approvals": _env_bool("HARVIS_OWUI_APPROVALS", False),
             "enable_version_update_check": False,
             "enable_google_drive_integration": False,
             "enable_onedrive_integration": False,

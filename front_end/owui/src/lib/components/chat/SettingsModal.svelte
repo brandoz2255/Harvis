@@ -18,6 +18,8 @@
 	import XMark from '../icons/XMark.svelte';
 	import Connections from './Settings/Connections.svelte';
 	import Integrations from './Settings/Integrations.svelte';
+	import WorkspaceSettings from './Settings/WorkspaceSettings.svelte';
+	import Sparkles from '../icons/Sparkles.svelte';
 	import DatabaseSettings from '../icons/DatabaseSettings.svelte';
 	import SettingsAlt from '../icons/SettingsAlt.svelte';
 	import Link from '../icons/Link.svelte';
@@ -240,6 +242,12 @@
 				'terminal',
 				'settings'
 			]
+		},
+
+		{
+			id: 'workspace',
+			title: 'Workspace',
+			keywords: ['workspace', 'openclaw', 'agent', 'provider', 'model', 'byo', 'usage', 'claw']
 		},
 
 		{
@@ -732,6 +740,23 @@
 									<div class=" self-center">{$i18n.t('Integrations')}</div>
 								</button>
 							{/if}
+						{:else if tabId === 'workspace'}
+							{#if $config?.features?.enable_harvis_studio ?? true}
+								<button
+									role="tab"
+									aria-controls="tab-workspace"
+									aria-selected={selectedTab === 'workspace'}
+									class="px-0.5 md:px-2.5 py-1 min-w-fit rounded-xl flex-1 md:flex-none flex text-left transition {selectedTab === 'workspace' ? '' : 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'}"
+									on:click={() => {
+										selectedTab = 'workspace';
+									}}
+								>
+									<div class=" self-center mr-2">
+										<Sparkles strokeWidth="2" className="size-4" />
+									</div>
+									<div class=" self-center">{$i18n.t('Workspace')}</div>
+								</button>
+							{/if}
 						{:else if tabId === 'personalization'}
 							<button
 								role="tab"
@@ -911,6 +936,8 @@
 							toast.success($i18n.t('Settings saved successfully!'));
 						}}
 					/>
+				{:else if selectedTab === 'workspace'}
+					<WorkspaceSettings {saveSettings} />
 				{:else if selectedTab === 'personalization'}
 					<Personalization
 						{saveSettings}

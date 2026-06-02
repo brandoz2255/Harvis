@@ -98,6 +98,14 @@ export const showArchivedChats = writable(false);
 export const showChangelog = writable(false);
 
 export const showControls = writable(false);
+// Lets the in-chat WorkspaceRunCard request a specific right-rail tab (e.g. 'activity').
+export const workspaceControlsTab = writable<string | null>(null);
+
+// Harvis top-bar mode pills (Navbar). The pills set these; backend wiring
+// (research-chat routing, agent auto-launch hint, /api/mic-chat voice) is P4.
+export const researchEnabled = writable(false);
+export const agentMode = writable(false);
+export const voiceActive = writable(false);
 export const showEmbeds = writable(false);
 export const showOverview = writable(false);
 export const showArtifacts = writable(false);

@@ -9,6 +9,7 @@ newjfrontend's ``/api/chat-history/*`` is left fully independent.
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from typing import Optional
 
@@ -31,6 +32,41 @@ CREATE INDEX IF NOT EXISTS idx_owui_chats_user_updated
 """
 
 
+def _debug_shape(chat_obj) -> dict:
+    if not isinstance(chat_obj, dict):
+        return {"type": type(chat_obj).__name__}
+    history = chat_obj.get("history")
+    messages = chat_obj.get("messages")
+    history_messages = history.get("messages") if isinstance(history, dict) else None
+    return {
+        "keys": sorted(str(k) for k in chat_obj.keys())[:20],
+        "hasHistory": isinstance(history, dict),
+        "historyMessageCount": len(history_messages) if isinstance(history_messages, dict) else None,
+        "historyCurrentId": history.get("currentId") if isinstance(history, dict) else None,
+        "messagesCount": len(messages) if isinstance(messages, list) else None,
+        "modelsCount": len(chat_obj.get("models")) if isinstance(chat_obj.get("models"), list) else None,
+        "hasParams": isinstance(chat_obj.get("params"), dict),
+        "filesCount": len(chat_obj.get("files")) if isinstance(chat_obj.get("files"), list) else None,
+    }
+
+
+def _debug_log(hypothesis_id: str, location: str, message: str, data: dict) -> None:
+    try:
+        payload = {
+            "sessionId": "d007eb",
+            "runId": "pre-fix",
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+        }
+        with open("/home/user/Harvis/.cursor/debug-d007eb.log", "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, default=str) + "\n")
+    except Exception:
+        pass
+
+
 def _as_uuid(chat_id) -> Optional[uuid.UUID]:
     try:
         return uuid.UUID(str(chat_id))
@@ -40,6 +76,43 @@ def _as_uuid(chat_id) -> Optional[uuid.UUID]:
 
 def _ts(value) -> Optional[int]:
     return int(value.timestamp()) if value is not None else None
+
+
+def _derive_title(chat_obj: dict) -> Optional[str]:
+    """A quick topic title from the first user message (the facade has no
+    server-side LLM title-gen). Cleaned, command-prefix-stripped, truncated."""
+    first = ""
+    for m in (chat_obj or {}).get("messages") or []:
+        if isinstance(m, dict) and m.get("role") == "user":
+            c = m.get("content")
+            if isinstance(c, list):  # multimodal parts → join the text ones
+                c = " ".join(
+                    p.get("text", "")
+                    for p in c
+                    if isinstance(p, dict) and p.get("type") == "text"
+                )
+            first = " ".join(str(c or "").split()).strip()
+            if first:
+                break
+    if not first:
+        return None
+    low = first.lower()
+    for pfx in ("/workspace ", "workspace "):
+        if low.startswith(pfx):
+            first = first[len(pfx):].strip()
+            break
+    if not first:
+        return None
+    return (first[:60].rstrip() + "…") if len(first) > 60 else first
+
+
+def _title_for(chat_obj: dict) -> str:
+    """Prefer a real client-supplied title; else derive one from the first user
+    message; else fall back to 'New Chat'."""
+    t = ((chat_obj or {}).get("title") or "").strip()
+    if t and t != "New Chat":
+        return t
+    return _derive_title(chat_obj) or "New Chat"
 
 
 def _row_to_owui(row) -> dict:
@@ -63,7 +136,14 @@ def _row_to_owui(row) -> dict:
 
 
 async def create_chat(pool, user_id: int, chat_obj: dict, folder_id: Optional[str] = None) -> dict:
-    title = (chat_obj or {}).get("title") or "New Chat"
+    title = _title_for(chat_obj)
+    # region agent log
+    _debug_log("A,B", "owui_compat/persistence.py:create_chat", "create_chat incoming payload shape", {
+        "userId": user_id,
+        "folderIdPresent": folder_id is not None,
+        "chatShape": _debug_shape(chat_obj),
+    })
+    # endregion
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
@@ -117,6 +197,14 @@ async def get_chat(pool, user_id: int, chat_id: str) -> Optional[dict]:
             cid,
             user_id,
         )
+    # region agent log
+    _debug_log("B,D", "owui_compat/persistence.py:get_chat", "get_chat returned row shape", {
+        "userId": user_id,
+        "chatId": str(chat_id),
+        "rowExists": row is not None,
+        "chatShape": _debug_shape(row["chat"]) if row else None,
+    })
+    # endregion
     return _row_to_owui(row) if row else None
 
 
@@ -124,12 +212,16 @@ async def update_chat(pool, user_id: int, chat_id: str, chat_obj: dict) -> Optio
     cid = _as_uuid(chat_id)
     if cid is None:
         return None
-    title = (chat_obj or {}).get("title") or "New Chat"
+    title = _title_for(chat_obj)
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
             UPDATE owui_chats
-            SET chat = $3::jsonb, title = $4, updated_at = NOW()
+            -- MERGE (||) not replace: OWUI sends PARTIAL chat objects on some
+            -- saves (e.g. saveControls posts only {params, files}). A full replace
+            -- ($3 alone) would clobber messages/history → wiped sessions. Top-level
+            -- jsonb merge keeps existing keys and overrides only the ones provided.
+            SET chat = chat || $3::jsonb, title = COALESCE(NULLIF($4, 'New Chat'), title), updated_at = NOW()
             WHERE id = $1 AND user_id = $2
             RETURNING *
             """,
@@ -138,6 +230,15 @@ async def update_chat(pool, user_id: int, chat_id: str, chat_obj: dict) -> Optio
             json.dumps(chat_obj or {}),
             title,
         )
+    # region agent log
+    _debug_log("A,B", "owui_compat/persistence.py:update_chat:after", "update_chat stored row shape", {
+        "userId": user_id,
+        "chatId": str(chat_id),
+        "incomingShape": _debug_shape(chat_obj),
+        "rowExists": row is not None,
+        "storedShape": _debug_shape(row["chat"]) if row else None,
+    })
+    # endregion
     return _row_to_owui(row) if row else None
 
 

@@ -33,6 +33,7 @@ from .schemas import (
     OwuiSigninBody,
     OwuiSignupBody,
 )
+from .stubs import register_stub_routes
 from .translate import harvis_models_to_owui, harvis_user_to_owui
 
 logger = logging.getLogger(__name__)
@@ -164,7 +165,28 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
     @router.post("/api/chat/completions")
     async def owui_chat_completions(request: Request, user=Depends(get_current_user)):
         owui_body = await request.json()
+        # Auto-detect workspace tasks → launch a run + return a WorkspaceRunCard
+        # marker (the OWUI card attaches to /api/workspace/stream/{id}). Falls
+        # through to a normal chat completion when it's not a workspace task.
+        from .workspace_bridge import maybe_handle_workspace
+
+        ws = await maybe_handle_workspace(request, owui_body, user)
+        if ws is not None:
+            return ws
         return await run_chat_completion(request, owui_body)
+
+    # ── workspace approval gate (P1.5, opt-in) — resolve a parked run ────────
+    @router.post("/api/owui/workspace/{workspace_id}/approve")
+    async def owui_ws_approve(workspace_id: str, request: Request, user=Depends(get_current_user)):
+        from .workspace_bridge import resolve_workspace_approval
+
+        return await resolve_workspace_approval(request, workspace_id, True)
+
+    @router.post("/api/owui/workspace/{workspace_id}/deny")
+    async def owui_ws_deny(workspace_id: str, request: Request, user=Depends(get_current_user)):
+        from .workspace_bridge import resolve_workspace_approval
+
+        return await resolve_workspace_approval(request, workspace_id, False)
 
     @router.post("/api/chat/completed")
     async def owui_chat_completed(request: Request, user=Depends(get_current_user)):
@@ -176,18 +198,49 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
 
     @router.post("/api/v1/tasks/title/completions")
     async def owui_title(request: Request, user=Depends(get_current_user)):
-        # Trivial title from the first user message; avoids a console 404.
+        # Trivial title from the conversation. OWUI sends `messages` as a STRING
+        # (rendered conversation) for task-gen, but a list in some paths — handle
+        # both, or a non-list/str would crash (str.get → 500).
         try:
             body = await request.json()
         except Exception:
             body = {}
-        title = "New Chat"
-        for m in body.get("messages") or []:
-            if m.get("role") == "user" and m.get("content"):
-                words = str(m["content"]).split()
-                title = " ".join(words[:6]) or "New Chat"
-                break
+        msgs = body.get("messages")
+        text = ""
+        if isinstance(msgs, str):
+            text = msgs
+        elif isinstance(msgs, list):
+            for m in msgs:
+                if isinstance(m, dict) and m.get("role") == "user" and m.get("content"):
+                    text = str(m["content"])
+                    break
+        title = " ".join(text.split()[:6]) or "New Chat"
         return {"choices": [{"message": {"content": title}}]}
+
+    # Tag / follow-up / emoji / autocomplete task-gen. The facade has no
+    # generation backend, but the OWUI frontend fires these after each response
+    # (e.g. ResponseMessage → generateTags, per message). Without these the calls
+    # 404 and the client throws "Not Found" (a lot of console noise + uncaught
+    # rejections). Return empty, parseable completions so the client resolves.
+    @router.post("/api/v1/tasks/tags/completions")
+    async def owui_tags(request: Request, user=Depends(get_current_user)):
+        return {"choices": [{"message": {"content": '{"tags": []}'}}]}
+
+    @router.post("/api/v1/tasks/follow_ups/completions")
+    async def owui_follow_ups(request: Request, user=Depends(get_current_user)):
+        return {"choices": [{"message": {"content": '{"follow_ups": []}'}}]}
+
+    @router.post("/api/v1/tasks/emoji/completions")
+    async def owui_emoji(request: Request, user=Depends(get_current_user)):
+        return {"choices": [{"message": {"content": ""}}]}
+
+    @router.post("/api/v1/tasks/auto/completions")
+    async def owui_auto_completion(request: Request, user=Depends(get_current_user)):
+        return {"choices": [{"message": {"content": ""}}]}
+
+    @router.post("/api/v1/tasks/queries/completions")
+    async def owui_queries(request: Request, user=Depends(get_current_user)):
+        return {"choices": [{"message": {"content": '{"queries": []}'}}]}
 
     # ── chat persistence ──────────────────────────────────────────────────
     # NOTE: static sub-paths declared BEFORE /{chat_id} so they aren't captured.
@@ -213,6 +266,10 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
     @router.get("/api/v1/chats/archived")
     async def owui_chat_archived(user=Depends(get_current_user)):
         return []
+
+    # Stub v1 routes (settings, tools, tags, profile images, …) — must be
+    # registered before parameterized chat routes where paths overlap.
+    register_stub_routes(router, get_current_user)
 
     @router.get("/api/v1/chats/{chat_id}")
     async def owui_chat_get(chat_id: str, request: Request, user=Depends(get_current_user)):

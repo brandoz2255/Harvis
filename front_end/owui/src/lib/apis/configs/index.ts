@@ -613,10 +613,10 @@ export const getBanners = async (token: string): Promise<Banner[]> => {
 		});
 
 	if (error) {
-		throw error;
+		return [];
 	}
 
-	return res;
+	return res ?? [];
 };
 
 export const setBanners = async (token: string, banners: Banner[]) => {

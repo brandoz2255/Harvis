@@ -198,6 +198,10 @@ export const convertMessagesToHistory = (messages) => {
 		currentId: null
 	};
 
+	if (!messages || !Array.isArray(messages)) {
+		return history;
+	}
+
 	let parentMessageId = null;
 	let messageId = null;
 

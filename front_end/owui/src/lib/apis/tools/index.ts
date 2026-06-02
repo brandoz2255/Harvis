@@ -90,10 +90,10 @@ export const getTools = async (token: string = '') => {
 		});
 
 	if (error) {
-		throw error;
+		return [];
 	}
 
-	return res;
+	return res ?? [];
 };
 
 export const getToolList = async (token: string = '') => {

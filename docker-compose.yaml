@@ -196,6 +196,7 @@ services:
       - ./python_back_end/tools:/app/tools:ro
       - ./python_back_end/integrations:/app/integrations:ro
       - ./python_back_end/plugins:/app/plugins:ro
+      - ./python_back_end/owui_compat:/app/owui_compat:ro
       - ./openclaw/config:/app/openclaw_config
       - ./python_back_end/notebooks:/app/notebooks:ro
       - ./python_back_end/vibecoding:/app/vibecoding:ro

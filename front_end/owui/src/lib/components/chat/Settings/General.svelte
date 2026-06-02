@@ -14,7 +14,7 @@
 	export let getModels: Function;
 
 	// General
-	let themes = ['dark', 'light', 'oled-dark'];
+	let themes = ['dark', 'light', 'oled-dark', 'harvis-dark'];
 	let selectedTheme = 'system';
 
 	let languages: Awaited<ReturnType<typeof getLanguages>> = [];
@@ -124,7 +124,12 @@
 	});
 
 	const applyTheme = (_theme: string) => {
-		let themeToApply = _theme === 'oled-dark' ? 'dark' : _theme === 'her' ? 'light' : _theme;
+		let themeToApply =
+			_theme === 'oled-dark' || _theme === 'harvis-dark'
+				? 'dark'
+				: _theme === 'her'
+					? 'light'
+					: _theme;
 
 		if (_theme === 'system') {
 			themeToApply = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
@@ -184,6 +189,14 @@
 			document.documentElement.classList.add('dark');
 		}
 
+		if (_theme === 'harvis-dark') {
+			document.documentElement.style.setProperty('--color-gray-800', '#1a1f2e');
+			document.documentElement.style.setProperty('--color-gray-850', '#141823');
+			document.documentElement.style.setProperty('--color-gray-900', '#0e111a');
+			document.documentElement.style.setProperty('--color-gray-950', '#090b12');
+			document.documentElement.classList.add('dark');
+		}
+
 		console.log(_theme);
 	};
 
@@ -213,6 +226,7 @@
 						<option value="system">⚙️ {$i18n.t('System')}</option>
 						<option value="dark">🌑 {$i18n.t('Dark')}</option>
 						<option value="oled-dark">🌃 {$i18n.t('OLED Dark')}</option>
+						<option value="harvis-dark">🤖 {$i18n.t('Harvis Dark')}</option>
 						<option value="light">☀️ {$i18n.t('Light')}</option>
 						{#if $config?.features?.enable_easter_eggs}
 							<option value="her">🌷 Her</option>
@@ -254,7 +268,7 @@
 						href="https://github.com/open-webui/open-webui/blob/main/docs/CONTRIBUTING.md#-translations-and-internationalization"
 						target="_blank"
 					>
-						Help us translate Open WebUI!
+						Help us translate Harvis!
 					</a>
 				</div>
 			{/if}

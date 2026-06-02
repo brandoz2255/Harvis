@@ -1,0 +1,80 @@
+<script lang="ts">
+	// Static idle pose of the Harvis mascot (teal robot). Ported from
+	// newjfrontend/components/mascots/HarvisMascot.tsx — the animated/interactive
+	// React states were dropped per the chosen "static idle pose" design.
+	export let size = 60;
+	export let className = '';
+</script>
+
+<svg
+	width={size}
+	height={size}
+	viewBox="0 0 60 70"
+	class={className}
+	xmlns="http://www.w3.org/2000/svg"
+	aria-hidden="true"
+>
+	<defs>
+		<filter id="harvisGlow" x="-50%" y="-50%" width="200%" height="200%">
+			<feGaussianBlur stdDeviation="1.5" result="coloredBlur" />
+			<feMerge>
+				<feMergeNode in="coloredBlur" />
+				<feMergeNode in="SourceGraphic" />
+			</feMerge>
+		</filter>
+		<linearGradient id="harvisBodyGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+			<stop offset="0%" stop-color="#4FD1C5" />
+			<stop offset="100%" stop-color="#319795" />
+		</linearGradient>
+		<linearGradient id="harvisScreenGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+			<stop offset="0%" stop-color="#1A365D" />
+			<stop offset="100%" stop-color="#0D1B2A" />
+		</linearGradient>
+	</defs>
+
+	<!-- antennae -->
+	<line x1="20" y1="8" x2="16" y2="0" stroke="#4FD1C5" stroke-width="2" stroke-linecap="round" />
+	<circle cx="16" cy="2" r="3" fill="#4FD1C5" filter="url(#harvisGlow)" />
+	<line x1="40" y1="8" x2="44" y2="0" stroke="#4FD1C5" stroke-width="2" stroke-linecap="round" />
+	<circle cx="44" cy="2" r="3" fill="#4FD1C5" filter="url(#harvisGlow)" />
+
+	<!-- head + screen -->
+	<rect x="12" y="8" width="36" height="30" rx="6" fill="url(#harvisBodyGradient)" />
+	<rect x="16" y="12" width="28" height="22" rx="3" fill="url(#harvisScreenGradient)" />
+
+	<!-- smiling eyes -->
+	<path
+		d="M21 21 Q24 17 27 21"
+		stroke="#4FD1C5"
+		stroke-width="2.5"
+		stroke-linecap="round"
+		fill="none"
+		filter="url(#harvisGlow)"
+	/>
+	<path
+		d="M33 21 Q36 17 39 21"
+		stroke="#4FD1C5"
+		stroke-width="2.5"
+		stroke-linecap="round"
+		fill="none"
+		filter="url(#harvisGlow)"
+	/>
+	<!-- smile -->
+	<path
+		d="M24 28 Q30 33 36 28"
+		stroke="#4FD1C5"
+		stroke-width="2"
+		stroke-linecap="round"
+		fill="none"
+		filter="url(#harvisGlow)"
+	/>
+
+	<!-- legs + base -->
+	<rect x="14" y="38" width="10" height="28" rx="3" fill="url(#harvisBodyGradient)" />
+	<rect x="36" y="38" width="10" height="28" rx="3" fill="url(#harvisBodyGradient)" />
+	<rect x="14" y="48" width="32" height="8" rx="2" fill="url(#harvisBodyGradient)" />
+
+	<!-- arms -->
+	<rect x="4" y="42" width="6" height="14" rx="3" fill="#4FD1C5" />
+	<rect x="50" y="42" width="6" height="14" rx="3" fill="#4FD1C5" />
+</svg>

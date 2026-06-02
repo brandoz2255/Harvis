@@ -10,6 +10,7 @@
 
 	import { getChatList } from '$lib/apis/chats';
 	import { updateFolderById } from '$lib/apis/folders';
+	import HarvisMascot from '$lib/components/common/HarvisMascot.svelte';
 
 	import {
 		config,
@@ -91,6 +92,7 @@
 		class="w-full text-3xl text-gray-800 dark:text-gray-100 text-center flex items-center gap-4 font-primary"
 	>
 		<div class="w-full flex flex-col justify-center items-center">
+			<HarvisMascot size={56} className="mb-3" />
 			{#if $selectedFolder}
 				<FolderTitle
 					folder={$selectedFolder}

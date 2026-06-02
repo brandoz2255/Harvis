@@ -180,6 +180,32 @@
 	let files = [];
 	let params = {};
 
+	const debugLog = (hypothesisId: string, location: string, message: string, data: object = {}) => {
+		fetch('http://127.0.0.1:7808/ingest/9269ee65-762c-4e4d-9bef-0cd2be96389e', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'd007eb' },
+			body: JSON.stringify({
+				sessionId: 'd007eb',
+				runId: 'pre-fix',
+				hypothesisId,
+				location,
+				message,
+				data,
+				timestamp: Date.now()
+			})
+		}).catch(() => {});
+	};
+
+	const historyDebugShape = (value) => {
+		const messages = value?.messages;
+		return {
+			hasHistory: !!value,
+			hasMessagesObject: messages && typeof messages === 'object' && !Array.isArray(messages),
+			messageCount: messages && typeof messages === 'object' ? Object.keys(messages).length : null,
+			currentId: value?.currentId ?? null
+		};
+	};
+
 	$: if (chatIdProp) {
 		navigateHandler();
 	}
@@ -191,6 +217,17 @@
 	}
 
 	const navigateHandler = async () => {
+		// #region agent log
+		debugLog('C,D,E', 'Chat.svelte:navigateHandler:start', 'navigateHandler started', {
+			chatIdProp,
+			currentStoreChatId: $chatId,
+			loading,
+			temporaryChatEnabled: $temporaryChatEnabled,
+			selectedModelsCount: selectedModels?.length ?? null,
+			codeInterpreterEnabled,
+			selectedToolIdsCount: selectedToolIds?.length ?? null
+		});
+		// #endregion
 		// Mark the outgoing chat as read before loading the new one.
 		// $chatId still holds the previous chat here — loadChat() updates it.
 		if ($chatId && $chatId !== chatIdProp && !$temporaryChatEnabled) {
@@ -214,47 +251,53 @@
 			`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`
 		);
 
-		if (chatIdProp && (await loadChat())) {
-			await tick();
-			loading = false;
-			window.setTimeout(() => scrollToBottom(), 0);
+		try {
+			if (chatIdProp && (await loadChat())) {
+				await tick();
+				window.setTimeout(() => scrollToBottom(), 0);
 
-			await tick();
+				await tick();
 
-			// Mark chat read when initially loading it
-			if (chatIdProp && !$temporaryChatEnabled) {
-				updateLastReadAt(chatIdProp);
-			}
+				// Mark chat read when initially loading it
+				if (chatIdProp && !$temporaryChatEnabled) {
+					updateLastReadAt(chatIdProp);
+				}
 
-			// Process any queued requests if the chat is idle
-			const lastMessage = history.currentId ? history.messages[history.currentId] : null;
-			const isIdle = !lastMessage || lastMessage.role !== 'assistant' || lastMessage.done;
-			if (isIdle) {
-				await processNextInQueue(chatIdProp);
-			}
+				// Process any queued requests if the chat is idle
+				const lastMessage = history.currentId ? history.messages[history.currentId] : null;
+				const isIdle = !lastMessage || lastMessage.role !== 'assistant' || lastMessage.done;
+				if (isIdle) {
+					await processNextInQueue(chatIdProp);
+				}
 
-			if (storageChatInput) {
-				try {
-					const input = JSON.parse(storageChatInput);
+				if (storageChatInput) {
+					try {
+						const input = JSON.parse(storageChatInput);
 
-					if (!$temporaryChatEnabled) {
-						messageInput?.setText(input.prompt);
-						files = input.files;
-						selectedToolIds = input.selectedToolIds;
-						selectedFilterIds = input.selectedFilterIds;
-						webSearchEnabled = input.webSearchEnabled;
-						imageGenerationEnabled = input.imageGenerationEnabled;
-						codeInterpreterEnabled = input.codeInterpreterEnabled;
-					}
-				} catch (e) {}
+						if (!$temporaryChatEnabled) {
+							messageInput?.setText(input.prompt);
+							files = input.files;
+							selectedToolIds = input.selectedToolIds;
+							selectedFilterIds = input.selectedFilterIds;
+							webSearchEnabled = input.webSearchEnabled;
+							imageGenerationEnabled = input.imageGenerationEnabled;
+							codeInterpreterEnabled = input.codeInterpreterEnabled;
+						}
+					} catch (e) {}
+				} else {
+					await setDefaults().catch((e) => console.error('setDefaults failed:', e));
+				}
+
+				const chatInput = document.getElementById('chat-input');
+				chatInput?.focus();
 			} else {
-				await setDefaults();
+				await goto('/');
 			}
-
-			const chatInput = document.getElementById('chat-input');
-			chatInput?.focus();
-		} else {
+		} catch (e) {
+			console.error('Failed to open chat:', e);
 			await goto('/');
+		} finally {
+			loading = false;
 		}
 	};
 
@@ -1375,9 +1418,19 @@
 				oldSelectedModelIds = structuredClone(selectedModels);
 
 				history =
-					(chatContent?.history ?? undefined) !== undefined
+					chatContent?.history != null
 						? chatContent.history
 						: convertMessagesToHistory(chatContent.messages);
+
+				if (!history?.messages || typeof history.messages !== 'object') {
+					history = { messages: {}, currentId: null };
+				}
+				// #region agent log
+				debugLog('B,D', 'Chat.svelte:loadChat:historyDerived', 'loadChat derived history shape', {
+					chatId: $chatId,
+					history: historyDebugShape(history)
+				});
+				// #endregion
 
 				// Sanitize history: repair orphaned references from failed regenerations (#24424)
 				for (const message of Object.values(history.messages)) {
@@ -1532,6 +1585,11 @@
 		// Backend handles outlet filters and persistence inline.
 		// Just refresh the sidebar chat list.
 		if ($chatId == _chatId && !$temporaryChatEnabled) {
+			// HARVIS (facade): native OWUI persists the chat server-side during the
+			// completion; the owui_compat facade does NOT. So persist the full
+			// conversation (incl. the assistant response) from the client here —
+			// otherwise only the user turn (saved at chat-create) survives a reopen.
+			await saveChatHandler(_chatId, history);
 			currentChatPage.set(1);
 			await chats.set(await getChatList(localStorage.token, $currentChatPage));
 		}
@@ -2117,6 +2175,12 @@
 			if ($temporaryChatEnabled) {
 				_chatId = `local:${$socket?.id}`;
 				await chatId.set(_chatId);
+			} else {
+				// HARVIS (facade): native OWUI has its backend create the chat + assign
+				// the id during the completion (pushed over the socket). The owui_compat
+				// facade streams statelessly and never creates a chat, so create the row
+				// client-side here, adopt its server id, and let the done-path save it.
+				_chatId = await initChatHandler(_history);
 			}
 			await tick();
 		}
@@ -2292,15 +2356,19 @@
 			$settings?.params?.stream_response ??
 			params?.stream_response ??
 			true;
-		// Always include system prompt — backend extracts it and prepends to DB messages.
-		// Only temp chats need conversation messages (persisted chats load from DB).
+		// HARVIS (facade): the owui_compat backend forwards statelessly to
+		// model_proxy — it does NOT reconstruct conversation history from the DB the
+		// way native OWUI's backend does. So the client must always send the full
+		// conversation (system prompt + every turn), for persisted chats as well as
+		// temporary ones. Start with the system prompt, then append the turns below.
 		let messages = [
 			params?.system || $settings.system
 				? { role: 'system', content: `${params?.system ?? $settings?.system ?? ''}` }
 				: undefined
 		].filter(Boolean);
 
-		if ($temporaryChatEnabled) {
+		// Always (temp + persisted) — the facade has no server-side history to merge.
+		{
 			messages = [
 				...messages,
 				..._messages.map((message) => ({
@@ -2801,6 +2869,7 @@
 
 			_chatId = chat.id;
 			await chatId.set(_chatId);
+			chatTitle.set(chat.title); // reflect the server-derived title in the title bar
 
 			window.history.replaceState(history.state, '', `/c/${_chatId}`);
 

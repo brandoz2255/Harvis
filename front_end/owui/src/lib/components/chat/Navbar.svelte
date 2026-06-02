@@ -13,7 +13,10 @@
 		showControls,
 		showSidebar,
 		temporaryChatEnabled,
-		user
+		user,
+		researchEnabled,
+		agentMode,
+		voiceActive
 	} from '$lib/stores';
 
 	import { slide } from 'svelte/transition';
@@ -38,6 +41,9 @@
 	import ChatPlus from '../icons/ChatPlus.svelte';
 	import ChatCheck from '../icons/ChatCheck.svelte';
 	import Knobs from '../icons/Knobs.svelte';
+	import GlobeAlt from '../icons/GlobeAlt.svelte';
+	import Sparkles from '../icons/Sparkles.svelte';
+	import Mic from '../icons/Mic.svelte';
 	import { WEBUI_API_BASE_URL } from '$lib/constants';
 
 	const i18n = getContext('i18n');
@@ -216,6 +222,42 @@
 								</div>
 							</button>
 						</Menu>
+					{/if}
+
+					{#if $config?.features?.enable_harvis_studio ?? true}
+						<Tooltip content={$i18n.t('Web Research')}>
+							<button
+								class="flex cursor-pointer px-2 py-2 rounded-xl transition {$researchEnabled ? 'text-amber-500 bg-amber-50 dark:bg-amber-950/40' : 'hover:bg-gray-50 dark:hover:bg-gray-850'}"
+								on:click={() => researchEnabled.set(!$researchEnabled)}
+								aria-label="Web Research"
+							>
+								<div class=" m-auto self-center">
+									<GlobeAlt className=" size-4.5" strokeWidth="1.5" />
+								</div>
+							</button>
+						</Tooltip>
+						<Tooltip content={$i18n.t('Agent Mode')}>
+							<button
+								class="flex cursor-pointer px-2 py-2 rounded-xl transition {$agentMode ? 'text-teal-500 bg-teal-50 dark:bg-teal-950/40' : 'hover:bg-gray-50 dark:hover:bg-gray-850'}"
+								on:click={() => agentMode.set(!$agentMode)}
+								aria-label="Agent Mode"
+							>
+								<div class=" m-auto self-center">
+									<Sparkles className=" size-4.5" strokeWidth="1.5" />
+								</div>
+							</button>
+						</Tooltip>
+						<Tooltip content={$i18n.t('Voice')}>
+							<button
+								class="flex cursor-pointer px-2 py-2 rounded-xl transition {$voiceActive ? 'text-teal-500 bg-teal-50 dark:bg-teal-950/40' : 'hover:bg-gray-50 dark:hover:bg-gray-850'}"
+								on:click={() => voiceActive.set(!$voiceActive)}
+								aria-label="Voice"
+							>
+								<div class=" m-auto self-center">
+									<Mic className=" size-4.5" strokeWidth="1.5" />
+								</div>
+							</button>
+						</Tooltip>
 					{/if}
 
 					{#if $user?.role === 'admin' || ($user?.permissions.chat?.controls ?? true)}

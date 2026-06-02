@@ -1,6 +1,36 @@
 import { WEBUI_API_BASE_URL } from '$lib/constants';
 import { getTimeRange } from '$lib/utils';
 
+const debugLog = (hypothesisId: string, location: string, message: string, data: object = {}) => {
+	fetch('http://127.0.0.1:7808/ingest/9269ee65-762c-4e4d-9bef-0cd2be96389e', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'd007eb' },
+		body: JSON.stringify({
+			sessionId: 'd007eb',
+			runId: 'pre-fix',
+			hypothesisId,
+			location,
+			message,
+			data,
+			timestamp: Date.now()
+		})
+	}).catch(() => {});
+};
+
+const chatShape = (chat: any) => ({
+	keys: chat && typeof chat === 'object' ? Object.keys(chat).slice(0, 20) : [],
+	hasHistory: !!chat?.history,
+	historyMessageCount:
+		chat?.history?.messages && typeof chat.history.messages === 'object'
+			? Object.keys(chat.history.messages).length
+			: null,
+	historyCurrentId: chat?.history?.currentId ?? null,
+	messagesCount: Array.isArray(chat?.messages) ? chat.messages.length : null,
+	modelsCount: Array.isArray(chat?.models) ? chat.models.length : null,
+	hasParams: !!chat?.params,
+	filesCount: Array.isArray(chat?.files) ? chat.files.length : null
+});
+
 export const createNewChat = async (token: string, chat: object, folderId: string | null) => {
 	let error = null;
 
@@ -651,6 +681,13 @@ export const getChatById = async (token: string, id: string) => {
 		throw error;
 	}
 
+	// #region agent log
+	debugLog('B,D', 'apis/chats/index.ts:getChatById:after', 'getChatById response shape', {
+		id,
+		chat: chatShape(res?.chat)
+	});
+	// #endregion
+
 	return res;
 };
 
@@ -1042,6 +1079,13 @@ export const getChatAccessGrants = async (token: string, id: string) => {
 export const updateChatById = async (token: string, id: string, chat: object) => {
 	let error = null;
 
+	// #region agent log
+	debugLog('A,B', 'apis/chats/index.ts:updateChatById:before', 'updateChatById outgoing payload shape', {
+		id,
+		chat: chatShape(chat)
+	});
+	// #endregion
+
 	const res = await fetch(`${WEBUI_API_BASE_URL}/chats/${id}`, {
 		method: 'POST',
 		headers: {
@@ -1132,10 +1176,10 @@ export const getTagsById = async (token: string, id: string) => {
 		});
 
 	if (error) {
-		throw error;
+		return [];
 	}
 
-	return res;
+	return res ?? [];
 };
 
 export const addTagById = async (token: string, id: string, tagName: string) => {

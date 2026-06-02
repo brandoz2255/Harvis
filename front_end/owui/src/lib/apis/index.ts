@@ -363,6 +363,21 @@ export const getTaskIdsByChatId = async (token: string, chat_id: string) => {
 		}
 	})
 		.then(async (res) => {
+			// #region agent log
+			fetch('http://127.0.0.1:7808/ingest/9269ee65-762c-4e4d-9bef-0cd2be96389e', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'd007eb' },
+				body: JSON.stringify({
+					sessionId: 'd007eb',
+					runId: 'pre-fix',
+					hypothesisId: 'C',
+					location: 'apis/index.ts:getTaskIdsByChatId:response',
+					message: 'getTaskIdsByChatId HTTP response',
+					data: { chatId: chat_id, ok: res.ok, status: res.status },
+					timestamp: Date.now()
+				})
+			}).catch(() => {});
+			// #endregion
 			if (!res.ok) throw await res.json();
 			return res.json();
 		})

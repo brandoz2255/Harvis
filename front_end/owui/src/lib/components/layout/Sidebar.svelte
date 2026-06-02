@@ -72,11 +72,12 @@
 	import PinnedModelList from './Sidebar/PinnedModelList.svelte';
 	import Note from '../icons/Note.svelte';
 	import Code from '../icons/Code.svelte';
+	import Sparkles from '../icons/Sparkles.svelte';
 	import { slide } from 'svelte/transition';
 	import HotkeyHint from '../common/HotkeyHint.svelte';
 
 	const BREAKPOINT = 768;
-	const DEFAULT_PINNED_ITEMS = ['notes', 'workspace'];
+	const DEFAULT_PINNED_ITEMS = ['agent-studio', 'vibecode', 'workspace'];
 
 	let scrollTop = 0;
 
@@ -133,6 +134,9 @@
 				);
 			case 'playground':
 				return $user?.role === 'admin';
+			case 'agent-studio':
+			case 'vibecode':
+				return $config?.features?.enable_harvis_studio ?? true;
 			default:
 				return false;
 		}
@@ -140,8 +144,10 @@
 
 	const getMenuItemMeta = (id) => {
 		const items = {
+			'agent-studio': { label: 'Agent Studio', href: '/harvis/agent-studio', iconType: 'agent-studio' },
+			vibecode: { label: 'Vibe Code', href: '/harvis/vibecode', iconType: 'vibecode' },
 			notes: { label: 'Notes', href: '/notes', iconType: 'note' },
-			workspace: { label: 'Workspace', href: '/workspace', iconType: 'workspace' },
+			workspace: { label: 'Library', href: '/workspace', iconType: 'workspace' },
 			automations: { label: 'Automations', href: '/automations', iconType: 'automations' },
 			calendar: { label: 'Calendar', href: '/calendar', iconType: 'calendar' },
 			playground: { label: 'Playground', href: '/playground', iconType: 'playground' }
@@ -923,6 +929,10 @@
 											</svg>
 										{:else if itemId === 'playground'}
 											<Code className="size-4.5" />
+										{:else if itemId === 'agent-studio'}
+											<Sparkles className="size-4.5" />
+										{:else if itemId === 'vibecode'}
+											<Code className="size-4.5" />
 										{/if}
 									</div>
 								</a>
@@ -1169,6 +1179,10 @@
 													/>
 												</svg>
 											{:else if itemId === 'playground'}
+												<Code className="size-4.5" strokeWidth="2" />
+											{:else if itemId === 'agent-studio'}
+												<Sparkles className="size-4.5" strokeWidth="2" />
+											{:else if itemId === 'vibecode'}
 												<Code className="size-4.5" strokeWidth="2" />
 											{/if}
 										</div>
