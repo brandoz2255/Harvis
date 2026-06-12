@@ -1854,7 +1854,15 @@ class OpenClawClient:
             _recent_tool_calls: Deque[Tuple[str, str]] = deque(maxlen=_LOOP_GUARD_N)
             looks_visual_task = _looks_like_browser_or_screenshot_task(last_user_msg)
             looks_terminal_task = _looks_like_terminal_execution_task(last_user_msg)
-            looks_hash_task = _looks_like_hash_task(last_user_msg)
+            # Gate the hash corrective on the SAME signal that built the hint
+            # (`_detected_hashes`), not the stricter ≥2-hash `_looks_like_hash_task`.
+            # Bug (2026-06-09): a single-hash task ("crack this MD5 hash: <one>")
+            # fires the hint (≥1 hash) but the corrective required ≥2, so when
+            # qwen3.5:9b narrated without calling exec, no retry fired and the run
+            # closed `done` with the narration as the summary ("just relays").
+            # Coupling corrective→hint: if we told the model to crack a hash and it
+            # didn't call the tool, retry — regardless of hash count.
+            looks_hash_task = _looks_like_hash_task(last_user_msg) or bool(_detected_hashes)
             target_url = _extract_browser_target_url(last_user_msg)
 
             # Consume events until the chat reaches a terminal state.
@@ -2338,6 +2346,19 @@ class OpenClawClient:
                             # the write+exec pattern; those would now
                             # contradict the system prompt and confuse the
                             # model further.
+                            # Concrete command — the EXACT detected hashes + theme
+                            # (not "<every hash from the user request>" placeholders
+                            # a 9B model fumbles). Mirrors the original dispatch
+                            # command (line ~1279) so the corrective reinforces it.
+                            # `_hcdir`/`_theme_arg`/`_hashes_argv` are defined inside
+                            # the `if _detected_hashes:` block, which ran (the gate
+                            # now requires _detected_hashes truthy → all defined).
+                            _corr_cmd = (
+                                f"python3 {_hcdir}/crack_all.py{_theme_arg} {_hashes_argv}"
+                                if _detected_hashes
+                                else "python3 /skills-shared/hash-cracking/crack_all.py "
+                                "<every hash from the user request>"
+                            )
                             correction = (
                                 "CORRECTION: Your previous response did NOT "
                                 "call the tool. Talking about what the "
@@ -2347,9 +2368,7 @@ class OpenClawClient:
                                 "Emit ONE `exec` tool_call NOW. Do not "
                                 "narrate. Do not summarize the plan. The "
                                 "command:\n"
-                                "  python3 /skills-shared/hash-cracking/"
-                                "crack_all.py --theme=pokemon <every hash from "
-                                "the user request>\n\n"
+                                f"  {_corr_cmd}\n\n"
                                 "After exec returns JSON, summarize only the "
                                 "hashes with verified=true. Say \"unverified\" "
                                 "for the rest — do NOT guess plaintexts.\n\n"
@@ -2828,6 +2847,45 @@ class OpenClawClient:
                 if msg:
                     yield self._tag(OpenClawEvent("log", {"message": str(msg)[:500]}), run_id)
 
+    async def _send_abort(self, ws):
+        """Tell the gateway to abort this session's running agent turn — stops
+        generation + tool execution SERVER-SIDE (which is what actually kills a
+        long run; closing the socket alone just detaches Harvis). Best-effort:
+        fire the known abort RPCs; failures fall through to the socket close.
+        Takes a captured `ws` ref because the stream's cleanup may null self._ws."""
+        if ws is None:
+            return
+        for method, params in (
+            ("sessions.abort", {"key": self._session_key}),
+            ("chat.abort", {"sessionKey": self._session_key}),
+        ):
+            try:
+                rid = self._next_id()
+                self._suppress_res_ids.add(rid)  # its res must not abort the stream loop
+                await ws.send(
+                    json.dumps({"type": "req", "id": rid, "method": method, "params": params})
+                )
+                logger.warning(
+                    "[workspace:%s] sent %s (key=%s) on cancel",
+                    self.workspace_id, method, self._session_key[:48],
+                )
+            except Exception as exc:  # noqa: BLE001 — best-effort abort
+                logger.warning(
+                    "[workspace:%s] %s failed on cancel: %s", self.workspace_id, method, exc
+                )
+
+    async def _abort_then_close(self, ws):
+        """Abort the server-side agent first, then close the (captured) socket."""
+        try:
+            await self._send_abort(ws)
+        except Exception:  # noqa: BLE001
+            pass
+        if ws is not None:
+            try:
+                await ws.close(code=1000, reason="cancelled")
+            except Exception:  # noqa: BLE001
+                pass
+
     def cancel(self):
         """Signal the stream loop to stop and force-close the websocket so
         the consumer (``async for raw in self._ws``) unblocks immediately
@@ -2842,7 +2900,11 @@ class OpenClawClient:
                 # call stays synchronous (matches existing callers). Use
                 # get_running_loop so we don't accidentally create a new loop.
                 loop = asyncio.get_running_loop()
-                loop.create_task(ws.close(code=1000, reason="cancelled"))
+                # Tell the GATEWAY to abort the running agent (stops generation +
+                # tool execution server-side), THEN close the socket. Closing alone
+                # only detaches Harvis; OpenClaw would keep running the agent. Pass
+                # the captured `ws` — the stream's cleanup may null self._ws first.
+                loop.create_task(self._abort_then_close(ws))
             except RuntimeError:
                 # Called from outside an event loop — nothing we can do, the
                 # _cancelled flag check on the next iteration will still exit.

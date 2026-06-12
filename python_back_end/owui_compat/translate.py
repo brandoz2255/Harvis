@@ -77,12 +77,14 @@ def _default_permissions(role: str) -> dict:
         },
         "chat": {
             "controls": True,
-            "file_upload": False,
+            # S3/S4: attachment upload + server STT/TTS are wired in the facade
+            # (POST /api/v1/files/, /api/v1/audio/{transcriptions,speech}).
+            "file_upload": True,
             "delete": True,
             "edit": True,
             "temporary": True,
-            "stt": False,
-            "tts": False,
+            "stt": True,
+            "tts": True,
         },
         "features": {
             "web_search": False,

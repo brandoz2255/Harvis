@@ -682,3 +682,33 @@ with the firefighter chat history pinned in memory. The agent:
    single script — instead of echoing memory.
 
 `tool_calls=2`, `event_count=10`, no failed tool calls, no memory echo.
+
+## 2026-06-01: OWUI chat re-open infinite spinner + /api/v1 404 storm
+
+### Problem
+Leaving a chat and opening it again left the UI on an endless loading spinner.
+Browser console showed many `404` on `/api/v1/*` (settings, tools, banners, folders,
+tags, profile images) plus `TypeError: e is not iterable` when reloading chat
+history.
+
+### Root cause
+1. Harvis OWUI facade (`owui_compat/router.py`) implemented auth, models, and chat
+   CRUD but not the ancillary v1 routes the OWUI layout and `Chat.svelte` call on
+   every navigation.
+2. `GET /api/v1/chats/{id}/tags` was missing; tag fetch threw and broke reload.
+3. `convertMessagesToHistory()` iterated `undefined` when a saved chat blob had no
+   `messages` / `history` yet → `e is not iterable`.
+4. `navigateHandler` set `loading = true` but only cleared it on success; any thrown
+   error left the spinner forever.
+
+### Solution
+- Added `python_back_end/owui_compat/stubs.py` with safe empty/default responses for
+  settings, tools, folders, banners, terminals, profile images, chat tags, etc.
+- `Chat.svelte`: try/catch/finally on navigate; guard empty history; catch `setDefaults`.
+- `convertMessagesToHistory`: tolerate missing/non-array `messages`.
+- `getTagsById`, `getTools`, `getBanners`: return `[]` instead of throwing on 404.
+- Rebuilt `front_end/owui/build` for nginx.
+
+### Result
+Stub endpoints return `200`. Chat re-open should complete or redirect home instead of
+spinning indefinitely. Hard-refresh the browser after deploy (`Ctrl+Shift+R`).

@@ -892,6 +892,52 @@ def _validate_hash_claims(
         ]
         return "\n".join(replacement_lines), True
 
+    # ── Zero-tool MEMORIZATION / context-echo guard ──────────────────────
+    # With no executing tool calls, the model did no cracking — it cannot have
+    # legitimately *obtained* any plaintext. If the summary nonetheless reveals
+    # a string that hashes to a target, that answer was recalled from the model's
+    # training weights (e.g. it "knows" md5(password)=5f4dcc…) or read from the
+    # conversation — NOT cracked. This enforces the "must obtain it itself" rule:
+    # a bare correct answer with zero tools is cheating, regardless of phrasing
+    # (the phrase-gated checks above only catch "cracked/verified/I ran …").
+    if tool_call_count == 0:
+        target_set = set(target_hashes)
+        # Candidate plaintexts: tokenize, treating quotes/backticks/asterisks as
+        # delimiters so `password` / **password** / "password" all surface.
+        cleaned = re.sub(r"[`'\"*]", " ", summary)
+        candidates = set()
+        for tok in re.findall(r"\S{1,70}", cleaned):
+            candidates.add(tok)  # raw (a password may legitimately end in punctuation)
+            stripped = tok.strip(".,!?;:()[]{}<>")  # …but usually it's a sentence ender
+            if stripped:
+                candidates.add(stripped)
+        leaked = None
+        for cand in candidates:
+            for algo in ("md5", "sha1", "sha256"):
+                try:
+                    if hashlib.new(algo, cand.encode("utf-8")).hexdigest() in target_set:
+                        leaked = cand
+                        break
+                except (ValueError, UnicodeError):
+                    continue
+            if leaked:
+                break
+        if leaked:
+            replacement_lines = [
+                "**Answer suppressed — the agent did not actually crack the hash.**",
+                "",
+                "It produced a correct plaintext with **zero tool calls** — meaning "
+                "the answer was recalled from the model's training (or read from the "
+                "conversation), not obtained by cracking. The hash must be solved by "
+                "running the cracker (`exec`) or a web search, never stated from memory.",
+                "",
+                f"Target hash(es): `{target_hashes}`",
+                "",
+                "Re-run; the model must emit a real `exec` (cracker.py) or `web_search` "
+                "tool call and report only its verified output.",
+            ]
+            return "\n".join(replacement_lines), True
+
     # ── Stray-hash check ──────────────────────────────────────────────
     # If the summary references a hex hash that does NOT appear in the
     # task_brief, the model is answering a DIFFERENT question (likely

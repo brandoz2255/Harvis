@@ -70,9 +70,19 @@ def build_config() -> dict:
             "enable_onedrive_integration": False,
         },
         "oauth": {"providers": {}},
+        # Voice (S4): a NON-EMPTY tts.engine is what makes the CallOverlay (the
+        # "sound" button) actually synthesize + play audio — its TTS branch is
+        # gated on `config.audio.tts.engine !== ''`. "openai" = the OpenAI-shaped
+        # server contract, which the facade serves at /api/v1/audio/speech (→
+        # Harvis TTS). STT in the overlay calls /api/v1/audio/transcriptions
+        # directly (not engine-gated). `voice` feeds getVoiceId().
         "audio": {
-            "tts": {"engine": "", "split_on": "punctuation"},
-            "stt": {"engine": ""},
+            "tts": {
+                "engine": "openai",
+                "voice": "alloy",
+                "split_on": "punctuation",
+            },
+            "stt": {"engine": "openai"},
         },
         "ui": {},
     }

@@ -154,6 +154,17 @@
 	const MIN_DECIBELS = -55;
 	const VISUALIZER_BUFFER_LENGTH = 300;
 
+	// ── Voice-activity detection (VAD) tuning ──────────────────────────────────
+	// SPEECH_RMS_THRESHOLD: normalized RMS (0–1) above which a frame counts as
+	//   real speech rather than the mic's ambient noise floor (~0.003–0.01 quiet,
+	//   ~0.03+ speech). The old gate used `domainData.some(v => v > 0)`, which is
+	//   true on EVERY frame from ambient noise — so the silence timer below never
+	//   aged out and the call listened forever without ever responding.
+	// SILENCE_DURATION_MS: how long RMS must stay below the threshold (a gap)
+	//   before we stop recording → transcribe → respond. Both are user-tunable.
+	const SPEECH_RMS_THRESHOLD = $settings?.audio?.stt?.speechThreshold ?? 0.01;
+	const SILENCE_DURATION_MS = $settings?.audio?.stt?.silenceDurationMs ?? 1500;
+
 	const transcribeHandler = async (audioBlob) => {
 		// Create a blob from the audio chunks
 		if (!audioBlob || audioBlob.size < 100) {
@@ -304,6 +315,18 @@
 		analyser.minDecibels = MIN_DECIBELS;
 		audioStreamSource.connect(analyser);
 
+		// CRITICAL: an AudioContext created outside a direct user-gesture handler
+		// (this one is created in onMount→startRecording, not in the click) is born
+		// SUSPENDED — the analyser then reads pure silence, RMS stays 0, no speech
+		// is ever detected, recording never starts, and nothing reaches the STT
+		// endpoint (0 transcriptions). Resume it so the mic graph actually runs.
+		if (audioContext.state === 'suspended') {
+			audioContext.resume().then(
+				() => console.log('🔊 AudioContext resumed →', audioContext.state),
+				(e) => console.error('AudioContext resume failed', e)
+			);
+		}
+
 		const bufferLength = analyser.frequencyBinCount;
 
 		const domainData = new Uint8Array(bufferLength);
@@ -312,7 +335,7 @@
 		let lastSoundTime = Date.now();
 		hasStartedSpeaking = false;
 
-		console.log('🔊 Sound detection started', lastSoundTime, hasStartedSpeaking);
+		console.log('🔊 Sound detection started', lastSoundTime, 'ctx=', audioContext.state);
 
 		const detectSound = () => {
 			const processFrame = () => {
@@ -339,11 +362,12 @@
 					rmsLevel = 0;
 				}
 
-				// Check if initial speech/noise has started
-				const hasSound = domainData.some((value) => value > 0);
+				// Real speech vs ambient: gate on the RMS amplitude, not "any
+				// non-zero frequency bin" (which ambient noise satisfies every
+				// frame, so the silence timer below never fired and the call
+				// listened forever without responding).
+				const hasSound = rmsLevel > SPEECH_RMS_THRESHOLD;
 				if (hasSound) {
-					// BIG RED TEXT
-					console.log('%c%s', 'color: red; font-size: 20px;', '🔊 Sound detected');
 					if (mediaRecorder && mediaRecorder.state !== 'recording') {
 						mediaRecorder.start();
 					}
@@ -356,13 +380,14 @@
 					lastSoundTime = Date.now();
 				}
 
-				// Start silence detection only after initial speech/noise has been detected
+				// Once the user has begun speaking, a gap of silence (RMS below
+				// threshold for SILENCE_DURATION_MS) ends the turn → transcribe.
 				if (hasStartedSpeaking) {
-					if (Date.now() - lastSoundTime > 2000) {
+					if (Date.now() - lastSoundTime > SILENCE_DURATION_MS) {
 						confirmed = true;
 
 						if (mediaRecorder) {
-							console.log('%c%s', 'color: red; font-size: 20px;', '🔇 Silence detected');
+							console.log('%c%s', 'color: red; font-size: 20px;', '🔇 Silence gap — ending turn');
 							mediaRecorder.stop();
 							return;
 						}
@@ -434,17 +459,16 @@
 
 				if (audioElement) {
 					audioElement.src = audio.src;
-					audioElement.muted = true;
+					// Do NOT mute: the overlay opens on a user gesture so autoplay is
+					// allowed, and muting here (the old autoplay trick) could leave the
+					// SHARED #audioElement muted if play()/unmute was interrupted —
+					// silently killing both the overlay voice AND message Read-Aloud.
+					audioElement.muted = false;
 					audioElement.playbackRate = $settings.audio?.tts?.playbackRate ?? 1;
 
-					audioElement
-						.play()
-						.then(() => {
-							audioElement.muted = false;
-						})
-						.catch((error) => {
-							console.error(error);
-						});
+					audioElement.play().catch((error) => {
+						console.error(error);
+					});
 
 					audioElement.onended = async (e) => {
 						await new Promise((r) => setTimeout(r, 100));
@@ -644,12 +668,16 @@
 	const toggleMute = () => {
 		muted = !muted;
 		if (muted && hasStartedSpeaking) {
-			// Abort the ongoing recording so it doesn't accidentally send a partial sentence
-			hasStartedSpeaking = false;
-			confirmed = false;
-			audioChunks = [];
+			// User muted mid-utterance → treat it as "I'm done talking": FINALIZE and
+			// send what was captured (transcribe → respond), then stay muted so outside
+			// noise can't start a new turn. (Previously this DISCARDED the partial —
+			// confirmed=false + cleared chunks — which felt like the call just stopped.)
+			// confirmed=true makes stopRecordingCallback transcribe instead of drop;
+			// keep hasStartedSpeaking true so the recorder's final `ondataavailable`
+			// still captures the audio before stop().
+			confirmed = true;
 			if (mediaRecorder && mediaRecorder.state === 'recording') {
-				mediaRecorder.stop();
+				mediaRecorder.stop(); // → onstop → stopRecordingCallback → transcribe + submit
 			}
 		}
 	};
@@ -660,10 +688,9 @@
 			wasAssistantSpeaking = true;
 		} else if (!assistantSpeaking && wasAssistantSpeaking) {
 			wasAssistantSpeaking = false;
-			// Auto unmute when AI finishes speaking
-			if (muted) {
-				muted = false;
-			}
+			// Sticky mute: do NOT auto-unmute when the AI finishes. If the user
+			// muted, the mic stays off so the assistant doesn't chain replies off
+			// ambient noise / silence. The user re-enables listening explicitly.
 		}
 	}
 
@@ -683,6 +710,39 @@
 	};
 
 	onMount(async () => {
+		// Unlock the shared #audioElement for autoplay. The overlay opens on a user
+		// gesture (the Voice/call button), so a muted silent play() here "blesses" the
+		// element — without it the assistant's TTS (played later from an async SSE
+		// callback with NO active gesture) stays autoplay-blocked until the user
+		// manually taps a per-message Read-Aloud button to unlock the element.
+		try {
+			const el = document.getElementById('audioElement') as HTMLAudioElement;
+			if (el) {
+				const N = 8; // tiny 8-bit/8kHz mono silent WAV (self-contained, no asset)
+				const buf = new ArrayBuffer(44 + N);
+				const dv = new DataView(buf);
+				const wr = (o: number, s: string) => {
+					for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i));
+				};
+				wr(0, 'RIFF'); dv.setUint32(4, 36 + N, true); wr(8, 'WAVE'); wr(12, 'fmt ');
+				dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+				dv.setUint32(24, 8000, true); dv.setUint32(28, 8000, true);
+				dv.setUint16(32, 1, true); dv.setUint16(34, 8, true); wr(36, 'data');
+				dv.setUint32(40, N, true);
+				for (let i = 0; i < N; i++) dv.setUint8(44 + i, 128); // 128 = 8-bit silence
+				const url = URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+				el.muted = true;
+				el.src = url;
+				await el.play().catch(() => {});
+				el.pause();
+				el.currentTime = 0;
+				el.muted = false;
+				URL.revokeObjectURL(url);
+			}
+		} catch (e) {
+			// Non-fatal — worst case is the old behavior (manual unlock once).
+		}
+
 		const setWakeLock = async () => {
 			try {
 				wakeLock = await navigator.wakeLock.request('screen');
@@ -787,7 +847,7 @@
 					>
 						{emoji}
 					</div>
-				{:else if loading || assistantSpeaking}
+				{:else if loading}
 					<svg
 						class="size-12 text-gray-900 dark:text-gray-400"
 						viewBox="0 0 24 24"
@@ -832,7 +892,7 @@
 								? ' size-16'
 								: rmsLevel * 100 > 1
 									? 'size-14'
-									: 'size-12'}  transition-all rounded-full bg-cover bg-center bg-no-repeat"
+									: 'size-12'}  {assistantSpeaking ? 'call-speaking-pulse ring-2 ring-blue-400/50 ring-offset-2 ring-offset-transparent' : ''} transition-all rounded-full bg-cover bg-center bg-no-repeat"
 						style={`background-image: url('${WEBUI_API_BASE_URL}/models/model/profile/image?id=${model?.id}&lang=${$i18n.language}&voice=true');`}
 					/>
 				{/if}
@@ -863,7 +923,7 @@
 						>
 							{emoji}
 						</div>
-					{:else if loading || assistantSpeaking}
+					{:else if loading}
 						<svg
 							class="size-44 text-gray-900 dark:text-gray-400"
 							viewBox="0 0 24 24"
@@ -908,7 +968,7 @@
 									? 'size-48'
 									: rmsLevel * 100 > 1
 										? 'size-44'
-										: 'size-40'} transition-all rounded-full bg-cover bg-center bg-no-repeat"
+										: 'size-40'} {assistantSpeaking ? 'call-speaking-pulse ring-2 ring-blue-400/50 ring-offset-2 ring-offset-transparent' : ''} transition-all rounded-full bg-cover bg-center bg-no-repeat"
 							style={`background-image: url('${WEBUI_API_BASE_URL}/models/model/profile/image?id=${model?.id}&lang=${$i18n.language}&voice=true');`}
 						/>
 					{/if}
@@ -1115,3 +1175,22 @@
 		</div>
 	</div>
 {/if}
+
+<style>
+	/* The call circle "vibrates" while the assistant is speaking — a clear
+	   speaking indicator instead of the Thinking dots. :global() because the
+	   class is applied via a dynamic {…} expression Svelte can't scope.
+	   (Real audio-waveform reactivity is part of the later voice pass.) */
+	:global(.call-speaking-pulse) {
+		animation: call-speaking-pulse 0.62s ease-in-out infinite;
+	}
+	@keyframes call-speaking-pulse {
+		0%,
+		100% {
+			transform: scale(1);
+		}
+		50% {
+			transform: scale(1.06);
+		}
+	}
+</style>

@@ -364,7 +364,7 @@ export const getTaskIdsByChatId = async (token: string, chat_id: string) => {
 	})
 		.then(async (res) => {
 			// #region agent log
-			fetch('http://127.0.0.1:7808/ingest/9269ee65-762c-4e4d-9bef-0cd2be96389e', {
+			Promise.resolve('ingest-disabled', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'd007eb' },
 				body: JSON.stringify({

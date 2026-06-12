@@ -1,5 +1,14 @@
 <script context="module" lang="ts">
-	let savedTab: 'controls' | 'files' | 'overview' | 'activity' = 'controls';
+	let savedTab:
+		| 'controls'
+		| 'files'
+		| 'overview'
+		| 'activity'
+		| 'view'
+		| 'global-map'
+		| 'brain'
+		| 'run'
+		| 'research' = 'controls';
 </script>
 
 <script lang="ts">
@@ -15,6 +24,8 @@
 		mobile,
 		showControls,
 		workspaceControlsTab,
+		dockedRunId,
+		dockedResearchId,
 		showCallOverlay,
 		showArtifacts,
 		showEmbeds,
@@ -28,7 +39,8 @@
 	import { toast } from 'svelte-sonner';
 
 	import Controls from './Controls/Controls.svelte';
-	import WorkspaceActivity from './WorkspaceActivity.svelte';
+	import ViewPanel from './ChatControls/ViewPanel.svelte';
+	import SessionArtifacts from './SessionArtifacts.svelte';
 	import CallOverlay from './MessageInput/CallOverlay.svelte';
 	import Drawer from '../common/Drawer.svelte';
 	import Artifacts from './Artifacts.svelte';
@@ -36,6 +48,12 @@
 	import FileNav from './FileNav.svelte';
 	import PyodideFileNav from './PyodideFileNav.svelte';
 	import Overview from './Overview.svelte';
+	import GlobalMap from '$lib/agent-studio/GlobalMap.svelte';
+	import Brain from '$lib/agent-studio/Brain.svelte';
+	import IncompletePanel from '$lib/agent-studio/IncompletePanel.svelte';
+	import Cookbook from '$lib/agent-studio/Cookbook.svelte';
+	import RunView from '$lib/agent-studio/RunView.svelte';
+	import ResearchPanel from '$lib/agent-studio/ResearchPanel.svelte';
 
 	const i18n = getContext('i18n');
 
@@ -81,7 +99,18 @@
 		(codeInterpreterEnabled && $config?.code?.interpreter_engine !== 'jupyter');
 	$: showOverviewTab = hasMessages;
 	$: showActivityTab = $user?.role === 'admin' || ($user?.permissions?.chat?.controls ?? true);
+	// Harvis Agent Studio surfaces available in the right-rail dock (same gate as Activity).
+	$: showStudioTabs = showActivityTab;
 	$: if (!showActivityTab && activeTab === 'activity') activeTab = 'controls';
+	// Keep the new studio tabs from sticking if the gate closes.
+	$: if (
+		!showStudioTabs &&
+		(activeTab === 'global-map' || activeTab === 'brain' || activeTab === 'view')
+	)
+		activeTab = 'controls';
+	// The Neural Map (was Global Map) lives inside Brain now — its tab button is
+	// gone; catch in-session stragglers (module-level savedTab) and land on Brain.
+	$: if (activeTab === 'global-map') activeTab = 'brain';
 
 	// The in-chat WorkspaceRunCard requests the Activity tab via this store.
 	$: if ($workspaceControlsTab) {
@@ -356,7 +385,27 @@
 											: 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'}"
 										on:click={() => (activeTab = 'activity')}
 									>
-										{$i18n.t('Activity')}
+										{$i18n.t('Artifacts')}
+									</button>
+								{/if}
+								{#if showStudioTabs}
+									<button
+										class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
+										'view'
+											? 'bg-gray-100 dark:bg-gray-800 font-medium text-gray-900 dark:text-white'
+											: 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'}"
+										on:click={() => (activeTab = 'view')}
+									>
+										{$i18n.t('View')}
+									</button>
+									<button
+										class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
+										'brain'
+											? 'bg-gray-100 dark:bg-gray-800 font-medium text-gray-900 dark:text-white'
+											: 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'}"
+										on:click={() => (activeTab = 'brain')}
+									>
+										{$i18n.t('Brain')}
 									</button>
 								{/if}
 							</div>
@@ -381,7 +430,7 @@
 						<div
 							class="flex-1 min-h-0 {activeTab === 'overview'
 								? 'h-full'
-								: activeTab === 'controls'
+								: activeTab === 'controls' || activeTab === 'view'
 									? 'overflow-y-auto px-3 pt-1'
 									: ''}"
 						>
@@ -395,13 +444,25 @@
 									onClose={() => showControls.set(false)}
 								/>
 							{:else if activeTab === 'activity'}
-								<WorkspaceActivity />
+								<SessionArtifacts {history} />
+							{:else if activeTab === 'view'}
+								<ViewPanel />
+							{:else if activeTab === 'global-map'}
+								<GlobalMap mode="dock" />
+							{:else if activeTab === 'brain'}
+								<Brain mode="dock" />
+							{:else if activeTab === 'run'}
+								<RunView wsId={$dockedRunId ?? ''} mode="dock" />
+							{:else if activeTab === 'research'}
+								<ResearchPanel researchId={$dockedResearchId ?? ''} mode="dock" />
 							{:else if activeTab === 'files' && $selectedTerminalId}
 								<FileNav onAttach={handleTerminalAttach} {chatId} />
 							{:else if activeTab === 'files' && codeInterpreterEnabled}
 								<PyodideFileNav />
-							{:else}
+							{:else if activeTab === 'controls'}
 								<Controls embed={true} {models} bind:chatFiles bind:params />
+							{:else}
+								<Cookbook mode="dock" />
 							{/if}
 						</div>
 					</div>
@@ -412,7 +473,7 @@
 {:else}
 	{#if $showControls}
 		<PaneResizer
-			class="relative flex items-center justify-center group border-l border-gray-50 dark:border-gray-850/30 hover:border-gray-200 dark:hover:border-gray-800 transition z-20"
+			class="relative w-2.5 shrink-0 flex items-center justify-center group border-l border-gray-100 dark:border-gray-850 hover:border-gray-200 dark:hover:border-gray-800 transition z-20"
 			id="controls-resizer"
 		>
 			<div
@@ -507,6 +568,37 @@
 											{$i18n.t('Overview')}
 										</button>
 									{/if}
+									{#if showActivityTab}
+										<button
+											class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
+											'activity'
+												? 'bg-gray-100 dark:bg-gray-800 font-medium text-gray-900 dark:text-white'
+												: 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'}"
+											on:click={() => (activeTab = 'activity')}
+										>
+											{$i18n.t('Artifacts')}
+										</button>
+									{/if}
+									{#if showStudioTabs}
+										<button
+											class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
+											'view'
+												? 'bg-gray-100 dark:bg-gray-800 font-medium text-gray-900 dark:text-white'
+												: 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'}"
+											on:click={() => (activeTab = 'view')}
+										>
+											{$i18n.t('View')}
+										</button>
+										<button
+											class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
+											'brain'
+												? 'bg-gray-100 dark:bg-gray-800 font-medium text-gray-900 dark:text-white'
+												: 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'}"
+											on:click={() => (activeTab = 'brain')}
+										>
+											{$i18n.t('Brain')}
+										</button>
+									{/if}
 								</div>
 								<button
 									class="p-1 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition text-gray-500 dark:text-gray-400"
@@ -529,7 +621,7 @@
 							<div
 								class="flex-1 min-h-0 {activeTab === 'overview'
 									? 'h-full'
-									: activeTab === 'controls'
+									: activeTab === 'controls' || activeTab === 'view'
 										? 'overflow-y-auto px-3 pt-1'
 										: ''}"
 							>
@@ -547,12 +639,26 @@
 										}}
 										onClose={() => showControls.set(false)}
 									/>
+								{:else if activeTab === 'activity'}
+									<SessionArtifacts {history} />
+								{:else if activeTab === 'view'}
+									<ViewPanel />
+								{:else if activeTab === 'global-map'}
+									<GlobalMap mode="dock" />
+								{:else if activeTab === 'brain'}
+									<Brain mode="dock" />
+								{:else if activeTab === 'run'}
+									<RunView wsId={$dockedRunId ?? ''} mode="dock" />
+								{:else if activeTab === 'research'}
+									<ResearchPanel researchId={$dockedResearchId ?? ''} mode="dock" />
 								{:else if activeTab === 'files' && $selectedTerminalId}
 									<FileNav onAttach={handleTerminalAttach} overlay={dragged} {chatId} />
 								{:else if activeTab === 'files' && codeInterpreterEnabled}
 									<PyodideFileNav overlay={dragged} />
-								{:else}
+								{:else if activeTab === 'controls'}
 									<Controls embed={true} {models} bind:chatFiles bind:params />
+								{:else}
+									<Cookbook mode="dock" />
 								{/if}
 							</div>
 						</div>

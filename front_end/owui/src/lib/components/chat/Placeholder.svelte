@@ -92,7 +92,16 @@
 		class="w-full text-3xl text-gray-800 dark:text-gray-100 text-center flex items-center gap-4 font-primary"
 	>
 		<div class="w-full flex flex-col justify-center items-center">
-			<HarvisMascot size={56} className="mb-3" />
+			<HarvisMascot size={56} className="mb-3" interactive={true} />
+			<div
+				class="text-3xl font-medium text-gray-800 dark:text-gray-100 mb-1.5"
+				in:fade={{ duration: 150 }}
+			>
+				{(() => {
+					const h = new Date().getHours();
+					return h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening';
+				})()}{$user?.name ? `, ${$user.name.split(' ')[0]}` : ''}
+			</div>
 			{#if $selectedFolder}
 				<FolderTitle
 					folder={$selectedFolder}
@@ -110,7 +119,7 @@
 			{:else}
 				<div class="flex flex-row justify-center gap-2.5 @sm:gap-3 w-fit px-5 max-w-xl">
 					<div class="flex shrink-0 justify-center">
-						<div class="flex -space-x-4 mb-0.5" in:fade={{ duration: 100 }}>
+						<div class="flex -space-x-1.5 mb-0.5" in:fade={{ duration: 100 }}>
 							{#each models as model, modelIdx}
 								<Tooltip
 									content={(models[modelIdx]?.info?.meta?.tags ?? [])
@@ -129,7 +138,7 @@
 									>
 										<img
 											src={`${WEBUI_API_BASE_URL}/models/model/profile/image?id=${model?.id}&lang=${$i18n.language}`}
-											class=" size-9 @sm:size-10 rounded-full border-[1px] border-gray-100 dark:border-none"
+											class=" size-5 @sm:size-6 rounded-full border-[1px] border-gray-100 dark:border-none"
 											aria-hidden="true"
 											draggable="false"
 											on:error={(e) => {
@@ -143,7 +152,7 @@
 					</div>
 
 					<div
-						class=" text-3xl @sm:text-3xl line-clamp-1 flex items-center"
+						class=" text-sm @sm:text-base text-gray-500 dark:text-gray-400 line-clamp-1 flex items-center"
 						in:fade={{ duration: 100 }}
 					>
 						{#if models[selectedModelIdx]?.name}
@@ -236,6 +245,7 @@
 					on:submit={(e) => {
 						dispatch('submit', e.detail);
 					}}
+					on:research={(e) => dispatch('research', e.detail)}
 				/>
 			</div>
 		</div>

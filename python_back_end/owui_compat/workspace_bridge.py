@@ -109,6 +109,40 @@ def _openai_sse_lines(workspace_id: str, content: str) -> list[str]:
     return lines
 
 
+# Models that aren't a concrete pick — never sync these (they ARE the auto-route).
+_MODEL_SENTINELS = {"", "auto", "default", "user-pref", "dynamic", "harvis-workspace"}
+
+
+async def _sync_workspace_model(pool, model_name: str) -> None:
+    """Make the OpenClaw workspace follow the model picked in the OWUI dropdown.
+
+    Points the active ``openclaw_llm_config`` row at ``model_name`` so model_proxy's
+    ``auto`` resolution serves it; ``_resolve_route`` then auto-discovers the node
+    (laptop vs rig) and falls back if it's unreachable. Without this, the workspace
+    ignored the dropdown and always used the static DB config.
+
+    NOTE: the active config is a single global row (``WHERE is_active=TRUE``), so this
+    is effectively the same lever as Discord's ``set-model`` — the web-UI selection
+    becomes the shared workspace model. Best-effort: a failure leaves the prior model.
+    """
+    if pool is None:
+        return
+    m = (model_name or "").strip()
+    if m.lower() in _MODEL_SENTINELS:
+        return
+    base = os.getenv("OLLAMA_URL", "http://ollama:11434")
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE openclaw_llm_config SET model_id=$1, provider_url=$2, updated_at=NOW() "
+                "WHERE is_active = TRUE AND (model_id IS DISTINCT FROM $1 OR provider_url IS DISTINCT FROM $2)",
+                m, base,
+            )
+        logger.info("owui workspace_bridge: workspace model synced to UI pick → %s", m)
+    except Exception:
+        logger.warning("owui workspace_bridge: model sync failed for %r", m, exc_info=True)
+
+
 async def maybe_handle_workspace(
     request: Request, owui_body: dict, user
 ) -> Optional[StreamingResponse]:
@@ -117,12 +151,21 @@ async def maybe_handle_workspace(
     normal chat completion). Never raises — any failure → ``None`` → normal chat.
     """
     history = _messages_to_history(owui_body)
-    if not _last_user_message(history).strip():
+    message = _last_user_message(history)
+    if not message.strip():
         return None
+
+    # Manual mode override — the Auto/Chat/Agent pill next to the Send button:
+    #   'chat'  → never launch a workspace (fast direct answer)
+    #   'agent' → always launch the workspace tool-loop for this message
+    #   'auto'/absent → fall through to the auto-detector (default)
+    mode = str(owui_body.get("harvis_mode") or "auto").strip().lower()
+    if mode == "chat":
+        return None  # user forced fast chat
 
     # Lazy imports — keep the package free of import-time coupling to workspace/.
     try:
-        from workspace.task_detector import detect_workspace_task
+        from workspace.task_detector import detect_workspace_task, WorkspaceSuggestion
         from workspace.workspace_router import (
             _start_workspace,
             _db_enable_interactive,
@@ -133,14 +176,24 @@ async def maybe_handle_workspace(
         logger.exception("owui workspace_bridge: import failed; skipping detection")
         return None
 
-    try:
-        suggestion = await detect_workspace_task(history)
-    except Exception:
-        logger.exception("owui workspace_bridge: detect_workspace_task failed")
-        return None
-
-    if not (suggestion.should_suggest and suggestion.confidence >= _AUTO_LAUNCH_CONFIDENCE):
-        return None
+    if mode == "agent":
+        # User forced agent — skip detection, force a workspace on this message.
+        suggestion = WorkspaceSuggestion({
+            "should_suggest": True,
+            "confidence": 1.0,
+            "task_type": "multi_step",
+            "task_brief": message[:500],
+            "reason": "Agent mode forced by user.",
+        })
+        logger.info("owui workspace_bridge: agent mode forced for this message")
+    else:
+        try:
+            suggestion = await detect_workspace_task(history)
+        except Exception:
+            logger.exception("owui workspace_bridge: detect_workspace_task failed")
+            return None
+        if not (suggestion.should_suggest and suggestion.confidence >= _AUTO_LAUNCH_CONFIDENCE):
+            return None
 
     pool = getattr(request.app.state, "pg_pool", None)
     user_id = getattr(user, "id", None)
@@ -151,7 +204,17 @@ async def maybe_handle_workspace(
     workspace_id = uuid.uuid4().hex[:8]
     session_id = owui_body.get("chat_id") or owui_body.get("session_id") or f"owui-{workspace_id}"
     model_name = owui_body.get("model") or ""
-    resolved_brief = _resolve_task_brief(suggestion.task_brief or message, history)
+    # Workspace follows the UI model: point the active OpenClaw config at whatever
+    # model the chat dropdown selected, so the workspace runs on it (model_proxy's
+    # `auto` path resolves to it; the node is auto-discovered downstream). Previously
+    # the workspace ignored the dropdown and used the static config.
+    await _sync_workspace_model(pool, model_name)
+    # Use the RAW user message as the brief — it carries the literal challenge
+    # data (hashes, ciphertext, encoded blobs) that the hash/decode/crypto skill
+    # detection in openclaw_client needs to fire its CodeAct flow. The detector's
+    # `suggestion.task_brief` paraphrases that away ("Find the MD5 hash values…"),
+    # which silently disables cracking for CTF tasks (model narrates instead).
+    resolved_brief = _resolve_task_brief(message, history)
     started_epoch = time.monotonic()
 
     interactive_context = None
@@ -168,7 +231,11 @@ async def maybe_handle_workspace(
         session_id=session_id,
         task_brief=resolved_brief,
         chat_history=history,
-        agent_id="local",
+        # Route web-UI workspace tasks through OpenClaw's tool-loop by default. agent_id
+        # NOT in {local,kimi,nvidia-kimi,cloud-ollama,gpt-oss} → the `else` branch in
+        # workspace_router → client.stream (which actually has tools). Override per-deploy
+        # via HARVIS_OWUI_WORKSPACE_AGENT (e.g. "local" for the tool-less direct model).
+        agent_id=os.getenv("HARVIS_OWUI_WORKSPACE_AGENT", "main"),
         user_id=user_id,
         model_name=model_name,
         live_web=True,

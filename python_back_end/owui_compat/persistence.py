@@ -31,6 +31,25 @@ CREATE INDEX IF NOT EXISTS idx_owui_chats_user_updated
     ON owui_chats(user_id, updated_at DESC);
 """
 
+# OWUI file-attachment store. The frontend uploads via POST /api/v1/files/, gets
+# an id back, polls /process/status, then references the file in the chat body's
+# `files[]`. We store metadata here + bytes on disk (OWUI_FILES_DIR); the facade
+# chat path resolves these into the model prompt (text → context block, image →
+# vision content-part). No RAG/embeddings in v1 — raw content injection.
+CREATE_OWUI_FILES_SQL = """
+CREATE TABLE IF NOT EXISTS owui_files (
+    id            TEXT PRIMARY KEY,
+    user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    filename      TEXT NOT NULL,
+    path          TEXT NOT NULL,
+    content_type  TEXT,
+    size          INTEGER NOT NULL DEFAULT 0,
+    meta          JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_owui_files_user ON owui_files(user_id, created_at DESC);
+"""
+
 
 def _debug_shape(chat_obj) -> dict:
     if not isinstance(chat_obj, dict):

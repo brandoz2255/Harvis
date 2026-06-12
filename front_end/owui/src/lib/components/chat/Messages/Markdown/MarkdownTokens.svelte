@@ -19,6 +19,7 @@
 	import Collapsible from '$lib/components/common/Collapsible.svelte';
 	import ToolCallDisplay from '$lib/components/common/ToolCallDisplay.svelte';
 	import WorkspaceRunCard from '$lib/components/chat/Messages/WorkspaceRunCard.svelte';
+	import ResearchRunCard from '$lib/components/chat/Messages/ResearchRunCard.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import Download from '$lib/components/icons/Download.svelte';
 	import ConsecutiveDetailsGroup from './ConsecutiveDetailsGroup.svelte';
@@ -434,6 +435,9 @@
 				attributes={token.attributes}
 				className="w-full"
 			/>
+		{:else if token?.attributes?.type === 'research_run'}
+			<!-- Harvis Deep Research card (consumes /api/research/stream/{id}) -->
+			<ResearchRunCard id={`${id}-${tokenIdx}-rr`} attributes={token.attributes} />
 		{:else if token?.attributes?.type === 'tool_calls'}
 			<!-- Tool calls have dedicated handling with ToolCallDisplay component -->
 			<ToolCallDisplay

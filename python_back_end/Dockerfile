@@ -1,6 +1,9 @@
 # ---------- Builder: compile any source wheels ----------
-# Use PyTorch base image with CUDA 12.4 pre-installed (eliminates ~8GB PyTorch installation)
-FROM docker.io/pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime AS builder
+# PyTorch base with CUDA 12.8 — required for RTX 50-series (sm_120 / Blackwell).
+# The prior 2.6.0+cu124 base only had kernels up to sm_90, so every torch model
+# (TTS, Whisper, embeddings) silently fell back to CPU on this GPU. 2.8.0+cu128
+# ships sm_120 kernels → GPU-accelerated TTS (was ~15s/sentence on CPU).
+FROM docker.io/pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime AS builder
 
 # Install build tools for compiling source wheels
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -47,12 +50,17 @@ RUN rm -f /wheels/numpy-*.whl
 # Remove any PyTorch / CUDA wheels that may have been pulled transitively.
 # PyTorch is already present in the base image; installing a different torch
 # wheel here can downgrade/replace the preinstalled CUDA build.
+# Also strip torch's FLOOR-PINNED transitive deps (sympy>=1.13.3,
+# typing-extensions>=4.10.0 + mpmath) — the builder resolves them without torch's
+# constraints visible and bakes older wheels that then conflict with the base's
+# torch 2.8.0 at install time. The base image already ships compatible versions.
 RUN rm -f /wheels/torch-*.whl /wheels/torchaudio-*.whl /wheels/torchvision-*.whl \
-  /wheels/nvidia_*.whl /wheels/cuda_*.whl /wheels/triton-*.whl || true
+  /wheels/nvidia_*.whl /wheels/cuda_*.whl /wheels/triton-*.whl \
+  /wheels/sympy-*.whl /wheels/typing_extensions-*.whl /wheels/mpmath-*.whl || true
 
 # ---------- Runtime: PyTorch pre-installed, minimal OS deps ----------
-# Use same PyTorch base image for runtime (PyTorch 2.6.0 + CUDA 12.4 + cuDNN 9)
-FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
+# Same base as builder: PyTorch 2.8.0 + CUDA 12.8 + cuDNN 9 (sm_120 / Blackwell).
+FROM pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime
 
 # Install system dependencies for AI services (including sox for TTS)
 RUN apt-get update && apt-get install -y --no-install-recommends \

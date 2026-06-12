@@ -135,3 +135,13 @@ def register_stub_routes(router: APIRouter, get_current_user: Callable) -> None:
     @router.get("/api/tasks/chat/{chat_id}")
     async def owui_tasks_chat_by_id(chat_id: str, user=Depends(get_current_user)):
         return {"task_ids": []}
+
+    # ── skills (Agent Studio "Brain" panel) ─────────────────────────────────
+    # The Agent Studio Brain lists agent skills via getSkills() → /api/v1/skills/.
+    # Harvis's skills live in the OpenClaw agent runtime, which is NOT mounted
+    # into this backend, so v1 returns an empty list — the Brain renders a
+    # graceful empty state rather than letting the call 404. Surfacing the real
+    # SKILL.md set (a skills bind-mount + frontmatter parse) is a follow-up.
+    @router.get("/api/v1/skills/")
+    async def owui_skills_list(user=Depends(get_current_user)):
+        return []

@@ -3,18 +3,20 @@
 @config '../tailwind.config.js';
 
 @theme {
-	--color-gray-50: oklch(0.98 0 0);
-	--color-gray-100: oklch(0.94 0 0);
-	--color-gray-200: oklch(0.92 0 0);
-	--color-gray-300: oklch(0.85 0 0);
-	--color-gray-400: oklch(0.77 0 0);
-	--color-gray-500: oklch(0.69 0 0);
-	--color-gray-600: oklch(0.51 0 0);
-	--color-gray-700: oklch(0.42 0 0);
-	--color-gray-800: oklch(0.32 0 0);
-	--color-gray-850: oklch(0.27 0 0);
-	--color-gray-900: oklch(0.2 0 0);
-	--color-gray-950: oklch(0.16 0 0);
+	/* Harvis blue-charcoal ramp — neutral grays re-hued toward blue (hue 255)
+	   so the whole app carries a subtle blue cast, strongest in dark mode. */
+	--color-gray-50: oklch(0.98 0.004 255);
+	--color-gray-100: oklch(0.94 0.006 255);
+	--color-gray-200: oklch(0.92 0.008 255);
+	--color-gray-300: oklch(0.85 0.01 255);
+	--color-gray-400: oklch(0.77 0.012 255);
+	--color-gray-500: oklch(0.69 0.014 255);
+	--color-gray-600: oklch(0.51 0.018 255);
+	--color-gray-700: oklch(0.42 0.022 255);
+	--color-gray-800: oklch(0.32 0.026 255);
+	--color-gray-850: oklch(0.27 0.028 255);
+	--color-gray-900: oklch(0.2 0.03 255);
+	--color-gray-950: oklch(0.16 0.032 255);
 }
 
 /*

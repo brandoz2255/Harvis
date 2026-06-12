@@ -9,6 +9,7 @@ can forward to the frontend to ask the user for confirmation.
 import json
 import logging
 import os
+import re
 import httpx
 from typing import Optional
 
@@ -219,6 +220,60 @@ def _keyword_override(chat_history: list[dict]) -> Optional[WorkspaceSuggestion]
     })
 
 
+# ── CTF / crypto deterministic override ──────────────────────────────────────
+# Hash-cracking, decoding, and cipher tasks OBJECTIVELY need tools — you can't
+# crack an MD5 or decode base64 by chatting. The LLM classifier is unreliable on
+# them (measured: returns should_suggest=False on raw hashes), so they fall
+# through to plain chat where the model just refuses. These patterns force such
+# tasks into the workspace, where the hash/decode/crypto skill flow (cracker.py /
+# decoders) actually runs. This is TASK detection (workspace vs chat), NOT model
+# routing — the model is never swapped.
+_CTF_HASH_RE = re.compile(
+    r"(?<![a-fA-F0-9])(?:[a-fA-F0-9]{32}|[a-fA-F0-9]{40}|[a-fA-F0-9]{64})(?![a-fA-F0-9])"
+)
+_CTF_INTENT_RE = re.compile(
+    r"\b(crack|decode|decrypt|decipher|unscramble|de-?obfuscate|brute[\s-]?force)\b",
+    re.IGNORECASE,
+)
+_CTF_ENCODING_RE = re.compile(
+    r"\b(hashes?|md5|sha-?1|sha-?256|sha-?512|ntlm|bcrypt|base\s?64|base\s?32|hex|"
+    r"rot-?13|rot-?\d+|caesar|vigen[eè]re|cipher|ciphertext|xor|morse|atbash)\b",
+    re.IGNORECASE,
+)
+
+
+def _ctf_override(chat_history: list[dict]) -> Optional[WorkspaceSuggestion]:
+    """Force hash/cipher/encoding tasks into the workspace (they need tools).
+    Trigger on a raw hash hex, OR a crack/decode/decrypt intent paired with an
+    encoding/cipher keyword. Returns None if it isn't clearly a CTF task."""
+    last_user = next(
+        (m for m in reversed(chat_history) if m.get("role") == "user"), None
+    )
+    if not last_user:
+        return None
+    content = str(last_user.get("content", "")).strip()
+    if not content:
+        return None
+
+    has_hash = bool(_CTF_HASH_RE.search(content))
+    has_intent = bool(_CTF_INTENT_RE.search(content))
+    has_encoding = bool(_CTF_ENCODING_RE.search(content))
+    if not (has_hash or (has_intent and has_encoding)):
+        return None
+
+    logger.info(
+        "CTF override triggered (hash=%s intent+enc=%s): %r",
+        has_hash, has_intent and has_encoding, content[:80],
+    )
+    return WorkspaceSuggestion({
+        "should_suggest": True,
+        "confidence": 1.0,
+        "task_type": "multi_step",
+        "task_brief": content[:500],  # RAW message — carries the hashes/ciphertext
+        "reason": "Hash/cipher/encoding task — needs tools (deterministic override).",
+    })
+
+
 async def detect_workspace_task(chat_history: list[dict]) -> WorkspaceSuggestion:
     """
     Analyze the chat history and return a WorkspaceSuggestion.
@@ -237,6 +292,13 @@ async def detect_workspace_task(chat_history: list[dict]) -> WorkspaceSuggestion
     override = _keyword_override(chat_history)
     if override:
         return override
+
+    # CTF/crypto shortcut — hash/cipher/encoding tasks objectively need tools, but
+    # the LLM classifier punts on them (should_suggest=False on raw hashes). Force
+    # them to the workspace so the cracking/decoding skill flow runs.
+    ctf = _ctf_override(chat_history)
+    if ctf:
+        return ctf
 
     # Build a compact representation of recent conversation for the classifier.
     # Cap at last 10 messages to keep the classifier call cheap and fast.

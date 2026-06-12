@@ -15,6 +15,14 @@
 		error_message?: string;
 	};
 
+	// Additive embed props — defaults preserve the original standalone behavior
+	// (self-fetching panel with header, mounted by Agent Studio + the right rail).
+	export let embed = false; // hide header + outer chrome (parent provides the card)
+	export let statuses: string[] | null = null; // filter to these status values
+	export let onOpenRun: ((id: string) => void) | null = null; // override goto(run page)
+	export let runsOverride: Run[] | null = null; // parent-supplied runs; skips self-fetch
+	export let emptyText: string | null = null;
+
 	let runs: Run[] = [];
 	let loading = true;
 	let error = '';
@@ -38,9 +46,13 @@
 		}
 	};
 
+	$: sourceRuns = runsOverride ?? runs;
+	$: shownRuns = statuses ? sourceRuns.filter((r) => statuses.includes(r.status ?? '')) : sourceRuns;
+	$: isLoading = runsOverride !== null ? false : loading;
+
 	const dot = (s?: string) =>
 		s === 'done'
-			? 'bg-teal-500'
+			? 'bg-blue-500'
 			: s === 'error'
 				? 'bg-red-500'
 				: s === 'cancelled'
@@ -50,27 +62,39 @@
 	const fmtDur = (ms?: number) =>
 		ms ? (ms < 60000 ? `${Math.round(ms / 1000)}s` : `${Math.round(ms / 60000)}m`) : '';
 
-	onMount(load);
+	const openRun = (id: string) => {
+		if (onOpenRun) {
+			onOpenRun(id);
+		} else {
+			goto(`/harvis/agent-studio/run/${id}`);
+		}
+	};
+
+	onMount(() => {
+		if (runsOverride === null) load();
+	});
 </script>
 
-<div class="h-full overflow-y-auto px-3 pt-1 pb-4 text-sm">
-	<div class="flex items-center justify-between mb-2">
-		<div class="font-medium text-gray-700 dark:text-gray-200">{$i18n.t('Activity')}</div>
-		<button
-			class="text-xs text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
-			on:click={load}>{$i18n.t('Refresh')}</button
-		>
-	</div>
+<div class={embed ? 'text-sm' : 'h-full overflow-y-auto px-3 pt-1 pb-4 text-sm'}>
+	{#if !embed}
+		<div class="flex items-center justify-between mb-2">
+			<div class="font-medium text-gray-700 dark:text-gray-200">{$i18n.t('Artifacts')}</div>
+			<button
+				class="text-xs text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
+				on:click={load}>{$i18n.t('Refresh')}</button
+			>
+		</div>
+	{/if}
 
-	{#if loading}
+	{#if isLoading}
 		<div class="text-gray-400 text-xs py-4">{$i18n.t('Loading…')}</div>
 	{:else if error}
 		<div class="text-red-500 text-xs py-2">{error}</div>
-	{:else if runs.length === 0}
-		<div class="text-gray-400 text-xs py-4">{$i18n.t('No workspace runs yet.')}</div>
+	{:else if shownRuns.length === 0}
+		<div class="text-gray-400 text-xs py-2">{emptyText ?? $i18n.t('No workspace runs yet.')}</div>
 	{:else}
 		<div class="space-y-1.5">
-			{#each runs as r (r.id)}
+			{#each shownRuns as r (r.id)}
 				<button
 					class="w-full text-left rounded-xl border border-gray-100 dark:border-gray-850 hover:bg-gray-50 dark:hover:bg-gray-850 transition px-3 py-2"
 					on:click={() => (expandedId = expandedId === r.id ? null : r.id)}
@@ -90,8 +114,8 @@
 						</div>
 						<button
 							class="mt-2 text-[11px] px-2 py-0.5 rounded-lg bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 transition"
-							on:click|stopPropagation={() => goto(`/harvis/agent-studio?ws=${r.id}`)}
-							>{$i18n.t('Open Agent Studio')}</button
+							on:click|stopPropagation={() => openRun(r.id)}
+							>{$i18n.t('Open run')}</button
 						>
 					{/if}
 				</button>

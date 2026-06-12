@@ -2,6 +2,21 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## 🗺️ Codebase map (graphify) — query this BEFORE grepping/reading the backend
+
+`python_back_end/` is indexed as a queryable knowledge graph at **`graphify-out/graph.json`**
+(5,659 nodes · 11,824 edges · 278 communities; AST-built 2026-06-07). To answer "how does X work?",
+"what calls Y?", "where is Z?", **query the map first — it's far cheaper than reading files**:
+
+```bash
+graphify query "how does the job manager execute code"   # BFS context across the graph
+graphify path "main.py" "JobManager"                      # shortest path between two nodes
+graphify explain "code_generator.py"                      # explain a node + its neighbors
+```
+
+Rebuild after big backend changes: run `/graphify python_back_end`. Scope = `python_back_end/` only
+(front_end and other dirs aren't mapped yet).
+
 ## Repository Overview
 
 This is the Harvis AI Project, a sophisticated AI voice assistant that combines Next.js frontend with Python backend services. The project features voice-first interaction, browser automation, AI-powered coding assistance, and authentication with PostgreSQL.

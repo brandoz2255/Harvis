@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { v4 as uuidv4 } from 'uuid';
 	import { toast } from 'svelte-sonner';
+	import { startResearch } from '$lib/apis/research';
 	import { PaneGroup, Pane, PaneResizer } from 'paneforge';
 
 	import { getContext, onDestroy, onMount, tick } from 'svelte';
@@ -30,6 +31,7 @@
 		socket,
 		audioQueue,
 		showControls,
+		chatMode,
 		showCallOverlay,
 		currentChatPage,
 		temporaryChatEnabled,
@@ -181,7 +183,7 @@
 	let params = {};
 
 	const debugLog = (hypothesisId: string, location: string, message: string, data: object = {}) => {
-		fetch('http://127.0.0.1:7808/ingest/9269ee65-762c-4e4d-9bef-0cd2be96389e', {
+		Promise.resolve('ingest-disabled', {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'd007eb' },
 			body: JSON.stringify({
@@ -1724,6 +1726,37 @@
 		}
 	};
 
+	// Deep Research: inject an inline ResearchRunCard (a research_run marker message)
+	// into the chat instead of a normal completion. Mirrors the workspace-run card.
+	const researchHandler = async (e) => {
+		const q = `${e?.detail ?? ''}`.trim();
+		if (!q) return;
+		const modelId =
+			selectedModels?.[0] && selectedModels[0] !== '' ? selectedModels[0] : ($models?.[0]?.id ?? '');
+		try {
+			const r = await startResearch(localStorage.token, { query: q });
+			const esc = (s) =>
+				`${s}`
+					.replace(/&/g, '&amp;')
+					.replace(/"/g, '&quot;')
+					.replace(/</g, '&lt;')
+					.replace(/>/g, '&gt;');
+			const marker =
+				`<details type="research_run" researchid="${r.session_id}" query="${esc(q)}">\n` +
+				`<summary>Deep Research…</summary>\n</details>`;
+			await addMessages({
+				modelId,
+				parentId: history.currentId,
+				messages: [
+					{ role: 'user', content: q },
+					{ role: 'assistant', content: marker }
+				]
+			});
+		} catch (err) {
+			toast.error(`${err}`);
+		}
+	};
+
 	const addMessages = async ({ modelId, parentId, messages }) => {
 		const model = $models.filter((m) => m.id === modelId).at(0);
 
@@ -2473,6 +2506,7 @@
 			{
 				stream: stream,
 				model: model.id,
+				harvis_mode: $chatMode, // 'auto' | 'chat' | 'agent' — forces fast chat vs workspace
 				...(messages.length > 0 ? { messages } : {}),
 				params: {
 					...$settings?.params,
@@ -3248,6 +3282,7 @@
 											submitHandler(e.detail);
 										}
 									}}
+									on:research={researchHandler}
 								/>
 
 								<div
@@ -3291,6 +3326,7 @@
 											submitHandler(e.detail);
 										}
 									}}
+									on:research={researchHandler}
 								/>
 							</div>
 						{/if}

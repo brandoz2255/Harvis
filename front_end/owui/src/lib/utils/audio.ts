@@ -46,6 +46,7 @@ export class AudioQueue {
 		if (!this.current && this.queue.length > 0) {
 			this.next();
 		} else {
+			this.audio.muted = false; // the shared #audioElement can be left muted by CallOverlay
 			this.audio.play();
 		}
 	}
@@ -55,6 +56,11 @@ export class AudioQueue {
 
 		if (this.current) {
 			this.audio.src = this.current;
+			// The CallOverlay's playAudio mutes #audioElement (autoplay trick) and
+			// only unmutes after play() resolves — if that's interrupted (slow TTS,
+			// overlay closed mid-play) the shared element stays muted, silencing the
+			// message Read-Aloud too. Always unmute before playing here.
+			this.audio.muted = false;
 			this.audio.play();
 		} else {
 			this.#halt();

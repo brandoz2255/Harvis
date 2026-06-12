@@ -45,6 +45,31 @@ services:
       retries: 5
       start_period: 15s
 
+  # Cookbook hardware scanner for the MAIN HOST. llmfit scans this box's
+  # GPU/CPU/RAM and serves a fit-ranked model DB that the backend's
+  # /api/cookbook/* proxies. GPU-passthrough (same pattern as ollama) so it
+  # detects the real card instead of CPU-only. Subhosts (e.g. the rig) run
+  # their own `llmfit serve`; this container is the "main-host" cookbook node
+  # (reached by the backend as http://llmfit:8787 on the shared network).
+  llmfit:
+    image: ghcr.io/alexsjones/llmfit:latest
+    runtime: nvidia
+    container_name: harvis-llmfit
+    restart: unless-stopped
+    command: ["serve", "--host", "0.0.0.0", "--port", "8787"]
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: utility,compute
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks:
+      - ollama-n8n-network
+
   # Model Downloader (Init Container equivalent)
   model-downloader:
     build:
@@ -105,6 +130,11 @@ services:
     environment:
       DATABASE_URL: "postgresql://pguser:pgpassword@pgsql:5432/database"
       JWT_SECRET: "***REMOVED***"
+      # Let PyTorch reuse fragmented/reserved VRAM instead of OOMing on the
+      # TTS generation's ~774MB activation alloc. Critical on the 8GB laptop GPU
+      # where Whisper + TTS + desktop fragment the small free pool. (The CUDA-OOM
+      # error itself recommends this.) Harmless on the rig.
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
       OLLAMA_URL: "http://ollama:11434"
       # Optional desktop-GPU Ollama for the model picker. Surfaces models that
       # only exist on the desktop (e.g. gemma4-26b on the 5080) in /api/models.
@@ -200,6 +230,8 @@ services:
       - ./openclaw/config:/app/openclaw_config
       - ./python_back_end/notebooks:/app/notebooks:ro
       - ./python_back_end/vibecoding:/app/vibecoding:ro
+      - ./python_back_end/cookbook:/app/cookbook:ro
+      - ./python_back_end/deep_research:/app/deep_research:ro
       - artifact_data:/data/artifacts
       - openclaw-projects:/data/openclaw-projects
       # Write-through to host's native OpenClaw config so Discord /model

@@ -177,7 +177,7 @@
 			on:click={resetToDefault}>{$i18n.t('Reset to default')}</button
 		>
 		<button
-			class="text-xs px-3.5 py-2 rounded-lg bg-teal-600 hover:bg-teal-700 text-white transition disabled:opacity-50"
+			class="text-xs px-3.5 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white transition disabled:opacity-50"
 			on:click={save}
 			disabled={saving}>{saving ? $i18n.t('Saving…') : $i18n.t('Save')}</button
 		>

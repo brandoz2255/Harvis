@@ -12,7 +12,12 @@ Streaming model (Option A): OWUI's normal chat is patched to read HTTP SSE, and
 
 from __future__ import annotations
 
-from .persistence import CREATE_OWUI_CHATS_SQL
+from .persistence import CREATE_OWUI_CHATS_SQL, CREATE_OWUI_FILES_SQL
 from .router import OwuiDeps, create_owui_router
 
-__all__ = ["create_owui_router", "OwuiDeps", "CREATE_OWUI_CHATS_SQL"]
+__all__ = [
+    "create_owui_router",
+    "OwuiDeps",
+    "CREATE_OWUI_CHATS_SQL",
+    "CREATE_OWUI_FILES_SQL",
+]

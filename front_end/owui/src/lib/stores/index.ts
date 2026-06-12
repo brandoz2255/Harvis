@@ -100,6 +100,12 @@ export const showChangelog = writable(false);
 export const showControls = writable(false);
 // Lets the in-chat WorkspaceRunCard request a specific right-rail tab (e.g. 'activity').
 export const workspaceControlsTab = writable<string | null>(null);
+// The workspace id the chat right-rail dock is currently showing (compact RunView).
+export const dockedRunId = writable<string | null>(null);
+// Deep Research dock: which research's overview/report the right rail shows.
+export const dockedResearchId = writable<string | null>(null);
+export const researchDockView = writable<'overview' | 'report'>('overview');
+export const researchDockQuery = writable<string>('');
 
 // Harvis top-bar mode pills (Navbar). The pills set these; backend wiring
 // (research-chat routing, agent auto-launch hint, /api/mic-chat voice) is P4.
@@ -107,6 +113,19 @@ export const researchEnabled = writable(false);
 export const agentMode = writable(false);
 export const voiceActive = writable(false);
 export const showEmbeds = writable(false);
+
+// Chat mode — forces the request path (overrides the auto-detector):
+//   'auto'  → smart-detect (workspace for CTF/multi-step, fast chat otherwise) [default]
+//   'chat'  → always answer directly, NEVER launch a workspace (fast)
+//   'agent' → always launch the workspace/agent tool-loop for this message
+// Persisted across reloads. Read by the backend facade via the `harvis_mode` body field.
+const _storedChatMode = typeof localStorage !== 'undefined' ? localStorage.getItem('chatMode') : null;
+export const chatMode = writable(
+	_storedChatMode === 'chat' || _storedChatMode === 'agent' ? _storedChatMode : 'auto'
+);
+if (typeof localStorage !== 'undefined') {
+	chatMode.subscribe((v) => localStorage.setItem('chatMode', v));
+}
 export const showOverview = writable(false);
 export const showArtifacts = writable(false);
 export const showCallOverlay = writable(false);

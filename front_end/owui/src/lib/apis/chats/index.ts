@@ -2,7 +2,7 @@ import { WEBUI_API_BASE_URL } from '$lib/constants';
 import { getTimeRange } from '$lib/utils';
 
 const debugLog = (hypothesisId: string, location: string, message: string, data: object = {}) => {
-	fetch('http://127.0.0.1:7808/ingest/9269ee65-762c-4e4d-9bef-0cd2be96389e', {
+	Promise.resolve('ingest-disabled', {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'd007eb' },
 		body: JSON.stringify({

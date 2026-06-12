@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.websockets import WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
 import asyncio, uvicorn, os, sys, tempfile, uuid, base64, io, logging, re, requests, random, json, httpx
@@ -210,6 +210,9 @@ async def get_user_api_key(
 
 # Images storage directory (mounted via PVC in K8s)
 IMAGES_DIR = os.getenv("IMAGES_DIR", "/app/images")
+# OWUI file-attachment storage (uploads via POST /api/v1/files/). Bytes live here,
+# metadata in the owui_files table. Persisted volume in prod; /app survives restart.
+OWUI_FILES_DIR = os.getenv("OWUI_FILES_DIR", "/app/owui_files")
 os.makedirs(IMAGES_DIR, exist_ok=True)
 print(f"Images directory: {IMAGES_DIR}")
 security = HTTPBearer(auto_error=False)
@@ -605,9 +608,10 @@ async def lifespan(app: FastAPI):
                 )
                 # OWUI-compat chat persistence (the forked OpenWebUI frontend
                 # stores its full chat blob as JSONB; see owui_compat/persistence.py).
-                from owui_compat import CREATE_OWUI_CHATS_SQL
+                from owui_compat import CREATE_OWUI_CHATS_SQL, CREATE_OWUI_FILES_SQL
 
                 await conn.execute(CREATE_OWUI_CHATS_SQL)
+                await conn.execute(CREATE_OWUI_FILES_SQL)
         except Exception as e:
             logger.warning("⚠️ Failed to init OpenClaw audit/prefs schema: %s", e)
 
@@ -835,6 +839,14 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
+def _pretty_ollama_name(name: str) -> str:
+    """Display label for an Ollama model — KEEP the variant tag (e4b/e2b/32b/
+    7b-instruct/…) so similar models stay distinguishable in the picker; only
+    drop the redundant ':latest'. Without this, gemma4:e4b and gemma4:e2b both
+    collapse to 'gemma4' and you can't tell them apart."""
+    return name[: -len(":latest")] if name.endswith(":latest") else name
+
+
 # ─── Models Endpoint ──────────────────────────────────────────────────────────
 # NOTE: native shape is `{"models": [...]}`. The OWUI-compat facade owns the bare
 # `GET /api/models` (OWUI shape `{"data": [...]}`) and calls list_models() in-process
@@ -930,7 +942,7 @@ async def list_models(
                     formatted_models.append(
                         {
                             "name": model_name,
-                            "displayName": f"{model_name.split(':')[0]} (Ollama)",
+                            "displayName": f"{_pretty_ollama_name(model_name)} (Ollama)",
                             "size": size_str,
                             "status": "available",
                             "provider": "ollama",
@@ -1012,7 +1024,7 @@ async def list_models(
                     if not any(existing["name"] == model_name for existing in formatted_models):
                         formatted_models.append({
                             "name": model_name,
-                            "displayName": f"{model_name.split(':')[0]} (Desktop 5080)",
+                            "displayName": f"{_pretty_ollama_name(model_name)} (Desktop 5080)",
                             "size": _parse_model_size(m.get("size")),
                             "status": "available",
                             "provider": "ollama-desktop",
@@ -1044,7 +1056,7 @@ async def list_models(
                         formatted_models.append(
                             {
                                 "name": model_name,
-                                "displayName": f"{model_name.split(':')[0]} (Cloud)",
+                                "displayName": f"{_pretty_ollama_name(model_name)} (Cloud)",
                                 "size": _parse_model_size(m.get("size")),
                                 "status": "available",
                                 "provider": "ollama-cloud",
@@ -1253,6 +1265,22 @@ from plugins.cron.routes import router as cron_router
 app.include_router(soul_router)
 app.include_router(memory_router)
 app.include_router(cron_router)
+
+# Cookbook — hardware-aware model recommendation + download (per-node llmfit serve proxy)
+try:
+    from cookbook.router import router as cookbook_router
+    app.include_router(cookbook_router)
+    logger.info("Cookbook router registered at /api/cookbook")
+except Exception as e:
+    logger.warning(f"Could not load cookbook router: {e}")
+
+# Deep Research — agentic multi-step research + visual reports (Odysseus port)
+try:
+    from deep_research.router import router as deep_research_router
+    app.include_router(deep_research_router)
+    logger.info("Deep Research router registered at /api/research")
+except Exception as e:
+    logger.warning(f"Could not load deep_research router: {e}")
 
 # ─── Device & models -----------------------------------------------------------
 device = 0 if torch.cuda.is_available() else -1
@@ -4838,6 +4866,289 @@ async def serve_image(
     if not os.path.exists(full_path):
         raise HTTPException(404, f"Image file not found: {filename}")
     return FileResponse(full_path, media_type="image/png")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# OWUI-compat AUDIO (S4) — STT/TTS over the OpenWebUI /api/v1/audio/* contract.
+# Thin wrappers over Harvis's existing Whisper (transcribe_with_whisper_optimized)
+# and TTS (safe_generate_speech_optimized). Living in main.py keeps them in scope
+# of those helpers + get_current_user without a circular import on owui_compat.
+# /api/config already reports audio.{tts,stt}.engine="" so OWUI routes here.
+# ════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/v1/audio/config", tags=["audio"])
+async def owui_audio_config(current_user: UserResponse = Depends(get_current_user)):
+    """OWUI reads this to decide STT/TTS routing. Server-side engines (empty
+    OPENAI_API_BASE_URL = same-origin) so the UI calls our endpoints, not the
+    browser Web Speech API."""
+    return {
+        "tts": {
+            "OPENAI_API_BASE_URL": "",
+            "OPENAI_API_KEY": "",
+            "API_KEY": "",
+            "ENGINE": "",
+            "MODEL": os.getenv("HARVIS_TTS_ENGINE", "qwen"),
+            "VOICE": "alloy",
+            "SPLIT_ON": "punctuation",
+        },
+        "stt": {
+            "OPENAI_API_BASE_URL": "",
+            "OPENAI_API_KEY": "",
+            "ENGINE": "",
+            "MODEL": "whisper-1",
+            "WHISPER_MODEL": os.getenv("WHISPER_MODEL", "base"),
+            "SUPPORTED_CONTENT_TYPES": ["audio/*"],
+        },
+    }
+
+
+@app.post("/api/v1/audio/config/update", tags=["audio"])
+async def owui_audio_config_update(
+    request: Request, current_user: UserResponse = Depends(get_current_user)
+):
+    """Accept admin audio-config edits. v1: echo back (engines are fixed to the
+    Harvis Whisper/TTS stack); persisting per-field config is a later pass."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    return body or (await owui_audio_config(current_user))
+
+
+@app.post("/api/v1/audio/transcriptions", tags=["audio"])
+async def owui_audio_transcriptions(
+    file: UploadFile = File(...),
+    language: str = Form(None),
+    current_user: UserResponse = Depends(get_current_user),
+):
+    """OWUI STT: multipart audio → Harvis Whisper → {text}. Mirrors /api/mic-chat's
+    save-then-transcribe, minus the LLM/TTS legs (OWUI just wants the transcript)."""
+    contents = await file.read()
+    _, ext = os.path.splitext(file.filename or "")
+    if not ext:
+        ext = ".wav"
+    tmp_path = os.path.join(tempfile.gettempdir(), f"owui_stt_{uuid.uuid4()}{ext}")
+    try:
+        with open(tmp_path, "wb") as f:
+            f.write(contents)
+        logger.info("🎤 OWUI STT: %s (%d bytes) → %s", file.filename, len(contents), tmp_path)
+        result = await run_in_threadpool(transcribe_with_whisper_optimized, tmp_path)
+        text = (result or {}).get("text", "") if isinstance(result, dict) else str(result or "")
+        return {"text": text.strip()}
+    except Exception as e:
+        logger.error("❌ OWUI STT failed: %s", e)
+        raise HTTPException(500, f"Transcription failed: {e}")
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+
+@app.post("/api/v1/audio/speech", tags=["audio"])
+async def owui_audio_speech(
+    request: Request, current_user: UserResponse = Depends(get_current_user)
+):
+    """OWUI TTS: {input, voice, model?} → Harvis TTS → audio/wav bytes (the OpenAI
+    /audio/speech contract — raw audio in the response body)."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    text = (body.get("input") or "").strip()
+    if not text:
+        raise HTTPException(400, "Missing 'input' text")
+    # Default to Piper (fast CPU, no VRAM). Override per-request with model=… or
+    # globally with HARVIS_TTS_ENGINE=qwen for the neural voice on a big GPU.
+    engine = body.get("model") or os.getenv("HARVIS_TTS_ENGINE", "piper")
+
+    # Piper: real-time CPU TTS (~0.1s/sentence, ZERO VRAM). The default for voice
+    # on VRAM-constrained boxes — neural qwen TTS needs ~3-5GB GPU which the 8GB
+    # laptop can't spare (it OOM-falls-back to CPU at 15-40s/sentence). Set
+    # HARVIS_TTS_ENGINE=piper (or pass model="piper"). Falls through to qwen if
+    # piper is unavailable so it degrades gracefully.
+    if engine == "piper":
+        from owui_compat.piper_tts import piper_synthesize_wav, piper_available
+        if piper_available():
+            audio_bytes = await run_in_threadpool(piper_synthesize_wav, text)
+            if audio_bytes:
+                return Response(content=audio_bytes, media_type="audio/wav")
+            logger.warning("Piper returned no audio; falling back to %s",
+                           os.getenv("HARVIS_TTS_FALLBACK", "qwen"))
+        else:
+            logger.warning("Piper unavailable; falling back to qwen TTS")
+        engine = os.getenv("HARVIS_TTS_FALLBACK", "qwen")
+
+    def _synth():
+        # auto_unload=False keeps the TTS model WARM between sentences. A voice
+        # reply is split into many sentences, each its own /speech call; with the
+        # default auto_unload=True the model reloads on CPU every sentence (this
+        # box's RTX 5070 sm_120 isn't CUDA-compatible with the installed torch),
+        # making playback crawl and the overlay's audio queue spin. Warm = load
+        # once, fast thereafter.
+        sr, wav = safe_generate_speech_optimized(
+            text=text, tts_engine=engine, auto_unload=False
+        )
+        if sr is None or wav is None:
+            return None
+        buf = io.BytesIO()
+        sf.write(buf, wav, sr, format="WAV")
+        return buf.getvalue()
+
+    audio_bytes = await run_in_threadpool(_synth)
+    if not audio_bytes:
+        raise HTTPException(503, "TTS unavailable")
+    return Response(content=audio_bytes, media_type="audio/wav")
+
+
+@app.get("/api/v1/audio/models", tags=["audio"])
+async def owui_audio_models(current_user: UserResponse = Depends(get_current_user)):
+    return {"models": [{"id": "qwen", "name": "Qwen TTS"}, {"id": "chatterbox", "name": "Chatterbox"}]}
+
+
+@app.get("/api/v1/audio/voices", tags=["audio"])
+async def owui_audio_voices(current_user: UserResponse = Depends(get_current_user)):
+    return {"voices": [{"id": "alloy", "name": "Alloy"}]}
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# OWUI-compat FILES (S3) — attachment upload/serve over /api/v1/files/*.
+# Stores bytes on disk + a row in owui_files; the facade chat path resolves these
+# into the model prompt (text → context block, image → vision part). No RAG in v1.
+# ════════════════════════════════════════════════════════════════════════════
+
+def _owui_file_obj(row: dict) -> dict:
+    """Shape a owui_files row the way OWUI's frontend expects a file object."""
+    meta = row.get("meta") or {}
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except Exception:
+            meta = {}
+    created = row.get("created_at")
+    ts = int(created.timestamp()) if hasattr(created, "timestamp") else int(time.time())
+    return {
+        "id": row["id"],
+        "user_id": str(row["user_id"]),
+        "hash": row["id"],
+        "filename": row["filename"],
+        "data": {},
+        "meta": {
+            "name": row["filename"],
+            "content_type": row.get("content_type") or "application/octet-stream",
+            "size": row.get("size") or 0,
+            **meta,
+        },
+        "created_at": ts,
+        "updated_at": ts,
+    }
+
+
+@app.post("/api/v1/files/", tags=["files"])
+async def owui_files_upload(
+    request: Request,
+    file: UploadFile = File(...),
+    metadata: str = Form(None),
+    current_user: UserResponse = Depends(get_current_user),
+):
+    """Store an uploaded attachment + return its OWUI file object."""
+    pool = getattr(request.app.state, "pg_pool", None)
+    if pool is None:
+        raise HTTPException(503, "Storage unavailable")
+    os.makedirs(OWUI_FILES_DIR, exist_ok=True)
+    file_id = str(uuid.uuid4())
+    _, ext = os.path.splitext(file.filename or "")
+    disk_path = os.path.join(OWUI_FILES_DIR, f"{file_id}{ext}")
+    contents = await file.read()
+    with open(disk_path, "wb") as f:
+        f.write(contents)
+    meta = {}
+    if metadata:
+        try:
+            meta = json.loads(metadata)
+        except Exception:
+            meta = {}
+    content_type = file.content_type or "application/octet-stream"
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO owui_files (id, user_id, filename, path, content_type, size, meta) "
+            "VALUES ($1,$2,$3,$4,$5,$6,$7)",
+            file_id, int(current_user.id), file.filename or file_id, disk_path,
+            content_type, len(contents), json.dumps(meta),
+        )
+    logger.info("📎 OWUI file upload: %s (%s, %d bytes) id=%s",
+                file.filename, content_type, len(contents), file_id)
+    return _owui_file_obj({
+        "id": file_id, "user_id": int(current_user.id), "filename": file.filename or file_id,
+        "content_type": content_type, "size": len(contents), "meta": meta, "created_at": None,
+    })
+
+
+@app.get("/api/v1/files/{file_id}/process/status", tags=["files"])
+async def owui_files_process_status(
+    file_id: str, current_user: UserResponse = Depends(get_current_user)
+):
+    """OWUI polls this after upload (NDJSON stream). We inject raw content at chat
+    time (no RAG), so report completed immediately."""
+    async def _gen():
+        yield json.dumps({"id": file_id, "status": "completed", "progress": 100}) + "\n"
+    return StreamingResponse(_gen(), media_type="application/x-ndjson")
+
+
+async def _owui_file_row(pool, file_id: str, user_id: int):
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT * FROM owui_files WHERE id=$1 AND user_id=$2", file_id, int(user_id)
+        )
+
+
+@app.get("/api/v1/files/{file_id}", tags=["files"])
+async def owui_files_get(
+    file_id: str, request: Request, current_user: UserResponse = Depends(get_current_user)
+):
+    pool = getattr(request.app.state, "pg_pool", None)
+    if pool is None:
+        raise HTTPException(503, "Storage unavailable")
+    row = await _owui_file_row(pool, file_id, current_user.id)
+    if not row:
+        raise HTTPException(404, "File not found")
+    return _owui_file_obj(dict(row))
+
+
+@app.get("/api/v1/files/{file_id}/content", tags=["files"])
+async def owui_files_content(
+    file_id: str, request: Request, current_user: UserResponse = Depends(get_current_user)
+):
+    pool = getattr(request.app.state, "pg_pool", None)
+    if pool is None:
+        raise HTTPException(503, "Storage unavailable")
+    row = await _owui_file_row(pool, file_id, current_user.id)
+    if not row or not os.path.exists(row["path"]):
+        raise HTTPException(404, "File not found")
+    return FileResponse(
+        row["path"],
+        media_type=row["content_type"] or "application/octet-stream",
+        filename=row["filename"],
+    )
+
+
+@app.delete("/api/v1/files/{file_id}", tags=["files"])
+async def owui_files_delete(
+    file_id: str, request: Request, current_user: UserResponse = Depends(get_current_user)
+):
+    pool = getattr(request.app.state, "pg_pool", None)
+    if pool is None:
+        raise HTTPException(503, "Storage unavailable")
+    row = await _owui_file_row(pool, file_id, current_user.id)
+    if row:
+        try:
+            os.remove(row["path"])
+        except OSError:
+            pass
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM owui_files WHERE id=$1 AND user_id=$2",
+                               file_id, int(current_user.id))
+    return {"id": file_id, "deleted": True}
 
 
 @app.post("/api/uploads", tags=["uploads"])

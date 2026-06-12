@@ -19,6 +19,19 @@
 
 	const dispatch = createEventDispatcher();
 
+	// Deep Research mode: when on, typing + send researches the topic instead of chatting.
+	let showResearchModal = false;
+	let researchAutoQuery = '';
+	const onSubmit = () => {
+		if ($researchEnabled && (prompt ?? '').trim()) {
+			dispatch('research', prompt); // Chat.svelte injects an inline ResearchRunCard
+			prompt = '';
+			chatInputElement?.setText(''); // RichTextInput is the source of truth — clear the editor too
+			return;
+		}
+		dispatch('submit', prompt);
+	};
+
 	import {
 		type Model,
 		mobile,
@@ -31,6 +44,8 @@
 		terminalServers,
 		user as _user,
 		showControls,
+		researchEnabled,
+		chatMode,
 		showSettings,
 		selectedTerminalId,
 		TTSWorker,
@@ -66,6 +81,8 @@
 	import { getSuggestionRenderer } from '../common/RichTextInput/suggestions';
 
 	import InputMenu from './MessageInput/InputMenu.svelte';
+	import Search from '$lib/components/icons/Search.svelte';
+	import DeepResearchModal from './MessageInput/DeepResearchModal.svelte';
 	import VoiceRecording from './MessageInput/VoiceRecording.svelte';
 
 	import ToolServersModal from './ToolServersModal.svelte';
@@ -75,6 +92,27 @@
 	import FileItem from '../common/FileItem.svelte';
 	import Image from '../common/Image.svelte';
 	import Spinner from '../common/Spinner.svelte';
+
+	// Chat-mode pill (next to Send): cycles Auto → Chat → Agent. Forces fast chat
+	// vs the workspace/agent tool-loop, overriding the backend auto-detector.
+	const CHAT_MODE_META = {
+		auto: {
+			label: 'Auto',
+			cls: 'text-gray-700 dark:text-gray-200 bg-white dark:bg-gray-700 shadow-sm',
+			hint: 'Auto — pick chat or workspace automatically'
+		},
+		chat: {
+			label: 'Chat',
+			cls: 'text-sky-600 dark:text-sky-300 bg-sky-500/10',
+			hint: 'Chat — fast: answer directly, never run the workspace'
+		},
+		agent: {
+			label: 'Agent',
+			cls: 'text-blue-600 dark:text-blue-300 bg-blue-500/10',
+			hint: 'Agent — always run the workspace (tools) for this message'
+		}
+	};
+	const CHAT_MODE_ORDER = ['auto', 'chat', 'agent'] as const;
 
 	import XMark from '../icons/XMark.svelte';
 	import GlobeAlt from '../icons/GlobeAlt.svelte';
@@ -1238,7 +1276,7 @@
 								document.getElementById('chat-input')?.focus();
 
 								if ($settings?.speechAutoSend ?? false) {
-									dispatch('submit', prompt);
+									onSubmit();
 								}
 							}}
 						/>
@@ -1247,7 +1285,7 @@
 						class="w-full flex flex-col gap-1.5 {recording ? 'hidden' : ''}"
 						on:submit|preventDefault={() => {
 							// check if selectedModels support image input
-							dispatch('submit', prompt);
+							onSubmit();
 						}}
 					>
 						<button
@@ -1546,7 +1584,7 @@
 																if (enterPressed) {
 																	e.preventDefault();
 																	if (prompt !== '' || files.length > 0) {
-																		dispatch('submit', prompt);
+																		onSubmit();
 																	}
 																}
 															}
@@ -1667,6 +1705,21 @@
 											<PlusAlt className="size-5.5" />
 										</div>
 									</InputMenu>
+
+									<DeepResearchModal bind:show={showResearchModal} autoQuery={researchAutoQuery} />
+
+									{#if $researchEnabled}
+										<Tooltip content={$i18n.t('Deep Research on — your next message is researched')} placement="top">
+											<button
+												type="button"
+												class="bg-amber-500/15 text-amber-500 hover:bg-amber-500/25 rounded-full size-8 flex justify-center items-center transition ml-0.5"
+												on:click={() => researchEnabled.set(false)}
+												aria-label="Deep Research enabled"
+											>
+												<Search className="size-4.5" />
+											</button>
+										</Tooltip>
+									{/if}
 
 									{#if showWebSearchButton || showImageGenerationButton || showCodeInterpreterButton || showToolsButton || (toggleFilters && toggleFilters.length > 0)}
 										<div
@@ -1948,7 +2001,9 @@
 												<TerminalMenu bind:show={showTerminalMenu} />
 											{/if}
 
-											{#if $_user?.role === 'admin' || ($_user?.permissions?.chat?.stt ?? true)}
+											<!-- Dictation mic hidden — voice is consolidated on the call ("sound")
+											     button (CallOverlay) per design. Remove `false &&` to restore. -->
+											{#if false && ($_user?.role === 'admin' || ($_user?.permissions?.chat?.stt ?? true))}
 												<!-- {$i18n.t('Record voice')} -->
 												<Tooltip content={$i18n.t('Dictate')}>
 													<button
@@ -1998,6 +2053,35 @@
 												</Tooltip>
 											{/if}
 										{/if}
+
+										<!-- Auto/Chat/Agent — ALWAYS visible (forces chat vs workspace),
+										     independent of whether the composer is empty or has text. -->
+										<div class="flex items-center">
+											<div
+												class="flex items-center self-center rounded-full bg-gray-100 dark:bg-gray-850 p-0.5"
+												role="group"
+												aria-label="Chat mode"
+											>
+												{#each CHAT_MODE_ORDER as m}
+													<Tooltip content={CHAT_MODE_META[m]?.hint}>
+														<button
+															type="button"
+															class="px-2 py-0.5 rounded-full text-xs font-medium transition {$chatMode === m
+																? CHAT_MODE_META[m]?.cls
+																: 'text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300'}"
+															on:click={(e) => {
+																chatMode.set(m);
+																e.currentTarget.blur();
+															}}
+															tabindex="-1"
+															aria-label="{CHAT_MODE_META[m]?.label} mode"
+														>
+															{CHAT_MODE_META[m]?.label}
+														</button>
+													</Tooltip>
+												{/each}
+											</div>
+										</div>
 
 										{#if prompt === '' && files.length === 0 && ($_user?.role === 'admin' || ($_user?.permissions?.chat?.call ?? true))}
 											<div class=" flex items-center">
@@ -2063,7 +2147,7 @@
 												</Tooltip>
 											</div>
 										{:else}
-											<div class=" flex items-center">
+											<div class=" flex items-center gap-1">
 												<Tooltip
 													content={uploadPending
 														? $i18n.t('Waiting for upload...')
@@ -2072,7 +2156,7 @@
 													<button
 														id="send-message-button"
 														class="{!(prompt === '' && files.length === 0) || uploadPending
-															? 'bg-black text-white hover:bg-gray-900 dark:bg-white dark:text-black dark:hover:bg-gray-100 '
+															? 'bg-blue-600 text-white hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-400 '
 															: 'text-white bg-gray-200 dark:text-gray-900 dark:bg-gray-700 disabled'} transition rounded-full p-1.5 self-center"
 														type="submit"
 														disabled={(prompt === '' && files.length === 0) || uploadPending}
