@@ -367,6 +367,17 @@
 										{$i18n.t('Overview')}
 									</button>
 								{/if}
+								{#if $dockedRunId}
+									<button
+										class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
+										'run'
+											? 'bg-gray-100 dark:bg-gray-800 font-medium text-gray-900 dark:text-white'
+											: 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'}"
+										on:click={() => (activeTab = 'run')}
+									>
+										{$i18n.t('Run')}
+									</button>
+								{/if}
 								{#if showActivityTab}
 									<button
 										class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
@@ -547,6 +558,14 @@
 											on:click={() => (activeTab = 'overview')}
 										>
 											{$i18n.t('Overview')}
+										</button>
+									{/if}
+									{#if $dockedRunId}
+										<button
+											class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab === 'run' ? 'bg-gray-100 dark:bg-gray-800 font-medium text-gray-900 dark:text-white' : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'}"
+											on:click={() => (activeTab = 'run')}
+										>
+											{$i18n.t('Run')}
 										</button>
 									{/if}
 									{#if showActivityTab}
