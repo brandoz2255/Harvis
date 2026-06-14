@@ -48,6 +48,7 @@
 		chatMode,
 		showSettings,
 		selectedTerminalId,
+		selectedFolder,
 		TTSWorker,
 		temporaryChatEnabled
 	} from '$lib/stores';
@@ -127,6 +128,7 @@
 	import TerminalMenu from './MessageInput/TerminalMenu.svelte';
 	import Component from '../icons/Component.svelte';
 	import PlusAlt from '../icons/PlusAlt.svelte';
+	import Folder from '../icons/Folder.svelte';
 	import Dropdown from '../common/Dropdown.svelte';
 
 	import CommandSuggestionList from './MessageInput/CommandSuggestionList.svelte';
@@ -1706,7 +1708,26 @@
 										</div>
 									</InputMenu>
 
-									<DeepResearchModal bind:show={showResearchModal} autoQuery={researchAutoQuery} />
+									{#if $selectedFolder}
+											<!-- This chat session is attached to a Project: its custom
+											     instructions apply. Click to leave the project context. -->
+											<Tooltip
+												content={$i18n.t('Working in project — click to leave')}
+												placement="top"
+											>
+												<button
+													type="button"
+													class="ml-0.5 flex items-center gap-1 max-w-[10rem] pl-1.5 pr-2 py-1 rounded-full text-xs text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-900/40 transition"
+													on:click={() => selectedFolder.set(null)}
+													aria-label={$i18n.t('Project')}
+												>
+													<Folder className="size-3.5 shrink-0" />
+													<span class="truncate">{$selectedFolder.name}</span>
+												</button>
+											</Tooltip>
+										{/if}
+
+										<DeepResearchModal bind:show={showResearchModal} autoQuery={researchAutoQuery} />
 
 									{#if $researchEnabled}
 										<Tooltip content={$i18n.t('Deep Research on — your next message is researched')} placement="top">

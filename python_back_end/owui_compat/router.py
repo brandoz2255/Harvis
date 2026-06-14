@@ -173,7 +173,7 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
         ws = await maybe_handle_workspace(request, owui_body, user)
         if ws is not None:
             return ws
-        return await run_chat_completion(request, owui_body)
+        return await run_chat_completion(request, owui_body, user_id=user.id)
 
     # ── workspace approval gate (P1.5, opt-in) — resolve a parked run ────────
     @router.post("/api/owui/workspace/{workspace_id}/approve")
@@ -266,6 +266,128 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
     @router.get("/api/v1/chats/archived")
     async def owui_chat_archived(user=Depends(get_current_user)):
         return []
+
+    # ── Folders = Projects ────────────────────────────────────────────────
+    # A folder owns chats (owui_chats.folder_id) + project settings
+    # (data.system_prompt = custom instructions, injected per chat). The
+    # frontend folders API client (lib/apis/folders) defines this exact contract.
+    @router.post("/api/v1/folders/")
+    async def owui_folder_create(request: Request, user=Depends(get_current_user)):
+        pool = _require_pool(request)
+        form = await request.json()
+        return await persistence.create_folder(pool, user.id, form)
+
+    @router.get("/api/v1/folders/")
+    async def owui_folder_list(request: Request, user=Depends(get_current_user)):
+        pool = _require_pool(request)
+        return await persistence.list_folders(pool, user.id)
+
+    # chats-in-a-folder listing (declared before /chats/{chat_id}; static
+    # 'folder' segment keeps it distinct from the parameterized chat route).
+    @router.get("/api/v1/chats/folder/{folder_id}/list")
+    async def owui_chats_in_folder_list(folder_id: str, request: Request, user=Depends(get_current_user)):
+        pool = _require_pool(request)
+        return await persistence.list_chats_by_folder(pool, user.id, folder_id)
+
+    @router.get("/api/v1/chats/folder/{folder_id}")
+    async def owui_chats_in_folder(folder_id: str, request: Request, user=Depends(get_current_user)):
+        pool = _require_pool(request)
+        return await persistence.list_chats_by_folder(pool, user.id, folder_id)
+
+    @router.post("/api/v1/chats/{chat_id}/folder")
+    async def owui_chat_set_folder(chat_id: str, request: Request, user=Depends(get_current_user)):
+        pool = _require_pool(request)
+        body = await request.json()
+        chat = await persistence.update_chat_folder_id(pool, user.id, chat_id, body.get("folder_id"))
+        if chat is None:
+            raise HTTPException(status_code=404, detail="Chat not found")
+        return chat
+
+    @router.get("/api/v1/folders/{folder_id}")
+    async def owui_folder_get(folder_id: str, request: Request, user=Depends(get_current_user)):
+        pool = _require_pool(request)
+        folder = await persistence.get_folder(pool, user.id, folder_id)
+        if folder is None:
+            raise HTTPException(status_code=404, detail="Folder not found")
+        return folder
+
+    @router.post("/api/v1/folders/{folder_id}/update")
+    async def owui_folder_update(folder_id: str, request: Request, user=Depends(get_current_user)):
+        pool = _require_pool(request)
+        form = await request.json()
+        folder = await persistence.update_folder(pool, user.id, folder_id, form)
+        if folder is None:
+            raise HTTPException(status_code=404, detail="Folder not found")
+        return folder
+
+    @router.post("/api/v1/folders/{folder_id}/update/expanded")
+    async def owui_folder_expanded(folder_id: str, request: Request, user=Depends(get_current_user)):
+        pool = _require_pool(request)
+        body = await request.json()
+        folder = await persistence.update_folder_expanded(pool, user.id, folder_id, bool(body.get("is_expanded")))
+        if folder is None:
+            raise HTTPException(status_code=404, detail="Folder not found")
+        return folder
+
+    @router.post("/api/v1/folders/{folder_id}/update/parent")
+    async def owui_folder_parent(folder_id: str, request: Request, user=Depends(get_current_user)):
+        pool = _require_pool(request)
+        body = await request.json()
+        folder = await persistence.update_folder_parent(pool, user.id, folder_id, body.get("parent_id"))
+        if folder is None:
+            raise HTTPException(status_code=404, detail="Folder not found")
+        return folder
+
+    @router.post("/api/v1/folders/{folder_id}/update/items")
+    async def owui_folder_items(folder_id: str, request: Request, user=Depends(get_current_user)):
+        pool = _require_pool(request)
+        body = await request.json()
+        folder = await persistence.update_folder_items(pool, user.id, folder_id, body.get("items") or {})
+        if folder is None:
+            raise HTTPException(status_code=404, detail="Folder not found")
+        return folder
+
+    @router.delete("/api/v1/folders/{folder_id}")
+    async def owui_folder_delete(folder_id: str, request: Request, user=Depends(get_current_user)):
+        pool = _require_pool(request)
+        delete_contents = (request.query_params.get("delete_contents") or "").lower() == "true"
+        return await persistence.delete_folder(pool, user.id, folder_id, delete_contents)
+
+    # ── model comparison runs (Agent Studio Comparison surface → Analytics) ──
+    @router.post("/api/owui/comparisons")
+    async def owui_comparison_save(request: Request, user=Depends(get_current_user)):
+        pool = _require_pool(request)
+        body = await request.json()
+        n = await persistence.save_comparison(
+            pool, user.id,
+            str(body.get("run_id") or ""),
+            str(body.get("prompt") or ""),
+            body.get("results") or [],
+        )
+        return {"saved": n}
+
+    @router.post("/api/owui/comparisons/judge")
+    async def owui_comparison_judge(request: Request, user=Depends(get_current_user)):
+        pool = _require_pool(request)
+        body = await request.json()
+        n = await persistence.save_comparison_judge(
+            pool, user.id,
+            str(body.get("run_id") or ""),
+            str(body.get("judge_model") or ""),
+            body.get("scores") or {},
+        )
+        return {"updated": n}
+
+    @router.get("/api/owui/comparisons")
+    async def owui_comparison_list(request: Request, user=Depends(get_current_user)):
+        pool = _require_pool(request)
+        try:
+            limit = int(request.query_params.get("limit", 300))
+        except (TypeError, ValueError):
+            limit = 300
+        runs = await persistence.list_comparisons(pool, user.id, limit=max(1, min(limit, 1000)))
+        stats = await persistence.comparison_stats(pool, user.id)
+        return {"runs": runs, "stats": stats}
 
     # Stub v1 routes (settings, tools, tags, profile images, …) — must be
     # registered before parameterized chat routes where paths overlap.

@@ -8,7 +8,7 @@
 		| 'global-map'
 		| 'brain'
 		| 'run'
-		| 'research' = 'controls';
+		| 'research' = 'overview';
 </script>
 
 <script lang="ts">
@@ -101,16 +101,22 @@
 	$: showActivityTab = $user?.role === 'admin' || ($user?.permissions?.chat?.controls ?? true);
 	// Harvis Agent Studio surfaces available in the right-rail dock (same gate as Activity).
 	$: showStudioTabs = showActivityTab;
-	$: if (!showActivityTab && activeTab === 'activity') activeTab = 'controls';
-	// Keep the new studio tabs from sticking if the gate closes.
+	$: if (!showActivityTab && activeTab === 'activity') activeTab = 'overview';
+	// Keep the studio tabs from sticking if the gate closes.
 	$: if (
 		!showStudioTabs &&
 		(activeTab === 'global-map' || activeTab === 'brain' || activeTab === 'view')
 	)
-		activeTab = 'controls';
+		activeTab = 'overview';
 	// The Neural Map (was Global Map) lives inside Brain now — its tab button is
 	// gone; catch in-session stragglers (module-level savedTab) and land on Brain.
 	$: if (activeTab === 'global-map') activeTab = 'brain';
+	// Controls is no longer a dock tab (its content lives in Brain → Tuning).
+	// The default + any straggler from a prior session land on Overview.
+	$: if (activeTab === 'controls') activeTab = 'overview';
+	// Map (the conversation node-graph, key 'view') needs a conversation — fall
+	// back to Overview (background tasks) when there are no messages.
+	$: if (!showOverviewTab && activeTab === 'view') activeTab = 'overview';
 
 	// The in-chat WorkspaceRunCard requests the Activity tab via this store.
 	$: if ($workspaceControlsTab) {
@@ -118,16 +124,11 @@
 		workspaceControlsTab.set(null);
 	}
 
-	// Tab fallback: if active tab becomes hidden, switch to next available
-	$: if (!showOverviewTab && activeTab === 'overview') activeTab = 'controls';
-	$: if (!showFilesTab && activeTab === 'files') activeTab = 'controls';
-	$: if (!showControlsTab && activeTab === 'controls') {
-		if (showFilesTab) activeTab = 'files';
-		else if (showOverviewTab) activeTab = 'overview';
-	}
+	// Tab fallback: if the Files tab becomes hidden, fall back to Overview.
+	$: if (!showFilesTab && activeTab === 'files') activeTab = 'overview';
 
-	// Auto-close if there are no visible tabs
-	$: if (!showControlsTab && !showFilesTab && !showOverviewTab) {
+	// Auto-close only if there's genuinely nothing to show.
+	$: if (!showOverviewTab && !showFilesTab && !showStudioTabs) {
 		showControls.set(false);
 	}
 
@@ -344,17 +345,6 @@
 						<!-- Tab bar -->
 						<div class="flex items-center justify-between px-2 pt-2 pb-2 shrink-0">
 							<div class="flex gap-1 min-w-0 overflow-x-auto scrollbar-hidden">
-								{#if showControlsTab}
-									<button
-										class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
-										'controls'
-											? 'bg-gray-100 dark:bg-gray-800 font-medium text-gray-900 dark:text-white'
-											: 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'}"
-										on:click={() => (activeTab = 'controls')}
-									>
-										{$i18n.t('Controls')}
-									</button>
-								{/if}
 								{#if showFilesTab}
 									<button
 										class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
@@ -366,7 +356,7 @@
 										{$i18n.t('Files')}
 									</button>
 								{/if}
-								{#if showOverviewTab}
+								{#if showStudioTabs}
 									<button
 										class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
 										'overview'
@@ -389,6 +379,7 @@
 									</button>
 								{/if}
 								{#if showStudioTabs}
+									{#if showOverviewTab}
 									<button
 										class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
 										'view'
@@ -396,8 +387,9 @@
 											: 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'}"
 										on:click={() => (activeTab = 'view')}
 									>
-										{$i18n.t('View')}
+										{$i18n.t('Map')}
 									</button>
+									{/if}
 									<button
 										class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
 										'brain'
@@ -428,13 +420,17 @@
 						</div>
 
 						<div
-							class="flex-1 min-h-0 {activeTab === 'overview'
+							class="flex-1 min-h-0 {activeTab === 'view'
 								? 'h-full'
-								: activeTab === 'controls' || activeTab === 'view'
+								: activeTab === 'overview'
 									? 'overflow-y-auto px-3 pt-1'
 									: ''}"
 						>
 							{#if activeTab === 'overview'}
+								<ViewPanel />
+							{:else if activeTab === 'activity'}
+								<SessionArtifacts {history} />
+							{:else if activeTab === 'view'}
 								<Overview
 									{history}
 									onNodeClick={(e) => {
@@ -443,10 +439,6 @@
 									}}
 									onClose={() => showControls.set(false)}
 								/>
-							{:else if activeTab === 'activity'}
-								<SessionArtifacts {history} />
-							{:else if activeTab === 'view'}
-								<ViewPanel />
 							{:else if activeTab === 'global-map'}
 								<GlobalMap mode="dock" />
 							{:else if activeTab === 'brain'}
@@ -535,17 +527,6 @@
 							<!-- Tab bar -->
 							<div class="flex items-center justify-between px-2 pt-2 pb-2 shrink-0">
 								<div class="flex gap-1 min-w-0 overflow-x-auto scrollbar-hidden">
-									{#if showControlsTab}
-										<button
-											class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
-											'controls'
-												? 'bg-gray-100 dark:bg-gray-800 font-medium text-gray-900 dark:text-white'
-												: 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'}"
-											on:click={() => (activeTab = 'controls')}
-										>
-											{$i18n.t('Controls')}
-										</button>
-									{/if}
 									{#if showFilesTab}
 										<button
 											class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
@@ -557,7 +538,7 @@
 											{$i18n.t('Files')}
 										</button>
 									{/if}
-									{#if showOverviewTab}
+									{#if showStudioTabs}
 										<button
 											class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
 											'overview'
@@ -580,6 +561,7 @@
 										</button>
 									{/if}
 									{#if showStudioTabs}
+										{#if showOverviewTab}
 										<button
 											class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
 											'view'
@@ -587,8 +569,9 @@
 												: 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'}"
 											on:click={() => (activeTab = 'view')}
 										>
-											{$i18n.t('View')}
+											{$i18n.t('Map')}
 										</button>
+										{/if}
 										<button
 											class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
 											'brain'
@@ -619,13 +602,17 @@
 							</div>
 
 							<div
-								class="flex-1 min-h-0 {activeTab === 'overview'
+								class="flex-1 min-h-0 {activeTab === 'view'
 									? 'h-full'
-									: activeTab === 'controls' || activeTab === 'view'
+									: activeTab === 'overview'
 										? 'overflow-y-auto px-3 pt-1'
 										: ''}"
 							>
 								{#if activeTab === 'overview'}
+									<ViewPanel />
+								{:else if activeTab === 'activity'}
+									<SessionArtifacts {history} />
+								{:else if activeTab === 'view'}
 									<Overview
 										{history}
 										onNodeClick={(e) => {
@@ -639,10 +626,6 @@
 										}}
 										onClose={() => showControls.set(false)}
 									/>
-								{:else if activeTab === 'activity'}
-									<SessionArtifacts {history} />
-								{:else if activeTab === 'view'}
-									<ViewPanel />
 								{:else if activeTab === 'global-map'}
 									<GlobalMap mode="dock" />
 								{:else if activeTab === 'brain'}

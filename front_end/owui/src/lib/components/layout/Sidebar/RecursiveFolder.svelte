@@ -35,6 +35,7 @@
 	import DragGhost from '$lib/components/common/DragGhost.svelte';
 
 	import FolderOpen from '$lib/components/icons/FolderOpen.svelte';
+	import Folder from '$lib/components/icons/Folder.svelte';
 	import EllipsisHorizontal from '$lib/components/icons/EllipsisHorizontal.svelte';
 
 	import ChatItem from './ChatItem.svelte';
@@ -572,7 +573,15 @@
 							{/if}
 						</div>
 					{:else}
-						<div class="p-[1px]">
+						<!-- Folder icon by default; the expand chevron reveals on hover. -->
+						<div class="flex group-hover:hidden transition-all p-[1px]">
+							{#if open}
+								<FolderOpen className="size-3.5" strokeWidth="2" />
+							{:else}
+								<Folder className="size-3.5" strokeWidth="2" />
+							{/if}
+						</div>
+						<div class="hidden group-hover:flex transition-all p-[1px]">
 							{#if open}
 								<ChevronDown className=" size-3" strokeWidth="2.5" />
 							{:else}

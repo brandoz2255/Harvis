@@ -50,6 +50,69 @@ CREATE TABLE IF NOT EXISTS owui_files (
 CREATE INDEX IF NOT EXISTS idx_owui_files_user ON owui_files(user_id, created_at DESC);
 """
 
+# OWUI Folders = Harvis "Projects". A folder owns a set of chats (via
+# owui_chats.folder_id) and carries project settings in ``data``:
+#   data.system_prompt  → custom instructions injected into every chat in the project
+#   data.files          → project knowledge selection (stored; RAG injection is v2)
+# ``meta`` holds presentation (background image), ``items`` mirrors OWUI's
+# {chat_ids,file_ids} membership blob (authoritative membership is the chat's folder_id).
+CREATE_OWUI_FOLDERS_SQL = """
+CREATE TABLE IF NOT EXISTS owui_folders (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL DEFAULT 'New Folder',
+    parent_id   UUID,
+    is_expanded BOOLEAN NOT NULL DEFAULT FALSE,
+    data        JSONB NOT NULL DEFAULT '{}'::jsonb,
+    meta        JSONB NOT NULL DEFAULT '{}'::jsonb,
+    items       JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_owui_folders_user ON owui_folders(user_id, updated_at DESC);
+"""
+
+# Model comparison runs (Agent Studio "Model Comparison" + Analytics). A run
+# sends the SAME prompt to N models; each model's column → one row. The Analytics
+# surface aggregates these into real measured performance (avg tok/s, latency,
+# judge score) per model — the "real data" lane alongside the curated open-source
+# benchmark numbers. One row per (run_id, model_id) so a re-save (e.g. after
+# on-demand judging) upserts rather than duplicates.
+CREATE_OWUI_COMPARISONS_SQL = """
+CREATE TABLE IF NOT EXISTS owui_model_comparisons (
+    id          SERIAL PRIMARY KEY,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    run_id      TEXT NOT NULL,
+    slot        INTEGER NOT NULL DEFAULT 0,
+    prompt      TEXT NOT NULL DEFAULT '',
+    model_id    TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'done',
+    ttft_ms     INTEGER,
+    total_ms    INTEGER,
+    tokens      INTEGER,
+    tokens_estimated BOOLEAN NOT NULL DEFAULT TRUE,
+    tok_per_sec REAL,
+    chars       INTEGER,
+    answer      TEXT,
+    judge_score REAL,
+    judge_model TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (run_id, slot)
+);
+CREATE INDEX IF NOT EXISTS idx_owui_cmp_user ON owui_model_comparisons(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_owui_cmp_model ON owui_model_comparisons(user_id, model_id);
+"""
+
+
+def _json(value) -> dict:
+    """asyncpg returns JSONB as a str (no codec registered here) — parse defensively."""
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except Exception:
+            return {}
+    return value or {}
+
 
 def _debug_shape(chat_obj) -> dict:
     if not isinstance(chat_obj, dict):
@@ -272,3 +335,359 @@ async def delete_chat(pool, user_id: int, chat_id: str) -> bool:
             user_id,
         )
     return result.upper().startswith("DELETE") and not result.endswith("0")
+
+
+# ── Folders / Projects ────────────────────────────────────────────────────────
+
+def _row_to_folder(row) -> dict:
+    return {
+        "id": str(row["id"]),
+        "user_id": row["user_id"],
+        "name": row["name"],
+        "parent_id": str(row["parent_id"]) if row["parent_id"] else None,
+        "is_expanded": row["is_expanded"],
+        "data": _json(row["data"]),
+        "meta": _json(row["meta"]),
+        "items": _json(row["items"]),
+        "created_at": _ts(row["created_at"]),
+        "updated_at": _ts(row["updated_at"]),
+    }
+
+
+async def create_folder(pool, user_id: int, form: dict) -> dict:
+    form = form or {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO owui_folders (user_id, name, parent_id, data, meta)
+            VALUES ($1, $2, $3, $4::jsonb, $5::jsonb)
+            RETURNING *
+            """,
+            user_id,
+            (form.get("name") or "New Project").strip() or "New Project",
+            _as_uuid(form.get("parent_id")),
+            json.dumps(form.get("data") or {}),
+            json.dumps(form.get("meta") or {}),
+        )
+    return _row_to_folder(row)
+
+
+async def list_folders(pool, user_id: int) -> list[dict]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM owui_folders WHERE user_id = $1 ORDER BY updated_at DESC",
+            user_id,
+        )
+    return [_row_to_folder(r) for r in rows]
+
+
+async def get_folder(pool, user_id: int, folder_id: str) -> Optional[dict]:
+    fid = _as_uuid(folder_id)
+    if fid is None:
+        return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM owui_folders WHERE id = $1 AND user_id = $2", fid, user_id
+        )
+    return _row_to_folder(row) if row else None
+
+
+async def update_folder(pool, user_id: int, folder_id: str, form: dict) -> Optional[dict]:
+    """Partial update of name/data/meta/parent_id — only provided keys change."""
+    fid = _as_uuid(folder_id)
+    if fid is None:
+        return None
+    form = form or {}
+    sets, args = [], []
+    if "name" in form and form.get("name") is not None:
+        args.append(str(form["name"]).strip() or "New Project"); sets.append(f"name = ${len(args)}")
+    # MERGE (||), not replace: OWUI sends PARTIAL data blobs (e.g. the model-sync
+    # writeback posts only {data:{model_ids}}). A full replace would clobber
+    # system_prompt/files. Top-level jsonb merge keeps existing keys (mirrors update_chat).
+    if "data" in form and form.get("data") is not None:
+        args.append(json.dumps(form["data"])); sets.append(f"data = data || ${len(args)}::jsonb")
+    if "meta" in form and form.get("meta") is not None:
+        args.append(json.dumps(form["meta"])); sets.append(f"meta = meta || ${len(args)}::jsonb")
+    if "parent_id" in form:
+        args.append(_as_uuid(form.get("parent_id"))); sets.append(f"parent_id = ${len(args)}")
+    if not sets:
+        return await get_folder(pool, user_id, folder_id)
+    args.extend([fid, user_id])
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f"UPDATE owui_folders SET {', '.join(sets)}, updated_at = NOW() "
+            f"WHERE id = ${len(args) - 1} AND user_id = ${len(args)} RETURNING *",
+            *args,
+        )
+    return _row_to_folder(row) if row else None
+
+
+async def update_folder_expanded(pool, user_id: int, folder_id: str, is_expanded: bool) -> Optional[dict]:
+    fid = _as_uuid(folder_id)
+    if fid is None:
+        return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE owui_folders SET is_expanded = $3, updated_at = NOW() "
+            "WHERE id = $1 AND user_id = $2 RETURNING *",
+            fid, user_id, bool(is_expanded),
+        )
+    return _row_to_folder(row) if row else None
+
+
+async def update_folder_parent(pool, user_id: int, folder_id: str, parent_id) -> Optional[dict]:
+    fid = _as_uuid(folder_id)
+    if fid is None:
+        return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE owui_folders SET parent_id = $3, updated_at = NOW() "
+            "WHERE id = $1 AND user_id = $2 RETURNING *",
+            fid, user_id, _as_uuid(parent_id),
+        )
+    return _row_to_folder(row) if row else None
+
+
+async def update_folder_items(pool, user_id: int, folder_id: str, items: dict) -> Optional[dict]:
+    fid = _as_uuid(folder_id)
+    if fid is None:
+        return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE owui_folders SET items = $3::jsonb, updated_at = NOW() "
+            "WHERE id = $1 AND user_id = $2 RETURNING *",
+            fid, user_id, json.dumps(items or {}),
+        )
+    return _row_to_folder(row) if row else None
+
+
+async def delete_folder(pool, user_id: int, folder_id: str, delete_contents: bool = False) -> bool:
+    fid = _as_uuid(folder_id)
+    if fid is None:
+        return False
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            if delete_contents:
+                await conn.execute(
+                    "DELETE FROM owui_chats WHERE user_id = $1 AND folder_id = $2",
+                    user_id, str(fid),
+                )
+            else:
+                # orphan the chats back to the root list
+                await conn.execute(
+                    "UPDATE owui_chats SET folder_id = NULL WHERE user_id = $1 AND folder_id = $2",
+                    user_id, str(fid),
+                )
+            # re-parent child folders to this folder's parent (flatten one level)
+            await conn.execute(
+                "UPDATE owui_folders SET parent_id = (SELECT parent_id FROM owui_folders WHERE id = $1) "
+                "WHERE parent_id = $1 AND user_id = $2",
+                fid, user_id,
+            )
+            result = await conn.execute(
+                "DELETE FROM owui_folders WHERE id = $1 AND user_id = $2", fid, user_id
+            )
+    return result.upper().startswith("DELETE") and not result.endswith("0")
+
+
+async def update_chat_folder_id(pool, user_id: int, chat_id: str, folder_id) -> Optional[dict]:
+    cid = _as_uuid(chat_id)
+    if cid is None:
+        return None
+    fid = _as_uuid(folder_id)  # None clears the assignment
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE owui_chats SET folder_id = $3, updated_at = NOW() "
+            "WHERE id = $1 AND user_id = $2 RETURNING *",
+            cid, user_id, (str(fid) if fid else None),
+        )
+    return _row_to_owui(row) if row else None
+
+
+async def list_chats_by_folder(pool, user_id: int, folder_id: str) -> list[dict]:
+    """Chats assigned to a project — sidebar list view (title + timestamps)."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, title, folder_id, pinned, created_at, updated_at
+            FROM owui_chats
+            WHERE user_id = $1 AND folder_id = $2 AND archived = FALSE
+            ORDER BY updated_at DESC
+            """,
+            user_id, str(folder_id),
+        )
+    return [
+        {
+            "id": str(r["id"]),
+            "title": r["title"],
+            "updated_at": _ts(r["updated_at"]),
+            "created_at": _ts(r["created_at"]),
+            "pinned": r["pinned"],
+            "folder_id": r["folder_id"],
+        }
+        for r in rows
+    ]
+
+
+async def get_chat_folder_system_prompt(pool, chat_id: str) -> Optional[str]:
+    """The project's custom instructions for the project a chat belongs to (or None)."""
+    cid = _as_uuid(chat_id)
+    if cid is None:
+        return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT f.data AS data
+            FROM owui_chats c
+            JOIN owui_folders f ON f.id::text = c.folder_id
+            WHERE c.id = $1 AND c.folder_id IS NOT NULL
+            """,
+            cid,
+        )
+    if not row:
+        return None
+    sp = _json(row["data"]).get("system_prompt")
+    return sp.strip() if isinstance(sp, str) and sp.strip() else None
+
+
+# ── Model comparison runs ────────────────────────────────────────────────────
+def _f(v):
+    return float(v) if v is not None else None
+
+
+async def save_comparison(pool, user_id: int, run_id: str, prompt: str, results: list) -> int:
+    """Persist one comparison run (one row per model result). Idempotent per
+    (run_id, model_id) so a re-save (e.g. after judging) upserts. Returns rows written."""
+    if not run_id or not isinstance(results, list) or not results:
+        return 0
+    n = 0
+    async with pool.acquire() as conn:
+        for idx, r in enumerate(results):
+            if not isinstance(r, dict):
+                continue
+            model_id = (r.get("model_id") or "").strip()
+            if not model_id:
+                continue
+            try:
+                slot = int(r.get("slot", idx))
+            except (TypeError, ValueError):
+                slot = idx
+            await conn.execute(
+                """
+                INSERT INTO owui_model_comparisons
+                    (user_id, run_id, slot, prompt, model_id, status, ttft_ms, total_ms,
+                     tokens, tokens_estimated, tok_per_sec, chars, answer)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                ON CONFLICT (run_id, slot) DO UPDATE SET
+                    model_id = EXCLUDED.model_id,
+                    status = EXCLUDED.status,
+                    ttft_ms = EXCLUDED.ttft_ms,
+                    total_ms = EXCLUDED.total_ms,
+                    tokens = EXCLUDED.tokens,
+                    tokens_estimated = EXCLUDED.tokens_estimated,
+                    tok_per_sec = EXCLUDED.tok_per_sec,
+                    chars = EXCLUDED.chars,
+                    answer = EXCLUDED.answer
+                """,
+                user_id, run_id, slot, str(prompt or ""), model_id,
+                str(r.get("status") or "done"),
+                r.get("ttft_ms"), r.get("total_ms"), r.get("tokens"),
+                bool(r.get("tokens_estimated", True)),
+                _f(r.get("tok_per_sec")), r.get("chars"),
+                (r.get("answer") or "")[:20000],
+            )
+            n += 1
+    return n
+
+
+async def save_comparison_judge(pool, user_id: int, run_id: str, judge_model: str, scores: dict) -> int:
+    """Attach on-demand LLM-as-judge scores to an existing run's rows."""
+    if not run_id or not isinstance(scores, dict) or not scores:
+        return 0
+    n = 0
+    async with pool.acquire() as conn:
+        for slot_key, score in scores.items():
+            try:
+                sc = float(score)
+                slot = int(slot_key)
+            except (TypeError, ValueError):
+                continue
+            await conn.execute(
+                """
+                UPDATE owui_model_comparisons
+                SET judge_score = $1, judge_model = $2
+                WHERE user_id = $3 AND run_id = $4 AND slot = $5
+                """,
+                sc, str(judge_model or ""), user_id, run_id, slot,
+            )
+            n += 1
+    return n
+
+
+async def list_comparisons(pool, user_id: int, *, limit: int = 300) -> list:
+    """Recent comparison rows (newest first) for the Analytics history view."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT run_id, slot, prompt, model_id, status, ttft_ms, total_ms, tokens,
+                   tokens_estimated, tok_per_sec, chars, judge_score, judge_model,
+                   created_at
+            FROM owui_model_comparisons
+            WHERE user_id = $1
+            ORDER BY created_at DESC, run_id, slot
+            LIMIT $2
+            """,
+            user_id, limit,
+        )
+    return [
+        {
+            "run_id": r["run_id"],
+            "slot": r["slot"],
+            "prompt": r["prompt"],
+            "model_id": r["model_id"],
+            "status": r["status"],
+            "ttft_ms": r["ttft_ms"],
+            "total_ms": r["total_ms"],
+            "tokens": r["tokens"],
+            "tokens_estimated": r["tokens_estimated"],
+            "tok_per_sec": _f(r["tok_per_sec"]),
+            "chars": r["chars"],
+            "judge_score": _f(r["judge_score"]),
+            "judge_model": r["judge_model"],
+            "created_at": _ts(r["created_at"]),
+        }
+        for r in rows
+    ]
+
+
+async def comparison_stats(pool, user_id: int) -> list:
+    """Per-model aggregates across all of a user's comparison runs (done only)."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT model_id,
+                   COUNT(*)                AS runs,
+                   AVG(tok_per_sec)        AS avg_tok_per_sec,
+                   AVG(total_ms)           AS avg_total_ms,
+                   AVG(NULLIF(ttft_ms, 0)) AS avg_ttft_ms,
+                   AVG(judge_score)        AS avg_judge_score,
+                   COUNT(judge_score)      AS judged_runs
+            FROM owui_model_comparisons
+            WHERE user_id = $1 AND status = 'done'
+            GROUP BY model_id
+            ORDER BY runs DESC, model_id ASC
+            """,
+            user_id,
+        )
+    return [
+        {
+            "model_id": r["model_id"],
+            "runs": r["runs"],
+            "avg_tok_per_sec": _f(r["avg_tok_per_sec"]),
+            "avg_total_ms": _f(r["avg_total_ms"]),
+            "avg_ttft_ms": _f(r["avg_ttft_ms"]),
+            "avg_judge_score": _f(r["avg_judge_score"]),
+            "judged_runs": r["judged_runs"],
+        }
+        for r in rows
+    ]

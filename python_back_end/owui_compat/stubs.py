@@ -54,11 +54,9 @@ def register_stub_routes(router: APIRouter, get_current_user: Callable) -> None:
     async def owui_update_timezone():
         return True
 
-    # ── layout boot (folders, banners, tools) ───────────────────────────────
-    @router.get("/api/v1/folders/")
-    async def owui_folders_list(user=Depends(get_current_user)):
-        return []
-
+    # ── layout boot (banners, tools) ─────────────────────────────────────────
+    # NOTE: /api/v1/folders/ is now served for real by the facade router
+    # (Projects feature) — no longer stubbed here.
     @router.get("/api/v1/configs/banners")
     async def owui_banners(user=Depends(get_current_user)):
         return []

@@ -61,6 +61,8 @@ def build_config() -> dict:
             "enable_direct_connections": False,
             "enable_channels": False,
             "enable_notes": False,
+            # Projects = OWUI Folders with custom instructions + knowledge (facade-served).
+            "enable_folders": True,
             # Harvis: gates the Agent Studio / Vibe Code sidebar pins + /harvis routes.
             "enable_harvis_studio": _env_bool("HARVIS_OWUI_ENABLE_STUDIO", True),
             # P1.5: opt-in run-level approval gate for workspace tasks (default OFF).

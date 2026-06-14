@@ -140,7 +140,7 @@
 		</div>
 	{:else if isEmpty}
 		<div class="mt-6 text-center text-xs text-gray-400 leading-relaxed px-2">
-			{$i18n.t('No artifacts in this session yet.')}<br />
+			{history ? $i18n.t('No artifacts in this session yet.') : $i18n.t('No artifacts yet.')}<br />
 			{$i18n.t('Research reports and things you create will collect here.')}
 		</div>
 	{:else}

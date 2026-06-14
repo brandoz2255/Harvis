@@ -59,6 +59,8 @@
 	import Spinner from '../common/Spinner.svelte';
 	import Loader from '../common/Loader.svelte';
 	import Folder from '../common/Folder.svelte';
+	import FolderIcon from '../icons/Folder.svelte';
+	import Plus from '../icons/Plus.svelte';
 	import Tooltip from '../common/Tooltip.svelte';
 	import Folders from './Sidebar/Folders.svelte';
 	import { getChannels, createNewChannel } from '$lib/apis/channels';
@@ -73,11 +75,12 @@
 	import Note from '../icons/Note.svelte';
 	import Code from '../icons/Code.svelte';
 	import Sparkles from '../icons/Sparkles.svelte';
+	import ArchiveBox from '../icons/ArchiveBox.svelte';
 	import { slide } from 'svelte/transition';
 	import HotkeyHint from '../common/HotkeyHint.svelte';
 
 	const BREAKPOINT = 768;
-	const DEFAULT_PINNED_ITEMS = ['agent-studio', 'vibecode', 'workspace'];
+	const DEFAULT_PINNED_ITEMS = ['agent-studio', 'vibecode', 'artifacts', 'workspace'];
 
 	let scrollTop = 0;
 
@@ -136,6 +139,7 @@
 				return $user?.role === 'admin';
 			case 'agent-studio':
 			case 'vibecode':
+			case 'artifacts':
 				return $config?.features?.enable_harvis_studio ?? true;
 			default:
 				return false;
@@ -146,6 +150,7 @@
 		const items = {
 			'agent-studio': { label: 'Agent Studio', href: '/harvis/agent-studio', iconType: 'agent-studio' },
 			vibecode: { label: 'Vibe Code', href: '/harvis/vibecode', iconType: 'vibecode' },
+			artifacts: { label: 'Artifacts', href: '/harvis/agent-studio/activity', iconType: 'artifacts' },
 			notes: { label: 'Notes', href: '/notes', iconType: 'note' },
 			workspace: { label: 'Library', href: '/workspace', iconType: 'workspace' },
 			automations: { label: 'Automations', href: '/automations', iconType: 'automations' },
@@ -187,6 +192,13 @@
 			return [];
 		});
 		_folders.set(folderList.sort((a, b) => b.updated_at - a.updated_at));
+
+		// Open the Projects group on load when projects exist (it defaults
+		// collapsed and is otherwise only opened on create — so existing
+		// projects would stay hidden in a collapsed group after a reload).
+		if (folderList.length > 0) {
+			showFolders = true;
+		}
 
 		folders = {};
 
@@ -933,7 +945,8 @@
 											<Sparkles className="size-4.5" />
 										{:else if itemId === 'vibecode'}
 											<Code className="size-4.5" />
-										{/if}
+										{:else if itemId === 'artifacts'}
+											<ArchiveBox className="size-4.5" />										{/if}
 									</div>
 								</a>
 							</Tooltip>
@@ -1184,7 +1197,8 @@
 												<Sparkles className="size-4.5" strokeWidth="2" />
 											{:else if itemId === 'vibecode'}
 												<Code className="size-4.5" strokeWidth="2" />
-											{/if}
+											{:else if itemId === 'artifacts'}
+												<ArchiveBox className="size-4.5" strokeWidth="2" />											{/if}
 										</div>
 
 										<div class="flex self-center translate-y-[0.5px]">
@@ -1314,12 +1328,12 @@
 						id="sidebar-folders"
 						bind:open={showFolders}
 						className="px-2 mt-0.5"
-						name={$i18n.t('Folders')}
+						name={$i18n.t('Projects')}
 						chevron={false}
 						onAdd={() => {
 							showCreateFolderModal = true;
 						}}
-						onAddLabel={$i18n.t('New Folder')}
+						onAddLabel={$i18n.t('New Project')}
 						on:drop={async (e) => {
 							const { type, id, item } = e.detail;
 
@@ -1341,6 +1355,24 @@
 							}
 						}}
 					>
+						<!-- New Project button — folder icon with a + badge, right under the header -->
+						<button
+							class="w-full flex items-center gap-1.5 px-2 py-1.5 rounded-xl text-xs font-medium text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-900 transition"
+							on:click={() => {
+								showCreateFolderModal = true;
+							}}
+						>
+							<span class="relative flex items-center justify-center shrink-0">
+								<FolderIcon className="size-4" strokeWidth="2" />
+								<span
+									class="absolute -bottom-0.5 -right-0.5 flex items-center justify-center rounded-full bg-gray-50 dark:bg-gray-950 text-gray-700 dark:text-gray-200"
+								>
+									<Plus className="size-2.5" strokeWidth="3" />
+								</span>
+							</span>
+							<span class="translate-y-[0.5px]">{$i18n.t('New Project')}</span>
+						</button>
+
 						<Folders
 							bind:folderRegistry
 							{folders}

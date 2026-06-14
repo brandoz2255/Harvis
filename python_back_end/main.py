@@ -608,10 +608,23 @@ async def lifespan(app: FastAPI):
                 )
                 # OWUI-compat chat persistence (the forked OpenWebUI frontend
                 # stores its full chat blob as JSONB; see owui_compat/persistence.py).
-                from owui_compat import CREATE_OWUI_CHATS_SQL, CREATE_OWUI_FILES_SQL
+                from owui_compat import (
+                    CREATE_OWUI_CHATS_SQL,
+                    CREATE_OWUI_COMPARISONS_SQL,
+                    CREATE_OWUI_FILES_SQL,
+                    CREATE_OWUI_FOLDERS_SQL,
+                )
 
                 await conn.execute(CREATE_OWUI_CHATS_SQL)
                 await conn.execute(CREATE_OWUI_FILES_SQL)
+                await conn.execute(CREATE_OWUI_FOLDERS_SQL)
+                await conn.execute(CREATE_OWUI_COMPARISONS_SQL)
+
+                # P5 orchestration: agent-run columns on workspace_runs + the
+                # workspace_artifacts table (idempotent ALTER/CREATE; workspace_runs
+                # itself comes from initdb, so this self-heals the live DB on restart).
+                from workspace.orchestration import ORCHESTRATION_SCHEMA_SQL
+                await conn.execute(ORCHESTRATION_SCHEMA_SQL)
         except Exception as e:
             logger.warning("⚠️ Failed to init OpenClaw audit/prefs schema: %s", e)
 

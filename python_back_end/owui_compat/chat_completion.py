@@ -43,11 +43,41 @@ def _as_content_list(content) -> list:
     return [{"type": "text", "text": content or ""}]
 
 
-async def _inject_files(request, owui_body: dict) -> None:
+def _chat_transcript(chat_obj: dict, max_chars: int = _MAX_TEXT_FILE_CHARS) -> str:
+    """Flatten a stored OWUI chat blob into a readable User/Assistant transcript."""
+    msgs = (chat_obj or {}).get("messages")
+    if not isinstance(msgs, list):
+        return ""
+    lines: list[str] = []
+    for m in msgs:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role") or ""
+        c = m.get("content")
+        if isinstance(c, list):  # multimodal → keep the text parts
+            c = " ".join(
+                p.get("text", "")
+                for p in c
+                if isinstance(p, dict) and p.get("type") == "text"
+            )
+        c = str(c or "").strip()
+        if not c:
+            continue
+        who = "User" if role == "user" else ("Assistant" if role == "assistant" else role or "—")
+        lines.append(f"{who}: {c}")
+    text = "\n\n".join(lines)
+    if len(text) > max_chars:
+        text = text[:max_chars] + "\n…[truncated]"
+    return text
+
+
+async def _inject_files(request, owui_body: dict, user_id: int | None = None) -> None:
     """Resolve ``owui_body['files']`` into the last user message, in place.
 
-    Never raises — attachment resolution must not break a chat turn. A failure
-    just means the file isn't injected (logged), not a 500.
+    Handles uploaded files (text → context block, image → vision part) AND
+    referenced chats (``type:"chat"`` — only id+metadata arrive, so we fetch the
+    referenced chat's transcript and inject it as context). Never raises — a
+    failure just means that attachment isn't injected (logged), not a 500.
     """
     files = owui_body.get("files")
     if not isinstance(files, list) or not files:
@@ -70,6 +100,19 @@ async def _inject_files(request, owui_body: dict) -> None:
             ftype = f.get("type") or ""
             url = f.get("url") or ""
             fid = f.get("id") or (f.get("file") or {}).get("id")
+
+            # 0) Referenced chat (type:"chat") — the body carries only id/title,
+            # so resolve the chat and inject its transcript as context.
+            if ftype == "chat" and fid and pool is not None and user_id is not None:
+                from . import persistence
+
+                ref = await persistence.get_chat(pool, user_id, fid)
+                if ref:
+                    transcript = _chat_transcript((ref or {}).get("chat") or {})
+                    if transcript:
+                        title = f.get("title") or f.get("name") or ref.get("title") or "Referenced chat"
+                        text_blocks.append(f"### Referenced chat: {title}\n{transcript}")
+                continue
 
             # 1) Inline image already carrying a data/remote URL — use as-is.
             if ftype == "image" and url:
@@ -132,11 +175,46 @@ async def _inject_files(request, owui_body: dict) -> None:
     )
 
 
-async def run_chat_completion(request, owui_body: dict):
+async def _inject_project_instructions(request, owui_body: dict) -> None:
+    """If the chat belongs to a Project (folder), prepend that project's custom
+    instructions (folder.data.system_prompt) as a system message so they apply
+    to the whole conversation — Claude-Projects style. ``chat_id`` rides in the
+    OWUI body (stripped later by owui_body_to_proxy). Never raises.
+    """
+    chat_id = owui_body.get("chat_id")
+    if not chat_id:
+        return
+    messages = owui_body.get("messages")
+    if not isinstance(messages, list):
+        return
+    pool = getattr(request.app.state, "pg_pool", None)
+    if pool is None:
+        return
+    try:
+        from . import persistence
+
+        instructions = await persistence.get_chat_folder_system_prompt(pool, chat_id)
+    except Exception:
+        logger.warning("owui_compat: project-instruction lookup failed", exc_info=True)
+        return
+    if not instructions:
+        return
+    messages.insert(
+        0,
+        {
+            "role": "system",
+            "content": "Project instructions (apply to this whole conversation):\n" + instructions,
+        },
+    )
+    logger.info("owui_compat: injected project instructions (%d chars)", len(instructions))
+
+
+async def run_chat_completion(request, owui_body: dict, user_id: int | None = None):
     # Lazy import keeps this package free of import-time coupling to the
     # workspace package (avoids any chance of a circular import at load).
     from workspace.model_proxy import execute_chat_completion
 
-    await _inject_files(request, owui_body)
+    await _inject_files(request, owui_body, user_id=user_id)
+    await _inject_project_instructions(request, owui_body)
     proxy_body = owui_body_to_proxy(owui_body)
     return await execute_chat_completion(request, proxy_body)

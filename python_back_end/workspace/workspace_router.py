@@ -380,21 +380,60 @@ def _looks_like_browser_task(task_brief: str, chat_history: list[dict] | None = 
 
 # ─── Database helpers ──────────────────────────────────────────────────────────
 
-async def _db_create_run(pool, workspace_id: str, user_id: int, session_id: str, task_brief: str) -> None:
+async def _db_create_run(
+    pool, workspace_id: str, user_id: int, session_id: str, task_brief: str,
+    *,
+    parent_run_id: Optional[str] = None,
+    role: Optional[str] = None,
+    model_provider: Optional[str] = None,
+    model_name: Optional[str] = None,
+    workspace_path: Optional[str] = None,
+    branch_name: Optional[str] = None,
+) -> None:
+    """Create a workspace_run row. The P5 orchestration columns (parent_run_id,
+    role, model_*, workspace_path, branch_name) are optional — existing single-run
+    callers pass none and get NULLs (unchanged behavior); the orchestrator passes
+    them so sub-agent runs are first-class rows under their parent."""
     if pool is None:
         return
     try:
         async with pool.acquire() as conn:
             await conn.execute(
                 """
-                INSERT INTO workspace_runs (id, user_id, session_id, task_brief, status, started_at)
-                VALUES ($1, $2, $3, $4, 'running', NOW())
+                INSERT INTO workspace_runs
+                    (id, user_id, session_id, task_brief, status, started_at,
+                     parent_run_id, role, model_provider, model_name, workspace_path, branch_name)
+                VALUES ($1, $2, $3, $4, 'running', NOW(), $5, $6, $7, $8, $9, $10)
                 ON CONFLICT (id) DO NOTHING
                 """,
                 workspace_id, user_id, session_id, task_brief,
+                parent_run_id, role, model_provider, model_name, workspace_path, branch_name,
             )
     except Exception as exc:
         logger.error("DB: failed to create workspace_run %s: %s", workspace_id, exc)
+
+
+async def _db_save_artifact(
+    pool, workspace_id: str, artifact_type: str,
+    *, path: Optional[str] = None, content: Optional[str] = None,
+) -> Optional[str]:
+    """Persist an agent artifact (diff / changed_files / summary / log) and return its id."""
+    if pool is None:
+        return None
+    artifact_id = uuid.uuid4().hex[:16]
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO workspace_artifacts (id, workspace_id, artifact_type, path, content)
+                VALUES ($1, $2, $3, $4, $5)
+                """,
+                artifact_id, workspace_id, artifact_type, path, content,
+            )
+        return artifact_id
+    except Exception as exc:
+        logger.error("DB: failed to save artifact for workspace %s: %s", workspace_id, exc)
+        return None
 
 
 async def _db_save_event(pool, workspace_id: str, seq: int, event: OpenClawEvent) -> None:
@@ -625,6 +664,19 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
             )
         else:
             event_stream = stream_ollama_cloud_workspace(task_brief, chat_history, model=model_name or "gpt-oss:120b")
+
+    elif agent_id == "orchestrated":
+        # P5: Harvis-native multi-agent orchestrator — parent → isolated sub-agent(s)
+        # in git-tracked scratch dirs → diff artifact. Emits the same OpenClawEvent
+        # stream, so the persist/broadcast loop + RunView/Neural Map render it
+        # unchanged. See workspace/orchestration/.
+        from .orchestration.orchestrator import run_orchestrated
+        event_stream = run_orchestrated(
+            task_brief, chat_history,
+            model_name=model_name, pool=pool,
+            parent_workspace_id=workspace_id, user_id=ws["user_id"],
+            session_id=ws.get("session_id") or f"ws-{workspace_id}",
+        )
 
     else:
         # Default: route through OpenClaw WebSocket
@@ -1691,7 +1743,7 @@ async def launch_workspace(
     agent_id = req.agent_id
     if agent_id == "qwen3":
         agent_id = "cloud-ollama"
-    if agent_id not in ("main", "kimi", "nvidia-kimi", "local", "cloud-ollama", "gpt-oss"):
+    if agent_id not in ("main", "kimi", "nvidia-kimi", "local", "cloud-ollama", "gpt-oss", "orchestrated"):
         agent_id = "local"
 
     # Tier 3 interactive browsing is always on for workspace launches.
@@ -2099,6 +2151,123 @@ async def get_workspace_status(
         task_brief=ws["task_brief"],
         session_id=ws["session_id"],
     )
+
+
+# ── P5 orchestration: agent tree + artifacts (Mission Control / diff review) ──
+def _run_row_to_dict(r) -> dict:
+    return {
+        "id": r["id"],
+        "parent_run_id": r["parent_run_id"],
+        "role": r["role"],
+        "status": r["status"],
+        "task": r["task_brief"],
+        "model_name": r["model_name"],
+        "model_provider": r["model_provider"],
+        "branch_name": r["branch_name"],
+        "started_at": r["started_at"].isoformat() if r["started_at"] else None,
+        "duration_ms": r["duration_ms"],
+        "tool_calls": r["tool_calls"],
+        "summary": r["final_summary"],
+        "error": r["error_message"],
+    }
+
+
+@workspace_router.get("/run/{run_id}/tree")
+async def get_run_tree(
+    run_id: str,
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """Parent run + its sub-agent children (P5 agent tree)."""
+    pool = getattr(request.app.state, "pg_pool", None)
+    if pool is None:
+        return {"run": None, "children": []}
+    uid = current_user.get("id")
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, parent_run_id, role, status, task_brief, model_name,
+                   model_provider, branch_name, started_at, completed_at,
+                   duration_ms, tool_calls, final_summary, error_message
+            FROM workspace_runs
+            WHERE user_id = $1 AND (id = $2 OR parent_run_id = $2)
+            ORDER BY started_at ASC
+            """,
+            uid, run_id,
+        )
+    parent = next((r for r in rows if r["id"] == run_id), None)
+    children = [_run_row_to_dict(r) for r in rows if r["id"] != run_id]
+    return {"run": _run_row_to_dict(parent) if parent else None, "children": children}
+
+
+@workspace_router.get("/run/{run_id}/artifacts")
+async def list_run_artifacts(
+    run_id: str,
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """Artifact metadata (diff / changed_files / summary) for a run — ownership-checked."""
+    pool = getattr(request.app.state, "pg_pool", None)
+    if pool is None:
+        return {"artifacts": []}
+    uid = current_user.get("id")
+    async with pool.acquire() as conn:
+        owner = await conn.fetchval("SELECT user_id FROM workspace_runs WHERE id = $1", run_id)
+        if owner is None or owner != uid:
+            raise HTTPException(status_code=404, detail="Run not found")
+        rows = await conn.fetch(
+            """
+            SELECT id, artifact_type, path, COALESCE(LENGTH(content), 0) AS size, created_at
+            FROM workspace_artifacts
+            WHERE workspace_id = $1
+            ORDER BY created_at ASC
+            """,
+            run_id,
+        )
+    return {
+        "artifacts": [
+            {
+                "id": r["id"],
+                "artifact_type": r["artifact_type"],
+                "path": r["path"],
+                "size": r["size"],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            }
+            for r in rows
+        ]
+    }
+
+
+@workspace_router.get("/artifact/{artifact_id}")
+async def get_artifact(
+    artifact_id: str,
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """Full artifact content (e.g. the diff), ownership-checked via the owning run."""
+    pool = getattr(request.app.state, "pg_pool", None)
+    if pool is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    uid = current_user.get("id")
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT a.id, a.artifact_type, a.path, a.content, a.created_at, r.user_id
+            FROM workspace_artifacts a
+            JOIN workspace_runs r ON r.id = a.workspace_id
+            WHERE a.id = $1
+            """,
+            artifact_id,
+        )
+    if row is None or row["user_id"] != uid:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    return {
+        "id": row["id"],
+        "artifact_type": row["artifact_type"],
+        "path": row["path"],
+        "content": row["content"],
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+    }
 
 
 @workspace_router.get("/history")
