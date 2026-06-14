@@ -243,6 +243,10 @@ async def maybe_handle_workspace(
         model_name=model_name,
         live_web=True,
         parallel=True,
+        # Orchestrate "uniform model" toggle: force every sub-agent onto the
+        # chat-selected model instead of per-role profile models. Default off
+        # (heterogeneous). Only meaningful when agent_id == "orchestrated".
+        uniform_model=bool(owui_body.get("harvis_orchestrate_uniform")),
         interactive_context=interactive_context,
     )
 

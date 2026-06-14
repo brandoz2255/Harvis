@@ -32,6 +32,7 @@
 		audioQueue,
 		showControls,
 		chatMode,
+		orchestrateUniformModel,
 		showCallOverlay,
 		currentChatPage,
 		temporaryChatEnabled,
@@ -2506,7 +2507,8 @@
 			{
 				stream: stream,
 				model: model.id,
-				harvis_mode: $chatMode, // 'auto' | 'chat' | 'agent' — forces fast chat vs workspace
+				harvis_mode: $chatMode, // 'auto' | 'chat' | 'agent' | 'orchestrate' — forces fast chat vs workspace
+				harvis_orchestrate_uniform: $orchestrateUniformModel, // orchestrate: force one model for all sub-agents
 				...(messages.length > 0 ? { messages } : {}),
 				params: {
 					...$settings?.params,

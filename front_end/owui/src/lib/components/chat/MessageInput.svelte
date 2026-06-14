@@ -46,6 +46,7 @@
 		showControls,
 		researchEnabled,
 		chatMode,
+		orchestrateUniformModel,
 		showSettings,
 		selectedTerminalId,
 		selectedFolder,
@@ -2107,6 +2108,31 @@
 													</Tooltip>
 												{/each}
 											</div>
+											{#if $chatMode === 'orchestrate'}
+												<!-- Sub-agent model policy: per-role profile models (default) vs
+												     one model for all sub-agents (the chat-selected model). -->
+												<Tooltip
+													content={$orchestrateUniformModel
+														? 'All sub-agents use the selected model. Click for per-role models.'
+														: 'Each sub-agent uses its role model. Click to force one model for all.'}
+												>
+													<button
+														type="button"
+														class="ml-1 px-2 py-0.5 rounded-full text-xs font-medium transition {$orchestrateUniformModel
+															? 'bg-purple-500/15 text-purple-500'
+															: 'text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300'}"
+														on:click={(e) => {
+															orchestrateUniformModel.update((v) => !v);
+															e.currentTarget.blur();
+														}}
+														tabindex="-1"
+														aria-pressed={$orchestrateUniformModel}
+														aria-label="Toggle uniform model for sub-agents"
+													>
+														{$orchestrateUniformModel ? '1 model' : 'Per-role'}
+													</button>
+												</Tooltip>
+											{/if}
 										</div>
 
 										{#if prompt === '' && files.length === 0 && ($_user?.role === 'admin' || ($_user?.permissions?.chat?.call ?? true))}

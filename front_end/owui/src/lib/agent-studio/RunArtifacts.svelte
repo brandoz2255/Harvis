@@ -10,7 +10,8 @@
 	export let done = false;
 
 	let artifacts: ArtifactMeta[] = [];
-	let diffContent = '';
+	// One block per sub-agent (multi-agent orchestrate runs produce N diffs).
+	let diffs: { label: string; content: string }[] = [];
 	let changedFiles = '';
 	let loaded = false;
 	let open = true;
@@ -18,9 +19,14 @@
 	const load = async () => {
 		if (!wsId) return;
 		artifacts = await getRunArtifacts(wsId);
-		const diff = artifacts.find((a) => a.artifact_type === 'diff');
+		const diffMetas = artifacts.filter((a) => a.artifact_type === 'diff');
 		const cf = artifacts.find((a) => a.artifact_type === 'changed_files');
-		diffContent = diff ? (await getArtifact(diff.id))?.content || '' : '';
+		diffs = await Promise.all(
+			diffMetas.map(async (d) => ({
+				label: d.path || $i18n.t('Changes'),
+				content: (await getArtifact(d.id))?.content || ''
+			}))
+		);
 		changedFiles = cf ? (await getArtifact(cf.id))?.content || '' : '';
 		loaded = true;
 	};
@@ -34,8 +40,9 @@
 		load();
 	}
 
+	const hasContent = (c: string) => !!c && c.trim() && c.trim() !== '(no changes)';
 	$: fileList = changedFiles.split('\n').map((s) => s.trim()).filter(Boolean);
-	$: hasDiff = !!diffContent && diffContent.trim() && diffContent.trim() !== '(no changes)';
+	$: anyDiff = diffs.some((d) => hasContent(d.content));
 
 	const lineClass = (l: string): string => {
 		if (l.startsWith('+') && !l.startsWith('+++')) return 'text-green-600 dark:text-green-400';
@@ -47,7 +54,7 @@
 	};
 </script>
 
-{#if loaded && (hasDiff || fileList.length)}
+{#if loaded && (anyDiff || fileList.length)}
 	<div class="rounded-xl border border-gray-100 dark:border-gray-850 bg-white dark:bg-gray-900 overflow-hidden mt-2">
 		<button class="w-full flex items-center gap-2 px-3 py-2 text-left" on:click={() => (open = !open)}>
 			<svg
@@ -62,7 +69,8 @@
 			<span class="text-sm font-medium text-gray-800 dark:text-gray-100">{$i18n.t('Changes')}</span>
 			<span class="text-[11px] text-gray-400"
 				>{fileList.length}
-				{fileList.length === 1 ? $i18n.t('file') : $i18n.t('files')}</span
+				{fileList.length === 1 ? $i18n.t('file') : $i18n.t('files')}{#if diffs.length > 1}
+					· {diffs.length} {$i18n.t('agents')}{/if}</span
 			>
 		</button>
 		{#if open}
@@ -77,17 +85,29 @@
 						{/each}
 					</div>
 				{/if}
-				{#if hasDiff}
-					<div
-						class="text-[11px] leading-relaxed overflow-auto bg-gray-50 dark:bg-gray-850 rounded-lg p-2.5 max-h-96 font-mono"
-					>
-						{#each diffContent.split('\n') as ln}
-							<div class="whitespace-pre {lineClass(ln)}">{ln || ' '}</div>
-						{/each}
-					</div>
-				{:else}
-					<div class="text-[11px] text-gray-400">{$i18n.t('No file changes.')}</div>
-				{/if}
+				<!-- One diff block per sub-agent. -->
+				<div class="space-y-2">
+					{#each diffs as d}
+						<div>
+							{#if diffs.length > 1}
+								<div class="text-[11px] font-medium text-gray-500 dark:text-gray-400 mb-1 truncate">
+									{d.label}
+								</div>
+							{/if}
+							{#if hasContent(d.content)}
+								<div
+									class="text-[11px] leading-relaxed overflow-auto bg-gray-50 dark:bg-gray-850 rounded-lg p-2.5 max-h-96 font-mono"
+								>
+									{#each d.content.split('\n') as ln}
+										<div class="whitespace-pre {lineClass(ln)}">{ln || ' '}</div>
+									{/each}
+								</div>
+							{:else}
+								<div class="text-[11px] text-gray-400">{$i18n.t('No file changes.')}</div>
+							{/if}
+						</div>
+					{/each}
+				</div>
 			</div>
 		{/if}
 	</div>

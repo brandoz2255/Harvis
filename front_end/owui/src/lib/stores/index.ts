@@ -121,10 +121,24 @@ export const showEmbeds = writable(false);
 // Persisted across reloads. Read by the backend facade via the `harvis_mode` body field.
 const _storedChatMode = typeof localStorage !== 'undefined' ? localStorage.getItem('chatMode') : null;
 export const chatMode = writable(
-	_storedChatMode === 'chat' || _storedChatMode === 'agent' ? _storedChatMode : 'auto'
+	_storedChatMode === 'chat' || _storedChatMode === 'agent' || _storedChatMode === 'orchestrate'
+		? _storedChatMode
+		: 'auto'
 );
 if (typeof localStorage !== 'undefined') {
 	chatMode.subscribe((v) => localStorage.setItem('chatMode', v));
+}
+
+// Orchestrate "uniform model" toggle: when ON, every sub-agent runs on the
+// chat-selected model instead of its per-role profile model. Persisted; read by
+// the backend facade via the `harvis_orchestrate_uniform` body field.
+const _storedUniform =
+	typeof localStorage !== 'undefined' ? localStorage.getItem('orchestrateUniformModel') : null;
+export const orchestrateUniformModel = writable(_storedUniform === 'true');
+if (typeof localStorage !== 'undefined') {
+	orchestrateUniformModel.subscribe((v) =>
+		localStorage.setItem('orchestrateUniformModel', String(v))
+	);
 }
 export const showOverview = writable(false);
 export const showArtifacts = writable(false);

@@ -676,6 +676,7 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
             model_name=model_name, pool=pool,
             parent_workspace_id=workspace_id, user_id=ws["user_id"],
             session_id=ws.get("session_id") or f"ws-{workspace_id}",
+            uniform_model=ws.get("uniform_model", False),
         )
 
     else:
@@ -1541,6 +1542,7 @@ async def _start_workspace(
     interactive_context: Optional[dict] = None,
     live_web: bool = True,
     parallel: bool = True,
+    uniform_model: bool = False,
 ) -> OpenClawClient:
     """
     Register a workspace in memory, create its queue, and start the background task.
@@ -1576,6 +1578,8 @@ async def _start_workspace(
         "interactive_context": interactive_context or None,
         "live_web": live_web,
         "parallel": parallel,
+        # P5: force every sub-agent onto the chat-selected model (vs per-role profile).
+        "uniform_model": uniform_model,
         # Two-mode tracking
         "mode": config.mode,
         "allowed_capabilities": config.allowed_capabilities,

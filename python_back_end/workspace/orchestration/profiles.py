@@ -9,6 +9,12 @@ override a profile's model via `model_name`.
 from __future__ import annotations
 
 # role -> profile. `model_provider="local"` = Ollama via model_proxy._resolve_route.
+#
+# Models are deliberately SMALL + HETEROGENEOUS: multi-agent runs fan these out
+# in parallel, and the dev box is an 8GB GPU, so a lane gets its own ≤8B model
+# (llama3.1:8b / gemma4:e4b / gemma4:e2b) rather than several qwen3:14b loads
+# fighting over VRAM. Each is a proven tool-caller. A launch can still force one
+# model for all sub-agents (the "uniform model" toggle) or override per profile.
 AGENT_PROFILES: dict[str, dict] = {
     "orchestrator": {
         "display_name": "Orchestrator Agent",
@@ -23,7 +29,7 @@ AGENT_PROFILES: dict[str, dict] = {
     "backend": {
         "display_name": "Backend Agent",
         "model_provider": "local",
-        "model_name": "qwen3:14b",
+        "model_name": "llama3.1:8b",
         "tools": ["read_file", "edit_file", "exec", "run_tests"],
         "approval_policy": "normal",
         "max_steps": 40,
@@ -33,7 +39,7 @@ AGENT_PROFILES: dict[str, dict] = {
     "frontend": {
         "display_name": "Frontend Agent",
         "model_provider": "local",
-        "model_name": "qwen3:14b",
+        "model_name": "gemma4:e4b",
         "tools": ["read_file", "edit_file", "exec", "run_tests"],
         "approval_policy": "normal",
         "max_steps": 40,
@@ -53,7 +59,7 @@ AGENT_PROFILES: dict[str, dict] = {
     "security": {
         "display_name": "Security Review Agent",
         "model_provider": "local",
-        "model_name": "qwen3:14b",
+        "model_name": "llama3.1:8b",
         "tools": ["read_file", "exec"],
         "approval_policy": "strict",
         "max_steps": 30,
