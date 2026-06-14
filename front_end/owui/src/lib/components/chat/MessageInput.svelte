@@ -111,9 +111,14 @@
 			label: 'Agent',
 			cls: 'text-blue-600 dark:text-blue-300 bg-blue-500/10',
 			hint: 'Agent — always run the workspace (tools) for this message'
+		},
+		orchestrate: {
+			label: 'Orchestrate',
+			cls: 'text-purple-600 dark:text-purple-300 bg-purple-500/10',
+			hint: 'Orchestrate — split into specialized sub-agents, each on its own model in an isolated workspace'
 		}
 	};
-	const CHAT_MODE_ORDER = ['auto', 'chat', 'agent'] as const;
+	const CHAT_MODE_ORDER = ['auto', 'chat', 'agent', 'orchestrate'] as const;
 
 	import XMark from '../icons/XMark.svelte';
 	import GlobeAlt from '../icons/GlobeAlt.svelte';

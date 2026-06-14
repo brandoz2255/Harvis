@@ -155,9 +155,10 @@ async def maybe_handle_workspace(
     if not message.strip():
         return None
 
-    # Manual mode override — the Auto/Chat/Agent pill next to the Send button:
-    #   'chat'  → never launch a workspace (fast direct answer)
-    #   'agent' → always launch the workspace tool-loop for this message
+    # Manual mode override — the Auto/Chat/Agent/Orchestrate pill next to Send:
+    #   'chat'        → never launch a workspace (fast direct answer)
+    #   'agent'       → always launch the workspace tool-loop for this message
+    #   'orchestrate' → always launch the P5 multi-agent orchestrator (agent_id="orchestrated")
     #   'auto'/absent → fall through to the auto-detector (default)
     mode = str(owui_body.get("harvis_mode") or "auto").strip().lower()
     if mode == "chat":
@@ -176,16 +177,16 @@ async def maybe_handle_workspace(
         logger.exception("owui workspace_bridge: import failed; skipping detection")
         return None
 
-    if mode == "agent":
-        # User forced agent — skip detection, force a workspace on this message.
+    if mode in ("agent", "orchestrate"):
+        # User forced agent/orchestrate — skip detection, force a workspace.
         suggestion = WorkspaceSuggestion({
             "should_suggest": True,
             "confidence": 1.0,
             "task_type": "multi_step",
             "task_brief": message[:500],
-            "reason": "Agent mode forced by user.",
+            "reason": f"{mode} mode forced by user.",
         })
-        logger.info("owui workspace_bridge: agent mode forced for this message")
+        logger.info("owui workspace_bridge: %s mode forced for this message", mode)
     else:
         try:
             suggestion = await detect_workspace_task(history)
@@ -235,7 +236,9 @@ async def maybe_handle_workspace(
         # NOT in {local,kimi,nvidia-kimi,cloud-ollama,gpt-oss} → the `else` branch in
         # workspace_router → client.stream (which actually has tools). Override per-deploy
         # via HARVIS_OWUI_WORKSPACE_AGENT (e.g. "local" for the tool-less direct model).
-        agent_id=os.getenv("HARVIS_OWUI_WORKSPACE_AGENT", "main"),
+        # 'orchestrate' mode → the P5 multi-agent orchestrator; otherwise the default
+        # OpenClaw tool-loop agent (override via HARVIS_OWUI_WORKSPACE_AGENT).
+        agent_id=("orchestrated" if mode == "orchestrate" else os.getenv("HARVIS_OWUI_WORKSPACE_AGENT", "main")),
         user_id=user_id,
         model_name=model_name,
         live_web=True,
