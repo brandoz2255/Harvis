@@ -11,6 +11,7 @@
 	import { PaneGroup, Pane, PaneResizer } from 'paneforge';
 	import WorkflowCanvas from './workflow/WorkflowCanvas.svelte';
 	import ThoughtStream from './workflow/ThoughtStream.svelte';
+	import RunArtifacts from './RunArtifacts.svelte';
 
 	const i18n: any = getContext('i18n');
 
@@ -122,6 +123,7 @@
 			<div
 				class="lg:w-96 max-h-56 lg:max-h-none lg:h-full overflow-y-auto border-b lg:border-b-0 lg:border-r border-gray-100 dark:border-gray-850 px-4 py-3 shrink-0"
 			>
+				<RunArtifacts {wsId} done={!running} />
 				<ThoughtStream {events} {running} />
 			</div>
 			<div class="flex-1 min-h-0 min-w-0">
