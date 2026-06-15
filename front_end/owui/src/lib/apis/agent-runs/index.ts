@@ -58,3 +58,25 @@ export const getArtifact = async (
 		return null;
 	}
 };
+
+export interface GlobalArtifactMeta {
+	id: string;
+	workspace_id: string;
+	path: string | null;
+	size: number;
+	task_brief: string | null;
+	created_at: string | null;
+}
+
+// Every FILE artifact across ALL the user's orchestrated runs — the global gallery.
+export const getAllArtifacts = async (limit = 200): Promise<GlobalArtifactMeta[]> => {
+	try {
+		const r = await fetch(`${BASE}/artifacts?limit=${limit}`, {
+			headers: headers(),
+			credentials: 'include'
+		});
+		return r.ok ? (await r.json()).artifacts ?? [] : [];
+	} catch (_) {
+		return [];
+	}
+};
