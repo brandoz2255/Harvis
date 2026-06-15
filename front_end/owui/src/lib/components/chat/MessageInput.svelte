@@ -120,6 +120,14 @@
 		}
 	};
 	const CHAT_MODE_ORDER = ['auto', 'chat', 'agent', 'orchestrate'] as const;
+	// Leading dot colour per mode (the dropdown rows + trigger).
+	const CHAT_MODE_DOT: Record<string, string> = {
+		auto: 'bg-gray-400',
+		chat: 'bg-sky-500',
+		agent: 'bg-blue-500',
+		orchestrate: 'bg-purple-500'
+	};
+	let showModeMenu = false;
 
 	import XMark from '../icons/XMark.svelte';
 	import GlobeAlt from '../icons/GlobeAlt.svelte';
@@ -2081,58 +2089,68 @@
 											{/if}
 										{/if}
 
-										<!-- Auto/Chat/Agent — ALWAYS visible (forces chat vs workspace),
-										     independent of whether the composer is empty or has text. -->
+										<!-- Mode selector — a dropdown (Auto / Chat / Agent / Orchestrate).
+										     Orchestrate + its sub-agent model policy live INSIDE this menu. -->
 										<div class="flex items-center">
-											<div
-												class="flex items-center self-center rounded-full bg-gray-100 dark:bg-gray-850 p-0.5"
-												role="group"
-												aria-label="Chat mode"
+											<Dropdown
+												bind:show={showModeMenu}
+												side="top"
+												align="start"
+												contentClass="rounded-xl border border-gray-100 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-lg p-1 w-56 text-sm"
 											>
-												{#each CHAT_MODE_ORDER as m}
-													<Tooltip content={CHAT_MODE_META[m]?.hint}>
+												<button
+													type="button"
+													class="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium transition {CHAT_MODE_META[$chatMode]?.cls}"
+													tabindex="-1"
+													aria-label="Chat mode"
+												>
+													<span class="size-1.5 rounded-full {CHAT_MODE_DOT[$chatMode]}"></span>
+													{CHAT_MODE_META[$chatMode]?.label}
+													<svg class="size-3 opacity-70" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6" /></svg>
+												</button>
+
+												<svelte:fragment slot="content">
+													{#each CHAT_MODE_ORDER as m}
 														<button
 															type="button"
-															class="px-2 py-0.5 rounded-full text-xs font-medium transition {$chatMode === m
-																? CHAT_MODE_META[m]?.cls
-																: 'text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300'}"
-															on:click={(e) => {
+															class="w-full flex items-center gap-2 py-1.5 rounded-lg text-left hover:bg-gray-50 dark:hover:bg-gray-800 transition {m === 'orchestrate' ? 'pl-6 pr-2.5' : 'px-2.5'}"
+															on:click={() => {
 																chatMode.set(m);
-																e.currentTarget.blur();
+																if (m !== 'orchestrate') showModeMenu = false;
 															}}
-															tabindex="-1"
-															aria-label="{CHAT_MODE_META[m]?.label} mode"
 														>
-															{CHAT_MODE_META[m]?.label}
+															{#if m === 'orchestrate'}<span class="text-gray-400 dark:text-gray-500 text-xs leading-none shrink-0">↳</span>{/if}<span class="size-1.5 rounded-full {CHAT_MODE_DOT[m]} shrink-0"></span>
+															<span class="flex-1 text-gray-800 dark:text-gray-100">{CHAT_MODE_META[m]?.label}</span>
+															{#if $chatMode === m}
+																<svg class="size-4 text-blue-500 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
+															{/if}
 														</button>
-													</Tooltip>
-												{/each}
-											</div>
-											{#if $chatMode === 'orchestrate'}
-												<!-- Sub-agent model policy: per-role profile models (default) vs
-												     one model for all sub-agents (the chat-selected model). -->
-												<Tooltip
-													content={$orchestrateUniformModel
-														? 'All sub-agents use the selected model. Click for per-role models.'
-														: 'Each sub-agent uses its role model. Click to force one model for all.'}
-												>
-													<button
-														type="button"
-														class="ml-1 px-2 py-0.5 rounded-full text-xs font-medium transition {$orchestrateUniformModel
-															? 'bg-purple-500/15 text-purple-500'
-															: 'text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300'}"
-														on:click={(e) => {
-															orchestrateUniformModel.update((v) => !v);
-															e.currentTarget.blur();
-														}}
-														tabindex="-1"
-														aria-pressed={$orchestrateUniformModel}
-														aria-label="Toggle uniform model for sub-agents"
-													>
-														{$orchestrateUniformModel ? '1 model' : 'Per-role'}
-													</button>
-												</Tooltip>
-											{/if}
+													{/each}
+
+													{#if $chatMode === 'orchestrate'}
+														<div class="my-1 border-t border-gray-100 dark:border-gray-800"></div>
+														<div class="px-2.5 pt-1 pb-0.5 text-[10px] uppercase tracking-wide text-gray-400">
+															{$i18n.t('Sub-agent models')}
+														</div>
+														<div class="flex gap-1 px-1.5 pb-1">
+															<button
+																type="button"
+																class="flex-1 px-2 py-1 rounded-lg text-xs transition {!$orchestrateUniformModel ? 'bg-purple-500/15 text-purple-600 dark:text-purple-300' : 'text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800'}"
+																on:click={() => orchestrateUniformModel.set(false)}
+															>
+																{$i18n.t('Per-role')}
+															</button>
+															<button
+																type="button"
+																class="flex-1 px-2 py-1 rounded-lg text-xs transition {$orchestrateUniformModel ? 'bg-purple-500/15 text-purple-600 dark:text-purple-300' : 'text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800'}"
+																on:click={() => orchestrateUniformModel.set(true)}
+															>
+																{$i18n.t('1 model')}
+															</button>
+														</div>
+													{/if}
+												</svelte:fragment>
+											</Dropdown>
 										</div>
 
 										{#if prompt === '' && files.length === 0 && ($_user?.role === 'admin' || ($_user?.permissions?.chat?.call ?? true))}

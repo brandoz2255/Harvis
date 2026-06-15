@@ -23,6 +23,9 @@
 	// `graph` wins when set; otherwise the graph is derived from events.
 	export let events: WorkspaceEvent[] = [];
 	export let graph: { nodes: any[]; edges: any[] } | null = null;
+	// When true, smoothly pan/zoom to the newest node as it streams in (run view).
+	// Parents pass `followLatest={running}` so it stops following once the run ends.
+	export let followLatest = false;
 
 	// A run node navigates to its run page; a session hub opens its chat
 	// (discord-* session ids have no chat page → inert).
@@ -43,7 +46,7 @@
 	const edges = writable<any[]>([]);
 	const nodeTypes = { custom: WorkflowNode, neural: NeuralMapNode };
 
-	const { fitView } = useSvelteFlow();
+	const { fitView, setCenter } = useSvelteFlow();
 	const nodesInitialized = useNodesInitialized();
 	let fitted = false;
 
@@ -64,6 +67,30 @@
 			fitView();
 		}
 	});
+
+	// Follow-latest: once the first fit has happened, glide to the newest node as
+	// it streams in (smooth zoom toward the freshest tool "pill"). Guarded on the
+	// last-followed id so it only fires when a genuinely new node appears.
+	let lastFollowedId = '';
+	$: if (followLatest && fitted && $nodes.length) {
+		const latest = $nodes[$nodes.length - 1];
+		if (latest && latest.id !== lastFollowedId) {
+			lastFollowedId = latest.id;
+			tick().then(() => {
+				try {
+					// setCenter (vs fitView{nodes}) is supported across xyflow versions and
+					// keeps the motion a smooth pan/zoom INTO the freshest box's center —
+					// zoom 1.6 so the camera visibly closes in on that single node.
+					const p = latest.position ?? { x: 0, y: 0 };
+					const w = latest.width ?? latest.measured?.width ?? 200;
+					const h = latest.height ?? latest.measured?.height ?? 64;
+					setCenter(p.x + w / 2, p.y + h / 2, { zoom: 1.6, duration: 500 });
+				} catch (_) {
+					// node not measured yet — skip this hop, the next one will catch up.
+				}
+			});
+		}
+	}
 
 	const resolveColorMode = (t: string): 'dark' | 'light' =>
 		t.includes('dark')
