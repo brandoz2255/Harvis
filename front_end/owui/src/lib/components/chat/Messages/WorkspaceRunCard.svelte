@@ -10,6 +10,7 @@
 	} from '$lib/apis/streaming/workspace-stream';
 	import Markdown from './Markdown.svelte';
 	import HarvisClawMascot from '$lib/components/common/HarvisClawMascot.svelte';
+	import RunArtifacts from '$lib/agent-studio/RunArtifacts.svelte';
 
 	const i18n: any = getContext('i18n');
 
@@ -41,6 +42,11 @@
 	let errorMessage = '';
 	let fixHint = '';
 	let elapsed = 0;
+	// Orchestrated completion moment: one entry per sub-agent, collected from its
+	// agent_end (label + its OWN finish() summary + ok + runtime). STITCHED, never
+	// model-generated. changedFiles drives the inline artifact.
+	let agents: { label: string; summary: string; ok: boolean; durationMs: number }[] = [];
+	let changedFiles: string[] = [];
 
 	// ── Live thought stream: a chronological feed of what the agent is doing. ──
 	// think = the model's streamed reasoning/output (token events, accumulated);
@@ -77,6 +83,13 @@
 	})();
 
 	$: running = phase === 'connecting' || phase === 'thinking' || phase === 'executing';
+	// Orchestrated runs are the ones whose sub-agents emit a parent_run_id-tagged
+	// agent_end → that's the gate for the rich completion block (single-agent runs
+	// never populate `agents`, so they keep the plain summary path).
+	$: isOrchestrated = agents.length > 0;
+	// Live wall-clock (elapsed); on a reloaded finished run elapsed is 0, so fall
+	// back to the longest sub-agent runtime (replay-safe, from agent_end).
+	$: doneDuration = elapsed > 0 ? elapsed : Math.max(0, ...agents.map((a) => a.durationMs));
 
 	// Map raw tool names → human phrases (mirrors chat_bridge._humanize_tool_call).
 	const PHRASES: Record<string, string> = {
@@ -191,9 +204,26 @@
 					}
 				}
 				break;
+			case 'agent_end': {
+				// Only orchestrated sub-agents (the native runner) carry parent_run_id
+				// AND their own finish() summary; OpenClaw's root agent_end has neither,
+				// so single-agent runs fall through to the plain summary path.
+				if (!evt.parent_run_id) break;
+				agents = [
+					...agents,
+					{
+						label: evt.agent_label || evt.label || $i18n.t('Agent'),
+						summary: (evt.summary || 'Done.').trim(),
+						ok: evt.success !== false,
+						durationMs: Number(evt.duration_ms) || 0
+					}
+				];
+				break;
+			}
 			case 'done':
 				phase = 'done';
 				summary = evt.summary ?? '';
+				if (Array.isArray(evt.changed_files)) changedFiles = evt.changed_files;
 				// Orchestrated runs emit changed_files — auto-open the Artifacts tab
 				// (the Preview) on finish (gate: orchestrated + ≥1 file). Once per run
 				// per tab so a reload of a finished chat doesn't re-pop the dock.
@@ -440,7 +470,32 @@
 			<div class="mt-1.5 text-gray-600 dark:text-gray-300">{currentStep}</div>
 		{/if}
 
-		{#if phase === 'done' && summary}
+		{#if phase === 'done' && isOrchestrated}
+			<!-- Completion moment (orchestrated): deterministic stats + STITCHED per-agent
+			     finish() summaries + the primary artifact rendered inline. Nothing generated. -->
+			<div class="mt-2 pt-2 border-t border-gray-100 dark:border-gray-850 space-y-2">
+				<div class="text-xs font-medium text-gray-600 dark:text-gray-300 tabular-nums">
+					{$i18n.t('Done')} · {agents.length}
+					{agents.length === 1 ? $i18n.t('agent') : $i18n.t('agents')} · {toolCount}
+					{toolCount === 1 ? $i18n.t('tool call') : $i18n.t('tool calls')}{#if doneDuration > 0} ·
+						{fmt(doneDuration)}{/if}
+				</div>
+				<div class="space-y-0.5">
+					{#each agents as a}
+						<div class="flex items-start gap-1.5 text-xs leading-relaxed">
+							<span class="shrink-0 mt-px {a.ok ? 'text-blue-500' : 'text-red-500'}"
+								>{a.ok ? '✓' : '✗'}</span
+							>
+							<span class="font-medium text-gray-700 dark:text-gray-200 shrink-0">{a.label}:</span>
+							<span class="text-gray-500 dark:text-gray-400 break-words min-w-0">{a.summary}</span>
+						</div>
+					{/each}
+				</div>
+				{#if changedFiles.length}
+					<RunArtifacts wsId={workspaceId} mode="all" />
+				{/if}
+			</div>
+		{:else if phase === 'done' && summary}
 			<div class="mt-2 pt-2 border-t border-gray-100 dark:border-gray-850 markdown-prose markdown-prose-sm text-sm text-gray-700 dark:text-gray-200">
 				<Markdown id={`ws-summary-${workspaceId}`} content={summary} />
 			</div>
