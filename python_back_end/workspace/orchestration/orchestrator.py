@@ -232,19 +232,28 @@ async def run_orchestrated(
     # clean up its scratch dir. ────────────────────────────────────────────────
     all_files: list[str] = []
     for c in children:
-        diff = await iso.collect_diff(c["wsinfo"]["workspace_path"])
-        files = await iso.collect_changed_files(c["wsinfo"]["workspace_path"])
+        ws_path = c["wsinfo"]["workspace_path"]
+        diff = await iso.collect_diff(ws_path)
+        files = await iso.collect_changed_files(ws_path)
+        contents = await iso.collect_file_contents(ws_path)  # before cleanup wipes the dir
         all_files += files
         await _db_save_artifact(
             pool, parent_workspace_id, "diff",
             path=f"{c['label']} · {c['wsinfo']['branch_name']}",
             content=diff or "(no changes)",
         )
+        # Full file contents → 'file' artifacts so the UI can PREVIEW (render the
+        # page), not just show a diff. Capped; the frontend picks the primary one.
+        for rel, content in contents.items():
+            await _db_save_artifact(
+                pool, parent_workspace_id, "file",
+                path=rel, content=(content or "")[:200_000],
+            )
         await _db_complete_run(
             pool, c["run_id"], "done" if c["ok"] else "error",
             f"{c['label']}: {len(files)} file(s) changed", None, 0, 0, c["start"],
         )
-        await iso.cleanup(c["wsinfo"]["workspace_path"])
+        await iso.cleanup(ws_path)
 
     await _db_save_artifact(
         pool, parent_workspace_id, "changed_files", content="\n".join(all_files),

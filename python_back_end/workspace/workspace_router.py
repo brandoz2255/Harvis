@@ -1868,17 +1868,31 @@ async def stream_workspace(
     the DB for the next reconnection.
     """
     ws = _workspaces.get(workspace_id)
-    if not ws:
-        _append_debug_log(
-            "workspace_router.py:stream_workspace",
-            "stream_workspace_missing_in_memory",
-            {"workspace_id": workspace_id, "known_workspaces": list(_workspaces.keys())[:20]},
-            "run_workspace_active_follow",
-            "H_active_orphan",
-        )
-        raise HTTPException(status_code=404, detail=f"Workspace {workspace_id} not found")
-
     pool = getattr(request.app.state, "pg_pool", None)
+
+    # Persistence: every event lives in workspace_events forever, but the in-memory
+    # _workspaces entry is lost on cleanup / a backend restart. Don't 404 those —
+    # verify ownership via the DB run row and serve the persisted history (replay
+    # only). The LIVE phase (broadcaster) still requires the in-memory ws.
+    if ws is None:
+        owner = None
+        if pool:
+            try:
+                async with pool.acquire() as conn:
+                    owner = await conn.fetchval(
+                        "SELECT user_id FROM workspace_runs WHERE id = $1", workspace_id
+                    )
+            except Exception:
+                owner = None
+        if owner is None or owner != current_user.get("id"):
+            _append_debug_log(
+                "workspace_router.py:stream_workspace",
+                "stream_workspace_missing_in_memory",
+                {"workspace_id": workspace_id, "known_workspaces": list(_workspaces.keys())[:20]},
+                "run_workspace_active_follow",
+                "H_active_orphan",
+            )
+            raise HTTPException(status_code=404, detail=f"Workspace {workspace_id} not found")
 
     async def event_generator():
         last_seq = -1  # highest seq replayed from DB
@@ -1944,6 +1958,12 @@ async def stream_workspace(
                             return
                 except Exception as exc:
                     logger.error("DB: replay workspace_events %s: %s", workspace_id, exc)
+
+            # Replay-only (no in-memory run — persisted history after cleanup /
+            # restart): the full DB history has been served, so close cleanly.
+            if ws is None:
+                yield 'data: {"type": "stream_end"}\n\n'
+                return
 
             # If the workspace is already terminal (DB write may have raced ahead
             # of the status update), close the stream now
@@ -2271,6 +2291,47 @@ async def get_artifact(
         "path": row["path"],
         "content": row["content"],
         "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+    }
+
+
+@workspace_router.get("/artifacts")
+async def list_all_artifacts(
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+    limit: int = 200,
+):
+    """Every FILE artifact the user's orchestrated runs produced — the global
+    Artifacts gallery. Joined to the owning run for task context, newest first."""
+    pool = getattr(request.app.state, "pg_pool", None)
+    if pool is None:
+        return {"artifacts": []}
+    uid = current_user.get("id")
+    limit = max(1, min(int(limit or 200), 500))
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT a.id, a.workspace_id, a.path,
+                   COALESCE(LENGTH(a.content), 0) AS size, a.created_at, r.task_brief
+            FROM workspace_artifacts a
+            JOIN workspace_runs r ON r.id = a.workspace_id
+            WHERE r.user_id = $1 AND a.artifact_type = 'file'
+            ORDER BY a.created_at DESC
+            LIMIT $2
+            """,
+            uid, limit,
+        )
+    return {
+        "artifacts": [
+            {
+                "id": r["id"],
+                "workspace_id": r["workspace_id"],
+                "path": r["path"],
+                "size": r["size"],
+                "task_brief": r["task_brief"],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            }
+            for r in rows
+        ]
     }
 
 

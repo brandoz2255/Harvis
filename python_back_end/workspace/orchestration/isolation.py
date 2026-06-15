@@ -117,6 +117,14 @@ class WorkspaceIsolationManager:
         changed |= {rel for rel in baseline if rel not in current}  # deletions
         return sorted(changed)
 
+    async def collect_file_contents(self, workspace_path: str) -> dict[str, str]:
+        """Current text content of every CHANGED file (vs baseline) — for live
+        previews (the diff alone can't be rendered as a page). Huge/binary blobs
+        come back as the snapshot's ``<N bytes — not snapshotted>`` placeholder."""
+        baseline = self._baseline(workspace_path)
+        current = _snapshot(workspace_path)
+        return {rel: content for rel, content in current.items() if baseline.get(rel) != content}
+
     async def collect_diff(self, workspace_path: str) -> str:
         """Unified diff of everything the agent produced (vs the baseline)."""
         baseline = self._baseline(workspace_path)

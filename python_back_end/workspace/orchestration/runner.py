@@ -13,8 +13,10 @@ Harvis tool-call-discipline concern.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import os
 import time
 from typing import AsyncGenerator
 
@@ -23,6 +25,36 @@ from .model_router import ModelRouter
 from .tools import TOOL_SCHEMA, dispatch_tool, parse_tool_calls
 
 logger = logging.getLogger(__name__)
+
+# No-progress guard: how many consecutive steps with ZERO file change before we
+# stop a churning sub-agent (the finish-reluctance loop — re-reading/re-writing
+# the same file without ever calling finish). Tunable via env.
+_MAX_IDLE_STEPS = max(1, int(os.getenv("HARVIS_ORCH_MAX_IDLE_STEPS", "3")))
+_SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv"}
+_BASELINE_FILE = ".harvis-baseline.json"
+
+
+def _ws_fingerprint(path: str) -> str:
+    """SHA-256 over every (small) file in the workspace — lets the runner detect
+    when an agent has stopped producing real changes."""
+    h = hashlib.sha256()
+    try:
+        for root, dirs, files in os.walk(path):
+            dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
+            for fn in sorted(files):
+                if fn == _BASELINE_FILE:
+                    continue
+                fp = os.path.join(root, fn)
+                try:
+                    h.update(os.path.relpath(fp, path).encode("utf-8", "replace"))
+                    with open(fp, "rb") as f:
+                        h.update(f.read(256 * 1024))
+                except Exception:
+                    continue
+    except Exception:
+        return ""
+    return h.hexdigest()
+
 
 _SYSTEM = (
     "You are {label}, an autonomous coding sub-agent working in an ISOLATED, "
@@ -69,6 +101,9 @@ class SubAgentRunner:
         summary = ""
         ok_overall = True
         steps = 0
+        last_fp = _ws_fingerprint(workspace_path)  # baseline (empty scratch dir)
+        made_edit = False
+        idle = 0
 
         try:
             while steps < max_steps and (time.monotonic() - started) < max_runtime_seconds:
@@ -97,6 +132,8 @@ class SubAgentRunner:
                         summary = str(args.get("summary") or "Task complete.")
                         finished = True
                         break
+                    if name in ("edit_file", "write"):
+                        made_edit = True
                     yield ev("tool_call", {"tool": name, "args": args})
                     result, ok = await dispatch_tool(workspace_path, name, args)
                     if not ok:
@@ -106,6 +143,23 @@ class SubAgentRunner:
                         f"{name}({json.dumps(args)[:140]}) -> {result[:500]}"
                     )
                 if finished:
+                    break
+
+                # ── No-progress guard: stop the finish-reluctance churn (the model
+                # re-reading / re-writing the same file without ever calling finish).
+                # Only after a real edit, and only when the workspace has been
+                # unchanged for _MAX_IDLE_STEPS in a row — so edit→test→edit loops
+                # (which DO change files) keep going. ──────────────────────────────
+                fp = _ws_fingerprint(workspace_path)
+                idle = idle + 1 if fp == last_fp else 0
+                last_fp = fp
+                if made_edit and idle >= _MAX_IDLE_STEPS:
+                    summary = summary or (
+                        f"Stopped — no further changes after {idle} idle steps."
+                    )
+                    logger.info(
+                        "subagent %s: no-progress guard tripped at step %d", label, steps
+                    )
                     break
 
                 # Feed tool results back as a user turn (robust for local models).
