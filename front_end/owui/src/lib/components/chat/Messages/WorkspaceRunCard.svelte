@@ -194,6 +194,22 @@
 			case 'done':
 				phase = 'done';
 				summary = evt.summary ?? '';
+				// Orchestrated runs emit changed_files — auto-open the Artifacts tab
+				// (the Preview) on finish (gate: orchestrated + ≥1 file). Once per run
+				// per tab so a reload of a finished chat doesn't re-pop the dock.
+				if (Array.isArray(evt.changed_files) && evt.changed_files.length > 0) {
+					try {
+						const k = `harvis-autopop-${workspaceId}`;
+						if (!sessionStorage.getItem(k)) {
+							sessionStorage.setItem(k, '1');
+							dockedRunId.set(workspaceId);
+							workspaceControlsTab.set('activity');
+							showControls.set(true);
+						}
+					} catch (_) {
+						// sessionStorage unavailable — skip auto-pop, no harm.
+					}
+				}
 				break;
 			case 'error':
 				phase = 'error';
@@ -256,11 +272,11 @@
 	};
 
 	const openStudio = () => goto(`/harvis/agent-studio/run/${workspaceId}`);
-	// Dock a COMPACT run-view of THIS run into the right-rail pane (half-screen) —
-	// not the Activity log of all runs. Resize the pane to taste.
+	// Dock THIS run's live workspace (Processes / Map / Changes) into the Overview
+	// tab of the right-rail pane. Resize the pane to taste.
 	const dockRun = () => {
 		dockedRunId.set(workspaceId);
-		workspaceControlsTab.set('run');
+		workspaceControlsTab.set('overview');
 		showControls.set(true);
 	};
 

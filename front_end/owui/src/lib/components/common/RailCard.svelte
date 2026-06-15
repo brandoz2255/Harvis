@@ -1,12 +1,17 @@
 <script lang="ts">
 	import { slide } from 'svelte/transition';
 	import { quintOut } from 'svelte/easing';
+	import { createEventDispatcher } from 'svelte';
 	import ChevronDown from '$lib/components/icons/ChevronDown.svelte';
+
+	const dispatch = createEventDispatcher();
 
 	export let title = '';
 	export let icon: any = null;
 	export let open = true;
 	export let collapsible = true;
+	// When true, show an ✕ that emits `dismiss` (parent hides/removes the card).
+	export let dismissible = false;
 	export let count: number | null = null;
 	// localStorage key for the open state; read once at init (SSR is off globally)
 	export let persistKey: string | null = null;
@@ -44,6 +49,24 @@
 		</button>
 		<!-- actions render OUTSIDE the toggle button (no nested-button a11y bug) -->
 		<slot name="actions" />
+		{#if dismissible}
+			<button
+				type="button"
+				class="p-1 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition"
+				aria-label="Hide"
+				on:click={() => dispatch('dismiss')}
+			>
+				<svg
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="2"
+					stroke-linecap="round"
+					stroke-linejoin="round"
+					class="size-3.5"><path d="M6 18 18 6M6 6l12 12" /></svg
+				>
+			</button>
+		{/if}
 		{#if collapsible}
 			<button
 				type="button"

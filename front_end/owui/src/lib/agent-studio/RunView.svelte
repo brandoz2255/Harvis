@@ -50,17 +50,37 @@
 
 	const consume = async (id: string) => {
 		controller = new AbortController();
-		try {
-			for await (const evt of createWorkspaceStream(id, localStorage.token, controller.signal)) {
-				events = [...events, evt];
-				if (evt.type === 'done') phase = 'done';
-				else if (evt.type === 'error') phase = 'error';
-				else if (evt.type === 'cancelled') phase = 'cancelled';
-				else if (phase === 'connecting') phase = 'running';
-				if (WORKSPACE_TERMINAL.has(evt.type)) break;
+		let failed = 0;
+		// Resume across dropped SSE connections: the backend replays the full DB
+		// history on each (re)connect, so the view PERSISTS instead of dying when
+		// the stream drops mid-run. A clean `stream_end` stops the loop.
+		while (activeId === id && !['done', 'error', 'cancelled'].includes(phase)) {
+			let cleanEnd = false;
+			let gotAny = false;
+			try {
+				for await (const evt of createWorkspaceStream(id, localStorage.token, controller.signal)) {
+					if (evt.type === 'stream_end') {
+						cleanEnd = true;
+						break;
+					}
+					gotAny = true;
+					events = [...events, evt];
+					if (evt.type === 'done') phase = 'done';
+					else if (evt.type === 'error') phase = 'error';
+					else if (evt.type === 'cancelled') phase = 'cancelled';
+					else if (phase === 'connecting') phase = 'running';
+					if (WORKSPACE_TERMINAL.has(evt.type)) break;
+				}
+			} catch (e: any) {
+				if (e?.name === 'AbortError') return;
 			}
-		} catch (e: any) {
-			if (e?.name !== 'AbortError' && phase !== 'done') phase = 'error';
+			if (cleanEnd || ['done', 'error', 'cancelled'].includes(phase) || activeId !== id) break;
+			failed = gotAny ? 0 : failed + 1;
+			if (failed > 20) break;
+			// Reconnect: replay rebuilds the full state, so clear to avoid dupes.
+			events = [];
+			phase = 'connecting';
+			await new Promise((r) => setTimeout(r, 1500));
 		}
 	};
 
@@ -144,6 +164,11 @@
 				on:click={openFull}
 				title={$i18n.t('Open full')}>⤢ {$i18n.t('Full')}</button
 			>
+		</div>
+		<!-- Artifact preview + diffs — auto-popped when an orchestrated run finishes.
+		     Renders nothing until artifacts exist, so it's invisible while running. -->
+		<div class="shrink-0 max-h-[55%] overflow-y-auto px-3">
+			<RunArtifacts {wsId} done={!running} />
 		</div>
 		<!-- Resizable split: drag the handle to push the thought stream up/down. -->
 		<PaneGroup direction="vertical" class="flex-1 min-h-0">

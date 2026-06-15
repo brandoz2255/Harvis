@@ -69,7 +69,12 @@ export async function* createWorkspaceStream(
 			continue;
 		}
 		if (!evt || !evt.type) continue;
-		if (evt.type === 'stream_end') break;
+		if (evt.type === 'stream_end') {
+			// Surface the clean end so consumers can tell "backend closed the stream"
+			// (don't reconnect) from "connection dropped mid-run" (do reconnect).
+			yield { type: 'stream_end' };
+			break;
+		}
 
 		yield evt;
 

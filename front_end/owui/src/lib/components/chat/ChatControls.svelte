@@ -39,8 +39,8 @@
 	import { toast } from 'svelte-sonner';
 
 	import Controls from './Controls/Controls.svelte';
-	import ViewPanel from './ChatControls/ViewPanel.svelte';
-	import SessionArtifacts from './SessionArtifacts.svelte';
+	import OverviewPanel from './ChatControls/OverviewPanel.svelte';
+	import ArtifactsPanel from './ChatControls/ArtifactsPanel.svelte';
 	import CallOverlay from './MessageInput/CallOverlay.svelte';
 	import Drawer from '../common/Drawer.svelte';
 	import Artifacts from './Artifacts.svelte';
@@ -117,6 +117,9 @@
 	// Map (the conversation node-graph, key 'view') needs a conversation — fall
 	// back to Overview (background tasks) when there are no messages.
 	$: if (!showOverviewTab && activeTab === 'view') activeTab = 'overview';
+	// The dedicated 'run' dock tab was removed — its pieces now live in Overview
+	// (Processes / Map / Changes) and Artifacts (Preview). Redirect any straggler.
+	$: if (activeTab === 'run') activeTab = 'overview';
 
 	// The in-chat WorkspaceRunCard requests the Activity tab via this store.
 	$: if ($workspaceControlsTab) {
@@ -367,17 +370,6 @@
 										{$i18n.t('Overview')}
 									</button>
 								{/if}
-								{#if $dockedRunId}
-									<button
-										class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
-										'run'
-											? 'bg-gray-100 dark:bg-gray-800 font-medium text-gray-900 dark:text-white'
-											: 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'}"
-										on:click={() => (activeTab = 'run')}
-									>
-										{$i18n.t('Run')}
-									</button>
-								{/if}
 								{#if showActivityTab}
 									<button
 										class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
@@ -438,9 +430,9 @@
 									: ''}"
 						>
 							{#if activeTab === 'overview'}
-								<ViewPanel />
+								<OverviewPanel />
 							{:else if activeTab === 'activity'}
-								<SessionArtifacts {history} />
+								<ArtifactsPanel {history} />
 							{:else if activeTab === 'view'}
 								<Overview
 									{history}
@@ -454,8 +446,6 @@
 								<GlobalMap mode="dock" />
 							{:else if activeTab === 'brain'}
 								<Brain mode="dock" />
-							{:else if activeTab === 'run'}
-								<RunView wsId={$dockedRunId ?? ''} mode="dock" />
 							{:else if activeTab === 'research'}
 								<ResearchPanel researchId={$dockedResearchId ?? ''} mode="dock" />
 							{:else if activeTab === 'files' && $selectedTerminalId}
@@ -560,14 +550,6 @@
 											{$i18n.t('Overview')}
 										</button>
 									{/if}
-									{#if $dockedRunId}
-										<button
-											class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab === 'run' ? 'bg-gray-100 dark:bg-gray-800 font-medium text-gray-900 dark:text-white' : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'}"
-											on:click={() => (activeTab = 'run')}
-										>
-											{$i18n.t('Run')}
-										</button>
-									{/if}
 									{#if showActivityTab}
 										<button
 											class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
@@ -628,9 +610,9 @@
 										: ''}"
 							>
 								{#if activeTab === 'overview'}
-									<ViewPanel />
+									<OverviewPanel />
 								{:else if activeTab === 'activity'}
-									<SessionArtifacts {history} />
+									<ArtifactsPanel {history} />
 								{:else if activeTab === 'view'}
 									<Overview
 										{history}
@@ -649,8 +631,6 @@
 									<GlobalMap mode="dock" />
 								{:else if activeTab === 'brain'}
 									<Brain mode="dock" />
-								{:else if activeTab === 'run'}
-									<RunView wsId={$dockedRunId ?? ''} mode="dock" />
 								{:else if activeTab === 'research'}
 									<ResearchPanel researchId={$dockedResearchId ?? ''} mode="dock" />
 								{:else if activeTab === 'files' && $selectedTerminalId}

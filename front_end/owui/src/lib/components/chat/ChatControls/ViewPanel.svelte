@@ -67,7 +67,7 @@
 	const dockRun = (id: string) => {
 		// Mirrors WorkspaceRunCard.dockRun — the pane is already open here
 		dockedRunId.set(id);
-		workspaceControlsTab.set('run');
+		workspaceControlsTab.set('overview');
 	};
 
 	const stopRun = async (id: string) => {
