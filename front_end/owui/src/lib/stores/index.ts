@@ -140,6 +140,12 @@ if (typeof localStorage !== 'undefined') {
 		localStorage.setItem('orchestrateUniformModel', String(v))
 	);
 }
+
+// One-shot: a prompt the next NEW chat should auto-submit on mount. Set by the
+// Agent Studio template gallery (one-click launch); Chat.svelte consumes it
+// once on '/' and clears it. NOT persisted — purely a hand-off between routes.
+export const pendingComposerPrompt = writable<string>('');
+
 export const showOverview = writable(false);
 export const showArtifacts = writable(false);
 export const showCallOverlay = writable(false);

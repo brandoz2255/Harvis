@@ -2,6 +2,7 @@
 // (`/harvis/agent-studio/[surface]`) and (Wave 2) the ChatControls dock-router.
 // "One component, two mounts": each surface takes a `mode: 'full' | 'dock'` prop.
 
+import Automations from './Automations.svelte';
 import Brain from './Brain.svelte';
 import GlobalMap from './GlobalMap.svelte';
 import ModelComparison from './ModelComparison.svelte';
@@ -17,6 +18,7 @@ export interface Surface {
 }
 
 export const surfaces: Surface[] = [
+	{ key: 'automations', label: 'Automations', component: Automations, modes: ['full'] },
 	{ key: 'brain', label: 'Brain', component: Brain, modes: ['full', 'dock'] },
 	// Renamed Neural Map (2026-06-11); key stays 'global-map' — the dock bridge
 	// values and the existing route depend on it. '/neural-map' is an alias below.

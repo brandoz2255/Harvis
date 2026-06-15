@@ -33,6 +33,7 @@
 		showControls,
 		chatMode,
 		orchestrateUniformModel,
+		pendingComposerPrompt,
 		showCallOverlay,
 		currentChatPage,
 		temporaryChatEnabled,
@@ -795,7 +796,19 @@
 		const pageSubscribe = page.subscribe(async (p) => {
 			if (p.url.pathname === '/') {
 				await tick();
-				initNewChat();
+				// Agent Studio one-click launch needs a fully-initialised chat before
+				// submit, so AWAIT init when a pending prompt is queued (initNewChat is
+				// async — firing submitPrompt during its history reset corrupts the
+				// message tree). Normal navigation keeps the existing fire-and-forget.
+				if ($pendingComposerPrompt) {
+					await initNewChat();
+					const _launchPrompt = $pendingComposerPrompt;
+					pendingComposerPrompt.set('');
+					await tick();
+					await submitPrompt(_launchPrompt, []);
+				} else {
+					initNewChat();
+				}
 
 				// Re-fetch banners on navigation to homepage so newly configured banners appear
 				try {
