@@ -48,13 +48,9 @@
 				researchEnabled.set(true);
 				go('/');
 			}
-		},
-		{
-			key: 'vibecode',
-			label: 'Vibecode',
-			hint: 'Open the Vibe Code workspace.',
-			run: () => go('/harvis/vibecode')
 		}
+		// Vibecode intent intentionally omitted — the Vibe Code workspace is parked;
+		// general/advanced AI use leads the hub. Re-add when Vibecode is revived.
 	];
 </script>
 
