@@ -98,6 +98,61 @@ async def create_my_job(
     return {"ok": True, "job": _to_view(job).model_dump()}
 
 
+@router.get("/stats")
+async def my_automation_stats(
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+) -> dict:
+    """Real run outcomes for this user's automations — aggregated from the
+    workspace_runs the cron tick launched (tagged session_id 'cron-<job>').
+    Counts only parent (orchestrator) runs so one fire == one run.
+
+    NOTE: declared BEFORE GET /{job_id} so 'stats' isn't matched as a job id.
+    """
+    pool = getattr(request.app.state, "pg_pool", None)
+    if pool is None:
+        raise HTTPException(status_code=503, detail="db unavailable")
+    uid = current_user["id"]
+    async with pool.acquire() as conn:
+        by_status = await conn.fetch(
+            """
+            SELECT status, COUNT(*) AS n
+            FROM workspace_runs
+            WHERE user_id = $1 AND session_id LIKE 'cron-%'
+              AND parent_run_id IS NULL
+              AND started_at >= NOW() - INTERVAL '7 days'
+            GROUP BY status
+            """,
+            uid,
+        )
+        recent = await conn.fetch(
+            """
+            SELECT id, task_brief, status, started_at, final_summary
+            FROM workspace_runs
+            WHERE user_id = $1 AND session_id LIKE 'cron-%'
+              AND parent_run_id IS NULL
+            ORDER BY started_at DESC
+            LIMIT 20
+            """,
+            uid,
+        )
+    counts = {r["status"]: int(r["n"]) for r in by_status}
+    return {
+        "successful_7d": counts.get("done", 0),
+        "failed_7d": counts.get("error", 0),
+        "recent": [
+            {
+                "id": r["id"],
+                "task_brief": r["task_brief"],
+                "status": r["status"],
+                "started_at": r["started_at"].isoformat() if r["started_at"] else None,
+                "summary": r["final_summary"],
+            }
+            for r in recent
+        ],
+    }
+
+
 @router.get("/{job_id}")
 async def get_my_job(
     job_id: str,

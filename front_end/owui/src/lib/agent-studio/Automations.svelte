@@ -8,7 +8,9 @@
 		setCronJobStatus,
 		deleteCronJob,
 		scheduleSummary,
+		getCronStats,
 		type CronJob,
+		type AutomationStats,
 		type ScheduleType
 	} from '$lib/apis/cron';
 	import {
@@ -26,19 +28,40 @@
 
 	// ── Automations (cron jobs that launch orchestrated runs) ──
 	let jobs: CronJob[] = [];
+	let stats: AutomationStats = { successful_7d: 0, failed_7d: 0, recent: [] };
 	let loaded = false;
 	let scope: 'mine' | 'team' = 'mine';
 
 	const load = async () => {
 		loaded = false;
-		jobs = await listCronJobs();
+		const [j, s] = await Promise.all([listCronJobs(), getCronStats()]);
+		jobs = j;
+		stats = s;
 		loaded = true;
 	};
 	onMount(load);
 
 	$: total = jobs.length;
-	$: successful = jobs.filter((j) => j.run_count > 0 && j.status !== 'error').length;
-	$: failed = jobs.filter((j) => j.status === 'error').length;
+	// Real 7-day run outcomes (from the runs the cron tick actually launched).
+	$: successful = stats.successful_7d;
+	$: failed = stats.failed_7d;
+
+	const relTime = (iso: string | null): string => {
+		if (!iso) return '';
+		const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+		if (s < 60) return 'just now';
+		if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+		if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+		return `${Math.floor(s / 86400)}d ago`;
+	};
+	const runStatusColor = (s: string): string =>
+		s === 'done'
+			? 'text-green-500'
+			: s === 'error'
+				? 'text-red-500'
+				: s === 'cancelled'
+					? 'text-amber-500'
+					: 'text-blue-500';
 
 	// ── Template gallery ──
 	let templateTab: TemplateTab = 'Popular';
@@ -272,6 +295,32 @@
 					</div>
 				{/each}
 			</div>
+		{/if}
+
+		<!-- Recent runs — the actual runs the automations launched -->
+		{#if stats.recent.length}
+			<section>
+				<h2 class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
+					{$i18n.t('Recent runs')}
+				</h2>
+				<div
+					class="rounded-xl border border-gray-100 dark:border-gray-850 divide-y divide-gray-100 dark:divide-gray-850"
+				>
+					{#each stats.recent as r (r.id)}
+						<a
+							href={`/harvis/agent-studio/run/${r.id}`}
+							class="flex items-center gap-2.5 px-4 py-2.5 hover:bg-gray-50 dark:hover:bg-gray-850 transition"
+						>
+							<span class="shrink-0 text-[10px] {runStatusColor(r.status)}">●</span>
+							<span class="text-sm text-gray-700 dark:text-gray-200 truncate flex-1"
+								>{r.task_brief || $i18n.t('Automation run')}</span
+							>
+							<span class="text-[10px] uppercase tracking-wide text-gray-400 shrink-0">{r.status}</span>
+							<span class="text-xs text-gray-400 shrink-0 tabular-nums">{relTime(r.started_at)}</span>
+						</a>
+					{/each}
+				</div>
+			</section>
 		{/if}
 
 		<!-- Template gallery -->

@@ -222,10 +222,15 @@ async def run_orchestrated(
         if item is sentinel:
             remaining -= 1
             continue
-        if item.type == "agent_end" and (item.data or {}).get("success") is False:
+        if item.type == "agent_end":
             c = child_by_run.get(getattr(item, "run_id", None))
             if c:
-                c["ok"] = False
+                data = item.data or {}
+                # Capture the sub-agent's own finish() summary for its run row.
+                if data.get("summary"):
+                    c["summary"] = data["summary"]
+                if data.get("success") is False:
+                    c["ok"] = False
         yield item
 
     # ── Collect each sub-agent's diff → its own artifact; complete its run row;
@@ -249,9 +254,13 @@ async def run_orchestrated(
                 pool, parent_workspace_id, "file",
                 path=rel, content=(content or "")[:200_000],
             )
+        # Prefer the sub-agent's own finish() summary (captured from its agent_end)
+        # so the run tree / history / Neural Map show what it actually did; fall
+        # back to a generic file-count line.
+        child_summary = c.get("summary") or f"{c['label']}: {len(files)} file(s) changed"
         await _db_complete_run(
             pool, c["run_id"], "done" if c["ok"] else "error",
-            f"{c['label']}: {len(files)} file(s) changed", None, 0, 0, c["start"],
+            child_summary, None, 0, 0, c["start"],
         )
         await iso.cleanup(ws_path)
 

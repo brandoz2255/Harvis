@@ -37,10 +37,21 @@ def _make_dispatch(app):
             from workspace.workspace_router import launch_workspace_internal  # type: ignore
 
             req = Request(scope={"type": "http", "app": app})
+            # Automations created from Agent Studio carry metadata.agent_id =
+            # "orchestrated" so the scheduled run fans out into the multi-agent
+            # orchestrator (same path as a chat Orchestrate run). Default "main"
+            # keeps any pre-existing jobs on the single-agent path.
+            meta = getattr(job, "metadata", None) or {}
             await launch_workspace_internal(
                 request=req,
                 user_id=job.user_id,
                 task_brief=job.prompt,
+                agent_id=str(meta.get("agent_id") or "main"),
+                model_name=str(meta.get("model_name") or ""),
+                # Tag every fire with a stable per-job session so the Automations
+                # dashboard can aggregate real run outcomes (Successful/Failed 7d)
+                # + a Run History from workspace_runs.
+                session_id=f"cron-{job.id}",
             )
             return True, None
         except Exception as e:

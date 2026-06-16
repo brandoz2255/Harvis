@@ -151,6 +151,8 @@ services:
       HARVIS_TERMINAL_DEFAULT_TIMEOUT_S: "${HARVIS_TERMINAL_DEFAULT_TIMEOUT_S:-30}"
       HARVIS_TERMINAL_MAX_TIMEOUT_S: "${HARVIS_TERMINAL_MAX_TIMEOUT_S:-600}"
       HARVIS_TERMINAL_IDLE_TIMEOUT_S: "${HARVIS_TERMINAL_IDLE_TIMEOUT_S:-1800}"
+      # Automations: the cron tick loop fires scheduled agent runs when true.
+      HARVIS_CRON_ENABLED: "${HARVIS_CRON_ENABLED:-true}"
       BACKEND_URL: "http://backend:8000"
       HF_HOME: "/models-cache/huggingface"
       TRANSFORMERS_CACHE: "/models-cache/huggingface"

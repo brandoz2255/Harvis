@@ -86,6 +86,31 @@ export const deleteCronJob = async (id: string): Promise<boolean> => {
 	}
 };
 
+export interface AutomationRun {
+	id: string;
+	task_brief: string | null;
+	status: string;
+	started_at: string | null;
+	summary: string | null;
+}
+
+export interface AutomationStats {
+	successful_7d: number;
+	failed_7d: number;
+	recent: AutomationRun[];
+}
+
+// Real run outcomes (Successful/Failed 7d + recent runs) aggregated from the
+// workspace_runs the cron tick launched. Backend: GET /api/cron/stats.
+export const getCronStats = async (): Promise<AutomationStats> => {
+	try {
+		const r = await fetch(`${BASE}/stats`, { headers: authHeaders(), credentials: 'include' });
+		return r.ok ? await r.json() : { successful_7d: 0, failed_7d: 0, recent: [] };
+	} catch (_) {
+		return { successful_7d: 0, failed_7d: 0, recent: [] };
+	}
+};
+
 // Human-readable schedule summary, e.g. "Every 30m", "Daily 9:00", "Once".
 export const scheduleSummary = (j: Pick<CronJob, 'schedule_type' | 'schedule_expr'>): string => {
 	if (j.schedule_type === 'interval') return `Every ${j.schedule_expr}`;
