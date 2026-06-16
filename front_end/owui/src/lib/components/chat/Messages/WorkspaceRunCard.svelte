@@ -224,22 +224,9 @@
 				phase = 'done';
 				summary = evt.summary ?? '';
 				if (Array.isArray(evt.changed_files)) changedFiles = evt.changed_files;
-				// Orchestrated runs emit changed_files — auto-open the Artifacts tab
-				// (the Preview) on finish (gate: orchestrated + ≥1 file). Once per run
-				// per tab so a reload of a finished chat doesn't re-pop the dock.
-				if (Array.isArray(evt.changed_files) && evt.changed_files.length > 0) {
-					try {
-						const k = `harvis-autopop-${workspaceId}`;
-						if (!sessionStorage.getItem(k)) {
-							sessionStorage.setItem(k, '1');
-							dockedRunId.set(workspaceId);
-							workspaceControlsTab.set('activity');
-							showControls.set(true);
-						}
-					} catch (_) {
-						// sessionStorage unavailable — skip auto-pop, no harm.
-					}
-				}
+				// The artifact now renders inline in this card's completion block, so we
+				// no longer force-open the dock Artifacts tab on finish (it was intrusive
+				// and raced the dock state). Click "View" to dock the run.
 				break;
 			case 'error':
 				phase = 'error';
