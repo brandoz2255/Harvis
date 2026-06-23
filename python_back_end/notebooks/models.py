@@ -57,6 +57,7 @@ class Notebook(BaseModel):
     user_id: int
     title: str
     description: Optional[str] = None
+    emoji: Optional[str] = None
     is_active: bool = True
     created_at: datetime
     updated_at: datetime
@@ -70,11 +71,18 @@ class Notebook(BaseModel):
 class CreateNotebookRequest(BaseModel):
     title: str = Field(..., min_length=1, max_length=255)
     description: Optional[str] = Field(None, max_length=2000)
+    emoji: Optional[str] = Field(None, max_length=16)
 
 
 class UpdateNotebookRequest(BaseModel):
     title: Optional[str] = Field(None, min_length=1, max_length=255)
     description: Optional[str] = Field(None, max_length=2000)
+    emoji: Optional[str] = Field(None, max_length=16)
+
+
+class AutonameResponse(BaseModel):
+    title: str
+    emoji: Optional[str] = None
 
 
 class NotebookListResponse(BaseModel):

@@ -65,6 +65,16 @@ def build_config() -> dict:
             "enable_folders": True,
             # Harvis: gates the Agent Studio / Vibe Code sidebar pins + /harvis routes.
             "enable_harvis_studio": _env_bool("HARVIS_OWUI_ENABLE_STUDIO", True),
+            # Harvis: Claude-Desktop-style Chat/Notebook/Code mode switcher at the top
+            # of the sidebar (route-based; scopes the sidebar body per mode).
+            "enable_harvis_mode_switcher": _env_bool("HARVIS_OWUI_MODE_SWITCHER", True),
+            # Harvis: VibeCode page = the Claude-Code-desktop layout (session list /
+            # attach-repo run + diffs + Create-PR / plan + tasks). Off → the stub.
+            "enable_harvis_vibecode": _env_bool("HARVIS_OWUI_VIBECODE", True),
+            # Whether a folder picked via the host browser may be edited IN-PLACE (real files).
+            # OFF by default → browsed folders are clone-mode only (held until the permission
+            # ladder + an exec sandbox are verified for that path). Mirrors HARVIS_INPLACE_ON_BROWSED.
+            "enable_inplace_on_browsed": _env_bool("HARVIS_INPLACE_ON_BROWSED", False),
             # P1.5: opt-in run-level approval gate for workspace tasks (default OFF).
             "enable_harvis_approvals": _env_bool("HARVIS_OWUI_APPROVALS", False),
             "enable_version_update_check": False,

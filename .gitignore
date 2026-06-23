@@ -12,6 +12,12 @@ python_back_end/**/*.pyc
 python_back_end/**/*.pyo
 python_back_end/**/*.pyd
 .env
+
+# Runtime RW host-browse / attach sandbox — keep the placeholder dir, ignore
+# everything the agent writes there (demo repos, nested .git, RW-mounted host files).
+harvis-fs-browse/*
+!harvis-fs-browse/.gitignore
+
 # Ignore .gradio folder
 .gradio/
 __pycache__

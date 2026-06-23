@@ -55,10 +55,10 @@ class NotebookManager:
         """Create a new notebook for a user"""
         async with self.db_pool.acquire() as conn:
             row = await conn.fetchrow("""
-                INSERT INTO notebooks (user_id, title, description)
-                VALUES ($1, $2, $3)
-                RETURNING id, user_id, title, description, is_active, created_at, updated_at
-            """, user_id, request.title, request.description)
+                INSERT INTO notebooks (user_id, title, description, emoji)
+                VALUES ($1, $2, $3, $4)
+                RETURNING id, user_id, title, description, emoji, is_active, created_at, updated_at
+            """, user_id, request.title, request.description, getattr(request, "emoji", None))
 
             logger.info(f"Created notebook {row['id']} for user {user_id}")
             return Notebook(**dict(row), source_count=0, note_count=0)
@@ -67,7 +67,7 @@ class NotebookManager:
         """Get a notebook by ID (only if owned by user)"""
         async with self.db_pool.acquire() as conn:
             row = await conn.fetchrow("""
-                SELECT n.id, n.user_id, n.title, n.description, n.is_active, n.created_at, n.updated_at,
+                SELECT n.id, n.user_id, n.title, n.description, n.emoji, n.is_active, n.created_at, n.updated_at,
                        (SELECT COUNT(*) FROM notebook_sources WHERE notebook_id = n.id) as source_count,
                        (SELECT COUNT(*) FROM notebook_notes WHERE notebook_id = n.id) as note_count
                 FROM notebooks n
@@ -84,7 +84,7 @@ class NotebookManager:
         async with self.db_pool.acquire() as conn:
             # Get notebooks with counts
             rows = await conn.fetch("""
-                SELECT n.id, n.user_id, n.title, n.description, n.is_active, n.created_at, n.updated_at,
+                SELECT n.id, n.user_id, n.title, n.description, n.emoji, n.is_active, n.created_at, n.updated_at,
                        (SELECT COUNT(*) FROM notebook_sources WHERE notebook_id = n.id) as source_count,
                        (SELECT COUNT(*) FROM notebook_notes WHERE notebook_id = n.id) as note_count
                 FROM notebooks n
@@ -119,6 +119,11 @@ class NotebookManager:
                 params.append(request.description)
                 param_idx += 1
 
+            if getattr(request, "emoji", None) is not None:
+                updates.append(f"emoji = ${param_idx}")
+                params.append(request.emoji)
+                param_idx += 1
+
             if not updates:
                 return await self.get_notebook(notebook_id, user_id)
 
@@ -126,7 +131,7 @@ class NotebookManager:
                 UPDATE notebooks
                 SET {', '.join(updates)}
                 WHERE id = $1 AND user_id = $2 AND is_active = TRUE
-                RETURNING id, user_id, title, description, is_active, created_at, updated_at
+                RETURNING id, user_id, title, description, emoji, is_active, created_at, updated_at
             """, *params)
 
             if not row:
@@ -183,7 +188,7 @@ class NotebookManager:
                 RETURNING id, notebook_id, type, title, storage_path, original_filename, metadata, status,
                           error_message, created_at, updated_at
             """, notebook_id, source_type.value, title, storage_path, original_filename,
-                 content_text, json.dumps(metadata or {}), SourceStatus.PENDING.value)
+                 content_text, json.dumps(metadata or {}, default=str), SourceStatus.PENDING.value)
 
             logger.info(f"Created source {row['id']} for notebook {notebook_id}")
 
@@ -252,7 +257,7 @@ class NotebookManager:
                     UPDATE notebook_sources
                     SET status = $1, error_message = $2, metadata = metadata || $3
                     WHERE id = $4
-                """, status.value, error_message, json.dumps(metadata_update), source_id)
+                """, status.value, error_message, json.dumps(metadata_update, default=str), source_id)
             else:
                 await conn.execute("""
                     UPDATE notebook_sources
@@ -311,7 +316,7 @@ class NotebookManager:
                     notebook_id, 
                     content, 
                     embedding_str, 
-                    json.dumps(metadata), 
+                    json.dumps(metadata, default=str),
                     chunk_index
                 ))
 
@@ -386,7 +391,7 @@ class NotebookManager:
                 RETURNING id, notebook_id, user_id, type, title, content, source_meta, is_pinned,
                           created_at, updated_at
             """, notebook_id, user_id, request.type.value, request.title, request.content,
-                 json.dumps(request.source_meta or {}), request.is_pinned)
+                 json.dumps(request.source_meta or {}, default=str), request.is_pinned)
 
             data = dict(row)
             if isinstance(data['source_meta'], str):
@@ -540,7 +545,8 @@ class NotebookManager:
         # Verify notebook ownership
         await self.get_notebook(notebook_id, user_id)
 
-        citations_json = json.dumps([c.dict() for c in (citations or [])])
+        # default=str so UUID/datetime in citation fields (e.g. source_id) serialize
+        citations_json = json.dumps([c.dict() for c in (citations or [])], default=str)
 
         async with self.db_pool.acquire() as conn:
             row = await conn.fetchrow("""

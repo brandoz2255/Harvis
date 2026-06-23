@@ -7,6 +7,7 @@ import logging
 import os
 import json
 import re
+import asyncio
 from typing import List, Optional, Dict, Any, Tuple
 from uuid import UUID
 import requests
@@ -23,16 +24,19 @@ logger = logging.getLogger(__name__)
 # Configuration
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
 CLOUD_OLLAMA_URL = os.getenv("OLLAMA_CLOUD_URL", "https://harvis.example.com/ollama")
-DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "codellama:7b")
+DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "llama3.1:8b")
 
-# Models to try in order of preference (lighter/faster models first)
+# Models to try in order of preference. These must be INSTALLED + reliable
+# (non-reasoning) instruct models — reasoning models like gpt-oss intermittently
+# emit all tokens into a separate `thinking` channel and leave `response` empty,
+# which surfaces as a blank chat bubble. llama3.1:8b is the dependable default;
+# the rest are installed fallbacks. (gpt-oss deliberately omitted here — if a user
+# explicitly selects it, the empty-content guard below falls through to these.)
 FALLBACK_MODELS = [
-    "gpt-oss:latest",      # Usually fastest
-    "codellama:7b",
-    "deepseek-coder:6.7b",
-    "mistral",
-    "llama3.2",
-    "qwen2.5",
+    "llama3.1:8b",
+    "granite4.1:8b",
+    "gemma4:e4b",
+    "qwen3:4b",
 ]
 
 # Performance settings
@@ -131,6 +135,50 @@ class RAGChatService:
             raw_chunks=chunks if request.include_reasoning else None
         )
 
+    async def answer_for_session(
+        self,
+        notebook_id: UUID,
+        message: str,
+        model: str,
+        source_ids: Optional[List[str]] = None,
+        top_k: int = MAX_CHUNKS,
+    ) -> Tuple[str, List[Citation]]:
+        """Stateless RAG answer for an onb_compat chat session.
+
+        Retrieval can be restricted to a subset of sources (open-notebook's
+        fine-grained context control). The caller persists the turn to its own
+        session tables. `source_ids=None` searches all of the notebook's chunks.
+        """
+        query_embedding = await self.ingestion_service.get_query_embedding(message)
+        if not query_embedding:
+            answer, _ = await self._generate_response(
+                message,
+                "You are a helpful research assistant. Sources could not be searched right now.",
+                "", model,
+            )
+            return answer.strip(), []
+
+        fetch_k = max(top_k * 5, top_k) if source_ids else top_k
+        chunks = await self.manager.search_chunks(notebook_id, query_embedding, top_k=fetch_k)
+        if source_ids:
+            wanted = {str(s) for s in source_ids}
+            chunks = [c for c in chunks if str(c.chunk.source_id) in wanted][:top_k]
+        else:
+            chunks = chunks[:top_k]
+
+        if not chunks:
+            return (
+                "I don't have any sources in context to answer from. Add a source "
+                "(or include one in the context) and ask again."
+            ), []
+
+        system_prompt, context_text, citations = self._build_rag_prompt(chunks)
+        answer, _ = await self._generate_response(message, system_prompt, context_text, model)
+        # Return the ORDERED context sources (citations[N-1] == "SOURCE N" in the
+        # prompt) so the caller can map the model's [SOURCE N] markers to real
+        # source ids for clickable inline citations.
+        return answer.strip(), citations
+
     def _build_rag_prompt(
         self,
         chunks: List[ChunkWithScore]
@@ -143,7 +191,7 @@ Your task is to answer questions based ONLY on the provided source materials.
 Important guidelines:
 1. ONLY use information from the provided sources - do not use external knowledge
 2. If the information is not in the sources, say "I don't see information about that in your sources"
-3. Cite your sources using [Source: Title, Page/Section] format when referencing specific information
+3. Cite sources using the bracketed source NUMBER exactly as shown in the context headers — e.g. [SOURCE 1] or [SOURCE 2] (you may add the paragraph, e.g. [SOURCE 1: Para 3]). Always cite by the SOURCE number, never by the title.
 4. Be direct and concise in your answers
 5. If multiple sources provide relevant information, synthesize them together
 6. Quote relevant passages when appropriate using quotation marks
@@ -217,7 +265,10 @@ Please provide a helpful answer based on the sources above. Remember to cite sou
         for try_model in models_to_try:
             try:
                 logger.info(f"Trying LLM with model: {try_model}")
-                response = requests.post(
+                # Offload the blocking HTTP call to a thread so the async event loop
+                # (and the rest of the backend) isn't frozen for the whole generation.
+                response = await asyncio.to_thread(
+                    requests.post,
                     f"{OLLAMA_URL}/api/generate",
                     json={
                         "model": try_model,
@@ -235,16 +286,29 @@ Please provide a helpful answer based on the sources above. Remember to cite sou
 
                 if response.status_code == 200:
                     data = response.json()
-                    answer = data.get("response", "")
+                    answer = data.get("response", "") or ""
 
-                    # Check for reasoning markers
-                    reasoning = None
+                    # Reasoning models (gpt-oss, etc.) may put chain-of-thought in a
+                    # separate Ollama `thinking` field and/or inline <think>...</think>.
+                    reasoning = data.get("thinking") or None
                     if "<think>" in answer and "</think>" in answer:
-                        reasoning, answer = self._separate_thinking(answer)
+                        inline_reasoning, answer = self._separate_thinking(answer)
+                        reasoning = reasoning or inline_reasoning
+
+                    answer = answer.strip()
+                    if not answer:
+                        # Reasoning-only response (all tokens went to the thinking
+                        # channel, `response` is blank). Don't persist an empty
+                        # bubble — fall through to the next (non-reasoning) model.
+                        logger.warning(
+                            f"Model {try_model} returned empty content "
+                            f"(reasoning-only); trying next model"
+                        )
+                        continue
 
                     logger.info(f"Successfully generated response with model: {try_model}")
-                    return answer.strip(), reasoning
-                    
+                    return answer, reasoning
+
                 elif response.status_code == 404:
                     logger.debug(f"Model {try_model} not found locally, trying next...")
                     continue
@@ -263,7 +327,8 @@ Please provide a helpful answer based on the sources above. Remember to cite sou
         for try_model in models_to_try:
             try:
                 logger.info(f"Trying cloud Ollama with model: {try_model}")
-                response = requests.post(
+                response = await asyncio.to_thread(
+                    requests.post,
                     f"{CLOUD_OLLAMA_URL}/api/generate",
                     json={
                         "model": try_model,
@@ -279,15 +344,24 @@ Please provide a helpful answer based on the sources above. Remember to cite sou
 
                 if response.status_code == 200:
                     data = response.json()
-                    answer = data.get("response", "")
-                    
-                    reasoning = None
+                    answer = data.get("response", "") or ""
+
+                    reasoning = data.get("thinking") or None
                     if "<think>" in answer and "</think>" in answer:
-                        reasoning, answer = self._separate_thinking(answer)
-                    
+                        inline_reasoning, answer = self._separate_thinking(answer)
+                        reasoning = reasoning or inline_reasoning
+
+                    answer = answer.strip()
+                    if not answer:
+                        logger.warning(
+                            f"Cloud model {try_model} returned empty content "
+                            f"(reasoning-only); trying next model"
+                        )
+                        continue
+
                     logger.info(f"Successfully generated response with cloud model: {try_model}")
-                    return answer.strip(), reasoning
-                    
+                    return answer, reasoning
+
                 elif response.status_code == 404:
                     continue
                     

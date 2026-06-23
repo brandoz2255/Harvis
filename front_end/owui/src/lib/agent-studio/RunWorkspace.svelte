@@ -8,6 +8,7 @@
 	import WorkflowCanvas from './workflow/WorkflowCanvas.svelte';
 	import ThoughtStream from './workflow/ThoughtStream.svelte';
 	import RunArtifacts from './RunArtifacts.svelte';
+	import RunTable from './RunTable.svelte';
 	import RailCard from '$lib/components/common/RailCard.svelte';
 	import Bolt from '$lib/components/icons/Bolt.svelte';
 
@@ -71,9 +72,11 @@
 	onDestroy(() => controller?.abort());
 
 	// Dismissible cards — the Overview "pick & choose" set, persisted per user.
+	// Order leads with Agents (the folded-phases table) since this mounts inside an
+	// already-expanded run row; Processes + Changes default collapsed (detail one click in).
 	const CARDS = [
+		{ key: 'map', label: 'Agents' },
 		{ key: 'processes', label: 'Processes' },
-		{ key: 'map', label: 'Map' },
 		{ key: 'changes', label: 'Changes' }
 	];
 	const HIDE_KEY = 'harvis-overview-cards-hidden';
@@ -100,6 +103,9 @@
 	};
 
 	let hasChanges = false;
+	// The "Agents" card defaults to the Background-tasks TABLE (per-agent Tokens/Tools/Time);
+	// the SvelteFlow graph stays one toggle away.
+	let agentsView: 'table' | 'graph' = 'table';
 	$: hiddenCards = CARDS.filter((c) => hidden[c.key]);
 </script>
 
@@ -117,10 +123,48 @@
 		</div>
 	{/if}
 
+	{#if !hidden['map']}
+		<RailCard
+			title={$i18n.t('Agents')}
+			dismissible
+			on:dismiss={() => hide('map')}
+			bodyClassName="px-2 pb-2"
+		>
+			<svelte:fragment slot="actions">
+				<div
+					class="inline-flex items-center gap-0.5 text-[11px] rounded-md bg-gray-100 dark:bg-gray-850 p-0.5"
+				>
+					<button
+						type="button"
+						class="px-1.5 py-0.5 rounded transition {agentsView === 'table'
+							? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-50 shadow-sm'
+							: 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'}"
+						on:click|stopPropagation={() => (agentsView = 'table')}>{$i18n.t('Table')}</button
+					>
+					<button
+						type="button"
+						class="px-1.5 py-0.5 rounded transition {agentsView === 'graph'
+							? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-50 shadow-sm'
+							: 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'}"
+						on:click|stopPropagation={() => (agentsView = 'graph')}>{$i18n.t('Graph')}</button
+					>
+				</div>
+			</svelte:fragment>
+			{#if agentsView === 'table'}
+				<RunTable {wsId} live={running} />
+			{:else}
+				<div class="h-72 rounded-lg overflow-hidden border border-gray-100 dark:border-gray-850">
+					<WorkflowCanvas {events} followLatest={running} />
+				</div>
+			{/if}
+		</RailCard>
+	{/if}
+
 	{#if !hidden['processes']}
 		<RailCard
 			title={$i18n.t('Processes')}
 			icon={Bolt}
+			open={false}
 			dismissible
 			on:dismiss={() => hide('processes')}
 			bodyClassName="px-3 pb-3"
@@ -131,17 +175,10 @@
 		</RailCard>
 	{/if}
 
-	{#if !hidden['map']}
-		<RailCard title={$i18n.t('Map')} dismissible on:dismiss={() => hide('map')} bodyClassName="px-2 pb-2">
-			<div class="h-72 rounded-lg overflow-hidden border border-gray-100 dark:border-gray-850">
-				<WorkflowCanvas {events} followLatest={running} />
-			</div>
-		</RailCard>
-	{/if}
-
 	{#if !hidden['changes']}
 		<RailCard
 			title={$i18n.t('Changes')}
+			open={false}
 			dismissible
 			on:dismiss={() => hide('changes')}
 			bodyClassName="px-3 pb-3"

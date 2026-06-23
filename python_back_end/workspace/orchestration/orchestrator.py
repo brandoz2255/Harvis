@@ -87,11 +87,13 @@ async def run_orchestrated(
     user_id: int = 0,
     session_id: str = "",
     uniform_model: bool = False,
+    isolation_mode: str = "scratch",
+    repo_config: dict | None = None,
 ) -> AsyncGenerator[OpenClawEvent, None]:
     # Lazy import (avoid circular import at module load). Import the FUNCTIONS
     # from the submodule path — `from .. import workspace_router` would resolve to
     # the re-exported APIRouter instance in workspace/__init__.py, not the module.
-    from ..workspace_router import _db_create_run, _db_save_artifact, _db_complete_run
+    from ..workspace_router import _db_create_run, _db_save_artifact, _db_complete_run, _db_set_run_repo
 
     # Ensure the parent (launched) run row exists before any event/artifact FK.
     # The launch starts this background task BEFORE its own _db_create_run commits,
@@ -101,8 +103,16 @@ async def run_orchestrated(
         pool, parent_workspace_id, user_id,
         session_id or f"ws-{parent_workspace_id}", task_brief,
     )
+    # Persist the attached repo on the parent run (the create above is ON CONFLICT
+    # DO NOTHING, so this UPDATE is how repo_path lands) → Create-PR can resolve the
+    # GitHub origin + base from the run long after the clone is torn down.
+    _attached_repo = (repo_config or {}).get("repo_path")
+    if _attached_repo:
+        await _db_set_run_repo(pool, parent_workspace_id, _attached_repo)
 
-    iso = WorkspaceIsolationManager()
+    # "attached" mode → each sub-agent runs in a git clone-local of the attached repo
+    # (real diff vs HEAD); default "scratch" → empty dir + difflib (unchanged).
+    iso = WorkspaceIsolationManager(isolation_mode=isolation_mode, repo_config=repo_config)
     runner = SubAgentRunner()
     orch_run_id = parent_workspace_id  # orchestrator node == the launched run
     sess = session_id or f"ws-{parent_workspace_id}"
@@ -138,6 +148,15 @@ async def run_orchestrated(
         "log",
         {"message": f"Planned {len(plan)} sub-agent(s){mode_note}: {planned}."},
     )
+    # Structured plan for the VibeCode right-rail Plan panel — the log above is the
+    # human line; this carries the steps so the UI can render per-step status.
+    yield root_ev("plan", {
+        "steps": [
+            {"role": p["role"], "label": p["label"], "model": p["model"], "task": p["task"]}
+            for p in plan
+        ],
+        "uniform": uniform_model,
+    })
 
     # ── Spawn each sub-agent: isolated workspace + first-class child run row +
     # a drain task feeding a shared queue. ─────────────────────────────────────
@@ -209,6 +228,9 @@ async def run_orchestrated(
             "task": p["task"],
             "start": time.monotonic(),
             "ok": True,
+            "tool_calls": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
         }
         children.append(child)
         tasks.append(asyncio.create_task(_drain(child)))
@@ -222,15 +244,22 @@ async def run_orchestrated(
         if item is sentinel:
             remaining -= 1
             continue
-        if item.type == "agent_end":
-            c = child_by_run.get(getattr(item, "run_id", None))
+        rid = getattr(item, "run_id", None)
+        if item.type == "tool_call":
+            c = child_by_run.get(rid)
+            if c:
+                c["tool_calls"] += 1  # per-agent Tools column for the Background-tasks table
+        elif item.type == "agent_end":
+            c = child_by_run.get(rid)
             if c:
                 data = item.data or {}
-                # Capture the sub-agent's own finish() summary for its run row.
+                # Capture the sub-agent's own finish() summary + real token usage for its row.
                 if data.get("summary"):
                     c["summary"] = data["summary"]
                 if data.get("success") is False:
                     c["ok"] = False
+                c["prompt_tokens"] = int(data.get("prompt_tokens") or 0)
+                c["completion_tokens"] = int(data.get("completion_tokens") or 0)
         yield item
 
     # ── Collect each sub-agent's diff → its own artifact; complete its run row;
@@ -260,7 +289,8 @@ async def run_orchestrated(
         child_summary = c.get("summary") or f"{c['label']}: {len(files)} file(s) changed"
         await _db_complete_run(
             pool, c["run_id"], "done" if c["ok"] else "error",
-            child_summary, None, 0, 0, c["start"],
+            child_summary, None, c["tool_calls"], 0, c["start"],
+            prompt_tokens=c["prompt_tokens"], completion_tokens=c["completion_tokens"],
         )
         await iso.cleanup(ws_path)
 

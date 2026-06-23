@@ -82,6 +82,33 @@ def _parse_state(state: str) -> Optional[dict]:
     except Exception:
         return None
 
+def _uid_from_request(request: Request) -> int:
+    """Resolve the Harvis user id from EITHER the `access_token` cookie (the OAuth browser
+    redirect flow) OR the `Authorization: Bearer` header (owui's fetch calls). Lets the
+    status/disconnect endpoints work in owui, which authenticates with a Bearer token in
+    localStorage rather than a cookie. Raises 401 if neither validates."""
+    from jose import jwt
+    # Fail CLOSED if JWT_SECRET is unset — never fall back to a weak default that would let a
+    # forged HS256 token impersonate any user id (IDOR on /status, /disconnect).
+    secret = os.getenv("JWT_SECRET")
+    if not secret:
+        raise HTTPException(status_code=500, detail="Auth not configured")
+    token = request.cookies.get("access_token")
+    if not token:
+        auth = request.headers.get("authorization") or request.headers.get("Authorization") or ""
+        if auth.lower().startswith("bearer "):
+            token = auth[7:].strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        payload = jwt.decode(token, secret, algorithms=["HS256"])
+        sub = payload.get("sub")
+        if sub is None or str(sub).strip() == "":
+            raise ValueError("missing sub")
+        return int(sub)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid authentication")
+
 class GitHubStatusResponse(BaseModel):
     connected: bool
     login: Optional[str] = None
@@ -95,18 +122,24 @@ class OAuthStartResponse(BaseModel):
     redirect: str
 
 @router.get("/start", response_model=OAuthStartResponse)
-async def github_oauth_start(request: Request):
+async def github_oauth_start(request: Request, response: Response):
     """
     Start GitHub OAuth flow by generating authorization URL.
-    Returns JSON with redirect URL (frontend handles navigation).
-    By default, omits redirect_uri to use the OAuth App's registered callback.
-    Set GITHUB_FORCE_REDIRECT_URI=true to include redirect_uri explicitly.
+    Returns JSON with redirect URL (frontend handles navigation) AND sets the CSRF
+    state cookie — the callback validates `state` against this cookie, so a JSON-start
+    flow (owui's "Connect GitHub" fetch) must set it just like the /login redirect does.
     """
     if not GITHUB_CLIENT_ID:
         raise HTTPException(status_code=500, detail="GitHub OAuth not configured")
-    
+
     # Generate CSRF state token
-    state = _mk_state("/ide")  # Default redirect to IDE after OAuth
+    state = _mk_state("/harvis/vibecode")  # land back on VibeCode after connecting
+    # Set the CSRF state cookie (SameSite=Lax so it survives the top-level redirect BACK from
+    # GitHub to /callback). Without this the callback rejects with "Invalid state parameter".
+    response.set_cookie(
+        key=STATE_COOKIE, value=state, max_age=STATE_MAX_AGE,
+        httponly=True, secure=False, samesite="lax", path="/",
+    )
     
     # Build GitHub authorization URL parameters
     params = {
@@ -231,6 +264,17 @@ async def _handle_github_callback(
     # Parse state to get next path
     st = _parse_state(state)
     next_path = st.get("next", "/ide") if st else "/ide"
+    # Open-redirect guard: `next` is user-controlled (encoded in the OAuth state). Only allow a
+    # same-origin RELATIVE path (single leading "/", no scheme, no protocol-relative "//"), else
+    # fall back to a safe internal default — never redirect to an attacker-supplied absolute URL.
+    if (
+        not isinstance(next_path, str)
+        or not next_path.startswith("/")
+        or next_path.startswith("//")
+        or "://" in next_path
+        or "\\" in next_path
+    ):
+        next_path = "/ide"
     
     # Use override if provided, otherwise use default
     token_exchange_redirect_uri = redirect_uri_override or REDIRECT_URI
@@ -265,9 +309,11 @@ async def _handle_github_callback(
     
     # Get user ID from JWT
     from jose import jwt
-    SECRET_KEY = os.getenv("JWT_SECRET", "key")
+    SECRET_KEY = os.getenv("JWT_SECRET")  # fail closed — never a weak default
     ALGORITHM = "HS256"
-    
+    if not SECRET_KEY:
+        return RedirectResponse(url=f"{OAUTH_REDIRECT_BASE}?error=invalid_session")
+
     token = request.cookies.get("access_token")
     if not token:
         # If no session, we can't store the token associated with a user
@@ -315,27 +361,14 @@ async def _handle_github_callback(
 async def github_status(request: Request):
     """
     Check if user has connected GitHub account and return user info.
-    Requires authentication via JWT cookie.
+    Auth via JWT cookie (OAuth flow) OR Authorization: Bearer (owui).
     """
-    # Extract user ID from JWT token
-    from jose import jwt
-    SECRET_KEY = os.getenv("JWT_SECRET", "key")
-    ALGORITHM = "HS256"
-    
-    token = request.cookies.get("access_token")
-    if not token:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id = int(payload.get("sub"))
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid authentication")
-    
+    user_id = _uid_from_request(request)
+
     pool = getattr(request.app.state, 'pg_pool', None)
     if not pool:
         raise HTTPException(status_code=500, detail="Database not available")
-    
+
     # Check if token exists
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -378,23 +411,10 @@ async def github_status(request: Request):
 async def github_disconnect(request: Request):
     """
     Disconnect GitHub account by deleting stored token.
-    Requires authentication via JWT cookie.
+    Auth via JWT cookie (OAuth flow) OR Authorization: Bearer (owui).
     """
-    # Extract user ID from JWT token
-    from jose import jwt
-    SECRET_KEY = os.getenv("JWT_SECRET", "key")
-    ALGORITHM = "HS256"
-    
-    token = request.cookies.get("access_token")
-    if not token:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id = int(payload.get("sub"))
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid authentication")
-    
+    user_id = _uid_from_request(request)
+
     pool = getattr(request.app.state, 'pg_pool', None)
     if not pool:
         raise HTTPException(status_code=500, detail="Database not available")

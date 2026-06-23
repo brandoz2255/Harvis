@@ -4,6 +4,7 @@
 	import Sortable from 'sortablejs';
 
 	import { goto } from '$app/navigation';
+	import { page } from '$app/stores';
 	import {
 		user,
 		chats,
@@ -74,13 +75,16 @@
 	import PinnedModelList from './Sidebar/PinnedModelList.svelte';
 	import Note from '../icons/Note.svelte';
 	import Code from '../icons/Code.svelte';
+	import ModeSwitcher from './Sidebar/ModeSwitcher.svelte';
+	import NotebookNav from './Sidebar/NotebookNav.svelte';
+	import VibeCodeNav from './Sidebar/VibeCodeNav.svelte';
+	import { DEFAULT_PINNED_ITEMS } from './Sidebar/pinned';
 	import Sparkles from '../icons/Sparkles.svelte';
 	import ArchiveBox from '../icons/ArchiveBox.svelte';
 	import { slide } from 'svelte/transition';
 	import HotkeyHint from '../common/HotkeyHint.svelte';
 
 	const BREAKPOINT = 768;
-	const DEFAULT_PINNED_ITEMS = ['agent-studio', 'vibecode', 'artifacts', 'workspace'];
 
 	let scrollTop = 0;
 
@@ -109,6 +113,18 @@
 	let newFolderId = null;
 
 	$: pinnedItems = $settings?.pinnedMenuItems ?? DEFAULT_PINNED_ITEMS;
+
+	// Claude-Desktop-style mode switcher (Chat / Notebook / Code). Route-based: the
+	// active mode is derived from the URL; the chat-specific sidebar sections show
+	// only in Chat mode. Gated by a feature flag (off ⇒ behaves exactly as before).
+	$: modeSwitcherEnabled = $config?.features?.enable_harvis_mode_switcher ?? true;
+	$: activeMode = modeSwitcherEnabled
+		? (($page?.url?.pathname ?? '/').startsWith('/harvis/notebooks')
+				? 'notebook'
+				: ($page?.url?.pathname ?? '/').startsWith('/harvis/vibecode')
+					? 'code'
+					: 'chat')
+		: 'chat';
 
 	const isMenuItemVisible = (id) => {
 		switch (id) {
@@ -139,6 +155,7 @@
 				return $user?.role === 'admin';
 			case 'agent-studio':
 			case 'vibecode':
+			case 'open-notebook':
 			case 'artifacts':
 				return $config?.features?.enable_harvis_studio ?? true;
 			default:
@@ -146,10 +163,21 @@
 		}
 	};
 
+	// Some pinned items are full pages OUTSIDE the SvelteKit SPA — e.g. the vendored
+	// open-notebook Next.js app at /onb. Those need a real browser navigation, not goto().
+	const navMenuItem = (href) => {
+		if (href && href.startsWith('/onb')) {
+			window.location.href = href;
+		} else {
+			goto(href);
+		}
+	};
+
 	const getMenuItemMeta = (id) => {
 		const items = {
 			'agent-studio': { label: 'Agent Studio', href: '/harvis/agent-studio', iconType: 'agent-studio' },
 			vibecode: { label: 'Vibe Code', href: '/harvis/vibecode', iconType: 'vibecode' },
+			'open-notebook': { label: 'Open Notebook', href: '/harvis/notebooks', iconType: 'open-notebook' },
 			artifacts: { label: 'Artifacts', href: '/harvis/agent-studio/activity', iconType: 'artifacts' },
 			notes: { label: 'Notes', href: '/notes', iconType: 'note' },
 			workspace: { label: 'Library', href: '/workspace', iconType: 'workspace' },
@@ -885,7 +913,7 @@
 									on:click={async (e) => {
 										e.stopImmediatePropagation();
 										e.preventDefault();
-										goto(meta.href);
+										navMenuItem(meta.href);
 										itemClickHandler();
 									}}
 									draggable="false"
@@ -945,6 +973,8 @@
 											<Sparkles className="size-4.5" />
 										{:else if itemId === 'vibecode'}
 											<Code className="size-4.5" />
+										{:else if itemId === 'open-notebook'}
+											<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" class="size-4.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6.042A8.967 8.967 0 0 0 6 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 0 1 6 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 0 1 6-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0 0 18 18a8.967 8.967 0 0 0-6 2.292m0-14.25v14.25" /></svg>
 										{:else if itemId === 'artifacts'}
 											<ArchiveBox className="size-4.5" />										{/if}
 									</div>
@@ -1085,6 +1115,21 @@
 				}}
 			>
 				<div class="pb-1.5">
+					{#if modeSwitcherEnabled}
+						<div class="px-[0.4375rem] pb-1">
+							<ModeSwitcher {activeMode} />
+						</div>
+					{/if}
+
+					{#if modeSwitcherEnabled && activeMode === 'notebook'}
+						<NotebookNav activeOnb={$page?.url?.searchParams?.get('onb') ?? ''} />
+					{/if}
+
+					{#if modeSwitcherEnabled && activeMode === 'code'}
+						<VibeCodeNav />
+					{/if}
+
+					{#if !modeSwitcherEnabled || activeMode === 'chat'}
 					<div class="px-[0.4375rem] flex justify-center text-gray-800 dark:text-gray-200">
 						<a
 							id="sidebar-new-chat-button"
@@ -1127,6 +1172,9 @@
 						</button>
 					</div>
 
+					{/if}
+
+					{#if !(modeSwitcherEnabled && (activeMode === 'notebook' || activeMode === 'code'))}
 					<div id="pinned-menu-items-list">
 						{#each pinnedItems as itemId (itemId)}
 							{@const meta = getMenuItemMeta(itemId)}
@@ -1197,6 +1245,8 @@
 												<Sparkles className="size-4.5" strokeWidth="2" />
 											{:else if itemId === 'vibecode'}
 												<Code className="size-4.5" strokeWidth="2" />
+											{:else if itemId === 'open-notebook'}
+												<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" class="size-4.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6.042A8.967 8.967 0 0 0 6 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 0 1 6 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 0 1 6-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0 0 18 18a8.967 8.967 0 0 0-6 2.292m0-14.25v14.25" /></svg>
 											{:else if itemId === 'artifacts'}
 												<ArchiveBox className="size-4.5" strokeWidth="2" />											{/if}
 										</div>
@@ -1209,6 +1259,7 @@
 							{/if}
 						{/each}
 					</div>
+					{/if}
 				</div>
 
 				{#if ($models ?? []).length > 0 && (($settings?.pinnedModels ?? []).length > 0 || $config?.default_pinned_models)}
@@ -1323,6 +1374,7 @@
 					</Folder>
 				{/if}
 
+				{#if !modeSwitcherEnabled || activeMode === 'chat'}
 				{#if $config?.features?.enable_folders && ($user?.role === 'admin' || ($user?.permissions?.features?.folders ?? true))}
 					<Folder
 						id="sidebar-folders"
@@ -1634,6 +1686,7 @@
 						</div>
 					</div>
 				</Folder>
+				{/if}
 			</div>
 
 			<div class="px-1.5 pt-1.5 pb-2 sticky bottom-0 z-10 -mt-3 sidebar">

@@ -4,6 +4,7 @@ Generates conversational podcast scripts from content using LLM
 """
 
 import os
+import asyncio
 import json
 import logging
 from typing import List, Dict, Any, Optional
@@ -193,20 +194,23 @@ SCRIPT (JSON only, no markdown):"""
         """Call LLM for script generation"""
         model = model or DEFAULT_MODEL
         
-        # Try local Ollama
+        # Try local Ollama. requests is blocking; run it off the event loop so a
+        # multi-minute podcast generation doesn't freeze the whole backend.
         try:
-            response = requests.post(
-                f"{OLLAMA_URL}/api/generate",
-                json={
-                    "model": model,
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {
-                        "temperature": 0.8,  # Higher creativity for podcasts
-                        "top_p": 0.95,
-                    }
-                },
-                timeout=600  # Extended timeout for large model script generation (10 min)
+            response = await asyncio.to_thread(
+                lambda: requests.post(
+                    f"{OLLAMA_URL}/api/generate",
+                    json={
+                        "model": model,
+                        "prompt": prompt,
+                        "stream": False,
+                        "options": {
+                            "temperature": 0.8,  # Higher creativity for podcasts
+                            "top_p": 0.95,
+                        }
+                    },
+                    timeout=600  # Extended timeout for large model script generation (10 min)
+                )
             )
             
             if response.status_code == 200:
@@ -217,16 +221,18 @@ SCRIPT (JSON only, no markdown):"""
         except Exception as e:
             logger.warning(f"Local Ollama failed: {e}")
         
-        # Try cloud fallback
+        # Try cloud fallback (also off the event loop — see local Ollama note above).
         try:
-            response = requests.post(
-                f"{CLOUD_OLLAMA_URL}/api/generate",
-                json={
-                    "model": model,
-                    "prompt": prompt,
-                    "stream": False
-                },
-                timeout=600  # Extended timeout for cloud fallback (10 min)
+            response = await asyncio.to_thread(
+                lambda: requests.post(
+                    f"{CLOUD_OLLAMA_URL}/api/generate",
+                    json={
+                        "model": model,
+                        "prompt": prompt,
+                        "stream": False
+                    },
+                    timeout=600  # Extended timeout for cloud fallback (10 min)
+                )
             )
             
             if response.status_code == 200:

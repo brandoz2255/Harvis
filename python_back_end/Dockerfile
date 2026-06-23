@@ -82,9 +82,10 @@ RUN pip install --no-cache-dir --no-index --find-links=/wheels /wheels/* \
   && rm -rf /wheels \
   && pip cache purge
 
-# Docker CLI for vibecoding container management
+# Docker CLI for vibecoding container management + git for clone-local repo isolation
+# (kept in this late layer so the expensive pip-wheel layers above stay cached on rebuild)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-  docker.io \
+  docker.io git \
   && rm -rf /var/lib/apt/lists/*
 
 # Reinstall Python docker package to override any system docker-py conflict

@@ -516,13 +516,18 @@ class IngestionService:
                 return result
             IngestionService._working_model = None
 
-        # Prioritize actually-installed embedding models first
+        # nomic-embed-text (the default) is the dedicated embedder; the rest are
+        # fallbacks. llama3.1:8b ships on this deploy and DOES support
+        # /api/embeddings (native 4096-dim = our target_dim) — the guaranteed
+        # safety net when no dedicated embedder is pulled. Note: chat-only models
+        # like qwen3:4b / gpt-oss return "does not support embeddings", so they're
+        # intentionally NOT in this list.
         embedding_models = [
+            EMBEDDING_MODEL,          # nomic-embed-text (dedicated, default)
             "qwen3-embedding:4b",
-            EMBEDDING_MODEL,  # nomic-embed-text
             "mxbai-embed-large",
+            "llama3.1:8b",            # installed fallback — supports embeddings
             "mistral",
-            "gpt-oss:latest",
         ]
 
         for model in embedding_models:

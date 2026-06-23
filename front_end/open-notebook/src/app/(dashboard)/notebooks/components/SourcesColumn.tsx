@@ -1,0 +1,260 @@
+'use client'
+
+import { useState, useMemo, useRef, useCallback, useEffect } from 'react'
+import { SourceListResponse } from '@/lib/types/api'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Plus, FileText, Loader2 } from 'lucide-react'
+import { LoadingSpinner } from '@/components/common/LoadingSpinner'
+import { EmptyState } from '@/components/common/EmptyState'
+import { AddSourceModal } from '@/components/sources/AddSourceModal'
+import { AddExistingSourceDialog } from '@/components/sources/AddExistingSourceDialog'
+import { SourceCard } from '@/components/sources/SourceCard'
+import { SourceWebSearch } from '@/components/sources/SourceWebSearch'
+import { useDeleteSource, useRetrySource, useRemoveSourceFromNotebook } from '@/lib/hooks/use-sources'
+import { ConfirmDialog } from '@/components/common/ConfirmDialog'
+import { useModalManager } from '@/lib/hooks/use-modal-manager'
+import { ContextMode } from '../[id]/page'
+import { CollapsibleColumn, createCollapseButton } from '@/components/notebooks/CollapsibleColumn'
+import { useNotebookColumnsStore } from '@/lib/stores/notebook-columns-store'
+import { useTranslation } from '@/lib/hooks/use-translation'
+
+interface SourcesColumnProps {
+  sources?: SourceListResponse[]
+  isLoading: boolean
+  notebookId: string
+  notebookName?: string
+  onRefresh?: () => void
+  contextSelections?: Record<string, ContextMode>
+  onContextModeChange?: (sourceId: string, mode: ContextMode) => void
+  // Pagination props
+  hasNextPage?: boolean
+  isFetchingNextPage?: boolean
+  fetchNextPage?: () => void
+  // When embedded in the merged Library panel: skip the collapse chrome.
+  embedded?: boolean
+  // When provided, clicking a source opens it inline (parent-controlled) instead of the overlay modal.
+  onOpenSource?: (sourceId: string) => void
+}
+
+export function SourcesColumn({
+  sources,
+  isLoading,
+  notebookId,
+  onRefresh,
+  contextSelections,
+  onContextModeChange,
+  hasNextPage,
+  isFetchingNextPage,
+  fetchNextPage,
+  embedded = false,
+  onOpenSource,
+}: SourcesColumnProps) {
+  const { t } = useTranslation()
+  const [addDialogOpen, setAddDialogOpen] = useState(false)
+  const [addExistingDialogOpen, setAddExistingDialogOpen] = useState(false)
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
+  const [sourceToDelete, setSourceToDelete] = useState<string | null>(null)
+  const [removeDialogOpen, setRemoveDialogOpen] = useState(false)
+  const [sourceToRemove, setSourceToRemove] = useState<string | null>(null)
+
+  const { openModal } = useModalManager()
+  const deleteSource = useDeleteSource()
+  const retrySource = useRetrySource()
+  const removeFromNotebook = useRemoveSourceFromNotebook()
+
+  // Collapsible column state
+  const { sourcesCollapsed, toggleSources } = useNotebookColumnsStore()
+  const collapseButton = useMemo(
+    () => createCollapseButton(toggleSources, t('navigation.sources')),
+    [toggleSources, t('navigation.sources')]
+  )
+
+  // Scroll container ref for infinite scroll
+  const scrollContainerRef = useRef<HTMLDivElement>(null)
+
+  // Handle scroll for infinite loading
+  const handleScroll = useCallback(() => {
+    const container = scrollContainerRef.current
+    if (!container || !hasNextPage || isFetchingNextPage || !fetchNextPage) return
+
+    const { scrollTop, scrollHeight, clientHeight } = container
+    // Load more when user scrolls within 200px of the bottom
+    if (scrollHeight - scrollTop - clientHeight < 200) {
+      fetchNextPage()
+    }
+  }, [hasNextPage, isFetchingNextPage, fetchNextPage])
+
+  // Attach scroll listener
+  useEffect(() => {
+    const container = scrollContainerRef.current
+    if (!container) return
+
+    container.addEventListener('scroll', handleScroll)
+    return () => container.removeEventListener('scroll', handleScroll)
+  }, [handleScroll])
+  
+  const handleDeleteClick = (sourceId: string) => {
+    setSourceToDelete(sourceId)
+    setDeleteDialogOpen(true)
+  }
+
+  const handleDeleteConfirm = async () => {
+    if (!sourceToDelete) return
+
+    try {
+      await deleteSource.mutateAsync(sourceToDelete)
+      setDeleteDialogOpen(false)
+      setSourceToDelete(null)
+      onRefresh?.()
+    } catch (error) {
+      console.error('Failed to delete source:', error)
+    }
+  }
+
+  const handleRemoveFromNotebook = (sourceId: string) => {
+    setSourceToRemove(sourceId)
+    setRemoveDialogOpen(true)
+  }
+
+  const handleRemoveConfirm = async () => {
+    if (!sourceToRemove) return
+
+    try {
+      await removeFromNotebook.mutateAsync({
+        notebookId,
+        sourceId: sourceToRemove
+      })
+      setRemoveDialogOpen(false)
+      setSourceToRemove(null)
+    } catch (error) {
+      console.error('Failed to remove source from notebook:', error)
+      // Error toast is handled by the hook
+    }
+  }
+
+  const handleRetry = async (sourceId: string) => {
+    try {
+      await retrySource.mutateAsync(sourceId)
+    } catch (error) {
+      console.error('Failed to retry source:', error)
+    }
+  }
+
+  const handleSourceClick = (sourceId: string) => {
+    if (onOpenSource) {
+      onOpenSource(sourceId)
+    } else {
+      openModal('source', sourceId)
+    }
+  }
+
+  return (
+    <>
+      <CollapsibleColumn
+        isCollapsed={embedded ? false : sourcesCollapsed}
+        onToggle={toggleSources}
+        collapsedIcon={FileText}
+        collapsedLabel={t('navigation.sources')}
+      >
+        <Card className="h-full flex flex-col flex-1 overflow-hidden">
+          <CardHeader className="pb-3 flex-shrink-0 space-y-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <CardTitle className="text-lg">{t('navigation.sources')}</CardTitle>
+              {!embedded && collapseButton}
+            </div>
+            <Button
+              variant="outline"
+              onClick={() => setAddDialogOpen(true)}
+              className="w-full justify-center rounded-xl"
+            >
+              <Plus className="h-4 w-4 mr-2" />
+              Add sources
+            </Button>
+          </CardHeader>
+
+          <CardContent ref={scrollContainerRef} className="flex-1 overflow-y-auto min-h-0">
+            {/* Web search → pick → import as sources */}
+            <SourceWebSearch notebookId={notebookId} onImported={onRefresh} />
+
+            {isLoading ? (
+              <div className="flex items-center justify-center py-8">
+                <LoadingSpinner />
+              </div>
+            ) : !sources || sources.length === 0 ? (
+              <EmptyState
+                icon={FileText}
+                title={t('sources.noSourcesYet')}
+                description={t('sources.createFirstSource')}
+              />
+            ) : (
+              <div className="space-y-1.5">
+                {sources.map((source) => (
+                  <SourceCard
+                    key={source.id}
+                    source={source}
+                    onClick={handleSourceClick}
+                    onDelete={handleDeleteClick}
+                    onRetry={handleRetry}
+                    onRemoveFromNotebook={handleRemoveFromNotebook}
+                    onRefresh={onRefresh}
+                    showRemoveFromNotebook={true}
+                    contextMode={contextSelections?.[source.id]}
+                    onContextModeChange={onContextModeChange
+                      ? (mode) => onContextModeChange(source.id, mode)
+                      : undefined
+                    }
+                  />
+                ))}
+                {/* Loading indicator for infinite scroll */}
+                {isFetchingNextPage && (
+                  <div className="flex items-center justify-center py-4">
+                    <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                  </div>
+                )}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </CollapsibleColumn>
+
+      <AddSourceModal
+        open={addDialogOpen}
+        onOpenChange={setAddDialogOpen}
+        notebookId={notebookId}
+        sourceCount={sources?.length ?? 0}
+        onAdded={onRefresh}
+        onAddExisting={() => setAddExistingDialogOpen(true)}
+      />
+
+      <AddExistingSourceDialog
+        open={addExistingDialogOpen}
+        onOpenChange={setAddExistingDialogOpen}
+        notebookId={notebookId}
+        onSuccess={onRefresh}
+      />
+
+      <ConfirmDialog
+        open={deleteDialogOpen}
+        onOpenChange={setDeleteDialogOpen}
+        title={t('sources.delete')}
+        description={t('sources.deleteConfirm')}
+        confirmText={t('common.delete')}
+        onConfirm={handleDeleteConfirm}
+        isLoading={deleteSource.isPending}
+        confirmVariant="destructive"
+      />
+
+      <ConfirmDialog
+        open={removeDialogOpen}
+        onOpenChange={setRemoveDialogOpen}
+        title={t('sources.removeFromNotebook')}
+        description={t('sources.removeConfirm')}
+        confirmText={t('common.remove')}
+        onConfirm={handleRemoveConfirm}
+        isLoading={removeFromNotebook.isPending}
+        confirmVariant="default"
+      />
+    </>
+  )
+}

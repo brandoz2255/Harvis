@@ -162,6 +162,10 @@ services:
       LOG_LEVEL: "INFO"
       PYTHONUNBUFFERED: "1"
       ARTIFACT_STORAGE_DIR: "/data/artifacts"
+      # Notebook source storage. Must live UNDER /data/artifacts — that subtree is
+      # owned by appuser(1001), whereas /data itself is root-owned and not writable,
+      # so the default /data/notebooks fails makedirs with EACCES.
+      NOTEBOOK_STORAGE_PATH: "/data/artifacts/notebooks"
       # For Docker Compose, run code locally (not in separate containers)
       # This avoids needing Docker socket access
       CODE_EXECUTOR_LOCAL: "true"
@@ -212,6 +216,27 @@ services:
       MESSAGING_GATEWAY_TOKEN: "${MESSAGING_GATEWAY_TOKEN:-}"
       # Shared projects volume path inside backend container
       OPENCLAW_PROJECTS_DIR: "/data/openclaw-projects"
+      # Real local repos bind-mounted READ-ONLY for orchestrated clone-local "attached" runs
+      # (comma-separated container paths). The agent only ever clones FROM these.
+      HARVIS_ATTACHED_REPOS: "${HARVIS_ATTACHED_REPOS:-/data/attached-repos/harvis}"
+      # Writable repos for opt-in VibeCode in-place mode (parallel :rw mount).
+      HARVIS_ATTACHED_REPOS_RW: "${HARVIS_ATTACHED_REPOS_RW:-/data/attached-repos-rw/harvis}"
+      # Optional in-container browse tree for allowlisted-repo flows. The PRIMARY
+      # "Open folder…" path is the browser's File System Access API (no mount needed).
+      HARVIS_FS_BROWSE_ROOT: "${HARVIS_FS_BROWSE_ROOT:-/data/host-fs}"
+      HARVIS_FS_BROWSE_ROOT_HOST: "${HARVIS_FS_BROWSE_ROOT_HOST:-./harvis-fs-browse}"
+      # READ-WRITE host-folder browse root → the "Open folder…" picker lists real projects under
+      # it. Browsed folders default to CLONE-mode; in-place on them is OFF until the ladder + an
+      # exec sandbox are verified (HARVIS_INPLACE_ON_BROWSED). Point HARVIS_FS_BROWSE_ROOT_RW_HOST
+      # at a deliberate, SECRETS-FREE projects dir.
+      HARVIS_FS_BROWSE_ROOT_RW: "${HARVIS_FS_BROWSE_ROOT_RW:-/data/host-fs-rw}"
+      # Host-side path of the RW browse root — display-only (shown in the picker) + drives the
+      # "still the default sandbox" empty-state hint. Set this to your real, SECRETS-FREE projects dir.
+      HARVIS_FS_BROWSE_ROOT_RW_HOST: "${HARVIS_FS_BROWSE_ROOT_RW_HOST:-./harvis-fs-browse}"
+      # In-place editing of a BROWSED folder's real files. OFF by default (browsed = clone-mode).
+      HARVIS_INPLACE_ON_BROWSED: "${HARVIS_INPLACE_ON_BROWSED:-false}"
+      # Host path of the primary attached repo — user-facing labels only (optional).
+      HARVIS_ATTACH_REPO_HOST: "${HARVIS_ATTACH_REPO:-}"
       # GitHub OAuth for repo mounting
       GITHUB_CLIENT_ID: "${GITHUB_CLIENT_ID:-}"
       GITHUB_CLIENT_SECRET: "${GITHUB_CLIENT_SECRET:-}"
@@ -229,6 +254,8 @@ services:
       - ./python_back_end/integrations:/app/integrations:ro
       - ./python_back_end/plugins:/app/plugins:ro
       - ./python_back_end/owui_compat:/app/owui_compat:ro
+      - ./python_back_end/onb_compat:/app/onb_compat:ro
+      - ./python_back_end/open_notebook:/app/open_notebook:ro
       - ./openclaw/config:/app/openclaw_config
       - ./python_back_end/notebooks:/app/notebooks:ro
       - ./python_back_end/vibecoding:/app/vibecoding:ro
@@ -236,6 +263,24 @@ services:
       - ./python_back_end/deep_research:/app/deep_research:ro
       - artifact_data:/data/artifacts
       - openclaw-projects:/data/openclaw-projects
+      # Real local repo, READ-ONLY, for orchestrated clone-local "attached" isolation.
+      # The agent only ever clones FROM this — it can never write the live repo.
+      - ${HARVIS_ATTACH_REPO:-./harvis-fs-browse/demo-repo}:/data/attached-repos/harvis:ro
+      # Parallel READ-WRITE mount of the SAME repo for opt-in VibeCode "in-place" mode
+      # (the agent edits the real repo on a session branch — no clone). Distinct from the
+      # :ro mount above, so clone-mode keeps its read-only containment untouched. Only
+      # allowlisted via HARVIS_ATTACHED_REPOS_RW; every write gated by the permission ladder.
+      - ${HARVIS_ATTACH_REPO:-./harvis-fs-browse/demo-repo}:/data/attached-repos-rw/harvis:rw
+      # Optional in-container browse tree for allowlisted-repo flows (most users leave
+      # this as the empty placeholder — local editing uses the browser File System Access API).
+      - ${HARVIS_FS_BROWSE_ROOT_HOST:-./harvis-fs-browse}:/data/host-fs:ro
+      # READ-WRITE host-folder browse tree → "Open folder…" lists real projects here.
+      # ⚠ The agent's `exec` is NOT yet sandboxed: a rogue command can touch anything under this
+      # mount. Even ~/Projects holds per-repo .env files (secrets) — point
+      # HARVIS_FS_BROWSE_ROOT_RW_HOST at a deliberate, SECRETS-FREE projects dir, never your home.
+      # Browsed folders are clone-mode by default; flip HARVIS_INPLACE_ON_BROWSED only once the
+      # permission ladder + an exec sandbox are verified.
+      - ${HARVIS_FS_BROWSE_ROOT_RW_HOST:-./harvis-fs-browse}:/data/host-fs-rw:rw
       # Write-through to host's native OpenClaw config so Discord /model
       # propagates to the BYO gateway. Set HOST_OPENCLAW_CONFIG_HOST_PATH
       # in .env to override. Requires file to be writable by UID 1001 (appuser)
@@ -334,6 +379,29 @@ services:
       resources:
         limits:
           memory: 64M
+    networks:
+      - ollama-n8n-network
+
+  # Vendored open-notebook Next.js frontend, served at /onb (nginx proxies here).
+  # Talks to the Harvis backend's onb_compat facade (/onb-api) via Next rewrites.
+  # Distinct from the `open-notebook` service below (the official lfnovo image on
+  # its own SurrealDB) — this one runs on the Harvis notebooks backend.
+  open-notebook-ui:
+    build:
+      context: ./front_end/open-notebook
+    container_name: harvis-open-notebook
+    restart: unless-stopped
+    environment:
+      INTERNAL_API_URL: "http://backend:8000"
+      PORT: "8502"
+      NODE_ENV: "production"
+      NEXT_TELEMETRY_DISABLED: "1"
+    depends_on:
+      - backend
+    deploy:
+      resources:
+        limits:
+          memory: 512M
     networks:
       - ollama-n8n-network
 

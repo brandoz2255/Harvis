@@ -37,14 +37,41 @@ TOOL_SCHEMA = [
         "type": "function",
         "function": {
             "name": "edit_file",
-            "description": "Create or overwrite a file inside your workspace with the given content.",
+            "description": (
+                "Create a NEW file, or fully REWRITE one, with `content`. ⚠ This OVERWRITES the "
+                "whole file — anything you omit is deleted. To change part of an EXISTING file, "
+                "use str_replace instead. Use edit_file only for brand-new files."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Path relative to your workspace."},
-                    "content": {"type": "string", "description": "Full file content to write."},
+                    "content": {"type": "string", "description": "The COMPLETE file content to write."},
                 },
                 "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "str_replace",
+            "description": (
+                "Edit an EXISTING file in place: replace the single exact occurrence of `old_str` "
+                "with `new_str`, leaving the rest of the file untouched. PREFER THIS for any change "
+                "to an existing file. `old_str` must match exactly (including indentation) and occur "
+                "exactly once — include a few surrounding lines to make it unique. ALWAYS copy "
+                "WHOLE lines into old_str and new_str (start at a line beginning, end at a line end) "
+                "— never cut a line mid-token, or you will leave broken leftover text."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path relative to your workspace."},
+                    "old_str": {"type": "string", "description": "Exact text to replace (unique in the file)."},
+                    "new_str": {"type": "string", "description": "Replacement text."},
+                },
+                "required": ["path", "old_str", "new_str"],
             },
         },
     },
@@ -101,6 +128,38 @@ async def dispatch_tool(workspace_path: str, name: str, args: dict) -> tuple[str
             with open(fp, "w", encoding="utf-8") as f:
                 f.write(content)
             return (f"Wrote {len(content)} bytes to {rel}", True)
+
+        if name == "str_replace":
+            rel = str(args.get("path") or "")
+            old = args.get("old_str")
+            new = args.get("new_str")
+            old = "" if old is None else str(old)
+            new = "" if new is None else str(new)
+            if not validate_agent_path(workspace_path, rel):
+                return (f"DENIED: path '{rel}' is outside your workspace.", False)
+            fp = os.path.join(workspace_path, rel)
+            if not os.path.isfile(fp):
+                return (f"No such file: {rel} (use edit_file to create it).", False)
+            if not old:
+                return ("str_replace needs a non-empty old_str.", False)
+            with open(fp, "r", encoding="utf-8", errors="replace") as f:
+                data = f.read()
+            count = data.count(old)
+            if count == 0:
+                return (
+                    f"old_str not found in {rel}. read_file it and copy the exact text "
+                    "(including indentation).",
+                    False,
+                )
+            if count > 1:
+                return (
+                    f"old_str matches {count} places in {rel}; add surrounding lines so it "
+                    "is unique (exactly one match).",
+                    False,
+                )
+            with open(fp, "w", encoding="utf-8") as f:
+                f.write(data.replace(old, new, 1))
+            return (f"Replaced 1 occurrence in {rel}", True)
 
         if name in ("exec", "run_tests"):
             cmd = str(args.get("command") or ("pytest -q" if name == "run_tests" else ""))

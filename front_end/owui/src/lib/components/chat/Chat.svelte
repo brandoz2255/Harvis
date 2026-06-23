@@ -33,6 +33,7 @@
 		showControls,
 		chatMode,
 		orchestrateUniformModel,
+		orchestrateRepoPath,
 		pendingComposerPrompt,
 		showCallOverlay,
 		currentChatPage,
@@ -2522,6 +2523,7 @@
 				model: model.id,
 				harvis_mode: $chatMode, // 'auto' | 'chat' | 'agent' | 'orchestrate' — forces fast chat vs workspace
 				harvis_orchestrate_uniform: $orchestrateUniformModel, // orchestrate: force one model for all sub-agents
+				harvis_repo_path: $orchestrateRepoPath || undefined, // orchestrate: attach a real repo (clone-local diff vs HEAD)
 				...(messages.length > 0 ? { messages } : {}),
 				params: {
 					...$settings?.params,

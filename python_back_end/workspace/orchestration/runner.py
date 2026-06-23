@@ -22,6 +22,7 @@ from typing import AsyncGenerator
 
 from ..openclaw_client import OpenClawEvent
 from .model_router import ModelRouter
+from .risk import await_action_decision, gate_decision, register_pending
 from .tools import TOOL_SCHEMA, dispatch_tool, parse_tool_calls
 
 logger = logging.getLogger(__name__)
@@ -59,10 +60,11 @@ def _ws_fingerprint(path: str) -> str:
 _SYSTEM = (
     "You are {label}, an autonomous coding sub-agent working in an ISOLATED, "
     "initially-empty workspace directory. You can ONLY use the provided tools, and "
-    "ONLY touch files inside your workspace using RELATIVE paths. Complete the task "
-    "by creating/editing files with edit_file (optionally run exec / run_tests to "
-    "check your work). Do NOT ask questions. When the task is fully done, call "
-    "finish with a one-line summary."
+    "ONLY touch files inside your workspace using RELATIVE paths. Create new files "
+    "with edit_file. To CHANGE a file you already created, use str_replace (it "
+    "edits a snippet and keeps the rest intact) rather than rewriting the whole "
+    "file. Optionally run exec / run_tests to check your work. Do NOT ask "
+    "questions. When the task is fully done, call finish with a one-line summary."
 )
 
 
@@ -81,6 +83,8 @@ class SubAgentRunner:
         workspace_path: str,
         max_steps: int = 12,
         max_runtime_seconds: int = 600,
+        system_prompt: str | None = None,
+        permission_mode: str | None = None,
     ) -> AsyncGenerator[OpenClawEvent, None]:
         def ev(etype: str, data: dict) -> OpenClawEvent:
             e = OpenClawEvent(
@@ -95,7 +99,7 @@ class SubAgentRunner:
         yield ev("agent_start", {"label": label})
 
         messages = [
-            {"role": "system", "content": _SYSTEM.format(label=label)},
+            {"role": "system", "content": (system_prompt or _SYSTEM).format(label=label)},
             {"role": "user", "content": task},
         ]
         summary = ""
@@ -104,6 +108,13 @@ class SubAgentRunner:
         last_fp = _ws_fingerprint(workspace_path)  # baseline (empty scratch dir)
         made_edit = False
         idle = 0
+        action_seq = 0  # per-action ids for the in-place permission gate
+        # Token accounting (real OpenAI usage surfaced by ModelRouter). The LAST step's
+        # prompt_tokens ≈ current context occupancy; completion/total accumulate over steps.
+        last_prompt_tokens = 0
+        total_completion_tokens = 0
+        total_tokens_sum = 0
+        ctx_window = int(os.getenv("HARVIS_OLLAMA_NUM_CTX", "24576") or 24576)
 
         try:
             while steps < max_steps and (time.monotonic() - started) < max_runtime_seconds:
@@ -111,6 +122,11 @@ class SubAgentRunner:
                 msg = await self.router.complete(
                     model_name=model_name, messages=messages, tools=TOOL_SCHEMA, temperature=0.2
                 )
+                _usage = msg.get("_usage") or {}
+                if _usage:
+                    last_prompt_tokens = int(_usage.get("prompt_tokens") or last_prompt_tokens)
+                    total_completion_tokens += int(_usage.get("completion_tokens") or 0)
+                    total_tokens_sum += int(_usage.get("total_tokens") or 0)
                 content = (msg.get("content") or "").strip()
                 tcs = parse_tool_calls(msg)
 
@@ -132,12 +148,47 @@ class SubAgentRunner:
                         summary = str(args.get("summary") or "Task complete.")
                         finished = True
                         break
-                    if name in ("edit_file", "write"):
-                        made_edit = True
                     yield ev("tool_call", {"tool": name, "args": args})
+                    # In-place permission gate. Only active when permission_mode is set
+                    # (in-place sessions); clone-mode + the orchestrator pass None → no
+                    # gating, byte-for-byte unchanged.
+                    if permission_mode:
+                        decision, tier = gate_decision(name, args, permission_mode)
+                        if decision == "block":
+                            msg_b = (
+                                f"BLOCKED: '{name}' was NOT executed. This turn is PLAN MODE "
+                                "(read-only) — every edit and command will fail, so do NOT "
+                                "retry it or try another edit. Call finish NOW with `summary` "
+                                "= a NUMBERED plan written in PLAIN ENGLISH: one FULL SENTENCE "
+                                "per step saying what you would change and why, naming files in "
+                                "words (e.g. \"1. Add a SUMMARY.md at the repo root describing "
+                                "what hello.txt contains.\"). Do NOT put tool calls, function "
+                                "names, JSON, or code in the plan — describe each step in words."
+                            )
+                            yield ev("tool_result", {"output": msg_b, "success": False})
+                            results_text.append(f"{name} BLOCKED (plan mode) — finish with a plan instead")
+                            continue
+                        if decision == "gate":
+                            action_seq += 1
+                            action_id = f"{run_id}-{steps}-{action_seq}"
+                            register_pending(action_id, {"tool": name, "args": args, "risk": tier})
+                            yield ev("approval_request", {
+                                "action_id": action_id, "tool": name, "args": args, "risk": tier,
+                            })
+                            approved = await await_action_decision(action_id)
+                            yield ev("approval_resolved", {"action_id": action_id, "approved": approved})
+                            if not approved:
+                                yield ev("tool_result", {"output": "Denied by the user.", "success": False})
+                                results_text.append(f"{name} DENIED by user")
+                                continue
                     result, ok = await dispatch_tool(workspace_path, name, args)
                     if not ok:
                         ok_overall = False
+                    # Count as a real edit only AFTER a successful dispatch — a blocked
+                    # (Plan) or denied (Ask) edit never reached the filesystem, so it must
+                    # not trip the no-progress guard.
+                    if ok and name in ("edit_file", "str_replace", "write"):
+                        made_edit = True
                     yield ev("tool_result", {"output": result, "success": ok})
                     results_text.append(
                         f"{name}({json.dumps(args)[:140]}) -> {result[:500]}"
@@ -195,5 +246,9 @@ class SubAgentRunner:
                 "duration_ms": int((time.monotonic() - started) * 1000),
                 "summary": summary,
                 "success": ok_overall,
+                "prompt_tokens": last_prompt_tokens,
+                "completion_tokens": total_completion_tokens,
+                "total_tokens": total_tokens_sum or (last_prompt_tokens + total_completion_tokens),
+                "context_window": ctx_window,
             },
         )

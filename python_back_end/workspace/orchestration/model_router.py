@@ -57,4 +57,7 @@ class ModelRouter:
         msg.setdefault("role", "assistant")
         if msg.get("content") is None:
             msg["content"] = ""
+        # Surface token usage (OpenAI shape: prompt_tokens/completion_tokens/total_tokens)
+        # so the runner can report real context occupancy. Was discarded before.
+        msg["_usage"] = data.get("usage") or {}
         return msg

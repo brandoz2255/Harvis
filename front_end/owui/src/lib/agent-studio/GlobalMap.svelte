@@ -2,8 +2,7 @@
 	import { onMount, getContext } from 'svelte';
 	import { WEBUI_BASE_URL } from '$lib/constants';
 	import { chatId } from '$lib/stores';
-	import WorkflowCanvas from './workflow/WorkflowCanvas.svelte';
-	import { sessionsToGraph } from './workflow/sessionsToGraph';
+	import NeuralGraph from './workflow/NeuralGraph.svelte';
 	import type { RunRow } from './workflow/runsToGraph';
 
 	const i18n: any = getContext('i18n');
@@ -36,7 +35,6 @@
 
 	$: filtered =
 		scope === 'session' && $chatId ? runs.filter((r) => r.session_id === $chatId) : runs;
-	$: graph = sessionsToGraph(filtered);
 
 	onMount(load);
 </script>
@@ -79,7 +77,7 @@
 			</div>
 		{:else}
 			{#key scope}
-				<WorkflowCanvas {graph} />
+				<NeuralGraph runs={filtered} />
 			{/key}
 		{/if}
 	</div>

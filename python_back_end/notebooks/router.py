@@ -18,7 +18,7 @@ from pydantic import BaseModel
 
 from .models import (
     Notebook, NotebookSource, NotebookNote, NotebookChatMessage,
-    CreateNotebookRequest, UpdateNotebookRequest,
+    CreateNotebookRequest, UpdateNotebookRequest, AutonameResponse,
     CreateNoteRequest, UpdateNoteRequest,
     NotebookChatRequest, NotebookChatResponse,
     SourceUploadResponse, IngestionStatusResponse,
@@ -158,6 +158,96 @@ async def update_notebook(
     except Exception as e:
         logger.error(f"Failed to update notebook: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{notebook_id}/autoname", response_model=AutonameResponse)
+async def autoname_notebook(
+    notebook_id: UUID,
+    request: Request = None,
+    current_user: Dict = Depends(get_current_user_from_request),
+    manager: NotebookManager = Depends(get_notebook_manager)
+):
+    """Derive an emoji (and, for untitled notebooks, a title) from the notebook's sources via the LLM.
+
+    Always assigns an emoji; only renames notebooks that are still 'untitled'. Falls back to the
+    first source title + a default emoji if the LLM is unavailable or returns nothing usable.
+    """
+    import re as _re
+    import requests as _requests
+    from .rag_chat import FALLBACK_MODELS, OLLAMA_URL
+
+    try:
+        nb = await manager.get_notebook(notebook_id, current_user["id"])
+        sources = await manager.list_sources(notebook_id, current_user["id"])
+    except NotebookNotFoundError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+    current_title = (nb.title or "").strip()
+    is_untitled = current_title.lower() in ("", "untitled", "untitled notebook", "new notebook")
+    fallback_title = (
+        (sources[0].title if sources and sources[0].title else current_title) or "Untitled notebook"
+    )
+
+    gen_title, gen_emoji = None, None
+    if sources:
+        source_lines = "\n".join(
+            f"- {(s.title or 'Untitled source')} ({getattr(s.type, 'value', s.type)})"
+            for s in sources[:12]
+        )
+        prompt = (
+            "You are naming a research notebook from its sources. Respond with ONLY a compact "
+            'JSON object: {"title": "<concise 2-4 word name>", "emoji": "<one relevant emoji>"}. '
+            "No prose, no markdown, no code fences.\n\nSources:\n" + source_lines
+        )
+        # Prefer small instruction-following models that emit clean JSON. Reasoning models
+        # (gpt-oss, qwen3) often spend num_predict on hidden reasoning and return empty, so
+        # they go last (via FALLBACK_MODELS) only as a backstop.
+        autoname_models = ["granite4.1:8b", "llama3.1:8b", "gemma4:e4b"]
+        autoname_models += [m for m in FALLBACK_MODELS if m not in autoname_models]
+        for model in autoname_models:
+            try:
+                r = _requests.post(
+                    f"{OLLAMA_URL}/api/generate",
+                    json={
+                        "model": model,
+                        "prompt": prompt,
+                        "stream": False,
+                        "options": {"temperature": 0.4, "num_predict": 80, "num_ctx": 2048},
+                    },
+                    timeout=60,
+                )
+                if r.status_code != 200:
+                    continue
+                text = (r.json().get("response") or "").strip()
+                match = _re.search(r"\{.*\}", text, _re.DOTALL)
+                if not match:
+                    continue
+                obj = json.loads(match.group(0))
+                gen_title = ((obj.get("title") or "").strip().strip('"').strip())[:60] or None
+                gen_emoji = ((obj.get("emoji") or "").strip())[:8] or None
+                if gen_title or gen_emoji:
+                    logger.info(f"autoname {notebook_id}: model={model} title={gen_title!r} emoji={gen_emoji!r}")
+                    break
+            except Exception as e:
+                logger.debug(f"autoname model {model} failed: {e}")
+                continue
+
+    final_title = (gen_title if (is_untitled and gen_title) else current_title) or fallback_title
+    final_emoji = gen_emoji or nb.emoji or "\U0001F4D3"  # 📓
+
+    try:
+        await manager.update_notebook(
+            notebook_id,
+            current_user["id"],
+            UpdateNotebookRequest(
+                title=final_title if final_title != current_title else None,
+                emoji=final_emoji,
+            ),
+        )
+    except Exception as e:
+        logger.error(f"autoname persist failed: {e}")
+
+    return AutonameResponse(title=final_title, emoji=final_emoji)
 
 
 @router.delete("/{notebook_id}")

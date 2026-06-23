@@ -337,6 +337,8 @@ async def push_changes(req: PushChangesRequest, request: Request, user=Depends(g
     await _run_git(["git", "remote", "set-url", "origin", safe_url], cwd=repo_path)
 
     if rc != 0:
+        if gh_token:
+            err = (err or "").replace(gh_token, "***")  # never echo the token in the error
         raise HTTPException(status_code=500, detail=f"Push failed: {err[:200]}")
 
     result = {"status": "pushed", "branch": req.branch}

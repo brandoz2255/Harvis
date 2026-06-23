@@ -313,6 +313,10 @@ class LaunchRequest(BaseModel):
     enable_interactive: bool = True
     live_web: bool = True  # When True, OpenClaw gets X-Live-Web (broad web + browser navigate)
     parallel: bool = True   # When True, planner may split task into parallel sub-agents
+    # When set (a path to a git repo bind-mounted read-only into the backend), an
+    # orchestrated run uses clone-local "attached" isolation: each sub-agent runs in
+    # a `git clone --local` of this repo and produces a real `git diff` vs HEAD.
+    repo_path: Optional[str] = None
     # User-uploaded files (images, PDFs, docs). Each entry should carry at least
     # one of: `url` (e.g. http://backend:8000/api/images/<id>.jpg), `path`
     # (inside a shared volume), or `file_id` (UUID from POST /api/uploads).
@@ -378,6 +382,229 @@ def _looks_like_browser_task(task_brief: str, chat_history: list[dict] | None = 
     return False
 
 
+def _repo_in_allowlist(repo_path: str, env_name: str) -> bool:
+    """True iff repo_path is a member of the comma-separated allowlist in env_name.
+    Realpath membership (NOT a string prefix) so `..` traversal + symlink escapes can't
+    smuggle in an arbitrary on-host git repo. The frontend only ever offers allowlisted
+    repos, so a non-member path is a tampering attempt → the caller rejects it (403)."""
+    if not repo_path:
+        return False
+    try:
+        target = os.path.realpath(repo_path)
+    except Exception:
+        return False
+    allowed = {
+        os.path.realpath(s.strip())
+        for s in os.getenv(env_name, "").split(",")
+        if s.strip()
+    }
+    return target in allowed
+
+
+def _browse_root() -> str:
+    """Realpath'd READ-ONLY filesystem-browse root from HARVIS_FS_BROWSE_ROOT, or "" when
+    unset. The deliberately-mounted host tree the "Open folder…" picker can reach — distinct
+    from the explicit single-repo allowlist. CLONE-MODE ONLY: a repo opened from here is cloned
+    (never edited in place), so the source mount stays read-only and contained."""
+    v = os.getenv("HARVIS_FS_BROWSE_ROOT", "").strip()
+    try:
+        return os.path.realpath(v) if v else ""
+    except Exception:
+        return ""
+
+
+def _browse_root_rw() -> str:
+    """Realpath'd filesystem-browse root for the host-folder picker (HARVIS_FS_BROWSE_ROOT_RW,
+    default = the dedicated browse mount /data/host-fs-rw — point HARVIS_FS_BROWSE_ROOT_RW_HOST at
+    a real, secrets-free projects dir to browse it). Browsed repos default to CLONE-mode; they are
+    only IN-PLACE eligible when HARVIS_INPLACE_ON_BROWSED is on (see _inplace_on_browsed). Distinct
+    from the read-only _browse_root(); realpath-contained; containment is by the MOUNT."""
+    v = os.getenv("HARVIS_FS_BROWSE_ROOT_RW", "/data/host-fs-rw").strip()
+    try:
+        return os.path.realpath(v) if v else ""
+    except Exception:
+        return ""
+
+
+def _inplace_on_browsed() -> bool:
+    """Whether a git repo under the RW browse root may be edited IN-PLACE (real files). OFF by
+    default: until the permission ladder + an `exec` sandbox are verified for this path, browsed
+    folders are CLONE-mode only (the throwaway-clone/diff is the gate). The one explicit
+    HARVIS_ATTACHED_REPOS_RW repo is always in-place-eligible regardless of this flag."""
+    return os.getenv("HARVIS_INPLACE_ON_BROWSED", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _browse_display_label() -> str:
+    """Human label for the browse root in the UI (e.g. 'Projects'), not the container path."""
+    label = os.getenv("HARVIS_FS_BROWSE_ROOT_LABEL", "").strip()
+    if label:
+        return label
+    host = os.getenv("HARVIS_FS_BROWSE_ROOT_HOST", "").strip()
+    if host:
+        return os.path.basename(host.rstrip(os.sep)) or "Projects"
+    root = _browse_root()
+    return os.path.basename(root.rstrip(os.sep)) if root else ""
+
+
+def _browse_display_path(container_path: str) -> str:
+    """Map a container path under the browse mount to a host-relative display string
+    (e.g. '/data/host-fs/projects/Harvis' → 'Projects/Harvis')."""
+    if not container_path:
+        return ""
+    root = _browse_root()
+    if not root:
+        return container_path
+    try:
+        p = os.path.realpath(container_path)
+        r = os.path.realpath(root)
+    except Exception:
+        return container_path
+    label = _browse_display_label()
+    if p == r:
+        return label
+    if p.startswith(r + os.sep):
+        rel = p[len(r) + 1 :].replace(os.sep, "/")
+        return f"{label}/{rel}" if rel else label
+    return os.path.basename(p)
+
+
+def _repo_display_path(repo_path: str | None) -> str:
+    """User-facing repo label for chips/headers — host-style when mappable, else basename."""
+    if not repo_path:
+        return ""
+    if _under_root(repo_path, _browse_root()):
+        return _browse_display_path(repo_path)
+    # Explicit allowlist mount (e.g. /data/attached-repos/harvis) → host path when configured.
+    host_attach = os.getenv("HARVIS_ATTACH_REPO_HOST", "").strip()
+    browse_host = os.getenv("HARVIS_FS_BROWSE_ROOT_HOST", "").strip()
+    if host_attach and browse_host:
+        try:
+            ha = os.path.realpath(host_attach)
+            bh = os.path.realpath(browse_host)
+            if ha == bh or ha.startswith(bh + os.sep):
+                rel = ha[len(bh) :].lstrip(os.sep).replace(os.sep, "/")
+                label = _browse_display_label()
+                return f"{label}/{rel}" if rel else label
+        except Exception:
+            pass
+    if host_attach:
+        return host_attach.replace(os.sep, "/")
+    return os.path.basename(repo_path.rstrip(os.sep))
+
+
+def _session_repo_display(repo_path: str | None, title: str | None) -> str:
+    """Display label for a VibeCode session's repo chip/header. A GitHub-clone (or copy-seed)
+    session stores repo_path = the clone UNDER the session-workspace root — it has no host
+    source, so the generic host-attach fallback in _repo_display_path mislabels it (e.g.
+    "/tmp/harvis-attach-test"). For those, show the session title ("owner/repo" for GitHub)
+    instead; every other session keeps the normal host-style mapping."""
+    try:
+        from .orchestration.isolation import SESSION_WORKSPACE_ROOT
+        rp = os.path.realpath(repo_path or "")
+        root = os.path.realpath(SESSION_WORKSPACE_ROOT)
+        if rp and (rp == root or rp.startswith(root + os.sep)):
+            return ((title or "").strip() or os.path.basename(rp) or "repo")
+    except Exception:
+        pass
+    return _repo_display_path(repo_path)
+
+
+def _under_root(path: str, root: str) -> bool:
+    """True iff realpath(path) is `root` itself or strictly inside it. realpath collapses
+    `..` AND resolves symlinks, so neither traversal nor a symlink can escape the root."""
+    if not path or not root:
+        return False
+    try:
+        t = os.path.realpath(path)
+    except Exception:
+        return False
+    return t == root or t.startswith(root + os.sep)
+
+
+def _dir_is_git_repo(path: str) -> bool:
+    """True iff `path` is a git repo whose `.git` is a REAL directory (not a symlink/gitfile).
+    Rejecting a symlinked `.git` is load-bearing: a dir under the browse root whose `.git`
+    symlinks to ANOTHER repo's `.git` would otherwise pass the is-repo test and let
+    `git clone --local` exfiltrate that out-of-tree repo."""
+    git = os.path.join(path, ".git")
+    try:
+        return (not os.path.islink(git)) and os.path.isdir(git)
+    except Exception:
+        return False
+
+
+def _is_repo_under_browse_root(repo_path: str) -> bool:
+    """True iff repo_path is a git repo living under the configured (read-only) browse root.
+    Lets the "Open folder…" picker clone a repo that isn't on the explicit allowlist —
+    realpath-contained, and the `.git` itself must also resolve under the root so a planted
+    `.git` symlink can't escape the tree."""
+    root = _browse_root()
+    if not _under_root(repo_path, root):
+        return False
+    try:
+        rp = os.path.realpath(repo_path)
+    except Exception:
+        return False
+    # `.git` must be a real dir AND its realpath must stay under the root — blocks the
+    # `.git`-symlink-to-an-out-of-tree-repo escape that `git clone --local` would follow.
+    return _dir_is_git_repo(rp) and _under_root(os.path.join(rp, ".git"), root)
+
+
+def _is_repo_under_browse_root_rw(repo_path: str) -> bool:
+    """True iff repo_path is a git repo under the configured READ-WRITE browse root. Lets the
+    "Browse writable folders…" picker target a repo for IN-PLACE editing without an explicit
+    per-repo allowlist entry — realpath-contained, and the `.git` itself must resolve under the
+    RW root (blocks the planted-`.git`-symlink escape, same discipline as the RO gate)."""
+    root = _browse_root_rw()
+    if not _under_root(repo_path, root):
+        return False
+    try:
+        rp = os.path.realpath(repo_path)
+    except Exception:
+        return False
+    return _dir_is_git_repo(rp) and _under_root(os.path.join(rp, ".git"), root)
+
+
+def _is_dir_under_browse_root(repo_path: str) -> bool:
+    """True iff repo_path is a real directory under EITHER browse root — even when it is NOT a
+    git repo. Lets the "Use this folder" picker target ANY folder: a non-git folder is
+    copy-seeded into a fresh clone workspace (the real folder is only READ, never modified).
+    realpath-contained on both roots, so `..`/symlink can't escape; clone-mode only (never
+    in-place — that still requires a real `.git` + the RW gate)."""
+    if not repo_path:
+        return False
+    try:
+        rp = os.path.realpath(repo_path)
+    except Exception:
+        return False
+    if not os.path.isdir(rp):
+        return False
+    return _under_root(rp, _browse_root()) or _under_root(rp, _browse_root_rw())
+
+
+def _is_allowed_repo(repo_path: str) -> bool:
+    """Read-only clone-mode sources: the explicit HARVIS_ATTACHED_REPOS allowlist, OR any git
+    repo under EITHER browse root, OR ANY folder under a browse root (non-git folders are
+    copy-seeded into a clone workspace). All clone-mode — the real source is only read."""
+    return (
+        _repo_in_allowlist(repo_path, "HARVIS_ATTACHED_REPOS")
+        or _is_repo_under_browse_root(repo_path)
+        or _is_repo_under_browse_root_rw(repo_path)
+        or _is_dir_under_browse_root(repo_path)
+    )
+
+
+def _is_allowed_repo_rw(repo_path: str) -> bool:
+    """Writable in-place targets. ALWAYS includes the explicit HARVIS_ATTACHED_REPOS_RW allowlist
+    (the one deliberately-chosen repo). A git repo under the RW browse root is in-place-eligible
+    ONLY when HARVIS_INPLACE_ON_BROWSED is on — until the ladder + an `exec` sandbox are verified
+    for that path, browsed folders stay CLONE-mode (the diff/PR is the gate). The READ-ONLY browse
+    root is never honored here."""
+    if _repo_in_allowlist(repo_path, "HARVIS_ATTACHED_REPOS_RW"):
+        return True
+    return _inplace_on_browsed() and _is_repo_under_browse_root_rw(repo_path)
+
+
 # ─── Database helpers ──────────────────────────────────────────────────────────
 
 async def _db_create_run(
@@ -436,6 +663,53 @@ async def _db_save_artifact(
         return None
 
 
+async def _db_set_run_repo(pool, workspace_id: str, repo_path: str) -> None:
+    """Persist the attached repo path on a run so Create-PR can resolve its GitHub
+    origin + base branch long after the clone-local workspace is torn down."""
+    if pool is None or not repo_path:
+        return
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE workspace_runs SET repo_path = $2 WHERE id = $1",
+                workspace_id, repo_path,
+            )
+    except Exception as exc:
+        logger.error("DB: failed to set repo_path for %s: %s", workspace_id, exc)
+
+
+async def _db_set_run_source(pool, workspace_id: str, source: str) -> None:
+    """Tag a run's kind (e.g. 'vibecode' for a VibeCode-session turn). Mirrors
+    _db_set_run_repo — the create is ON CONFLICT DO NOTHING, so an UPDATE is how the
+    marker lands. Keeps VibeCode turns filterable + out of generic history lists."""
+    if pool is None or not source:
+        return
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE workspace_runs SET source = $2 WHERE id = $1",
+                workspace_id, source,
+            )
+    except Exception as exc:
+        logger.error("DB: failed to set source for %s: %s", workspace_id, exc)
+
+
+async def _db_set_run_attachments(pool, workspace_id: str, attachments: list) -> None:
+    """Persist the user's ORIGINAL attachments (image/file refs) on a turn so the chat
+    thread can render them inline. The agent's brief carries the machine-readable refs
+    separately — this is purely for display (and survives reload)."""
+    if pool is None or not attachments:
+        return
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE workspace_runs SET attachments = $2::jsonb WHERE id = $1",
+                workspace_id, json.dumps(attachments),
+            )
+    except Exception as exc:
+        logger.error("DB: failed to set attachments for %s: %s", workspace_id, exc)
+
+
 async def _db_save_event(pool, workspace_id: str, seq: int, event: OpenClawEvent) -> None:
     if pool is None:
         return
@@ -444,7 +718,8 @@ async def _db_save_event(pool, workspace_id: str, seq: int, event: OpenClawEvent
         for key in (
             "content", "tool", "args", "output", "success", "message",
             "summary", "fix_hint", "model", "parent_run_id",
-            "run_id", "agent_label",
+            "run_id", "agent_label", "steps",
+            "action_id", "risk", "approved",  # per-action permission gate (in-place)
         ):
             val = event.data.get(key)
             if val is not None:
@@ -476,26 +751,34 @@ async def _db_complete_run(
     tool_calls: int,
     event_count: int,
     started_epoch: float,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
 ) -> None:
     if pool is None:
         return
     try:
         duration_ms = int((time.monotonic() - started_epoch) * 1000)
         async with pool.acquire() as conn:
+            # Tokens are written CONDITIONALLY (COALESCE/NULLIF): a 0 leaves any existing
+            # value intact — so the bg loop completing a vibecode/main run (which sets its
+            # own tokens elsewhere) never clobbers them, while orchestrated sub-agents
+            # (which pass real counts) get attributed. Powers the Background-tasks table.
             await conn.execute(
                 """
                 UPDATE workspace_runs
-                SET status        = $2,
-                    completed_at  = NOW(),
-                    duration_ms   = $3,
-                    event_count   = $4,
-                    tool_calls    = $5,
-                    final_summary = $6,
-                    error_message = $7
+                SET status            = $2,
+                    completed_at      = NOW(),
+                    duration_ms       = $3,
+                    event_count       = $4,
+                    tool_calls        = $5,
+                    final_summary     = $6,
+                    error_message     = $7,
+                    prompt_tokens     = COALESCE(NULLIF($8, 0), prompt_tokens),
+                    completion_tokens = COALESCE(NULLIF($9, 0), completion_tokens)
                 WHERE id = $1
                 """,
                 workspace_id, status, duration_ms, event_count, tool_calls,
-                summary, error,
+                summary, error, int(prompt_tokens or 0), int(completion_tokens or 0),
             )
     except Exception as exc:
         logger.error("DB: failed to complete workspace_run %s: %s", workspace_id, exc)
@@ -671,12 +954,35 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
         # stream, so the persist/broadcast loop + RunView/Neural Map render it
         # unchanged. See workspace/orchestration/.
         from .orchestration.orchestrator import run_orchestrated
+        _repo_path = ws.get("repo_path")
         event_stream = run_orchestrated(
             task_brief, chat_history,
             model_name=model_name, pool=pool,
             parent_workspace_id=workspace_id, user_id=ws["user_id"],
             session_id=ws.get("session_id") or f"ws-{workspace_id}",
             uniform_model=ws.get("uniform_model", False),
+            # Attached-repo (clone-local) isolation when a repo is attached; else scratch.
+            isolation_mode="attached" if _repo_path else "scratch",
+            repo_config={"repo_path": _repo_path} if _repo_path else None,
+        )
+
+    elif agent_id == "vibecode-turn":
+        # VibeCode cumulative-session turn: ONE agent on the session's PERSISTENT
+        # working clone (clone-mode). Each follow-up builds on prior turns' edits;
+        # the diff accumulates vs the session's fixed base_sha. See orchestration/
+        # session_turn.py. Same OpenClawEvent stream → unchanged persist/broadcast.
+        from .orchestration.session_turn import run_vibecode_turn
+        event_stream = run_vibecode_turn(
+            task_brief, chat_history,
+            model_name=model_name, pool=pool,
+            parent_workspace_id=workspace_id, user_id=ws["user_id"],
+            session_id=ws.get("session_id") or f"ws-{workspace_id}",
+            vibecode_session_id=ws.get("vibecode_session_id") or "",
+            workspace_path=ws.get("workspace_path") or "",
+            base_sha=ws.get("base_sha") or "",
+            repo_path=ws.get("repo_path") or "",
+            isolation_mode=ws.get("vibecode_isolation_mode") or "session",
+            permission_mode=ws.get("vibecode_permission_mode") or "ask",
         )
 
     else:
@@ -1543,6 +1849,12 @@ async def _start_workspace(
     live_web: bool = True,
     parallel: bool = True,
     uniform_model: bool = False,
+    repo_path: Optional[str] = None,
+    vibecode_session_id: Optional[str] = None,
+    workspace_path: Optional[str] = None,
+    base_sha: Optional[str] = None,
+    vibecode_isolation_mode: str = "session",
+    vibecode_permission_mode: str = "ask",
 ) -> OpenClawClient:
     """
     Register a workspace in memory, create its queue, and start the background task.
@@ -1580,6 +1892,15 @@ async def _start_workspace(
         "parallel": parallel,
         # P5: force every sub-agent onto the chat-selected model (vs per-role profile).
         "uniform_model": uniform_model,
+        # When set, orchestrated runs use clone-local "attached" isolation of this repo.
+        "repo_path": repo_path,
+        # VibeCode cumulative-session turn: the persistent session workspace + its
+        # fixed cumulative-diff baseline, used by the "vibecode-turn" dispatch.
+        "vibecode_session_id": vibecode_session_id,
+        "workspace_path": workspace_path,
+        "base_sha": base_sha,
+        "vibecode_isolation_mode": vibecode_isolation_mode,
+        "vibecode_permission_mode": vibecode_permission_mode,
         # Two-mode tracking
         "mode": config.mode,
         "allowed_capabilities": config.allowed_capabilities,
@@ -1750,6 +2071,11 @@ async def launch_workspace(
     if agent_id not in ("main", "kimi", "nvidia-kimi", "local", "cloud-ollama", "gpt-oss", "orchestrated"):
         agent_id = "local"
 
+    # Attached-repo isolation may only target an ops-mounted allowlisted repo — same
+    # gate as the VibeCode session create (closes the systemic attached-repo auth gap).
+    if req.repo_path and not _is_allowed_repo(req.repo_path):
+        raise HTTPException(status_code=403, detail="repo_path is not in the attached-repos allowlist")
+
     # Tier 3 interactive browsing is always on for workspace launches.
     # Keep req.enable_interactive for backward-compatible clients.
     enable_interactive = True
@@ -1787,6 +2113,7 @@ async def launch_workspace(
         live_web=req.live_web,
         interactive_context=interactive_context,
         parallel=req.parallel,
+        repo_path=req.repo_path,
     )
 
     try:
@@ -2191,6 +2518,8 @@ def _run_row_to_dict(r) -> dict:
         "started_at": r["started_at"].isoformat() if r["started_at"] else None,
         "duration_ms": r["duration_ms"],
         "tool_calls": r["tool_calls"],
+        "prompt_tokens": r["prompt_tokens"],
+        "completion_tokens": r["completion_tokens"],
         "summary": r["final_summary"],
         "error": r["error_message"],
     }
@@ -2212,7 +2541,8 @@ async def get_run_tree(
             """
             SELECT id, parent_run_id, role, status, task_brief, model_name,
                    model_provider, branch_name, started_at, completed_at,
-                   duration_ms, tool_calls, final_summary, error_message
+                   duration_ms, tool_calls, final_summary, error_message,
+                   prompt_tokens, completion_tokens
             FROM workspace_runs
             WHERE user_id = $1 AND (id = $2 OR parent_run_id = $2)
             ORDER BY started_at ASC
@@ -2315,6 +2645,7 @@ async def list_all_artifacts(
             FROM workspace_artifacts a
             JOIN workspace_runs r ON r.id = a.workspace_id
             WHERE r.user_id = $1 AND a.artifact_type = 'file'
+              AND r.source IS DISTINCT FROM 'vibecode'
             ORDER BY a.created_at DESC
             LIMIT $2
             """,
@@ -2335,6 +2666,1114 @@ async def list_all_artifacts(
     }
 
 
+@workspace_router.get("/attached-repos")
+async def list_attached_repos(
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """List git repos bind-mounted into the backend. RO repos (HARVIS_ATTACHED_REPOS) for
+    clone-mode; writable repos (HARVIS_ATTACHED_REPOS_RW) for opt-in in-place mode. Each
+    entry carries `writable` so the UI offers in-place only on writable repos."""
+    from .orchestration.isolation import _run_git
+
+    async def _enumerate(env_name: str, writable: bool):
+        out_repos = []
+        for p in [s.strip() for s in os.getenv(env_name, "").split(",") if s.strip()]:
+            if not os.path.isdir(os.path.join(p, ".git")):
+                continue
+            branch = ""
+            try:
+                rc, b, _ = await _run_git(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=p)
+                if rc == 0:
+                    branch = b.strip()
+            except Exception:
+                pass
+            out_repos.append({
+                "path": p,
+                "name": os.path.basename(p.rstrip("/")) or p,
+                "branch": branch,
+                "writable": writable,
+            })
+        return out_repos
+
+    repos = await _enumerate("HARVIS_ATTACHED_REPOS", False)
+    repos += await _enumerate("HARVIS_ATTACHED_REPOS_RW", True)
+    return {"repos": repos}
+
+
+@workspace_router.get("/fs/browse")
+async def browse_filesystem(
+    path: str = "",
+    rw: bool = False,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """List the immediate subdirectories of `path`, bounded to a browse root. With `rw=false`
+    (default) it browses the READ-ONLY root (HARVIS_FS_BROWSE_ROOT) → repos clone-only. With
+    `rw=true` it browses the READ-WRITE root (HARVIS_FS_BROWSE_ROOT_RW) → repos are flagged
+    `rw_capable` (eligible for in-place editing of the REAL files). Each dir is flagged
+    `is_repo` when it contains a real `.git`. The path is realpath-contained to the chosen root
+    (`../`/symlink escapes rejected), so this only ever reveals the deliberately-mounted tree."""
+    root = _browse_root_rw() if rw else _browse_root()
+    # The HOST-side path of the browse root (display-only) + whether it's still the default
+    # sandbox — drives the "point HARVIS_FS_BROWSE_ROOT_RW_HOST at your projects" empty/default hint.
+    host_root = os.getenv(
+        "HARVIS_FS_BROWSE_ROOT_RW_HOST" if rw else "HARVIS_FS_BROWSE_ROOT_HOST", ""
+    ).strip()
+    is_default_root = (not host_root) or host_root in ("./harvis-fs-browse", "harvis-fs-browse")
+    if not root or not os.path.isdir(root):
+        return {"enabled": False, "rw": rw, "root": "", "path": "", "parent": None,
+                "is_repo": False, "rw_capable": False, "entries": [],
+                "host_root": host_root, "is_default_root": is_default_root}
+
+    # Resolve the requested path INSIDE the root (default = the root itself). realpath
+    # collapses `..` and resolves symlinks; the containment check rejects any escape.
+    req = (path or "").strip() or root
+    try:
+        if not os.path.isabs(req):
+            req = os.path.join(root, req)
+        p = os.path.realpath(req)
+    except Exception:
+        raise HTTPException(status_code=400, detail="bad path")
+    if not (p == root or p.startswith(root + os.sep)):
+        raise HTTPException(status_code=403, detail="path is outside the browse root")
+    if not os.path.isdir(p):
+        raise HTTPException(status_code=404, detail="not a directory")
+
+    # Display label/path: the RO root reuses the existing helpers; the RW root maps relative
+    # to itself (its own label) so chips read sensibly for either root.
+    if rw:
+        rw_label = (
+            os.getenv("HARVIS_FS_BROWSE_ROOT_RW_LABEL", "").strip()
+            or os.path.basename(root.rstrip(os.sep))
+            or "Workspace"
+        )
+
+        def _disp(cp: str) -> str:
+            try:
+                pp = os.path.realpath(cp)
+            except Exception:
+                return cp
+            if pp == root:
+                return rw_label
+            if pp.startswith(root + os.sep):
+                rel = pp[len(root) + 1:].replace(os.sep, "/")
+                return f"{rw_label}/{rel}" if rel else rw_label
+            return os.path.basename(pp)
+
+        display_root = rw_label
+    else:
+        _disp = _browse_display_path
+        display_root = _browse_display_label()
+
+    entries: list[dict] = []
+    try:
+        with os.scandir(p) as it:
+            for e in it:
+                if e.name.startswith("."):
+                    continue  # hide dotdirs (.git, .config, …) from the picker
+                try:
+                    if e.is_symlink() or not e.is_dir():
+                        continue  # never offer symlinks (escape) or files
+                except OSError:
+                    continue
+                child = os.path.join(p, e.name)
+                entries.append({
+                    "name": e.name,
+                    "path": child,
+                    "display_path": _disp(child),
+                    "is_repo": _dir_is_git_repo(child),  # rejects symlinked .git (mirrors the accept gate)
+                    "rw_capable": rw,  # under the RW root ⇒ eligible for in-place editing
+                })
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="permission denied")
+    entries.sort(key=lambda x: (not x["is_repo"], x["name"].lower()))
+
+    return {
+        "enabled": True,
+        "rw": rw,
+        "root": root,
+        "path": p,
+        "display_root": display_root,
+        "display_path": _disp(p),
+        "parent": None if p == root else os.path.dirname(p),
+        "is_repo": _dir_is_git_repo(p),
+        "rw_capable": rw,
+        "host_root": host_root,
+        "is_default_root": is_default_root,
+        "at_root": p == root,
+        "entries": entries,
+    }
+
+
+# ─── VibeCode cumulative multi-turn sessions ───────────────────────────────────
+# A VibeCode session is a durable, named container holding a THREAD of turns. Each
+# turn is a workspace_runs row (session_id = <vibecode_session.id>, source='vibecode')
+# running ONE agent on the session's PERSISTENT working clone (clone-mode). Kept
+# cleanly separate from owui_chats (the main chat sidebar) and generic runs.
+
+class VibecodeSessionCreate(BaseModel):
+    repo_path: Optional[str] = None
+    model_name: str = ""
+    title: Optional[str] = None
+    isolation_mode: str = "session"   # 'session' (clone, default+safe) | 'inplace' (opt-in)
+    permission_mode: str = "ask"      # in-place only: plan|ask|auto-accept|full-auto
+    # Local-folder mode (browser File System Access API): the picked directory's display
+    # label. Set ⇒ repo_path is ignored, the workspace is created empty + seeded by the
+    # browser (POST /seed), and changed files are written back to the real folder per turn.
+    local_folder_name: Optional[str] = None
+    # GitHub-clone source: clone owner/repo (optional branch) into the session. Always
+    # clone-mode; private repos need a connected GitHub account, public repos clone tokenless.
+    github_owner: Optional[str] = None
+    github_repo: Optional[str] = None
+    github_branch: Optional[str] = None
+
+
+class VibecodeSeedRequest(BaseModel):
+    # The browser-walked folder snapshot: relative path + text content per file.
+    files: list[dict] = []
+
+
+class VibecodeTurnRequest(BaseModel):
+    task_brief: str
+    model_name: str = ""
+    run_mode: str = ""  # per-turn: 'plan' (read-only → draft a plan) | 'auto'/'' (execute)
+    attachments: list[dict] = []  # image/file refs ({url|path|file_id, name, mime_type})
+
+
+async def _vibecode_session_row(pool, session_id: str, user_id: int):
+    if pool is None:
+        return None
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT * FROM vibecode_sessions WHERE id = $1 AND user_id = $2",
+            session_id, user_id,
+        )
+
+
+@workspace_router.post("/vibecode/sessions")
+async def create_vibecode_session(
+    req: VibecodeSessionCreate,
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """Create a VibeCode session. Clone-mode (default, safe): a PERSISTENT throwaway
+    clone of a RO attached repo. In-place (opt-in): a session branch ON the real repo
+    (RW mount) — requires the RW allowlist, a CLEAN tree, and no other active in-place
+    session on that repo. Turns share the one evolving working copy either way."""
+    from .orchestration.isolation import (
+        _run_git, create_or_attach_session_workspace, create_inplace_session_workspace,
+        create_local_folder_session_workspace,
+    )
+    pool = getattr(request.app.state, "pg_pool", None)
+    uid = current_user["id"]
+    if pool is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    session_id = str(uuid.uuid4())[:12]
+    repo_path = (req.repo_path or "").strip() or None
+    isolation_mode = req.isolation_mode if req.isolation_mode in ("session", "inplace") else "session"
+    permission_mode = (
+        req.permission_mode if req.permission_mode in ("plan", "ask", "auto-accept", "full-auto") else "ask"
+    )
+    local_folder_name = (req.local_folder_name or "").strip() or None
+    github_owner = (req.github_owner or "").strip() or None
+    github_repo = (req.github_repo or "").strip() or None
+    github_branch = (req.github_branch or "").strip() or None
+
+    if local_folder_name:
+        # Local-folder mode (browser File System Access API): empty git workspace now,
+        # seeded by the browser via POST /seed (which sets base_sha). Always clone-style
+        # isolation — the real folder is the browser's, not a container path.
+        isolation_mode = "session"
+        repo_path = None
+        info = await create_local_folder_session_workspace(session_id)
+        workspace_path = info.get("workspace_path")
+        base_sha = None  # set on /seed
+        base_branch = None
+    elif github_repo:
+        # GitHub-clone source: always clone-mode (a remote repo, not a local mount). Use the
+        # user's connected token if present (private repos); else a tokenless clone (public).
+        isolation_mode = "session"
+        token = ""
+        try:
+            from .repo_manager import _get_github_token
+            token = (await _get_github_token(pool, uid)) or ""
+        except Exception:
+            token = ""  # not connected / decrypt error → public-only tokenless clone
+        info = await create_or_attach_session_workspace(
+            session_id, None, None,
+            github_source={
+                "owner": github_owner or "", "repo": github_repo,
+                "branch": github_branch or "", "token": token,
+            },
+        )
+        if info.get("error"):
+            raise HTTPException(status_code=502, detail=info["error"])
+        workspace_path = info.get("workspace_path")
+        base_sha = info.get("base_sha")
+        repo_path = info.get("repo_path") or workspace_path
+        base_branch = github_branch
+    elif isolation_mode == "inplace":
+        # In-place edits the REAL repo → require the RW allowlist + a clean tree + no other
+        # active in-place session on this repo (one working tree per repo can't be shared).
+        # NOTE: browse-root ("Open folder…") repos are clone-mode only — _is_allowed_repo_rw
+        # honors the explicit RW allowlist alone, so an opened folder can't reach in-place.
+        if not repo_path or not _is_allowed_repo_rw(repo_path):
+            raise HTTPException(
+                status_code=403,
+                detail="In-place requires a writable allowlisted repo (HARVIS_ATTACHED_REPOS_RW).",
+            )
+        async with pool.acquire() as conn:
+            clash = await conn.fetchrow(
+                "SELECT id FROM vibecode_sessions WHERE repo_path = $1 AND isolation_mode = 'inplace' "
+                "AND status = 'active' LIMIT 1",
+                repo_path,
+            )
+        if clash:
+            raise HTTPException(
+                status_code=409,
+                detail="Another in-place session is already active on this repo — delete it first.",
+            )
+        info = await create_inplace_session_workspace(session_id, repo_path, None)
+        if info.get("error"):
+            raise HTTPException(status_code=409, detail=info["error"])
+        workspace_path = info["workspace_path"]
+        base_sha = info["base_sha"]
+        base_branch = info["base_branch"]
+    else:
+        # Clone-mode (default, safe): RO allowlist + a persistent throwaway clone.
+        if repo_path and not _is_allowed_repo(repo_path):
+            raise HTTPException(status_code=403, detail="repo_path is not in the attached-repos allowlist")
+        base_branch = ""
+        if repo_path and os.path.isdir(os.path.join(repo_path, ".git")):
+            # A git repo → clone-local; capture its current branch as the baseline.
+            try:
+                rc, b, _ = await _run_git(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_path)
+                if rc == 0:
+                    base_branch = b.strip()
+            except Exception:
+                pass
+        elif repo_path and not _is_dir_under_browse_root(repo_path):
+            # Not a git repo AND not a browsable folder → scratch session.
+            repo_path = None
+        # else: a non-git folder under a browse root → kept; create_or_attach copy-seeds it.
+        info = await create_or_attach_session_workspace(session_id, repo_path, base_branch)
+        workspace_path = info.get("workspace_path")
+        base_sha = info.get("base_sha")
+        base_branch = base_branch or None
+
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO vibecode_sessions
+                    (id, user_id, title, repo_path, base_branch, workspace_path, base_sha,
+                     isolation_mode, permission_mode, local_folder_name, source, status)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'vibecode', 'active')
+                """,
+                session_id, uid,
+                req.title or local_folder_name or (f"{github_owner}/{github_repo}" if github_repo else None),
+                repo_path, base_branch or None,
+                workspace_path, base_sha, isolation_mode, permission_mode, local_folder_name,
+            )
+    except Exception as exc:
+        # Partial-unique-index (23505) → another in-place session raced us onto this repo.
+        # The DB is the real guard against the check-then-create TOCTOU; roll back our branch.
+        if getattr(exc, "sqlstate", None) == "23505" and isolation_mode == "inplace":
+            from .orchestration.isolation import cleanup_inplace_session
+            safe = "".join(c for c in session_id if c.isalnum() or c in "-_")[:64] or "session"
+            await cleanup_inplace_session(repo_path, base_branch, f"vibecode/{safe}")
+            raise HTTPException(
+                status_code=409,
+                detail="Another in-place session is already active on this repo — delete it first.",
+            )
+        raise
+    logger.info(
+        "vibecode: created %s session %s (user=%s, repo=%s, perm=%s)",
+        isolation_mode, session_id, uid, repo_path, permission_mode,
+    )
+    display_title = req.title or local_folder_name or (f"{github_owner}/{github_repo}" if github_repo else None)
+    return {
+        "id": session_id,
+        "title": display_title,
+        "repo_path": repo_path,
+        "repo_display_path": local_folder_name or _session_repo_display(repo_path, display_title),
+        "base_branch": base_branch or None,
+        "workspace_path": workspace_path,
+        "isolation_mode": isolation_mode,
+        "permission_mode": permission_mode,
+        "local_folder_name": local_folder_name,
+        # Local-folder sessions must be seeded by the browser before the first turn.
+        "needs_seed": bool(local_folder_name),
+        "status": "active",
+    }
+
+
+@workspace_router.get("/vibecode/sessions")
+async def list_vibecode_sessions(
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """The user's VibeCode sessions (newest first) for the sidebar list."""
+    pool = getattr(request.app.state, "pg_pool", None)
+    if pool is None:
+        return {"sessions": []}
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, title, emoji, repo_path, status, created_at, updated_at
+            FROM vibecode_sessions
+            WHERE user_id = $1 AND status != 'deleted'
+            ORDER BY updated_at DESC
+            LIMIT 100
+            """,
+            current_user["id"],
+        )
+    return {"sessions": [dict(r) for r in rows]}
+
+
+@workspace_router.get("/vibecode/session/{session_id}")
+async def get_vibecode_session(
+    session_id: str,
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """A session + its ordered thread of turns (workspace_runs, source='vibecode')."""
+    pool = getattr(request.app.state, "pg_pool", None)
+    uid = current_user["id"]
+    sess = await _vibecode_session_row(pool, session_id, uid)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    async with pool.acquire() as conn:
+        turns = await conn.fetch(
+            """
+            SELECT id, task_brief, status, started_at, completed_at,
+                   duration_ms, tool_calls, final_summary, error_message,
+                   model_name, prompt_tokens, completion_tokens, context_window,
+                   attachments
+            FROM workspace_runs
+            WHERE session_id = $1 AND source = 'vibecode'
+            ORDER BY started_at ASC
+            """,
+            session_id,
+        )
+    s = dict(sess)
+    rp = s.get("repo_path")
+    local_folder_name = s.get("local_folder_name")
+    return {
+        "session": {
+            "id": s["id"], "title": s.get("title"), "emoji": s.get("emoji"),
+            "repo_path": rp,
+            "repo_display_path": local_folder_name or _session_repo_display(rp, s.get("title")),
+            "base_branch": s.get("base_branch"),
+            "status": s.get("status"),
+            "isolation_mode": s.get("isolation_mode") or "session",
+            "permission_mode": s.get("permission_mode") or "ask",
+            "local_folder_name": local_folder_name,
+            # No base_sha yet ⇒ the browser still needs to seed this local-folder session.
+            "needs_seed": bool(local_folder_name) and not s.get("base_sha"),
+        },
+        "turns": [_vibecode_turn_to_dict(t) for t in turns],
+    }
+
+
+def _vibecode_turn_to_dict(t) -> dict:
+    """Row → dict, decoding the JSONB `attachments` (asyncpg hands it back as a str) into a
+    list so the chat thread can render the user's images inline."""
+    d = dict(t)
+    raw = d.get("attachments")
+    if isinstance(raw, str):
+        try:
+            d["attachments"] = json.loads(raw) or []
+        except Exception:
+            d["attachments"] = []
+    elif raw is None:
+        d["attachments"] = []
+    return d
+
+
+@workspace_router.post("/vibecode/session/{session_id}/seed")
+async def seed_vibecode_local_folder(
+    session_id: str,
+    req: VibecodeSeedRequest,
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """Seed a LOCAL-FOLDER session with the browser-walked folder snapshot. Writes the
+    files into the session workspace, commits the fixed baseline (``base_sha``), and stores
+    it on the session row. Idempotent-ish: re-seeding before the first turn just resets the
+    baseline. Returns ``{base_sha, written}``."""
+    from .orchestration.isolation import seed_local_folder_workspace
+    pool = getattr(request.app.state, "pg_pool", None)
+    uid = current_user["id"]
+    sess = await _vibecode_session_row(pool, session_id, uid)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    s = dict(sess)
+    if not s.get("local_folder_name"):
+        raise HTTPException(status_code=400, detail="Not a local-folder session")
+    wp = s.get("workspace_path")
+    if not wp or not os.path.isdir(os.path.join(wp, ".git")):
+        raise HTTPException(status_code=409, detail="Session workspace is missing")
+    if s.get("base_sha"):
+        # Already seeded (turns may have edited the tree) — don't clobber it.
+        return {"base_sha": s.get("base_sha"), "written": 0, "reused": True}
+
+    safe = "".join(c for c in session_id if c.isalnum() or c in "-_")[:64] or "session"
+    result = await seed_local_folder_workspace(wp, req.files or [], f"vibecode-{safe}")
+    base_sha = result.get("base_sha")
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE vibecode_sessions SET base_sha = $2, updated_at = NOW() WHERE id = $1",
+            session_id, base_sha,
+        )
+    logger.info(
+        "vibecode: seeded local-folder session %s (user=%s, %d files)",
+        session_id, uid, result.get("written", 0),
+    )
+    return {"base_sha": base_sha, "written": result.get("written", 0)}
+
+
+@workspace_router.get("/vibecode/session/{session_id}/writeback")
+async def get_vibecode_local_folder_writeback(
+    session_id: str,
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """Files the agent changed/deleted vs the baseline — the browser writes these BACK into
+    the user's real folder (local-folder mode). Returns ``{changed: [{path, content}],
+    deleted: [path]}``."""
+    from .orchestration.isolation import collect_local_folder_writeback
+    pool = getattr(request.app.state, "pg_pool", None)
+    uid = current_user["id"]
+    sess = await _vibecode_session_row(pool, session_id, uid)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    s = dict(sess)
+    if not s.get("local_folder_name"):
+        raise HTTPException(status_code=400, detail="Not a local-folder session")
+    wp = s.get("workspace_path")
+    if not wp or not os.path.isdir(os.path.join(wp, ".git")):
+        return {"changed": [], "deleted": []}
+    return await collect_local_folder_writeback(wp, s.get("base_sha"))
+
+
+@workspace_router.post("/vibecode/session/{session_id}/turn")
+async def start_vibecode_turn(
+    session_id: str,
+    req: VibecodeTurnRequest,
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """Send a follow-up message: spawn a turn run bound to the session, operating on
+    the session's PERSISTENT working clone. Returns {workspace_id} → the caller
+    streams it via /api/workspace/stream/{id}."""
+    pool = getattr(request.app.state, "pg_pool", None)
+    uid = current_user["id"]
+    sess = await _vibecode_session_row(pool, session_id, uid)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    task_brief = (req.task_brief or "").strip()
+    if not task_brief:
+        raise HTTPException(status_code=400, detail="task_brief is required")
+    # A local-folder session has no baseline until the browser seeds it — refuse turns
+    # until then (the agent would otherwise run on an empty tree).
+    if dict(sess).get("local_folder_name") and not dict(sess).get("base_sha"):
+        raise HTTPException(
+            status_code=409,
+            detail="This folder hasn't finished loading yet — try again in a moment.",
+        )
+    # The user's ORIGINAL message (task_brief) is what the chat thread renders. The AGENT
+    # gets a SEPARATE assembled brief that folds in attachment refs + execution rules — that
+    # scaffolding must never leak into the user's bubble.
+    agent_brief = await _prepend_attachments(task_brief, req.attachments or [])
+
+    s = dict(sess)
+    workspace_id = str(uuid.uuid4())[:8]
+    started_epoch = time.monotonic()
+
+    # Per-turn run mode = the permission pyramid rung chosen in the composer:
+    # plan (read-only → fills the Plan panel) · ask · auto-accept · full-auto. Falls back
+    # to the session's stored permission_mode if absent/unknown.
+    _turn_mode = (req.run_mode or "").strip().lower()
+    turn_permission = (
+        _turn_mode
+        if _turn_mode in ("plan", "ask", "auto-accept", "full-auto")
+        else (s.get("permission_mode") or "ask")
+    )
+
+    # Create the turn row NOW with the ORIGINAL text + attachments (for display), BEFORE
+    # spawning the bg task — run_vibecode_turn's _db_create_run is ON CONFLICT DO NOTHING,
+    # so this original wins; the agent still receives the assembled agent_brief below.
+    try:
+        await _db_create_run(pool, workspace_id, uid, session_id, task_brief)
+        await _db_set_run_source(pool, workspace_id, "vibecode")
+        await _db_set_run_attachments(pool, workspace_id, req.attachments or [])
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE vibecode_sessions SET updated_at = NOW() WHERE id = $1", session_id
+            )
+    except Exception as exc:
+        logger.error("vibecode: turn bookkeeping failed for %s: %s", workspace_id, exc)
+
+    await _start_workspace(
+        workspace_id=workspace_id,
+        session_id=session_id,  # the turn run's session_id == the vibecode session id
+        task_brief=agent_brief,
+        chat_history=[],
+        agent_id="vibecode-turn",
+        user_id=uid,
+        pool=pool,
+        started_epoch=started_epoch,
+        model_name=req.model_name or s.get("model_name") or "",
+        live_web=False,
+        parallel=False,
+        repo_path=s.get("repo_path"),
+        vibecode_session_id=session_id,
+        workspace_path=s.get("workspace_path"),
+        base_sha=s.get("base_sha"),
+        vibecode_isolation_mode=s.get("isolation_mode") or "session",
+        vibecode_permission_mode=turn_permission,
+    )
+
+    logger.info("vibecode: turn %s on session %s (user=%s)", workspace_id, session_id, uid)
+    return {"workspace_id": workspace_id, "session_id": session_id, "status": "running"}
+
+
+@workspace_router.delete("/vibecode/session/{session_id}")
+async def delete_vibecode_session(
+    session_id: str,
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """Delete a VibeCode session: tear down its workspace (the ONLY teardown point),
+    release its in-memory turn lock, and soft-delete the row. Clone-mode → rmtree the
+    throwaway clone; in-place → restore the base branch + delete the session branch
+    (NEVER the real repo). Human-only, ownership-scoped."""
+    from .orchestration.isolation import cleanup_session_workspace, cleanup_inplace_session
+    from .orchestration.session_turn import release_session_lock, _lock_for
+    from .orchestration.risk import _PENDING_ACTIONS, resolve_action
+    pool = getattr(request.app.state, "pg_pool", None)
+    uid = current_user["id"]
+    sess = await _vibecode_session_row(pool, session_id, uid)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    s = dict(sess)
+
+    # 1. Mark deleted FIRST so the list hides it immediately.
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE vibecode_sessions SET status = 'deleted', updated_at = NOW() "
+            "WHERE id = $1 AND user_id = $2",
+            session_id, uid,
+        )
+    # 2. Unblock any turn paused on the approval gate (deny its pending action) so it
+    #    resumes + releases the per-session lock instead of holding the working tree.
+    try:
+        async with pool.acquire() as conn:
+            running = await conn.fetch(
+                "SELECT id FROM workspace_runs WHERE session_id = $1 AND status = 'running'",
+                session_id,
+            )
+        for r in running:
+            for aid in [a for a in list(_PENDING_ACTIONS) if a.startswith(f"{r['id']}-")]:
+                resolve_action(aid, False)
+    except Exception as exc:
+        logger.warning("vibecode: delete %s pending-deny failed: %s", session_id, exc)
+    # 3. Take the per-session lock (bounded) so cleanup can't run while a turn is mid-write
+    #    on the SHARED working copy (critical for in-place: it's the user's real repo).
+    lock = _lock_for(session_id)
+    got = False
+    try:
+        await asyncio.wait_for(lock.acquire(), timeout=30)
+        got = True
+    except asyncio.TimeoutError:
+        logger.warning("vibecode: delete %s cleaning up without lock (turn still active)", session_id)
+    try:
+        if s.get("isolation_mode") == "inplace":
+            safe = "".join(c for c in session_id if c.isalnum() or c in "-_")[:64] or "session"
+            await cleanup_inplace_session(s.get("repo_path"), s.get("base_branch"), f"vibecode/{safe}")
+        elif s.get("workspace_path"):
+            await cleanup_session_workspace(s["workspace_path"])
+    finally:
+        if got:
+            lock.release()
+    release_session_lock(session_id)
+    logger.info("vibecode: deleted session %s (user=%s)", session_id, uid)
+    return {"ok": True, "status": "deleted"}
+
+
+class VibecodeUpdateRequest(BaseModel):
+    title: Optional[str] = None
+    permission_mode: Optional[str] = None  # change the in-place ladder rung mid-session
+
+
+@workspace_router.patch("/vibecode/session/{session_id}")
+async def update_vibecode_session(
+    session_id: str,
+    req: VibecodeUpdateRequest,
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """Update a VibeCode session: rename (title) and/or change the permission ladder rung
+    (permission_mode) — the composer mode pill PATCHes this mid-session. Ownership-scoped."""
+    pool = getattr(request.app.state, "pg_pool", None)
+    uid = current_user["id"]
+    sess = await _vibecode_session_row(pool, session_id, uid)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    sets, vals = [], []
+    if req.title is not None:
+        t = req.title.strip()[:140]
+        if not t:
+            raise HTTPException(status_code=400, detail="title cannot be blank")
+        sets.append(f"title = ${len(vals) + 3}")
+        vals.append(t)
+    if req.permission_mode is not None:
+        if req.permission_mode not in ("plan", "ask", "auto-accept", "full-auto"):
+            raise HTTPException(status_code=400, detail="invalid permission_mode")
+        sets.append(f"permission_mode = ${len(vals) + 3}")
+        vals.append(req.permission_mode)
+    if not sets:
+        return {"id": session_id}
+    async with pool.acquire() as conn:
+        await conn.execute(
+            f"UPDATE vibecode_sessions SET {', '.join(sets)}, updated_at = NOW() "
+            "WHERE id = $1 AND user_id = $2",
+            session_id, uid, *vals,
+        )
+    return {"id": session_id, "title": req.title, "permission_mode": req.permission_mode}
+
+
+def _vibecode_fallback_title(task_brief: str) -> str:
+    """Deterministic, non-blank title from the first turn's brief (~6 words)."""
+    words = " ".join((task_brief or "").split())
+    if not words:
+        return "Coding session"
+    short = words[:56]
+    return (short.rsplit(" ", 1)[0] if len(words) > 56 else short) or "Coding session"
+
+
+@workspace_router.post("/vibecode/session/{session_id}/autoname")
+async def autoname_vibecode_session(
+    session_id: str,
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """Generate a concise title + emoji for a VibeCode session from its FIRST turn's
+    task_brief (open-notebook autoname pattern). Deterministic fallback — never blank."""
+    pool = getattr(request.app.state, "pg_pool", None)
+    uid = current_user["id"]
+    sess = await _vibecode_session_row(pool, session_id, uid)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    async with pool.acquire() as conn:
+        first = await conn.fetchrow(
+            "SELECT task_brief FROM workspace_runs WHERE session_id = $1 AND source = 'vibecode' "
+            "ORDER BY started_at ASC LIMIT 1",
+            session_id,
+        )
+    brief = ((first["task_brief"] if first else "") or "")
+    fallback = _vibecode_fallback_title(brief)
+
+    gen_title, gen_emoji = None, None
+    if brief.strip():
+        prompt = (
+            "You are titling a short coding session from the user's request below. Produce:\n"
+            "1. title — a concise 3-6 word descriptive title for the task (like a PR / branch "
+            "title, NOT a sentence).\n"
+            "2. emoji — one emoji that fits the task.\n"
+            'Respond with ONLY a compact JSON object: {"title": "...", "emoji": "..."}. '
+            "No prose, no markdown, no code fences.\n\n"
+            f"Request: {brief[:600]}"
+        )
+        try:
+            from notebooks.rag_chat import FALLBACK_MODELS
+        except Exception:
+            FALLBACK_MODELS = []
+        autoname_models = ["granite4.1:8b", "llama3.1:8b", "gemma4:e4b"]
+        autoname_models += [m for m in FALLBACK_MODELS if m not in autoname_models]
+        for model in autoname_models:
+            try:
+                async with _httpx.AsyncClient(timeout=60.0) as c:
+                    r = await c.post(
+                        f"{_LOCAL_OLLAMA_URL.rstrip('/')}/api/generate",
+                        json={"model": model, "prompt": prompt, "stream": False,
+                              "options": {"temperature": 0.4, "num_predict": 400, "num_ctx": 4096}},
+                    )
+                if r.status_code != 200:
+                    continue
+                text = (r.json().get("response") or "").strip()
+                m = re.search(r"\{.*\}", text, re.DOTALL)
+                if not m:
+                    continue
+                obj = json.loads(m.group(0))
+                gen_title = ((obj.get("title") or "").strip().strip('"').strip())[:140] or None
+                gen_emoji = ((obj.get("emoji") or "").strip())[:8] or None
+                if gen_title or gen_emoji:
+                    logger.info(
+                        "vibecode autoname %s: model=%s title=%r emoji=%r",
+                        session_id, model, gen_title, gen_emoji,
+                    )
+                    break
+            except Exception as exc:
+                logger.debug("vibecode autoname model %s failed: %s", model, exc)
+                continue
+
+    final_title = gen_title or fallback
+    final_emoji = gen_emoji or "\U0001F9E9"  # 🧩
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE vibecode_sessions SET title = $2, emoji = $3, updated_at = NOW() "
+            "WHERE id = $1 AND user_id = $4",
+            session_id, final_title, final_emoji, uid,
+        )
+    return {"id": session_id, "title": final_title, "emoji": final_emoji}
+
+
+def _parse_github_remote(url: str):
+    """(owner, repo) from a github https/ssh remote url, or (None, None)."""
+    import re
+    if not url:
+        return None, None
+    m = re.search(r"github\.com[/:]([^/]+)/([^/]+?)(?:\.git)?/?$", url.strip())
+    return (m.group(1), m.group(2)) if m else (None, None)
+
+
+@workspace_router.get("/run/{run_id}/repo")
+async def get_run_repo(
+    run_id: str,
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """The attached repo for a run (for the diff-row `repo · branch` header + Create-PR
+    gating). Returns {repo: null} if the run had no attached repo. `has_github` tells the
+    UI whether a PR can be opened (the source needs a GitHub origin)."""
+    from .orchestration.isolation import _run_git
+    pool = getattr(request.app.state, "pg_pool", None)
+    uid = current_user["id"]
+    if pool is None:
+        return {"repo": None}
+    async with pool.acquire() as conn:
+        run = await conn.fetchrow(
+            "SELECT repo_path FROM workspace_runs WHERE id = $1 AND user_id = $2", run_id, uid
+        )
+    repo_path = run["repo_path"] if run else None
+    if not repo_path or not os.path.isdir(os.path.join(repo_path, ".git")):
+        return {"repo": None}
+    branch, has_github = "", False
+    try:
+        _rc, b, _e = await _run_git(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_path)
+        branch = b.strip()
+        _rc2, o, _e2 = await _run_git(["git", "config", "--get", "remote.origin.url"], cwd=repo_path)
+        owner, repo = _parse_github_remote(o.strip())
+        has_github = bool(owner)
+    except Exception:
+        pass
+    return {"repo": {
+        "name": os.path.basename(repo_path.rstrip("/")) or repo_path,
+        "branch": branch,
+        "path": repo_path,
+        "has_github": has_github,
+    }}
+
+
+async def _open_pr_from_diff(
+    pool, uid: int, repo_path: str, diff_text: str, head: str,
+    title: Optional[str], body: Optional[str], source_label: str,
+    base_branch: Optional[str] = None,
+) -> dict:
+    """Shared HUMAN-ONLY PR path: resolve the source repo's GitHub origin + the user's
+    token, fresh clone-local, apply `diff_text` onto a feature branch, push, open the
+    PR. Refuses main/master as head. Raises HTTPException on any failure. Used by both
+    the run-level and the VibeCode-session create-pr endpoints.
+
+    `base_branch` is the PR target (e.g. "main"). Pass it explicitly for session clones,
+    whose checked-out branch is the session branch (never pushed) — deriving base from
+    HEAD there sends GitHub a non-existent base and 422s. Falls back to HEAD when None."""
+    import tempfile, shutil
+    from .repo_manager import _get_github_token
+    from .orchestration.isolation import _run_git
+
+    if not diff_text.strip() or diff_text.strip() == "(no changes)":
+        raise HTTPException(status_code=400, detail="No diff to open a PR for.")
+    if not os.path.isdir(os.path.join(repo_path, ".git")):
+        raise HTTPException(status_code=404, detail="The source repo is no longer available.")
+    if head in ("main", "master"):
+        raise HTTPException(status_code=400, detail="Refusing to use main/master as the PR head branch.")
+
+    _rc, origin, _e = await _run_git(["git", "config", "--get", "remote.origin.url"], cwd=repo_path)
+    owner, repo = _parse_github_remote(origin.strip())
+    if not owner:
+        raise HTTPException(status_code=400, detail=f"The source repo has no GitHub origin to open a PR against (origin={origin.strip()!r}).")
+    if base_branch and base_branch.strip():
+        base = base_branch.strip()
+    else:
+        _rc, base, _e = await _run_git(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_path)
+        base = base.strip() or "main"
+    gh_token = await _get_github_token(pool, uid)
+    if not gh_token:
+        raise HTTPException(status_code=400, detail="No GitHub token connected for your account — connect GitHub first.")
+
+    work = tempfile.mkdtemp(prefix="harvis-pr-")
+    clone_dir = os.path.join(work, "repo")
+    try:
+        rc, _o, err = await _run_git(
+            ["git", "clone", "--local", "--no-hardlinks", repo_path, clone_dir], cwd=work
+        )
+        if rc != 0:
+            raise HTTPException(status_code=500, detail=f"clone failed: {(err or _o)[:200]}")
+        await _run_git(["git", "checkout", base], cwd=clone_dir)
+        await _run_git(["git", "checkout", "-B", head], cwd=clone_dir)
+        await _run_git(["git", "config", "user.name", "Harvis"], cwd=clone_dir)
+        await _run_git(["git", "config", "user.email", "agent@harvis.local"], cwd=clone_dir)
+
+        patch_path = os.path.join(work, "change.diff")
+        with open(patch_path, "w", encoding="utf-8") as f:
+            f.write(diff_text if diff_text.endswith("\n") else diff_text + "\n")
+        rc, _o, err = await _run_git(["git", "apply", "--whitespace=nowarn", patch_path], cwd=clone_dir)
+        if rc != 0:
+            rc, _o, err = await _run_git(["git", "apply", "--3way", patch_path], cwd=clone_dir)
+            if rc != 0:
+                raise HTTPException(status_code=409, detail=f"Could not apply the diff onto '{base}' (source may have moved): {err[:200]}")
+        await _run_git(["git", "add", "-A"], cwd=clone_dir)
+        rc, _o, _e = await _run_git(["git", "diff", "--cached", "--quiet"], cwd=clone_dir)
+        if rc == 0:
+            raise HTTPException(status_code=400, detail="The diff produced no changes against the current base.")
+        msg = (title or f"Harvis: {source_label}").strip()
+        rc, _o, err = await _run_git(["git", "commit", "-m", msg], cwd=clone_dir)
+        if rc != 0:
+            raise HTTPException(status_code=500, detail=f"commit failed: {err[:200]}")
+
+        push_url = f"https://x-access-token:{gh_token}@github.com/{owner}/{repo}.git"
+        rc, _o, err = await _run_git(
+            ["git", "push", "--force-with-lease", push_url, f"{head}:{head}"], cwd=clone_dir
+        )
+        if rc != 0:
+            if gh_token:
+                err = (err or "").replace(gh_token, "***")  # never echo the token in the error
+            raise HTTPException(status_code=502, detail=f"push failed: {err[:200]}")
+
+        async with _httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.post(
+                f"https://api.github.com/repos/{owner}/{repo}/pulls",
+                headers={"Authorization": f"Bearer {gh_token}", "Accept": "application/vnd.github+json"},
+                json={
+                    "title": msg,
+                    "body": body or f"Opened by Harvis from {source_label}.",
+                    "head": head,
+                    "base": base,
+                },
+            )
+        if resp.status_code in (200, 201):
+            pr = resp.json()
+            return {
+                "status": "ok", "pr_url": pr.get("html_url"), "pr_number": pr.get("number"),
+                "branch": head, "base": base, "owner": owner, "repo": repo,
+            }
+        raise HTTPException(status_code=502, detail=f"PR creation failed ({resp.status_code}): {resp.text[:200]}")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+class CreatePrRequest(BaseModel):
+    artifact_id: Optional[str] = None  # which diff artifact (default: first diff on the run)
+    branch: Optional[str] = None       # PR head branch (default: harvis/<run_id>)
+    title: Optional[str] = None
+    body: Optional[str] = None
+
+
+@workspace_router.post("/run/{run_id}/create-pr")
+async def create_pr_for_run(
+    run_id: str,
+    req: CreatePrRequest,
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """HUMAN-ONLY: open a GitHub PR from an attached-repo run's diff. Resolves the
+    source repo's GitHub origin + the user's token, re-clones, applies the saved diff
+    to a fresh feature branch, pushes, opens the PR. NEVER agent-triggered (only the UI
+    button calls this). Refuses main/master as the PR head branch."""
+    pool = getattr(request.app.state, "pg_pool", None)
+    uid = current_user["id"]
+    if pool is None:
+        raise HTTPException(status_code=500, detail="Database not available")
+
+    # The run's attached repo + the chosen diff artifact (the clone is torn down at run
+    # end, so the PR re-applies the SAVED diff). Then the shared PR path takes over.
+    async with pool.acquire() as conn:
+        run = await conn.fetchrow(
+            "SELECT repo_path FROM workspace_runs WHERE id = $1 AND user_id = $2", run_id, uid
+        )
+        if not run or not run["repo_path"]:
+            raise HTTPException(status_code=404, detail="This run has no attached repo to open a PR for.")
+        repo_path = run["repo_path"]
+        if req.artifact_id:
+            art = await conn.fetchrow(
+                "SELECT content FROM workspace_artifacts WHERE id = $1 AND workspace_id = $2 AND artifact_type = 'diff'",
+                req.artifact_id, run_id,
+            )
+        else:
+            art = await conn.fetchrow(
+                "SELECT content FROM workspace_artifacts WHERE workspace_id = $1 AND artifact_type = 'diff' ORDER BY created_at LIMIT 1",
+                run_id,
+            )
+    diff_text = (art["content"] if art else "") or ""
+    head = (req.branch or f"harvis/{run_id}").strip()
+    return await _open_pr_from_diff(
+        pool, uid, repo_path, diff_text, head, req.title, req.body,
+        source_label=f"orchestrated run `{run_id}`",
+    )
+
+
+async def _resolve_run_action(request: Request, current_user: dict, run_id: str, action_id: str, approved: bool):
+    """Resolve a gated in-place action (HUMAN-only — the acknowledge-popup). Ownership-
+    scoped; resumes the paused agent turn via the in-memory pending-actions registry."""
+    from .orchestration.risk import resolve_action
+    pool = getattr(request.app.state, "pg_pool", None)
+    uid = current_user["id"]
+    if pool is None:
+        # Fail closed — never skip the ownership check when the DB is unavailable.
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT 1 FROM workspace_runs WHERE id = $1 AND user_id = $2", run_id, uid
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Run not found")
+    # action_id is namespaced by run_id (f"{run_id}-{step}-{seq}") — defense-in-depth.
+    if not action_id.startswith(f"{run_id}-"):
+        raise HTTPException(status_code=400, detail="action_id does not belong to this run")
+    if not resolve_action(action_id, approved):
+        raise HTTPException(status_code=404, detail="No pending action with that id (expired or already resolved)")
+    return {"ok": True, "approved": approved}
+
+
+@workspace_router.get("/run/{run_id}/pending-action")
+async def get_pending_action(
+    run_id: str, request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """The gated action (if any) awaiting approval for this run — polled by the in-place
+    UI to raise the acknowledge-popup. Reload-safe (the pending entry lives until resolved)."""
+    from .orchestration.risk import get_pending_for_run
+    pool = getattr(request.app.state, "pg_pool", None)
+    uid = current_user["id"]
+    if pool is None:
+        # Fail closed — never skip the ownership check when the DB is unavailable.
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT 1 FROM workspace_runs WHERE id = $1 AND user_id = $2", run_id, uid
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return {"pending": get_pending_for_run(run_id)}
+
+
+@workspace_router.post("/run/{run_id}/action/{action_id}/approve")
+async def approve_run_action(
+    run_id: str, action_id: str, request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """Approve a gated in-place action → the paused agent turn resumes + dispatches it."""
+    return await _resolve_run_action(request, current_user, run_id, action_id, True)
+
+
+@workspace_router.post("/run/{run_id}/action/{action_id}/deny")
+async def deny_run_action(
+    run_id: str, action_id: str, request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """Deny a gated in-place action → the turn skips it and continues."""
+    return await _resolve_run_action(request, current_user, run_id, action_id, False)
+
+
+@workspace_router.get("/vibecode/session/{session_id}/diff")
+async def get_vibecode_session_diff(
+    session_id: str,
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """The session's LIVE ACCUMULATED diff (working tree vs the fixed base_sha) — the
+    union of every turn's edits. `has_github` gates the Create-PR button (the source
+    needs a GitHub origin)."""
+    from .orchestration.isolation import (
+        WorkspaceIsolationManager, SESSION_WORKSPACE_ROOT, _run_git,
+    )
+    pool = getattr(request.app.state, "pg_pool", None)
+    uid = current_user["id"]
+    sess = await _vibecode_session_row(pool, session_id, uid)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    s = dict(sess)
+    wp = s.get("workspace_path")
+    if not wp or not os.path.isdir(os.path.join(wp, ".git")):
+        return {"diff": "", "has_github": False, "repo": None}
+    iso = WorkspaceIsolationManager(
+        root=SESSION_WORKSPACE_ROOT, isolation_mode="session",
+        repo_config={"base_sha": s.get("base_sha")},
+    )
+    diff = await iso.collect_diff(wp)
+    has_github = False
+    rp = s.get("repo_path")
+    if rp and os.path.isdir(os.path.join(rp, ".git")):
+        try:
+            _rc, o, _e = await _run_git(["git", "config", "--get", "remote.origin.url"], cwd=rp)
+            owner, _r = _parse_github_remote(o.strip())
+            has_github = bool(owner)
+        except Exception:
+            pass
+    return {
+        "diff": diff or "",
+        "has_github": has_github,
+        "repo": os.path.basename(rp.rstrip("/")) if rp else None,
+    }
+
+
+class VibecodeCreatePrRequest(BaseModel):
+    branch: Optional[str] = None
+    title: Optional[str] = None
+    body: Optional[str] = None
+
+
+@workspace_router.post("/vibecode/session/{session_id}/create-pr")
+async def create_pr_for_vibecode_session(
+    session_id: str,
+    req: VibecodeCreatePrRequest,
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """HUMAN-ONLY: open ONE GitHub PR from a session's ACCUMULATED diff (all turns).
+    Uses the LIVE session working-tree diff (not a saved artifact — the session clone
+    persists). Refuses main/master; NEVER agent-triggered (only the UI button)."""
+    from .orchestration.isolation import WorkspaceIsolationManager, SESSION_WORKSPACE_ROOT
+    pool = getattr(request.app.state, "pg_pool", None)
+    uid = current_user["id"]
+    if pool is None:
+        raise HTTPException(status_code=500, detail="Database not available")
+    sess = await _vibecode_session_row(pool, session_id, uid)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    s = dict(sess)
+    repo_path = s.get("repo_path")
+    wp = s.get("workspace_path")
+    if not repo_path:
+        raise HTTPException(status_code=400, detail="This session has no attached repo to open a PR for.")
+    if not wp or not os.path.isdir(os.path.join(wp, ".git")):
+        raise HTTPException(status_code=404, detail="The session workspace is no longer available.")
+    iso = WorkspaceIsolationManager(
+        root=SESSION_WORKSPACE_ROOT, isolation_mode="session",
+        repo_config={"base_sha": s.get("base_sha")},
+    )
+    diff_text = await iso.collect_diff(wp)
+    head = (req.branch or f"harvis/vibecode/{session_id}").strip()
+    return await _open_pr_from_diff(
+        pool, uid, repo_path, diff_text, head, req.title, req.body,
+        source_label=f"VibeCode session `{session_id}`",
+        base_branch=s.get("base_branch"),
+    )
+
+
 @workspace_router.get("/history")
 async def list_workspace_history(
     request: Request,
@@ -2343,19 +3782,38 @@ async def list_workspace_history(
     pool = getattr(request.app.state, "pg_pool", None)
     if pool is None:
         return {"runs": []}
+    # ?top_level=1 → only parent/launched runs (the VibeCode session list; sub-agent
+    # child runs have their events under the parent, so they aren't streamable alone).
+    top_level = request.query_params.get("top_level") in ("1", "true", "yes")
+    # ?session_id=<chat_id> → scope the list to ONE chat's runs (the process rail is
+    # per-chat: a chat-launched run's session_id IS the OWUI chat_id). Persistent because
+    # the rows are DB-backed — reopening the chat re-shows its runs + statuses.
+    sess = request.query_params.get("session_id")
+    # Exclude VibeCode session turns — they live in their own surface (the VibeCode
+    # thread), not the generic Agent Studio history / Neural Map. IS DISTINCT FROM
+    # keeps NULL-source rows (all generic/orchestrated runs).
+    where = "WHERE r.user_id = $1 AND r.source IS DISTINCT FROM 'vibecode'" + (
+        " AND r.parent_run_id IS NULL" if top_level else ""
+    )
+    params: list = [current_user["id"]]
+    if sess:
+        where += f" AND r.session_id = ${len(params) + 1}"
+        params.append(sess)
     try:
         async with pool.acquire() as conn:
             rows = await conn.fetch(
-                """
-                SELECT id, session_id, task_brief, status,
-                       started_at, completed_at, duration_ms,
-                       event_count, tool_calls, final_summary, error_message
-                FROM workspace_runs
-                WHERE user_id = $1
-                ORDER BY started_at DESC
-                LIMIT 20
+                f"""
+                SELECT r.id, r.session_id, r.task_brief, r.status, r.parent_run_id,
+                       r.started_at, r.completed_at, r.duration_ms,
+                       r.event_count, r.tool_calls, r.final_summary, r.error_message,
+                       (SELECT COUNT(*) FROM workspace_runs c WHERE c.parent_run_id = r.id)
+                         AS child_count
+                FROM workspace_runs r
+                {where}
+                ORDER BY r.started_at DESC
+                LIMIT 50
                 """,
-                current_user["id"],
+                *params,
             )
         runs = [dict(r) for r in rows]
         for run in runs:

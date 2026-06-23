@@ -47,6 +47,7 @@
 		researchEnabled,
 		chatMode,
 		orchestrateUniformModel,
+		orchestrateRepoPath,
 		showSettings,
 		selectedTerminalId,
 		selectedFolder,
@@ -75,6 +76,7 @@
 	import { getChatById } from '$lib/apis/chats';
 	import { getSessionUser } from '$lib/apis/auths';
 	import { getTools } from '$lib/apis/tools';
+	import { getAttachedRepos, type AttachedRepo } from '$lib/apis/agent-runs';
 
 	import { WEBUI_BASE_URL, WEBUI_API_BASE_URL, PASTED_TEXT_CHARACTER_LIMIT } from '$lib/constants';
 	import { getOAuthClientAuthorizationUrl } from '$lib/apis/configs';
@@ -128,6 +130,18 @@
 		orchestrate: 'bg-purple-500'
 	};
 	let showModeMenu = false;
+
+	// Orchestrate "attached repo" dropdown — real git repos bind-mounted read-only
+	// into the backend (clone-local isolation → real diff vs HEAD). Loaded lazily the
+	// first time orchestrate mode is active; selection persists via orchestrateRepoPath.
+	let attachedRepos: AttachedRepo[] = [];
+	let attachedReposLoaded = false;
+	const loadAttachedRepos = async () => {
+		if (attachedReposLoaded) return;
+		attachedReposLoaded = true;
+		attachedRepos = await getAttachedRepos();
+	};
+	$: if ($chatMode === 'orchestrate') loadAttachedRepos();
 
 	import XMark from '../icons/XMark.svelte';
 	import GlobeAlt from '../icons/GlobeAlt.svelte';
@@ -2147,6 +2161,20 @@
 															>
 																{$i18n.t('1 model')}
 															</button>
+														</div>
+														<div class="px-2.5 pt-1 pb-0.5 text-[10px] uppercase tracking-wide text-gray-400">
+															{$i18n.t('Attached repo')}
+														</div>
+														<div class="px-1.5 pb-1.5">
+															<select
+																class="w-full text-xs rounded-lg bg-gray-50 dark:bg-gray-800 border-0 px-2 py-1.5 text-gray-700 dark:text-gray-200 outline-none focus:ring-1 focus:ring-purple-500/40"
+																bind:value={$orchestrateRepoPath}
+															>
+																<option value="">{$i18n.t('None (scratch workspace)')}</option>
+																{#each attachedRepos as r}
+																	<option value={r.path}>{r.name}{r.branch ? ` · ${r.branch}` : ''}</option>
+																{/each}
+															</select>
 														</div>
 													{/if}
 												</svelte:fragment>

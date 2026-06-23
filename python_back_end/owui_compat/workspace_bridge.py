@@ -247,6 +247,10 @@ async def maybe_handle_workspace(
         # chat-selected model instead of per-role profile models. Default off
         # (heterogeneous). Only meaningful when agent_id == "orchestrated".
         uniform_model=bool(owui_body.get("harvis_orchestrate_uniform")),
+        # Attached repo (clone-local "attached" isolation): a read-only bind-mounted
+        # repo path the user picked. Each sub-agent runs in a `git clone --local` of
+        # it and produces a real `git diff` vs HEAD. Only meaningful when orchestrated.
+        repo_path=(owui_body.get("harvis_repo_path") or None),
         interactive_context=interactive_context,
     )
 

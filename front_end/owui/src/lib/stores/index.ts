@@ -141,6 +141,16 @@ if (typeof localStorage !== 'undefined') {
 	);
 }
 
+// Orchestrate "attached repo": the container path of a read-only bind-mounted git
+// repo the run should clone-local and diff against HEAD. Empty = no repo (scratch
+// isolation, the default). Persisted; read by the facade via `harvis_repo_path`.
+const _storedRepoPath =
+	typeof localStorage !== 'undefined' ? localStorage.getItem('orchestrateRepoPath') : null;
+export const orchestrateRepoPath = writable(_storedRepoPath || '');
+if (typeof localStorage !== 'undefined') {
+	orchestrateRepoPath.subscribe((v) => localStorage.setItem('orchestrateRepoPath', v || ''));
+}
+
 // One-shot: a prompt the next NEW chat should auto-submit on mount. Set by the
 // Agent Studio template gallery (one-click launch); Chat.svelte consumes it
 // once on '/' and clears it. NOT persisted — purely a hand-off between routes.

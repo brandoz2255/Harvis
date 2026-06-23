@@ -32,6 +32,7 @@
 	import SignOut from '$lib/components/icons/SignOut.svelte';
 	import FaceSmile from '$lib/components/icons/FaceSmile.svelte';
 	import UserStatusModal from './UserStatusModal.svelte';
+	import { DEFAULT_PINNED_ITEMS } from './pinned';
 	import Emoji from '$lib/components/common/Emoji.svelte';
 	import XMark from '$lib/components/icons/XMark.svelte';
 	import Note from '$lib/components/icons/Note.svelte';
@@ -57,8 +58,6 @@
 	let shiftKey = false;
 
 	const dispatch = createEventDispatcher();
-
-	const DEFAULT_PINNED_ITEMS = ['notes', 'workspace'];
 
 	$: pinnedItems = $settings?.pinnedMenuItems ?? DEFAULT_PINNED_ITEMS;
 
@@ -335,7 +334,7 @@
 								/>
 							</svg>
 						</div>
-						<div class="self-center truncate">{$i18n.t('Workspace')}</div>
+						<div class="self-center truncate">{$i18n.t('Library')}</div>
 					</a>
 					{#if shiftKey}
 						<Tooltip

@@ -54,6 +54,7 @@ from workspace.github_proxy import github_proxy_router
 from workspace.rag_proxy import rag_proxy_router
 from workspace.kubectl_proxy import kubectl_proxy_router
 from workspace.repo_manager import repo_manager_router
+from vibecoding.auth_github import router as auth_github_router, auth_router as auth_github_callback_router
 from workspace.terminal_routes import router as workspace_terminal_router
 
 # Import tools routers
@@ -625,6 +626,14 @@ async def lifespan(app: FastAPI):
                 # itself comes from initdb, so this self-heals the live DB on restart).
                 from workspace.orchestration import ORCHESTRATION_SCHEMA_SQL
                 await conn.execute(ORCHESTRATION_SCHEMA_SQL)
+
+                # Open Notebook (RAG notebooks) — self-create the schema (the tables
+                # were never applied on this deploy). Idempotent CREATE TABLE/INDEX.
+                import os as _os
+                _nb_schema_path = _os.path.join(_os.path.dirname(__file__), "notebooks", "schema.sql")
+                with open(_nb_schema_path, "r") as _nbf:
+                    await conn.execute(_nbf.read())
+                logger.info("✅ Notebook schema ensured")
         except Exception as e:
             logger.warning("⚠️ Failed to init OpenClaw audit/prefs schema: %s", e)
 
@@ -1219,6 +1228,23 @@ try:
 except Exception as e:
     logger.warning(f"Could not load notebooks router: {e}")
 
+# Include open-notebook compatibility facade (/onb-api) — serves the vendored
+# open-notebook Next.js frontend (front_end/open-notebook, at /onb) on Harvis data.
+try:
+    from onb_compat import onb_router
+    app.include_router(onb_router)
+    logger.info("✅ onb_compat facade mounted at /onb-api")
+except Exception as e:
+    logger.warning(f"Could not load onb_compat facade: {e}")
+
+# Include open-notebook podcasts facade (/onb-api/podcasts, /onb-api/*-profiles)
+try:
+    from onb_compat.podcasts import router as onb_podcasts_router
+    app.include_router(onb_podcasts_router)
+    logger.info("✅ onb_compat podcasts mounted at /onb-api")
+except Exception as e:
+    logger.warning(f"Could not load onb_compat podcasts facade: {e}")
+
 # Include RAG corpus router
 if RAG_CORPUS_AVAILABLE:
     app.include_router(rag_router)
@@ -1252,6 +1278,10 @@ app.include_router(kubectl_proxy_router, prefix="/kubectl")
 
 # Include workspace repo manager (GitHub repo clone/sync/push for OpenClaw workspace)
 app.include_router(repo_manager_router)
+# GitHub OAuth for VibeCode (connect → clone → Create-PR). /api/vibecode/github/{start,callback,
+# status,disconnect} + the /api/auth/vibecode/github/callback alias. Needs GITHUB_CLIENT_ID/SECRET.
+app.include_router(auth_github_router)
+app.include_router(auth_github_callback_router)
 
 # Include Maps proxy (Google Maps API endpoints without exposing API keys)
 app.include_router(maps_router)

@@ -12,8 +12,13 @@
 	import WorkflowCanvas from './workflow/WorkflowCanvas.svelte';
 	import ThoughtStream from './workflow/ThoughtStream.svelte';
 	import RunArtifacts from './RunArtifacts.svelte';
+	import RunTable from './RunTable.svelte';
 
 	const i18n: any = getContext('i18n');
+
+	// Background-tasks panel: the per-agent table is the default body; the SvelteFlow
+	// graph is one toggle away.
+	let view: 'table' | 'graph' = 'table';
 
 	// One component, two mounts: 'full' = the run page (side-by-side), 'dock' = a
 	// compact, stacked version that lives in the chat right-rail pane (half-screen).
@@ -146,8 +151,38 @@
 				<RunArtifacts {wsId} done={!running} />
 				<ThoughtStream {events} {running} />
 			</div>
-			<div class="flex-1 min-h-0 min-w-0">
-				<WorkflowCanvas {events} />
+			<div class="flex-1 min-h-0 min-w-0 flex flex-col">
+				<div
+					class="flex items-center justify-end gap-2 px-3 py-1.5 border-b border-gray-100 dark:border-gray-850 shrink-0"
+				>
+					<div
+						class="inline-flex items-center gap-0.5 text-[11px] rounded-md bg-gray-100 dark:bg-gray-850 p-0.5"
+					>
+						<button
+							type="button"
+							class="px-2 py-0.5 rounded transition {view === 'table'
+								? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-50 shadow-sm'
+								: 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'}"
+							on:click={() => (view = 'table')}>{$i18n.t('Table')}</button
+						>
+						<button
+							type="button"
+							class="px-2 py-0.5 rounded transition {view === 'graph'
+								? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-50 shadow-sm'
+								: 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'}"
+							on:click={() => (view = 'graph')}>{$i18n.t('Graph')}</button
+						>
+					</div>
+				</div>
+				{#if view === 'table'}
+					<div class="flex-1 min-h-0 overflow-y-auto px-4 py-3">
+						<RunTable {wsId} live={running} />
+					</div>
+				{:else}
+					<div class="flex-1 min-h-0 min-w-0">
+						<WorkflowCanvas {events} />
+					</div>
+				{/if}
 			</div>
 		</div>
 	{:else}
