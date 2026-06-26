@@ -131,6 +131,9 @@
 	};
 	let showModeMenu = false;
 
+	// The composer always Auto-routes by default; the mode pill shows the active model name.
+	onMount(() => chatMode.set('auto'));
+
 	// Orchestrate "attached repo" dropdown — real git repos bind-mounted read-only
 	// into the backend (clone-local isolation → real diff vs HEAD). Loaded lazily the
 	// first time orchestrate mode is active; selection persists via orchestrateRepoPath.
@@ -186,6 +189,56 @@
 
 	let selectedModelIds = [];
 	$: selectedModelIds = atSelectedModel !== undefined ? [atSelectedModel.id] : selectedModels;
+
+	// Active model name shown in the (Auto-routed) composer model pill.
+	$: composerModel =
+		atSelectedModel?.name ??
+		($models ?? []).find((m) => m.id === (selectedModels?.[0] ?? ''))?.name ??
+		(selectedModels?.[0] || 'Auto');
+
+	// Cap the composer model menu (current model first); a footer links to the full list.
+	$: modelMenuList = (() => {
+		const cur = selectedModels?.[0];
+		const curModel = ($models ?? []).find((m) => m.id === cur);
+		const rest = ($models ?? []).filter((m) => m.id !== cur);
+		// Current model first (the menu opens downward, Gemini-style).
+		return (curModel ? [curModel, ...rest] : rest).slice(0, 7);
+	})();
+
+	// Mic dropdown — detect input devices + the chosen one (threaded into recording).
+	let showMicMenu = false;
+	let selectedMicId = '';
+	let micDevices: MediaDeviceInfo[] = [];
+	const loadMicDevices = async () => {
+		try {
+			let devs = await navigator.mediaDevices.enumerateDevices();
+			let mics = devs.filter((d) => d.kind === 'audioinput');
+			// Labels are blank without permission — request once, then re-enumerate.
+			if (mics.length && !mics[0].label) {
+				const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+				s.getTracks().forEach((t) => t.stop());
+				devs = await navigator.mediaDevices.enumerateDevices();
+				mics = devs.filter((d) => d.kind === 'audioinput');
+			}
+			micDevices = mics;
+		} catch {
+			micDevices = [];
+		}
+	};
+	const startDictation = async () => {
+		showMicMenu = false;
+		try {
+			const s = await navigator.mediaDevices.getUserMedia({
+				audio: selectedMicId ? { deviceId: { exact: selectedMicId } } : true
+			});
+			if (s) {
+				recording = true;
+				s.getTracks().forEach((t) => t.stop());
+			}
+		} catch {
+			toast.error($i18n.t('Permission denied when accessing microphone'));
+		}
+	};
 
 	export let history;
 	export let taskIds = null;
@@ -1289,6 +1342,7 @@
 					<div class={recording ? '' : 'hidden'}>
 						<VoiceRecording
 							bind:recording
+							deviceId={selectedMicId}
 							onCancel={async () => {
 								recording = false;
 
@@ -1736,6 +1790,63 @@
 										</div>
 									</InputMenu>
 
+									<!-- Mic — detects input devices + dictation + audio settings (left, next to the + button) -->
+									{#if $_user?.role === 'admin' || ($_user?.permissions?.chat?.stt ?? true)}
+										<div class="flex items-center">
+											<Dropdown
+												bind:show={showMicMenu}
+												side="bottom"
+												align="start"
+												contentClass="rounded-xl border border-gray-100 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-lg p-1 w-60 text-sm"
+											>
+												<Tooltip content={$i18n.t('Microphone')}>
+													<button
+														type="button"
+														class="flex items-center gap-0.5 text-gray-600 dark:text-gray-300 hover:text-gray-700 dark:hover:text-gray-200 transition rounded-full px-2 py-1.5 self-center"
+														aria-label="Microphone"
+														on:click={loadMicDevices}
+													>
+														<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="size-5 translate-y-[0.5px]">
+															<path d="M7 4a3 3 0 016 0v6a3 3 0 11-6 0V4z" />
+															<path d="M5.5 9.643a.75.75 0 00-1.5 0V10c0 3.06 2.29 5.585 5.25 5.954V17.5h-1.5a.75.75 0 000 1.5h4.5a.75.75 0 000-1.5h-1.5v-1.546A6.001 6.001 0 0016 10v-.357a.75.75 0 00-1.5 0V10a4.5 4.5 0 01-9 0v-.357z" />
+														</svg>
+														<svg class="size-3 opacity-70" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6" /></svg>
+													</button>
+												</Tooltip>
+												<svelte:fragment slot="content">
+													<div class="px-2.5 pt-1 pb-1 text-[10px] uppercase tracking-wide text-gray-400">
+														{$i18n.t('Microphone')}
+													</div>
+													{#if micDevices.length === 0}
+														<div class="px-2.5 py-1.5 text-xs text-gray-500">{$i18n.t('No microphone detected')}</div>
+													{:else}
+														{#each micDevices as d, i}
+															<button
+																type="button"
+																class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-left hover:bg-gray-50 dark:hover:bg-gray-800 transition"
+																on:click={() => { selectedMicId = d.deviceId; startDictation(); }}
+															>
+																<span class="flex-1 truncate text-gray-800 dark:text-gray-100">{d.label || `${$i18n.t('Microphone')} ${i + 1}`}</span>
+																{#if (selectedMicId || (micDevices[0] && micDevices[0].deviceId)) === d.deviceId}
+																	<svg class="size-4 text-blue-500 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
+																{/if}
+															</button>
+														{/each}
+													{/if}
+													<div class="my-1 border-t border-gray-100 dark:border-gray-800"></div>
+													<button
+														type="button"
+														class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-left text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800 transition"
+														on:click={() => { showMicMenu = false; showSettings.set(true); }}
+													>
+														<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="size-4 shrink-0"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
+														<span class="flex-1">{$i18n.t('Audio settings')}</span>
+													</button>
+												</svelte:fragment>
+											</Dropdown>
+										</div>
+									{/if}
+
 									{#if $selectedFolder}
 											<!-- This chat session is attached to a Project: its custom
 											     instructions apply. Click to leave the project context. -->
@@ -2050,57 +2161,6 @@
 												<TerminalMenu bind:show={showTerminalMenu} />
 											{/if}
 
-											<!-- Dictation mic hidden — voice is consolidated on the call ("sound")
-											     button (CallOverlay) per design. Remove `false &&` to restore. -->
-											{#if false && ($_user?.role === 'admin' || ($_user?.permissions?.chat?.stt ?? true))}
-												<!-- {$i18n.t('Record voice')} -->
-												<Tooltip content={$i18n.t('Dictate')}>
-													<button
-														id="voice-input-button"
-														class=" text-gray-600 dark:text-gray-300 hover:text-gray-700 dark:hover:text-gray-200 transition rounded-full p-1.5 self-center mr-0.5"
-														type="button"
-														on:click={async () => {
-															try {
-																let stream = await navigator.mediaDevices
-																	.getUserMedia({ audio: true })
-																	.catch(function (err) {
-																		toast.error(
-																			$i18n.t(
-																				`Permission denied when accessing microphone: {{error}}`,
-																				{
-																					error: err
-																				}
-																			)
-																		);
-																		return null;
-																	});
-
-																if (stream) {
-																	recording = true;
-																	const tracks = stream.getTracks();
-																	tracks.forEach((track) => track.stop());
-																}
-																stream = null;
-															} catch {
-																toast.error($i18n.t('Permission denied when accessing microphone'));
-															}
-														}}
-														aria-label="Voice Input"
-													>
-														<svg
-															xmlns="http://www.w3.org/2000/svg"
-															viewBox="0 0 20 20"
-															fill="currentColor"
-															class="size-5 translate-y-[0.5px]"
-														>
-															<path d="M7 4a3 3 0 016 0v6a3 3 0 11-6 0V4z" />
-															<path
-																d="M5.5 9.643a.75.75 0 00-1.5 0V10c0 3.06 2.29 5.585 5.25 5.954V17.5h-1.5a.75.75 0 000 1.5h4.5a.75.75 0 000-1.5h-1.5v-1.546A6.001 6.001 0 0016 10v-.357a.75.75 0 00-1.5 0V10a4.5 4.5 0 01-9 0v-.357z"
-															/>
-														</svg>
-													</button>
-												</Tooltip>
-											{/if}
 										{/if}
 
 										<!-- Mode selector — a dropdown (Auto / Chat / Agent / Orchestrate).
@@ -2108,7 +2168,7 @@
 										<div class="flex items-center">
 											<Dropdown
 												bind:show={showModeMenu}
-												side="top"
+												side="bottom"
 												align="start"
 												contentClass="rounded-xl border border-gray-100 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-lg p-1 w-56 text-sm"
 											>
@@ -2119,67 +2179,43 @@
 													aria-label="Chat mode"
 												>
 													<span class="size-1.5 rounded-full {CHAT_MODE_DOT[$chatMode]}"></span>
-													{CHAT_MODE_META[$chatMode]?.label}
+													<span class="max-w-[11rem] truncate"
+														>{$chatMode === 'auto' ? composerModel : CHAT_MODE_META[$chatMode]?.label}</span
+													>
 													<svg class="size-3 opacity-70" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6" /></svg>
 												</button>
 
 												<svelte:fragment slot="content">
-													{#each CHAT_MODE_ORDER as m}
+													{#each modelMenuList as m}
 														<button
 															type="button"
-															class="w-full flex items-center gap-2 py-1.5 rounded-lg text-left hover:bg-gray-50 dark:hover:bg-gray-800 transition {m === 'orchestrate' ? 'pl-6 pr-2.5' : 'px-2.5'}"
+															class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-left hover:bg-gray-50 dark:hover:bg-gray-800 transition"
 															on:click={() => {
-																chatMode.set(m);
-																if (m !== 'orchestrate') showModeMenu = false;
+																selectedModels = [m.id];
+																showModeMenu = false;
 															}}
 														>
-															{#if m === 'orchestrate'}<span class="text-gray-400 dark:text-gray-500 text-xs leading-none shrink-0">↳</span>{/if}<span class="size-1.5 rounded-full {CHAT_MODE_DOT[m]} shrink-0"></span>
-															<span class="flex-1 text-gray-800 dark:text-gray-100">{CHAT_MODE_META[m]?.label}</span>
-															{#if $chatMode === m}
+															<span class="flex-1 truncate text-gray-800 dark:text-gray-100">{m.name}</span>
+															{#if (selectedModels?.[0] ?? '') === m.id}
 																<svg class="size-4 text-blue-500 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
 															{/if}
 														</button>
 													{/each}
-
-													{#if $chatMode === 'orchestrate'}
+													{#if ($models ?? []).length > 7}
 														<div class="my-1 border-t border-gray-100 dark:border-gray-800"></div>
-														<div class="px-2.5 pt-1 pb-0.5 text-[10px] uppercase tracking-wide text-gray-400">
-															{$i18n.t('Sub-agent models')}
-														</div>
-														<div class="flex gap-1 px-1.5 pb-1">
-															<button
-																type="button"
-																class="flex-1 px-2 py-1 rounded-lg text-xs transition {!$orchestrateUniformModel ? 'bg-purple-500/15 text-purple-600 dark:text-purple-300' : 'text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800'}"
-																on:click={() => orchestrateUniformModel.set(false)}
-															>
-																{$i18n.t('Per-role')}
-															</button>
-															<button
-																type="button"
-																class="flex-1 px-2 py-1 rounded-lg text-xs transition {$orchestrateUniformModel ? 'bg-purple-500/15 text-purple-600 dark:text-purple-300' : 'text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800'}"
-																on:click={() => orchestrateUniformModel.set(true)}
-															>
-																{$i18n.t('1 model')}
-															</button>
-														</div>
-														<div class="px-2.5 pt-1 pb-0.5 text-[10px] uppercase tracking-wide text-gray-400">
-															{$i18n.t('Attached repo')}
-														</div>
-														<div class="px-1.5 pb-1.5">
-															<select
-																class="w-full text-xs rounded-lg bg-gray-50 dark:bg-gray-800 border-0 px-2 py-1.5 text-gray-700 dark:text-gray-200 outline-none focus:ring-1 focus:ring-purple-500/40"
-																bind:value={$orchestrateRepoPath}
-															>
-																<option value="">{$i18n.t('None (scratch workspace)')}</option>
-																{#each attachedRepos as r}
-																	<option value={r.path}>{r.name}{r.branch ? ` · ${r.branch}` : ''}</option>
-																{/each}
-															</select>
-														</div>
+														<button
+															type="button"
+															class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-left text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800 transition"
+															on:click={() => { goto('/workspace/models'); showModeMenu = false; }}
+														>
+															<span class="flex-1">Browse all models…</span>
+															<svg class="size-3.5 opacity-60 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+														</button>
 													{/if}
 												</svelte:fragment>
 											</Dropdown>
 										</div>
+
 
 										{#if prompt === '' && files.length === 0 && ($_user?.role === 'admin' || ($_user?.permissions?.chat?.call ?? true))}
 											<div class=" flex items-center">

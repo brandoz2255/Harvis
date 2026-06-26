@@ -76,6 +76,7 @@
 	import Note from '../icons/Note.svelte';
 	import Code from '../icons/Code.svelte';
 	import ModeSwitcher from './Sidebar/ModeSwitcher.svelte';
+	import SidebarMore from './Sidebar/SidebarMore.svelte';
 	import NotebookNav from './Sidebar/NotebookNav.svelte';
 	import VibeCodeNav from './Sidebar/VibeCodeNav.svelte';
 	import { DEFAULT_PINNED_ITEMS } from './Sidebar/pinned';
@@ -108,6 +109,10 @@
 	let showFolders = false;
 
 	let folders = {};
+	// folder_id → project name, for the "from <project>" mark on Recents/Pinned chat rows.
+	$: folderNameById = Object.fromEntries(
+		(($_folders ?? []) as any[]).map((f) => [f?.id, f?.name])
+	);
 	let folderRegistry = {};
 
 	let newFolderId = null;
@@ -1073,7 +1078,7 @@
 				<a href="/" class="flex flex-1 px-0.5" on:click={newChatHandler}>
 					<div
 						id="sidebar-webui-name"
-						class=" self-center font-medium text-gray-850 dark:text-white font-primary"
+						class=" self-center text-gray-850 dark:text-white harvis-wordmark"
 					>
 						{$WEBUI_NAME}
 					</div>
@@ -1116,17 +1121,10 @@
 			>
 				<div class="pb-1.5">
 					{#if modeSwitcherEnabled}
-						<div class="px-[0.4375rem] pb-1">
+						<!-- Chat | Notebook | Code — switches the action list + session list below. -->
+						<div class="px-[0.5625rem] pb-2">
 							<ModeSwitcher {activeMode} />
 						</div>
-					{/if}
-
-					{#if modeSwitcherEnabled && activeMode === 'notebook'}
-						<NotebookNav activeOnb={$page?.url?.searchParams?.get('onb') ?? ''} />
-					{/if}
-
-					{#if modeSwitcherEnabled && activeMode === 'code'}
-						<VibeCodeNav />
 					{/if}
 
 					{#if !modeSwitcherEnabled || activeMode === 'chat'}
@@ -1151,30 +1149,78 @@
 						</a>
 					</div>
 
-					<div class="px-[0.4375rem] flex justify-center text-gray-800 dark:text-gray-200">
+					<div class="px-[0.4375rem] flex items-center gap-1 text-gray-800 dark:text-gray-200">
+						<a
+							id="sidebar-projects-button"
+							href="/harvis/projects"
+							class="group grow flex items-center space-x-3 rounded-2xl px-2.5 py-2 hover:bg-gray-100 dark:hover:bg-gray-900 transition outline-none"
+							draggable="false"
+							aria-label={$i18n.t('Projects')}
+						>
+							<div class="self-center">
+								<FolderIcon strokeWidth="2" className="size-4.5" />
+							</div>
+
+							<div class="flex flex-1 self-center translate-y-[0.5px]">
+								<div class=" self-center text-sm font-primary">{$i18n.t('Projects')}</div>
+							</div>
+						</a>
 						<button
 							id="sidebar-search-button"
-							class="group grow flex items-center space-x-3 rounded-2xl px-2.5 py-2 hover:bg-gray-100 dark:hover:bg-gray-900 transition outline-none"
+							class="shrink-0 rounded-2xl p-2 hover:bg-gray-100 dark:hover:bg-gray-900 transition outline-none"
 							on:click={() => {
 								showSearch.set(true);
 							}}
 							draggable="false"
 							aria-label={$i18n.t('Search')}
 						>
-							<div class="self-center">
-								<Search strokeWidth="2" className="size-4.5" />
-							</div>
-
-							<div class="flex flex-1 self-center translate-y-[0.5px]">
-								<div class=" self-center text-sm font-primary">{$i18n.t('Search')}</div>
-							</div>
-							<HotkeyHint name="search" className=" group-hover:visible invisible" />
+							<Search strokeWidth="2" className="size-4.5" />
 						</button>
 					</div>
 
+						{#if modeSwitcherEnabled}
+							<!-- Chat-mode tools: Artifacts + Customize -->
+							<a
+								href="/harvis/agent-studio/activity"
+								class="group mx-[0.4375rem] flex items-center space-x-3 rounded-2xl px-2.5 py-2 text-gray-800 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-900 transition outline-none"
+								draggable="false"
+								aria-label={$i18n.t('Artifacts')}
+							>
+								<div class="self-center">
+									<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="size-4.5"><path d="M12 2 2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" /></svg>
+								</div>
+								<div class="flex flex-1 self-center translate-y-[0.5px]">
+									<div class=" self-center text-sm font-primary">{$i18n.t('Artifacts')}</div>
+								</div>
+							</a>
+							<a
+								href="/harvis/agent-studio/customize"
+								class="group mx-[0.4375rem] flex items-center space-x-3 rounded-2xl px-2.5 py-2 text-gray-800 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-900 transition outline-none"
+								draggable="false"
+								aria-label={$i18n.t('Customize')}
+							>
+								<div class="self-center">
+									<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="size-4.5"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6" /></svg>
+								</div>
+								<div class="flex flex-1 self-center translate-y-[0.5px]">
+									<div class=" self-center text-sm font-primary">{$i18n.t('Customize')}</div>
+								</div>
+							</a>
+							<!-- More (bold) — tools, directly under Customize in chat mode. -->
+							<SidebarMore activePath={$page.url.pathname} bold />
+						{/if}
 					{/if}
 
-					{#if !(modeSwitcherEnabled && (activeMode === 'notebook' || activeMode === 'code'))}
+					{#if modeSwitcherEnabled && activeMode === 'notebook'}
+						<NotebookNav activeOnb={$page?.url?.searchParams?.get('onb') ?? ''} />
+					{/if}
+
+					{#if modeSwitcherEnabled && activeMode === 'code'}
+						<VibeCodeNav />
+					{/if}
+
+
+					{#if !modeSwitcherEnabled}
 					<div id="pinned-menu-items-list">
 						{#each pinnedItems as itemId (itemId)}
 							{@const meta = getMenuItemMeta(itemId)}
@@ -1375,82 +1421,50 @@
 				{/if}
 
 				{#if !modeSwitcherEnabled || activeMode === 'chat'}
-				{#if $config?.features?.enable_folders && ($user?.role === 'admin' || ($user?.permissions?.features?.folders ?? true))}
+
+				{#if $pinnedChats.length > 0}
 					<Folder
-						id="sidebar-folders"
-						bind:open={showFolders}
+						id="sidebar-pinned-chats"
 						className="px-2 mt-0.5"
-						name={$i18n.t('Projects')}
+						name={$i18n.t('Pinned')}
 						chevron={false}
-						onAdd={() => {
-							showCreateFolderModal = true;
-						}}
-						onAddLabel={$i18n.t('New Project')}
-						on:drop={async (e) => {
-							const { type, id, item } = e.detail;
-
-							if (type === 'folder') {
-								if (folders[id].parent_id === null) {
-									return;
-								}
-
-								const res = await updateFolderParentIdById(localStorage.token, id, null).catch(
-									(error) => {
-										toast.error(`${error}`);
-										return null;
-									}
-								);
-
-								if (res) {
-									await initFolders();
-								}
-							}
-						}}
+						dragAndDrop={false}
 					>
-						<!-- New Project button — folder icon with a + badge, right under the header -->
-						<button
-							class="w-full flex items-center gap-1.5 px-2 py-1.5 rounded-xl text-xs font-medium text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-900 transition"
-							on:click={() => {
-								showCreateFolderModal = true;
-							}}
-						>
-							<span class="relative flex items-center justify-center shrink-0">
-								<FolderIcon className="size-4" strokeWidth="2" />
-								<span
-									class="absolute -bottom-0.5 -right-0.5 flex items-center justify-center rounded-full bg-gray-50 dark:bg-gray-950 text-gray-700 dark:text-gray-200"
-								>
-									<Plus className="size-2.5" strokeWidth="3" />
-								</span>
-							</span>
-							<span class="translate-y-[0.5px]">{$i18n.t('New Project')}</span>
-						</button>
-
-						<Folders
-							bind:folderRegistry
-							{folders}
-							{shiftKey}
-							onDelete={(folderId) => {
-								selectedFolder.set(null);
-								initChatList();
-							}}
-							on:update={() => {
-								initChatList();
-							}}
-							on:import={(e) => {
-								const { folderId, items } = e.detail;
-								importChatHandler(items, false, folderId);
-							}}
-							on:change={async () => {
-								initChatList();
-							}}
-						/>
+						<div class="flex flex-col mt-0.5">
+							{#each $pinnedChats as chat, idx (`pinned-chat-${chat?.id ?? idx}`)}
+								<ChatItem
+									className=""
+									id={chat.id}
+									title={chat.title}
+									createdAt={chat.created_at}
+									updatedAt={chat.updated_at}
+									lastReadAt={chat.last_read_at}
+									folderName={chat.folder_id ? (folderNameById[chat.folder_id] ?? '') : ''}
+									{shiftKey}
+									selected={selectedChatId === chat.id}
+									on:select={() => {
+										selectedChatId = chat.id;
+									}}
+									on:unselect={() => {
+										selectedChatId = null;
+									}}
+									on:change={async () => {
+										initChatList();
+									}}
+									on:tag={(e) => {
+										const { type, name } = e.detail;
+										tagEventHandler(type, name, chat.id);
+									}}
+								/>
+							{/each}
+						</div>
 					</Folder>
 				{/if}
 
 				<Folder
 					id="sidebar-chats"
 					className="px-2 mt-0.5"
-					name={$i18n.t('Chats')}
+					name={$i18n.t('Recents')}
 					chevron={false}
 					on:change={async (e) => {
 						selectedFolder.set(null);
@@ -1515,124 +1529,11 @@
 						}
 					}}
 				>
-					{#if $pinnedChats.length > 0}
-						<div class="mb-1">
-							<div class="flex flex-col space-y-1 rounded-xl">
-								<Folder
-									id="sidebar-pinned-chats"
-									buttonClassName=" text-gray-500"
-									on:import={(e) => {
-										importChatHandler(e.detail, true);
-									}}
-									on:drop={async (e) => {
-										const { type, id, item } = e.detail;
-
-										if (type === 'chat') {
-											let chat = await getChatById(localStorage.token, id).catch((error) => {
-												return null;
-											});
-											if (!chat && item) {
-												chat = await importChats(localStorage.token, [
-													{
-														chat: item.chat,
-														meta: item?.meta ?? {},
-														pinned: false,
-														folder_id: null,
-														created_at: item?.created_at ?? null,
-														updated_at: item?.updated_at ?? null
-													}
-												]);
-											}
-
-											if (chat) {
-												console.log(chat);
-												if (chat.folder_id) {
-													const res = await updateChatFolderIdById(
-														localStorage.token,
-														chat.id,
-														null
-													).catch((error) => {
-														toast.error(`${error}`);
-														return null;
-													});
-												}
-
-												if (!chat.pinned) {
-													const res = await toggleChatPinnedStatusById(localStorage.token, chat.id);
-												}
-
-												initChatList();
-											}
-										}
-									}}
-									name={$i18n.t('Pinned')}
-								>
-									<div
-										class="ml-3 pl-1 mt-[1px] flex flex-col overflow-y-auto scrollbar-hidden border-s border-gray-100 dark:border-gray-900 text-gray-900 dark:text-gray-200"
-									>
-										{#each $pinnedChats as chat, idx (`pinned-chat-${chat?.id ?? idx}`)}
-											<ChatItem
-												className=""
-												id={chat.id}
-												title={chat.title}
-												createdAt={chat.created_at}
-												updatedAt={chat.updated_at}
-												lastReadAt={chat.last_read_at}
-												{shiftKey}
-												selected={selectedChatId === chat.id}
-												on:select={() => {
-													selectedChatId = chat.id;
-												}}
-												on:unselect={() => {
-													selectedChatId = null;
-												}}
-												on:change={async () => {
-													initChatList();
-												}}
-												on:tag={(e) => {
-													const { type, name } = e.detail;
-													tagEventHandler(type, name, chat.id);
-												}}
-											/>
-										{/each}
-									</div>
-								</Folder>
-							</div>
-						</div>
-					{/if}
 
 					<div class=" flex-1 flex flex-col overflow-y-auto scrollbar-hidden">
 						<div class="pt-1.5">
 							{#if $chats}
 								{#each $chats as chat, idx (`chat-${chat?.id ?? idx}`)}
-									{#if idx === 0 || (idx > 0 && chat.time_range !== $chats[idx - 1].time_range)}
-										<div
-											class="w-full pl-2.5 text-xs text-gray-500 dark:text-gray-500 font-medium {idx ===
-											0
-												? ''
-												: 'pt-5'} pb-1.5"
-										>
-											{$i18n.t(chat.time_range)}
-											<!-- localisation keys for time_range to be recognized from the i18next parser (so they don't get automatically removed):
-							{$i18n.t('Today')}
-							{$i18n.t('Yesterday')}
-							{$i18n.t('Previous 7 days')}
-							{$i18n.t('Previous 30 days')}
-							{$i18n.t('January')}
-							{$i18n.t('February')}
-							{$i18n.t('March')}
-							{$i18n.t('April')}
-							{$i18n.t('May')}
-							{$i18n.t('June')}
-							{$i18n.t('July')}
-							{$i18n.t('August')}
-							{$i18n.t('September')}
-							{$i18n.t('October')}
-							{$i18n.t('November')}
-							{$i18n.t('December')}
-							-->
-										</div>
-									{/if}
 
 									<ChatItem
 										className=""
@@ -1641,6 +1542,7 @@
 										createdAt={chat.created_at}
 										updatedAt={chat.updated_at}
 										lastReadAt={chat.last_read_at}
+										folderName={chat.folder_id ? (folderNameById[chat.folder_id] ?? '') : ''}
 										{shiftKey}
 										selected={selectedChatId === chat.id}
 										on:select={() => {
@@ -1694,6 +1596,40 @@
 					class=" sidebar-bg-gradient-to-t bg-linear-to-t from-gray-50 dark:from-gray-950 to-transparent from-50% pointer-events-none absolute inset-0 -z-10 -mt-6"
 				></div>
 				<div class="flex flex-col font-primary">
+					{#if modeSwitcherEnabled}
+						<!-- Integrations — its own footer row (with icon) above the stack status. -->
+						<div class="px-[0.4375rem] pt-2 mt-1 border-t border-gray-100 dark:border-gray-850">
+							<a
+								id="sidebar-integrations-button"
+								href="/harvis/integrations"
+								class="group flex items-center gap-3 rounded-2xl px-2.5 py-2 text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-900 hover:text-gray-900 dark:hover:text-gray-100 transition outline-none {($page.url.pathname ?? '').startsWith('/harvis/integrations')
+									? 'bg-gray-100 dark:bg-gray-850 text-gray-900 dark:text-gray-100 font-medium'
+									: ''}"
+								draggable="false"
+								aria-label={$i18n.t('Integrations')}
+							>
+								<svg
+									xmlns="http://www.w3.org/2000/svg"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="currentColor"
+									stroke-width="2"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+									class="size-4.5 shrink-0"
+								>
+									<path d="m7 11 2-2-2-2M11 13h4M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z" />
+								</svg>
+								<span class="flex-1 self-center translate-y-[0.5px]">{$i18n.t('Integrations')}</span>
+							</a>
+						</div>
+						<div
+							class="flex items-center gap-2 px-2.5 py-1.5 mb-0.5 text-xs text-gray-500 dark:text-gray-400"
+						>
+							<span class="size-2 rounded-full bg-green-500 shrink-0"></span>
+							<span>Local stack ready</span>
+						</div>
+					{/if}
 					{#if $user !== undefined && $user !== null}
 						<UserMenu
 							role={$user?.role}

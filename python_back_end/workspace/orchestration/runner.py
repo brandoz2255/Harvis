@@ -103,7 +103,11 @@ class SubAgentRunner:
             {"role": "user", "content": task},
         ]
         summary = ""
-        ok_overall = True
+        # Final success = did the agent ACTUALLY COMPLETE its task — it called finish(),
+        # or it produced real edits. A tool that fails mid-run (e.g. str_replace "old_str
+        # not found") then gets retried successfully must NOT mark the agent failed. So we
+        # track completion, NOT "every tool call succeeded".
+        completed = False
         steps = 0
         last_fp = _ws_fingerprint(workspace_path)  # baseline (empty scratch dir)
         made_edit = False
@@ -147,6 +151,7 @@ class SubAgentRunner:
                     if name == "finish":
                         summary = str(args.get("summary") or "Task complete.")
                         finished = True
+                        completed = True
                         break
                     yield ev("tool_call", {"tool": name, "args": args})
                     # In-place permission gate. Only active when permission_mode is set
@@ -182,8 +187,9 @@ class SubAgentRunner:
                                 results_text.append(f"{name} DENIED by user")
                                 continue
                     result, ok = await dispatch_tool(workspace_path, name, args)
-                    if not ok:
-                        ok_overall = False
+                    # NOTE: a single failed tool no longer marks the whole agent failed —
+                    # the agent can (and often does) recover and finish. Success is decided
+                    # by completion (finish() / real edits), not by per-tool `ok`.
                     # Count as a real edit only AFTER a successful dispatch — a blocked
                     # (Plan) or denied (Ask) edit never reached the filesystem, so it must
                     # not trip the no-progress guard.
@@ -245,7 +251,10 @@ class SubAgentRunner:
                 "label": label,
                 "duration_ms": int((time.monotonic() - started) * 1000),
                 "summary": summary,
-                "success": ok_overall,
+                # Green/done when the agent actually completed the task (called finish, or
+                # produced real edits); red/error only if it did neither. Transient tool
+                # failures it recovered from no longer count against it.
+                "success": completed or made_edit,
                 "prompt_tokens": last_prompt_tokens,
                 "completion_tokens": total_completion_tokens,
                 "total_tokens": total_tokens_sum or (last_prompt_tokens + total_completion_tokens),

@@ -11,8 +11,27 @@
 	import Markdown from './Markdown.svelte';
 	import HarvisClawMascot from '$lib/components/common/HarvisClawMascot.svelte';
 	import RunArtifacts from '$lib/agent-studio/RunArtifacts.svelte';
+	import WorkflowInspector from '$lib/agent-studio/WorkflowInspector.svelte';
 
 	const i18n: any = getContext('i18n');
+
+	// Inspector overview overlay — pops in-place over the chat so the user can browse
+	// each agent's posts/responses without navigating away to the full run page.
+	let showInspector = false;
+	const onInspectorKey = (e: KeyboardEvent) => {
+		if (e.key === 'Escape' && showInspector) showInspector = false;
+	};
+	// Portal the overlay to <body> — the chat message column is a transformed/clipped
+	// ancestor, so a `fixed inset-0` nested inside it is scoped + clipped (the inspector's
+	// top tab bar gets cut off). Re-parenting to body makes `fixed` span the real viewport.
+	const portal = (node: HTMLElement) => {
+		document.body.appendChild(node);
+		return {
+			destroy() {
+				if (node.parentNode) node.parentNode.removeChild(node);
+			}
+		};
+	};
 
 	// Props come from the marked `<details type="workspace_run" …>` token.
 	export let id = '';
@@ -288,7 +307,8 @@
 		}
 	};
 
-	const openStudio = () => goto(`/harvis/agent-studio/run/${workspaceId}`);
+	// Pop the inspector overview over the chat (agents + their posts/responses).
+	const openStudio = () => (showInspector = true);
 	// Dock THIS run's live workspace (Processes / Map / Changes) into the Overview
 	// tab of the right-rail pane. Resize the pane to taste.
 	const dockRun = () => {
@@ -506,7 +526,7 @@
 			>
 			<button
 				class="text-xs px-2 py-1 rounded-lg bg-gray-100 dark:bg-gray-850 hover:bg-gray-200 dark:hover:bg-gray-800 transition"
-				on:click={openStudio}>{$i18n.t('Open Studio')}</button
+				on:click={openStudio}>{$i18n.t('Open run')}</button
 			>
 			<button
 				class="text-xs px-2 py-1 rounded-lg text-red-600 hover:bg-red-50 dark:hover:bg-red-950 transition ml-auto"
@@ -519,8 +539,29 @@
 			>
 			<button
 				class="text-xs px-2 py-1 rounded-lg bg-gray-100 dark:bg-gray-850 hover:bg-gray-200 dark:hover:bg-gray-800 transition"
-				on:click={openStudio}>{$i18n.t('Open Studio')}</button
+				on:click={openStudio}>{$i18n.t('Open run')}</button
 			>
 		{/if}
 	</div>
 </div>
+
+<svelte:window on:keydown={onInspectorKey} />
+
+{#if showInspector}
+	<!-- Inspector overview overlay — agents + their posts/responses, in-place over the chat.
+	     Portaled to <body> so `fixed inset-0` spans the real viewport (not a clipped ancestor). -->
+	<div use:portal class="fixed inset-0 z-[9998]">
+		<div
+			class="absolute inset-0 bg-black/50 backdrop-blur-sm"
+			on:click={() => (showInspector = false)}
+			role="presentation"
+		></div>
+		<div class="absolute inset-0 flex items-center justify-center p-4 pointer-events-none">
+			<div
+				class="pointer-events-auto w-full max-w-5xl h-[85vh] flex flex-col rounded-2xl border border-white/10 bg-[#0c111d] shadow-2xl shadow-black/50 overflow-hidden"
+			>
+				<WorkflowInspector wsId={workspaceId} on:close={() => (showInspector = false)} />
+			</div>
+		</div>
+	</div>
+{/if}

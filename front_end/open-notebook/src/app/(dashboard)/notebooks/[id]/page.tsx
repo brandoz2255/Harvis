@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useRef } from 'react'
+import { useCallback, useState, useEffect, useRef } from 'react'
 import { useParams, useRouter, useSearchParams, usePathname } from 'next/navigation'
 import { useQueryClient } from '@tanstack/react-query'
 import { notebooksApi } from '@/lib/api/notebooks'
@@ -19,7 +19,10 @@ import { useTranslation } from '@/lib/hooks/use-translation'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Button } from '@/components/ui/button'
 import { SourceDetailContent } from '@/components/source/SourceDetailContent'
-import { FileText, StickyNote, MessageSquare, ArrowLeft } from 'lucide-react'
+import { NotebookStudioDialog } from '@/components/notebook/NotebookStudioDialog'
+import { NotebookStudioRail } from '@/components/notebook/NotebookStudioRail'
+import type { ArtifactLogItem, GeneratableKind } from '@/lib/api/artifacts'
+import { FileText, StickyNote, MessageSquare, ArrowLeft, Sparkles } from 'lucide-react'
 
 export type ContextMode = 'off' | 'insights' | 'full'
 
@@ -34,6 +37,21 @@ export default function NotebookPage() {
 
   // Ensure the notebook ID is properly decoded from URL
   const notebookId = params?.id ? decodeURIComponent(params.id as string) : ''
+  const [studioOpen, setStudioOpen] = useState(false)
+  const [studioKind, setStudioKind] = useState<GeneratableKind | null>(null)
+  const [reviewItem, setReviewItem] = useState<ArtifactLogItem | null>(null)
+
+  // Studio rail "Create X" → generate that kind; a log row → review the stored artifact.
+  const openCreate = useCallback((kind: GeneratableKind) => {
+    setReviewItem(null)
+    setStudioKind(kind)
+    setStudioOpen(true)
+  }, [])
+  const openReview = useCallback((item: ArtifactLogItem) => {
+    setStudioKind(null)
+    setReviewItem(item)
+    setStudioOpen(true)
+  }, [])
 
   const { data: notebook, isLoading: notebookLoading } = useNotebook(notebookId)
   const {
@@ -50,7 +68,7 @@ export default function NotebookPage() {
   const isDesktop = useIsDesktop()
 
   // Mobile tab state (Sources, Notes, or Chat)
-  const [mobileActiveTab, setMobileActiveTab] = useState<'sources' | 'notes' | 'chat'>('chat')
+  const [mobileActiveTab, setMobileActiveTab] = useState<'sources' | 'notes' | 'chat' | 'studio'>('chat')
 
   // A source opened inline (takes over the left column + expands it for reading) instead
   // of an overlay modal. URL-backed (?source=&highlight=&claim=) so it survives refresh /
@@ -225,23 +243,37 @@ export default function NotebookPage() {
             emoji, title, date, source count, and synopsis, so a top band here just
             repeated the description. Archive/Delete live on each hub card's ⋯ menu. */}
         <div className="flex-1 p-6 overflow-x-auto flex flex-col">
+          {/* Notebook Studio dialog — opened by the Studio rail (Create) or a log row
+              (review). Portaled, so its placement here is incidental. */}
+          <NotebookStudioDialog
+            open={studioOpen}
+            onOpenChange={setStudioOpen}
+            notebookId={notebookId}
+            notebookTitle={(notebook as { name?: string })?.name}
+            initialKind={studioKind}
+            reviewItem={reviewItem}
+          />
           {/* Mobile: Tabbed interface - only render on mobile to avoid double-mounting */}
           {!isDesktop && (
             <>
               <div className="lg:hidden mb-4">
-                <Tabs value={mobileActiveTab} onValueChange={(value) => setMobileActiveTab(value as 'sources' | 'notes' | 'chat')}>
-                  <TabsList className="grid w-full grid-cols-3">
-                    <TabsTrigger value="sources" className="gap-2">
+                <Tabs value={mobileActiveTab} onValueChange={(value) => setMobileActiveTab(value as 'sources' | 'notes' | 'chat' | 'studio')}>
+                  <TabsList className="grid w-full grid-cols-4">
+                    <TabsTrigger value="sources" className="gap-1.5">
                       <FileText className="h-4 w-4" />
                       {t('navigation.sources')}
                     </TabsTrigger>
-                    <TabsTrigger value="notes" className="gap-2">
+                    <TabsTrigger value="notes" className="gap-1.5">
                       <StickyNote className="h-4 w-4" />
                       {t('common.notes')}
                     </TabsTrigger>
-                    <TabsTrigger value="chat" className="gap-2">
+                    <TabsTrigger value="chat" className="gap-1.5">
                       <MessageSquare className="h-4 w-4" />
                       {t('common.chat')}
+                    </TabsTrigger>
+                    <TabsTrigger value="studio" className="gap-1.5">
+                      <Sparkles className="h-4 w-4" />
+                      Studio
                     </TabsTrigger>
                   </TabsList>
                 </Tabs>
@@ -281,12 +313,21 @@ export default function NotebookPage() {
                     notebook={notebook}
                   />
                 )}
+                {mobileActiveTab === 'studio' && (
+                  <div className="h-full overflow-hidden">
+                    <NotebookStudioRail
+                      notebookId={notebookId}
+                      onCreate={openCreate}
+                      onReview={openReview}
+                    />
+                  </div>
+                )}
               </div>
             </>
           )}
 
           {/* Desktop: merged Library (Sources + Notes) on the left, wide Chat center */}
-          <div className="hidden lg:flex h-full min-h-0 gap-6 flex-row">
+          <div className="hidden lg:flex h-full min-h-0 gap-6 flex-row overflow-hidden">
             {/* Left: Library (Sources + Notes). When a source is opened it takes over this
                 side and the column expands wider (flex-1) for comfortable reading. */}
             <div className={openSourcePrefixed ? 'flex-1 min-w-0 min-h-0' : 'flex-none w-96 min-h-0'}>
@@ -331,7 +372,7 @@ export default function NotebookPage() {
             </div>
 
             {/* Chat — wide center */}
-            <div className="flex-1 min-w-0 lg:pr-6 lg:-mr-6">
+            <div className="flex-1 min-w-0">
               <ChatColumn
                 notebookId={notebookId}
                 contextSelections={contextSelections}
@@ -341,6 +382,18 @@ export default function NotebookPage() {
                 notebook={notebook}
               />
             </div>
+
+            {/* Studio rail — Create + a log of generated artifacts, reviewable in place.
+                Hidden while reading a source so the source + chat get the full width. */}
+            {!openSourcePrefixed && (
+              <div className="flex-none w-80 min-h-0 border-l border-border pl-6">
+                <NotebookStudioRail
+                  notebookId={notebookId}
+                  onCreate={openCreate}
+                  onReview={openReview}
+                />
+              </div>
+            )}
           </div>
         </div>
       </div>

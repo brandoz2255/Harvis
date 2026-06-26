@@ -43,6 +43,19 @@ def _as_content_list(content) -> list:
     return [{"type": "text", "text": content or ""}]
 
 
+def _content_to_text(content) -> str:
+    """Flatten a message's content (str or content-part list) to plain text."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(
+            p.get("text", "")
+            for p in content
+            if isinstance(p, dict) and p.get("type") == "text"
+        )
+    return ""
+
+
 def _chat_transcript(chat_obj: dict, max_chars: int = _MAX_TEXT_FILE_CHARS) -> str:
     """Flatten a stored OWUI chat blob into a readable User/Assistant transcript."""
     msgs = (chat_obj or {}).get("messages")
@@ -100,6 +113,11 @@ async def _inject_files(request, owui_body: dict, user_id: int | None = None) ->
             ftype = f.get("type") or ""
             url = f.get("url") or ""
             fid = f.get("id") or (f.get("file") or {}).get("id")
+
+            # Knowledge bases (type:"collection") are handled by _inject_knowledge
+            # (RAG over the KB's vector chunks) — not as a raw file.
+            if ftype == "collection":
+                continue
 
             # 0) Referenced chat (type:"chat") — the body carries only id/title,
             # so resolve the chat and inject its transcript as context.
@@ -175,6 +193,111 @@ async def _inject_files(request, owui_body: dict, user_id: int | None = None) ->
     )
 
 
+async def _inject_knowledge(request, owui_body: dict, user_id: int | None = None) -> None:
+    """K3 RAG: when the chat carries attached knowledge base(s) (OWUI sends them
+    as ``{type:"collection", id}`` entries inside ``files``), embed the latest
+    user message, vector-search each KB's chunks, and inject the top matches as a
+    context block on the last user message. Never raises — a failure just means
+    no KB context is injected (logged), not a 500.
+    """
+    files = owui_body.get("files")
+    if not isinstance(files, list) or not files:
+        return
+    kb_ids = [
+        f.get("id")
+        for f in files
+        if isinstance(f, dict) and f.get("type") == "collection" and f.get("id")
+    ]
+    if not kb_ids:
+        return
+    messages = owui_body.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return
+    idx = _last_user_index(messages)
+    if idx < 0:
+        return
+    pool = getattr(request.app.state, "pg_pool", None)
+    if pool is None:
+        return
+    query_text = _content_to_text(messages[idx].get("content"))
+    if not query_text.strip():
+        return
+    try:
+        from . import knowledge as kb
+
+        blocks = await kb.retrieve_context(pool, kb_ids, query_text, user_id=user_id)
+    except Exception:
+        logger.warning("owui_compat: knowledge injection failed", exc_info=True)
+        return
+    if not blocks:
+        return
+
+    msg = messages[idx]
+    content = _as_content_list(msg.get("content"))
+    block = (
+        "The user attached the following knowledge base(s). Use the retrieved "
+        "context below to answer; cite the file path when relevant.\n\n"
+        + "\n\n".join(blocks)
+    )
+    content.append({"type": "text", "text": block})
+    msg["content"] = content
+    logger.info(
+        "owui_compat: injected %d knowledge block(s) from %d KB(s)", len(blocks), len(kb_ids)
+    )
+
+
+async def _inject_skills(request, owui_body: dict, user_id: int | None = None) -> None:
+    """Inject the user's ENABLED Customize skills as a system message, so a skill
+    created in Agent Studio → Customize actually shapes the agent's behaviour (the
+    runtime half of the Skills builder). Bounded so many skills can't blow the
+    context budget. Never raises. (MCP connections reaching the runtime remains a
+    separate, deferred bridge.)
+    """
+    if user_id is None:
+        return
+    # Only skills EXPLICITLY attached to THIS chat (skill_ids) — NEVER all enabled
+    # ones. Global always-on bled e.g. a "pirate" skill into every chat. No UI
+    # populates skill_ids yet, so nothing injects until per-chat skill attach lands.
+    skill_ids = owui_body.get("skill_ids")
+    if not isinstance(skill_ids, list) or not skill_ids:
+        return
+    messages = owui_body.get("messages")
+    if not isinstance(messages, list):
+        return
+    pool = getattr(request.app.state, "pg_pool", None)
+    if pool is None:
+        return
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT name, content FROM owui_skills WHERE user_id=$1 "
+                "AND id = ANY($2::text[]) AND enabled=TRUE",
+                int(user_id), [str(s) for s in skill_ids],
+            )
+    except Exception:
+        return
+    blocks: list[str] = []
+    used = 0
+    for r in rows:
+        c = (r["content"] or "").strip()
+        body = f"### {r['name']}\n{c}" if c else f"### {r['name']}"
+        if used + len(body) > 6000 and blocks:
+            break
+        blocks.append(body)
+        used += len(body)
+    if not blocks:
+        return
+    messages.insert(
+        0,
+        {
+            "role": "system",
+            "content": "Active skills — apply these capabilities/instructions when relevant:\n\n"
+            + "\n\n".join(blocks),
+        },
+    )
+    logger.info("owui_compat: injected %d active skill(s) into the prompt", len(blocks))
+
+
 async def _inject_project_instructions(request, owui_body: dict) -> None:
     """If the chat belongs to a Project (folder), prepend that project's custom
     instructions (folder.data.system_prompt) as a system message so they apply
@@ -215,6 +338,12 @@ async def run_chat_completion(request, owui_body: dict, user_id: int | None = No
     from workspace.model_proxy import execute_chat_completion
 
     await _inject_files(request, owui_body, user_id=user_id)
+    await _inject_knowledge(request, owui_body, user_id=user_id)
+    # NOTE: skills are NOT auto-injected into every chat — that bled a globally-
+    # enabled skill (e.g. "always answer like a pirate") into unrelated chats.
+    # Skills now apply only when explicitly attached to a chat (kb_ids-style opt-in,
+    # below) — never globally. See _inject_skills.
+    await _inject_skills(request, owui_body, user_id=user_id)
     await _inject_project_instructions(request, owui_body)
     proxy_body = owui_body_to_proxy(owui_body)
     return await execute_chat_completion(request, proxy_body)

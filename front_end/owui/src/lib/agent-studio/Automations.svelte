@@ -25,6 +25,7 @@
 	// 'full' = the Automations sub-page (under the Agent Studio hub). 'dock' is
 	// reserved for a future right-rail mount.
 	export let mode: 'full' | 'dock' = 'full';
+	export let embed = false; // mounted inside another page → drop the page wrapper + header
 
 	// ── Automations (cron jobs that launch orchestrated runs) ──
 	let jobs: CronJob[] = [];
@@ -142,23 +143,25 @@
 	};
 </script>
 
-<div class="w-full h-full overflow-y-auto">
-	<div class="max-w-5xl mx-auto px-5 py-6 space-y-6">
-		<!-- Header -->
-		<header>
-			<button
-				class="text-xs text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
-				on:click={() => goto('/harvis/agent-studio')}>← {$i18n.t('Agent Studio')}</button
-			>
-			<h1 class="text-2xl font-semibold text-gray-800 dark:text-gray-100 mt-2">
-				{$i18n.t('Automations')}
-			</h1>
-			<p class="text-sm text-gray-500 mt-1">
-				{$i18n.t(
-					'Automate repetitive tasks with agents that run on a schedule — or launch one now from a template.'
-				)}
-			</p>
-		</header>
+<div class={embed ? '' : 'w-full h-full overflow-y-auto'}>
+	<div class={embed ? 'space-y-6' : 'max-w-5xl mx-auto px-5 py-6 space-y-6'}>
+		{#if !embed}
+			<!-- Header -->
+			<header>
+				<button
+					class="text-xs text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+					on:click={() => goto('/harvis/agent-studio')}>← {$i18n.t('Agent Studio')}</button
+				>
+				<h1 class="text-2xl font-semibold text-gray-800 dark:text-gray-100 mt-2">
+					{$i18n.t('Automations')}
+				</h1>
+				<p class="text-sm text-gray-500 mt-1">
+					{$i18n.t(
+						'Automate repetitive tasks with agents that run on a schedule — or launch one now from a template.'
+					)}
+				</p>
+			</header>
+		{/if}
 
 		<!-- Stat cards -->
 		<div class="grid grid-cols-2 lg:grid-cols-4 gap-3">

@@ -9,6 +9,7 @@ import ModelComparison from './ModelComparison.svelte';
 import TuningPanel from './TuningPanel.svelte';
 import GlobalArtifacts from './GlobalArtifacts.svelte';
 import Cookbook from './Cookbook.svelte';
+import Customize from './Customize.svelte';
 
 export interface Surface {
 	key: string;
@@ -25,8 +26,9 @@ export const surfaces: Surface[] = [
 	{ key: 'global-map', label: 'Neural Map', component: GlobalMap, modes: ['full', 'dock'] },
 	{ key: 'model-comparison', label: 'Model Comparison', component: ModelComparison, modes: ['full'] },
 	{ key: 'activity', label: 'Artifacts', component: GlobalArtifacts, modes: ['full', 'dock'] },
-	{ key: 'cookbook', label: 'Cookbook', component: Cookbook, modes: ['full', 'dock'] },
-	{ key: 'tuning', label: 'Tuning', component: TuningPanel, modes: ['full', 'dock'] }
+	{ key: 'cookbook', label: 'Models', component: Cookbook, modes: ['full', 'dock'] },
+	{ key: 'tuning', label: 'Tuning', component: TuningPanel, modes: ['full', 'dock'] },
+	{ key: 'customize', label: 'Customize', component: Customize, modes: ['full'] }
 ];
 
 export const surfaceByKey = (key: string): Surface | undefined =>

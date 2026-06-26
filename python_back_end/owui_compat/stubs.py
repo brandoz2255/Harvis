@@ -29,22 +29,8 @@ _PLACEHOLDER_AVATAR = (
 def register_stub_routes(router: APIRouter, get_current_user: Callable) -> None:
     """Attach stub routes to the OWUI facade router."""
 
-    # ── user settings / profile ─────────────────────────────────────────────
-    @router.get("/api/v1/users/user/settings")
-    async def owui_user_settings(user=Depends(get_current_user)):
-        return DEFAULT_USER_SETTINGS
-
-    @router.post("/api/v1/users/user/settings/update")
-    async def owui_user_settings_update(request: Request, user=Depends(get_current_user)):
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
-        merged = {**DEFAULT_USER_SETTINGS, **body}
-        if "ui" not in merged:
-            merged["ui"] = {}
-        return merged
-
+    # ── user settings: now REAL persisted endpoints in user_settings.py ──
+    # ── profile image ───────────────────────────────────────────────────────
     @router.get("/api/v1/users/{user_id}/profile/image")
     async def owui_user_profile_image(user_id: str):
         return Response(content=_PLACEHOLDER_AVATAR, media_type="image/svg+xml")
@@ -90,22 +76,7 @@ def register_stub_routes(router: APIRouter, get_current_user: Callable) -> None:
     async def owui_model_profile_image():
         return Response(content=_PLACEHOLDER_AVATAR, media_type="image/svg+xml")
 
-    # ── chat tags (re-open chat path) ───────────────────────────────────────
-    @router.get("/api/v1/chats/{chat_id}/tags")
-    async def owui_chat_tags_get(chat_id: str, user=Depends(get_current_user)):
-        return []
-
-    @router.post("/api/v1/chats/{chat_id}/tags")
-    async def owui_chat_tags_add(chat_id: str, user=Depends(get_current_user)):
-        return []
-
-    @router.delete("/api/v1/chats/{chat_id}/tags")
-    async def owui_chat_tags_delete(chat_id: str, user=Depends(get_current_user)):
-        return True
-
-    @router.get("/api/v1/chats/{chat_id}/tags/all")
-    async def owui_chat_tags_all(chat_id: str, user=Depends(get_current_user)):
-        return []
+    # ── chat tags: now REAL endpoints in router.py (persist to owui_chats.tags) ──
 
     # ── optional task helpers (avoid console noise) ─────────────────────────
     @router.get("/api/v1/tasks/")
@@ -134,12 +105,6 @@ def register_stub_routes(router: APIRouter, get_current_user: Callable) -> None:
     async def owui_tasks_chat_by_id(chat_id: str, user=Depends(get_current_user)):
         return {"task_ids": []}
 
-    # ── skills (Agent Studio "Brain" panel) ─────────────────────────────────
-    # The Agent Studio Brain lists agent skills via getSkills() → /api/v1/skills/.
-    # Harvis's skills live in the OpenClaw agent runtime, which is NOT mounted
-    # into this backend, so v1 returns an empty list — the Brain renders a
-    # graceful empty state rather than letting the call 404. Surfacing the real
-    # SKILL.md set (a skills bind-mount + frontmatter parse) is a follow-up.
-    @router.get("/api/v1/skills/")
-    async def owui_skills_list(user=Depends(get_current_user)):
-        return []
+    # ── skills: now REAL endpoints in skills.py (owui_skills table + CRUD) ──
+    # The Customize area (Agent Studio) creates/edits user skills; the Brain
+    # panel + composer list them via getSkills() → /api/v1/skills/.

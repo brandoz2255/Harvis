@@ -34,6 +34,11 @@ from .schemas import (
     OwuiSignupBody,
 )
 from .stubs import register_stub_routes
+from .knowledge import register_knowledge_routes
+from .skills import register_skill_routes
+from .connections import register_connection_routes
+from .user_settings import register_user_settings_routes
+from .orchestration_pool import register_orchestration_pool_routes
 from .translate import harvis_models_to_owui, harvis_user_to_owui
 
 logger = logging.getLogger(__name__)
@@ -198,48 +203,208 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
 
     @router.post("/api/v1/tasks/title/completions")
     async def owui_title(request: Request, user=Depends(get_current_user)):
-        # Trivial title from the conversation. OWUI sends `messages` as a STRING
-        # (rendered conversation) for task-gen, but a list in some paths — handle
-        # both, or a non-list/str would crash (str.get → 500).
+        # Auto-generate a concise chat title from the conversation via the LLM
+        # (a direct, isolated non-stream Ollama call — NOT the heavy chat
+        # pipeline). Falls back to a trimmed first-message heuristic on ANY
+        # error so chat creation never breaks. OWUI sends `messages` as a
+        # STRING (rendered) for task-gen, but a list in some paths — handle both.
+        import json
+        import os
+        import re
+
+        import httpx
+
         try:
             body = await request.json()
         except Exception:
             body = {}
         msgs = body.get("messages")
-        text = ""
+        first_user = ""
+        parts = []
         if isinstance(msgs, str):
-            text = msgs
+            parts.append(msgs)
+            first_user = msgs
         elif isinstance(msgs, list):
             for m in msgs:
-                if isinstance(m, dict) and m.get("role") == "user" and m.get("content"):
-                    text = str(m["content"])
-                    break
-        title = " ".join(text.split()[:6]) or "New Chat"
-        return {"choices": [{"message": {"content": title}}]}
+                if isinstance(m, dict) and m.get("content") and m.get("role") in ("user", "assistant"):
+                    c = str(m["content"])
+                    parts.append(f"{m['role']}: {c}")
+                    if not first_user and m.get("role") == "user":
+                        first_user = c
+        transcript = "\n".join(parts).strip()
+        # Clean fallback = first words of the user's actual message (no "user:" prefix).
+        fallback = " ".join((first_user or transcript).split()[:6]) or "New Chat"
+        # OWUI's generateTitle() parses a {"title": "..."} JSON block out of the
+        # content (plain text → it returns null and the title never applies), so
+        # every return wraps the title in that JSON envelope.
+        if not transcript:
+            return {"choices": [{"message": {"content": json.dumps({"title": fallback})}}]}
 
-    # Tag / follow-up / emoji / autocomplete task-gen. The facade has no
-    # generation backend, but the OWUI frontend fires these after each response
-    # (e.g. ResponseMessage → generateTags, per message). Without these the calls
-    # 404 and the client throws "Not Found" (a lot of console noise + uncaught
-    # rejections). Return empty, parseable completions so the client resolves.
+        # Task-gen (title / tags / follow-ups) ALWAYS uses a small LOCAL model — NOT
+        # body['model'], which can live on a remote GPU host (e.g. gemma4:12b on the
+        # rig) that ollama:11434 lacks → /api/generate 404 → fallback to first message.
+        model = os.getenv("HARVIS_TITLE_MODEL", "llama3.1:8b")
+        ollama_url = os.getenv("OLLAMA_URL", "http://ollama:11434")
+        prompt = (
+            "You name chat conversations. Reply with ONLY a concise, descriptive "
+            "title of 3-5 words — no quotes, no 'Title:' prefix, no trailing "
+            "punctuation. Summarize what the conversation is about.\n\n"
+            "Conversation:\n" + transcript[:4000] + "\n\nTitle:"
+        )
+        title = fallback
+        try:
+            # Generous timeout: the model may need a one-time reload; this call is
+            # fire-after-response, so the user never waits on it. NO num_ctx → reuse
+            # the already-loaded context (OLLAMA_CONTEXT_LENGTH), avoiding a reload
+            # — a mismatched num_ctx forces a reload and times the call out.
+            async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as hc:
+                r = await hc.post(
+                    f"{ollama_url}/api/generate",
+                    json={
+                        "model": model,
+                        "prompt": prompt,
+                        "stream": False,
+                        "think": False,
+                        "options": {"temperature": 0.3, "num_predict": 48},
+                    },
+                )
+                r.raise_for_status()
+                raw = (r.json().get("response") or "").strip()
+            # Strip any leaked <think>…</think> reasoning, then take the title line.
+            raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL | re.IGNORECASE).strip()
+            cleaned = (raw.splitlines() or [""])[0].strip().strip("\"'`").strip()
+            if cleaned.lower().startswith("title:"):
+                cleaned = cleaned[6:].strip().strip("\"'`").strip()
+            cleaned = cleaned.rstrip(".!,").strip()
+            if len(cleaned) > 60:
+                cleaned = cleaned[:60].rstrip()
+            if cleaned:
+                title = cleaned
+        except Exception:
+            logger.warning("owui_compat: title generation fell back to heuristic", exc_info=True)
+        return {"choices": [{"message": {"content": json.dumps({"title": title})}}]}
+
+    # Tag / follow-up / emoji task-gen. The OWUI frontend fires these after each
+    # response; wire them to a direct, isolated Ollama call (same pattern as the
+    # title endpoint) so the affordances actually populate. Autocomplete + queries
+    # stay no-ops (as-you-type autocomplete is noisy; queries only matter when web
+    # search is enabled, which it isn't here).
+    async def _task_gen(request: Request, prompt_tmpl: str, num_predict: int = 64,
+                        temperature: float = 0.3) -> str:
+        import os
+        import re
+
+        import httpx
+
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        msgs = body.get("messages")
+        parts = []
+        if isinstance(msgs, str):
+            parts.append(msgs)
+        elif isinstance(msgs, list):
+            for m in msgs:
+                if isinstance(m, dict) and m.get("content") and m.get("role") in ("user", "assistant"):
+                    parts.append(f"{m['role']}: {str(m['content'])}")
+        transcript = "\n".join(parts).strip()
+        if not transcript:
+            return ""
+        # Task-gen (title / tags / follow-ups) ALWAYS uses a small LOCAL model — NOT
+        # body['model'], which can live on a remote GPU host (e.g. gemma4:12b on the
+        # rig) that ollama:11434 lacks → /api/generate 404 → fallback to first message.
+        model = os.getenv("HARVIS_TITLE_MODEL", "llama3.1:8b")
+        ollama_url = os.getenv("OLLAMA_URL", "http://ollama:11434")
+        prompt = prompt_tmpl.replace("{transcript}", transcript[:4000])
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as hc:
+                r = await hc.post(
+                    f"{ollama_url}/api/generate",
+                    json={"model": model, "prompt": prompt, "stream": False, "think": False,
+                          "options": {"temperature": temperature, "num_predict": num_predict}},
+                )
+                r.raise_for_status()
+                raw = (r.json().get("response") or "").strip()
+            return re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL | re.IGNORECASE).strip()
+        except Exception:
+            logger.warning("owui_compat: task-gen failed", exc_info=True)
+            return ""
+
     @router.post("/api/v1/tasks/tags/completions")
     async def owui_tags(request: Request, user=Depends(get_current_user)):
+        import json
+        import re
+
+        raw = await _task_gen(
+            request,
+            "Generate 1-3 broad, lowercase tags for the main themes of this conversation. "
+            'Reply with ONLY a JSON object exactly like {"tags": ["tag1", "tag2"]} and nothing else.'
+            "\n\nConversation:\n{transcript}\n\nJSON:",
+            num_predict=64,
+        )
+        if raw:
+            m = re.search(r"\{.*\}", raw, re.DOTALL)
+            if m:
+                try:
+                    obj = json.loads(m.group(0))
+                    if isinstance(obj.get("tags"), list) and obj["tags"]:
+                        tags = [str(t).strip().lower() for t in obj["tags"] if str(t).strip()][:4]
+                        return {"choices": [{"message": {"content": json.dumps({"tags": tags})}}]}
+                except Exception:
+                    pass
         return {"choices": [{"message": {"content": '{"tags": []}'}}]}
 
     @router.post("/api/v1/tasks/follow_ups/completions")
     async def owui_follow_ups(request: Request, user=Depends(get_current_user)):
+        import json
+        import re
+
+        raw = await _task_gen(
+            request,
+            "Suggest 3 short, natural follow-up questions the user might ask next, based on this "
+            'conversation. Reply with ONLY a JSON object exactly like {"follow_ups": ["q1?", "q2?", "q3?"]} '
+            "and nothing else.\n\nConversation:\n{transcript}\n\nJSON:",
+            num_predict=128,
+        )
+        if raw:
+            m = re.search(r"\{.*\}", raw, re.DOTALL)
+            if m:
+                try:
+                    obj = json.loads(m.group(0))
+                    if isinstance(obj.get("follow_ups"), list) and obj["follow_ups"]:
+                        fu = [str(q).strip() for q in obj["follow_ups"] if str(q).strip()][:3]
+                        return {"choices": [{"message": {"content": json.dumps({"follow_ups": fu})}}]}
+                except Exception:
+                    pass
         return {"choices": [{"message": {"content": '{"follow_ups": []}'}}]}
 
     @router.post("/api/v1/tasks/emoji/completions")
     async def owui_emoji(request: Request, user=Depends(get_current_user)):
-        return {"choices": [{"message": {"content": ""}}]}
+        import re
+
+        raw = await _task_gen(
+            request,
+            "Reply with ONLY a single emoji that best represents the topic of this conversation. "
+            "No words, no explanation — just one emoji.\n\nConversation:\n{transcript}\n\nEmoji:",
+            num_predict=8,
+            temperature=0.5,
+        )
+        emoji = ""
+        if raw:
+            m = re.search(r"[\U0001F000-\U0001FAFF☀-➿←-⇿⬀-⯿]", raw)
+            if m:
+                emoji = m.group(0)
+        return {"choices": [{"message": {"content": emoji}}]}
 
     @router.post("/api/v1/tasks/auto/completions")
     async def owui_auto_completion(request: Request, user=Depends(get_current_user)):
+        # As-you-type autocomplete intentionally left off (noisy + per-keystroke cost).
         return {"choices": [{"message": {"content": ""}}]}
 
     @router.post("/api/v1/tasks/queries/completions")
     async def owui_queries(request: Request, user=Depends(get_current_user)):
+        # Auto web-search queries only matter when web search is enabled (off here).
         return {"choices": [{"message": {"content": '{"queries": []}'}}]}
 
     # ── chat persistence ──────────────────────────────────────────────────
@@ -256,16 +421,39 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
         return await persistence.list_chats(pool, user.id, limit=60, offset=(page - 1) * 60)
 
     @router.get("/api/v1/chats/all/tags")
-    async def owui_chat_all_tags(user=Depends(get_current_user)):
-        return []
+    async def owui_chat_all_tags(request: Request, user=Depends(get_current_user)):
+        pool = _require_pool(request)
+        return await persistence.list_all_tags(pool, user.id)
 
     @router.get("/api/v1/chats/pinned")
-    async def owui_chat_pinned(user=Depends(get_current_user)):
-        return []
+    async def owui_chat_pinned(request: Request, user=Depends(get_current_user)):
+        pool = _require_pool(request)
+        return await persistence.list_pinned_chats(pool, user.id)
 
     @router.get("/api/v1/chats/archived")
-    async def owui_chat_archived(user=Depends(get_current_user)):
-        return []
+    async def owui_chat_archived(request: Request, user=Depends(get_current_user), page: int = 1):
+        pool = _require_pool(request)
+        page = max(1, page)
+        return await persistence.list_archived_chats(pool, user.id, limit=60, offset=(page - 1) * 60)
+
+    @router.get("/api/v1/chats/search")
+    async def owui_chat_search(
+        request: Request, user=Depends(get_current_user), text: str = "", page: int = 1
+    ):
+        pool = _require_pool(request)
+        page = max(1, page)
+        if not (text or "").strip():
+            return []
+        return await persistence.search_chats(pool, user.id, text, limit=60, offset=(page - 1) * 60)
+
+    @router.post("/api/v1/chats/tags")
+    async def owui_chat_list_by_tag(request: Request, user=Depends(get_current_user)):
+        pool = _require_pool(request)
+        body = await request.json()
+        name = (body.get("name") or body.get("tag_name") or "").strip()
+        if not name:
+            return []
+        return await persistence.list_chats_by_tag(pool, user.id, name)
 
     # ── Folders = Projects ────────────────────────────────────────────────
     # A folder owns chats (owui_chats.folder_id) + project settings
@@ -302,6 +490,53 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
         if chat is None:
             raise HTTPException(status_code=404, detail="Chat not found")
         return chat
+
+    @router.post("/api/v1/chats/{chat_id}/pin")
+    async def owui_chat_toggle_pin(chat_id: str, request: Request, user=Depends(get_current_user)):
+        pool = _require_pool(request)
+        chat = await persistence.toggle_chat_pinned(pool, user.id, chat_id)
+        if chat is None:
+            raise HTTPException(status_code=404, detail="Chat not found")
+        return chat
+
+    @router.get("/api/v1/chats/{chat_id}/pinned")
+    async def owui_chat_pin_status(chat_id: str, request: Request, user=Depends(get_current_user)):
+        pool = _require_pool(request)
+        chat = await persistence.get_chat(pool, user.id, chat_id)
+        return bool(chat and chat.get("pinned"))
+
+    @router.post("/api/v1/chats/{chat_id}/archive")
+    async def owui_chat_toggle_archive(chat_id: str, request: Request, user=Depends(get_current_user)):
+        pool = _require_pool(request)
+        chat = await persistence.toggle_chat_archived(pool, user.id, chat_id)
+        if chat is None:
+            raise HTTPException(status_code=404, detail="Chat not found")
+        return chat
+
+    # ── per-chat tags (real; supersede the stubs in stubs.py) ─────────────────
+    @router.get("/api/v1/chats/{chat_id}/tags")
+    async def owui_chat_tags_get(chat_id: str, request: Request, user=Depends(get_current_user)):
+        pool = _require_pool(request)
+        return await persistence.get_chat_tags(pool, user.id, chat_id)
+
+    @router.post("/api/v1/chats/{chat_id}/tags")
+    async def owui_chat_tags_add(chat_id: str, request: Request, user=Depends(get_current_user)):
+        pool = _require_pool(request)
+        body = await request.json()
+        name = (body.get("name") or body.get("tag_name") or "").strip()
+        return await persistence.add_chat_tag(pool, user.id, chat_id, name)
+
+    @router.delete("/api/v1/chats/{chat_id}/tags/all")
+    async def owui_chat_tags_clear(chat_id: str, request: Request, user=Depends(get_current_user)):
+        pool = _require_pool(request)
+        return await persistence.clear_chat_tags(pool, user.id, chat_id)
+
+    @router.delete("/api/v1/chats/{chat_id}/tags")
+    async def owui_chat_tags_delete(chat_id: str, request: Request, user=Depends(get_current_user)):
+        pool = _require_pool(request)
+        body = await request.json()
+        name = (body.get("name") or body.get("tag_name") or "").strip()
+        return await persistence.remove_chat_tag(pool, user.id, chat_id, name)
 
     @router.get("/api/v1/folders/{folder_id}")
     async def owui_folder_get(folder_id: str, request: Request, user=Depends(get_current_user)):
@@ -392,6 +627,11 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
     # Stub v1 routes (settings, tools, tags, profile images, …) — must be
     # registered before parameterized chat routes where paths overlap.
     register_stub_routes(router, get_current_user)
+    register_knowledge_routes(router, get_current_user)
+    register_skill_routes(router, get_current_user)
+    register_connection_routes(router, get_current_user)
+    register_user_settings_routes(router, get_current_user)
+    register_orchestration_pool_routes(router, get_current_user)
 
     @router.get("/api/v1/chats/{chat_id}")
     async def owui_chat_get(chat_id: str, request: Request, user=Depends(get_current_user)):

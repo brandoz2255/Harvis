@@ -26,6 +26,9 @@
 	export let onCancel = () => {};
 	export let onConfirm = (data) => {};
 
+	// Preferred microphone (deviceId from the composer's mic dropdown). Empty = default.
+	export let deviceId = '';
+
 	let loading = false;
 	let confirmed = false;
 
@@ -226,7 +229,8 @@
 					audio: {
 						echoCancellation: echoCancellation,
 						noiseSuppression: noiseSuppression,
-						autoGainControl: autoGainControl
+						autoGainControl: autoGainControl,
+						...(deviceId ? { deviceId: { exact: deviceId } } : {})
 					}
 				});
 			}

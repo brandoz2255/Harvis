@@ -331,8 +331,8 @@
 	<!-- title -->
 	<div class="flex items-center gap-2 mb-2 shrink-0">
 		<Bolt className="size-4 text-blue-500" />
-		<div class="text-sm font-medium text-gray-800 dark:text-gray-100">{$i18n.t('Cookbook')}</div>
-		<span class="text-[11px] text-gray-400 hidden sm:inline">{$i18n.t('hardware-aware model picks')}</span>
+		<div class="text-sm font-medium text-gray-800 dark:text-gray-100">{$i18n.t('Models')}</div>
+		<span class="text-[11px] text-gray-400 hidden sm:inline">{$i18n.t('your installed models + hardware-aware picks')}</span>
 		<button
 			class="ml-auto text-[11px] text-gray-400 hover:text-blue-500 transition"
 			on:click={loadNodes}

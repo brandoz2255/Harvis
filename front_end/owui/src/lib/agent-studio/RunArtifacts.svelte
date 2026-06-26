@@ -26,6 +26,10 @@
 	// `fill` (with bare) makes the preview take the full available height — the
 	// Artifacts tab renders the preview full-bleed as THE artifact.
 	export let fill = false;
+	// When set, keep ONLY the diff produced by this sub-agent (the Workflow Inspector's
+	// per-agent session). The diff's label is "{agent_label} · {branch}", so we match the
+	// first segment exactly against the agent's label. Unset ⇒ all agents' diffs (default).
+	export let agentLabel: string | null = null;
 
 	let artifacts: ArtifactMeta[] = [];
 	// One block per sub-agent (multi-agent orchestrate runs produce N diffs).
@@ -91,6 +95,12 @@
 			}))
 		);
 		changedFiles = cf ? (await getArtifact(cf.id))?.content || '' : '';
+		// Per-agent session (agentLabel set): keep only this agent's diff and drop the
+		// aggregate changed-files chips (the agent's own diff is its source of truth).
+		if (agentLabel) {
+			diffs = diffs.filter((d) => (d.label.split(' · ')[0] || '').trim() === agentLabel);
+			changedFiles = '';
+		}
 		// Full file contents → pick the primary one to preview.
 		const fileMetas = artifacts.filter((a) => a.artifact_type === 'file');
 		const files = await Promise.all(

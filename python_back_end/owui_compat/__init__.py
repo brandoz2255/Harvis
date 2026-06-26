@@ -18,6 +18,10 @@ from .persistence import (
     CREATE_OWUI_FILES_SQL,
     CREATE_OWUI_FOLDERS_SQL,
 )
+from .knowledge import CREATE_OWUI_KNOWLEDGE_SQL
+from .skills import CREATE_OWUI_SKILLS_SQL
+from .user_settings import CREATE_OWUI_USER_SETTINGS_SQL
+from .orchestration_pool import CREATE_OWUI_ORCH_POOL_SQL
 from .router import OwuiDeps, create_owui_router
 
 __all__ = [
@@ -27,4 +31,8 @@ __all__ = [
     "CREATE_OWUI_COMPARISONS_SQL",
     "CREATE_OWUI_FILES_SQL",
     "CREATE_OWUI_FOLDERS_SQL",
+    "CREATE_OWUI_KNOWLEDGE_SQL",
+    "CREATE_OWUI_SKILLS_SQL",
+    "CREATE_OWUI_USER_SETTINGS_SQL",
+    "CREATE_OWUI_ORCH_POOL_SQL",
 ]

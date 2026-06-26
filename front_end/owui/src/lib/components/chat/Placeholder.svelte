@@ -23,6 +23,7 @@
 	} from '$lib/stores';
 	import { sanitizeResponseContent, extractCurlyBraceWords } from '$lib/utils';
 	import { WEBUI_API_BASE_URL, WEBUI_BASE_URL } from '$lib/constants';
+	import { goto } from '$app/navigation';
 
 	import Suggestions from './Suggestions.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
@@ -73,6 +74,57 @@
 	}
 
 	$: models = selectedModels.map((id) => $_models.find((m) => m.id === id));
+
+	// ── Bridged from the React prototype ──────────────────────────────────────
+	// Quirky randomized greeting, wired to the real account name. Picked once per
+	// mount (random each load); several lines use the first name when available.
+	const _firstName = $user?.name ? $user.name.split(' ')[0] : '';
+	const _greetings = [
+		'How can I help today?',
+		'How can Harvis help?',
+		'Welcome, stranger.',
+		'What should we make?',
+		'Ready when you are.',
+		"What's the move?",
+		'Back to it?',
+		'Welcome back.',
+		...(_firstName
+			? [
+					`Hey ${_firstName}.`,
+					`What are we building, ${_firstName}?`,
+					`Good to see you, ${_firstName}.`,
+					`Yes, ${_firstName}?`
+				]
+			: [])
+	];
+	const greeting = _greetings[Math.floor(Math.random() * _greetings.length)];
+
+	// Compact routing pills → real Harvis surfaces (shown alongside model suggestions).
+	$: studioEnabled = $config?.features?.enable_harvis_studio ?? true;
+	const _iconAttrs =
+		'width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"';
+	const starters = [
+		{
+			label: 'Build something',
+			route: '/harvis/vibecode',
+			icon: `<svg xmlns="http://www.w3.org/2000/svg" ${_iconAttrs}><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>`
+		},
+		{
+			label: 'Analyze files',
+			route: '/harvis/notebooks',
+			icon: `<svg xmlns="http://www.w3.org/2000/svg" ${_iconAttrs}><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`
+		},
+		{
+			label: 'Research topic',
+			route: '/harvis/notebooks',
+			icon: `<svg xmlns="http://www.w3.org/2000/svg" ${_iconAttrs}><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>`
+		},
+		{
+			label: 'Plan a project',
+			seed: 'Help me plan a project.',
+			icon: `<svg xmlns="http://www.w3.org/2000/svg" ${_iconAttrs}><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>`
+		}
+	];
 </script>
 
 <div class="m-auto w-full max-w-6xl px-2 @2xl:px-20 translate-y-6 py-24 text-center">
@@ -91,16 +143,14 @@
 	<div
 		class="w-full text-3xl text-gray-800 dark:text-gray-100 text-center flex items-center gap-4 font-primary"
 	>
-		<div class="w-full flex flex-col justify-center items-center">
+		<div class="home-stage relative w-full flex flex-col justify-center items-center">
 			<HarvisMascot size={56} className="mb-3" interactive={true} />
 			<div
-				class="text-3xl font-medium text-gray-800 dark:text-gray-100 mb-1.5"
+				class="home-greeting text-3xl font-medium mb-1.5"
+				style="background-image:linear-gradient(100deg,#38bdf8 0%,#bae6fd 48%,#38bdf8 100%);background-size:200% auto;-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:transparent;"
 				in:fade={{ duration: 150 }}
 			>
-				{(() => {
-					const h = new Date().getHours();
-					return h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening';
-				})()}{$user?.name ? `, ${$user.name.split(' ')[0]}` : ''}
+				{greeting}
 			</div>
 			{#if $selectedFolder}
 				<FolderTitle
@@ -116,114 +166,13 @@
 						selectedFolder.set(null);
 					}}
 				/>
-			{:else}
-				<div class="flex flex-row justify-center gap-2.5 @sm:gap-3 w-fit px-5 max-w-xl">
-					<div class="flex shrink-0 justify-center">
-						<div class="flex -space-x-1.5 mb-0.5" in:fade={{ duration: 100 }}>
-							{#each models as model, modelIdx}
-								<Tooltip
-									content={(models[modelIdx]?.info?.meta?.tags ?? [])
-										.map((tag) => tag.name.toUpperCase())
-										.join(', ')}
-									placement="top"
-								>
-									<button
-										aria-hidden={models.length <= 1}
-										aria-label={$i18n.t('Get information on {{name}} in the UI', {
-											name: models[modelIdx]?.name
-										})}
-										on:click={() => {
-											selectedModelIdx = modelIdx;
-										}}
-									>
-										<img
-											src={`${WEBUI_API_BASE_URL}/models/model/profile/image?id=${model?.id}&lang=${$i18n.language}`}
-											class=" size-5 @sm:size-6 rounded-full border-[1px] border-gray-100 dark:border-none"
-											aria-hidden="true"
-											draggable="false"
-											on:error={(e) => {
-												e.currentTarget.src = '/favicon.png';
-											}}
-										/>
-									</button>
-								</Tooltip>
-							{/each}
-						</div>
-					</div>
-
-					<div
-						class=" text-sm @sm:text-base text-gray-500 dark:text-gray-400 line-clamp-1 flex items-center"
-						in:fade={{ duration: 100 }}
-					>
-						{#if models[selectedModelIdx]?.name}
-							<Tooltip
-								content={models[selectedModelIdx]?.name}
-								placement="top"
-								className=" flex items-center "
-							>
-								<span class="line-clamp-1">
-									{models[selectedModelIdx]?.name}
-								</span>
-							</Tooltip>
-						{:else}
-							{$i18n.t('Hello, {{name}}', { name: $user?.name })}
-						{/if}
-					</div>
-				</div>
-
-				<div class="flex mt-1 mb-2">
-					<div in:fade={{ duration: 100, delay: 50 }}>
-						{#if models[selectedModelIdx]?.info?.meta?.description ?? null}
-							<Tooltip
-								className=" w-fit"
-								content={DOMPurify.sanitize(
-									marked.parse(
-										sanitizeResponseContent(
-											models[selectedModelIdx]?.info?.meta?.description ?? ''
-										).replaceAll('\n', '<br>')
-									)
-								)}
-								placement="top"
-							>
-								<div
-									class="mt-0.5 px-2 text-sm font-normal text-gray-500 dark:text-gray-400 line-clamp-2 max-w-xl markdown"
-								>
-									{@html DOMPurify.sanitize(
-										marked.parse(
-											sanitizeResponseContent(
-												models[selectedModelIdx]?.info?.meta?.description ?? ''
-											).replaceAll('\n', '<br>')
-										)
-									)}
-								</div>
-							</Tooltip>
-
-							{#if models[selectedModelIdx]?.info?.meta?.user}
-								<div class="mt-0.5 text-sm font-normal text-gray-400 dark:text-gray-500">
-									By
-									{#if models[selectedModelIdx]?.info?.meta?.user.community}
-										<a
-											href="https://openwebui.com/m/{models[selectedModelIdx]?.info?.meta?.user
-												.username}"
-											>{models[selectedModelIdx]?.info?.meta?.user.name
-												? models[selectedModelIdx]?.info?.meta?.user.name
-												: `@${models[selectedModelIdx]?.info?.meta?.user.username}`}</a
-										>
-									{:else}
-										{models[selectedModelIdx]?.info?.meta?.user.name}
-									{/if}
-								</div>
-							{/if}
-						{/if}
-					</div>
-				</div>
 			{/if}
 
 			<div class="text-base font-normal @md:max-w-3xl w-full py-3 {atSelectedModel ? 'mt-2' : ''}">
 				<MessageInput
 					bind:this={messageInput}
 					{history}
-					{selectedModels}
+					bind:selectedModels
 					bind:files
 					bind:prompt
 					bind:autoScroll
@@ -239,7 +188,7 @@
 					{toolServers}
 					{stopResponse}
 					{createMessagePair}
-					placeholder={$i18n.t('How can I help you today?')}
+					placeholder={$i18n.t('Ask Harvis anything…')}
 					{onChange}
 					{onUpload}
 					on:submit={(e) => {
@@ -273,3 +222,50 @@
 		</div>
 	{/if}
 </div>
+
+<style>
+	/* The gradient + background-clip:text live INLINE on the element — a
+	   `background-clip: text` in a CSS file gets stripped by the production
+	   minifier. Here we only animate the sheen; keyframe + animation stay
+	   together so Svelte's scoped-keyframe rename keeps matching. */
+	.home-greeting {
+		animation: home-sheen 7s ease-in-out 0.4s infinite;
+	}
+
+	/* Subtle cyan glow behind the home content (bridged from the prototype). */
+	.home-stage::before {
+		content: '';
+		position: absolute;
+		top: -8%;
+		left: 50%;
+		width: 460px;
+		max-width: 90%;
+		height: 360px;
+		transform: translateX(-50%);
+		background: radial-gradient(closest-side, rgba(56, 189, 248, 0.1), transparent);
+		pointer-events: none;
+		z-index: 0;
+	}
+	.home-stage > * {
+		position: relative;
+		z-index: 1;
+	}
+
+	@keyframes home-sheen {
+		0% {
+			background-position: 150% center;
+		}
+		100% {
+			background-position: -50% center;
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.home-greeting {
+			animation: none;
+			background-image: none !important;
+			color: #38bdf8 !important;
+			-webkit-text-fill-color: #38bdf8 !important;
+		}
+	}
+</style>

@@ -1,8 +1,9 @@
 <script lang="ts">
-	import { getContext, onDestroy } from 'svelte';
+	import { getContext, onDestroy, createEventDispatcher } from 'svelte';
 	import { getRunTree, type RunNode } from '$lib/apis/agent-runs';
 
 	const i18n: any = getContext('i18n');
+	const dispatch = createEventDispatcher();
 
 	// The run whose agent tree to show. `live` ⇒ poll while it's still going (token/tool
 	// counts land as each sub-agent finishes). Claude-Code "Background tasks" panel:
@@ -101,10 +102,12 @@
 	};
 	$: bands = computeBands(children);
 	$: banded = bands.length > 1;
-	// Phases fold SHUT by default — a band shows its name + a dot-progress row; the
-	// per-agent Tokens/Tools/Time table is one click in (the reference's dense default).
+	// Phases default OPEN — opening the Background-tasks panel shows the running agents
+	// straight away (no drop-down hunting). A click collapses a band. `?? true` = open
+	// unless explicitly toggled shut.
 	let openBands: Record<number, boolean> = {};
-	const toggleBand = (i: number) => (openBands = { ...openBands, [i]: !openBands[i] });
+	const isOpen = (i: number): boolean => openBands[i] ?? true;
+	const toggleBand = (i: number) => (openBands = { ...openBands, [i]: !isOpen(i) });
 </script>
 
 {#if !run && !children.length}
@@ -143,7 +146,7 @@
 						fill="none"
 						stroke="currentColor"
 						stroke-width="2.5"
-						class="size-3 text-gray-400 transition {openBands[bi] ? 'rotate-90' : ''}"
+						class="size-3 text-gray-400 transition {isOpen(bi) ? 'rotate-90' : ''}"
 						><path d="M9 6l6 6-6 6" stroke-linecap="round" stroke-linejoin="round" /></svg
 					>
 					<span class="font-medium text-gray-700 dark:text-gray-200"
@@ -158,7 +161,7 @@
 						{#each band as c}<span class="size-1.5 rounded-full shrink-0 {dot(c.status)}"></span>{/each}
 					</span>
 				</button>
-				{#if openBands[bi]}
+				{#if isOpen(bi)}
 					<div class="pl-3 pb-1.5">
 						<div
 							class="grid grid-cols-[1fr_auto_auto_auto] gap-x-3 px-2 pb-0.5 text-[10px] text-gray-400 uppercase tracking-wide"
@@ -169,8 +172,11 @@
 							<span class="text-right">{$i18n.t('Time')}</span>
 						</div>
 						{#each band as c (c.id)}
-							<div
-								class="grid grid-cols-[1fr_auto_auto_auto] gap-x-3 px-2 py-1 rounded-md hover:bg-gray-50 dark:hover:bg-gray-850/60 items-center"
+							<button
+								type="button"
+								title={$i18n.t('Open this agent')}
+								class="w-full text-left grid grid-cols-[1fr_auto_auto_auto] gap-x-3 px-2 py-1 rounded-md hover:bg-gray-50 dark:hover:bg-gray-850/60 items-center"
+								on:click={() => dispatch('viewAgent', { id: c.id })}
 							>
 								<span class="flex items-center gap-1.5 min-w-0">
 									<span class="size-1.5 rounded-full shrink-0 {dot(c.status)}"></span>
@@ -184,7 +190,7 @@
 								>
 								<span class="text-right tabular-nums text-gray-600 dark:text-gray-300">{c.tool_calls ?? 0}</span>
 								<span class="text-right tabular-nums text-gray-600 dark:text-gray-300">{fmtDur(c.duration_ms)}</span>
-							</div>
+							</button>
 						{/each}
 					</div>
 				{/if}

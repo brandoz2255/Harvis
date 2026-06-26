@@ -8,7 +8,8 @@ import { GeneratePodcastDialog } from '@/components/podcasts/GeneratePodcastDial
 interface CreateDialogsContextType {
   openSourceDialog: () => void
   openNotebookDialog: () => void
-  openPodcastDialog: () => void
+  /** Optionally pre-scope the podcast to a notebook (Studio rail passes the current one). */
+  openPodcastDialog: (notebookId?: string) => void
 }
 
 const CreateDialogsContext = createContext<CreateDialogsContextType | null>(null)
@@ -17,10 +18,14 @@ export function CreateDialogsProvider({ children }: { children: ReactNode }) {
   const [sourceDialogOpen, setSourceDialogOpen] = useState(false)
   const [notebookDialogOpen, setNotebookDialogOpen] = useState(false)
   const [podcastDialogOpen, setPodcastDialogOpen] = useState(false)
+  const [podcastNotebookId, setPodcastNotebookId] = useState<string | undefined>(undefined)
 
   const openSourceDialog = useCallback(() => setSourceDialogOpen(true), [])
   const openNotebookDialog = useCallback(() => setNotebookDialogOpen(true), [])
-  const openPodcastDialog = useCallback(() => setPodcastDialogOpen(true), [])
+  const openPodcastDialog = useCallback((notebookId?: string) => {
+    setPodcastNotebookId(notebookId)
+    setPodcastDialogOpen(true)
+  }, [])
 
   return (
     <CreateDialogsContext.Provider
@@ -33,7 +38,11 @@ export function CreateDialogsProvider({ children }: { children: ReactNode }) {
       {children}
       <AddSourceDialog open={sourceDialogOpen} onOpenChange={setSourceDialogOpen} />
       <CreateNotebookDialog open={notebookDialogOpen} onOpenChange={setNotebookDialogOpen} />
-      <GeneratePodcastDialog open={podcastDialogOpen} onOpenChange={setPodcastDialogOpen} />
+      <GeneratePodcastDialog
+        open={podcastDialogOpen}
+        onOpenChange={setPodcastDialogOpen}
+        defaultNotebookId={podcastNotebookId}
+      />
     </CreateDialogsContext.Provider>
   )
 }

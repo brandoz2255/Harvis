@@ -30,6 +30,31 @@ export interface RunNode {
 	error: string | null;
 }
 
+// All workspace/orchestration runs (account-wide) — feeds the Build Background-tasks panel.
+export const getWorkspaceHistory = async (limit = 50): Promise<any[]> => {
+	try {
+		const r = await fetch(`${BASE}/history?limit=${limit}`, { headers: headers() });
+		if (!r.ok) return [];
+		const j = await r.json();
+		return j?.runs ?? j ?? [];
+	} catch {
+		return [];
+	}
+};
+
+// Cancel a running workspace/vibecode turn (best-effort).
+export const cancelWorkspaceRun = async (runId: string): Promise<void> => {
+	try {
+		await fetch(`${BASE}/cancel/${runId}`, {
+			method: 'POST',
+			headers: headers(),
+			credentials: 'include'
+		});
+	} catch (_) {
+		/* best-effort */
+	}
+};
+
 export const getRunTree = async (
 	runId: string
 ): Promise<{ run: RunNode | null; children: RunNode[] }> => {
@@ -260,6 +285,7 @@ export interface VibecodeTurn {
 	prompt_tokens?: number | null; // ≈ context occupancy at the last step
 	completion_tokens?: number | null;
 	context_window?: number | null; // num_ctx the model ran with
+	child_count?: number | null; // >0 ⇒ a multi-agent (orchestrated) turn → "Workflow · N agents"
 	// The user's original attachments (image/file refs) — rendered inline in the chat bubble.
 	attachments?: { url?: string; name?: string; mime_type?: string; file_id?: string }[] | null;
 }
@@ -387,7 +413,13 @@ export const getVibecodeSession = async (
 // Returns the new turn's workspace_id (stream it via /api/workspace/stream/{id}).
 export const startVibecodeTurn = async (
 	sessionId: string,
-	body: { task_brief: string; model_name?: string; attachments?: any[]; run_mode?: string }
+	body: {
+		task_brief: string;
+		model_name?: string;
+		attachments?: any[];
+		run_mode?: string;
+		orchestrate?: boolean; // fan the turn out to N task-delegated sub-agents (multi-agent)
+	}
 ): Promise<{ workspace_id: string }> => {
 	const r = await fetch(`${BASE}/vibecode/session/${sessionId}/turn`, {
 		method: 'POST',

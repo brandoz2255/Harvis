@@ -6,6 +6,9 @@
 		WEBUI_NAME,
 		banners,
 		chatId,
+		chats,
+		folders as _folders,
+		selectedFolder,
 		config,
 		mobile,
 		settings,
@@ -62,6 +65,17 @@
 	let closedBannerIds = [];
 
 	let showShareChatModal = false;
+
+	// Project breadcrumb (top-left): resolve the open chat's project (folder) from
+	// the chat-list + folders stores, falling back to the compose-time selectedFolder.
+	$: _openFolderId =
+		($chats ?? []).find((c) => c.id === $chatId)?.folder_id ?? $selectedFolder?.id ?? null;
+	$: _openFolder = _openFolderId
+		? (($_folders ?? []).find((f) => f.id === _openFolderId) ??
+				($selectedFolder?.id === _openFolderId ? $selectedFolder : null))
+		: null;
+	$: projectName = _openFolder?.name ?? '';
+	$: projectId = _openFolder?.id ?? '';
 	let showDownloadChatModal = false;
 </script>
 
@@ -115,8 +129,21 @@
 			{$showSidebar ? 'ml-1' : ''}
 			"
 				>
-					{#if showModelSelector}
-						<ModelSelector bind:selectedModels showSetDefault={!shareEnabled} />
+					<!-- Top model selector removed; the model is chosen in the composer pill. -->
+					{#if projectName}
+						<div class="flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400 min-w-0">
+							<a
+								href="/harvis/projects"
+								class="hover:text-gray-700 dark:hover:text-gray-200 transition shrink-0"
+								>{$i18n.t('Projects')}</a
+							>
+							<span class="opacity-50 shrink-0">/</span>
+							<a
+								href={`/harvis/projects/${projectId}`}
+								class="font-medium text-gray-700 dark:text-gray-300 hover:text-blue-600 dark:hover:text-blue-400 transition truncate"
+								>{projectName}</a
+							>
+						</div>
 					{/if}
 				</div>
 
@@ -236,32 +263,6 @@
 						</Tooltip>
 					{/if}
 
-					{#if $user !== undefined && $user !== null}
-						<UserMenu
-							className="w-[240px]"
-							role={$user?.role}
-							help={true}
-							on:show={(e) => {
-								if (e.detail === 'archived-chat') {
-									showArchivedChats.set(true);
-								}
-							}}
-						>
-							<div
-								class="select-none flex rounded-xl p-1.5 w-full hover:bg-gray-50 dark:hover:bg-gray-850 transition"
-							>
-								<div class=" self-center">
-									<span class="sr-only">{$i18n.t('User menu')}</span>
-									<img
-										src={`${WEBUI_API_BASE_URL}/users/${$user?.id}/profile/image`}
-										class="size-6 object-cover rounded-full"
-										alt=""
-										draggable="false"
-									/>
-								</div>
-							</div>
-						</UserMenu>
-					{/if}
 				</div>
 			</div>
 		</div>

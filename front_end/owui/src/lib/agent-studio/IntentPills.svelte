@@ -13,34 +13,6 @@
 
 	const intents: Intent[] = [
 		{
-			key: 'auto',
-			label: 'Auto',
-			hint: 'Start a normal chat — Harvis auto-detects the task.',
-			run: () => go('/')
-		},
-		{
-			key: 'hash',
-			label: 'Hash',
-			hint: 'Prefill a hash-cracking prompt — paste your hash, then send.',
-			run: () =>
-				go(
-					`/?q=${encodeURIComponent(
-						'Crack this hash — identify the algorithm and use the hash-cracking skill:\n'
-					)}&submit=false`
-				)
-		},
-		{
-			key: 'decode',
-			label: 'Decode',
-			hint: 'Prefill a decode prompt — paste your encoded text, then send.',
-			run: () =>
-				go(
-					`/?q=${encodeURIComponent(
-						'Decode this — identify the encoding (base64 / hex / url / rot13 / …) and decode it:\n'
-					)}&submit=false`
-				)
-		},
-		{
 			key: 'research',
 			label: 'Research',
 			hint: 'Enable research mode, then start a chat.',
@@ -48,9 +20,21 @@
 				researchEnabled.set(true);
 				go('/');
 			}
+		},
+		{
+			key: 'code',
+			label: 'Code',
+			hint: 'Open the Build workspace — repos, diffs, and code review.',
+			run: () => go('/harvis/vibecode')
+		},
+		{
+			key: 'automate',
+			label: 'Automate',
+			hint: 'Schedule recurring tasks and background workflows.',
+			run: () => go('/harvis/automations')
 		}
-		// Vibecode intent intentionally omitted — the Vibe Code workspace is parked;
-		// general/advanced AI use leads the hub. Re-add when Vibecode is revived.
+		// Chat-only presets (Analyze / Decode / Summarize) intentionally dropped —
+		// Quick Start keeps only agent-surface launchers, not main-chat prompt prefills.
 	];
 </script>
 

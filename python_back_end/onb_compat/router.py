@@ -1008,6 +1008,15 @@ _BUILTIN_TRANSFORMATIONS = [
     {"id": "action_items", "title": "Action Items",
      "description": "Action items, recommendations, and next steps.",
      "prompt": "Extract action items, recommendations, and next steps from the following content:\n\n{content}"},
+    {"id": "quiz", "title": "Quiz",
+     "description": "A multiple-choice quiz grounded in this content.",
+     "prompt": "Create a quiz of 8-12 questions based ONLY on the following content. For each question give: the question, four options labelled A-D, the correct answer, and a one-line explanation. Format as clean Markdown with each question numbered. Do not invent facts beyond the content.\n\n{content}"},
+    {"id": "flashcards", "title": "Flashcards",
+     "description": "A study flashcard deck grounded in this content.",
+     "prompt": "Create 15-20 study flashcards based ONLY on the following content. Format each as a Markdown list item exactly like: **Front:** <term or question> — **Back:** <answer or definition>. Cover the most important concepts. Do not invent facts beyond the content.\n\n{content}"},
+    {"id": "study_guide", "title": "Study Guide",
+     "description": "A structured study guide grounded in this content.",
+     "prompt": "Create a structured study guide from ONLY the following content, in Markdown, with these sections: ## Key Concepts (5-7 bullets), ## Detailed Notes (per concept: a short explanation and an example), ## Key Terms (term: definition), ## Common Pitfalls, ## Practice Questions (3-5 with answers). Do not invent facts beyond the content.\n\n{content}"},
 ]
 _BUILTIN_BY_ID = {t["id"]: t for t in _BUILTIN_TRANSFORMATIONS}
 
@@ -1164,6 +1173,322 @@ async def onb_execute_transformation(
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"Model request failed: {e}")
     return {"output": output, "transformation_id": str(tid), "model_id": model}
+
+
+# Ollama structured-output schemas — constrain small models to the EXACT shape the
+# interactive renderers need (passed as `format`, not just "json").
+_QUIZ_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "questions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "q": {"type": "string"},
+                    "options": {"type": "array", "items": {"type": "string"}},
+                    "answer": {"type": "integer"},
+                    "explanation": {"type": "string"},
+                },
+                "required": ["q", "options", "answer"],
+            },
+        }
+    },
+    "required": ["questions"],
+}
+_FLASHCARDS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "cards": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"front": {"type": "string"}, "back": {"type": "string"}},
+                "required": ["front", "back"],
+            },
+        }
+    },
+    "required": ["cards"],
+}
+
+
+def _normalize_quiz(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Coerce model output to [{q, options[str], answer:int, explanation}] — tolerant of
+    the ways small models wander (A/B/C/D keys, letter answers, stray fields)."""
+    raw = data.get("questions") or data.get("quiz") or data.get("items") if isinstance(data, dict) else []
+    if not isinstance(raw, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        q_text = item.get("q") or item.get("question") or item.get("text") or ""
+        opts = item.get("options")
+        if not isinstance(opts, list):
+            lettered = []
+            for k in ("A", "B", "C", "D", "E", "F"):
+                if k in item:
+                    v = item[k]
+                    if isinstance(v, list):
+                        v = v[0] if v else ""
+                    lettered.append(str(v))
+            opts = lettered
+        opts = [str(o) for o in opts if o not in (None, "")] if isinstance(opts, list) else []
+        if not str(q_text).strip() or len(opts) < 2:
+            continue
+        ans = item.get("answer")
+        if isinstance(ans, str):
+            mm = re.search(r"\d+", ans)
+            if mm:
+                ans = int(mm.group())
+            elif ans.strip().upper() in ("A", "B", "C", "D", "E", "F"):
+                ans = "ABCDEF".index(ans.strip().upper())
+            else:
+                ans = 0
+        if not isinstance(ans, int) or ans < 0 or ans >= len(opts):
+            ans = 0
+        out.append({
+            "q": str(q_text),
+            "options": opts,
+            "answer": ans,
+            "explanation": str(item.get("explanation") or item.get("rationale") or ""),
+        })
+    return out
+
+
+def _normalize_flashcards(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Coerce model output to [{front, back}] — tolerant of term/definition aliases."""
+    raw = data.get("cards") or data.get("flashcards") or data.get("items") if isinstance(data, dict) else []
+    if not isinstance(raw, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        front = item.get("front") or item.get("term") or item.get("question") or item.get("q") or ""
+        back = item.get("back") or item.get("definition") or item.get("answer") or item.get("a") or ""
+        if not str(front).strip() or not str(back).strip():
+            continue
+        out.append({"front": str(front), "back": str(back)})
+    return out
+
+
+def _artifact_row_to_log(row) -> Dict[str, Any]:
+    """Normalize an onb_notebook_artifacts row to the Studio-log shape."""
+    content = row["content"]
+    if isinstance(content, str):
+        try:
+            content = json.loads(content)
+        except Exception as e:
+            logger.warning("artifact %s: JSONB decode failed: %s", row["id"], e)
+            content = {}
+    return {
+        "id": str(row["id"]),
+        "kind": row["kind"],
+        "title": row["title"] or row["kind"],
+        "format": row["format"],
+        "content": content,
+        "status": "ready",
+        "audio_url": None,
+        "error_message": None,
+        "created_at": _iso(row["created_at"]),
+    }
+
+
+async def _persist_and_return_artifact(
+    manager, notebook_id, user_id, kind, title, fmt, content_obj, model
+) -> Dict[str, Any]:
+    """INSERT a generated artifact and return it in the Studio-log shape."""
+    try:
+        nb_uuid = _clean_uuid(notebook_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid notebook id")
+    async with manager.db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "INSERT INTO onb_notebook_artifacts "
+            "(notebook_id, user_id, kind, title, format, content, model_used) "
+            "VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7) "
+            "RETURNING id, kind, title, format, content, created_at",
+            nb_uuid, user_id, kind, title, fmt, json.dumps(content_obj), model,
+        )
+    return _artifact_row_to_log(row)
+
+
+@router.post("/notebooks/{notebook_id}/generate")
+async def onb_notebook_generate(
+    notebook_id: str,
+    body: Dict[str, Any],
+    request: Request,
+    current_user: Dict = Depends(get_current_user_from_request),
+    manager: NotebookManager = Depends(get_notebook_manager),
+):
+    """Generate a grounded artifact from the WHOLE notebook's source + note content.
+    quiz / flashcards return STRUCTURED JSON (for an interactive UI); study_guide
+    returns Markdown."""
+    import json
+    import re
+
+    from .podcasts import _resolve_notebook_content
+
+    kind = (body or {}).get("kind") or ""
+    if kind not in ("quiz", "flashcards", "study_guide"):
+        raise HTTPException(status_code=400, detail=f"Unknown generator: {kind}")
+    content = await _resolve_notebook_content(manager, notebook_id, None)
+    if not content or not content.strip():
+        raise HTTPException(
+            status_code=400, detail="This notebook has no source content to generate from yet."
+        )
+    model = (body or {}).get("model_id") or DEFAULT_CHAT_MODEL
+
+    if kind == "study_guide":
+        prompt = (
+            "Create a structured study guide based ONLY on the following content, in clean "
+            "Markdown with these sections: ## Key Concepts (5-7 bullets), ## Detailed Notes "
+            "(per concept: a short explanation and an example), ## Key Terms (term: definition), "
+            "## Common Pitfalls, ## Practice Questions (3-5 with answers). Do not invent facts.\n\n"
+            "{content}"
+        )
+        try:
+            output = await _run_transformation_llm(prompt, content, model)
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=502, detail=f"Model request failed: {e}")
+        return await _persist_and_return_artifact(
+            manager, notebook_id, current_user["id"], "study_guide", "Study Guide",
+            "markdown", {"markdown": output}, model,
+        )
+
+    if kind == "quiz":
+        prompt = (
+            "Create 8-10 multiple-choice questions based ONLY on the following content. Return "
+            'ONLY a JSON object exactly like {"questions":[{"q":"question text","options":["A","B",'
+            '"C","D"],"answer":0,"explanation":"why"}]} where "answer" is the 0-based index of the '
+            "correct option. No prose, no Markdown, no code fences. Do not invent facts beyond the "
+            "content.\n\n{content}"
+        )
+    else:  # flashcards
+        prompt = (
+            "Create 12-18 study flashcards based ONLY on the following content. Return ONLY a JSON "
+            'object exactly like {"cards":[{"front":"term or question","back":"answer or '
+            'definition"}]}. No prose, no Markdown, no code fences. Do not invent facts beyond the '
+            "content.\n\n{content}"
+        )
+    # Constrain the model to the EXACT shape via Ollama structured outputs (a JSON
+    # schema as `format`), then normalize defensively — small models still wander.
+    schema = _QUIZ_SCHEMA if kind == "quiz" else _FLASHCARDS_SCHEMA
+    full_prompt = prompt.replace("{content}", content[:8000])
+    try:
+        async with httpx.AsyncClient(timeout=180.0) as client:
+            resp = await client.post(
+                f"{_ONB_OLLAMA_URL}/api/generate",
+                json={"model": model, "prompt": full_prompt, "stream": False, "format": schema},
+            )
+            resp.raise_for_status()
+            raw = (resp.json().get("response") or "").strip()
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"Model request failed: {e}")
+    raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL | re.IGNORECASE).strip()
+    data: Dict[str, Any] = {}
+    try:
+        data = json.loads(raw)
+    except Exception:
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        if m:
+            try:
+                data = json.loads(m.group(0))
+            except Exception:
+                data = {}
+
+    if kind == "quiz":
+        questions = _normalize_quiz(data)
+        if not questions:
+            raise HTTPException(status_code=502, detail="The model didn't return a usable quiz — try again.")
+        title = f"Quiz · {len(questions)} questions"
+        return await _persist_and_return_artifact(
+            manager, notebook_id, current_user["id"], "quiz", title, "json",
+            {"questions": questions}, model,
+        )
+    cards = _normalize_flashcards(data)
+    if not cards:
+        raise HTTPException(status_code=502, detail="The model didn't return usable flashcards — try again.")
+    title = f"Flashcards · {len(cards)} cards"
+    return await _persist_and_return_artifact(
+        manager, notebook_id, current_user["id"], "flashcards", title, "json",
+        {"cards": cards}, model,
+    )
+
+
+@router.get("/notebooks/{notebook_id}/artifacts")
+async def onb_notebook_artifacts(
+    notebook_id: str,
+    request: Request,
+    current_user: Dict = Depends(get_current_user_from_request),
+    manager: NotebookManager = Depends(get_notebook_manager),
+):
+    """Unified Studio log for ONE notebook: quiz / flashcards / study_guide artifacts
+    PLUS this notebook's podcasts, newest first. The Studio rail renders this."""
+    try:
+        nb_uuid = _clean_uuid(notebook_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid notebook id")
+    user_id = current_user["id"]
+    items: List[Dict[str, Any]] = []
+    async with manager.db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, kind, title, format, content, created_at "
+            "FROM onb_notebook_artifacts WHERE notebook_id = $1 AND user_id = $2 "
+            "ORDER BY created_at DESC",
+            nb_uuid, user_id,
+        )
+        items.extend(_artifact_row_to_log(r) for r in rows)
+        # Podcasts for THIS notebook (standalone_podcasts.notebook_id is TEXT = nb uuid).
+        try:
+            # Match both the canonical uuid string AND the raw path param — podcasts.py
+            # stores whatever the client sent, so be tolerant of prefix/case differences.
+            prows = await conn.fetch(
+                "SELECT id, title, status, audio_url, error_message, created_at "
+                "FROM standalone_podcasts WHERE notebook_id = ANY($1::text[]) AND user_id = $2 "
+                "ORDER BY created_at DESC",
+                list({str(nb_uuid), notebook_id}), user_id,
+            )
+        except Exception as e:
+            logger.warning("artifacts: podcast sub-query failed for notebook %s: %s", notebook_id, e)
+            prows = []
+        for r in prows:
+            items.append({
+                "id": str(r["id"]),
+                "kind": "podcast",
+                "title": r["title"] or "Podcast",
+                "format": "audio",
+                "content": None,
+                "status": r["status"] or "pending",
+                "audio_url": r["audio_url"],
+                "error_message": r["error_message"],
+                "created_at": _iso(r["created_at"]),
+            })
+    items.sort(key=lambda x: x["created_at"], reverse=True)
+    return items
+
+
+@router.delete("/notebooks/{notebook_id}/artifacts/{artifact_id}")
+async def onb_delete_artifact(
+    notebook_id: str,
+    artifact_id: str,
+    request: Request,
+    current_user: Dict = Depends(get_current_user_from_request),
+    manager: NotebookManager = Depends(get_notebook_manager),
+):
+    """Delete a generated artifact (quiz/flashcards/study_guide). Podcasts are deleted
+    via the existing /podcasts/episodes/{id} endpoint."""
+    try:
+        aid = _clean_uuid(artifact_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid artifact id")
+    async with manager.db_pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM onb_notebook_artifacts WHERE id = $1 AND user_id = $2",
+            aid, current_user["id"],
+        )
+    return {"status": "deleted"}
 
 
 @router.get("/transformations/{transformation_id}")

@@ -955,12 +955,25 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
         # unchanged. See workspace/orchestration/.
         from .orchestration.orchestrator import run_orchestrated
         _repo_path = ws.get("repo_path")
+        # Custom orchestration model pool (Agent Studio → Customize, opt-in). When the user
+        # has ACTIVATED a pool, every orchestrate run re-models its task-delegated agents
+        # across that pool (round-robin); else the run's own policy (uniform session model) holds.
+        _custom_pool = None
+        try:
+            from owui_compat.orchestration_pool import get_orchestration_pool
+            _cfg = await get_orchestration_pool(pool, ws["user_id"])
+            if _cfg.get("active") and _cfg.get("models"):
+                _custom_pool = _cfg["models"]
+        except Exception:
+            _custom_pool = None
         event_stream = run_orchestrated(
             task_brief, chat_history,
             model_name=model_name, pool=pool,
             parent_workspace_id=workspace_id, user_id=ws["user_id"],
             session_id=ws.get("session_id") or f"ws-{workspace_id}",
-            uniform_model=ws.get("uniform_model", False),
+            # Active custom pool → draw from it (heterogeneous); else the launch's uniform flag.
+            uniform_model=False if _custom_pool else ws.get("uniform_model", False),
+            model_pool=_custom_pool,
             # Attached-repo (clone-local) isolation when a repo is attached; else scratch.
             isolation_mode="attached" if _repo_path else "scratch",
             repo_config={"repo_path": _repo_path} if _repo_path else None,
@@ -2837,6 +2850,7 @@ class VibecodeTurnRequest(BaseModel):
     model_name: str = ""
     run_mode: str = ""  # per-turn: 'plan' (read-only → draft a plan) | 'auto'/'' (execute)
     attachments: list[dict] = []  # image/file refs ({url|path|file_id, name, mime_type})
+    orchestrate: bool = False  # fan the turn out to N task-delegated sub-agents (multi-agent)
 
 
 async def _vibecode_session_row(pool, session_id: str, user_id: int):
@@ -3046,13 +3060,15 @@ async def get_vibecode_session(
     async with pool.acquire() as conn:
         turns = await conn.fetch(
             """
-            SELECT id, task_brief, status, started_at, completed_at,
-                   duration_ms, tool_calls, final_summary, error_message,
-                   model_name, prompt_tokens, completion_tokens, context_window,
-                   attachments
-            FROM workspace_runs
-            WHERE session_id = $1 AND source = 'vibecode'
-            ORDER BY started_at ASC
+            SELECT r.id, r.task_brief, r.status, r.started_at, r.completed_at,
+                   r.duration_ms, r.tool_calls, r.final_summary, r.error_message,
+                   r.model_name, r.prompt_tokens, r.completion_tokens, r.context_window,
+                   r.attachments,
+                   (SELECT COUNT(*) FROM workspace_runs c WHERE c.parent_run_id = r.id)
+                     AS child_count
+            FROM workspace_runs r
+            WHERE r.session_id = $1 AND r.source = 'vibecode'
+            ORDER BY r.started_at ASC
             """,
             session_id,
         )
@@ -3215,27 +3231,62 @@ async def start_vibecode_turn(
     except Exception as exc:
         logger.error("vibecode: turn bookkeeping failed for %s: %s", workspace_id, exc)
 
-    await _start_workspace(
-        workspace_id=workspace_id,
-        session_id=session_id,  # the turn run's session_id == the vibecode session id
-        task_brief=agent_brief,
-        chat_history=[],
-        agent_id="vibecode-turn",
-        user_id=uid,
-        pool=pool,
-        started_epoch=started_epoch,
-        model_name=req.model_name or s.get("model_name") or "",
-        live_web=False,
-        parallel=False,
-        repo_path=s.get("repo_path"),
-        vibecode_session_id=session_id,
-        workspace_path=s.get("workspace_path"),
-        base_sha=s.get("base_sha"),
-        vibecode_isolation_mode=s.get("isolation_mode") or "session",
-        vibecode_permission_mode=turn_permission,
-    )
+    if req.orchestrate:
+        # MULTI-AGENT turn: fan out to N task-delegated sub-agents (the LLM planner
+        # decides 3–10, naming each after its job). Runs through the SAME orchestrator
+        # as Agent Studio, but SESSION-SCOPED — session_id = this vibecode session, so
+        # the run surfaces in THIS session's Background tasks (and nowhere else). The
+        # parent row is already source='vibecode' (set above) → it lives in the session
+        # thread with child_count sub-agents; each sub-agent works on its own clone of
+        # the session's repo (real diffs), collected as per-agent artifacts. (Isolated
+        # clones → the orchestrate turn does NOT advance the session's cumulative diff;
+        # review per-agent diffs via Open run.)
+        await _start_workspace(
+            workspace_id=workspace_id,
+            session_id=session_id,
+            task_brief=task_brief,  # clean brief → the planner decomposes it
+            chat_history=[],
+            agent_id="orchestrated",
+            user_id=uid,
+            pool=pool,
+            started_epoch=started_epoch,
+            model_name=req.model_name or s.get("model_name") or "",
+            live_web=False,
+            parallel=True,
+            # DEFAULT: every sub-agent runs on the SESSION's model (the one the user is
+            # working with), not the heterogeneous pool — `uniform_model=True` + that
+            # model_name. (Per-agent custom models = a future opt-in via Customize.)
+            uniform_model=True,
+            # Clone source for the sub-agents: the session's source repo, else its
+            # persistent workspace (a git repo), else scratch (empty-dir + difflib).
+            repo_path=s.get("repo_path") or s.get("workspace_path") or None,
+            vibecode_session_id=session_id,
+        )
+    else:
+        await _start_workspace(
+            workspace_id=workspace_id,
+            session_id=session_id,  # the turn run's session_id == the vibecode session id
+            task_brief=agent_brief,
+            chat_history=[],
+            agent_id="vibecode-turn",
+            user_id=uid,
+            pool=pool,
+            started_epoch=started_epoch,
+            model_name=req.model_name or s.get("model_name") or "",
+            live_web=False,
+            parallel=False,
+            repo_path=s.get("repo_path"),
+            vibecode_session_id=session_id,
+            workspace_path=s.get("workspace_path"),
+            base_sha=s.get("base_sha"),
+            vibecode_isolation_mode=s.get("isolation_mode") or "session",
+            vibecode_permission_mode=turn_permission,
+        )
 
-    logger.info("vibecode: turn %s on session %s (user=%s)", workspace_id, session_id, uid)
+    logger.info(
+        "vibecode: turn %s on session %s (user=%s, orchestrate=%s)",
+        workspace_id, session_id, uid, req.orchestrate,
+    )
     return {"workspace_id": workspace_id, "session_id": session_id, "status": "running"}
 
 

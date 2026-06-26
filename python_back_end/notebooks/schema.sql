@@ -175,6 +175,25 @@ CREATE INDEX IF NOT EXISTS idx_notebook_transformations_user_id ON notebook_tran
 CREATE INDEX IF NOT EXISTS idx_notebook_transformations_source_id ON notebook_transformations(source_id);
 CREATE INDEX IF NOT EXISTS idx_notebook_transformations_type ON notebook_transformations(transformation_type);
 
+-- Notebook Studio artifacts (onb_compat) — generated, REVIEWABLE study artifacts
+-- (quiz / flashcards / study_guide) produced by the per-notebook Studio rail.
+-- Persisted so the rail can LOG them and the user can reopen + review later.
+-- Podcasts live in standalone_podcasts (also notebook-scoped via its TEXT notebook_id)
+-- and are merged into the same log at read time.
+CREATE TABLE IF NOT EXISTS onb_notebook_artifacts (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    notebook_id UUID NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL CHECK (kind IN ('quiz', 'flashcards', 'study_guide')),
+    title       TEXT,
+    format      TEXT NOT NULL DEFAULT 'json',   -- 'json' (quiz/flashcards) | 'markdown' (study_guide)
+    content     JSONB NOT NULL,                  -- {questions:[…]} | {cards:[…]} | {markdown:"…"}
+    model_used  TEXT,
+    created_at  TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_onb_artifacts_notebook ON onb_notebook_artifacts(notebook_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_onb_artifacts_user ON onb_notebook_artifacts(user_id);
+
 -- Notebook Podcasts - generated podcast episodes
 CREATE TABLE IF NOT EXISTS notebook_podcasts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

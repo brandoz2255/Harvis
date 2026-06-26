@@ -14,6 +14,7 @@
 
 	export let id = '';
 	export let name = '';
+	export let nameClassName = '';
 	export let collapsible = true;
 
 	export let className = '';
@@ -163,7 +164,7 @@
 							</div>
 						{/if}
 
-						<div class="translate-y-[0.5px] {chevron ? '' : 'pl-0.5'}">
+						<div class="translate-y-[0.5px] {chevron ? '' : 'pl-0.5'} {nameClassName}">
 							{name}
 						</div>
 					</button>

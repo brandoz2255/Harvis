@@ -29,6 +29,9 @@ CREATE TABLE IF NOT EXISTS owui_chats (
 );
 CREATE INDEX IF NOT EXISTS idx_owui_chats_user_updated
     ON owui_chats(user_id, updated_at DESC);
+-- Per-chat tags (array of names). Additive for tables that predate it.
+ALTER TABLE owui_chats ADD COLUMN IF NOT EXISTS tags JSONB NOT NULL DEFAULT '[]'::jsonb;
+CREATE INDEX IF NOT EXISTS idx_owui_chats_tags ON owui_chats USING GIN (tags);
 """
 
 # OWUI file-attachment store. The frontend uploads via POST /api/v1/files/, gets
@@ -248,7 +251,7 @@ async def list_chats(pool, user_id: int, *, limit: int = 60, offset: int = 0) ->
             """
             SELECT id, title, folder_id, pinned, created_at, updated_at
             FROM owui_chats
-            WHERE user_id = $1 AND archived = FALSE
+            WHERE user_id = $1 AND archived = FALSE AND pinned = FALSE
             ORDER BY updated_at DESC
             LIMIT $2 OFFSET $3
             """,
@@ -335,6 +338,215 @@ async def delete_chat(pool, user_id: int, chat_id: str) -> bool:
             user_id,
         )
     return result.upper().startswith("DELETE") and not result.endswith("0")
+
+
+def _chat_summary(r) -> dict:
+    """Sidebar-list shape (title + timestamps + flags), shared by the list views."""
+    return {
+        "id": str(r["id"]),
+        "title": r["title"],
+        "updated_at": _ts(r["updated_at"]),
+        "created_at": _ts(r["created_at"]),
+        "pinned": r["pinned"],
+        "folder_id": r["folder_id"],
+    }
+
+
+async def list_pinned_chats(pool, user_id: int) -> list[dict]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, title, folder_id, pinned, created_at, updated_at
+            FROM owui_chats
+            WHERE user_id = $1 AND pinned = TRUE AND archived = FALSE
+            ORDER BY updated_at DESC
+            """,
+            user_id,
+        )
+    return [_chat_summary(r) for r in rows]
+
+
+async def list_archived_chats(pool, user_id: int, *, limit: int = 60, offset: int = 0) -> list[dict]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, title, folder_id, pinned, created_at, updated_at
+            FROM owui_chats
+            WHERE user_id = $1 AND archived = TRUE
+            ORDER BY updated_at DESC
+            LIMIT $2 OFFSET $3
+            """,
+            user_id,
+            limit,
+            offset,
+        )
+    return [_chat_summary(r) for r in rows]
+
+
+async def search_chats(pool, user_id: int, text: str, *, limit: int = 60, offset: int = 0) -> list[dict]:
+    """Search non-archived chats by title OR content (the JSONB blob, as text)."""
+    pattern = f"%{(text or '').strip()}%"
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, title, folder_id, pinned, created_at, updated_at
+            FROM owui_chats
+            WHERE user_id = $1 AND archived = FALSE
+              AND (title ILIKE $2 OR chat::text ILIKE $2)
+            ORDER BY updated_at DESC
+            LIMIT $3 OFFSET $4
+            """,
+            user_id,
+            pattern,
+            limit,
+            offset,
+        )
+    return [_chat_summary(r) for r in rows]
+
+
+async def toggle_chat_pinned(pool, user_id: int, chat_id: str) -> Optional[dict]:
+    cid = _as_uuid(chat_id)
+    if cid is None:
+        return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE owui_chats SET pinned = NOT pinned, updated_at = NOW() "
+            "WHERE id = $1 AND user_id = $2 RETURNING *",
+            cid,
+            user_id,
+        )
+    return _row_to_owui(row) if row else None
+
+
+async def toggle_chat_archived(pool, user_id: int, chat_id: str) -> Optional[dict]:
+    cid = _as_uuid(chat_id)
+    if cid is None:
+        return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE owui_chats SET archived = NOT archived, updated_at = NOW() "
+            "WHERE id = $1 AND user_id = $2 RETURNING *",
+            cid,
+            user_id,
+        )
+    return _row_to_owui(row) if row else None
+
+
+# ─── Chat tags (JSONB array of names on owui_chats) ───────────────────────────
+
+
+def _as_tag_list(raw) -> list[str]:
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            return []
+    return [str(x) for x in raw] if isinstance(raw, list) else []
+
+
+def _tags_to_owui(names: list[str]) -> list[dict]:
+    # OWUI's Tag is { id, name }; for name-based tags id == name.
+    return [{"id": n, "name": n} for n in names]
+
+
+async def get_chat_tags(pool, user_id: int, chat_id: str) -> list[dict]:
+    cid = _as_uuid(chat_id)
+    if cid is None:
+        return []
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT tags FROM owui_chats WHERE id = $1 AND user_id = $2", cid, user_id
+        )
+    return _tags_to_owui(_as_tag_list(row["tags"]) if row else [])
+
+
+async def list_all_tags(pool, user_id: int) -> list[dict]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT DISTINCT jsonb_array_elements_text(tags) AS name "
+            "FROM owui_chats WHERE user_id = $1 ORDER BY name",
+            user_id,
+        )
+    return [{"id": r["name"], "name": r["name"]} for r in rows]
+
+
+async def list_chats_by_tag(
+    pool, user_id: int, name: str, *, limit: int = 60, offset: int = 0
+) -> list[dict]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, title, folder_id, pinned, created_at, updated_at
+            FROM owui_chats
+            WHERE user_id = $1 AND archived = FALSE
+              AND tags @> jsonb_build_array($2::text)
+            ORDER BY updated_at DESC
+            LIMIT $3 OFFSET $4
+            """,
+            user_id,
+            name,
+            limit,
+            offset,
+        )
+    return [_chat_summary(r) for r in rows]
+
+
+async def add_chat_tag(pool, user_id: int, chat_id: str, name: str) -> list[dict]:
+    cid = _as_uuid(chat_id)
+    name = (name or "").strip()
+    if cid is None or not name:
+        return await get_chat_tags(pool, user_id, chat_id)
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE owui_chats
+            SET tags = CASE
+                WHEN tags @> jsonb_build_array($3::text) THEN tags
+                ELSE tags || jsonb_build_array($3::text)
+            END
+            WHERE id = $1 AND user_id = $2
+            RETURNING tags
+            """,
+            cid,
+            user_id,
+            name,
+        )
+    return _tags_to_owui(_as_tag_list(row["tags"]) if row else [])
+
+
+async def remove_chat_tag(pool, user_id: int, chat_id: str, name: str) -> list[dict]:
+    cid = _as_uuid(chat_id)
+    name = (name or "").strip()
+    if cid is None:
+        return []
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE owui_chats
+            SET tags = COALESCE(
+                (SELECT jsonb_agg(e) FROM jsonb_array_elements_text(tags) e WHERE e <> $3),
+                '[]'::jsonb)
+            WHERE id = $1 AND user_id = $2
+            RETURNING tags
+            """,
+            cid,
+            user_id,
+            name,
+        )
+    return _tags_to_owui(_as_tag_list(row["tags"]) if row else [])
+
+
+async def clear_chat_tags(pool, user_id: int, chat_id: str) -> bool:
+    cid = _as_uuid(chat_id)
+    if cid is None:
+        return False
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE owui_chats SET tags = '[]'::jsonb WHERE id = $1 AND user_id = $2",
+            cid,
+            user_id,
+        )
+    return True
 
 
 # ── Folders / Projects ────────────────────────────────────────────────────────

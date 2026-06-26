@@ -1,5 +1,44 @@
 import { WEBUI_API_BASE_URL } from '$lib/constants';
 
+// ── Harvis K3: build a Knowledge Base by ingesting a public GitHub repo ──
+// These hit the Harvis-native facade routes (/api/owui/kb/*), not OWUI's /api/v1.
+export const createKbFromRepo = async (
+	token: string,
+	owner: string,
+	repo: string,
+	branch: string = 'main'
+) => {
+	let error = null;
+	const res = await fetch(`/api/owui/kb/from-repo`, {
+		method: 'POST',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify({ owner, repo, branch })
+	})
+		.then(async (r) => {
+			if (!r.ok) throw await r.json();
+			return r.json();
+		})
+		.catch((err) => {
+			error = err.detail ?? err;
+			console.error(err);
+			return null;
+		});
+	if (error) throw error;
+	return res;
+};
+
+export const getKbStatus = async (token: string, id: string) => {
+	return await fetch(`/api/owui/kb/${id}/status`, {
+		headers: { Accept: 'application/json', authorization: `Bearer ${token}` }
+	})
+		.then(async (r) => (r.ok ? r.json() : null))
+		.catch(() => null);
+};
+
 export const createNewKnowledge = async (
 	token: string,
 	name: string,

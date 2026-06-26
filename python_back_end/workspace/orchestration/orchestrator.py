@@ -87,6 +87,7 @@ async def run_orchestrated(
     user_id: int = 0,
     session_id: str = "",
     uniform_model: bool = False,
+    model_pool: list[str] | None = None,
     isolation_mode: str = "scratch",
     repo_config: dict | None = None,
 ) -> AsyncGenerator[OpenClawEvent, None]:
@@ -130,17 +131,15 @@ async def run_orchestrated(
 
     yield root_ev("agent_start", {"label": "Orchestrator Agent"})
 
-    # Resolve role → model up front so the plan line is accurate before we spawn.
-    plan: list[dict] = []
-    for st in simple_task_split(task_brief):
-        profile = get_profile(st["role"])
-        plan.append({
-            "role": st["role"],
-            "task": st["task"],
-            "profile": profile,
-            "model": _pick_model(profile),
-            "label": profile["display_name"],
-        })
+    # LLM task-delegation: split the task into N **task-named** sub-agents (3–10,
+    # scaling to complexity), each on its own model. Replaces the old rule-based
+    # frontend/backend/testing keyword split; falls back to it on any LLM failure.
+    # See planner.plan_agents. (`_pick_model` above is the uniform/per-role policy
+    # the planner now applies internally.)
+    from .planner import plan_agents
+    plan: list[dict] = await plan_agents(
+        task_brief, model_name=model_name, uniform_model=uniform_model, model_pool=model_pool
+    )
 
     planned = "; ".join(f"{p['label']} on {p['model']}" for p in plan)
     mode_note = " (uniform model)" if uniform_model else ""
@@ -300,8 +299,26 @@ async def run_orchestrated(
 
     files_str = ", ".join(all_files) if all_files else "no files"
     n = len(children)
+    # Conversational results recap — the orchestrator "talking back" to the user about what
+    # each agent did, built from the sub-agents' OWN finish() summaries (grounded, no extra
+    # LLM call / no fabrication). The frontend types this out + renders the markdown list.
+    parts: list[str] = []
+    for c in children:
+        label = c.get("label") or c.get("role") or "agent"
+        s = " ".join((c.get("summary") or "").split())  # collapse to one line
+        if len(s) > 240:
+            s = s[:237].rstrip() + "…"
+        if s:
+            parts.append(f"- **{label}** — {s}")
+        elif c.get("ok"):
+            parts.append(f"- **{label}** — done.")
+        else:
+            parts.append(f"- **{label}** — didn't finish cleanly.")
     summary = (
-        f"Orchestrated run complete — {n} agent{'s' if n != 1 else ''} "
-        f"changed {len(all_files)} file(s) ({files_str})."
+        f"Done! I ran {n} agent{'s' if n != 1 else ''} and changed "
+        f"{len(all_files)} file{'s' if len(all_files) != 1 else ''}"
+        + (f" ({files_str})" if all_files else "")
+        + ".\n\nHere's what each did:\n\n"
+        + "\n".join(parts)
     )
     yield root_ev("done", {"summary": summary, "changed_files": all_files})

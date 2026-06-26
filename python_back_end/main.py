@@ -614,12 +614,20 @@ async def lifespan(app: FastAPI):
                     CREATE_OWUI_COMPARISONS_SQL,
                     CREATE_OWUI_FILES_SQL,
                     CREATE_OWUI_FOLDERS_SQL,
+                    CREATE_OWUI_KNOWLEDGE_SQL,
+                    CREATE_OWUI_SKILLS_SQL,
+                    CREATE_OWUI_USER_SETTINGS_SQL,
+                    CREATE_OWUI_ORCH_POOL_SQL,
                 )
 
                 await conn.execute(CREATE_OWUI_CHATS_SQL)
                 await conn.execute(CREATE_OWUI_FILES_SQL)
                 await conn.execute(CREATE_OWUI_FOLDERS_SQL)
                 await conn.execute(CREATE_OWUI_COMPARISONS_SQL)
+                await conn.execute(CREATE_OWUI_KNOWLEDGE_SQL)
+                await conn.execute(CREATE_OWUI_SKILLS_SQL)
+                await conn.execute(CREATE_OWUI_USER_SETTINGS_SQL)
+                await conn.execute(CREATE_OWUI_ORCH_POOL_SQL)
 
                 # P5 orchestration: agent-run columns on workspace_runs + the
                 # workspace_artifacts table (idempotent ALTER/CREATE; workspace_runs

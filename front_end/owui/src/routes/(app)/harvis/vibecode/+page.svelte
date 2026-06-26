@@ -16,15 +16,25 @@
 		setVibecodePermission,
 		seedVibecodeLocalFolder,
 		getVibecodeWriteback,
+		getVibecodeSessionDiff,
+		getRunArtifacts,
+		cancelWorkspaceRun,
 		type AttachedRepo,
 		type VibecodeSession,
 		type VibecodeTurn,
 		type PendingAction
 	} from '$lib/apis/agent-runs';
 	import RunView from '$lib/agent-studio/RunView.svelte';
+	import WorkflowInspector from '$lib/agent-studio/WorkflowInspector.svelte';
+	import { humanizeRunTitle } from '$lib/agent-studio/runFormat';
 	import PlanPanel from '$lib/agent-studio/PlanPanel.svelte';
-	import VibecodeSessionDiff from '$lib/agent-studio/VibecodeSessionDiff.svelte';
 	import GitHubRepoModal from '$lib/agent-studio/GitHubRepoModal.svelte';
+	import BuildHeader from '$lib/agent-studio/build/BuildHeader.svelte';
+	import WorkspaceFileRail from '$lib/agent-studio/build/WorkspaceFileRail.svelte';
+	import WorkspaceMainPanel from '$lib/agent-studio/build/WorkspaceMainPanel.svelte';
+	import WorkspacePanel from '$lib/agent-studio/build/WorkspacePanel.svelte';
+	import BackgroundTaskCard from '$lib/agent-studio/build/BackgroundTaskCard.svelte';
+	import { PaneGroup, Pane, PaneResizer } from 'paneforge';
 	import Markdown from '$lib/components/chat/Messages/Markdown.svelte';
 	import {
 		supportsLocalFs,
@@ -63,10 +73,75 @@
 	$: latestTurnId = turns.length ? turns[turns.length - 1].id : '';
 	$: doneTurns = turns.filter((t) => t.status === 'done').length;
 
-	// ── Background-tasks panel (right rail) — this session's turns as task chips. ──
+	// ── Background-tasks panel (right rail) — THIS session's turns ONLY. Scoped by
+	// construction (getVibecodeSession is per-session) → no account-wide leak from
+	// other sessions. Running + finished both sorted newest-first so a freshly-
+	// launched run lands at the TOP of its section. ──
 	let bgHidden: Set<string> = new Set(); // finished tasks the user "Clear"-ed from the panel
-	$: runningTasks = turns.filter((t) => t.status === 'running');
-	$: finishedTasks = turns.filter((t) => t.status !== 'running' && !bgHidden.has(t.id));
+	$: runningTasks = turns.filter((t) => t.status === 'running').slice().reverse();
+	$: finishedTasks = turns
+		.filter((t) => t.status !== 'running' && !bgHidden.has(t.id))
+		.slice()
+		.reverse();
+
+	// ── BW: customizable rail — collapse/expand each panel, persisted ──
+	let railOpen: Record<string, boolean> = (() => {
+		const def: Record<string, boolean> = { bg: true, files: true, plan: true, file: true };
+		try {
+			return { ...def, ...JSON.parse(localStorage.getItem('harvis.vibecode.rail') || '{}') };
+		} catch {
+			return def;
+		}
+	})();
+	const toggleRail = (k: string) => {
+		railOpen = { ...railOpen, [k]: !railOpen[k] };
+		try {
+			localStorage.setItem('harvis.vibecode.rail', JSON.stringify(railOpen));
+		} catch {}
+	};
+
+	// ── BW: Files + File panels — the session's changed files, parsed from its diff ──
+	let sessionDiff = '';
+	let selectedFile = '';
+	const loadDiff = async () => {
+		if (!sessionId) {
+			sessionDiff = '';
+			return;
+		}
+		try {
+			const r: any = await getVibecodeSessionDiff(sessionId);
+			sessionDiff = r?.diff ?? '';
+		} catch {
+			sessionDiff = '';
+		}
+	};
+	function parseDiffFiles(diff: string): { path: string; status: 'M' | 'A' | 'D'; lines: string[] }[] {
+		if (!diff) return [];
+		const files: { path: string; status: 'M' | 'A' | 'D'; lines: string[] }[] = [];
+		let cur: { path: string; status: 'M' | 'A' | 'D'; lines: string[] } | null = null;
+		for (const line of diff.split('\n')) {
+			const m = line.match(/^diff --git a\/(.+?) b\/(.+)$/);
+			if (m) {
+				cur = { path: m[2], status: 'M', lines: [line] };
+				files.push(cur);
+			} else if (cur) {
+				cur.lines.push(line);
+				if (line.startsWith('new file mode')) cur.status = 'A';
+				else if (line.startsWith('deleted file mode')) cur.status = 'D';
+			}
+		}
+		return files;
+	}
+	$: changedFiles = parseDiffFiles(sessionDiff);
+	$: selectedFileObj = changedFiles.find((f) => f.path === selectedFile) || changedFiles[0] || null;
+	// Refresh the workspace runs + session diff on load and whenever a turn completes.
+	$: {
+		doneTurns;
+		sessionId;
+		latestTurnId;
+		loadDiff();
+		loadArtifacts();
+	}
 	const clearBg = () => {
 		bgHidden = new Set([...bgHidden, ...finishedTasks.map((t) => t.id)]);
 	};
@@ -86,6 +161,249 @@
 				: s === 'cancelled'
 					? $i18n.t('Cancelled')
 					: $i18n.t('Completed');
+
+	// (BW2 3-region dock helpers removed — superseded by the BW3 dock + ⋯ panel menu)
+
+	// Left-rail tab + main-panel tab + file/artifact selection wiring.
+	let fileTab: 'files' | 'changes' | 'artifacts' = 'changes';
+	let mainTab: 'chat' | 'diff' | 'logs' | 'editor' | 'preview' = 'chat';
+	const onFileSelect = (path: string) => {
+		selectedFile = path;
+		mainTab = 'diff';
+	};
+	let artifacts: any[] = [];
+	const loadArtifacts = async () => {
+		if (!latestTurnId) {
+			artifacts = [];
+			return;
+		}
+		try {
+			artifacts = await getRunArtifacts(latestTurnId);
+		} catch {
+			artifacts = [];
+		}
+	};
+	const onArtifactSelect = (_id: string) => {
+		mainTab = 'diff';
+	};
+
+	// Right-rail "Agents" — a vibecode turn runs one coder agent; surface it.
+	$: agents = (() => {
+		const t = turns.length ? turns[turns.length - 1] : null;
+		if (!t) return [];
+		const st =
+			t.status === 'running'
+				? 'running'
+				: t.status === 'done'
+					? 'done'
+					: t.status === 'error'
+						? 'error'
+						: 'pending';
+		return [{ name: t.model_name || $i18n.t('Coder'), status: st }];
+	})();
+
+	// Mirror the pending-action approval into the right rail's Approvals section.
+	$: rightApproval = pendingAction
+		? {
+				tool: pendingAction.tool,
+				command:
+					pendingAction.args && (pendingAction.args.command || pendingAction.args.cmd)
+						? String(pendingAction.args.command || pendingAction.args.cmd)
+						: pendingAction.tool,
+				risk: pendingAction.risk
+			}
+		: null;
+
+	// ── BuildHeader props ─────────────────────────────────────────────────────────
+	$: hdrHasProject = !!sessionId;
+	$: hdrProjectName =
+		session?.title ||
+		session?.repo_display_path ||
+		(session?.repo_path ? session.repo_path.split('/').filter(Boolean).pop() : '') ||
+		$i18n.t('Untitled session');
+	$: hdrSourceLabel = session?.repo_path ? $i18n.t('Local repo') : $i18n.t('Scratch');
+	$: hdrIsoLabel = activeIso === 'inplace' ? $i18n.t('In-place branch') : $i18n.t('Clone');
+	// Run-mode label is the permission ladder rung — only meaningful in-place (clone
+	// has no ladder), so it's blank for clone to avoid a redundant "Clone · Clone".
+	$: hdrModeLabel = activeIso === 'inplace' ? PERM_SHORT[activePerm] || activePerm : '';
+
+	// Header / rail actions.
+	const cancelRun = async () => {
+		const running = turns.find((t) => t.status === 'running');
+		if (running) await cancelWorkspaceRun(running.id);
+	};
+	const cancelRunId = async (id: string) => {
+		if (id) await cancelWorkspaceRun(id);
+	};
+	// Open run / View logs → slide the Workflow Inspector IN over the page (right→left)
+	// instead of navigating away. The inspector shows the run's sub-agents as inspectable
+	// chat-like sessions (Overview + one per agent).
+	let overlayRunId = '';
+	let overlayInitialTab: string = 'overview';
+	// The inspector docks into the right workspace pane (pushes the chat, doesn't take over).
+	// Remember the dock width and the inspector width SEPARATELY (persisted) so opening a
+	// run restores your last inspector width and CLOSING restores your last dock width —
+	// no snap-back to a hardcoded size if you'd resized it.
+	let rightPane: any = null;
+	let _lastOverlayOpen = false;
+	const _clampPane = (n: number) => Math.min(62, Math.max(22, n || 0));
+	let dockSize = 33;
+	let inspectorSize = 50;
+	if (typeof localStorage !== 'undefined') {
+		dockSize = _clampPane(Number(localStorage.getItem('vibecodeDockSize')) || 33);
+		inspectorSize = _clampPane(Number(localStorage.getItem('vibecodeInspectorSize')) || 50);
+	}
+	$: {
+		const _open = !!overlayRunId;
+		if (_open !== _lastOverlayOpen && rightPane) {
+			try {
+				const cur = rightPane.getSize();
+				if (_open) {
+					if (cur > 0) dockSize = _clampPane(cur); // leaving the dock → remember its width
+					rightPane.resize(inspectorSize); // open at your last inspector width
+				} else {
+					if (cur > 0) inspectorSize = _clampPane(cur); // leaving inspector → remember it
+					rightPane.resize(dockSize); // restore your dock width
+				}
+				if (typeof localStorage !== 'undefined') {
+					localStorage.setItem('vibecodeDockSize', String(Math.round(dockSize)));
+					localStorage.setItem('vibecodeInspectorSize', String(Math.round(inspectorSize)));
+				}
+			} catch (_) {
+				// pane not ready — defaultSize handles the just-mounted case
+			}
+		}
+		_lastOverlayOpen = _open;
+	}
+	$: overlayTitle = overlayRunId
+		? humanizeRunTitle(turns.find((t) => t.id === overlayRunId) || { task_brief: '' })
+		: '';
+	const headerOpenRun = () => {
+		if (latestTurnId) {
+			overlayInitialTab = 'overview';
+			overlayRunId = latestTurnId;
+		}
+	};
+	const headerOpenRunId = (id: string) => {
+		if (id) {
+			overlayInitialTab = 'overview';
+			overlayRunId = id;
+		}
+	};
+	const headerCreatePR = () => {
+		mainTab = 'chat';
+		toast.info($i18n.t('Use “Create PR” in the changes card below the conversation.'));
+	};
+
+	// ── BW3: main conversation + resizable workspace dock (the quad lives in the dock) ─
+	let dockOpen = (() => {
+		try {
+			const v = localStorage.getItem('harvis.vibecode.dock');
+			return v === null ? true : v === '1';
+		} catch {
+			return true;
+		}
+	})();
+	const toggleDock = () => {
+		dockOpen = !dockOpen;
+		try {
+			localStorage.setItem('harvis.vibecode.dock', dockOpen ? '1' : '0');
+		} catch {
+			/* ignore */
+		}
+	};
+	// ── Dock panel visibility (the ⋯ menu) — conditional render so EVERY panel exits
+	// reliably. (PaneForge collapse() failed when both panes in a column were collapsed.)
+	let panelVisible: Record<string, boolean> = (() => {
+		const def = { tl: true, tr: true, bl: false, br: false };
+		try {
+			return { ...def, ...JSON.parse(localStorage.getItem('harvis.vibecode.panels') || '{}') };
+		} catch {
+			return def;
+		}
+	})();
+	const persistPanels = () => {
+		try {
+			localStorage.setItem('harvis.vibecode.panels', JSON.stringify(panelVisible));
+		} catch {
+			/* ignore */
+		}
+	};
+	let blTouched = false; // user manually toggled Plan → stop auto-managing it
+	const togglePanel = (k: string) => {
+		const turningOn = !panelVisible[k];
+		panelVisible = { ...panelVisible, [k]: !panelVisible[k] };
+		if (k === 'bl') blTouched = true;
+		// Enabling a panel always brings the dock back (so it can't get stuck hidden when
+		// the dock was collapsed); when all panels are off the dock yields its space to chat.
+		if (turningOn && !dockOpen) {
+			dockOpen = true;
+			try {
+				localStorage.setItem('harvis.vibecode.dock', '1');
+			} catch {
+				/* ignore */
+			}
+		}
+		persistPanels();
+	};
+	// Plan auto-opens once a run produces a plan (until the user touches it).
+	let planStepCount = 0;
+	$: if (planStepCount > 0 && !blTouched && !panelVisible.bl) {
+		panelVisible = { ...panelVisible, bl: true };
+	}
+	$: leftHasAny = panelVisible.tl || panelVisible.bl;
+	$: rightHasAny = panelVisible.tr || panelVisible.br;
+	// Rows-first dock: top row = tl|tr, bottom row = bl|br. With one column of panels
+	// visible they stack top/bottom; with all four it's a 2×2.
+	$: topHasAny = panelVisible.tl || panelVisible.bl;
+	$: bottomHasAny = panelVisible.tr || panelVisible.br;
+	$: panelList = [
+		{ key: 'tl', label: $i18n.t('Background tasks'), visible: panelVisible.tl },
+		{ key: 'tr', label: $i18n.t('Files'), visible: panelVisible.tr },
+		{ key: 'bl', label: $i18n.t('Plan'), visible: panelVisible.bl },
+		{ key: 'br', label: $i18n.t('File'), visible: panelVisible.br }
+	];
+	// When a NEW run starts, surface the Background tasks panel automatically (open the
+	// dock if it was hidden, show the panel if it was closed). Only on the rising edge —
+	// the user can still hide it mid-run.
+	let prevRunningCount = 0;
+	$: surfaceBackgroundOnRun(runningTasks.length);
+	function surfaceBackgroundOnRun(n: number) {
+		if (n > prevRunningCount) {
+			if (!dockOpen) {
+				dockOpen = true;
+				try {
+					localStorage.setItem('harvis.vibecode.dock', '1');
+				} catch {
+					/* ignore */
+				}
+			}
+			if (!panelVisible.tl) {
+				panelVisible = { ...panelVisible, tl: true };
+				persistPanels();
+			}
+		}
+		prevRunningCount = n;
+	}
+	// Finished background tasks stay collapsed by default; show-logs targets one run.
+	let showFinished = false;
+	let logsRunId = '';
+	const viewLogs = (id: string, agentTab: string = '') => {
+		// Open the Workflow Inspector. `agentTab` (a sub-agent's run id, from clicking a
+		// specific agent row) focuses that agent's tab; otherwise we land on Overview.
+		logsRunId = id;
+		if (id) {
+			overlayInitialTab = agentTab || 'overview';
+			overlayRunId = id;
+		}
+	};
+	// Main-panel empty-state actions.
+	const connectGithub = () => (showGithubModal = true);
+	const setupCli = () =>
+		toast.info(
+			$i18n.t('Local CLI sessions are coming soon — connect a GitHub or local repo for now.')
+		);
+	const refreshFiles = () => loadDiff();
 
 	// ── Token / context usage — real per-turn OpenAI usage, summed across the session.
 	// prompt_tokens of the latest turn ≈ current context occupancy vs the model's window. ──
@@ -196,6 +514,9 @@
 	type RunRung = 'plan' | 'ask' | 'auto-accept' | 'full-auto';
 	let runMode: RunRung = 'full-auto';
 	let pendingRunModeAfterAck: RunRung | '' = '';
+	// Orchestrate = fan this turn out to N task-delegated sub-agents (the planner picks
+	// 3–10, scaling to the task). Off ⇒ a single agent on the session's working copy.
+	let orchestrate = false;
 	// Apex → base (rendered top-to-bottom; base = safest = Plan, apex = most autonomy = Auto).
 	const RUN_LADDER: { mode: RunRung; label: string; desc: string }[] = [
 		{ mode: 'full-auto', label: 'Auto', desc: 'Runs everything automatically — no prompts.' },
@@ -636,6 +957,7 @@
 		if (!text || composerDisabled) return;
 		sending = true;
 		sendError = '';
+		stickBottom = true; // a new turn → follow the conversation down
 		const attachments = attachedImages.map((im) => ({
 			file_id: im.id,
 			name: im.name,
@@ -659,7 +981,7 @@
 					await seedVibecodeLocalFolder(s.id, files);
 					seedingStatus = '';
 					lastWriteBackDone = -1;
-					await startVibecodeTurn(s.id, { task_brief: text, attachments, model_name: selectedModel || undefined, run_mode: runMode });
+					await startVibecodeTurn(s.id, { task_brief: text, attachments, model_name: selectedModel || undefined, run_mode: runMode, orchestrate });
 					prompt = '';
 					attachedImages = [];
 					goto(`/harvis/vibecode?session=${s.id}`);
@@ -671,7 +993,7 @@
 					seedingStatus = $i18n.t('Loading into workspace…');
 					await seedVibecodeLocalFolder(s.id, localFolderFiles);
 					seedingStatus = '';
-					await startVibecodeTurn(s.id, { task_brief: text, attachments, model_name: selectedModel || undefined, run_mode: runMode });
+					await startVibecodeTurn(s.id, { task_brief: text, attachments, model_name: selectedModel || undefined, run_mode: runMode, orchestrate });
 					prompt = '';
 					attachedImages = [];
 					localFolderFiles = [];
@@ -686,7 +1008,7 @@
 						github_branch: selectedGithubRepo.branch
 					});
 					createdId = s.id;
-					await startVibecodeTurn(s.id, { task_brief: text, attachments, model_name: selectedModel || undefined, run_mode: runMode });
+					await startVibecodeTurn(s.id, { task_brief: text, attachments, model_name: selectedModel || undefined, run_mode: runMode, orchestrate });
 					prompt = '';
 					attachedImages = [];
 					goto(`/harvis/vibecode?session=${s.id}`);
@@ -697,13 +1019,13 @@
 						permission_mode: isolationMode === 'inplace' ? permissionMode : undefined
 					});
 					createdId = s.id;
-					await startVibecodeTurn(s.id, { task_brief: text, attachments, model_name: selectedModel || undefined, run_mode: runMode });
+					await startVibecodeTurn(s.id, { task_brief: text, attachments, model_name: selectedModel || undefined, run_mode: runMode, orchestrate });
 					prompt = '';
 					attachedImages = [];
 					goto(`/harvis/vibecode?session=${s.id}`);
 				}
 			} else {
-				await startVibecodeTurn(sessionId, { task_brief: text, attachments, model_name: selectedModel || undefined, run_mode: runMode });
+				await startVibecodeTurn(sessionId, { task_brief: text, attachments, model_name: selectedModel || undefined, run_mode: runMode, orchestrate });
 				prompt = '';
 				attachedImages = [];
 				await loadSession();
@@ -718,6 +1040,61 @@
 		}
 	};
 
+	// ── Auto-follow the conversation: stick to the bottom as content streams in (new
+	// turns, the live run card, the typewriter) — unless the user scrolled up to read.
+	let threadScrollEl: HTMLDivElement;
+	let stickBottom = true;
+	const onThreadScroll = () => {
+		if (!threadScrollEl) return;
+		const { scrollTop, scrollHeight, clientHeight } = threadScrollEl;
+		stickBottom = scrollHeight - scrollTop - clientHeight < 80;
+	};
+	const scrollThreadToBottom = () => {
+		if (threadScrollEl) threadScrollEl.scrollTop = threadScrollEl.scrollHeight;
+	};
+	function autoFollow(node: HTMLElement) {
+		const ro = new ResizeObserver(() => {
+			if (stickBottom) scrollThreadToBottom();
+		});
+		ro.observe(node);
+		return { destroy: () => ro.disconnect() };
+	}
+
+	// ── Type the assistant's answer out (not pasted) when a turn finishes LIVE. Turns that
+	// were already done when the page loaded render instantly (no replay-typing on reload).
+	const _sawRunning = new Set<string>();
+	const _typedTurns = new Set<string>();
+	let typingText: Record<string, string> = {};
+	const typeOut = (id: string, full: string) => {
+		if (!full) return;
+		const dur = Math.max(700, Math.min(3600, full.length * 22));
+		const start = performance.now();
+		typingText = { ...typingText, [id]: '' };
+		const step = () => {
+			const frac = Math.min(1, (performance.now() - start) / dur);
+			const n = Math.max(1, Math.floor(frac * full.length));
+			typingText = { ...typingText, [id]: full.slice(0, n) };
+			if (stickBottom) scrollThreadToBottom();
+			if (frac < 1) {
+				requestAnimationFrame(step);
+			} else {
+				const next = { ...typingText };
+				delete next[id];
+				typingText = next;
+			}
+		};
+		requestAnimationFrame(step);
+	};
+	$: {
+		for (const t of turns) {
+			if (t.status === 'running') _sawRunning.add(t.id);
+			else if (_sawRunning.has(t.id) && !_typedTurns.has(t.id)) {
+				_typedTurns.add(t.id);
+				if (t.status === 'done') typeOut(t.id, (t.final_summary || '').toString());
+			}
+		}
+	}
+
 	onMount(async () => {
 		if (!enabled) return;
 		fsSupported = supportsLocalFs();
@@ -729,6 +1106,8 @@
 	});
 	onDestroy(() => clearTimeout(pollTimer));
 </script>
+
+<svelte:window on:keydown={(e) => e.key === 'Escape' && overlayRunId && (overlayRunId = '')} />
 
 <svelte:head>
 	<title>{$i18n.t('Vibe Code')} • {$WEBUI_NAME}</title>
@@ -747,53 +1126,50 @@
 	</div>
 {:else}
 	<div
-		class="w-full h-full flex min-h-0 text-sm {$showSidebar
+		class="w-full h-full flex flex-col min-h-0 text-sm {$showSidebar
 			? 'md:max-w-[calc(100%-var(--sidebar-width))]'
 			: ''}"
 	>
-		<!-- CENTER -->
-		<div class="flex-1 min-w-0 flex flex-col min-h-0">
-			{#if sessionId}
-				<!-- Session header bar -->
-				<div
-					class="flex items-center gap-2 px-4 py-2.5 border-b border-gray-100 dark:border-gray-850 shrink-0"
-				>
-					<svg
-						xmlns="http://www.w3.org/2000/svg"
-						viewBox="0 0 24 24"
-						fill="none"
-						stroke="currentColor"
-						stroke-width="1.8"
-						class="size-4 text-gray-400 shrink-0"
-					>
-						<path d="M16 18l6-6-6-6M8 6l-6 6 6 6" stroke-linecap="round" stroke-linejoin="round" />
-					</svg>
-					<span class="font-medium text-gray-800 dark:text-gray-100 truncate">
-						{session?.emoji ? session.emoji + ' ' : ''}{session?.title || $i18n.t('Untitled session')}
-					</span>
-					{#if session?.repo_path}
-						<span
-							class="text-[11px] px-1.5 py-0.5 rounded-md bg-gray-100 dark:bg-gray-850 text-gray-500 font-mono shrink-0"
-						>
-							{session.repo_display_path ||
-								session.repo_path.split('/').filter(Boolean).pop()}{session.base_branch
-								? ` · ${session.base_branch}`
-								: ''}
-						</span>
-					{/if}
-				</div>
+		<!-- BW2: Build header -->
+		<BuildHeader
+			projectName={hdrProjectName}
+			hasProject={hdrHasProject}
+			sourceLabel={hdrSourceLabel}
+			isolationLabel={hdrIsoLabel}
+			modeLabel={hdrModeLabel}
+			model={displayModel}
+			isRunning={anyRunning}
+			panels={panelList}
+			{dockOpen}
+			on:stop={cancelRun}
+			on:createPR={headerCreatePR}
+			on:openRun={headerOpenRun}
+			on:togglePanel={(e) => togglePanel(e.detail.key)}
+			on:toggleDock={toggleDock}
+			on:settings={() => goto('/harvis/agent-studio')}
+		/>
 
-				<!-- Conversation thread -->
-				<div class="flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-4">
+		<!-- BW3 dock layout: main conversation (left, dominant) + resizable workspace dock (right) -->
+		<div class="flex-1 min-h-0">
+			<PaneGroup direction="horizontal" class="w-full h-full">
+				<!-- MAIN conversation column (dominant) -->
+				<Pane minSize={32} class="min-h-0">
+					<div class="h-full flex flex-col min-h-0">
+						<div class="flex-1 min-h-0 overflow-y-auto" bind:this={threadScrollEl} on:scroll={onThreadScroll}>
+					{#if sessionId}
+						<!-- Conversation thread — centered island column (buffered from the sidebar +
+						     the right dock; aligns with the composer island below). `autoFollow` keeps
+						     the view pinned to the bottom as content streams in. -->
+						<div class="px-5 py-4 space-y-3 max-w-4xl mx-auto w-full" use:autoFollow>
 					{#if !turns.length}
-						<div class="text-xs text-gray-400 text-center pt-8">
+						<div class="text-xs text-gray-500 text-center pt-8">
 							{$i18n.t('No turns yet — send a message to start coding.')}
 						</div>
 					{/if}
 					{#each turns as t (t.id)}
 						<div class="flex justify-end">
 							<div
-								class="max-w-[60%] rounded-2xl bg-gray-100 dark:bg-gray-850 px-3.5 py-2 text-gray-800 dark:text-gray-100"
+								class="max-w-[68%] border border-white/8 bg-white/[0.03] px-3 py-2 text-gray-100"
 							>
 								{#if t.attachments && t.attachments.length}
 									<!-- The user's attachments stay in the chat: images inline, other files as chips. -->
@@ -807,7 +1183,7 @@
 												/>
 											{:else}
 												<span
-													class="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md bg-gray-200 dark:bg-gray-800 text-gray-600 dark:text-gray-300"
+													class="inline-flex items-center gap-1 text-xs px-2 py-1 border border-white/8 bg-white/6 text-gray-300"
 													>📎 {att.name || $i18n.t('file')}</span
 												>
 											{/if}
@@ -819,25 +1195,32 @@
 						</div>
 						{#if t.status === 'running'}
 							<!-- live run while Harvis works -->
-							<div class="rounded-2xl border border-gray-100 dark:border-gray-850 overflow-hidden">
-								{#key t.id}<RunView wsId={t.id} mode="dock" />{/key}
+							<div class="border border-white/8 overflow-hidden bg-[#0b101b]">
+								{#key t.id}<RunView wsId={t.id} mode="dock" title={t.task_brief} />{/key}
 							</div>
 						{:else}
-							<!-- assistant reply (left): the model's explanation; full run is one click away -->
-							<div class="flex flex-col items-start gap-1.5">
+							<!-- assistant reply: "the AI's domain" — unbubbled, full-width (matches the main
+							     chat). Only the user's message above is bubbled. Full run is one click away. -->
+							<div class="flex flex-col items-start gap-1.5 w-full">
 								<div
-									class="max-w-[85%] rounded-2xl bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-850 px-3.5 py-2 text-sm text-gray-800 dark:text-gray-100 markdown-prose markdown-prose-sm"
+									class="w-full text-sm text-gray-100 markdown-prose markdown-prose-sm"
 								>
 									{#if t.status === 'error'}
 										<span class="text-red-500 dark:text-red-400"
 											>{t.error_message || $i18n.t('This turn failed.')}</span
 										>
+									{:else if typingText[t.id] !== undefined}
+										<!-- typing the answer out (not pasted) — plain text + cursor while it
+										     streams, then the full markdown render once it finishes. -->
+										<div class="whitespace-pre-wrap break-words">{typingText[t.id]}<span
+												class="text-gray-500 animate-pulse">▍</span
+											></div>
 									{:else}
 										<Markdown id={`vc-turn-${t.id}`} content={t.final_summary || $i18n.t('Done.')} />
 									{/if}
 								</div>
 								<button
-									class="inline-flex items-center gap-1 text-[11px] text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition"
+									class="inline-flex items-center gap-1 text-[11px] text-gray-500 hover:text-gray-300 transition"
 									on:click={() => toggleRun(t.id)}
 								>
 									<svg
@@ -855,41 +1238,27 @@
 								</button>
 								{#if expandedRuns[t.id]}
 									<div
-										class="w-full rounded-2xl border border-gray-100 dark:border-gray-850 overflow-hidden"
+										class="w-full border border-white/8 overflow-hidden bg-[#0b101b]"
 									>
-										{#key t.id}<RunView wsId={t.id} mode="dock" />{/key}
+										{#key t.id}<RunView wsId={t.id} mode="dock" title={t.task_brief} />{/key}
 									</div>
 								{/if}
 							</div>
 						{/if}
 					{/each}
 				</div>
-			{:else}
-				<!-- No-session: empty-state hint (controls live in the composer below). -->
-				<div class="flex-1 min-h-0 flex flex-col items-center justify-center px-6">
-					<div class="w-full max-w-xl text-center">
-						<h2 class="text-base font-medium text-gray-800 dark:text-gray-100 mb-1">
-							{$i18n.t('Start a coding session')}
-						</h2>
-						<p class="text-xs text-gray-400">
-							{$i18n.t(
-								'Pick a repo and mode below, describe a task, and Harvis works — each follow-up builds on the last.'
-							)}
-						</p>
-					</div>
-				</div>
-			{/if}
-
-			{#if sessionId && turns.length}
-				<!-- Session changes — pinned at the bottom of the chat, above the composer line -->
-				<div class="shrink-0 px-3 pt-2 max-w-3xl w-full mx-auto">
-					<VibecodeSessionDiff {sessionId} refreshKey={doneTurns} />
-				</div>
-			{/if}
-
-			<!-- Composer cluster (pinned bottom) -->
-			<div class="shrink-0 border-t border-gray-100 dark:border-gray-850 p-3">
-				<div class="w-full max-w-3xl mx-auto">
+					{/if}
+							{#if !sessionId}
+								<div class="h-full flex flex-col items-center justify-center text-center px-6">
+									<div class="text-lg font-medium text-gray-800 dark:text-gray-100">{$i18n.t('Start a coding session')}</div>
+									<div class="mt-1.5 max-w-md text-xs text-gray-500">{$i18n.t('Pick a repo and mode below, describe a task, and Harvis works — each follow-up builds on the last.')}</div>
+								</div>
+							{/if}
+						</div>
+						<!-- composer under the conversation — a centered floating island (not a
+						     full-width bar), buffered from the sidebar + dock to match the thread. -->
+		<div class="shrink-0 px-5 pb-4 pt-2">
+				<div class="w-full max-w-4xl mx-auto rounded-2xl border border-white/10 bg-[#0c111d] p-2.5 shadow-lg shadow-black/30">
 					<!-- attached image chips -->
 					{#if attachedImages.length}
 						<div class="flex flex-wrap gap-2 mb-2">
@@ -1084,7 +1453,7 @@
 					{/if}
 					{#if sessionId && session?.local_folder_name && needsRelink && !writeBackStatus}
 						<div
-							class="flex items-center justify-between gap-2 mb-2 text-[11px] px-2.5 py-1.5 rounded-lg bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300"
+							class="flex items-center justify-between gap-2 mb-2 text-[11px] px-2.5 py-1.5 border border-amber-500/20 bg-amber-500/10 text-amber-300"
 						>
 							<span class="truncate"
 								>{$i18n.t('Reconnect "{{name}}" so edits save back to your computer.', {
@@ -1102,7 +1471,7 @@
 					<div class="relative">
 						<textarea
 							bind:this={promptEl}
-							class="w-full text-sm rounded-xl bg-gray-50 dark:bg-gray-850 border border-gray-100 dark:border-gray-800 py-2.5 pl-3.5 pr-10 outline-none resize-none disabled:opacity-50 leading-relaxed"
+							class="w-full text-sm bg-transparent py-2 pl-2 pr-10 outline-none resize-none disabled:opacity-50 leading-relaxed text-gray-100 placeholder:text-gray-500"
 							style="max-height: 160px"
 							rows="1"
 							placeholder={sessionId ? $i18n.t('Send a follow-up…') : $i18n.t('Describe a task or ask a question')}
@@ -1117,7 +1486,7 @@
 							}}
 						></textarea>
 						<button
-							class="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 disabled:opacity-40 disabled:hover:text-gray-400 transition"
+							class="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-200 disabled:opacity-40 transition"
 							disabled={composerDisabled || !prompt.trim()}
 							on:click={submit}
 							aria-label={sessionId ? $i18n.t('Send') : $i18n.t('Start')}
@@ -1138,12 +1507,12 @@
 						<div class="relative">
 							<button
 								type="button"
-								class="inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-lg transition hover:opacity-90 {runMode ===
+								class="inline-flex items-center gap-1 text-xs px-2.5 py-1 border transition hover:opacity-90 {runMode ===
 								'plan'
-									? 'bg-gray-100 dark:bg-gray-850 text-gray-600 dark:text-gray-300'
+									? 'border-white/8 bg-white/4 text-gray-300'
 									: runMode === 'full-auto'
-										? 'bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300'
-										: 'bg-blue-50 dark:bg-blue-950/50 text-blue-700 dark:text-blue-300'}"
+										? 'border-amber-500/20 bg-amber-500/10 text-amber-300'
+										: 'border-sky-500/20 bg-sky-500/10 text-sky-300'}"
 								title={$i18n.t('Run mode — how much the agent does on its own this turn')}
 								on:click={() => (showModeMenu = !showModeMenu)}
 							>
@@ -1214,10 +1583,36 @@
 							{/if}
 						</div>
 
+						<!-- Orchestrate = fan this turn out to N task-delegated sub-agents (the planner
+						     picks 3–10). The multi-agent run shows live in Background tasks. -->
+						<button
+							type="button"
+							class="inline-flex items-center gap-1 text-xs px-2.5 py-1 border transition hover:opacity-90 {orchestrate
+								? 'border-violet-500/30 bg-violet-500/12 text-violet-300'
+								: 'border-white/8 bg-white/4 text-gray-400 hover:text-gray-200'}"
+							title={$i18n.t('Orchestrate — fan this task out to multiple task-delegated agents')}
+							on:click={() => (orchestrate = !orchestrate)}
+						>
+							<svg
+								xmlns="http://www.w3.org/2000/svg"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="1.8"
+								class="size-3.5"
+								><circle cx="12" cy="5" r="2" /><circle cx="5" cy="19" r="2" /><circle
+									cx="19"
+									cy="19"
+									r="2"
+								/><path d="M12 7v3m0 0-5 7m5-7 5 7" stroke-linecap="round" stroke-linejoin="round" /></svg
+							>
+							{$i18n.t('Agents')}
+						</button>
+
 						<!-- attach menu: the + opens a multi-choice popup (Add image / Attach files) -->
 						<div class="relative">
 							<button
-								class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 p-1.5 rounded-md"
+								class="text-gray-500 hover:text-gray-200 p-1.5"
 								title={$i18n.t('Add attachment')}
 								on:click={() => (showAttachMenu = !showAttachMenu)}
 							>
@@ -1274,7 +1669,7 @@
 
 						<!-- mic (placeholder) -->
 						<button
-							class="text-gray-300 dark:text-gray-600 p-1.5 rounded-md cursor-default"
+							class="text-gray-600 p-1.5 cursor-default"
 							title={$i18n.t('Voice (coming soon)')}
 						>
 							<svg
@@ -1296,7 +1691,7 @@
 						<!-- model selector → pick from available models -->
 						<div class="relative">
 							<button
-								class="inline-flex items-center gap-1 text-[11px] px-2 py-1 rounded-lg bg-gray-100 dark:bg-gray-850 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-800 transition max-w-[10rem]"
+								class="inline-flex items-center gap-1 text-[11px] px-2 py-1 border border-white/8 bg-white/4 text-gray-300 hover:bg-white/8 transition max-w-[10rem]"
 								on:click={() => (showModelMenu = !showModelMenu)}
 								title={$i18n.t('Model')}
 							>
@@ -1323,7 +1718,7 @@
 						<!-- usage gauge → click for the full context/token breakdown -->
 						<div class="relative hidden sm:block">
 							<button
-								class="flex items-center gap-2 text-[10px] text-gray-400 px-1.5 py-1 rounded-md hover:bg-gray-100 dark:hover:bg-gray-850 transition"
+								class="flex items-center gap-2 text-[10px] text-gray-500 px-1.5 py-1 hover:bg-white/4 transition"
 								on:click={() => (showUsageStats = !showUsageStats)}
 								title={$i18n.t('Context & token usage')}
 							>
@@ -1354,87 +1749,149 @@
 							{/if}
 						</div>
 						
-						{#if anyRunning}<span class="text-[11px] text-gray-400">{$i18n.t('Working…')}</span>{/if}
+						{#if anyRunning}<span class="text-[11px] text-gray-500">{$i18n.t('Working…')}</span>{/if}
 					</div>
 					{#if sendError}<div class="text-[11px] text-red-500 mt-1">{sendError}</div>{/if}
+					</div>
 				</div>
-			</div>
+					</div>
+				</Pane>
+				{#if (dockOpen && (topHasAny || bottomHasAny)) || overlayRunId}
+					<PaneResizer class="w-1.5 shrink-0 bg-gray-100 dark:bg-gray-850 hover:bg-blue-400 dark:hover:bg-blue-500 transition" />
+					<!-- RIGHT PANE: the workspace 2×2 dock, OR the Workflow Inspector when a run is
+					     open — the inspector pushes the chat narrower instead of taking over the page. -->
+					<Pane bind:pane={rightPane} defaultSize={overlayRunId ? inspectorSize : dockSize} minSize={22} maxSize={72} class="min-h-0 bg-[#070b13]">
+						{#if (topHasAny || bottomHasAny) || overlayRunId}
+						<!-- When a run is open the inspector sits BESIDE the workspace dock (not over it),
+						     so the panels stay usable; the dock shrinks to a side strip. -->
+						<div class="flex h-full min-h-0">
+						{#if topHasAny || bottomHasAny}
+						<div class="h-full min-h-0 min-w-0 overflow-hidden order-last {overlayRunId ? 'border-l border-white/8' : ''}" style={overlayRunId ? 'flex: 0 0 38%' : 'flex: 1 1 100%'}>
+							<!-- Rows-first island grid: top row (Background tl | Plan bl) stacks above the
+							     bottom row (Files tr | File br). One panel per column → top/bottom stack;
+							     all four → 2×2. Transparent resizers = small island gaps. -->
+							<div class="h-full p-1">
+							<PaneGroup direction="vertical" class="w-full h-full">
+							{#if topHasAny}
+							<Pane defaultSize={50} minSize={18} class="min-h-0">
+							<PaneGroup direction="horizontal" class="w-full h-full">
+{#if panelVisible.tl}
+									<Pane class="min-h-0">
+										<WorkspacePanel title={$i18n.t('Background tasks')} on:dismiss={() => togglePanel('tl')}>
+											<div class="p-2 space-y-2">
+												{#if runningTasks.length}
+													<div class="px-1 text-[10px] uppercase tracking-wider text-gray-500">{$i18n.t('Running')}</div>
+													{#each runningTasks as t (t.id)}
+														<BackgroundTaskCard run={t} live autoExpand={(t.child_count || 0) > 1} on:stop={(e) => cancelRunId(e.detail.id)} on:openRun={(e) => headerOpenRunId(e.detail.id)} on:viewLogs={(e) => viewLogs(e.detail.id, e.detail.agentTab)} />
+													{/each}
+												{/if}
+												{#if finishedTasks.length}
+													<div class="flex items-center justify-between px-1 pt-1">
+														<button class="flex items-center gap-1 text-[10px] uppercase tracking-wider text-gray-500 hover:text-gray-300 transition" on:click={() => (showFinished = !showFinished)}>
+															<svg class="size-3 transition-transform {showFinished ? 'rotate-90' : ''}" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.21 14.77a.75.75 0 0 1 .02-1.06L11.168 10 7.23 6.29a.75.75 0 1 1 1.04-1.08l4.5 4.25a.75.75 0 0 1 0 1.08l-4.5 4.25a.75.75 0 0 1-1.06-.02Z" clip-rule="evenodd" /></svg>
+															<span>{$i18n.t('Finished')} {finishedTasks.length}</span>
+														</button>
+														<button class="text-[10px] text-blue-400 hover:underline" on:click={clearBg}>{$i18n.t('Clear')}</button>
+													</div>
+													{#if showFinished}
+														{#each finishedTasks as t (t.id)}
+															<BackgroundTaskCard run={t} on:openRun={(e) => headerOpenRunId(e.detail.id)} on:viewLogs={(e) => viewLogs(e.detail.id, e.detail.agentTab)} />
+														{/each}
+													{/if}
+												{/if}
+												{#if !runningTasks.length && !finishedTasks.length}
+													<div class="text-xs text-gray-500 px-1 py-2">{$i18n.t('Nothing running.')}</div>
+												{/if}
+											</div>
+										</WorkspacePanel>
+									</Pane>
+									{/if}
+							{#if panelVisible.tl && panelVisible.bl}
+							<PaneResizer class="w-1.5 shrink-0 bg-transparent hover:bg-blue-500/40 transition" />
+							{/if}
+{#if panelVisible.bl}
+									<Pane class="min-h-0">
+										<WorkspacePanel title={$i18n.t('Plan')} on:dismiss={() => togglePanel('bl')}>
+											{#if latestTurnId}
+												<div class="p-2"><PlanPanel wsId={latestTurnId} on:steps={(e) => (planStepCount = e.detail.count)} /></div>
+											{:else}
+												<div class="p-3 text-[11px] text-gray-500 leading-snug">{$i18n.t('No plan yet. Harvis will outline steps here once an agent starts working.')}</div>
+											{/if}
+										</WorkspacePanel>
+									</Pane>
+									{/if}
+							</PaneGroup>
+							</Pane>
+							{/if}
+							{#if topHasAny && bottomHasAny}
+							<PaneResizer class="h-1.5 shrink-0 bg-transparent hover:bg-blue-500/40 transition" />
+							{/if}
+							{#if bottomHasAny}
+							<Pane minSize={18} class="min-h-0">
+							<PaneGroup direction="horizontal" class="w-full h-full">
+{#if panelVisible.tr}
+									<Pane class="min-h-0">
+										<WorkspacePanel title={$i18n.t('Explorer')} scroll={false} on:dismiss={() => togglePanel('tr')}>
+											<WorkspaceFileRail bind:tab={fileTab} {changedFiles} {artifacts} {selectedFile} on:select={(e) => onFileSelect(e.detail.path)} on:selectArtifact={(e) => onArtifactSelect(e.detail.id)} />
+										</WorkspacePanel>
+									</Pane>
+									{/if}
+							{#if panelVisible.tr && panelVisible.br}
+							<PaneResizer class="w-1.5 shrink-0 bg-transparent hover:bg-blue-500/40 transition" />
+							{/if}
+{#if panelVisible.br}
+									<Pane class="min-h-0">
+										<WorkspacePanel title={$i18n.t('File')} scroll={false} on:dismiss={() => togglePanel('br')}>
+											<WorkspaceMainPanel showChat={false} bind:tab={mainTab} {selectedFile} diffLines={selectedFileObj ? selectedFileObj.lines : []} hasRepo={!!sessionId} hasChanges={changedFiles.length > 0} on:refresh={refreshFiles}>
+												<div slot="logs" class="h-full overflow-auto">
+													{#if logsRunId || latestTurnId}
+														{#key logsRunId || latestTurnId}<RunView wsId={logsRunId || latestTurnId} mode="dock" />{/key}
+													{:else}
+														<div class="h-full flex items-center justify-center text-xs text-gray-500 px-4 text-center">{$i18n.t('No logs yet. Agent output and command results will appear here once work begins.')}</div>
+													{/if}
+												</div>
+											</WorkspaceMainPanel>
+										</WorkspacePanel>
+									</Pane>
+									{/if}
+							</PaneGroup>
+							</Pane>
+							{/if}
+							</PaneGroup>
+							</div>
+							</div>
+						{/if}
+						{#if overlayRunId}
+						<div class="h-full min-h-0 min-w-0 flex-1 order-first">
+							{#key overlayRunId}
+								<WorkflowInspector
+									wsId={overlayRunId}
+									initialTab={overlayInitialTab}
+									on:close={() => (overlayRunId = '')}
+								/>
+							{/key}
+						</div>
+						{/if}
+						</div>
+						{:else}
+						<div class="h-full flex items-center justify-center text-center px-4">
+							<div class="text-xs text-gray-500">{$i18n.t('All panels hidden — use the ⋯ menu in the header to show panels.')}</div>
+						</div>
+						{/if}
+					</Pane>
+				{/if}
+			</PaneGroup>
 		</div>
 
-		<!-- RIGHT rail: Run mode + Background tasks (top) + Plan (bottom) -->
-		<div class="w-80 shrink-0 border-l border-gray-100 dark:border-gray-850 flex flex-col min-h-0">
-			<!-- Mode note: Auto executes on a copy (diff/PR); Plan is read-only and fills this panel -->
-			<div class="shrink-0 px-3 py-2 border-b border-gray-100 dark:border-gray-850">
-				<div class="text-[10px] uppercase tracking-wider text-gray-400 mb-1.5">{$i18n.t('Mode')}</div>
-				<div class="text-[11px] text-gray-400 leading-relaxed">
-					{#if runMode === 'plan'}
-						{$i18n.t('Plan — read-only. The agent reads the repo and drafts a step-by-step plan below; it changes nothing. Pick a higher rung to carry it out.')}
-					{:else if runMode === 'ask'}
-						{$i18n.t('Ask — the agent works on a copy and pauses for your approval before each edit or command.')}
-					{:else if runMode === 'auto-accept'}
-						{$i18n.t('Accept edits — edits auto-apply on the copy; risky ops (delete, push, .env) pause for approval. Review the diff or open a PR.')}
-					{:else}
-						{$i18n.t('Auto — the agent makes every change on a copy with no prompts; your originals stay untouched. Review the diff or open a pull request.')}
-					{/if}
-				</div>
+		<!-- dock toggle (panel visibility lives in the header ⋯ menu) -->
+		{#if !dockOpen && (topHasAny || bottomHasAny)}
+			<div class="shrink-0 flex items-center gap-1.5 px-3 py-1.5 border-t border-gray-100 dark:border-gray-850">
+				<button class="flex items-center gap-1.5 text-[11px] text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 transition" on:click={toggleDock}>
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" class="size-3.5"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M15 4v16" /></svg>
+					{$i18n.t('Show workspace')}
+				</button>
 			</div>
-			<!-- Background tasks: this session's runs as task chips (running + finished) -->
-			<div class="flex-1 min-h-0 flex flex-col border-b border-gray-100 dark:border-gray-850">
-				<div class="px-3 py-2 text-xs font-medium text-gray-700 dark:text-gray-200 shrink-0">
-					{$i18n.t('Background tasks')}
-				</div>
-				<div class="flex-1 min-h-0 overflow-y-auto px-2 pb-2 space-y-3">
-					{#if runningTasks.length}
-						<div class="space-y-1.5">
-							<div class="px-1 text-[10px] uppercase tracking-wider text-gray-400">{$i18n.t('Running')}</div>
-							{#each runningTasks as t (t.id)}
-								<button
-									class="w-full text-left rounded-xl bg-gray-50 dark:bg-gray-850/60 hover:bg-gray-100 dark:hover:bg-gray-800 transition px-3 py-2"
-									on:click={() => toggleRun(t.id)}
-								>
-									<div class="flex items-center gap-2">
-										<span class="size-2 rounded-full shrink-0 {bgDot(t.status)}"></span>
-										<span class="truncate text-xs font-medium text-gray-700 dark:text-gray-200">{t.task_brief || $i18n.t('Run')}</span>
-									</div>
-									<div class="mt-0.5 pl-4 text-[11px] text-gray-400 truncate">{t.model_name || 'VibeCode'} · {bgStatusLabel(t.status)}</div>
-								</button>
-							{/each}
-						</div>
-					{/if}
-					{#if finishedTasks.length}
-						<div class="space-y-1.5">
-							<div class="flex items-center justify-between px-1">
-								<span class="text-[10px] uppercase tracking-wider text-gray-400">{$i18n.t('Finished')}</span>
-								<button class="text-[11px] text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition" on:click={clearBg}>{$i18n.t('Clear')}</button>
-							</div>
-							{#each finishedTasks as t (t.id)}
-								<button
-									class="w-full text-left rounded-xl bg-gray-50 dark:bg-gray-850/60 hover:bg-gray-100 dark:hover:bg-gray-800 transition px-3 py-2"
-									on:click={() => toggleRun(t.id)}
-								>
-									<div class="flex items-center gap-2">
-										<span class="size-2 rounded-full shrink-0 {bgDot(t.status)}"></span>
-										<span class="truncate text-xs font-medium text-gray-700 dark:text-gray-200">{t.task_brief || $i18n.t('Run')}</span>
-									</div>
-									<div class="mt-0.5 pl-4 text-[11px] text-gray-400 truncate">{t.model_name || 'VibeCode'} · {bgStatusLabel(t.status)}</div>
-								</button>
-							{/each}
-						</div>
-					{/if}
-					{#if !runningTasks.length && !finishedTasks.length}
-						<div class="text-xs text-gray-400 px-2 pt-3">{$i18n.t('Nothing running.')}</div>
-					{/if}
-				</div>
-			</div>
-			<div class="flex-1 min-h-0 flex flex-col">
-				<div class="px-3 py-2 text-xs font-medium text-gray-700 dark:text-gray-200 shrink-0">
-					{$i18n.t('Plan')}
-				</div>
-				<div class="flex-1 min-h-0 overflow-y-auto px-2 pb-2">
-					<PlanPanel wsId={latestTurnId} />
-				</div>
-			</div>
-		</div>
+		{/if}
 	</div>
 
 	<!-- click-away backdrop for the composer menus -->
@@ -1521,6 +1978,10 @@
 
 	<!-- GitHub: connect → pick a repo (or clone a public repo by name) → clone-mode session. -->
 	<GitHubRepoModal bind:show={showGithubModal} onPick={pickGithubRepo} />
+
+	<!-- The Workflow Inspector is no longer a full-page overlay — it docks into the right
+	     workspace pane (see above), so opening a run PUSHES the chat narrower instead of
+	     covering the page. Escape still closes it (handled on the window keydown). -->
 
 	<!-- Full-auto entry acknowledge (one-time). -->
 	{#if fullAutoAckOpen}

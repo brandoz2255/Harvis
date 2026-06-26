@@ -1,8 +1,9 @@
 <script lang="ts">
-	import { getContext, onDestroy } from 'svelte';
+	import { getContext, onDestroy, createEventDispatcher } from 'svelte';
 	import { createWorkspaceStream } from '$lib/apis/streaming/workspace-stream';
 
 	const i18n: any = getContext('i18n');
+	const dispatch = createEventDispatcher();
 
 	// The run whose plan to stream. Empty = idle. The backend's orchestrator emits a
 	// structured `plan` event (steps) + agent_start/agent_end — we map those to status.
@@ -16,6 +17,8 @@
 		status: 'queued' | 'running' | 'done' | 'error';
 	};
 	let steps: Step[] = [];
+	// Tell the host whether a plan exists (so the dock can auto-show the Plan panel).
+	$: dispatch('steps', { count: steps.length });
 	let uniform = false;
 	let controller: AbortController | null = null;
 	let activeId = '';

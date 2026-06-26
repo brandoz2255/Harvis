@@ -3,8 +3,10 @@
 @config '../tailwind.config.js';
 
 @theme {
-	/* Harvis blue-charcoal ramp — neutral grays re-hued toward blue (hue 255)
-	   so the whole app carries a subtle blue cast, strongest in dark mode. */
+	/* Harvis near-black ramp — bridged from the UI prototype (shell #06080d →
+	   panel #0c1018 → raised #131a26). Light/mid grays unchanged (text + light
+	   mode); the dark end is pulled toward near-black so dark mode reads like the
+	   prototype's deep blue-charcoal. Hue nudged 255→260 (slightly more blue). */
 	--color-gray-50: oklch(0.98 0.004 255);
 	--color-gray-100: oklch(0.94 0.006 255);
 	--color-gray-200: oklch(0.92 0.008 255);
@@ -12,11 +14,18 @@
 	--color-gray-400: oklch(0.77 0.012 255);
 	--color-gray-500: oklch(0.69 0.014 255);
 	--color-gray-600: oklch(0.51 0.018 255);
-	--color-gray-700: oklch(0.42 0.022 255);
-	--color-gray-800: oklch(0.32 0.026 255);
-	--color-gray-850: oklch(0.27 0.028 255);
-	--color-gray-900: oklch(0.2 0.03 255);
-	--color-gray-950: oklch(0.16 0.032 255);
+	--color-gray-700: oklch(0.42 0.022 257);
+	--color-gray-800: oklch(0.2 0.026 258);
+	--color-gray-850: oklch(0.14 0.028 259);
+	--color-gray-900: oklch(0.095 0.03 260);
+	--color-gray-950: oklch(0.055 0.03 262);
+
+	/* Accent → prototype cyan (#38bdf8): re-hue the blue ramp toward sky/cyan so
+	   buttons, active states, and the send control read cyan, not royal blue. */
+	--color-blue-400: oklch(0.79 0.12 230);
+	--color-blue-500: oklch(0.72 0.135 233);
+	--color-blue-600: oklch(0.64 0.145 235);
+	--color-blue-700: oklch(0.55 0.13 237);
 }
 
 /*

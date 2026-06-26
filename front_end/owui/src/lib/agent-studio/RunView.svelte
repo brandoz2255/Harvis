@@ -13,6 +13,7 @@
 	import ThoughtStream from './workflow/ThoughtStream.svelte';
 	import RunArtifacts from './RunArtifacts.svelte';
 	import RunTable from './RunTable.svelte';
+	import { toolLabel } from './workflow/humanizeTool';
 
 	const i18n: any = getContext('i18n');
 
@@ -24,6 +25,12 @@
 	// compact, stacked version that lives in the chat right-rail pane (half-screen).
 	export let wsId: string = '';
 	export let mode: 'full' | 'dock' = 'full';
+	// `embedded` = full layout WITHOUT the breadcrumb nav header (the host — e.g. the
+	// VibeCode run overlay — provides its own header + close, and we must NOT navigate away).
+	export let embedded = false;
+	// Optional title (the turn's task) so the dock card names itself immediately instead of
+	// falling back to "Workspace run" while the meta fetch is in flight.
+	export let title = '';
 
 	let events: WorkspaceEvent[] = [];
 	let phase: 'connecting' | 'running' | 'done' | 'error' | 'cancelled' = 'connecting';
@@ -33,6 +40,46 @@
 	let activeId = '';
 
 	$: running = phase === 'connecting' || phase === 'running';
+
+	// A friendly "the agent is talking" status line, derived from the live event stream:
+	// orchestrated → "Spawned 3 agents · readme-content is writing a file…" / "2/3 agents
+	// done…"; single-agent → the current tool phrase. Sub-agents are events whose run_id
+	// differs from the parent ws id.
+	$: liveStatus = (() => {
+		if (!running) return '';
+		const subStarts = new Set<string>();
+		const subEnds = new Set<string>();
+		let sawPlan = false;
+		let lastTool = '';
+		let lastAgent = '';
+		for (const e of events) {
+			const rid = e.run_id as string | undefined;
+			if (rid && rid !== wsId) {
+				if (e.type === 'agent_start') subStarts.add(rid);
+				else if (e.type === 'agent_end') subEnds.add(rid);
+			}
+			if (e.type === 'plan') sawPlan = true;
+			else if (e.type === 'tool_call') {
+				lastTool = (e.tool as string) || lastTool;
+				lastAgent = (e.agent_label as string) || lastAgent;
+			}
+		}
+		const n = subStarts.size;
+		const done = subEnds.size;
+		const tool = lastTool ? toolLabel(lastTool).toLowerCase() : '';
+		if (n > 0) {
+			const base =
+				done >= n
+					? 'Wrapping up'
+					: done > 0
+						? `${done}/${n} agents done`
+						: `Spawned ${n} agent${n > 1 ? 's' : ''}`;
+			return lastAgent && tool ? `${base} · ${lastAgent} ${tool}…` : `${base}…`;
+		}
+		if (tool) return `${toolLabel(lastTool)}…`;
+		if (sawPlan) return 'Planning the work…';
+		return 'Working…';
+	})();
 
 	const loadMeta = async (id: string) => {
 		try {
@@ -123,10 +170,11 @@
 
 <div class="w-full h-full flex flex-col">
 	{#if mode === 'full'}
-		<!-- full-page header (breadcrumb) -->
-		<div
-			class="flex items-center gap-2 px-4 py-2.5 border-b border-gray-100 dark:border-gray-850 shrink-0"
-		>
+		{#if !embedded}
+			<!-- full-page header (breadcrumb) -->
+			<div
+				class="flex items-center gap-2 px-4 py-2.5 border-b border-gray-100 dark:border-gray-850 shrink-0"
+			>
 			<nav class="flex items-center gap-1 text-xs text-gray-400 shrink-0">
 				<button class="hover:text-gray-600 dark:hover:text-gray-200" on:click={backToChat}
 					>{$i18n.t('Chat')}</button
@@ -143,7 +191,8 @@
 				{taskBrief || $i18n.t('Workspace run')}
 			</span>
 			<span class="ml-auto text-[11px] text-gray-400 tabular-nums shrink-0">{wsId}</span>
-		</div>
+			</div>
+		{/if}
 		<div class="flex-1 min-h-0 flex flex-col lg:flex-row">
 			<div
 				class="lg:w-96 max-h-56 lg:max-h-none lg:h-full overflow-y-auto border-b lg:border-b-0 lg:border-r border-gray-100 dark:border-gray-850 px-4 py-3 shrink-0"
@@ -191,9 +240,17 @@
 			class="flex items-center gap-2 px-3 py-2 border-b border-gray-100 dark:border-gray-850 shrink-0"
 		>
 			<span class="size-2 rounded-full shrink-0 {statusDot(status, phase)}"></span>
-			<span class="text-xs font-medium text-gray-700 dark:text-gray-200 truncate">
-				{taskBrief || $i18n.t('Workspace run')}
-			</span>
+			<div class="min-w-0 flex-1">
+				<div class="text-xs font-medium text-gray-700 dark:text-gray-200 truncate">
+					{title || taskBrief || $i18n.t('Workspace run')}
+				</div>
+				{#if running && liveStatus}
+					<div class="mt-0.5 flex items-center gap-1.5 text-[11px] text-blue-500/90 dark:text-blue-400/90 truncate">
+						<span class="inline-block size-1.5 rounded-full bg-blue-500 dark:bg-blue-400 animate-pulse shrink-0"></span>
+						<span class="truncate">{liveStatus}</span>
+					</div>
+				{/if}
+			</div>
 			<button
 				class="ml-auto text-[11px] text-gray-400 hover:text-blue-500 transition shrink-0"
 				on:click={openFull}

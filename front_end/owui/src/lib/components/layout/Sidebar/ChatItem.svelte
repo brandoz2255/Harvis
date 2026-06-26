@@ -59,6 +59,7 @@
 	export let createdAt: number | null = null;
 	export let updatedAt: number | null = null;
 	export let lastReadAt: number | null = null;
+	export let folderName = '';
 
 	export let selected = false;
 	export let shiftKey = false;
@@ -209,7 +210,8 @@
 	};
 
 	const moveChatHandler = async (chatId, folderId) => {
-		if (chatId && folderId) {
+		// folderId null = remove from project (unattach to root).
+		if (chatId) {
 			const res = await updateChatFolderIdById(localStorage.token, chatId, folderId).catch(
 				(error) => {
 					toast.error(`${error}`);
@@ -493,11 +495,6 @@
 			{/if}
 
 			<div class="flex self-center flex-1 w-full min-w-0">
-				{#if unread}
-					<div class="shrink-0 self-center pr-2.5 flex transition-opacity duration-300">
-						<div class="size-1.5 bg-sky-500 rounded-full" />
-					</div>
-				{/if}
 				<div
 					dir="auto"
 					class="text-left self-center overflow-hidden w-full h-[20px] truncate {unread

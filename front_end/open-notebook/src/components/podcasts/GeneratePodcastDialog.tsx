@@ -68,6 +68,8 @@ function getSourceDefaultMode(source: SourceListResponse): SourceMode {
 interface GeneratePodcastDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
+  /** When set (the notebook Studio rail), pre-select + expand only this notebook. */
+  defaultNotebookId?: string
 }
 
 interface NotebookSummary {
@@ -394,7 +396,7 @@ function ContentSelectionPanel({
   )
 }
 
-export function GeneratePodcastDialog({ open, onOpenChange }: GeneratePodcastDialogProps) {
+export function GeneratePodcastDialog({ open, onOpenChange, defaultNotebookId }: GeneratePodcastDialogProps) {
   const { t } = useTranslation()
   const { toast } = useToast()
   const queryClient = useQueryClient()
@@ -511,11 +513,14 @@ export function GeneratePodcastDialog({ open, onOpenChange }: GeneratePodcastDia
           changed = true
         }
 
+        // When launched scoped to a notebook, default-select ONLY that one.
+        const include = !defaultNotebookId || notebook.id === defaultNotebookId
+
         if (sources) {
           const currentSources = next[notebook.id].sources
           sources.forEach((source) => {
             if (!(source.id in currentSources)) {
-              currentSources[source.id] = getSourceDefaultMode(source)
+              currentSources[source.id] = include ? getSourceDefaultMode(source) : 'off'
               changed = true
             }
           })
@@ -525,7 +530,7 @@ export function GeneratePodcastDialog({ open, onOpenChange }: GeneratePodcastDia
           const currentNotes = next[notebook.id].notes
           notes.forEach((note) => {
             if (!(note.id in currentNotes)) {
-              currentNotes[note.id] = 'full'
+              currentNotes[note.id] = include ? 'full' : 'off'
               changed = true
             }
           })
@@ -535,7 +540,14 @@ export function GeneratePodcastDialog({ open, onOpenChange }: GeneratePodcastDia
       return changed ? next : prev
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, notebooks, dataKey])
+  }, [open, notebooks, dataKey, defaultNotebookId])
+
+  // Studio rail: expand the pre-scoped notebook on open.
+  useEffect(() => {
+    if (open && defaultNotebookId) {
+      setExpandedNotebooks((prev) => (prev.includes(defaultNotebookId) ? prev : [defaultNotebookId]))
+    }
+  }, [open, defaultNotebookId])
 
   const resetState = useCallback(() => {
     setExpandedNotebooks([])

@@ -89,6 +89,7 @@
 	import { getAndUpdateUserLocation, getUserSettings } from '$lib/apis/users';
 	import {
 		generateQueries,
+		generateTitle,
 		chatAction,
 		generateMoACompletion,
 		stopTask,
@@ -1607,6 +1608,30 @@
 			// conversation (incl. the assistant response) from the client here —
 			// otherwise only the user turn (saved at chat-create) survives a reopen.
 			await saveChatHandler(_chatId, history);
+
+			// HARVIS (facade): the socket-less facade can't run OWUI's server-side
+			// background title task, so auto-name a brand-new chat client-side via
+			// the title endpoint (LLM-generated) instead of leaving the raw prompt.
+			try {
+				const _msgs = createMessagesList(history, history.currentId).map((m) => ({
+					role: m.role,
+					content: typeof m.content === 'string' ? m.content : (m.content ?? '')
+				}));
+				const _firstExchange = _msgs.filter((m) => m.role === 'user').length === 1;
+				if (_firstExchange && ($settings?.title?.auto ?? true)) {
+					const _gen = await generateTitle(localStorage.token, modelId, _msgs, _chatId).catch(
+						() => null
+					);
+					const _title = typeof _gen === 'string' ? _gen : _gen?.choices?.[0]?.message?.content;
+					if (_title && $chatId == _chatId) {
+						chatTitle.set(_title);
+						await updateChatById(localStorage.token, _chatId, { title: _title });
+					}
+				}
+			} catch (e) {
+				console.error('HARVIS auto-title failed', e);
+			}
+
 			currentChatPage.set(1);
 			await chats.set(await getChatList(localStorage.token, $currentChatPage));
 		}
@@ -3231,7 +3256,7 @@
 									bind:this={messageInput}
 									{history}
 									{taskIds}
-									{selectedModels}
+									bind:selectedModels
 									bind:files
 									bind:prompt
 									bind:autoScroll
@@ -3312,7 +3337,7 @@
 							<div class="flex items-center h-full">
 								<Placeholder
 									{history}
-									{selectedModels}
+									bind:selectedModels
 									bind:messageInput
 									bind:files
 									bind:prompt

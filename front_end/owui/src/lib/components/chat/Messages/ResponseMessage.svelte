@@ -658,14 +658,9 @@
 		dir={$settings.chatDirection}
 		style="scroll-margin-top: 3rem;"
 	>
-		<div class={`shrink-0 ltr:mr-3 rtl:ml-3 hidden @lg:flex mt-1 `}>
-			<ProfileImage
-				src={`${WEBUI_API_BASE_URL}/models/model/profile/image?id=${model?.id}&lang=${$i18n.language}`}
-				className={'size-8 assistant-message-profile-image'}
-			/>
-		</div>
-
-		<div class="flex-auto w-0 pl-1 relative">
+		<!-- Harvis chat: the assistant response is "the AI's domain" — no avatar gutter, so it
+		     spans the full centered conversation column. Only the USER's messages are bubbled. -->
+		<div class="flex-auto w-0 relative">
 			<Name>
 				<Tooltip content={model?.name ?? message.model} placement="top-start">
 					<span id="response-message-model-name" class="line-clamp-1 text-black dark:text-white">
