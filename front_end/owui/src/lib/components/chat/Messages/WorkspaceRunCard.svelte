@@ -12,6 +12,7 @@
 	import HarvisClawMascot from '$lib/components/common/HarvisClawMascot.svelte';
 	import RunArtifacts from '$lib/agent-studio/RunArtifacts.svelte';
 	import WorkflowInspector from '$lib/agent-studio/WorkflowInspector.svelte';
+	import { getRunArtifacts } from '$lib/apis/agent-runs';
 
 	const i18n: any = getContext('i18n');
 
@@ -317,6 +318,29 @@
 		showControls.set(true);
 	};
 
+	// "Preview" — open the run's rendered output (HTML/MD/SVG) in the Artifacts dock so the
+	// user can SEE what the agents built, not just read the code/diffs. Only offered when the
+	// run actually produced a renderable file.
+	let hasPreview = false;
+	let _checkedPreview = false;
+	const checkPreview = async () => {
+		try {
+			const arts = await getRunArtifacts(workspaceId);
+			hasPreview = (arts ?? []).some(
+				(a) => a.artifact_type === 'file' && /\.(html?|md|markdown|svg)$/i.test(a.path || '')
+			);
+		} catch (_) {}
+	};
+	$: if (phase === 'done' && workspaceId && !_checkedPreview) {
+		_checkedPreview = true;
+		checkPreview();
+	}
+	const previewRun = () => {
+		dockedRunId.set(workspaceId);
+		workspaceControlsTab.set('activity');
+		showControls.set(true);
+	};
+
 	const startTimerAndStream = () => {
 		// startedAt is the persisted run start (above) — do NOT reset it here, or
 		// re-entering a running workspace restarts the counter from 0.
@@ -533,6 +557,15 @@
 				on:click={stop}>{$i18n.t('Stop')}</button
 			>
 		{:else}
+			{#if hasPreview}
+				<button
+					class="text-xs px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium transition flex items-center gap-1.5"
+					on:click={previewRun}
+				>
+					<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="size-3.5"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>
+					{$i18n.t('Preview')}
+				</button>
+			{/if}
 			<button
 				class="text-xs px-2 py-1 rounded-lg bg-gray-100 dark:bg-gray-850 hover:bg-gray-200 dark:hover:bg-gray-800 transition"
 				on:click={dockRun}>{$i18n.t('View')}</button

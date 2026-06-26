@@ -4,6 +4,7 @@
 		| 'files'
 		| 'overview'
 		| 'activity'
+		| 'sources'
 		| 'view'
 		| 'global-map'
 		| 'brain'
@@ -41,6 +42,7 @@
 	import Controls from './Controls/Controls.svelte';
 	import OverviewPanel from './ChatControls/OverviewPanel.svelte';
 	import ArtifactsPanel from './ChatControls/ArtifactsPanel.svelte';
+	import SourcesPanel from './ChatControls/SourcesPanel.svelte';
 	import CallOverlay from './MessageInput/CallOverlay.svelte';
 	import Drawer from '../common/Drawer.svelte';
 	import Artifacts from './Artifacts.svelte';
@@ -102,24 +104,19 @@
 	// Harvis Agent Studio surfaces available in the right-rail dock (same gate as Activity).
 	$: showStudioTabs = showActivityTab;
 	$: if (!showActivityTab && activeTab === 'activity') activeTab = 'overview';
-	// Keep the studio tabs from sticking if the gate closes.
+	// The dock is now Overview · Artifacts · Sources only. Map / Brain / Global-Map /
+	// Controls / Run are no longer tabs — redirect any straggler (module-level savedTab or
+	// the dock bridge) to Overview.
 	$: if (
-		!showStudioTabs &&
-		(activeTab === 'global-map' || activeTab === 'brain' || activeTab === 'view')
+		activeTab === 'global-map' ||
+		activeTab === 'brain' ||
+		activeTab === 'view' ||
+		activeTab === 'controls' ||
+		activeTab === 'run'
 	)
 		activeTab = 'overview';
-	// The Neural Map (was Global Map) lives inside Brain now — its tab button is
-	// gone; catch in-session stragglers (module-level savedTab) and land on Brain.
-	$: if (activeTab === 'global-map') activeTab = 'brain';
-	// Controls is no longer a dock tab (its content lives in Brain → Tuning).
-	// The default + any straggler from a prior session land on Overview.
-	$: if (activeTab === 'controls') activeTab = 'overview';
-	// Map (the conversation node-graph, key 'view') needs a conversation — fall
-	// back to Overview (background tasks) when there are no messages.
-	$: if (!showOverviewTab && activeTab === 'view') activeTab = 'overview';
-	// The dedicated 'run' dock tab was removed — its pieces now live in Overview
-	// (Processes / Map / Changes) and Artifacts (Preview). Redirect any straggler.
-	$: if (activeTab === 'run') activeTab = 'overview';
+	// Sources rides the same gate as Artifacts.
+	$: if (!showStudioTabs && activeTab === 'sources') activeTab = 'overview';
 
 	// The in-chat WorkspaceRunCard requests the Activity tab via this store.
 	$: if ($workspaceControlsTab) {
@@ -382,25 +379,14 @@
 									</button>
 								{/if}
 								{#if showStudioTabs}
-									{#if showOverviewTab}
 									<button
 										class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
-										'view'
+										'sources'
 											? 'bg-gray-100 dark:bg-gray-800 font-medium text-gray-900 dark:text-white'
 											: 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'}"
-										on:click={() => (activeTab = 'view')}
+										on:click={() => (activeTab = 'sources')}
 									>
-										{$i18n.t('Map')}
-									</button>
-									{/if}
-									<button
-										class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
-										'brain'
-											? 'bg-gray-100 dark:bg-gray-800 font-medium text-gray-900 dark:text-white'
-											: 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'}"
-										on:click={() => (activeTab = 'brain')}
-									>
-										{$i18n.t('Brain')}
+										{$i18n.t('Sources')}
 									</button>
 								{/if}
 							</div>
@@ -433,6 +419,8 @@
 								<OverviewPanel />
 							{:else if activeTab === 'activity'}
 								<ArtifactsPanel {history} />
+							{:else if activeTab === 'sources'}
+								<SourcesPanel {history} />
 							{:else if activeTab === 'view'}
 								<Overview
 									{history}
@@ -562,25 +550,14 @@
 										</button>
 									{/if}
 									{#if showStudioTabs}
-										{#if showOverviewTab}
 										<button
 											class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
-											'view'
+											'sources'
 												? 'bg-gray-100 dark:bg-gray-800 font-medium text-gray-900 dark:text-white'
 												: 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'}"
-											on:click={() => (activeTab = 'view')}
+											on:click={() => (activeTab = 'sources')}
 										>
-											{$i18n.t('Map')}
-										</button>
-										{/if}
-										<button
-											class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
-											'brain'
-												? 'bg-gray-100 dark:bg-gray-800 font-medium text-gray-900 dark:text-white'
-												: 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'}"
-											on:click={() => (activeTab = 'brain')}
-										>
-											{$i18n.t('Brain')}
+											{$i18n.t('Sources')}
 										</button>
 									{/if}
 								</div>
@@ -613,6 +590,8 @@
 									<OverviewPanel />
 								{:else if activeTab === 'activity'}
 									<ArtifactsPanel {history} />
+								{:else if activeTab === 'sources'}
+									<SourcesPanel {history} />
 								{:else if activeTab === 'view'}
 									<Overview
 										{history}
