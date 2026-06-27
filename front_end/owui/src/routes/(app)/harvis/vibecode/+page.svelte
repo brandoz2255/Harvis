@@ -5,6 +5,7 @@
 	import { WEBUI_NAME, config, showSidebar, models } from '$lib/stores';
 	import { WEBUI_BASE_URL } from '$lib/constants';
 	import { uploadFile } from '$lib/apis/files';
+	import { getCapabilityRegistry, preferredEngineForVibecode } from '$lib/integrations/registry';
 	import {
 		getAttachedRepos,
 		createVibecodeSession,
@@ -517,6 +518,15 @@
 	// Orchestrate = fan this turn out to N task-delegated sub-agents (the planner picks
 	// 3–10, scaling to the task). Off ⇒ a single agent on the session's working copy.
 	let orchestrate = false;
+	// Phase E1: external Build engine. 'native' = OpenClaw vibecode-turn runner; 'opencode'
+	// = the harvis-opencode sidecar (clone-mode only, flag-gated). Selector shows ONLY when
+	// the deploy flag is on AND opencode is ready AND this is a clone (session) flow.
+	let selectedEngine: 'native' | 'opencode' = 'native';
+	let opencodeReady = false;
+	$: externalEnginesEnabled = $config?.features?.enable_harvis_external_engines ?? false;
+	$: showEngineSelector = externalEnginesEnabled && opencodeReady && isolationMode === 'session';
+	// Force native whenever the selector isn't applicable (inplace / flag-off / not ready).
+	$: if (!showEngineSelector && selectedEngine !== 'native') selectedEngine = 'native';
 	// Apex → base (rendered top-to-bottom; base = safest = Plan, apex = most autonomy = Auto).
 	const RUN_LADDER: { mode: RunRung; label: string; desc: string }[] = [
 		{ mode: 'full-auto', label: 'Auto', desc: 'Runs everything automatically — no prompts.' },
@@ -970,7 +980,7 @@
 				if (localFolderHandle) {
 					// Local-folder session: create empty → snapshot the real folder → seed the
 					// backend baseline → first turn. Edits flow back to the folder after each turn.
-					const s = await createVibecodeSession({ local_folder_name: localFolderName });
+					const s = await createVibecodeSession({ local_folder_name: localFolderName, engine: selectedEngine });
 					createdId = s.id;
 					await linkSessionToFolder(localFolderKey, s.id);
 					seedingStatus = $i18n.t('Reading folder…');
@@ -988,7 +998,7 @@
 				} else if (localFolderFiles.length) {
 					// Read-only local folder (webkitdirectory — Brave/Firefox/Safari): seed the
 					// snapshot → clone-mode session. No live writeback (no persistent handle).
-					const s = await createVibecodeSession({ local_folder_name: localFolderName });
+					const s = await createVibecodeSession({ local_folder_name: localFolderName, engine: selectedEngine });
 					createdId = s.id;
 					seedingStatus = $i18n.t('Loading into workspace…');
 					await seedVibecodeLocalFolder(s.id, localFolderFiles);
@@ -1005,7 +1015,8 @@
 					const s = await createVibecodeSession({
 						github_owner: selectedGithubRepo.owner,
 						github_repo: selectedGithubRepo.name,
-						github_branch: selectedGithubRepo.branch
+						github_branch: selectedGithubRepo.branch,
+						engine: selectedEngine
 					});
 					createdId = s.id;
 					await startVibecodeTurn(s.id, { task_brief: text, attachments, model_name: selectedModel || undefined, run_mode: runMode, orchestrate });
@@ -1016,7 +1027,8 @@
 					const s = await createVibecodeSession({
 						repo_path: selectedRepoPath || undefined,
 						isolation_mode: isolationMode,
-						permission_mode: isolationMode === 'inplace' ? permissionMode : undefined
+						permission_mode: isolationMode === 'inplace' ? permissionMode : undefined,
+						engine: selectedEngine
 					});
 					createdId = s.id;
 					await startVibecodeTurn(s.id, { task_brief: text, attachments, model_name: selectedModel || undefined, run_mode: runMode, orchestrate });
@@ -1097,6 +1109,31 @@
 
 	onMount(async () => {
 		if (!enabled) return;
+		// Pre-fill the model picker from the user's saved Integrations default model
+		// (Phase C2/C3): localStorage cache → server fallback (cross-device). Only fills
+		// when the slot is empty AND the model is actually available, so a default that
+		// was removed since can never be sent as an invalid model.
+		try {
+			let d = localStorage.getItem('harvis.integrations.default_model') || '';
+			// Fetch the registry when we need the default model OR the engine default (Phase E1).
+			const reg = !d || externalEnginesEnabled ? await getCapabilityRegistry(localStorage.token) : null;
+			if (!d && reg) {
+				d = reg?.default_model || '';
+				try {
+					if (d) localStorage.setItem('harvis.integrations.default_model', d);
+				} catch (_) {}
+			}
+			if (d && !selectedModel && ($models || []).some((m: any) => m?.id === d)) selectedModel = d;
+			// Phase E1: offer OpenCode only when its sidecar is ready; default per the user's
+			// preferred code engine (opencode iff preferred AND ready, else native).
+			if (externalEnginesEnabled && reg) {
+				const oc = reg?.capabilities?.code_engine_candidate?.providers?.find(
+					(p: any) => p?.id === 'opencode'
+				);
+				opencodeReady = !!oc?.ready;
+				selectedEngine = preferredEngineForVibecode(reg);
+			}
+		} catch (_) {}
 		fsSupported = supportsLocalFs();
 		if (fsSupported) recentFolders = await listRecentFolders();
 		repos = await getAttachedRepos();
@@ -1502,6 +1539,34 @@
 
 					<!-- toolbar -->
 					<div class="flex items-center gap-1.5 mt-2">
+						{#if showEngineSelector}
+							<!-- Phase E1: external Build engine — Native (OpenClaw) vs OpenCode sidecar. -->
+							<div
+								class="inline-flex items-center rounded-full border border-white/8 bg-white/4 p-0.5 text-xs"
+								title={$i18n.t('Build engine for this session')}
+							>
+								<button
+									type="button"
+									class="px-2 py-0.5 rounded-full transition {selectedEngine === 'native'
+										? 'bg-white/10 text-gray-100'
+										: 'text-gray-400 hover:text-gray-200'}"
+									on:click={() => (selectedEngine = 'native')}>{$i18n.t('Native')}</button
+								>
+								<button
+									type="button"
+									class="px-2 py-0.5 rounded-full transition {selectedEngine === 'opencode'
+										? 'bg-teal-500/15 text-teal-300'
+										: 'text-gray-400 hover:text-gray-200'}"
+									on:click={() => (selectedEngine = 'opencode')}>OpenCode</button
+								>
+							</div>
+						{/if}
+						{#if selectedEngine === 'opencode'}
+							<span class="text-[11px] text-gray-500"
+								>{$i18n.t('OpenCode runs autonomously on a clone — review the diff.')}</span
+							>
+						{/if}
+						{#if selectedEngine !== 'opencode'}
 						<!-- Run-mode = the permission PYRAMID (per turn): Plan ▸ Ask ▸ Accept ▸ Auto.
 						     The agent works on a clone; the diff/PR is the outer gate. -->
 						<div class="relative">
@@ -1608,6 +1673,7 @@
 							>
 							{$i18n.t('Agents')}
 						</button>
+						{/if}
 
 						<!-- attach menu: the + opens a multi-choice popup (Add image / Attach files) -->
 						<div class="relative">

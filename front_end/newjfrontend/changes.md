@@ -1,3 +1,263 @@
+## 2026-06-26: Phase E1 — External code engine (OpenCode) makes "Build with OpenCode" real
+
+### Goal
+The Integrations arc let users *prefer* a `code_engine_candidate` (Claude Code / Codex / OpenCode) but **nothing launched them** — Build always ran the native OpenClaw runner. E1 makes one provider runnable: a generic **engine-adapter** that spawns OpenCode against a Build session's clone (local Ollama models, **zero cloud credentials**) and streams its work back through the existing pipeline.
+
+### What shipped (flag-gated, default OFF, clone-mode only)
+- **NEW `harvis-opencode` sidecar** (`opencode/{Dockerfile,opencode.json,entrypoint.sh}` + compose `opencode` service): `node:20-slim` + `opencode-ai`, uid 1001, mounts the shared `artifact_data` volume so it edits the session clone in place. Entrypoint regenerates the Ollama provider model list from live tags at boot.
+- **NEW `python_back_end/workspace/orchestration/engine_adapter.py`**: `run_external_engine_adapter` — `docker exec`s `opencode run "<task>" --model ollama/<m> --format json --dangerously-skip-permissions --dir <clone>`, maps OpenCode's NDJSON (`text→token`, `tool_use→tool_call/tool_result`, `step_finish→tokens`; everything else → `log`) to `OpenClawEvent`s, collects the diff vs `base_sha`, persists diff/file/changed_files artifacts. Defensive parser (partial lines, parse-on-nonzero-exit), hard timeout, path-safety guard (clone must be under `SESSION_WORKSPACE_ROOT`).
+- **Dispatch + threading** (`workspace_router.py`): `agent_id="engine-adapter"` branch; per-session `engine` field read from the `vibecode_sessions` row at turn start; `orchestrate` and in-place force native; `permission_mode` ignored (diff is the gate); server coerces `engine→native` when the flag is off. `vibecode_sessions.engine` column (idempotent ALTER).
+- **Cancel** reuses the existing `/cancel` Stop path — the adapter's `finally` kills the **specific** run via `pkill -f <clone>` (safe with concurrent users; the unique clone path is the marker).
+- **Flag** `enable_harvis_external_engines` (`HARVIS_OWUI_EXTERNAL_ENGINES`, default OFF) in `owui_compat/config.py`.
+- **Registry honesty**: `opencode` gets `service_key:"opencode"` (ready iff flag on + sidecar `running`, via a docker-SDK probe); added to `_derive_source`; claude-code/codex stay `service_key:None`.
+- **Frontend**: `vibecode/+page.svelte` Engine selector (Native | OpenCode), shown only when flag on + opencode ready + clone-mode; default via `preferredEngineForVibecode(reg)` (opencode iff preferred AND ready, NOT first-ready); hides Plan ladder + Agents toggle when OpenCode selected; `engine` threaded into all `createVibecodeSession` calls. `agent-runs` API `engine?` field; `catalog.ts` opencode `runtimeNote` flipped to "runs when enabled".
+- **Docs**: `docs/guides/vibecode-external-engines.md` (enable, smoke, UI flow, testing matrix, K8s caveat).
+
+### Verified E2E (:9000 / API, flag ON)
+build-step-0 (opencode 1.17 edits a file via Ollama, JSON schema captured) · capabilities shows `opencode (ready, detected)`, claude/codex `(false, static)` · scratch opencode session persists `engine=opencode` · turn → engine-adapter → opencode → `hello.py=print('hi')` real git diff (138s, zero cloud creds) · **Stop mid-run → cancelled + no orphaned opencode** · native session → vibecode-turn (no engine-adapter) · orchestrate on opencode session → orchestrated branch.
+
+### NOT pushed
+On `harvis1.1`, uncommitted. The committed compose flag default stays OFF; the live dev backend currently has it ON for testing.
+
+---
+
+## 2026-06-26: Integrations → setup guide + honest copy
+
+### Goal
+Close the "what works today vs what's coming" gap so users don't think "Save preference on Claude Code"
+runs Claude inside Harvis. Documentation + truthful UI copy — no behavior change.
+
+### New doc
+- `docs/guides/harvis-integrations-setup.md` — full user guide: the 3 layers (catalog / connect / runtime),
+  **what actually runs code (OpenClaw + Ollama only; Claude Code/Codex/OpenCode = install-locally
+  references, no Harvis adapter)**, connect-your-stack steps, **default model = used now vs provider
+  "Save preference" = saved-for-later**, first Build walkthrough, per-surface model/runtime table, API
+  verification (`/api/owui/capabilities`, no secrets), and a Track A/B/C + personas testing matrix.
+
+### Honest copy fixes (frontend, build → restart nginx-proxy)
+- `catalog.ts` — added a `runtimeNote` to **claude-code** and **codex-app**: *"External CLI — install on
+  your machine; Harvis can't launch it from Build yet."* (they previously had no at-a-glance caveat; only
+  opencode did). Verified both render.
+- Integrations page — the Save-preference toast now says *"Saved {{name}} as a preferred provider
+  (applied later)"* / *"… locally (applied later)"* so it matches the tooltip's honest "no effect yet"
+  (provider prefs are stored for a future engine-selection feature; they don't switch the engine today).
+
+### Result
+Built clean, deployed :9000; claude-code + codex-app show the external-CLI note (×2), opencode/openclaw
+notes intact. Uncommitted on `harvis1.1`; no push until reviewed.
+
+---
+
+## 2026-06-26: Integrations → backend routing from preference (Phase D)
+
+### Goal
+Make the saved default model actually drive backend routing for clients that DON'T pre-fill a model
+(raw API hitting the OWUI facade) — closing the loop so preferences route, not just pre-fill the UI.
+
+### Change (backend only — restart harvis-backend)
+- `owui_compat/chat_completion.py` — NEW `_apply_default_model(request, owui_body, user_id)`, called in
+  `run_chat_completion` after the injections, before `owui_body_to_proxy`. When the incoming model is
+  empty / an auto sentinel (`auto`/`default`/`user-pref`/`dynamic`), it substitutes the user's server-side
+  `default_model` (reuses `capabilities._read_integrations`). Fail-soft (any error leaves the body
+  untouched → model_proxy's own auto-resolution still runs).
+
+### Why it's safe / scoped
+- Normal OWUI chat always sends an explicit model → no-op there.
+- The direct OpenClaw/Discord path bypasses the facade → its global `/model` pick is unchanged (clean
+  separation: facade = per-user pref; direct model_proxy = global pick).
+- Per-user (JWT) — never crosses users.
+
+### Result
+Verified live: set default = `hermes3:3b`, sent `/api/chat/completions {model:"auto"}` → response came back
+from `hermes3:3b` (the saved pref, NOT the global `qwen3.5:latest` fallback). Default cleared after.
+**The Integrations capability arc is now complete: A → B1 → C1 → C2 → C3 → D.**
+
+### Gap-review hardening (post-audit, 2 adversarial auditors)
+Triaged the audit; fixed 4 genuine findings (rest were by-design fail-soft or false positives):
+1. **VibeCode could pre-fill a removed model** → now guards `($models).some(m=>m.id===d)` before setting
+   `selectedModel` (Chat already guarded; verified a bogus default no longer pre-fills).
+2. **Dual localStorage keys** → consolidated to one `harvis.integrations.default_model` (the legacy
+   `harvis.code.defaultModel` had no external reader left); removes a cross-device desync seam.
+3. **`preferredReadyProvider`** was dead code → removed.
+4. **`POST /default-model`** accepted unbounded strings → 256-char cap (→ 400). Verified.
+
+Uncommitted on `harvis1.1`; no push until reviewed.
+
+---
+
+## 2026-06-26: Integrations → Default model preference + Chat/Code pre-fill (Phase C, slice C2+C3)
+
+### Goal
+Make preferences actually *pick* a model: "preferred provider" ≠ "preferred model", so C1's registry
+couldn't pre-fill anything concrete. C2 adds a server-side `default_model`; C3 wires VibeCode + Chat to
+pre-fill from it (only when nothing else set a model).
+
+### Backend (owui_compat/capabilities.py — restart harvis-backend)
+- `GET /api/owui/capabilities` now also returns `default_model` (read from
+  `owui_user_settings.settings.integrations.default_model`). `_read_prefs` → `_read_integrations` (one read
+  returns both prefs + default_model).
+- NEW `POST /api/owui/capabilities/default-model` `{model: string|null}` — validates (non-empty string or
+  null → else 400), RMW preserving ALL sibling settings keys (mutates only `integrations.default_model`).
+  Display/preference only — does NOT change backend run-time routing.
+
+### Frontend (front_end/owui — build → restart nginx-proxy)
+- `lib/integrations/registry.ts` — `default_model` in the type/GET + `saveDefaultModel(model|null)`
+  (write-through: localStorage `harvis.integrations.default_model` + legacy `harvis.code.defaultModel`, then POST).
+- `integrations/+page.svelte` — NEW compact **"Default model"** selector under the header (from `$models`),
+  saves on change ("Default model saved" / "Saved locally"); one consolidated registry fetch on mount
+  hydrates the picker + caches default_model to localStorage (primes Chat/Code) + soft-syncs local prefs.
+- `vibecode/+page.svelte` — the existing inert seam now resolves the default (localStorage → server fallback
+  for cross-device) and pre-fills `selectedModel` when empty.
+- `Chat.svelte` `loadChat()` — a guarded branch between `$settings.models` and `$config.default_models`:
+  pre-fills from `localStorage['harvis.integrations.default_model']` ONLY when no URL/folder/session/settings
+  model set one AND it's an available model (localStorage read, no fetch in the hot path). Dead-code for any
+  user who already has an OWUI default model — **never overrides an explicit choice**.
+
+### Deliberate non-goal — Phase D (backend run-time routing) deferred
+Because C3 pre-fills the model in the UI, the backend always receives an explicit model for Chat/Code, so
+backend-side "route from prefs" would only affect non-OWUI clients (Discord/raw API) — a separate concern,
+and it touches `model_proxy._resolve_route`/orchestration (risk). Left for a dedicated Phase D.
+
+### Result
+Built clean, deployed :9000, browser-verified: default-model persists in the registry + survives, empty
+string → 400, `ui` preserved, clears to null; setter renders 18 options; VibeCode pre-fills the saved model;
+Chat structurally cannot override an existing OWUI default (verified: user with `settings.models=["gemma4:12b"]`
+keeps it). Test default cleared. Uncommitted on `harvis1.1`; no push until reviewed.
+
+---
+
+## 2026-06-26: Integrations → Capability Registry (Phase C, slice C1)
+
+### Goal
+Make Phase A's preferences + Phase B's connections queryable and VISIBLE: a backend
+capability registry that aggregates live detection + per-user connection state + persisted
+preferences, plus one visible consumer (Agent Studio readiness badges). User chose
+"Foundation + readiness badges" — no Chat/Code model pre-fill (inert today), no routing change.
+
+### Backend (owui_compat — bind-mounted, restart harvis-backend)
+- NEW `capabilities.py`:
+  - `GET /api/owui/capabilities` → `capability → {preferred, providers:[{id,status,ready,source,detail,
+    preferred,connection}]}` + raw `preferences` + `generated_at`. Aggregates the shared `probe_services`
+    helper + per-user OpenClaw BYO row + persisted prefs, inverted through a ~10-row `_PROVIDER_MIRROR`
+    (mirror of catalog.ts `provides`/`detect.serviceKey`). Fail-closed (`ready` only on confirmed probe;
+    no service_key ⇒ never ready). **OpenClaw honesty:** verified-BYO ⇒ `source:"configured"` +
+    `connection:"byo_verified"`; bundled+healthy ⇒ `detected`/`"bundled"`. NO secrets (no byo_url/tokens/
+    mcp commands).
+  - `POST /api/owui/capabilities/preference` → capability-scoped validation (`PREFERABLE_CAPS` + provider
+    must declare that capability → else 400; `provider_id:null` clears). RMW preserves ALL sibling
+    `owui_user_settings.settings` keys (mutates only `integrations.preferences[<cap>]`).
+- `integrations_status.py` — extracted `probe_services(request,user)` so the status endpoint + the registry
+  share ONE readiness computation. Hermes keyed to its own probe (not Ollama).
+- `router.py` — register the new routes after `integrations_status`.
+
+### Frontend (front_end/owui — build → restart nginx-proxy)
+- NEW `lib/integrations/registry.ts` — `getCapabilityRegistry` (fail-soft null), `saveCapabilityPreference`
+  (localStorage-first write-through then POST; `synced` flag), `preferredReadyProvider` (returns a ready
+  provider or null — never a stale/unready id).
+- `integrations/+page.svelte` — `save_preference` now also persists server-side ("Saved to your account" /
+  "Saved locally" on POST failure); one-time soft sync pushes local-only prefs up if the server has none.
+- `agent-studio/Brain.svelte` — NEW compact "Capabilities" RailCard at the top of the stack (pure display):
+  Models / Agents / Tools / Repos, each a label + status dot + honest text ("BYO verified" / "N servers" /
+  "Connected"). Reads only — no runtime behavior change.
+- NEW `python_back_end/tests/test_capability_mirror.py` — drift guard (mirror ids ⊆ catalog, capabilities ⊆
+  catalog `provides`, `PREFERABLE_CAPS` == TS export). Self-contained (ast + regex, no heavy imports).
+
+### Deliberate non-goals
+Frontend display/preference only — NOTHING routes off prefs (orchestration/model_proxy untouched). No new
+tables (reuse `owui_user_settings`). `code_engine_candidate` is display-only; external engines stay
+`ready:false`. Cards keep catalog `deriveSource`; registry consumers trust the backend.
+
+### Result
+Built clean, deployed :9000, browser-verified end-to-end: registry reflects real per-user state (OpenClaw
+`source:configured`/`byo_verified`, GitHub `Connected`, MCP "1 server"); NO secrets in the payload; save a
+preference → persists server-side, survives a backend restart (JSONB), `ui` key preserved; invalid/
+wrong-capability POST → 400; Brain badges match the registry (Models "12 models" · Agents "BYO verified" ·
+Tools "1 server" · Repos "Connected"). Mirror drift checks pass. Test prefs cleared. Uncommitted on
+`harvis1.1`; no push until reviewed. Next = C2: concrete `default_model` preference so prefs can pre-fill Chat/Code.
+
+---
+
+## 2026-06-26: Integrations → Connections / Profiles (Phase B, slice B1)
+
+### Goal
+Make the Integrations detail modal the place a user connects their stack — surfacing the
+EXISTING per-user, encrypted connection backends (OpenClaw BYO, GitHub OAuth, MCP) so
+"connect your gateway → sessions route to it" is real, with no new backend or credential storage.
+
+### Solution (frontend-only — reuse existing encrypted endpoints)
+- NEW `front_end/owui/src/lib/integrations/ConnectionPanel.svelte` — a self-contained
+  "Connection" section keyed off a new catalog field `connect?: 'openclaw_byo'|'github_oauth'|'mcp_link'`:
+  - **OpenClaw BYO** (`openclaw_byo`): "Current runtime: Bundled / Your gateway" + verified/last-error,
+    a gateway-URL field (ws://|wss:// guard), a write-only token field ("🔒 Token saved · Replace token"
+    when one exists — never displayed). **Verify & connect** (`POST /config/byo/verify` — enables routing,
+    sets `byo_verified_at`), **Save connection** (`POST /config/openclaw` — persists without verify),
+    **Use bundled**. Honest copy: "Verify enables routing; saving without verifying keeps bundled until verified."
+  - **GitHub** (`github_oauth`): "Connected as @login" + Disconnect, or **Connect GitHub** (OAuth popup +
+    2s×60 poll, popup-blocked fallback, poll cleared onDestroy) — reuses `lib/apis/agent-runs` github clients.
+  - **MCP** (`mcp_link`): "{N} servers connected" + **Manage connections** → `/harvis/agent-studio/customize`
+    (don't duplicate the CRUD; runtime wiring stays "planned").
+- `lib/apis/integrations/index.ts` — added `getOpenclawConfig`/`verifyOpenclawByo`/`saveOpenclawConfig`
+  (relative `/api/workspace/config/openclaw` + `/config/byo/verify`, Bearer) + `getMcpConnections`.
+- `catalog.ts` — `connect?` field + set on openclaw/github/mcp.
+- `IntegrationDetailModal.svelte` — mount `{#if def.connect}<ConnectionPanel/>`; **suppress the static
+  "Authentication — planned" block when `def.connect` is set** (the Connection section replaces it).
+
+### Deliberate non-goals
+Surface-unification only — the 3 encrypted stores (`user_openclaw_config`, `github_tokens`, `mcp_servers`)
+stay separate (no risky credential migration). Token is write-only (booleans only). No new endpoints/tables.
+Cards/rows keep deploy-level source lines (the modal is the source of truth for per-user state; B1.5 overlay deferred).
+
+### Result
+Built clean, deployed to :9000, browser-verified: OpenClaw panel reflects real BYO state ("Your gateway ·
+Verified", token saved, never shown); GitHub shows connect/connected state; MCP shows server count + Manage
+link; no "— planned" auth block above a working connect. Uncommitted on `harvis1.1`; no push until reviewed.
+Next: Phase C (capability registry `GET /api/owui/capabilities` + consumers).
+
+---
+
+## 2026-06-26: Integrations → global capability layer (Phase A)
+
+### Problem / goal
+Integrations was a per-page catalog. It needed to become the first layer of a global
+plug-and-play capability system: integrations belong to Harvis globally, and every surface
+(Chat, Code, Notebook, Agent Studio, Automations) should consume them BY CAPABILITY — with
+honest copy about what's actually live vs. planned.
+
+### Solution (Phase A — frontend metadata + UI only; no backend/runtime/adapter changes)
+- NEW `front_end/owui/src/lib/integrations/capabilities.ts` — typed `IntegrationCapability`
+  (13), `HarvisSurface` (5), `IntegrationSource` (static/detected/configured/imported);
+  label maps; `deriveSource()` (pure, fail-closed) + `formatSourceLine()` (folds status +
+  detail + source into one line) + `preferableCapabilities()`. One-way import (depends on
+  catalog) so there's no runtime cycle.
+- `catalog.ts` — `IntegrationDefinition` gains `provides` (typed capability contract),
+  `usedBy` (surfaces), `runtimeNote` (honest caveat). All 12 entries mapped. `PREFERABLE_CAPABILITIES`
+  + `actionsFor` now emits a generic `save_preference` (replaces the Code-only `save_for_code`)
+  for any preferable-capability provider. `filterCatalog` searches `provides`/`usedBy` too.
+- Card / Row / Modal show capability chips, "Used by …", and a single source line (rows drop
+  the duplicate `· {detail}`). Modal adds typed Capabilities + "Feature tags" (the old
+  free-form list) + a runtime Note callout. Harvis CLI hero gets its capability chips inline.
+- "Save preference" writes `localStorage['harvis.integrations.preferences.<capability>']=id`
+  per provided capability — PREFERENCE ONLY (no consumer reads it in Phase A).
+
+### Honest runtime notes shown
+OpenClaw = live runtime; MCP = "Registered; agent-runtime wiring planned"; OpenCode/Claude/
+Codex = engine candidates, "not runnable from Harvis yet"; Hermes = models via Ollama, not a
+daemon; Discord = configured at the deploy level.
+
+### Files
+NEW `lib/integrations/capabilities.ts`. EDIT `lib/integrations/{catalog.ts, IntegrationCard,
+IntegrationRow, IntegrationDetailModal}.svelte`, `routes/(app)/harvis/integrations/+page.svelte`.
+
+### Result
+Built clean (no save_for_code refs remain), deployed to :9000, browser-verified: every
+card/row shows capabilities + used-by + source; modal shows typed Capabilities/Feature
+tags/Used-by/Note; "Save preference" writes per-capability keys (OpenClaw → 3 keys), legacy
+`harvis.code.defaultApp` gone; live probes still overlay status. Uncommitted on `harvis1.1`;
+no push until reviewed. Phases B (profiles/import), C (registry/`GET /api/owui/capabilities`),
+D (adapters) deferred.
+
+---
+
 ## 2026-04-24: Agent ran tools but produced empty answers / wrong answers in workspaces
 
 ### Problem

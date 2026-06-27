@@ -139,8 +139,8 @@ openclaw/
 !openclaw/skills/
 !openclaw/skills/.gitkeep
 
-# OpenCode repo clone (embedded git repo - not tracked)
-opencode/
+# OpenCode engine sidecar: the config dir (Dockerfile / opencode.json / entrypoint.sh)
+# IS tracked — only a nested vendored OpenCode source clone is ignored.
 opencode/opencode/
 
 # SGLang fork vendor clone (gitignored — patched locally, not committed)

@@ -71,6 +71,9 @@ def build_config() -> dict:
             # Harvis: VibeCode page = the Claude-Code-desktop layout (session list /
             # attach-repo run + diffs + Create-PR / plan + tasks). Off → the stub.
             "enable_harvis_vibecode": _env_bool("HARVIS_OWUI_VIBECODE", True),
+            # Phase E1: external code engines (OpenCode sidecar) — gates the Build engine
+            # selector. Default OFF; the engine only runs when the sidecar is deployed.
+            "enable_harvis_external_engines": _env_bool("HARVIS_OWUI_EXTERNAL_ENGINES", False),
             # Whether a folder picked via the host browser may be edited IN-PLACE (real files).
             # OFF by default → browsed folders are clone-mode only (held until the permission
             # ladder + an exec sandbox are verified for that path). Mirrors HARVIS_INPLACE_ON_BROWSED.

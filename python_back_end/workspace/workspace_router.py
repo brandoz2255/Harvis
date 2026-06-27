@@ -86,6 +86,11 @@ _LOCAL_OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
 _EXTERNAL_OLLAMA_URL = os.getenv("EXTERNAL_OLLAMA_URL", "")
 _EXTERNAL_OLLAMA_API_KEY = os.getenv("EXTERNAL_OLLAMA_API_KEY", "")
 _MOONSHOT_API_KEY = os.getenv("MOONSHOT_API_KEY", "")
+
+
+def _external_engines_enabled() -> bool:
+    """Phase E1 flag: is the external code-engine adapter (OpenCode) enabled on this deploy?"""
+    return (os.getenv("HARVIS_OWUI_EXTERNAL_ENGINES") or "").strip().lower() in {"1", "true", "yes", "on"}
 _NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
 
 
@@ -998,6 +1003,23 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
             permission_mode=ws.get("vibecode_permission_mode") or "ask",
         )
 
+    elif agent_id == "engine-adapter":
+        # External code engine (Phase E1, e.g. OpenCode): run an external CLI against the
+        # session's clone via the sidecar; same OpenClawEvent stream → unchanged persist/
+        # broadcast/RunView. CLONE (session) isolation only — enforced at turn dispatch.
+        from .orchestration.engine_adapter import run_external_engine_adapter
+        event_stream = run_external_engine_adapter(
+            task_brief, chat_history,
+            model_name=model_name, pool=pool,
+            parent_workspace_id=workspace_id, user_id=ws["user_id"],
+            session_id=ws.get("session_id") or f"ws-{workspace_id}",
+            vibecode_session_id=ws.get("vibecode_session_id") or "",
+            workspace_path=ws.get("workspace_path") or "",
+            base_sha=ws.get("base_sha") or "",
+            repo_path=ws.get("repo_path") or "",
+            engine=ws.get("engine") or "opencode",
+        )
+
     else:
         # Default: route through OpenClaw WebSocket
         event_stream = client.stream(
@@ -1868,6 +1890,7 @@ async def _start_workspace(
     base_sha: Optional[str] = None,
     vibecode_isolation_mode: str = "session",
     vibecode_permission_mode: str = "ask",
+    engine: Optional[str] = None,
 ) -> OpenClawClient:
     """
     Register a workspace in memory, create its queue, and start the background task.
@@ -1914,6 +1937,8 @@ async def _start_workspace(
         "base_sha": base_sha,
         "vibecode_isolation_mode": vibecode_isolation_mode,
         "vibecode_permission_mode": vibecode_permission_mode,
+        # Phase E1: external code engine (e.g. "opencode") for this run; None = native runner.
+        "engine": engine,
         # Two-mode tracking
         "mode": config.mode,
         "allowed_capabilities": config.allowed_capabilities,
@@ -2829,6 +2854,7 @@ class VibecodeSessionCreate(BaseModel):
     title: Optional[str] = None
     isolation_mode: str = "session"   # 'session' (clone, default+safe) | 'inplace' (opt-in)
     permission_mode: str = "ask"      # in-place only: plan|ask|auto-accept|full-auto
+    engine: str = "native"            # Phase E1: 'native' (OpenClaw runner) | 'opencode' (external CLI; clone-only, flag-gated)
     # Local-folder mode (browser File System Access API): the picked directory's display
     # label. Set ⇒ repo_path is ignored, the workspace is created empty + seeded by the
     # browser (POST /seed), and changed files are written back to the real folder per turn.
@@ -2975,19 +3001,25 @@ async def create_vibecode_session(
         base_sha = info.get("base_sha")
         base_branch = base_branch or None
 
+    # Phase E1: external engine is opt-in, clone-only, flag-gated — coerce to native otherwise.
+    engine_val = (
+        "opencode"
+        if (req.engine == "opencode" and _external_engines_enabled() and isolation_mode == "session")
+        else "native"
+    )
     try:
         async with pool.acquire() as conn:
             await conn.execute(
                 """
                 INSERT INTO vibecode_sessions
                     (id, user_id, title, repo_path, base_branch, workspace_path, base_sha,
-                     isolation_mode, permission_mode, local_folder_name, source, status)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'vibecode', 'active')
+                     isolation_mode, permission_mode, local_folder_name, engine, source, status)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'vibecode', 'active')
                 """,
                 session_id, uid,
                 req.title or local_folder_name or (f"{github_owner}/{github_repo}" if github_repo else None),
                 repo_path, base_branch or None,
-                workspace_path, base_sha, isolation_mode, permission_mode, local_folder_name,
+                workspace_path, base_sha, isolation_mode, permission_mode, local_folder_name, engine_val,
             )
     except Exception as exc:
         # Partial-unique-index (23505) → another in-place session raced us onto this repo.
@@ -3263,12 +3295,22 @@ async def start_vibecode_turn(
             vibecode_session_id=session_id,
         )
     else:
+        # Phase E1: route to an EXTERNAL engine when the session selected one AND it's
+        # enabled AND clone-mode (never in-place — we can't gate an external CLI's
+        # actions). Otherwise the native `vibecode-turn` runner (unchanged path). The
+        # `engine` is read from the authoritative session ROW, so reload/resume is consistent.
+        _engine = s.get("engine") or "native"
+        _use_engine = (
+            _engine == "opencode"
+            and _external_engines_enabled()
+            and (s.get("isolation_mode") or "session") == "session"
+        )
         await _start_workspace(
             workspace_id=workspace_id,
             session_id=session_id,  # the turn run's session_id == the vibecode session id
             task_brief=agent_brief,
             chat_history=[],
-            agent_id="vibecode-turn",
+            agent_id="engine-adapter" if _use_engine else "vibecode-turn",
             user_id=uid,
             pool=pool,
             started_epoch=started_epoch,
@@ -3281,6 +3323,7 @@ async def start_vibecode_turn(
             base_sha=s.get("base_sha"),
             vibecode_isolation_mode=s.get("isolation_mode") or "session",
             vibecode_permission_mode=turn_permission,
+            engine=_engine if _use_engine else None,
         )
 
     logger.info(

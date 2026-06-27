@@ -72,6 +72,10 @@ ALTER TABLE vibecode_sessions ADD COLUMN IF NOT EXISTS permission_mode TEXT NOT 
 -- is NULL, the workspace is seeded from the browser, and changed files are written back
 -- to the real folder after each turn. The name is the picked directory's display label.
 ALTER TABLE vibecode_sessions ADD COLUMN IF NOT EXISTS local_folder_name TEXT;
+-- Phase E1: which code engine runs this session's turns. 'native' = the OpenClaw/
+-- vibecode-turn runner; 'opencode' = the external OpenCode CLI via the harvis-opencode
+-- sidecar (clone-mode only, gated by HARVIS_OWUI_EXTERNAL_ENGINES).
+ALTER TABLE vibecode_sessions ADD COLUMN IF NOT EXISTS engine TEXT NOT NULL DEFAULT 'native';
 -- At most ONE active in-place session per repo (they share the real working tree).
 -- DB-enforced so the check-then-create in the endpoint can't race (TOCTOU).
 CREATE UNIQUE INDEX IF NOT EXISTS uq_vibecode_active_inplace

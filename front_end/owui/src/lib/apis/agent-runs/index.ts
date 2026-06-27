@@ -300,6 +300,7 @@ export const createVibecodeSession = async (body: {
 	github_owner?: string; // GitHub-clone source (always clone-mode)
 	github_repo?: string;
 	github_branch?: string;
+	engine?: string; // Phase E1: 'native' (OpenClaw runner) | 'opencode' (external CLI, clone-only, flag-gated)
 }): Promise<VibecodeSession> => {
 	const r = await fetch(`${BASE}/vibecode/sessions`, {
 		method: 'POST',

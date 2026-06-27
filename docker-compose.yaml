@@ -218,6 +218,11 @@ services:
       OPENCLAW_PROJECTS_DIR: "/data/openclaw-projects"
       # Real local repos bind-mounted READ-ONLY for orchestrated clone-local "attached" runs
       # (comma-separated container paths). The agent only ever clones FROM these.
+      # Phase E1 — external code engines (OpenCode sidecar). Flag default OFF.
+      HARVIS_OWUI_EXTERNAL_ENGINES: "${HARVIS_OWUI_EXTERNAL_ENGINES:-}"
+      HARVIS_OPENCODE_CONTAINER: "${HARVIS_OPENCODE_CONTAINER:-harvis-opencode}"
+      HARVIS_OPENCODE_DEFAULT_MODEL: "${HARVIS_OPENCODE_DEFAULT_MODEL:-qwen3:4b}"
+      HARVIS_OPENCODE_TIMEOUT_S: "${HARVIS_OPENCODE_TIMEOUT_S:-900}"
       HARVIS_ATTACHED_REPOS: "${HARVIS_ATTACHED_REPOS:-/data/attached-repos/harvis}"
       # Writable repos for opt-in VibeCode in-place mode (parallel :rw mount).
       HARVIS_ATTACHED_REPOS_RW: "${HARVIS_ATTACHED_REPOS_RW:-/data/attached-repos-rw/harvis}"
@@ -851,6 +856,31 @@ services:
       - "127.0.0.1:18800:18800"
     depends_on:
       backend:
+        condition: service_started
+    networks:
+      - ollama-n8n-network
+
+  # ── Harvis OpenCode engine sidecar (Phase E1 — external code engine) ──
+  # An external coding CLI the VibeCode/Build runtime can drive: the backend
+  # `docker exec`s `opencode run` here against the session clone (shared via the
+  # artifact_data volume, same path) using a LOCAL Ollama model — zero cloud
+  # credentials. Idle by default (invoked per-turn); gated on the backend by
+  # HARVIS_OWUI_EXTERNAL_ENGINES. No host ports. uid 1001 = artifact_data owner.
+  opencode:
+    build:
+      context: ./opencode
+      dockerfile: Dockerfile
+    image: harvis-opencode:local
+    container_name: harvis-opencode
+    restart: unless-stopped
+    user: "1001:1001"
+    environment:
+      OLLAMA_URL: "${OLLAMA_URL:-http://ollama:11434}"
+      HOME: /home/opencode
+    volumes:
+      - artifact_data:/data/artifacts
+    depends_on:
+      ollama:
         condition: service_started
     networks:
       - ollama-n8n-network
