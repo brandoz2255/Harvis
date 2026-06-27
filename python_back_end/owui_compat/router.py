@@ -37,6 +37,8 @@ from .stubs import register_stub_routes
 from .knowledge import register_knowledge_routes
 from .skills import register_skill_routes
 from .connections import register_connection_routes
+from .integrations_status import register_integrations_status_routes
+from .capabilities import register_capabilities_routes
 from .user_settings import register_user_settings_routes
 from .orchestration_pool import register_orchestration_pool_routes
 from .translate import harvis_models_to_owui, harvis_user_to_owui
@@ -630,6 +632,8 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
     register_knowledge_routes(router, get_current_user)
     register_skill_routes(router, get_current_user)
     register_connection_routes(router, get_current_user)
+    register_integrations_status_routes(router, get_current_user)
+    register_capabilities_routes(router, get_current_user)
     register_user_settings_routes(router, get_current_user)
     register_orchestration_pool_routes(router, get_current_user)
 

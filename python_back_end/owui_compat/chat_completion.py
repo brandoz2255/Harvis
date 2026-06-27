@@ -332,6 +332,38 @@ async def _inject_project_instructions(request, owui_body: dict) -> None:
     logger.info("owui_compat: injected project instructions (%d chars)", len(instructions))
 
 
+# Sentinels that mean "no explicit model was chosen" — route these to the user's
+# saved Integrations default model (Phase D). A real model name is left untouched.
+_NO_MODEL_SENTINELS = {"", "auto", "default", "user-pref", "dynamic"}
+
+
+async def _apply_default_model(request, owui_body: dict, user_id: int | None) -> None:
+    """Phase D — backend run-time routing from the user's saved preference.
+
+    When a request arrives WITHOUT an explicit model (empty / an auto sentinel),
+    substitute the user's server-side `default_model` (Integrations preference,
+    set via Phase C2). This is what makes a saved default actually drive routing
+    for clients that don't pre-fill a model (raw API hitting the facade). Normal
+    OWUI chat always sends an explicit model, so this is a no-op there. The direct
+    OpenClaw/Discord path bypasses the facade, so its global `/model` pick still
+    applies. Fail-soft: any error leaves the body untouched and model_proxy's own
+    auto-resolution still runs."""
+    try:
+        if user_id is None:
+            return
+        m = (owui_body.get("model") or "").strip()
+        if m.lower() not in _NO_MODEL_SENTINELS:
+            return
+        from .capabilities import _read_integrations
+
+        pool = getattr(request.app.state, "pg_pool", None)
+        _prefs, default_model = await _read_integrations(pool, int(user_id))
+        if default_model:
+            owui_body["model"] = default_model
+    except Exception:
+        pass
+
+
 async def run_chat_completion(request, owui_body: dict, user_id: int | None = None):
     # Lazy import keeps this package free of import-time coupling to the
     # workspace package (avoids any chance of a circular import at load).
@@ -345,5 +377,6 @@ async def run_chat_completion(request, owui_body: dict, user_id: int | None = No
     # below) — never globally. See _inject_skills.
     await _inject_skills(request, owui_body, user_id=user_id)
     await _inject_project_instructions(request, owui_body)
+    await _apply_default_model(request, owui_body, user_id)  # Phase D: pref → routing
     proxy_body = owui_body_to_proxy(owui_body)
     return await execute_chat_completion(request, proxy_body)

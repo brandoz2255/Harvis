@@ -1239,9 +1239,20 @@
 					if ($settings?.models) {
 						// Set from user settings
 						selectedModels = $settings?.models;
-					} else if (defaultModels && defaultModels.length > 0) {
-						// Set from default models
-						selectedModels = defaultModels;
+					} else {
+						// Phase C: pre-fill from the user's saved Integrations default model —
+						// ONLY when nothing above set a model. localStorage cache (no fetch here);
+						// falls through to config defaults if unset / not an available model.
+						let prefModel = '';
+						try {
+							prefModel = localStorage.getItem('harvis.integrations.default_model') || '';
+						} catch (_) {}
+						if (prefModel && availableModels.includes(prefModel)) {
+							selectedModels = [prefModel];
+						} else if (defaultModels && defaultModels.length > 0) {
+							// Set from default models
+							selectedModels = defaultModels;
+						}
 					}
 				}
 			}
