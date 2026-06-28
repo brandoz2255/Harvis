@@ -89,8 +89,73 @@ _MOONSHOT_API_KEY = os.getenv("MOONSHOT_API_KEY", "")
 
 
 def _external_engines_enabled() -> bool:
-    """Phase E1 flag: is the external code-engine adapter (OpenCode) enabled on this deploy?"""
+    """ONE global flag (no per-engine flags) gating ALL external code engines (E1+E2)."""
     return (os.getenv("HARVIS_OWUI_EXTERNAL_ENGINES") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _hermes_engine_enabled() -> bool:
+    """Phase E4 (now ``hermes-native``, experimental fallback): flag gating the Hermes
+    *native* engine (SubAgentRunner + SOUL persona on a local Hermes Ollama model)."""
+    return (os.getenv("HARVIS_OWUI_HERMES_ENGINE") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _hermes_agent_engine_enabled() -> bool:
+    """Phase E4B: separate flag gating the FULL Hermes Agent app engine (the real
+    NousResearch hermes-agent runtime in the harvis-hermes-agent sidecar). Decoupled from
+    both the external-engines flag and the E4 native-hermes flag."""
+    return (os.getenv("HARVIS_OWUI_HERMES_AGENT_ENGINE") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+# Engine ids stored in vibecode_sessions.engine. opencode = local (no auth); codex +
+# claude-code = CLOUD (per-user API key); hermes-agent = the full Hermes Agent app
+# (local Ollama, no key) run via the engine-adapter sidecar (Phase E4B). All of these
+# route to the engine-adapter. The auth-row engine id == the engine id here.
+EXTERNAL_ENGINE_IDS = {"opencode", "codex", "claude-code", "hermes-agent"}
+CLOUD_ENGINE_IDS = {"codex", "claude-code"}
+# Phase E4 (renamed): the experimental NATIVE Hermes engine (vibecode-turn SubAgentRunner
+# + SOUL persona, NOT a sidecar). Kept as an opt-in fallback alongside the real app engine.
+NATIVE_ENGINE_IDS = {"hermes-native"}
+
+
+def _engine_enabled(engine: str) -> bool:
+    """Per-engine enablement: hermes-agent has its OWN flag; the other external engines
+    (opencode/codex/claude-code) share the external-engines flag. (hermes-native is NATIVE,
+    gated by _hermes_engine_enabled separately.)"""
+    if engine == "hermes-agent":
+        return _hermes_agent_engine_enabled()
+    if engine in EXTERNAL_ENGINE_IDS:
+        return _external_engines_enabled()
+    return False
+
+
+async def _installed_hermes_models() -> Optional[list[str]]:
+    """Phase E4: best-effort list of installed Ollama tags containing 'hermes' (local +
+    optional desktop). Returns ``None`` if the tags probe FAILED on every endpoint — so
+    callers can fail-OPEN on a transient error rather than falsely rejecting a Hermes
+    session. Returns ``[]`` when the probe succeeded but no Hermes model is installed.
+    Never raises; never logs model contents."""
+    urls = [_LOCAL_OLLAMA_URL]
+    _desk = os.getenv("DESKTOP_OLLAMA_URL", "")
+    if _desk:
+        urls.append(_desk)
+    any_ok = False
+    found: list[str] = []
+    for base in urls:
+        if not base:
+            continue
+        b = base.rstrip("/")
+        tags_url = b.replace("/v1", "") + "/api/tags" if "/v1" in b else f"{b}/api/tags"
+        try:
+            async with _httpx.AsyncClient(timeout=_httpx.Timeout(5.0)) as client:
+                resp = await client.get(tags_url)
+            if resp.status_code == 200:
+                any_ok = True
+                for m in (resp.json() or {}).get("models", []) or []:
+                    name = m.get("name") or m.get("model") or ""
+                    if "hermes" in name.lower():
+                        found.append(name)
+        except Exception as exc:
+            logger.debug("hermes-model probe failed for %s: %s", b, exc)
+    return found if any_ok else None
 _NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
 
 
@@ -1001,6 +1066,8 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
             repo_path=ws.get("repo_path") or "",
             isolation_mode=ws.get("vibecode_isolation_mode") or "session",
             permission_mode=ws.get("vibecode_permission_mode") or "ask",
+            # Phase E4: "hermes" → SOUL persona + Hermes model; "" → plain native runner.
+            persona_engine=ws.get("vibecode_persona_engine") or "",
         )
 
     elif agent_id == "engine-adapter":
@@ -1018,6 +1085,8 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
             base_sha=ws.get("base_sha") or "",
             repo_path=ws.get("repo_path") or "",
             engine=ws.get("engine") or "opencode",
+            api_key=ws.get("engine_key"),  # decrypted per-user credential for cloud engines; None for opencode
+            auth_mode=ws.get("engine_auth_mode") or "api_key",  # E4B: api_key vs subscription oauth_token
         )
 
     else:
@@ -1891,6 +1960,9 @@ async def _start_workspace(
     vibecode_isolation_mode: str = "session",
     vibecode_permission_mode: str = "ask",
     engine: Optional[str] = None,
+    engine_key: Optional[str] = None,
+    engine_auth_mode: str = "api_key",
+    vibecode_persona_engine: str = "",
 ) -> OpenClawClient:
     """
     Register a workspace in memory, create its queue, and start the background task.
@@ -1939,6 +2011,15 @@ async def _start_workspace(
         "vibecode_permission_mode": vibecode_permission_mode,
         # Phase E1: external code engine (e.g. "opencode") for this run; None = native runner.
         "engine": engine,
+        # Phase E2: decrypted per-user CREDENTIAL for cloud engines (codex/claude-code), held
+        # in-memory for this run only — NEVER logged/persisted. None for opencode/native.
+        "engine_key": engine_key,
+        # Phase E4B: which credential the cloud engine injects — 'api_key' (ANTHROPIC_API_KEY)
+        # or 'oauth_token' (CLAUDE_CODE_OAUTH_TOKEN, Claude subscription). Never both.
+        "engine_auth_mode": engine_auth_mode,
+        # Phase E4: "hermes" when this is a Hermes native-engine turn (SOUL persona +
+        # Hermes model on the SubAgentRunner); "" for plain native / external engines.
+        "vibecode_persona_engine": vibecode_persona_engine,
         # Two-mode tracking
         "mode": config.mode,
         "allowed_capabilities": config.allowed_capabilities,
@@ -3001,12 +3082,34 @@ async def create_vibecode_session(
         base_sha = info.get("base_sha")
         base_branch = base_branch or None
 
-    # Phase E1: external engine is opt-in, clone-only, flag-gated — coerce to native otherwise.
-    engine_val = (
-        "opencode"
-        if (req.engine == "opencode" and _external_engines_enabled() and isolation_mode == "session")
-        else "native"
-    )
+    # Phase E1/E2/E4: an engine is opt-in, clone-only, flag-gated. Policy: COERCE to
+    # native for flag-off / in-place; REJECT an unknown engine; REJECT a cloud engine
+    # (codex/claude-code) without a verified per-user API key; REJECT Hermes when no
+    # Hermes model is installed. External engines run as sidecars (engine-adapter);
+    # Hermes runs the NATIVE SubAgentRunner with a SOUL persona.
+    _req_engine = (req.engine or "native")
+    if _req_engine != "native" and _req_engine not in (EXTERNAL_ENGINE_IDS | NATIVE_ENGINE_IDS):
+        raise HTTPException(status_code=400, detail=f"unknown engine '{_req_engine}'")
+    engine_val = "native"
+    if _req_engine in EXTERNAL_ENGINE_IDS and _engine_enabled(_req_engine) and isolation_mode == "session":
+        if _req_engine in CLOUD_ENGINE_IDS:
+            from owui_compat.engine_auth import user_has_verified_engine
+            if not await user_has_verified_engine(pool, uid, _req_engine):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{_req_engine} requires a connected, verified API key — connect it in Integrations first",
+                )
+        engine_val = _req_engine   # opencode / codex / claude-code / hermes-agent → engine-adapter
+    elif _req_engine == "hermes-native" and _hermes_engine_enabled() and isolation_mode == "session":
+        # Phase E4 (experimental fallback): reject only when the model probe SUCCEEDS and
+        # finds no Hermes model (fail-OPEN on a transient probe error — runtime fails soft).
+        _hms = await _installed_hermes_models()
+        if _hms is not None and len(_hms) == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Hermes Native needs an installed Hermes model — pull one (e.g. `ollama pull hermes3:3b`) first",
+            )
+        engine_val = "hermes-native"
     try:
         async with pool.acquire() as conn:
             await conn.execute(
@@ -3300,11 +3403,33 @@ async def start_vibecode_turn(
         # actions). Otherwise the native `vibecode-turn` runner (unchanged path). The
         # `engine` is read from the authoritative session ROW, so reload/resume is consistent.
         _engine = s.get("engine") or "native"
+        _is_session = (s.get("isolation_mode") or "session") == "session"
+        # opencode / codex / claude-code / hermes-agent → engine-adapter sidecar. Each is
+        # gated by its own flag (hermes-agent has HARVIS_OWUI_HERMES_AGENT_ENGINE; the rest
+        # share the external-engines flag) via _engine_enabled().
         _use_engine = (
-            _engine == "opencode"
-            and _external_engines_enabled()
-            and (s.get("isolation_mode") or "session") == "session"
+            _engine in EXTERNAL_ENGINE_IDS
+            and _engine_enabled(_engine)
+            and _is_session
         )
+        # Phase E4 (experimental): hermes-native is a NATIVE engine — it runs the
+        # vibecode-turn SubAgentRunner (NOT the sidecar), specialized with a SOUL persona +
+        # a local Hermes model. agent_id stays "vibecode-turn"; we thread a persona flag.
+        _use_hermes = (
+            _engine == "hermes-native"
+            and _hermes_engine_enabled()
+            and _is_session
+        )
+        # Cloud engines need the user's verified key, decrypted here at turn start and
+        # held in-memory for this run only. If it was disconnected since session-create,
+        # the adapter fails soft (emits a "connect your key" error) so the user sees why.
+        _engine_key = None
+        _engine_auth_mode = "api_key"  # E4B: 'api_key' | 'oauth_token' (Claude subscription)
+        if _use_engine and _engine in CLOUD_ENGINE_IDS:
+            from owui_compat.engine_auth import get_verified_engine_auth
+            _auth = await get_verified_engine_auth(pool, uid, _engine)
+            if _auth:
+                _engine_key, _engine_auth_mode = _auth
         await _start_workspace(
             workspace_id=workspace_id,
             session_id=session_id,  # the turn run's session_id == the vibecode session id
@@ -3324,6 +3449,9 @@ async def start_vibecode_turn(
             vibecode_isolation_mode=s.get("isolation_mode") or "session",
             vibecode_permission_mode=turn_permission,
             engine=_engine if _use_engine else None,
+            engine_key=_engine_key,
+            engine_auth_mode=_engine_auth_mode,
+            vibecode_persona_engine="hermes-native" if _use_hermes else "",
         )
 
     logger.info(

@@ -39,6 +39,7 @@ from .skills import register_skill_routes
 from .connections import register_connection_routes
 from .integrations_status import register_integrations_status_routes
 from .capabilities import register_capabilities_routes
+from .engine_auth import register_engine_auth_routes
 from .user_settings import register_user_settings_routes
 from .orchestration_pool import register_orchestration_pool_routes
 from .translate import harvis_models_to_owui, harvis_user_to_owui
@@ -158,7 +159,17 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
     # ── models ────────────────────────────────────────────────────────────
     async def _owui_models(request: Request, user):
         native = await deps.list_models(request, user)
-        return {"data": harvis_models_to_owui(native)}
+        data = harvis_models_to_owui(native)
+        # Phase E4B: surface the Hermes-Agent chat model when its engine flag is on AND the
+        # sidecar API server is reachable (fail-closed). Additive — never replaces a model.
+        try:
+            from .hermes_chat import hermes_chat_model_entry
+            _hm = await hermes_chat_model_entry()
+            if _hm and not any((m or {}).get("id") == _hm["id"] for m in data):
+                data.append(_hm)
+        except Exception:
+            pass
+        return {"data": data}
 
     @router.get("/api/models")
     async def owui_models(request: Request, user=Depends(get_current_user)):
@@ -634,6 +645,7 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
     register_connection_routes(router, get_current_user)
     register_integrations_status_routes(router, get_current_user)
     register_capabilities_routes(router, get_current_user)
+    register_engine_auth_routes(router, get_current_user)
     register_user_settings_routes(router, get_current_user)
     register_orchestration_pool_routes(router, get_current_user)
 

@@ -32,7 +32,7 @@ class ModelRouter:
         ``{role, content, tool_calls?}``. Raises on transport/HTTP error so the
         caller can surface it as an agent error event."""
         # Lazy import — avoid import-time coupling; reuse the single resolver.
-        from workspace.model_proxy import _resolve_route
+        from workspace.model_proxy import _resolve_route, _rescue_text_tool_calls
 
         target_url, headers, _is_kimi, _is_nvidia, upstream_model = await _resolve_route(model_name)
 
@@ -60,4 +60,15 @@ class ModelRouter:
         # Surface token usage (OpenAI shape: prompt_tokens/completion_tokens/total_tokens)
         # so the runner can report real context occupancy. Was discarded before.
         msg["_usage"] = data.get("usage") or {}
+        # Phase E4: Hermes models often emit tool_calls as fenced JSON inside the text
+        # content instead of the OpenAI tool_calls field (the same quirk model_proxy
+        # rescues for the chat/OpenClaw path). The native runner POSTs straight to the
+        # model and bypasses that rescue, so the model "tries" to edit but the runner
+        # sees no tool_call. Re-apply the rescue here for Hermes models. Idempotent +
+        # a no-op when there's nothing to lift; gated on the model name to stay scoped.
+        if "hermes" in (model_name or "").lower():
+            try:
+                msg, _n = _rescue_text_tool_calls(msg)
+            except Exception:
+                pass
         return msg

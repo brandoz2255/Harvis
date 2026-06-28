@@ -21,6 +21,7 @@ must never edit one working tree at once (corruption + a meaningless diff).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import re
@@ -146,6 +147,7 @@ async def run_vibecode_turn(
     repo_path: str = "",
     isolation_mode: str = "session",   # 'session' (clone) | 'inplace' (real repo on a branch)
     permission_mode: str = "ask",      # in-place permission ladder: plan|ask|auto-accept|full-auto
+    persona_engine: str = "",          # Phase E4: "hermes" → SOUL persona + Hermes model; "" → plain native
 ) -> AsyncGenerator[OpenClawEvent, None]:
     # Lazy import (avoid circular import at module load) — the FUNCTIONS, not the
     # re-exported APIRouter in workspace/__init__.py.
@@ -160,6 +162,14 @@ async def run_vibecode_turn(
     label = "VibeCode"
     run_id = parent_workspace_id  # the turn run == this run
     started = time.monotonic()
+
+    # Phase E4: Hermes native engine — default to a Hermes model if the selected model
+    # isn't one, then reassign model_name so EVERY event + the run row reflect the model
+    # actually used (amendment: record which Hermes model ran when overriding a selection).
+    _persona_override_from = ""
+    if persona_engine == "hermes-native" and "hermes" not in (model_name or "").lower():
+        _persona_override_from = model_name or "(none)"
+        model_name = os.getenv("HARVIS_HERMES_DEFAULT_MODEL", "hermes3:3b")
 
     # Ensure the turn run row exists, tag it source='vibecode' (keeps it out of
     # generic history), and carry repo_path (for later Create-PR resolution).
@@ -219,10 +229,42 @@ async def run_vibecode_turn(
             "steps. You are proposing the work, not doing it."
         )
 
+    # Phase E4: Hermes engine — PREPEND the user's SOUL persona to whatever system prompt
+    # we composed above (base or plan-augmented). This is what makes Hermes a DISTINCT
+    # engine vs "pick a hermes model on Native", and it finally wires the otherwise chat-
+    # only plugins/soul/loader.py into a Build prompt builder. Fail-soft: any load error →
+    # plain native behavior. SECURITY: never log the raw persona / system prompt — only a
+    # length + truncated hash as a safe marker.
+    if persona_engine == "hermes-native":
+        persona = ""
+        if pool is not None and user_id:
+            try:
+                from plugins.soul.loader import build_persona_block
+                persona = await build_persona_block(
+                    pool, int(user_id), include_default_when_unset=True
+                )
+            except Exception as exc:
+                logger.warning("vibecode: hermes SOUL persona load failed (user=%s): %s", user_id, exc)
+                persona = ""
+        if persona:
+            sys_prompt = persona + "\n\n" + sys_prompt
+            _phash = hashlib.sha256(persona.encode("utf-8")).hexdigest()[:12]
+            logger.info(
+                "vibecode: hermes persona applied (user=%s, chars=%d, sha256=%s)",
+                user_id, len(persona), _phash,
+            )
+
     # Serialize turns on this session's single working tree.
     lock = _lock_for(vibecode_session_id or sess or parent_workspace_id)
     async with lock:
         yield root_ev("log", {"message": f"VibeCode turn on {os.path.basename(workspace_path)}"})
+        if persona_engine == "hermes-native":
+            # Record the Hermes model actually used (and what it overrode, if anything) so
+            # it's visible in the run stream — not just the persisted run row.
+            _msg = f"Hermes engine: running {model_name}"
+            if _persona_override_from:
+                _msg += f" (overrode selected model {_persona_override_from})"
+            yield root_ev("log", {"message": _msg})
         async for ev in runner.run(
             run_id=run_id,
             parent_run_id=run_id,

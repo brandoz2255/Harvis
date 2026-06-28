@@ -93,3 +93,71 @@ export const getMcpConnections = async (): Promise<any[]> => {
 		return [];
 	}
 };
+
+// Phase E2: per-user cloud-engine credentials (engine ∈ {codex, claude-code}). Write-only —
+// the GET returns only {api_key_saved, verified_at, last_error}, never the key.
+export type EngineAuthStatus = {
+	engine: string;
+	api_key_saved: boolean;
+	auth_mode?: string; // E4B: 'api_key' | 'oauth_token' (Claude subscription)
+	supports_oauth?: boolean; // true for claude-code (subscription token mode)
+	verified_at: string | null;
+	last_error: string | null;
+};
+
+export const getEngineAuth = async (engine: string): Promise<EngineAuthStatus | null> => {
+	try {
+		const r = await fetch(`/api/owui/engine-auth/${engine}`, { headers: hdr(), credentials: 'include' });
+		if (!r.ok) return null;
+		return await r.json();
+	} catch (_) {
+		return null;
+	}
+};
+
+export const saveEngineKey = async (
+	engine: string,
+	credential: string,
+	authMode: string = 'api_key'
+): Promise<{ ok: boolean }> => {
+	try {
+		const r = await fetch(`/api/owui/engine-auth/${engine}`, {
+			method: 'POST', headers: hdr(), credentials: 'include',
+			body: JSON.stringify({ credential, auth_mode: authMode })
+		});
+		return { ok: r.ok };
+	} catch (_) {
+		return { ok: false };
+	}
+};
+
+export const verifyEngineKey = async (
+	engine: string,
+	credential?: string,
+	authMode?: string
+): Promise<{ ok: boolean; error?: string }> => {
+	try {
+		const body: Record<string, string> = {};
+		if (credential) body.credential = credential;
+		if (authMode) body.auth_mode = authMode;
+		const r = await fetch(`/api/owui/engine-auth/${engine}/verify`, {
+			method: 'POST', headers: hdr(), credentials: 'include',
+			body: JSON.stringify(body)
+		});
+		const d = await r.json().catch(() => ({}));
+		return { ok: !!d?.ok, error: d?.error };
+	} catch (_) {
+		return { ok: false, error: 'request failed' };
+	}
+};
+
+export const disconnectEngine = async (engine: string): Promise<{ ok: boolean }> => {
+	try {
+		const r = await fetch(`/api/owui/engine-auth/${engine}/disconnect`, {
+			method: 'POST', headers: hdr(), credentials: 'include'
+		});
+		return { ok: r.ok };
+	} catch (_) {
+		return { ok: false };
+	}
+};

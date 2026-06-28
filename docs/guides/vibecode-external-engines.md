@@ -1,12 +1,96 @@
-# VibeCode External Code Engines — OpenCode (Phase E1)
+# VibeCode External Code Engines — OpenCode (E1) + Codex / Claude Code (E2)
 
 Harvis Build (VibeCode) normally runs its own native agent on the OpenClaw runtime.
-**Phase E1** lets a Build session run an **external coding CLI** instead — shipping
-with **OpenCode**, run against your **local Ollama** models (zero cloud credentials).
+**External engines** let a Build session run a third-party coding CLI instead:
 
-The engine is **off by default**, **clone-mode only**, and the **git diff is the only
-gate** (the external CLI runs autonomously inside a throwaway clone — your real repo is
-never touched).
+| Engine | Models | Auth | Notes |
+|---|---|---|---|
+| **OpenCode** (E1) | local Ollama | none | zero cloud credentials; sidecar CLI |
+| **Codex** (E2) | cloud GPT/Codex | **your OpenAI key** | per-user, encrypted; sidecar CLI |
+| **Claude Code** (E2) | cloud Claude | **your Anthropic key** | per-user, encrypted; sidecar CLI |
+| **Hermes** (E4) | local Hermes models | none | **native runner** + your SOUL persona; own flag |
+
+The **sidecar** engines (OpenCode/Codex/Claude Code) are **off by default** behind
+`HARVIS_OWUI_EXTERNAL_ENGINES`. **Hermes** is a *native* engine (the in-process Harvis
+runner, not a sidecar) behind its **own** flag `HARVIS_OWUI_HERMES_ENGINE` — enable it
+independently. All engines are **clone-mode only**, and the **git diff is the only gate**
+(the agent runs autonomously inside a throwaway clone — your real repo is never touched).
+The cloud engines bill **your** vendor account, so the operator pays nothing.
+
+---
+
+## Hermes — the native persona engine (E4)
+
+Hermes is **not** a sidecar CLI like the others. It runs Harvis's own in-process agent
+runner (`SubAgentRunner`, the same engine as **Native**) but specialized two ways:
+
+1. **Defaults to a local Hermes model** — if the selected model isn't a `hermes` tag, the
+   turn uses `HARVIS_HERMES_DEFAULT_MODEL` (default `hermes3:3b`). The model actually used
+   is recorded on the run row **and** logged into the run stream when it overrode a
+   selection.
+2. **Carries your SOUL persona** — it prepends your per-user `SOUL.md`
+   (`plugins/soul/loader.build_persona_block`, with the neutral `DEFAULT_SOUL_MD` when you
+   haven't set one) to the Build system prompt. This is what makes Hermes a *distinct*
+   engine versus "pick a hermes model on Native", and it activates the SOUL machinery that
+   was otherwise chat-only. The raw persona/prompt is **never logged** — only a length +
+   truncated SHA-256 marker.
+
+Everything else is the standard native pipeline: RunView, **Stop**, the cumulative diff,
+artifacts, and the clone-safety model. No sidecar, no credentials, no new tables (it reuses
+the `user_soul` table). In v1 the composer hides the Plan/Agents controls for Hermes (same
+as the other non-native engines).
+
+```bash
+# enable + pull a Hermes model
+ollama pull hermes3:3b
+HARVIS_OWUI_HERMES_ENGINE=1 HARVIS_HERMES_DEFAULT_MODEL=hermes3:3b docker restart harvis-backend
+# Build → new clone session → engine selector shows "Hermes" (ready iff flag + a hermes model)
+```
+
+**Readiness** (`/api/owui/capabilities` → `engine_readiness.hermes`): `ready` iff the flag
+is on AND a Hermes model is installed; otherwise `reason: "disabled"` (flag off) or
+`reason: "no_hermes_model"` (flag on, none pulled — surfaced as a hint in the composer).
+
+---
+
+## Cloud engines (Codex, Claude Code) — connecting a key
+
+The cloud engines need **your own API key**, connected per-user through the encrypted
+**Connect panel** (Integrations → Codex / Claude Code → "Connect & verify"). The key is
+stored **encrypted** (Fernet, same as OpenClaw BYO), is **write-only** (the UI never shows
+it back), and is decrypted only at run time and injected into the sidecar **per-exec** —
+never baked in the image, never logged. **User A's key is never visible or usable by user B.**
+
+A cloud engine only becomes selectable in Build once its credential is **verified** (the
+registry reports `engine_readiness.<engine>.ready` only when the sidecar is up AND the user
+has a verified credential; otherwise `reason: "missing_auth"`).
+
+```bash
+# enable + bring up all three sidecars
+HARVIS_OWUI_EXTERNAL_ENGINES=1 docker compose up -d --build opencode codex claude-code backend
+# then connect a credential in the UI: Integrations → Codex (or Claude Code) → Connect & verify
+```
+
+### Claude Code — two auth modes (Phase E4B)
+
+Claude Code accepts **either** of two per-user credentials — the user picks the mode in the
+Connect panel (Codex is API-key-only):
+
+| Mode | What you provide | Stored | Runtime env | Verify |
+|------|------------------|--------|-------------|--------|
+| **API key** | an Anthropic API key | encrypted (`auth_mode='api_key'`) | `ANTHROPIC_API_KEY` | `max_tokens:1` Messages call |
+| **Claude subscription** | the token from `claude setup-token` (needs Pro/Max/Team/Enterprise) | encrypted (`auth_mode='oauth_token'`) | `CLAUDE_CODE_OAUTH_TOKEN` | a `claude -p` CLI smoke in the sidecar |
+
+**Subscription users don't need API credits.** Exactly **one** credential env var is injected
+per run — never both (`ANTHROPIC_API_KEY` officially takes precedence, so a stray one would
+shadow the OAuth token). Secrets are write-only + encrypted, decrypted only at run time,
+never logged. The `user_engine_auth` table carries `auth_mode`.
+
+⚠️ **Sidecar gotcha:** the `claude-code` image bakes `CLAUDE_CODE_SIMPLE=1` (simple/bare mode),
+which reads auth **strictly** from `ANTHROPIC_API_KEY` and **ignores `CLAUDE_CODE_OAUTH_TOKEN`**
+(a valid token → "Not logged in"). Harvis therefore sets `CLAUDE_CODE_SIMPLE=` (off) per-exec
+for subscription-token mode (and `=1` for API-key mode). Same reason Harvis never uses
+`--bare`. Verified end-to-end with a real subscription token (Build run → diff, no API credits).
 
 ---
 

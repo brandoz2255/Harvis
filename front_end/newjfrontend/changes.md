@@ -1,3 +1,74 @@
+## 2026-06-28: Claude Code dual-auth (API key OR Claude subscription) + Phase E4B Hermes Agent
+
+### Claude Code = dual per-user auth (E4B)
+Claude Code now connects with **either** an Anthropic **API key** OR a **Claude subscription token**
+(`claude setup-token`, for Pro/Max/Team/Enterprise) — subscribers no longer need API credits. The user
+picks the mode in the Connect panel.
+- **Backend:** `user_engine_auth.auth_mode` column (idempotent ALTER); `engine_auth.py` dual save/verify/
+  status (`get_verified_engine_auth → (secret, mode)`); **OAuth verify = a real `claude -p` CLI smoke in
+  the sidecar** (never the Messages API — that token isn't for normal API requests); API-key verify =
+  `max_tokens:1` Messages call; `oauth_token` rejected for Codex (400). `engine_adapter._build_claude_command`
+  injects **exactly one** credential env var by mode (`ANTHROPIC_API_KEY` | `CLAUDE_CODE_OAUTH_TOKEN`) —
+  never both, never `--bare`. `workspace_router` threads `engine_auth_mode` end-to-end.
+- **🩹 Root-cause fix:** the `claude-code` sidecar bakes `CLAUDE_CODE_SIMPLE=1` (simple/bare mode) which
+  **ignores `CLAUDE_CODE_OAUTH_TOKEN`** (a valid token → "Not logged in"). Now set `CLAUDE_CODE_SIMPLE=`
+  (off) per-exec for subscription-token mode (`=1` for API key); verify smoke does the same + surfaces the
+  real CLI error (it logs to stdout).
+- **Frontend:** Connect panel **API key | Claude subscription** toggle with a 3-step "Get your subscription
+  token" guide (copyable `claude setup-token`, Pro/Max note, "lasts ~1 year · no API credits"); corrected the
+  Claude Code card copy (was "future release"/"Planned" → "Supported", dual-auth described honestly).
+- **Verified end-to-end with a real subscription token:** connect → verify `ok=true` → `claude-code` ready
+  → Build run created `hello.py` + captured the diff in 6.3s **on the subscription, no API credits**, token
+  never logged. New `tests/test_engine_auth_modes.py` (7 passing) locks the credential-injection invariants.
+
+### Phase E4B — Hermes Agent runtime as a Build engine + Chat model
+The **real** NousResearch Hermes Agent app runs as the `harvis-hermes-agent` sidecar — a **Build engine**
+(`engine="hermes-agent"` → engine-adapter `docker exec hermes -z --yolo` in a clone, diff captured) and a
+**Chat model** (`owui_compat/hermes_chat.py` proxies `model=hermes-agent` → the app's `:8642/v1`, isolated
+from `model_proxy`). Per-user `HERMES_HOME`, write-confined to the clone, local Ollama (no cloud keys).
+E4's native engine renamed `hermes` → `hermes-native` (experimental fallback). Full report:
+`docs/handoffs/2026-06-28-e4b-hermes-agent-complete.md`.
+
+---
+
+## 2026-06-27: Phase E4 — Hermes as a specialized native Build engine (SOUL persona + Hermes model)
+
+### Goal
+Make **Hermes** a real Build engine. Key finding: there is **no runnable hermes-agent gateway** to wire (NousResearch's hermes-agent is a single-session CLI, not a daemon), so Hermes can't be a sidecar/gateway like OpenCode/Codex/Claude. Instead Hermes is a **specialized *native* runner**: the in-process `vibecode-turn` `SubAgentRunner`, defaulted to a local Hermes model and carrying the user's **SOUL persona** — surfacing the per-user SOUL machinery (`plugins/soul/loader.py`, phases 1–7B, otherwise chat-only) into Build.
+
+### What shipped (flag-gated default OFF; clone-mode only; on `harvis1.1`, NOT committed)
+- **Own flag** `HARVIS_OWUI_HERMES_ENGINE` (decoupled from the external-engines flag) + `HARVIS_HERMES_DEFAULT_MODEL` (default `hermes3:3b`). Hermes is **excluded from `EXTERNAL_ENGINE_IDS`** (new `NATIVE_ENGINE_IDS`); `engine="hermes"` routes to `agent_id="vibecode-turn"` (the native runner), NOT the sidecar `engine-adapter`.
+- **`run_vibecode_turn(persona_engine="hermes")`**: prepends `build_persona_block(pool, user_id, include_default_when_unset=True)` to the system prompt (never logs the raw persona — only `chars=N, sha256=…`); defaults a Hermes model if the selected isn't a hermes tag and **records/emits the model actually used**.
+- **Registry**: `integrations_status.py` `hermes-engine` readiness (ready iff flag + installed Hermes model; reason `disabled`/`no_hermes_model`); `capabilities.py` `engine_readiness.hermes` + `hermes-agent` now provides `agent_runtime` (mirror + `catalog.ts` in sync → `test_capability_mirror.py` green).
+- **Frontend** `vibecode/+page.svelte`: `ENGINE_LABELS.hermes`, Hermes in `readyEngineIds`, selector gating generalized to backend readiness (each engine self-gates by its own flag), a "Pull a Hermes model" hint. `catalog.ts` honest copy.
+- **Tool-call rescue**: the native `SubAgentRunner` (`ModelRouter`) POSTs straight to Ollama and **bypassed `model_proxy`'s hermes tool-call-as-text rescue**, so Hermes "tried" to edit but the runner saw no tool_call. Now calls `model_proxy._rescue_text_tool_calls` in `ModelRouter.complete` gated on `"hermes"` in the model name.
+
+### Verified (flag ON, :9000)
+`engine_readiness.hermes={ready:true}`; `agent_runtime` providers `[hermes-agent, openclaw]`; session persists `engine=hermes`; **persona injected** (logged sha+chars, no raw text); **model-override emitted** in the run stream; **Stop works** (×2 clean cancel); OpenCode/Codex/Claude/Native unaffected; OWUI builds. The native runner **dispatched a Hermes `edit_file` tool_call** (edit path proven). **NOT cleanly demonstrated:** a fully-completed turn→diff — hermes3:3b is an inconsistent tool-caller and slow on the 8 GB GPU; the 8b is too slow; hermes4 (the rescue's target) isn't installed. Best confirmed in-browser with a capable Hermes model. **Commit held** until then.
+
+---
+
+## 2026-06-27: Phase E2 — Codex + Claude Code as authenticated cloud Build engines
+
+### Goal
+Extend the E1 engine adapter to two more terminal coding CLIs — **Codex** (cloud GPT) and **Claude Code** (cloud Claude) — each run on the *user's own* API key (operator pays nothing). OpenCode stays the free-local option. (Codex-local was dropped: it works only with the heavy gpt-oss:20b + bwrap-free sandbox + a socat ollama forward — impractical on the 8 GB dev GPU; OpenCode covers free-local.) Hermes → separate deferred E4 (it's an OpenClaw-style gateway, not a CLI).
+
+### What shipped (flag-gated default OFF; clone-mode only)
+- **NEW sidecars** `harvis-codex` + `harvis-claude-code` (`codex/` + `claude-code/` Dockerfiles/entrypoints + compose services): node:20 + the CLI + git, uid 1001, share `artifact_data`. **No key baked** — the backend injects the user's decrypted key per-exec (`docker exec -e OPENAI_API_KEY=… / -e ANTHROPIC_API_KEY=…`).
+- **NEW `owui_compat/engine_auth.py`** + `user_engine_auth` table (idempotent): per-user encrypted keys reusing `main.encrypt/decrypt_api_key` (Fernet). Endpoints `GET/POST/verify/disconnect /api/owui/engine-auth/{codex|claude-code}` — **write-only** (status returns `{api_key_saved, verified_at, last_error}`, never the key). Verify hits the vendor (OpenAI `/v1/models`, Anthropic `max_tokens:1`).
+- **`engine_adapter.py` refactor**: per-engine **command builders** + **output mappers** (`_build_*`/`_map_*` for opencode/codex/claude), dispatched by `engine`; shared path-guard/timeout/diff/persist + a robust per-run kill (cwd+argv match). Codex maps `item.completed{command_execution,reasoning,agent_message}`; Claude maps stream-json `assistant/user/result`. Accepts a decrypted `api_key` for cloud engines.
+- **`workspace_router` generalization**: `_engine == "opencode"` → `_engine in EXTERNAL_ENGINE_IDS` (one global flag, no per-engine flags); session-create **coerces** native (flag-off/in-place) + **rejects** (unknown engine | cloud-without-verified-key); turn-start decrypts the user's key in-memory for the run; orchestrate/in-place force native.
+- **Registry**: `codex-app`/`claude-code` get real `service_key`s + `_derive_source`; `probe_services` reports cloud engines ready ONLY when (flag + sidecar running + **user has a verified key**); NEW structured `engine_readiness` object in `/api/owui/capabilities`.
+- **Frontend**: ConnectionPanel `engine_api_key` mode (write-only key, Connect&verify/Re-verify/Disconnect); `engine-auth` API clients; catalog `connect`+honest runtimeNote for codex-app/claude-code; Build selector generalized to Native + each *ready* engine (cloud never auto-default unless preferred + verified).
+
+### Verified (flag ON, :9000; cloud paths sans real key)
+codex + claude-code sidecars up; CLIs present; **no-key codex run → 401 from api.openai.com** (auth gate works) · `engine_readiness` = `{opencode:ready, codex/claude:needs_setup missing_auth}` · engine-auth GET write-only · **verify bogus key → "OpenAI rejected the key (HTTP 401)" + last_error set** (whole verify path works) · unknown engine → 400 · **OpenCode regression: refactored adapter still produces a real diff** (`ok.py`). Cloud Codex/Claude turns edit-a-file verification needs a real key — connect via the UI to activate (the key flow is proven by the 401 path).
+
+### NOT pushed
+On `harvis1.1`, uncommitted, flag default OFF (live dev backend has it ON for testing).
+
+---
+
 ## 2026-06-26: Phase E1 — External code engine (OpenCode) makes "Build with OpenCode" real
 
 ### Goal

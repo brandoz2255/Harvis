@@ -223,6 +223,21 @@ services:
       HARVIS_OPENCODE_CONTAINER: "${HARVIS_OPENCODE_CONTAINER:-harvis-opencode}"
       HARVIS_OPENCODE_DEFAULT_MODEL: "${HARVIS_OPENCODE_DEFAULT_MODEL:-qwen3:4b}"
       HARVIS_OPENCODE_TIMEOUT_S: "${HARVIS_OPENCODE_TIMEOUT_S:-900}"
+      # Phase E4 — Hermes NATIVE engine (SubAgentRunner + SOUL persona, no sidecar). Own
+      # flag (decoupled from the external-engines flag). Flag default OFF.
+      HARVIS_OWUI_HERMES_ENGINE: "${HARVIS_OWUI_HERMES_ENGINE:-}"
+      HARVIS_HERMES_DEFAULT_MODEL: "${HARVIS_HERMES_DEFAULT_MODEL:-hermes3:3b}"
+      # Phase E4B — Hermes AGENT app engine (the REAL Hermes Agent runtime in the
+      # harvis-hermes-agent sidecar). Own flag, default OFF. The connector docker-execs
+      # the sidecar per Build run (local Ollama, no cloud key).
+      HARVIS_OWUI_HERMES_AGENT_ENGINE: "${HARVIS_OWUI_HERMES_AGENT_ENGINE:-}"
+      HARVIS_HERMES_AGENT_CONTAINER: "${HARVIS_HERMES_AGENT_CONTAINER:-harvis-hermes-agent}"
+      HARVIS_HERMES_OLLAMA_URL: "${HARVIS_HERMES_OLLAMA_URL:-http://ollama:11434/v1}"
+      HARVIS_HERMES_AGENT_DEFAULT_MODEL: "${HARVIS_HERMES_AGENT_DEFAULT_MODEL:-qwen3:4b}"
+      # E4B Chat: the facade proxies the "hermes-agent" chat model to the sidecar's
+      # OpenAI-compatible API server (:8642). Key MUST match the sidecar's API_SERVER_KEY.
+      HARVIS_HERMES_API_SERVER_KEY: "${HARVIS_HERMES_API_SERVER_KEY:-harvis-hermes-local-dev}"
+      HARVIS_HERMES_AGENT_CHAT_URL: "${HARVIS_HERMES_AGENT_CHAT_URL:-http://harvis-hermes-agent:8642}"
       HARVIS_ATTACHED_REPOS: "${HARVIS_ATTACHED_REPOS:-/data/attached-repos/harvis}"
       # Writable repos for opt-in VibeCode in-place mode (parallel :rw mount).
       HARVIS_ATTACHED_REPOS_RW: "${HARVIS_ATTACHED_REPOS_RW:-/data/attached-repos-rw/harvis}"
@@ -885,6 +900,76 @@ services:
     networks:
       - ollama-n8n-network
 
+  # ── Harvis Codex engine sidecar (Phase E2 — cloud, per-user OpenAI key) ──
+  # Runs OpenAI's Codex CLI against the session clone. The user's OpenAI key is
+  # injected per-exec at run time (docker exec -e OPENAI_API_KEY=…) — NOT baked here.
+  # Talks to api.openai.com over the bridge network. Gated by HARVIS_OWUI_EXTERNAL_ENGINES.
+  codex:
+    build:
+      context: ./codex
+      dockerfile: Dockerfile
+    image: harvis-codex:local
+    container_name: harvis-codex
+    restart: unless-stopped
+    user: "1001:1001"
+    environment:
+      HOME: /home/codex
+    volumes:
+      - artifact_data:/data/artifacts
+    networks:
+      - ollama-n8n-network
+
+  # ── Harvis Claude Code engine sidecar (Phase E2 — cloud, per-user Anthropic key) ──
+  # Runs Anthropic's Claude Code CLI against the session clone. The user's Anthropic
+  # key is injected per-exec at run time (docker exec -e ANTHROPIC_API_KEY=…) — NOT
+  # baked here. Talks to api.anthropic.com over the bridge network. Same flag gate.
+  claude-code:
+    build:
+      context: ./claude-code
+      dockerfile: Dockerfile
+    image: harvis-claude-code:local
+    container_name: harvis-claude-code
+    restart: unless-stopped
+    user: "1001:1001"
+    environment:
+      HOME: /home/claude
+      CLAUDE_CODE_SIMPLE: "1"
+    volumes:
+      - artifact_data:/data/artifacts
+    networks:
+      - ollama-n8n-network
+
+  # ── Harvis Hermes Agent engine sidecar (Phase E4B — the REAL NousResearch Hermes app) ──
+  # Thin wrapper FROM the official image. Runs as ROOT (the gateway is s6-supervised and
+  # requires root) and serves the OpenAI-compatible API server on :8642 (Chat) on the
+  # INTERNAL network only — no host port. Build runs are driven by the backend via
+  # `docker exec -u 1001 hermes -z` against a session clone (files land 1001-owned so the
+  # backend can diff them). Local Ollama only — NO provider/API key baked.
+  hermes-agent:
+    build:
+      context: ./hermes-agent
+      dockerfile: Dockerfile
+    image: harvis-hermes-agent:local
+    container_name: harvis-hermes-agent
+    restart: unless-stopped
+    environment:
+      HERMES_HOME: /opt/data
+      API_SERVER_ENABLED: "${HARVIS_HERMES_API_SERVER_ENABLED:-true}"
+      API_SERVER_HOST: "0.0.0.0"
+      API_SERVER_PORT: "8642"
+      # v0.17 REQUIRES a key to start the API server (even internal/loopback). Internal
+      # network only (no host port); this is a local gateway bearer token, NOT a user/
+      # cloud credential. Override in prod. The backend Chat connector uses the same value.
+      API_SERVER_KEY: "${HARVIS_HERMES_API_SERVER_KEY:-harvis-hermes-local-dev}"
+      HARVIS_HERMES_OLLAMA_URL: "${HARVIS_HERMES_OLLAMA_URL:-http://ollama:11434/v1}"
+      HARVIS_HERMES_AGENT_DEFAULT_MODEL: "${HARVIS_HERMES_AGENT_DEFAULT_MODEL:-qwen3:4b}"
+    volumes:
+      - artifact_data:/data/artifacts       # session clones (Build) — shared with the backend
+      - hermes_gateway_home:/opt/data       # gateway (Chat) profile/config/memory
+      - hermes_homes:/data/hermes-homes     # per-user Build profiles (HERMES_HOME per run)
+    networks:
+      - ollama-n8n-network
+
 networks:
   ollama-n8n-network:
     external: true
@@ -907,3 +992,5 @@ volumes:
   tts_rvc_assets:
   openclaw-data:
   openclaw-projects:
+  hermes_gateway_home:   # Phase E4B: Hermes Agent gateway (Chat) profile/config/memory
+  hermes_homes:          # Phase E4B: per-user Hermes Build profiles (HERMES_HOME per run)

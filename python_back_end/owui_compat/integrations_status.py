@@ -113,23 +113,80 @@ async def probe_services(request: Request, user) -> tuple[dict, list]:
         {"status": "ready"} if os.getenv("DISCORD_BOT_TOKEN") else {"status": "available"}
     )
 
-    # ── OpenCode external engine (Phase E1): ready ONLY when the deploy flag is on AND
-    # the harvis-opencode sidecar is actually running — so the registry never advertises
-    # a dead engine. Fail-closed to "available" (= not runnable) on any error.
-    services["opencode"] = {"status": "available"}
-    if (os.getenv("HARVIS_OWUI_EXTERNAL_ENGINES") or "").strip().lower() in {"1", "true", "yes", "on"}:
+    # ── External code engines (Phase E1/E2): ready ONLY when the global flag is on AND the
+    # sidecar is running AND — for CLOUD engines (codex/claude-code) — the current user has
+    # a verified API key. (opencode is local, no key.) Fail-closed to "available" on error.
+    # Keyed by service_key so the capability mirror reads them directly.
+    _engines = (
+        ("opencode", "HARVIS_OPENCODE_CONTAINER", "harvis-opencode", False),
+        ("codex", "HARVIS_CODEX_CONTAINER", "harvis-codex", True),
+        ("claude-code", "HARVIS_CLAUDE_CODE_CONTAINER", "harvis-claude-code", True),
+    )
+    _flag_on = (os.getenv("HARVIS_OWUI_EXTERNAL_ENGINES") or "").strip().lower() in {"1", "true", "yes", "on"}
+    for _eng, _cenv, _cdefault, _needs_auth in _engines:
+        services[_eng] = {"status": "available"}
+        if not _flag_on:
+            continue
         try:
-            import docker  # available in this image (workspace/terminal_container.py uses it)
+            import docker
 
-            _cli = docker.from_env()
-            _name = os.getenv("HARVIS_OPENCODE_CONTAINER", "harvis-opencode")
-            _c = _cli.containers.get(_name)
-            services["opencode"] = (
-                {"status": "ready", "detail": "Engine ready"} if _c.status == "running"
-                else {"status": "needs_setup"}
+            _running = docker.from_env().containers.get(os.getenv(_cenv, _cdefault)).status == "running"
+        except Exception:
+            _running = False
+        if not _running:
+            services[_eng] = {"status": "needs_setup", "detail": "Sidecar not running"}
+            continue
+        if not _needs_auth:
+            services[_eng] = {"status": "ready", "detail": "Engine ready"}
+            continue
+        _authed = False
+        try:
+            from .engine_auth import user_has_verified_engine
+
+            _authed = await user_has_verified_engine(
+                getattr(request.app.state, "pg_pool", None), int(user.id), _eng
             )
         except Exception:
-            services["opencode"] = {"status": "needs_setup"}
+            _authed = False
+        services[_eng] = (
+            {"status": "ready", "detail": "Connected"} if _authed
+            else {"status": "needs_setup", "detail": "Connect your API key", "reason": "missing_auth"}
+        )
+
+    # ── Hermes AGENT app engine (Phase E4B): the REAL NousResearch Hermes Agent runtime
+    # in the harvis-hermes-agent sidecar. Its OWN flag (HARVIS_OWUI_HERMES_AGENT_ENGINE) +
+    # the sidecar running. Local Ollama, NO credentials. Ready is NOT "an ollama hermes
+    # model exists" — it's the actual app service being up.
+    _ha_flag = (os.getenv("HARVIS_OWUI_HERMES_AGENT_ENGINE") or "").strip().lower() in {"1", "true", "yes", "on"}
+    if not _ha_flag:
+        services["hermes-agent"] = {"status": "needs_setup", "reason": "disabled"}
+    else:
+        try:
+            import docker
+            _ha_running = docker.from_env().containers.get(
+                os.getenv("HARVIS_HERMES_AGENT_CONTAINER", "harvis-hermes-agent")
+            ).status == "running"
+        except Exception:
+            _ha_running = False
+        services["hermes-agent"] = (
+            {"status": "ready", "detail": "Hermes Agent app ready"} if _ha_running
+            else {"status": "needs_setup", "detail": "Sidecar not running", "reason": "sidecar_down"}
+        )
+
+    # ── Hermes NATIVE engine (Phase E4): runs the in-process SubAgentRunner with a SOUL
+    # persona on a local Hermes model — no sidecar, no credentials. Gated by its OWN flag
+    # (HARVIS_OWUI_HERMES_ENGINE), ready iff that flag is on AND a Hermes model is installed.
+    # Stored under "hermes-engine" — distinct from the "hermes" model-provider status above
+    # — so the capability mirror's engine_readiness reads it without conflating the two.
+    _hermes_flag = (os.getenv("HARVIS_OWUI_HERMES_ENGINE") or "").strip().lower() in {"1", "true", "yes", "on"}
+    if not _hermes_flag:
+        services["hermes-engine"] = {"status": "needs_setup", "reason": "disabled"}
+    elif hermes_models:
+        services["hermes-engine"] = {"status": "ready", "detail": "Native Hermes engine"}
+    else:
+        services["hermes-engine"] = {
+            "status": "needs_setup", "detail": "No Hermes model installed", "reason": "no_hermes_model",
+        }
 
     return services, installed_models
 

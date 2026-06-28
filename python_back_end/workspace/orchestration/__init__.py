@@ -76,6 +76,26 @@ ALTER TABLE vibecode_sessions ADD COLUMN IF NOT EXISTS local_folder_name TEXT;
 -- vibecode-turn runner; 'opencode' = the external OpenCode CLI via the harvis-opencode
 -- sidecar (clone-mode only, gated by HARVIS_OWUI_EXTERNAL_ENGINES).
 ALTER TABLE vibecode_sessions ADD COLUMN IF NOT EXISTS engine TEXT NOT NULL DEFAULT 'native';
+-- Phase E2: per-user encrypted credentials for CLOUD external engines (Codex GPT,
+-- Claude Code). Reuses main.encrypt_api_key (Fernet). Write-only at the frontend; the
+-- key is decrypted ONLY at run time and injected into the sidecar per-exec. OpenCode is
+-- local (no row). engine ∈ {'codex','claude-code'}.
+CREATE TABLE IF NOT EXISTS user_engine_auth (
+    user_id            INTEGER NOT NULL,
+    engine             TEXT NOT NULL,
+    -- holds the per-user CREDENTIAL (encrypted): an API key OR a Claude subscription
+    -- OAuth token, disambiguated by auth_mode. Column name kept for back-compat.
+    api_key_encrypted  TEXT,
+    auth_mode          TEXT NOT NULL DEFAULT 'api_key',  -- 'api_key' | 'oauth_token'
+    verified_at        TIMESTAMPTZ,
+    last_error         TEXT,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (user_id, engine)
+);
+-- Phase E4B: dual-auth for Claude Code (API key OR Claude subscription OAuth token).
+-- Idempotent for DBs created before auth_mode existed.
+ALTER TABLE user_engine_auth ADD COLUMN IF NOT EXISTS auth_mode TEXT NOT NULL DEFAULT 'api_key';
 -- At most ONE active in-place session per repo (they share the real working tree).
 -- DB-enforced so the check-then-create in the endpoint can't race (TOCTOU).
 CREATE UNIQUE INDEX IF NOT EXISTS uq_vibecode_active_inplace

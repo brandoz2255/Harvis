@@ -54,13 +54,13 @@ PREFERABLE_CAPS: set[str] = {
 # they are intentionally omitted. service_key=None ⇒ catalog reference, never `ready`.
 _PROVIDER_MIRROR: dict[str, dict] = {
     "ollama":       {"capabilities": ["model_provider"],                                          "service_key": "ollama"},
-    "hermes-agent": {"capabilities": ["model_provider"],                                          "service_key": "hermes"},
+    "hermes-agent": {"capabilities": ["model_provider", "agent_runtime"],                          "service_key": "hermes"},
     "openclaw":     {"capabilities": ["agent_runtime", "tool_runtime", "code_engine_candidate"],  "service_key": "openclaw"},
     "github":       {"capabilities": ["repo_provider", "pr_provider"],                            "service_key": "github"},
     "mcp":          {"capabilities": ["tool_provider"],                                           "service_key": "mcp"},
     "discord":      {"capabilities": ["notification_provider"],                                   "service_key": "discord"},
-    "claude-code":  {"capabilities": ["code_engine_candidate"],                                   "service_key": None},
-    "codex-app":    {"capabilities": ["code_engine_candidate"],                                   "service_key": None},
+    "claude-code":  {"capabilities": ["code_engine_candidate"],                                   "service_key": "claude-code"},
+    "codex-app":    {"capabilities": ["code_engine_candidate"],                                   "service_key": "codex"},
     "opencode":     {"capabilities": ["code_engine_candidate"],                                   "service_key": "opencode"},
     "ssh":          {"capabilities": ["remote_execution_target"],                                 "service_key": None},
 }
@@ -88,7 +88,7 @@ def _derive_source(provider_id: str, service_key: Optional[str], status: str, co
         return "configured" if live else "static"
     if service_key == "mcp":
         return "configured" if status not in ("available", "error") else "static"
-    if service_key in ("ollama", "discord", "hermes", "opencode"):
+    if service_key in ("ollama", "discord", "hermes", "opencode", "codex", "claude-code"):
         return "detected" if live else "static"
     return "static"
 
@@ -192,10 +192,32 @@ def register_capabilities_routes(router: APIRouter, get_current_user: Callable) 
         prefs, default_model = await _read_integrations(pool, uid)
         connection = await _openclaw_connection(pool, uid)
         caps = _build_registry(services, prefs, connection)
+        # Phase E2: structured per-ENGINE readiness so the Build selector knows each engine
+        # mode independently (NOT inferred from a single provider boolean). `reason` is set
+        # (e.g. "missing_auth") when the sidecar is up but the user hasn't connected a key.
+        engine_readiness = {}
+        # (engine id exposed to the Build selector, service-key it reads). Phase E4B:
+        # "hermes-agent" = the REAL Hermes Agent app engine (sidecar). "hermes-native" =
+        # the experimental E4 native engine (keyed under "hermes-engine"). Both are distinct
+        # from the "hermes" model-provider status, so flags/gating are read without conflation.
+        for _eng, _svc_key in (
+            ("opencode", "opencode"),
+            ("codex", "codex"),
+            ("claude-code", "claude-code"),
+            ("hermes-agent", "hermes-agent"),
+            ("hermes-native", "hermes-engine"),
+        ):
+            _svc = services.get(_svc_key) or {}
+            _ready = _svc.get("status") in ("ready", "running")
+            _entry = {"ready": _ready}
+            if not _ready and _svc.get("reason"):
+                _entry["reason"] = _svc["reason"]
+            engine_readiness[_eng] = _entry
         return {
             "capabilities": caps,
             "preferences": prefs,
             "default_model": default_model,
+            "engine_readiness": engine_readiness,
             "generated_at": int(time.time()),
         }
 

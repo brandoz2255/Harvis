@@ -60,7 +60,7 @@ export interface IntegrationDefinition {
 	provides?: IntegrationCapability[]; // typed capability contract (capability-first)
 	usedBy?: HarvisSurface[]; // Harvis surfaces that consume it
 	runtimeNote?: string; // honest runtime caveat (e.g. "wiring planned", "not runnable yet")
-	connect?: 'openclaw_byo' | 'github_oauth' | 'mcp_link'; // Phase B: which in-modal connect flow
+	connect?: 'openclaw_byo' | 'github_oauth' | 'mcp_link' | 'engine_api_key'; // Phase B/E2: which in-modal connect flow
 	permissions?: string[];
 	auth?: { required: boolean; modes: AuthMode[]; configured?: boolean; notes?: string };
 	engine?: { support: EngineSupport; adapterId?: string; notes?: string };
@@ -87,7 +87,7 @@ export const CATALOG: IntegrationDefinition[] = [
 		category: 'application',
 		description: 'Anthropic’s terminal coding agent for local developer workflows.',
 		longDescription:
-			'Anthropic’s terminal-native coding agent. In a future release Harvis can drive an installed, user-authenticated Claude Code as an external Code engine — reading the repo, running tasks, and streaming diffs back into Vibe Code.',
+			'Anthropic’s terminal-native coding agent. Harvis drives it as an external Build engine on your own auth — it edits an isolated clone of your repo, runs the task, and streams the diff back into Vibe Code. Connect with an Anthropic API key OR a Claude subscription token (Pro/Max/Team/Enterprise) — so subscribers don’t need API credits.',
 		brandKey: 'claude',
 		status: 'available',
 		provider: 'Anthropic',
@@ -95,16 +95,17 @@ export const CATALOG: IntegrationDefinition[] = [
 		provides: ['code_engine_candidate'],
 		usedBy: ['code'],
 		permissions: ['Runs shell commands', 'Reads / writes repo files'],
-		runtimeNote: 'External CLI — install on your machine; Harvis can’t launch it from Build yet.',
+		connect: 'engine_api_key',
+		runtimeNote: 'Runs as a Harvis Build engine when enabled — connect an Anthropic API key or a Claude subscription token (no API credits needed).',
 		commands: { install: 'curl -fsSL https://claude.ai/install.sh | bash', launch: 'claude', check: 'claude --version' },
 		auth: {
 			required: true,
-			modes: ['local_auth', 'api_key'],
-			notes: 'Uses your local Claude Code sign-in/session or Anthropic credentials. Harvis does not store Claude credentials in this release.'
+			modes: ['api_key', 'oauth_token'],
+			notes: 'Connect with an Anthropic API key OR a Claude subscription token (run `claude setup-token`). Stored encrypted, never shown; exactly one is injected at runtime.'
 		},
 		engine: {
-			support: 'planned',
-			notes: 'Future external engine via an installed + authenticated Claude Code CLI / SDK.'
+			support: 'supported',
+			notes: 'External Build engine via the Claude Code CLI in an isolated sidecar — per-user auth (API key or Claude subscription).'
 		},
 		links: { docs: 'https://code.claude.com/docs/en/', homepage: 'https://www.anthropic.com' }
 	},
@@ -122,7 +123,8 @@ export const CATALOG: IntegrationDefinition[] = [
 		provides: ['code_engine_candidate'],
 		usedBy: ['code'],
 		permissions: ['Runs shell commands', 'Reads / writes repo files'],
-		runtimeNote: 'External CLI — install on your machine; Harvis can’t launch it from Build yet.',
+		connect: 'engine_api_key',
+		runtimeNote: 'Runs as a Harvis Build engine when enabled — connect your OpenAI API key (cloud GPT/Codex models).',
 		commands: { install: 'curl -fsSL https://chatgpt.com/codex/install.sh | sh', launch: 'codex', check: 'codex --version' },
 		auth: {
 			required: true,
@@ -155,18 +157,18 @@ export const CATALOG: IntegrationDefinition[] = [
 	},
 	{
 		id: 'hermes-agent',
-		name: 'Hermes',
+		name: 'Hermes Agent',
 		category: 'service',
-		description: 'Model router / local model family used by Harvis routing.',
+		description: 'The full NousResearch Hermes Agent app — runs as a Harvis Build engine on local models.',
 		longDescription:
-			'Hermes is treated as a routing/model integration in Harvis. The live status is ready when a Hermes model is available through Ollama.',
+			'Hermes Agent is the real NousResearch open-source agent runtime (its own memory, skills, tools and profile system), run as an isolated Harvis sidecar. With the engine enabled (HARVIS_OWUI_HERMES_AGENT_ENGINE), a Build session dispatches to it: Hermes edits a private clone of your repo with its own tools and Harvis captures the diff, RunView and Stop. It runs on your local Ollama models — no cloud credentials. (A lighter experimental "Hermes Native" engine — the in-process runner with a SOUL persona — is also available under its own flag.)',
 		brandKey: 'hermes',
 		status: 'available',
-		provider: 'Nous Research / local models',
-		capabilities: ['model_routing', 'local_models'],
-		provides: ['model_provider'],
+		provider: 'Nous Research (Hermes Agent, MIT)',
+		capabilities: ['agent_runtime', 'local_models', 'build_engine'],
+		provides: ['model_provider', 'agent_runtime'],
 		usedBy: ['chat', 'code', 'notebook', 'agent_studio'],
-		runtimeNote: 'Models served via Ollama, not a separate daemon.',
+		runtimeNote: 'Runs the real Hermes Agent app as a Harvis Build engine (isolated sidecar, local Ollama, no credentials) when enabled.',
 		auth: { required: false, modes: ['ollama'] },
 		detect: { serviceKey: 'hermes' }
 	},

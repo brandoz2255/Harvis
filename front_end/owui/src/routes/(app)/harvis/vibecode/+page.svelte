@@ -5,7 +5,7 @@
 	import { WEBUI_NAME, config, showSidebar, models } from '$lib/stores';
 	import { WEBUI_BASE_URL } from '$lib/constants';
 	import { uploadFile } from '$lib/apis/files';
-	import { getCapabilityRegistry, preferredEngineForVibecode } from '$lib/integrations/registry';
+	import { getCapabilityRegistry } from '$lib/integrations/registry';
 	import {
 		getAttachedRepos,
 		createVibecodeSession,
@@ -518,15 +518,36 @@
 	// Orchestrate = fan this turn out to N task-delegated sub-agents (the planner picks
 	// 3–10, scaling to the task). Off ⇒ a single agent on the session's working copy.
 	let orchestrate = false;
-	// Phase E1: external Build engine. 'native' = OpenClaw vibecode-turn runner; 'opencode'
-	// = the harvis-opencode sidecar (clone-mode only, flag-gated). Selector shows ONLY when
-	// the deploy flag is on AND opencode is ready AND this is a clone (session) flow.
-	let selectedEngine: 'native' | 'opencode' = 'native';
-	let opencodeReady = false;
-	$: externalEnginesEnabled = $config?.features?.enable_harvis_external_engines ?? false;
-	$: showEngineSelector = externalEnginesEnabled && opencodeReady && isolationMode === 'session';
-	// Force native whenever the selector isn't applicable (inplace / flag-off / not ready).
+	// Phase E1/E2: external Build engine. 'native' = OpenClaw vibecode-turn runner; the others
+	// = sidecar CLIs (opencode = local; codex/claude-code = cloud, per-user key). Clone-mode
+	// only, flag-gated. Selector shows ONLY ready engines (per the registry engine_readiness).
+	let selectedEngine = 'native';
+	let engineReadiness: Record<string, { ready: boolean; reason?: string }> = {};
+	// Phase E4B: "Hermes Agent" = the REAL NousResearch Hermes Agent app (sidecar, via the
+	// engine-adapter). "Hermes Native" = the experimental E4 in-process runner (SubAgentRunner +
+	// SOUL persona on a local Hermes model). Each gated by its own backend flag.
+	const ENGINE_LABELS: Record<string, string> = {
+		opencode: 'OpenCode',
+		codex: 'Codex',
+		'claude-code': 'Claude Code',
+		'hermes-agent': 'Hermes Agent',
+		'hermes-native': 'Hermes Native'
+	};
+	// The backend engine_readiness ALREADY encodes each engine's flag (a ready entry implies
+	// its flag is on), so we gate the selector purely on "≥1 ready engine + clone-mode" — no
+	// separate front-end flag check. This lets each Hermes engine show under its own flag
+	// without coupling to the external-engines flag, and vice-versa.
+	$: readyEngineIds = ['opencode', 'codex', 'claude-code', 'hermes-agent', 'hermes-native'].filter(
+		(e) => engineReadiness?.[e]?.ready
+	);
+	$: showEngineSelector = readyEngineIds.length > 0 && isolationMode === 'session';
+	// Surface the Hermes-Native "enabled but no model" reason even when the selector is hidden.
+	$: hermesNeedsModel =
+		isolationMode === 'session' && engineReadiness?.['hermes-native']?.reason === 'no_hermes_model';
+	// Force native whenever the selector isn't applicable (inplace / flag-off) or the selected
+	// engine is no longer ready (e.g. key disconnected, sidecar down).
 	$: if (!showEngineSelector && selectedEngine !== 'native') selectedEngine = 'native';
+	$: if (selectedEngine !== 'native' && !engineReadiness?.[selectedEngine]?.ready) selectedEngine = 'native';
 	// Apex → base (rendered top-to-bottom; base = safest = Plan, apex = most autonomy = Auto).
 	const RUN_LADDER: { mode: RunRung; label: string; desc: string }[] = [
 		{ mode: 'full-auto', label: 'Auto', desc: 'Runs everything automatically — no prompts.' },
@@ -1115,8 +1136,10 @@
 		// was removed since can never be sent as an invalid model.
 		try {
 			let d = localStorage.getItem('harvis.integrations.default_model') || '';
-			// Fetch the registry when we need the default model OR the engine default (Phase E1).
-			const reg = !d || externalEnginesEnabled ? await getCapabilityRegistry(localStorage.token) : null;
+			// Always fetch the registry: we need either the default model OR per-engine readiness
+			// (Phase E1/E2/E4 — each engine self-gates by its own flag, so we can't skip this when
+			// a default model is cached). One cheap GET on mount.
+			const reg = await getCapabilityRegistry(localStorage.token);
 			if (!d && reg) {
 				d = reg?.default_model || '';
 				try {
@@ -1124,14 +1147,19 @@
 				} catch (_) {}
 			}
 			if (d && !selectedModel && ($models || []).some((m: any) => m?.id === d)) selectedModel = d;
-			// Phase E1: offer OpenCode only when its sidecar is ready; default per the user's
-			// preferred code engine (opencode iff preferred AND ready, else native).
-			if (externalEnginesEnabled && reg) {
-				const oc = reg?.capabilities?.code_engine_candidate?.providers?.find(
-					(p: any) => p?.id === 'opencode'
-				);
-				opencodeReady = !!oc?.ready;
-				selectedEngine = preferredEngineForVibecode(reg);
+			// Phase E1/E2/E4: read per-engine readiness whenever the registry loads (each engine
+			// gates itself by its own flag, so Hermes surfaces even when the external-engines flag
+			// is off). Default to the user's PREFERRED engine ONLY if it's ready (cloud never auto-
+			// defaults unless preferred + verified; Hermes has no pref mapping, so it's opt-in).
+			if (reg) {
+				engineReadiness = (reg as any)?.engine_readiness || {};
+				const pref = (reg?.preferences as any)?.code_engine_candidate; // provider id
+				const prefEngine =
+					pref === 'opencode' ? 'opencode'
+					: pref === 'codex-app' ? 'codex'
+					: pref === 'claude-code' ? 'claude-code'
+					: null;
+				selectedEngine = prefEngine && engineReadiness?.[prefEngine]?.ready ? prefEngine : 'native';
 			}
 		} catch (_) {}
 		fsSupported = supportsLocalFs();
@@ -1540,7 +1568,7 @@
 					<!-- toolbar -->
 					<div class="flex items-center gap-1.5 mt-2">
 						{#if showEngineSelector}
-							<!-- Phase E1: external Build engine — Native (OpenClaw) vs OpenCode sidecar. -->
+							<!-- Phase E1/E2: external Build engine — Native (OpenClaw) + each ready engine. -->
 							<div
 								class="inline-flex items-center rounded-full border border-white/8 bg-white/4 p-0.5 text-xs"
 								title={$i18n.t('Build engine for this session')}
@@ -1552,21 +1580,29 @@
 										: 'text-gray-400 hover:text-gray-200'}"
 									on:click={() => (selectedEngine = 'native')}>{$i18n.t('Native')}</button
 								>
-								<button
-									type="button"
-									class="px-2 py-0.5 rounded-full transition {selectedEngine === 'opencode'
-										? 'bg-teal-500/15 text-teal-300'
-										: 'text-gray-400 hover:text-gray-200'}"
-									on:click={() => (selectedEngine = 'opencode')}>OpenCode</button
-								>
+								{#each readyEngineIds as eid}
+									<button
+										type="button"
+										class="px-2 py-0.5 rounded-full transition {selectedEngine === eid
+											? 'bg-teal-500/15 text-teal-300'
+											: 'text-gray-400 hover:text-gray-200'}"
+										on:click={() => (selectedEngine = eid)}>{ENGINE_LABELS[eid] || eid}</button
+									>
+								{/each}
 							</div>
 						{/if}
-						{#if selectedEngine === 'opencode'}
-							<span class="text-[11px] text-gray-500"
-								>{$i18n.t('OpenCode runs autonomously on a clone — review the diff.')}</span
+						{#if hermesNeedsModel}
+							<span class="text-[11px] text-amber-400/80"
+								>{$i18n.t('Pull a Hermes model to enable the Hermes engine.')}</span
 							>
 						{/if}
-						{#if selectedEngine !== 'opencode'}
+						{#if selectedEngine !== 'native'}
+							<span class="text-[11px] text-gray-500"
+								>{ENGINE_LABELS[selectedEngine] || selectedEngine}
+								{$i18n.t('runs autonomously on a clone — review the diff.')}</span
+							>
+						{/if}
+						{#if selectedEngine === 'native'}
 						<!-- Run-mode = the permission PYRAMID (per turn): Plan ▸ Ask ▸ Accept ▸ Auto.
 						     The agent works on a clone; the diff/PR is the outer gate. -->
 						<div class="relative">

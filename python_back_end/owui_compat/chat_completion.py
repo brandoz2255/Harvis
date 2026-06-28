@@ -378,5 +378,10 @@ async def run_chat_completion(request, owui_body: dict, user_id: int | None = No
     await _inject_skills(request, owui_body, user_id=user_id)
     await _inject_project_instructions(request, owui_body)
     await _apply_default_model(request, owui_body, user_id)  # Phase D: pref → routing
+    # Phase E4B: the Hermes-Agent chat model is the real app's OpenAI-compatible API server
+    # (a separate sidecar) — proxy it straight through, never entering the native router.
+    from .hermes_chat import is_hermes_chat_model, proxy_hermes_chat
+    if is_hermes_chat_model(owui_body.get("model")):
+        return await proxy_hermes_chat(owui_body)
     proxy_body = owui_body_to_proxy(owui_body)
     return await execute_chat_completion(request, proxy_body)
