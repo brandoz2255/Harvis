@@ -647,6 +647,7 @@
 	let showModeMenu = false;
 	let showRepoMenu = false;
 	let showExecMenu = false; // execution-target dropdown (Local live + SSH seam)
+	let showEngineMenu = false; // Build-engine dropdown (Native + each ready engine)
 	// In-place editing of a BROWSED host folder is gated server-side; the flag is surfaced via
 	// /api/config so the picker defaults to clone unless the deployer has enabled it.
 	$: inplaceOnBrowsed = $config?.features?.enable_inplace_on_browsed ?? false;
@@ -1569,26 +1570,55 @@
 					<div class="flex items-center gap-1.5 mt-2">
 						{#if showEngineSelector}
 							<!-- Phase E1/E2: external Build engine — Native (OpenClaw) + each ready engine. -->
-							<div
-								class="inline-flex items-center rounded-full border border-white/8 bg-white/4 p-0.5 text-xs"
-								title={$i18n.t('Build engine for this session')}
-							>
+							<!-- Build-engine chip → dropdown. Defaults to your Integrations preference
+							     (Save preference on a card); this is the per-session override. -->
+							<div class="relative">
 								<button
 									type="button"
-									class="px-2 py-0.5 rounded-full transition {selectedEngine === 'native'
-										? 'bg-white/10 text-gray-100'
-										: 'text-gray-400 hover:text-gray-200'}"
-									on:click={() => (selectedEngine = 'native')}>{$i18n.t('Native')}</button
+									class="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border border-white/8 bg-white/4 hover:bg-white/8 transition {selectedEngine !==
+									'native'
+										? 'text-teal-300'
+										: 'text-gray-300'}"
+									title={$i18n.t('Build engine for this session')}
+									on:click={() => (showEngineMenu = !showEngineMenu)}
 								>
-								{#each readyEngineIds as eid}
-									<button
-										type="button"
-										class="px-2 py-0.5 rounded-full transition {selectedEngine === eid
-											? 'bg-teal-500/15 text-teal-300'
-											: 'text-gray-400 hover:text-gray-200'}"
-										on:click={() => (selectedEngine = eid)}>{ENGINE_LABELS[eid] || eid}</button
-									>
-								{/each}
+									<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" class="size-3.5"><path d="M12 2 3 7v10l9 5 9-5V7l-9-5z" stroke-linejoin="round" /><path d="M3 7l9 5 9-5M12 12v10" stroke-linejoin="round" /></svg>
+									{selectedEngine === 'native' ? $i18n.t('Native') : ENGINE_LABELS[selectedEngine] || selectedEngine}
+									<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="size-3 text-gray-400"><path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 0 1 1.06.02L10 11.17l3.71-3.94a.75.75 0 1 1 1.08 1.04l-4.25 4.5a.75.75 0 0 1-1.08 0l-4.25-4.5a.75.75 0 0 1 .02-1.06z" clip-rule="evenodd" /></svg>
+								</button>
+								{#if showEngineMenu}
+									<div class="absolute bottom-full mb-1 left-0 z-30 w-56 rounded-xl bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 shadow-lg py-1 text-xs">
+										<div class="px-3 pt-1.5 pb-0.5 text-[10px] uppercase tracking-wide text-gray-400">
+											{$i18n.t('Build engine')}
+										</div>
+										<button
+											class="w-full flex items-center justify-between gap-2 px-3 py-1.5 hover:bg-gray-100 dark:hover:bg-gray-850"
+											on:click={() => {
+												selectedEngine = 'native';
+												showEngineMenu = false;
+											}}
+										>
+											<span>{$i18n.t('Native (OpenClaw)')}</span>
+											{#if selectedEngine === 'native'}<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="size-3.5 shrink-0 text-blue-500"><path d="M20 6 9 17l-5-5" stroke-linecap="round" stroke-linejoin="round" /></svg>{/if}
+										</button>
+										{#each readyEngineIds as eid}
+											<button
+												class="w-full flex items-center justify-between gap-2 px-3 py-1.5 hover:bg-gray-100 dark:hover:bg-gray-850"
+												on:click={() => {
+													selectedEngine = eid;
+													showEngineMenu = false;
+												}}
+											>
+												<span>{ENGINE_LABELS[eid] || eid}</span>
+												{#if selectedEngine === eid}<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="size-3.5 shrink-0 text-blue-500"><path d="M20 6 9 17l-5-5" stroke-linecap="round" stroke-linejoin="round" /></svg>{/if}
+											</button>
+										{/each}
+										<div class="border-t border-gray-100 dark:border-gray-800 my-1"></div>
+										<div class="px-3 py-1 text-[10px] text-gray-400">
+											{$i18n.t('Set a default in Integrations → Save preference.')}
+										</div>
+									</div>
+								{/if}
 							</div>
 						{/if}
 						{#if hermesNeedsModel}
@@ -1997,7 +2027,7 @@
 	</div>
 
 	<!-- click-away backdrop for the composer menus -->
-	{#if showModeMenu || showRepoMenu || showExecMenu || showAttachMenu || showUsageStats || showModelMenu}
+	{#if showModeMenu || showRepoMenu || showExecMenu || showEngineMenu || showAttachMenu || showUsageStats || showModelMenu}
 		<button
 			class="fixed inset-0 z-20 cursor-default"
 			tabindex="-1"
@@ -2006,6 +2036,7 @@
 				showModeMenu = false;
 				showRepoMenu = false;
 				showExecMenu = false;
+				showEngineMenu = false;
 				showAttachMenu = false;
 				showUsageStats = false;
 				showModelMenu = false;
