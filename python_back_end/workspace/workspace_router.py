@@ -2673,6 +2673,47 @@ async def get_run_tree(
     return {"run": _run_row_to_dict(parent) if parent else None, "children": children}
 
 
+# Binary artifacts are stored base64 with this prefix — MUST match isolation._B64_SENTINEL.
+_ARTIFACT_B64_SENTINEL = "__HARVIS_B64__"
+_ARTIFACT_MIME = {
+    "html": "text/html", "htm": "text/html", "md": "text/markdown", "markdown": "text/markdown",
+    "txt": "text/plain", "log": "text/plain", "csv": "text/csv", "tsv": "text/tab-separated-values",
+    "json": "application/json", "yaml": "application/yaml", "yml": "application/yaml", "xml": "application/xml",
+    "svg": "image/svg+xml", "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "gif": "image/gif",
+    "webp": "image/webp", "bmp": "image/bmp", "ico": "image/x-icon", "tiff": "image/tiff", "pdf": "application/pdf",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "zip": "application/zip", "tar": "application/x-tar", "gz": "application/gzip",
+}
+_ARTIFACT_CATEGORY = {
+    "html": "html", "htm": "html", "pdf": "pdf",
+    "png": "image", "jpg": "image", "jpeg": "image", "gif": "image", "webp": "image",
+    "bmp": "image", "ico": "image", "tiff": "image", "svg": "image",
+    "md": "markdown", "markdown": "markdown", "txt": "text", "log": "text",
+    "csv": "data", "tsv": "data", "json": "data", "yaml": "data", "yml": "data", "xml": "data",
+    "docx": "office", "pptx": "office", "xlsx": "office", "doc": "office", "ppt": "office", "xls": "office",
+    "zip": "archive", "tar": "archive", "gz": "archive", "tgz": "archive", "bz2": "archive", "7z": "archive", "rar": "archive",
+}
+_ARTIFACT_SECRET_HINTS = (".env", "credential", "secret", ".key", ".pem", "id_rsa", "id_ed25519", "apikey", "api_key")
+
+
+def _artifact_meta(path) -> dict:
+    """Classify an artifact by filename: category (html/pdf/image/markdown/text/data/office/archive/
+    unknown), mime, and whether its stored content is base64 (binary). svg is an image but TEXT."""
+    p = (path or "")
+    ext = p.rsplit(".", 1)[-1].lower() if "." in p else ""
+    category = _ARTIFACT_CATEGORY.get(ext, "unknown")
+    is_binary = category in ("image", "pdf", "office", "archive") and ext != "svg"
+    return {"category": category, "mime": _ARTIFACT_MIME.get(ext, "application/octet-stream"),
+            "is_binary": is_binary, "ext": ext}
+
+
+def _artifact_is_secret(path) -> bool:
+    n = (path or "").lower().rsplit("/", 1)[-1]
+    return any(h in n for h in _ARTIFACT_SECRET_HINTS)
+
+
 @workspace_router.get("/run/{run_id}/artifacts")
 async def list_run_artifacts(
     run_id: str,
@@ -2697,18 +2738,20 @@ async def list_run_artifacts(
             """,
             run_id,
         )
-    return {
-        "artifacts": [
-            {
-                "id": r["id"],
-                "artifact_type": r["artifact_type"],
-                "path": r["path"],
-                "size": r["size"],
-                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
-            }
-            for r in rows
-        ]
-    }
+    out = []
+    for r in rows:
+        meta = _artifact_meta(r["path"]) if r["artifact_type"] == "file" else {"category": r["artifact_type"], "mime": "text/plain", "is_binary": False}
+        out.append({
+            "id": r["id"],
+            "artifact_type": r["artifact_type"],
+            "path": r["path"],
+            "size": r["size"],
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            "category": meta["category"],
+            "mime": meta["mime"],
+            "is_binary": meta["is_binary"],
+        })
+    return {"artifacts": out}
 
 
 @workspace_router.get("/artifact/{artifact_id}")
@@ -2734,13 +2777,96 @@ async def get_artifact(
         )
     if row is None or row["user_id"] != uid:
         raise HTTPException(status_code=404, detail="Artifact not found")
+    meta = _artifact_meta(row["path"]) if row["artifact_type"] == "file" else {"category": row["artifact_type"], "mime": "text/plain", "is_binary": False}
+    content = row["content"] or ""
+    is_b64 = content.startswith(_ARTIFACT_B64_SENTINEL)
+    # Don't ship base64 bytes in the JSON content — the frontend fetches /raw for binary preview.
+    if is_b64:
+        content = ""
     return {
         "id": row["id"],
         "artifact_type": row["artifact_type"],
         "path": row["path"],
-        "content": row["content"],
+        "content": content,
+        "category": meta["category"],
+        "mime": meta["mime"],
+        "is_binary": meta["is_binary"] or is_b64,
         "created_at": row["created_at"].isoformat() if row["created_at"] else None,
     }
+
+
+async def _fetch_owned_artifact(pool, artifact_id: str, uid):
+    """Fetch an artifact's (path, content) iff the run belongs to uid. Raises 404 otherwise."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT a.path, a.content, r.user_id
+            FROM workspace_artifacts a JOIN workspace_runs r ON r.id = a.workspace_id
+            WHERE a.id = $1
+            """,
+            artifact_id,
+        )
+    if row is None or row["user_id"] != uid:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    if _artifact_is_secret(row["path"]):
+        raise HTTPException(status_code=403, detail="This file type is not downloadable")
+    return row["path"], (row["content"] or "")
+
+
+def _artifact_bytes(path, content: str) -> tuple:
+    """Decode a stored artifact to (bytes, mime). Binary artifacts carry the base64 sentinel."""
+    meta = _artifact_meta(path)
+    if content.startswith(_ARTIFACT_B64_SENTINEL):
+        import base64 as _b64
+        try:
+            data = _b64.b64decode(content[len(_ARTIFACT_B64_SENTINEL):], validate=False)
+        except Exception:
+            data = b""
+        return data, meta["mime"]
+    return content.encode("utf-8", "replace"), (meta["mime"] if meta["category"] != "unknown" else "text/plain; charset=utf-8")
+
+
+@workspace_router.get("/artifact/{artifact_id}/raw")
+async def get_artifact_raw(
+    artifact_id: str,
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """Serve an artifact's bytes inline with the right Content-Type (for <img>/<iframe>/<embed>
+    preview). Ownership-checked; secret-named files refused; HTML served as octet-stream so the
+    browser NEVER renders untrusted model HTML at our origin (preview uses the sandboxed iframe)."""
+    from fastapi.responses import Response
+    pool = getattr(request.app.state, "pg_pool", None)
+    if pool is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    path, content = await _fetch_owned_artifact(pool, artifact_id, current_user.get("id"))
+    data, mime = _artifact_bytes(path, content)
+    # Never serve raw HTML/SVG with an active content-type at our origin (XSS) — force download type.
+    if mime in ("text/html", "image/svg+xml"):
+        mime = "application/octet-stream"
+    return Response(content=data, media_type=mime, headers={"X-Content-Type-Options": "nosniff"})
+
+
+@workspace_router.get("/artifact/{artifact_id}/download")
+async def download_artifact_file(
+    artifact_id: str,
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """Download an artifact as an attachment (always allowed for non-secret files)."""
+    from fastapi.responses import Response
+    import os as _os
+    pool = getattr(request.app.state, "pg_pool", None)
+    if pool is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    path, content = await _fetch_owned_artifact(pool, artifact_id, current_user.get("id"))
+    data, mime = _artifact_bytes(path, content)
+    fname = _os.path.basename(path or "artifact") or "artifact"
+    fname = "".join(c for c in fname if c.isalnum() or c in "._- ()") or "artifact"
+    return Response(
+        content=data, media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"', "X-Content-Type-Options": "nosniff"},
+    )
 
 
 @workspace_router.get("/artifacts")

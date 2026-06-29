@@ -280,7 +280,7 @@ async def run_orchestrated(
         for rel, content in contents.items():
             await _db_save_artifact(
                 pool, parent_workspace_id, "file",
-                path=rel, content=(content or "")[:200_000],
+                path=rel, content=(content or ""),
             )
         # Prefer the sub-agent's own finish() summary (captured from its agent_end)
         # so the run tree / history / Neural Map show what it actually did; fall

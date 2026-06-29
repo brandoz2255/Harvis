@@ -307,7 +307,7 @@ async def run_vibecode_turn(
     )
     for rel, content in contents.items():
         await _db_save_artifact(
-            pool, parent_workspace_id, "file", path=rel, content=(content or "")[:200_000],
+            pool, parent_workspace_id, "file", path=rel, content=(content or ""),
         )
     await _db_save_artifact(
         pool, parent_workspace_id, "changed_files", content="\n".join(files),

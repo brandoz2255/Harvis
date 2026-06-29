@@ -480,7 +480,7 @@ async def run_external_engine_adapter(
     repo_name = os.path.basename((repo_path or workspace_path).rstrip("/")) or "session"
     await _db_save_artifact(pool, parent_workspace_id, "diff", path=f"{label} · {repo_name}", content=diff or "(no changes)")
     for rel, content in contents.items():
-        await _db_save_artifact(pool, parent_workspace_id, "file", path=rel, content=(content or "")[:200_000])
+        await _db_save_artifact(pool, parent_workspace_id, "file", path=rel, content=(content or ""))
     await _db_save_artifact(pool, parent_workspace_id, "changed_files", content="\n".join(files))
 
     try:

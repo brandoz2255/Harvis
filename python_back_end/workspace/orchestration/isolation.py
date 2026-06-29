@@ -16,6 +16,7 @@ rebuild. A future "worktree of an attached repo" mode would use git directly.
 from __future__ import annotations
 
 import asyncio
+import base64
 import difflib
 import json
 import logging
@@ -44,7 +45,34 @@ SESSION_WORKSPACE_ROOT = os.getenv(
 # are computed against this (empty for a fresh scratch dir → all additions).
 _BASELINE_FILE = ".harvis-baseline.json"
 _SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv"}
-_MAX_FILE_BYTES = 512 * 1024  # don't snapshot huge/binary blobs
+_MAX_FILE_BYTES = 512 * 1024  # text snapshot cap
+_MAX_BINARY_BYTES = 8 * 1024 * 1024  # base64-in-DB cap for binary artifacts (images/pdf/office)
+# Binary artifacts are stored base64-encoded with this sentinel prefix so the serve route can
+# unambiguously decode them (vs a text artifact). Children never see this — it's a storage detail.
+_B64_SENTINEL = "__HARVIS_B64__"
+
+# Binary file extensions captured as base64; everything else is read as text.
+_BINARY_EXTS = {
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "tiff",
+    "pdf", "docx", "pptx", "xlsx", "doc", "ppt", "xls", "odt", "ods", "odp",
+    "zip", "tar", "gz", "tgz", "bz2", "7z", "rar",
+    "woff", "woff2", "ttf", "otf", "mp3", "mp4", "wav", "ogg", "webm", "mov", "avi",
+}
+# Secret-looking files are NEVER collected as artifacts (no preview/download). Mirrors the
+# hermes-import deny-list. The diff still shows config changes; artifacts must not expose secrets.
+_ARTIFACT_SECRET_HINTS = (
+    ".env", "credential", "secret", ".key", ".pem", "id_rsa", "id_ed25519",
+    "apikey", "api_key", ".npmrc", ".netrc", ".pgpass", ".htpasswd", ".aws", ".ssh",
+)
+
+
+def _ext_of(name: str) -> str:
+    return name.rsplit(".", 1)[-1].lower() if "." in name else ""
+
+
+def _is_secret_artifact(name: str) -> bool:
+    n = (name or "").lower().rsplit("/", 1)[-1]
+    return any(h in n for h in _ARTIFACT_SECRET_HINTS)
 
 
 def validate_agent_path(workspace_path: str, requested_path: str) -> bool:
@@ -262,18 +290,29 @@ class WorkspaceIsolationManager:
         return sorted(changed)
 
     async def collect_file_contents(self, workspace_path: str) -> dict[str, str]:
-        """Current text content of every CHANGED file — for live previews (the diff
-        alone can't be rendered as a page). Huge/binary blobs come back as a
-        ``<N bytes — not snapshotted>`` placeholder."""
+        """Current content of every CHANGED file, for live artifact previews/downloads.
+
+        Text files → their text (capped). Recognised BINARY files (images/pdf/office/...) →
+        base64 with the ``_B64_SENTINEL`` prefix (capped). Secret-named files (.env/keys) are
+        EXCLUDED entirely — artifacts must never expose credentials. Huge blobs → a placeholder."""
         if self.isolation_mode in ("attached", "session", "inplace"):
             result: dict[str, str] = {}
             for rel in await self.collect_changed_files(workspace_path):
+                if _is_secret_artifact(rel):
+                    continue  # never expose secrets as artifacts
                 fp = os.path.join(workspace_path, rel)
                 try:
                     if not os.path.exists(fp):
                         continue  # deleted file → no content to preview
-                    if os.path.getsize(fp) > _MAX_FILE_BYTES:
-                        result[rel] = f"<{os.path.getsize(fp)} bytes — not snapshotted>"
+                    size = os.path.getsize(fp)
+                    if _ext_of(rel) in _BINARY_EXTS:
+                        if size > _MAX_BINARY_BYTES:
+                            result[rel] = f"<{size} bytes — too large to snapshot>"
+                        else:
+                            with open(fp, "rb") as fh:
+                                result[rel] = _B64_SENTINEL + base64.b64encode(fh.read()).decode("ascii")
+                    elif size > _MAX_FILE_BYTES:
+                        result[rel] = f"<{size} bytes — not snapshotted>"
                     else:
                         with open(fp, "r", encoding="utf-8", errors="replace") as fh:
                             result[rel] = fh.read()
@@ -282,7 +321,10 @@ class WorkspaceIsolationManager:
             return result
         baseline = self._baseline(workspace_path)
         current = _snapshot(workspace_path)
-        return {rel: content for rel, content in current.items() if baseline.get(rel) != content}
+        return {
+            rel: content for rel, content in current.items()
+            if baseline.get(rel) != content and not _is_secret_artifact(rel)
+        }
 
     async def collect_diff(self, workspace_path: str) -> str:
         """Unified diff of everything the agent produced (vs HEAD / the baseline)."""
