@@ -103,7 +103,14 @@ textarea::placeholder {
 }
 
 .markdown-prose {
-	@apply prose dark:prose-invert prose-blockquote:border-s-gray-100 prose-blockquote:dark:border-gray-800 prose-blockquote:border-s-2 prose-blockquote:not-italic prose-blockquote:font-normal  prose-headings:font-semibold prose-hr:my-4 prose-hr:border-gray-50 prose-hr:dark:border-gray-850 prose-p:my-0 prose-img:my-1 prose-headings:my-1 prose-pre:my-0 prose-table:my-0 prose-blockquote:my-0 prose-ul:-my-0 prose-ol:-my-0 prose-li:-my-0 whitespace-pre-line max-w-none;
+	/* Harvis: readable vertical rhythm for AI responses (was near-zero margins → wall of
+	   text). Paragraphs/lists/tables/code now breathe; headings get top space to separate
+	   sections. Tune the `my-*` values here to taste. */
+	@apply prose dark:prose-invert prose-blockquote:border-s-gray-100 prose-blockquote:dark:border-gray-800 prose-blockquote:border-s-2 prose-blockquote:not-italic prose-blockquote:font-normal prose-headings:font-semibold prose-headings:mt-5 prose-headings:mb-2.5 prose-hr:my-6 prose-hr:border-gray-100 prose-hr:dark:border-gray-800 prose-p:my-3 prose-p:leading-7 prose-img:my-3 prose-pre:my-3.5 prose-table:my-4 prose-blockquote:my-3 prose-ul:my-2.5 prose-ol:my-2.5 prose-li:my-1 prose-li:leading-7 whitespace-pre-line max-w-none;
+}
+/* Don't let the first block in a response push down from the avatar. */
+.markdown-prose > :first-child {
+	margin-top: 0 !important;
 }
 
 .markdown-prose-sm {
