@@ -169,6 +169,22 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
                 data.append(_hm)
         except Exception:
             pass
+        # Phase F: per-user cloud chat models (Claude now, GPT later). Appear only when this user
+        # has a VERIFIED cloud credential in Integrations. Fail-closed; never decrypts the secret.
+        try:
+            from .cloud_chat import cloud_chat_model_entries
+            pool = getattr(request.app.state, "pg_pool", None)
+            uid = getattr(user, "id", None)
+            for _cm in await cloud_chat_model_entries(pool, uid):
+                # Dedup by (id, owned_by) so a same-id native model can't silently drop a cloud
+                # entry (cloud ids are anthropic/-prefixed, so this is belt-and-suspenders).
+                if _cm and not any(
+                    (m or {}).get("id") == _cm["id"] and (m or {}).get("owned_by") == _cm.get("owned_by")
+                    for m in data
+                ):
+                    data.append(_cm)
+        except Exception:
+            pass
         return {"data": data}
 
     @router.get("/api/models")

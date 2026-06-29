@@ -130,6 +130,10 @@
 		orchestrate: 'bg-purple-500'
 	};
 	let showModeMenu = false;
+	// "Browse all models…" expands the capped composer model menu IN PLACE (the old goto pointed
+	// at the admin /workspace/models page, which isn't a model picker). Reset when the menu closes.
+	let showAllModels = false;
+	$: if (!showModeMenu) showAllModels = false;
 
 	// The composer always Auto-routes by default; the mode pill shows the active model name.
 	onMount(() => chatMode.set('auto'));
@@ -186,6 +190,10 @@
 
 	export let atSelectedModel: Model | undefined = undefined;
 	export let selectedModels: [''];
+	// Phase F: per-chat reasoning effort for cloud models that support it (Claude via API key,
+	// GPT reasoning models). 'auto' = no forced thinking. The button only shows when the selected
+	// model advertises info.meta.supports_effort.
+	export let selectedEffort = 'auto';
 
 	let selectedModelIds = [];
 	$: selectedModelIds = atSelectedModel !== undefined ? [atSelectedModel.id] : selectedModels;
@@ -196,14 +204,38 @@
 		($models ?? []).find((m) => m.id === (selectedModels?.[0] ?? ''))?.name ??
 		(selectedModels?.[0] || 'Auto');
 
-	// Cap the composer model menu (current model first); a footer links to the full list.
+	// Cap the composer model menu; a footer links to the full list. Phase F: connected cloud
+	// models (Claude/GPT) float to the TOP — when you've connected a cloud provider it becomes
+	// the primary set, with local Ollama models below (still reachable, never stranded).
 	$: modelMenuList = (() => {
+		const all = $models ?? [];
+		const isCloud = (m) => ['anthropic', 'openai'].includes(m?.owned_by);
+		const cloud = all.filter(isCloud);
+		const local = all.filter((m) => !isCloud(m));
+		const ordered = [...cloud, ...local]; // cloud-first
 		const cur = selectedModels?.[0];
-		const curModel = ($models ?? []).find((m) => m.id === cur);
-		const rest = ($models ?? []).filter((m) => m.id !== cur);
-		// Current model first (the menu opens downward, Gemini-style).
-		return (curModel ? [curModel, ...rest] : rest).slice(0, 7);
+		const curModel = all.find((m) => m.id === cur);
+		// Float the active model to the very top (so the current pick is visible) without
+		// disturbing the cloud-first ordering of the rest.
+		const withCur = curModel ? [curModel, ...ordered.filter((m) => m.id !== cur)] : ordered;
+		// Capped to 7 by default; "Browse all models…" expands to the full (scrollable) list.
+		return showAllModels ? withCur : withCur.slice(0, 7);
 	})();
+
+	// Phase F: reasoning-effort control. Shown only when the active model advertises support
+	// (cloud reasoning models). 'auto' → no forced thinking; others map to a thinking budget.
+	const EFFORT_OPTIONS = [
+		{ id: 'auto', label: 'Auto' },
+		{ id: 'low', label: 'Low' },
+		{ id: 'medium', label: 'Medium' },
+		{ id: 'high', label: 'High' },
+		{ id: 'max', label: 'Max' }
+	];
+	let showEffortMenu = false;
+	$: effortModel = ($models ?? []).find(
+		(m) => m.id === (atSelectedModel?.id ?? selectedModels?.[0] ?? '')
+	);
+	$: effortCapable = !!effortModel?.info?.meta?.supports_effort;
 
 	// Mic dropdown — detect input devices + the chosen one (threaded into recording).
 	let showMicMenu = false;
@@ -2186,36 +2218,84 @@
 												</button>
 
 												<svelte:fragment slot="content">
-													{#each modelMenuList as m}
-														<button
-															type="button"
-															class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-left hover:bg-gray-50 dark:hover:bg-gray-800 transition"
-															on:click={() => {
-																selectedModels = [m.id];
-																showModeMenu = false;
-															}}
-														>
-															<span class="flex-1 truncate text-gray-800 dark:text-gray-100">{m.name}</span>
-															{#if (selectedModels?.[0] ?? '') === m.id}
-																<svg class="size-4 text-blue-500 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
-															{/if}
-														</button>
-													{/each}
-													{#if ($models ?? []).length > 7}
+													<div class="max-h-72 overflow-y-auto">
+														{#each modelMenuList as m}
+															<button
+																type="button"
+																class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-left hover:bg-gray-50 dark:hover:bg-gray-800 transition"
+																on:click={() => {
+																	selectedModels = [m.id];
+																	showModeMenu = false;
+																}}
+															>
+																<span class="flex-1 truncate text-gray-800 dark:text-gray-100">{m.name}</span>
+																{#if (selectedModels?.[0] ?? '') === m.id}
+																	<svg class="size-4 text-blue-500 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
+																{/if}
+															</button>
+														{/each}
+													</div>
+													{#if !showAllModels && ($models ?? []).length > 7}
 														<div class="my-1 border-t border-gray-100 dark:border-gray-800"></div>
 														<button
 															type="button"
 															class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-left text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800 transition"
-															on:click={() => { goto('/workspace/models'); showModeMenu = false; }}
+															on:click={() => (showAllModels = true)}
 														>
-															<span class="flex-1">Browse all models…</span>
-															<svg class="size-3.5 opacity-60 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+															<span class="flex-1">{$i18n.t('Show all models')} ({($models ?? []).length})</span>
+															<svg class="size-3.5 opacity-60 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
 														</button>
 													{/if}
 												</svelte:fragment>
 											</Dropdown>
 										</div>
 
+										<!-- Phase F: reasoning-effort dropdown — same UI as the model pill, shown only
+										     when the active cloud model supports it (Claude via API key, GPT reasoning). -->
+										{#if effortCapable}
+											<div class="flex items-center">
+												<Dropdown
+													bind:show={showEffortMenu}
+													side="bottom"
+													align="start"
+													contentClass="rounded-xl border border-gray-100 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-lg p-1 w-44 text-sm"
+												>
+													<button
+														type="button"
+														class="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-gray-850 hover:bg-gray-200 dark:hover:bg-gray-800 transition"
+														tabindex="-1"
+														aria-label="Reasoning effort"
+													>
+														<svg class="size-3.5 opacity-80" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6M10 22h4M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.3 1 2.1h6c0-.8.4-1.6 1-2.1A7 7 0 0 0 12 2z"/></svg>
+														<span class="max-w-[7rem] truncate"
+															>{EFFORT_OPTIONS.find((e) => e.id === selectedEffort)?.label ?? 'Auto'}</span
+														>
+														<svg class="size-3 opacity-70" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6" /></svg>
+													</button>
+
+													<svelte:fragment slot="content">
+														{#each EFFORT_OPTIONS as e}
+															<button
+																type="button"
+																class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-left hover:bg-gray-50 dark:hover:bg-gray-800 transition"
+																on:click={() => {
+																	selectedEffort = e.id;
+																	showEffortMenu = false;
+																}}
+															>
+																<span class="flex-1 truncate text-gray-800 dark:text-gray-100">{e.label}</span>
+																{#if selectedEffort === e.id}
+																	<svg class="size-4 text-blue-500 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
+																{/if}
+															</button>
+														{/each}
+														<div class="px-2.5 pt-1 pb-0.5 text-[10px] text-gray-400">
+															{$i18n.t('Reasoning effort — higher = deeper thinking, slower.')}
+														</div>
+													</svelte:fragment>
+												</Dropdown>
+											</div>
+										{/if}
 
 										{#if prompt === '' && files.length === 0 && ($_user?.role === 'admin' || ($_user?.permissions?.chat?.call ?? true))}
 											<div class=" flex items-center">

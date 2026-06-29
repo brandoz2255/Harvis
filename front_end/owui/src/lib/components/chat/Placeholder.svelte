@@ -41,6 +41,7 @@
 
 	export let atSelectedModel: Model | undefined;
 	export let selectedModels: [''];
+	export let selectedEffort = 'auto'; // Phase F: reasoning effort for cloud reasoning models
 
 	export let history;
 
@@ -173,6 +174,7 @@
 					bind:this={messageInput}
 					{history}
 					bind:selectedModels
+					bind:selectedEffort
 					bind:files
 					bind:prompt
 					bind:autoScroll

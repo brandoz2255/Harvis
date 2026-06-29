@@ -90,6 +90,16 @@ async def get_verified_engine_auth(pool, user_id: int, engine: str) -> Optional[
         return None
 
 
+async def get_verified_auth_mode(pool, user_id: int, engine: str) -> Optional[str]:
+    """Return the auth_mode ('api_key' | 'oauth_token') of a user's VERIFIED credential for an
+    engine, or None if absent/unverified — WITHOUT decrypting the secret. Used by the cloud-chat
+    model list to decide which catalog to surface without touching the encrypted key."""
+    row = await _engine_auth_row(pool, user_id, engine)
+    if not row or row["verified_at"] is None or not row["api_key_encrypted"]:
+        return None
+    return (row["auth_mode"] or "api_key") if "auth_mode" in row else "api_key"
+
+
 async def _verify_oauth_token_via_cli(token: str) -> tuple[bool, str]:
     """Verify a Claude SUBSCRIPTION OAuth token by running the real Claude Code CLI in the
     sidecar with CLAUDE_CODE_OAUTH_TOKEN injected — the EXACT runtime path. A clean exit

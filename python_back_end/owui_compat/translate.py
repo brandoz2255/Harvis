@@ -31,6 +31,7 @@ _OWUI_ONLY_FIELDS = {
     "regeneration_prompt",
     "assistant_message_id",
     "background_tasks",
+    "effort",  # Phase F: cloud-chat reasoning effort — consumed by the cloud proxy, never the native router
 }
 
 # Generation params OWUI nests under `params`; model_proxy / upstreams read them

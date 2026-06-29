@@ -378,6 +378,12 @@ async def run_chat_completion(request, owui_body: dict, user_id: int | None = No
     await _inject_skills(request, owui_body, user_id=user_id)
     await _inject_project_instructions(request, owui_body)
     await _apply_default_model(request, owui_body, user_id)  # Phase D: pref → routing
+    # Phase F: cloud chat models (Claude/GPT) routed to the vendor with the user's OWN verified
+    # credential — full context already injected above; never enters the native Ollama router.
+    from .cloud_chat import is_cloud_chat_model, proxy_cloud_chat
+    if is_cloud_chat_model(owui_body.get("model")):
+        pool = getattr(request.app.state, "pg_pool", None)
+        return await proxy_cloud_chat(owui_body, pool, user_id)
     # Phase E4B: the Hermes-Agent chat model is the real app's OpenAI-compatible API server
     # (a separate sidecar) — proxy it straight through, never entering the native router.
     from .hermes_chat import is_hermes_chat_model, proxy_hermes_chat

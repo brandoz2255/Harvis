@@ -146,6 +146,7 @@
 	let eventCallback = null;
 
 	let selectedModels = [''];
+	let selectedEffort = 'auto'; // Phase F: reasoning effort for cloud reasoning models
 	let atSelectedModel: Model | undefined;
 	let selectedModelIds = [];
 	$: if (atSelectedModel !== undefined) {
@@ -2611,6 +2612,10 @@
 					follow_up_generation: $settings?.autoFollowUps ?? true
 				},
 
+				// Phase F: reasoning effort for cloud models (Claude API key / GPT reasoning). Allowlisted
+				// (omitted for 'auto'/invalid) so non-cloud requests are untouched; the cloud proxy reads it.
+				...(['low', 'medium', 'high', 'max'].includes(selectedEffort) ? { effort: selectedEffort } : {}),
+
 				...(stream && (model.info?.meta?.capabilities?.usage ?? false)
 					? {
 							stream_options: {
@@ -3268,6 +3273,7 @@
 									{history}
 									{taskIds}
 									bind:selectedModels
+									bind:selectedEffort
 									bind:files
 									bind:prompt
 									bind:autoScroll
@@ -3349,6 +3355,7 @@
 								<Placeholder
 									{history}
 									bind:selectedModels
+									bind:selectedEffort
 									bind:messageInput
 									bind:files
 									bind:prompt
