@@ -60,7 +60,7 @@ export interface IntegrationDefinition {
 	provides?: IntegrationCapability[]; // typed capability contract (capability-first)
 	usedBy?: HarvisSurface[]; // Harvis surfaces that consume it
 	runtimeNote?: string; // honest runtime caveat (e.g. "wiring planned", "not runnable yet")
-	connect?: 'openclaw_byo' | 'github_oauth' | 'mcp_link' | 'engine_api_key'; // Phase B/E2: which in-modal connect flow
+	connect?: 'openclaw_byo' | 'github_oauth' | 'mcp_link' | 'engine_api_key' | 'hermes_agent'; // Phase B/E2/F: which in-modal connect flow
 	permissions?: string[];
 	auth?: { required: boolean; modes: AuthMode[]; configured?: boolean; notes?: string };
 	engine?: { support: EngineSupport; adapterId?: string; notes?: string };
@@ -170,6 +170,7 @@ export const CATALOG: IntegrationDefinition[] = [
 		usedBy: ['chat', 'code', 'notebook', 'agent_studio'],
 		runtimeNote: 'Runs the real Hermes Agent app as a Harvis Build engine (isolated sidecar, local Ollama, no credentials) when enabled.',
 		auth: { required: false, modes: ['ollama'] },
+		connect: 'hermes_agent',
 		detect: { serviceKey: 'hermes' }
 	},
 	{

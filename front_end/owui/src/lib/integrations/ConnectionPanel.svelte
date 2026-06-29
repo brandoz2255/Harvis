@@ -2,7 +2,7 @@
 	// Integrations → Connection panel (Phase B1). Surfaces the user's per-integration
 	// connection state + connect/manage actions, driving the EXISTING encrypted endpoints.
 	// No new backend. Source of truth for per-user connection state (cards stay deploy-level).
-	import { onMount, onDestroy, getContext } from 'svelte';
+	import { createEventDispatcher, onMount, onDestroy, getContext } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { toast } from 'svelte-sonner';
 	import type { IntegrationDefinition } from '$lib/integrations/catalog';
@@ -15,13 +15,17 @@
 		saveEngineKey,
 		verifyEngineKey,
 		disconnectEngine,
+		getIntegrationsStatus,
 		type OpenclawConfig,
 		type EngineAuthStatus
 	} from '$lib/apis/integrations';
 	import { getGithubStatus, getGithubStartUrl, disconnectGithub } from '$lib/apis/agent-runs';
+	import { getCapabilityRegistry } from '$lib/integrations/registry';
 
 	const i18n: any = getContext('i18n');
 	export let def: IntegrationDefinition;
+	const dispatch = createEventDispatcher();
+	const changed = () => dispatch('changed'); // tell the page to refetch (instant real-time)
 
 	// ── OpenClaw BYO ──
 	let cfg: OpenclawConfig | null = null;
@@ -150,6 +154,36 @@
 		mcpCount = items.length;
 	};
 
+	// ── Hermes Agent (Phase F) — an honest status surface for the local sidecar. It has no
+	// per-user credential (deploy-configured, local Ollama), so "management" = a clear live status
+	// + a Test, not a key form. This fills the "no config in the Integrations tab" gap.
+	let hermesReady: { ready: boolean; reason?: string } | null = null;
+	let hermesReachable: boolean | null = null;
+	let hermesBusy = false;
+	const loadHermes = async () => {
+		const [reg, live] = await Promise.all([
+			getCapabilityRegistry(localStorage.token),
+			getIntegrationsStatus(localStorage.token)
+		]);
+		hermesReady = reg?.engine_readiness?.['hermes-agent'] ?? null;
+		const s = (live?.services as any)?.hermes?.status;
+		hermesReachable = s ? s === 'ready' || s === 'running' : null;
+	};
+	const testHermes = async () => {
+		hermesBusy = true;
+		await loadHermes();
+		hermesBusy = false;
+		changed();
+	};
+	const hermesReasonText = (reason?: string) => {
+		const r = (reason || '').toLowerCase();
+		if (r.includes('disabled') || r.includes('flag'))
+			return $i18n.t('The Hermes engine flag is off (HARVIS_OWUI_HERMES_AGENT_ENGINE).');
+		if (r.includes('model')) return $i18n.t('No Hermes model is installed — pull one with Ollama.');
+		if (reason) return reason;
+		return $i18n.t('The Hermes sidecar is not reachable.');
+	};
+
 	// ── Cloud engine API key (Phase E2: codex / claude-code) ──
 	$: authEngine = def.id === 'codex-app' ? 'codex' : 'claude-code';
 	// E4B: only Claude Code offers a Claude-subscription (OAuth token) mode; Codex is API-key-only.
@@ -222,6 +256,7 @@
 		else if (def.connect === 'github_oauth') loadGithub();
 		else if (def.connect === 'mcp_link') loadMcp();
 		else if (def.connect === 'engine_api_key') loadEngineAuth();
+		else if (def.connect === 'hermes_agent') loadHermes();
 	});
 	onDestroy(() => {
 		if (pollTimer) clearInterval(pollTimer);
@@ -520,6 +555,60 @@
 						{$i18n.t('Disconnect')}
 					</button>
 				{/if}
+			</div>
+		</div>
+	{:else if def.connect === 'hermes_agent'}
+		<!-- Hermes Agent: a local sidecar (no credentials, deploy-configured). Management = an
+		     honest live status + a Test, not a key form. -->
+		<div class="rounded-xl border border-gray-100 dark:border-white/8 bg-gray-50/60 dark:bg-[#0f1626] p-3.5 space-y-2.5">
+			<div class="flex items-center justify-between gap-2">
+				<span class="text-sm font-medium text-gray-700 dark:text-gray-200">{$i18n.t('Status')}</span>
+				{#if hermesReady?.ready}
+					<span class="inline-flex items-center gap-1.5 text-xs font-medium text-green-600 dark:text-green-400">
+						<span class="size-1.5 rounded-full bg-green-500"></span>{$i18n.t('Ready')}
+					</span>
+				{:else if hermesReady}
+					<span class="inline-flex items-center gap-1.5 text-xs font-medium text-amber-600 dark:text-amber-400">
+						<span class="size-1.5 rounded-full bg-amber-500"></span>{$i18n.t('Not ready')}
+					</span>
+				{:else}
+					<span class="text-xs text-gray-400">{$i18n.t('Checking…')}</span>
+				{/if}
+			</div>
+
+			<div class="text-xs text-gray-500 dark:text-gray-400 space-y-1">
+				<div class="flex items-center justify-between">
+					<span>{$i18n.t('Sidecar (harvis-hermes-agent)')}</span>
+					<span class={hermesReachable ? 'text-green-600 dark:text-green-400' : 'text-orange-500'}>
+						{hermesReachable === null
+							? '—'
+							: hermesReachable
+								? $i18n.t('Reachable')
+								: $i18n.t('Not reachable')}
+					</span>
+				</div>
+				<div class="flex items-center justify-between">
+					<span>{$i18n.t('Runtime')}</span>
+					<span>{$i18n.t('Local Ollama · no credentials')}</span>
+				</div>
+				{#if hermesReady && !hermesReady.ready}
+					<p class="text-amber-600 dark:text-amber-400 pt-1">{hermesReasonText(hermesReady.reason)}</p>
+				{/if}
+			</div>
+
+			<p class="text-[11px] text-gray-400 dark:text-gray-500 leading-relaxed">
+				{$i18n.t(
+					'Hermes runs as a local sidecar configured at the deploy level — there is no per-user key. When Ready, set it as your default to use it for Build & Chat.'
+				)}
+			</p>
+
+			<div class="flex items-center gap-2">
+				<button
+					type="button"
+					disabled={hermesBusy}
+					class="text-xs px-2.5 py-1 rounded-lg border border-gray-200 dark:border-white/10 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-white/5 transition disabled:opacity-50"
+					on:click={testHermes}>{hermesBusy ? $i18n.t('Testing…') : $i18n.t('Test connection')}</button
+				>
 			</div>
 		</div>
 	{/if}

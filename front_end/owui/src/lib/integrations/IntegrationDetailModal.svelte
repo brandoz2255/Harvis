@@ -92,7 +92,7 @@
 
 			<!-- connection (Phase B) — the source of truth for per-user connection state -->
 			{#if def.connect}
-				<ConnectionPanel {def} />
+				<ConnectionPanel {def} on:changed />
 			{/if}
 
 			<!-- setup / commands -->
