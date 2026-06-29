@@ -323,11 +323,17 @@
 	// run actually produced a renderable file.
 	let hasPreview = false;
 	let _checkedPreview = false;
+	let _autoPopped = false;
+	let _wasRunning = false;
+	// Renderable OUTPUT types worth auto-surfacing — NOT source code (.py/.ts/.js etc.).
+	const _PREVIEWABLE = /\.(html?|pdf|png|jpe?g|gif|webp|svg|markdown|md|csv)$/i;
+	// Track whether THIS card saw the run live (so we don't auto-pop historical runs on chat load).
+	$: if (running) _wasRunning = true;
 	const checkPreview = async () => {
 		try {
 			const arts = await getRunArtifacts(workspaceId);
 			hasPreview = (arts ?? []).some(
-				(a) => a.artifact_type === 'file' && /\.(html?|md|markdown|svg)$/i.test(a.path || '')
+				(a) => a.artifact_type === 'file' && _PREVIEWABLE.test(a.path || '')
 			);
 		} catch (_) {}
 	};
@@ -340,6 +346,12 @@
 		workspaceControlsTab.set('activity');
 		showControls.set(true);
 	};
+	// Auto-pop: when a run that finished LIVE in this session produced a renderable output, open the
+	// Artifacts dock once. Gated on _wasRunning so replayed/historical done-runs don't pop on load.
+	$: if (hasPreview && phase === 'done' && _wasRunning && !_autoPopped) {
+		_autoPopped = true;
+		previewRun();
+	}
 
 	const startTimerAndStream = () => {
 		// startedAt is the persisted run start (above) — do NOT reset it here, or
