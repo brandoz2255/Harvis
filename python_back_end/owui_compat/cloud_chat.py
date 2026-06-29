@@ -27,7 +27,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
+import uuid
 from typing import Optional
 
 import httpx
@@ -84,7 +86,6 @@ _EFFORT_OPENAI = {"low": "low", "medium": "medium", "high": "high", "max": "high
 # Effort → extended-thinking budget (Anthropic api_key path). "auto"/"none"/absent → no thinking.
 _EFFORT_BUDGET = {"low": 4000, "medium": 8000, "high": 16000, "max": 32000}
 
-import os
 _CLAUDE_CODE_CONTAINER = os.getenv("HARVIS_CLAUDE_CODE_CONTAINER", "harvis-claude-code")
 
 
@@ -482,8 +483,13 @@ async def _proxy_claude_cli(owui_body: dict, model_id: str, token: str):
     """Run `claude -p` in the sidecar on the user's subscription OAuth token. Captures the final
     text (no fragile stream-json parse) and returns it as a completion / SSE-wrapped single chunk."""
     prompt = _flatten_to_prompt(owui_body)
+    run_id = uuid.uuid4().hex  # credit-safety: lets us hard-kill THIS run's subtree by env marker
     argv = [
         "docker", "exec",
+        # Credit-safety kill marker — children inherit it, so a Stop/timeout/disconnect can SIGKILL
+        # the whole `claude` subtree in the sidecar. Without this, proc.kill() only kills the host
+        # docker-exec client and the in-container `claude` keeps billing the subscription.
+        "-e", f"HARVIS_RUN_ID={run_id}",
         # E4B dual-auth: subscription token MUST disable the baked CLAUDE_CODE_SIMPLE=1 (which
         # ignores the OAuth token). The token is passed only to `docker exec -e` and never logged.
         "-e", f"CLAUDE_CODE_OAUTH_TOKEN={token}",
@@ -494,27 +500,50 @@ async def _proxy_claude_cli(owui_body: dict, model_id: str, token: str):
         "--model", _api_model(model_id),
     ]
     want_stream = bool(owui_body.get("stream"))
+    timeout_s = int(os.getenv("HARVIS_CLOUD_CHAT_TIMEOUT_S", "180") or "180")
+    proc = None
+    out = b""
+    err = b""
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
         try:
-            out, err = await asyncio.wait_for(proc.communicate(), timeout=180)
+            proc = await asyncio.create_subprocess_exec(
+                *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError:
+            return _err_response(owui_body, 502, "Claude subscription chat unavailable (docker CLI missing).")
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
         except asyncio.TimeoutError:
-            try:
-                proc.kill()
-            except Exception:
-                pass
+            _hard_kill_claude(proc, run_id)   # in-container claude survives proc.kill() → reap it
             return _err_response(owui_body, 504, "Claude (subscription) timed out.")
-        if proc.returncode != 0:
-            detail = ((out or b"") + b"\n" + (err or b"")).decode("utf-8", "replace").strip()
-            return _err_response(owui_body, 502, f"Claude (subscription) error: {_clip(detail)}")
-        text = (out or b"").decode("utf-8", "replace").strip()
-    except FileNotFoundError:
-        return _err_response(owui_body, 502, "Claude subscription chat unavailable (docker CLI missing).")
-    except Exception as exc:
-        logger.warning("cloud_chat: claude CLI failed: %s", type(exc).__name__)
-        return _err_response(owui_body, 502, "Claude (subscription) is unavailable right now.")
+        except asyncio.CancelledError:
+            _hard_kill_claude(proc, run_id)   # client disconnected → stop billing immediately
+            raise
+        except Exception as exc:
+            _hard_kill_claude(proc, run_id)
+            logger.warning("cloud_chat: claude CLI failed: %s", type(exc).__name__)
+            return _err_response(owui_body, 502, "Claude (subscription) is unavailable right now.")
+    finally:
+        # Belt-and-suspenders: never leave the in-container `claude` alive (credit safety).
+        if proc is not None and proc.returncode is None:
+            _hard_kill_claude(proc, run_id)
+
+    detail = ((out or b"") + b"\n" + (err or b"")).decode("utf-8", "replace").strip()
+    text = (out or b"").decode("utf-8", "replace").strip()
+    # The CLI prints "Not logged in · Please run /login" but EXITS 0 — so a missing/expired
+    # subscription would otherwise be returned as the assistant's ANSWER. Surface it as a clean 401.
+    if _looks_like_auth_failure(detail):
+        logger.info("cloud_chat: claude subscription not authenticated (re-auth needed)")
+        return _err_response(
+            owui_body, 401,
+            "Your Claude subscription isn't connected (or the session expired). Reconnect it in "
+            "Integrations → Claude Code (run `claude setup-token` and paste the token).",
+        )
+    if proc.returncode != 0:
+        logger.warning("cloud_chat: claude CLI exit=%s detail=%s", proc.returncode, _clip(detail))
+        return _err_response(owui_body, 502, f"Claude (subscription) error: {_clip(detail)}")
+    if not text:
+        return _err_response(owui_body, 502, "Claude (subscription) returned no output.")
 
     if not want_stream:
         return JSONResponse(status_code=200, content={
@@ -560,3 +589,30 @@ def _err_response(owui_body: dict, status: int, message: str):
             yield b"data: [DONE]\n\n"
         return StreamingResponse(_gen(), media_type="text/event-stream")
     return JSONResponse(status_code=status, content={"error": {"message": message}})
+
+
+# Specific CLI/API auth-failure phrases — tight enough not to false-positive on a normal answer.
+_AUTH_FAIL_MARKERS = (
+    "not logged in", "please run /login", "invalid bearer token",
+    "authentication_error", "oauth token", "invalid api key",
+)
+
+
+def _looks_like_auth_failure(s: str) -> bool:
+    low = (s or "").lower()
+    return any(m in low for m in _AUTH_FAIL_MARKERS)
+
+
+def _hard_kill_claude(proc, run_id: str) -> None:
+    """Kill the host docker-exec client AND the surviving in-container `claude` subtree (by env
+    marker). proc.kill() alone only kills the host client; the in-container `claude` keeps billing."""
+    try:
+        if proc is not None and proc.returncode is None:
+            proc.kill()
+    except Exception:
+        pass
+    try:
+        from workspace.orchestration.engine_adapter import kill_run_by_marker
+        kill_run_by_marker(_CLAUDE_CODE_CONTAINER, run_id)
+    except Exception:
+        pass

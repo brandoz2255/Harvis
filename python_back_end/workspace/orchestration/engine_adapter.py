@@ -257,6 +257,32 @@ def _kill_run(container: str, workspace_path: str) -> None:
         pass
 
 
+def kill_run_by_marker(container: str, run_id: str) -> None:
+    """Hard-kill (SIGKILL) every process in the sidecar whose ENV carries HARVIS_RUN_ID=<run_id>.
+
+    Children inherit the env, so this kills the WHOLE subtree (e.g. a cloud `claude -p` plus any
+    helpers) — which argv/cwd matching can miss (cloud chat runs with cwd=/tmp, no path in argv).
+    Credit-safety backstop: on Stop / timeout / client-disconnect a subscription run must NOT keep
+    billing. The marker is unique per run, so this is cross-run/cross-user safe. Best-effort, sync."""
+    if not container or not run_id:
+        return
+    rid = "".join(ch for ch in str(run_id) if ch.isalnum() or ch in "-_")
+    if not rid:
+        return
+    # Match the exact env line HARVIS_RUN_ID=<rid> (NUL-delimited environ → newlines), then SIGKILL.
+    script = (
+        f'for p in /proc/[0-9]*; do '
+        f'tr "\\0" "\\n" < "$p/environ" 2>/dev/null | grep -qxF "HARVIS_RUN_ID={rid}" '
+        f'&& kill -KILL "${{p##*/}}" 2>/dev/null; '
+        f'done; true'
+    )
+    try:
+        subprocess.run(["docker", "exec", container, "sh", "-c", script],
+                       timeout=6, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
 async def _ensure_hermes_home(container: str, user_id: int) -> None:
     """Phase E4B: ensure the per-user Hermes home (``<homes-root>/<uid>``) has a local-
     Ollama provider config.yaml, so Build runs with that HERMES_HOME find a provider.
@@ -351,6 +377,11 @@ async def run_external_engine_adapter(
         except Exception:
             pass  # fail-soft: _build_hermes_command falls back to _HERMES_DEFAULT_MODEL
     cmd, model_id = _BUILDERS[engine](container, workspace_path, task_brief, model_name, api_key, user_id=user_id, auth_mode=auth_mode)
+    # Credit-safety: tag THIS run's docker-exec env so Stop/timeout can hard-kill its process
+    # subtree (children inherit the env) even when argv/cwd matching misses. All builders emit
+    # ["docker","exec",...]; inject the marker right after "exec".
+    if run_id and len(cmd) >= 2 and cmd[0] == "docker" and cmd[1] == "exec":
+        cmd = [cmd[0], cmd[1], "-e", f"HARVIS_RUN_ID={run_id}", *cmd[2:]]
     mapper = _MAPPERS[engine]
     yield root_ev("log", {"message": f"Launching {label} on {os.path.basename(workspace_path)}…"})
 
@@ -433,7 +464,9 @@ async def run_external_engine_adapter(
         except Exception:
             pass
         if container and workspace_path:
-            _kill_run(container, workspace_path)
+            _kill_run(container, workspace_path)          # graceful TERM, argv/cwd-keyed
+        if container and run_id:
+            kill_run_by_marker(container, run_id)         # SIGKILL backstop, env-marker-keyed
 
     # Collect the cumulative diff (working tree vs base_sha) — even on a non-zero exit.
     try:
