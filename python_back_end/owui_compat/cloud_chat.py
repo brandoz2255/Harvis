@@ -68,7 +68,20 @@ _DEFAULT_CLAUDE_MODEL = "anthropic/claude-sonnet-4-6"
 _ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 _ANTHROPIC_VERSION = "2023-06-01"
 
-# Effort → extended-thinking budget (api_key path). "auto"/"none"/absent → no thinking (fast).
+# Phase 2 — OpenAI / GPT chat models (the ``codex`` engine = a per-user OpenAI API key, api_key
+# only — no oauth). Same provider-prefix discipline as Claude. The OpenAI Chat Completions API
+# IS the target wire format, so the proxy is near-passthrough + reasoning_effort.
+_OPENAI_MODELS = [
+    {"id": "openai/gpt-5", "name": "GPT-5", "supports_effort": True},
+    {"id": "openai/gpt-5-codex", "name": "GPT-5 Codex", "supports_effort": True},
+]
+_OPENAI_BY_ID = {m["id"]: m for m in _OPENAI_MODELS}
+_ALL_OPENAI_IDS = {m["id"] for m in _OPENAI_MODELS}
+_OPENAI_URL = "https://api.openai.com/v1/chat/completions"
+# reasoning_effort is the OpenAI reasoning control (low|medium|high). "max" → "high" (no native ultra).
+_EFFORT_OPENAI = {"low": "low", "medium": "medium", "high": "high", "max": "high"}
+
+# Effort → extended-thinking budget (Anthropic api_key path). "auto"/"none"/absent → no thinking.
 _EFFORT_BUDGET = {"low": 4000, "medium": 8000, "high": 16000, "max": 32000}
 
 import os
@@ -79,22 +92,32 @@ _CLAUDE_CODE_CONTAINER = os.getenv("HARVIS_CLAUDE_CODE_CONTAINER", "harvis-claud
 def is_cloud_chat_model(model_id: Optional[str]) -> bool:
     """True iff this model id is one of our cloud chat models (exact match — never a prefix,
     so it can't accidentally swallow an Ollama tag or the ``claude-code`` Build engine id)."""
-    return (model_id or "").strip() in _ALL_CLAUDE_IDS
+    mid = (model_id or "").strip()
+    return mid in _ALL_CLAUDE_IDS or mid in _ALL_OPENAI_IDS
 
 
-def _is_claude(model_id: str) -> bool:
-    return model_id in _ALL_CLAUDE_IDS
+def _provider_of(model_id: str) -> Optional[str]:
+    if model_id in _ALL_CLAUDE_IDS:
+        return "anthropic"
+    if model_id in _ALL_OPENAI_IDS:
+        return "openai"
+    return None
+
+
+# Which verified-credential engine backs each provider's chat models.
+_PROVIDER_ENGINE = {"anthropic": "claude-code", "openai": "codex"}
 
 
 # ── Per-user model list (no decrypt) ────────────────────────────────────────────────────
 def _model_entry(m: dict, owned_by: str, mode: str) -> dict:
     """Build the OWUI picker dict (same shape as hermes_chat_model_entry)."""
     supports = bool(m.get("supports_effort"))
-    desc = (
-        "Anthropic Claude via your connected API key — full catalog + reasoning effort."
-        if mode == "api_key"
-        else "Anthropic Claude via your Claude subscription (Claude Code). No API credits used."
-    )
+    if owned_by == "openai":
+        desc = "OpenAI GPT via your connected API key — reasoning effort supported."
+    elif mode == "api_key":
+        desc = "Anthropic Claude via your connected API key — full catalog + reasoning effort."
+    else:
+        desc = "Anthropic Claude via your Claude subscription (Claude Code). No API credits used."
     return {
         "id": m["id"],
         "name": m["name"],
@@ -126,38 +149,49 @@ async def cloud_chat_model_entries(pool, user_id: Optional[int]) -> list[dict]:
         elif mode == "oauth_token":
             out += [_model_entry(m, "anthropic", "oauth_token") for m in _CLAUDE_SUB_MODELS]
     except Exception:
-        logger.debug("cloud_chat: model-list probe failed", exc_info=True)
-    # Phase 2 (OpenAI/codex) entries would append here, gated on get_verified_auth_mode(..,'codex').
+        logger.debug("cloud_chat: claude model-list probe failed", exc_info=True)
+    # Phase 2: OpenAI/GPT — gated on a verified ``codex`` (OpenAI) api_key credential.
+    try:
+        if await get_verified_auth_mode(pool, user_id, "codex") == "api_key":
+            out += [_model_entry(m, "openai", "api_key") for m in _OPENAI_MODELS]
+    except Exception:
+        logger.debug("cloud_chat: openai model-list probe failed", exc_info=True)
     return out
 
 
 # ── Routing entrypoint ──────────────────────────────────────────────────────────────────
 async def proxy_cloud_chat(owui_body: dict, pool, user_id: Optional[int]):
     """Route a chat request for a cloud model to its vendor with the user's verified credential.
-    Branches on the stored auth_mode: api_key → Anthropic Messages API; oauth_token → claude CLI."""
+    Dispatch by provider: Anthropic api_key → Messages API; Anthropic oauth → claude CLI;
+    OpenAI api_key → OpenAI Chat Completions (near-passthrough + reasoning_effort)."""
     model_id = (owui_body.get("model") or "").strip()
     effort = _normalize_effort(owui_body.get("effort"))
-    if not _is_claude(model_id):
+    provider = _provider_of(model_id)
+    if not provider:
         return JSONResponse(status_code=400, content={"error": {"message": f"Unknown cloud model {model_id!r}."}})
 
+    engine = _PROVIDER_ENGINE[provider]
     auth = None
     try:
-        auth = await get_verified_engine_auth(pool, user_id, "claude-code") if (pool and user_id) else None
+        auth = await get_verified_engine_auth(pool, user_id, engine) if (pool and user_id) else None
     except Exception:
         auth = None
     if not auth:
+        label = "Claude" if provider == "anthropic" else "OpenAI"
         return _err_response(
             owui_body, 402,
-            "Connect Claude in Integrations to use Claude chat models (no verified credential found).",
+            f"Connect {label} in Integrations to use these chat models (no verified credential found).",
         )
     secret, mode = auth
     try:
+        if provider == "openai":
+            return await _proxy_openai_api(owui_body, model_id, secret, effort)
         if mode == "oauth_token":
             return await _proxy_claude_cli(owui_body, model_id, secret)
         return await _proxy_claude_api(owui_body, model_id, secret, effort)
     except Exception as exc:  # never leak the secret in the error
         logger.warning("cloud_chat: proxy failed (%s): %s", model_id, type(exc).__name__)
-        return _err_response(owui_body, 502, "Claude chat is unavailable right now. Please try again.")
+        return _err_response(owui_body, 502, "Cloud chat is unavailable right now. Please try again.")
 
 
 def _normalize_effort(val) -> str:
@@ -366,6 +400,64 @@ def _anthropic_msg_to_openai(body: dict, model_id: str) -> dict:
             "total_tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
         },
     }
+
+
+# ── OpenAI Chat Completions path (api_key) ──────────────────────────────────────────────
+async def _proxy_openai_api(owui_body: dict, model_id: str, api_key: str, effort: str):
+    """OpenAI is the target wire format → near-passthrough. Build a clean body (strip OWUI-only
+    keys) + add reasoning_effort for reasoning models. Reasoning models reject temperature/top_p,
+    so we deliberately send only model/messages/stream/reasoning_effort."""
+    spec = _OPENAI_BY_ID.get(model_id, {})
+    messages = [
+        {"role": m.get("role"), "content": m.get("content")}
+        for m in (owui_body.get("messages") or [])
+        if m.get("role") and m.get("content") is not None
+    ]
+    body: dict = {"model": _api_model(model_id), "messages": messages, "stream": bool(owui_body.get("stream"))}
+    eff = _EFFORT_OPENAI.get(effort)
+    if eff and spec.get("supports_effort"):
+        body["reasoning_effort"] = eff
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+    if not body["stream"]:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0)) as client:
+            r = await client.post(_OPENAI_URL, headers=headers, json=body)
+        if r.status_code >= 400:
+            return _err_response(owui_body, 502, _safe_openai_error(r))
+        return JSONResponse(status_code=200, content=r.json())
+
+    async def _gen():
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(None, connect=10.0)) as client:
+                async with client.stream("POST", _OPENAI_URL, headers=headers, json=body) as r:
+                    if r.status_code >= 400:
+                        detail = (await r.aread()).decode("utf-8", "replace")
+                        err = {"error": {"message": f"GPT error: {_clip(detail)}"}}
+                        yield ("data: " + json.dumps(err) + "\n\n").encode()
+                        yield b"data: [DONE]\n\n"
+                        return
+                    # OpenAI already emits chat.completion.chunk SSE — forward verbatim.
+                    async for chunk in r.aiter_raw():
+                        if chunk:
+                            yield chunk
+        except Exception as exc:
+            logger.warning("cloud_chat: openai stream dropped: %s", type(exc).__name__)
+            yield ("data: " + json.dumps({"error": {"message": "GPT chat stream dropped."}}) + "\n\n").encode()
+            yield b"data: [DONE]\n\n"
+
+    return StreamingResponse(
+        _gen(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+def _safe_openai_error(resp) -> str:
+    try:
+        body = resp.json()
+        msg = (((body or {}).get("error") or {}).get("message")) or json.dumps(body)
+    except Exception:
+        msg = f"HTTP {resp.status_code}"
+    return f"GPT error: {_clip(msg)}"
 
 
 # ── Claude CLI path (subscription / oauth_token) ────────────────────────────────────────
