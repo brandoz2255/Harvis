@@ -51,7 +51,7 @@ export const CAPABILITY_LABEL: Record<IntegrationCapability, string> = {
 
 export const SURFACE_LABEL: Record<HarvisSurface, string> = {
 	chat: 'Chat',
-	code: 'Code',
+	code: 'Build',
 	notebook: 'Notebook',
 	agent_studio: 'Agent Studio',
 	automations: 'Automations'
@@ -74,7 +74,7 @@ export function deriveSource(def: IntegrationDefinition): IntegrationSource {
 	if (key === 'github') return live ? 'configured' : 'static';
 	if (key === 'mcp') return def.status !== 'available' && def.status !== 'error' ? 'configured' : 'static';
 	// auto-probed services (no per-user config in Phase A)
-	if (key === 'ollama' || key === 'openclaw' || key === 'discord' || key === 'hermes')
+	if (key === 'ollama' || key === 'openclaw' || key === 'discord' || key === 'hermes' || key === 'hermes-agent')
 		return live ? 'detected' : 'static';
 	return 'static';
 }

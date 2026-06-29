@@ -159,19 +159,21 @@ export const CATALOG: IntegrationDefinition[] = [
 		id: 'hermes-agent',
 		name: 'Hermes Agent',
 		category: 'service',
-		description: 'The full NousResearch Hermes Agent app — runs as a Harvis Build engine on local models.',
+		description: 'Full Hermes Agent runtime for Build & Chat — isolated sidecar, local Ollama, no credentials.',
 		longDescription:
-			'Hermes Agent is the real NousResearch open-source agent runtime (its own memory, skills, tools and profile system), run as an isolated Harvis sidecar. With the engine enabled (HARVIS_OWUI_HERMES_AGENT_ENGINE), a Build session dispatches to it: Hermes edits a private clone of your repo with its own tools and Harvis captures the diff, RunView and Stop. It runs on your local Ollama models — no cloud credentials. (A lighter experimental "Hermes Native" engine — the in-process runner with a SOUL persona — is also available under its own flag.)',
+			'Hermes Agent is the full Nous Research agent runtime running inside Harvis — it uses its own tools, memory, skills and profile system, while Harvis keeps control of workspace safety, RunView, Stop and diff capture. It runs in an isolated sidecar on local Ollama, with no cloud credentials. (A lighter experimental "Hermes Native" in-process engine is also available under its own flag.)',
 		brandKey: 'hermes',
 		status: 'available',
 		provider: 'Nous Research (Hermes Agent, MIT)',
 		capabilities: ['agent_runtime', 'local_models', 'build_engine'],
 		provides: ['model_provider', 'agent_runtime'],
-		usedBy: ['chat', 'code', 'notebook', 'agent_studio'],
+		usedBy: ['chat', 'code'],
 		runtimeNote: 'Runs the real Hermes Agent app as a Harvis Build engine (isolated sidecar, local Ollama, no credentials) when enabled.',
 		auth: { required: false, modes: ['ollama'] },
 		connect: 'hermes_agent',
-		detect: { serviceKey: 'hermes' }
+		// Detect on the SIDECAR (engine), not the 'hermes' Ollama-model count — so the card reads
+		// "Hermes Agent app ready", not "N models". (E4B: this is the app runtime, not a model.)
+		detect: { serviceKey: 'hermes-agent' }
 	},
 	{
 		id: 'opencode',
