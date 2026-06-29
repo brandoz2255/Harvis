@@ -213,6 +213,14 @@ def register_capabilities_routes(router: APIRouter, get_current_user: Callable) 
             if not _ready and _svc.get("reason"):
                 _entry["reason"] = _svc["reason"]
             engine_readiness[_eng] = _entry
+        # When the user has a VERIFIED external Hermes connected, Chat routes there but Build can't
+        # (the external server has no access to the Build workspace clone) — mark it unavailable.
+        try:
+            from owui_compat.hermes_connect import is_external_active
+            if await is_external_active(pool, uid):
+                engine_readiness["hermes-agent"] = {"ready": False, "reason": "external_no_workspace"}
+        except Exception:
+            pass
         # H1: the Hermes Agent runtime's OWN model (NOT the user's chat model). Surface the
         # current preference + the resolved model (pref → env → recommended → first) + the
         # installed Ollama tags so the Integrations drawer can offer a model dropdown.

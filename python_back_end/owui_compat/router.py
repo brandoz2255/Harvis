@@ -662,6 +662,10 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
     register_integrations_status_routes(router, get_current_user)
     register_capabilities_routes(router, get_current_user)
     register_engine_auth_routes(router, get_current_user)
+    from .hermes_connect import register_hermes_connect_routes
+    register_hermes_connect_routes(router, get_current_user)
+    from .hermes_import import register_hermes_import_routes
+    register_hermes_import_routes(router, get_current_user)
     register_user_settings_routes(router, get_current_user)
     register_orchestration_pool_routes(router, get_current_user)
 

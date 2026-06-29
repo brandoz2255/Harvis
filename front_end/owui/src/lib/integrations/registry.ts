@@ -106,6 +106,53 @@ export const saveHermesModel = async (
 	}
 };
 
+// ── "Bring your Hermes into Harvis" — connection modes ───────────────────────────────────
+// Mode 2: Connect an external Hermes Agent (per-user URL + optional token; token never returned).
+const _h = () => ({ 'Content-Type': 'application/json', authorization: `Bearer ${localStorage.token}` });
+
+export const getHermesExternal = async (): Promise<any> => {
+	try {
+		const r = await fetch(`${WEBUI_BASE_URL}/api/owui/integrations/hermes-external`, { headers: _h() });
+		return r.ok ? await r.json() : null;
+	} catch (_) {
+		return null;
+	}
+};
+export const saveHermesExternal = async (url: string, token: string | null): Promise<any> => {
+	const r = await fetch(`${WEBUI_BASE_URL}/api/owui/integrations/hermes-external`, {
+		method: 'POST', headers: _h(), body: JSON.stringify({ url, token })
+	});
+	if (!r.ok) throw new Error((await r.json().catch(() => ({})))?.detail || 'save failed');
+	return await r.json();
+};
+export const verifyHermesExternal = async (): Promise<any> => {
+	const r = await fetch(`${WEBUI_BASE_URL}/api/owui/integrations/hermes-external/verify`, {
+		method: 'POST', headers: _h()
+	});
+	return r.ok ? await r.json() : { ok: false, error: 'verify failed' };
+};
+export const disconnectHermesExternal = async (): Promise<void> => {
+	await fetch(`${WEBUI_BASE_URL}/api/owui/integrations/hermes-external/disconnect`, {
+		method: 'POST', headers: _h()
+	});
+};
+
+// Mode 1: Import an existing Hermes profile (read-only preview, then backup+replace).
+export const previewHermesImport = async (path: string): Promise<any> => {
+	const r = await fetch(`${WEBUI_BASE_URL}/api/owui/integrations/hermes-import/preview`, {
+		method: 'POST', headers: _h(), body: JSON.stringify({ path })
+	});
+	if (!r.ok) throw new Error((await r.json().catch(() => ({})))?.detail || 'preview failed');
+	return await r.json();
+};
+export const doHermesImport = async (path: string): Promise<any> => {
+	const r = await fetch(`${WEBUI_BASE_URL}/api/owui/integrations/hermes-import`, {
+		method: 'POST', headers: _h(), body: JSON.stringify({ path, mode: 'replace' })
+	});
+	if (!r.ok) throw new Error((await r.json().catch(() => ({})))?.detail || 'import failed');
+	return await r.json();
+};
+
 // Write-through: localStorage FIRST (instant, offline-safe) then POST. `synced`
 // reflects whether the server accepted it; the caller can toast accordingly.
 export const saveCapabilityPreference = async (

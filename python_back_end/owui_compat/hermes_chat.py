@@ -150,18 +150,32 @@ async def proxy_hermes_chat(owui_body: dict, pool=None, user_id=None):
     Returns a FastAPI response (StreamingResponse for SSE, JSONResponse otherwise). A clean
     OpenAI body is sent; the model is the RESOLVED Hermes Agent model (per-user pref → env →
     recommended → first-installed), regardless of the model id the caller picked — the user's
-    normal chat model never drives the Hermes runtime."""
+    normal chat model never drives the Hermes runtime.
+
+    Connection mode (Bring your Hermes into Harvis): a VERIFIED external Hermes Agent → route
+    there with the user's token; otherwise the LOCAL sidecar (managed or imported profile)."""
     resolved = await resolve_hermes_model(pool, user_id)
     body = {
-        "model": resolved,
+        "model": resolved,  # external servers may override with their own configured model
         "messages": owui_body.get("messages") or [],
         "stream": bool(owui_body.get("stream")),
     }
     if owui_body.get("temperature") is not None:
         body["temperature"] = owui_body["temperature"]
     stream = bool(body.get("stream"))
-    url = f"{_base_url()}/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {_api_key()}", "Content-Type": "application/json"}
+    # Resolve the target: external Hermes (user-owned) wins over the local sidecar.
+    base_url, api_key = _base_url(), _api_key()
+    try:
+        from .hermes_connect import resolve_external_target
+        ext = await resolve_external_target(pool, user_id)
+        if ext:
+            base_url, api_key = ext["base_url"], (ext.get("token") or "")
+    except Exception:
+        pass
+    url = f"{base_url}/v1/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
 
     if not stream:
         try:

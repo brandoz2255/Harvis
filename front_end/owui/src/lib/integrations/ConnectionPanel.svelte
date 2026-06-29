@@ -15,12 +15,11 @@
 		saveEngineKey,
 		verifyEngineKey,
 		disconnectEngine,
-		getIntegrationsStatus,
 		type OpenclawConfig,
 		type EngineAuthStatus
 	} from '$lib/apis/integrations';
 	import { getGithubStatus, getGithubStartUrl, disconnectGithub } from '$lib/apis/agent-runs';
-	import { getCapabilityRegistry, saveHermesModel } from '$lib/integrations/registry';
+	import HermesConnect from '$lib/integrations/HermesConnect.svelte';
 
 	const i18n: any = getContext('i18n');
 	export let def: IntegrationDefinition;
@@ -154,61 +153,7 @@
 		mcpCount = items.length;
 	};
 
-	// ── Hermes Agent (Phase F) — an honest status surface for the local sidecar. It has no
-	// per-user credential (deploy-configured, local Ollama), so "management" = a clear live status
-	// + a Test, not a key form. This fills the "no config in the Integrations tab" gap.
-	let hermesReady: { ready: boolean; reason?: string } | null = null;
-	let hermesReachable: boolean | null = null;
-	let hermesBusy = false;
-	// H1: the Hermes Agent runtime's underlying Ollama model (its OWN setting, separate from
-	// the user's chat model). `hermesModel` = the resolved model in use; `hermesModelPref` =
-	// the explicit per-user choice (null = following the deploy default / auto-recommended).
-	let hermesModel: string | null = null;
-	let hermesModelPref: string | null = null;
-	let installedModels: string[] = [];
-	let hermesModelBusy = false;
-	const loadHermes = async () => {
-		const [reg, live] = await Promise.all([
-			getCapabilityRegistry(localStorage.token),
-			getIntegrationsStatus(localStorage.token)
-		]);
-		hermesReady = reg?.engine_readiness?.['hermes-agent'] ?? null;
-		hermesModel = reg?.hermes_agent_model ?? null;
-		hermesModelPref = reg?.hermes_agent_model_pref ?? null;
-		installedModels = reg?.installed_models ?? [];
-		const s = (live?.services as any)?.hermes?.status;
-		hermesReachable = s ? s === 'ready' || s === 'running' : null;
-	};
-	// '' (Auto) clears the pref → resolution falls back to deploy default → recommended → first.
-	const onHermesModelChange = async (e: Event) => {
-		const v = (e.target as HTMLSelectElement).value;
-		hermesModelBusy = true;
-		const res = await saveHermesModel(v || null);
-		hermesModelBusy = false;
-		if (res.ok) {
-			hermesModel = res.resolved;
-			hermesModelPref = v || null;
-			toast.success($i18n.t('Hermes Agent model updated'));
-			await loadHermes();
-			changed();
-		} else {
-			toast.error($i18n.t('Could not update the Hermes model'));
-		}
-	};
-	const testHermes = async () => {
-		hermesBusy = true;
-		await loadHermes();
-		hermesBusy = false;
-		changed();
-	};
-	const hermesReasonText = (reason?: string) => {
-		const r = (reason || '').toLowerCase();
-		if (r.includes('disabled') || r.includes('flag'))
-			return $i18n.t('The Hermes engine flag is off (HARVIS_OWUI_HERMES_AGENT_ENGINE).');
-		if (r.includes('model')) return $i18n.t('No Hermes model is installed — pull one with Ollama.');
-		if (reason) return reason;
-		return $i18n.t('The Hermes sidecar is not reachable.');
-	};
+	// Hermes Agent management is its own component (3 connection modes — import / external / managed).
 
 	// ── Cloud engine API key (Phase E2: codex / claude-code) ──
 	$: authEngine = def.id === 'codex-app' ? 'codex' : 'claude-code';
@@ -282,7 +227,6 @@
 		else if (def.connect === 'github_oauth') loadGithub();
 		else if (def.connect === 'mcp_link') loadMcp();
 		else if (def.connect === 'engine_api_key') loadEngineAuth();
-		else if (def.connect === 'hermes_agent') loadHermes();
 	});
 	onDestroy(() => {
 		if (pollTimer) clearInterval(pollTimer);
@@ -584,95 +528,6 @@
 			</div>
 		</div>
 	{:else if def.connect === 'hermes_agent'}
-		<!-- Hermes Agent: a local sidecar (no credentials, deploy-configured). Management = an
-		     honest live status + a Test, not a key form. -->
-		<div class="rounded-xl border border-gray-100 dark:border-white/8 bg-gray-50/60 dark:bg-[#0f1626] p-3.5 space-y-2.5">
-			<div class="flex items-center justify-between gap-2">
-				<span class="text-sm font-medium text-gray-700 dark:text-gray-200">{$i18n.t('Status')}</span>
-				{#if hermesReady?.ready}
-					<span class="inline-flex items-center gap-1.5 text-xs font-medium text-green-600 dark:text-green-400">
-						<span class="size-1.5 rounded-full bg-green-500"></span>{$i18n.t('Ready')}
-					</span>
-				{:else if hermesReady}
-					<span class="inline-flex items-center gap-1.5 text-xs font-medium text-amber-600 dark:text-amber-400">
-						<span class="size-1.5 rounded-full bg-amber-500"></span>{$i18n.t('Not ready')}
-					</span>
-				{:else}
-					<span class="text-xs text-gray-400">{$i18n.t('Checking…')}</span>
-				{/if}
-			</div>
-
-			<div class="text-xs text-gray-500 dark:text-gray-400 space-y-1">
-				<div class="flex items-center justify-between">
-					<span>{$i18n.t('Sidecar (harvis-hermes-agent)')}</span>
-					<span class={hermesReachable ? 'text-green-600 dark:text-green-400' : 'text-orange-500'}>
-						{hermesReachable === null
-							? '—'
-							: hermesReachable
-								? $i18n.t('Reachable')
-								: $i18n.t('Not reachable')}
-					</span>
-				</div>
-				<div class="flex items-center justify-between">
-					<span>{$i18n.t('Provider')}</span>
-					<span>{$i18n.t('Ollama · no credentials')}</span>
-				</div>
-				<div class="flex items-center justify-between">
-					<span>{$i18n.t('Powered by')}</span>
-					<span class="font-mono text-gray-700 dark:text-gray-200">{hermesModel ?? '—'}</span>
-				</div>
-				{#if hermesReady && !hermesReady.ready}
-					<p class="text-amber-600 dark:text-amber-400 pt-1">{hermesReasonText(hermesReady.reason)}</p>
-				{/if}
-			</div>
-
-			<!-- H1: the model INSIDE the Hermes Agent runtime (Build + Chat Agent Mode). NOT the
-			     user's normal chat model. Any installed Ollama model can drive it. -->
-			<div class="space-y-1.5 pt-0.5">
-				<label class="text-xs font-medium text-gray-700 dark:text-gray-200" for="hermes-model-select">
-					{$i18n.t('Hermes Agent model')}
-				</label>
-				<select
-					id="hermes-model-select"
-					class="w-full text-xs rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-[#0b1220] px-2.5 py-1.5 text-gray-700 dark:text-gray-200 disabled:opacity-50"
-					disabled={hermesModelBusy || installedModels.length === 0}
-					value={hermesModelPref ?? ''}
-					on:change={onHermesModelChange}
-				>
-					<option value="">{$i18n.t('Auto (recommended installed model)')}</option>
-					{#each installedModels as m}
-						<option value={m}>{m}</option>
-					{/each}
-				</select>
-				<p class="text-[11px] text-gray-400 dark:text-gray-500 leading-relaxed">
-					{$i18n.t(
-						'Smaller models are faster but may be less reliable with tools. Larger models may be slower but better for complex tasks. Auto picks a capable installed model.'
-					)}
-				</p>
-			</div>
-
-			<p class="text-[11px] text-gray-400 dark:text-gray-500 leading-relaxed">
-				{$i18n.t(
-					'Hermes runs as a local sidecar configured at the deploy level — there is no per-user key. When Ready, set it as your default to use it for Build & Chat Agent Mode.'
-				)}
-			</p>
-
-			<!-- #4: profile / transfer honesty — do NOT imply the desktop Hermes CLI profile imports. -->
-			<div class="rounded-lg border border-gray-100 dark:border-white/8 bg-gray-100/50 dark:bg-white/[0.02] px-2.5 py-2 text-[11px] text-gray-500 dark:text-gray-400 leading-relaxed">
-				<span class="font-medium text-gray-600 dark:text-gray-300">{$i18n.t('Harvis-managed Hermes profile')}</span>
-				— {$i18n.t(
-					'Hermes keeps its own per-user memory and profile inside Harvis. This does not automatically import your existing desktop Hermes CLI profile yet. Importing a profile, connecting an external Hermes Agent API server, and bring-your-own profile are on the roadmap.'
-				)}
-			</div>
-
-			<div class="flex items-center gap-2">
-				<button
-					type="button"
-					disabled={hermesBusy}
-					class="text-xs px-2.5 py-1 rounded-lg border border-gray-200 dark:border-white/10 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-white/5 transition disabled:opacity-50"
-					on:click={testHermes}>{hermesBusy ? $i18n.t('Testing…') : $i18n.t('Test connection')}</button
-				>
-			</div>
-		</div>
+		<HermesConnect on:changed={changed} />
 	{/if}
 </div>
