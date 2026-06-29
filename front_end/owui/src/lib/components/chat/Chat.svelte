@@ -166,6 +166,10 @@
 	let showCommands = false;
 
 	let generating = false;
+	// Auto-open the artifact preview once per turn when the model produces a
+	// renderable artifact (HTML/SVG). Starts true so loading a chat never auto-pops;
+	// reset to false at the start of each generation.
+	let _artifactPoppedThisTurn = true;
 	let dragged = false;
 	let generationController = null;
 
@@ -1161,6 +1165,16 @@
 		});
 
 		artifactContents.set(contents);
+
+		// Auto-open the artifact preview the moment the model produces a renderable
+		// artifact (HTML/SVG) in its response — so "make me an html" pops the preview
+		// with no click. Once per turn (armed when generation starts), so loading a
+		// chat never auto-pops and a manual close isn't fought.
+		if (contents.length > 0 && !_artifactPoppedThisTurn) {
+			_artifactPoppedThisTurn = true;
+			showControls.set(true);
+			showArtifacts.set(true);
+		}
 	};
 
 	//////////////////////////
@@ -2676,6 +2690,7 @@
 		// response carries no chat_id.
 		if (res && res.ok && res.body) {
 			generating = true;
+			_artifactPoppedThisTurn = false; // arm artifact auto-pop for this turn
 			generationController = controller as AbortController;
 			try {
 				const textStream = await createOpenAITextStream(
@@ -2912,6 +2927,7 @@
 
 		try {
 			generating = true;
+			_artifactPoppedThisTurn = false; // arm artifact auto-pop for this turn
 			const [res, controller] = await generateMoACompletion(
 				localStorage.token,
 				message.model ?? '',
