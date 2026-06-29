@@ -25,6 +25,9 @@ export interface CapabilityRegistry {
 	preferences: Record<string, string>;
 	default_model: string | null;
 	generated_at: number;
+	// Phase E1/E2/E4(B): per-engine Build readiness (opencode/codex/claude-code/hermes-agent/
+	// hermes-native → {ready, reason?}). The VibeCode engine selector reads this.
+	engine_readiness: Record<string, { ready: boolean; reason?: string }>;
 }
 
 const PREF_KEY = (cap: string) => `harvis.integrations.preferences.${cap}`;
@@ -40,7 +43,8 @@ export const getCapabilityRegistry = async (token: string): Promise<CapabilityRe
 			capabilities: d?.capabilities ?? {},
 			preferences: d?.preferences ?? {},
 			default_model: d?.default_model ?? null,
-			generated_at: d?.generated_at ?? 0
+			generated_at: d?.generated_at ?? 0,
+			engine_readiness: d?.engine_readiness ?? {}
 		};
 	} catch (_) {
 		return null;

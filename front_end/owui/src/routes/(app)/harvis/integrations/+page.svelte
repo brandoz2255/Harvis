@@ -60,7 +60,19 @@
 	const HARVIS_CLI_PROVIDES: IntegrationCapability[] = ['local_execution_bridge'];
 	const HARVIS_CLI_USED_BY: HarvisSurface[] = ['code', 'agent_studio', 'automations'];
 
-	$: merged = mergeLiveStatus(CATALOG, live);
+	// Phase E1/E2/E4B: overlay per-user engine readiness onto the engine cards so a verified
+	// cloud engine reads "Ready" (not the static "Available"). card id → engine_readiness key.
+	let engineReadiness: Record<string, { ready: boolean; reason?: string }> = {};
+	const ENGINE_CARD_TO_READINESS: Record<string, string> = {
+		'claude-code': 'claude-code',
+		'codex-app': 'codex',
+		opencode: 'opencode',
+		'hermes-agent': 'hermes-agent'
+	};
+	$: merged = mergeLiveStatus(CATALOG, live).map((d) => {
+		const ek = ENGINE_CARD_TO_READINESS[d.id];
+		return ek && engineReadiness[ek]?.ready ? { ...d, status: 'ready' as const } : d;
+	});
 	$: visible = filterCatalog(merged, q);
 	$: recommended = visible.filter((d) => d.recommended);
 	$: shownCategories = tab === 'all' ? CATEGORY_ORDER : ([tab] as IntegrationCategory[]);
@@ -96,6 +108,7 @@
 		try {
 			const reg = await getCapabilityRegistry(localStorage.token);
 			if (!reg) return;
+			engineReadiness = reg.engine_readiness || {};
 			defaultModel = reg.default_model || '';
 			try {
 				if (reg.default_model) {
