@@ -1262,6 +1262,15 @@
 			selectedModels = selectedModels.filter((modelId) => availableModels.includes(modelId));
 		}
 
+		// Phase F: restore the per-chat reasoning effort across the new-chat → /c/<id> remount
+		// (saved at submit above). Mirrors selectedModels' sessionStorage survival.
+		try {
+			if (sessionStorage.selectedEffort) {
+				selectedEffort = sessionStorage.selectedEffort;
+				sessionStorage.removeItem('selectedEffort');
+			}
+		} catch (_) {}
+
 		// Ensure at least one model is selected
 		if (selectedModels.length === 0 || (selectedModels.length === 1 && selectedModels[0] === '')) {
 			if (availableModels.length > 0) {
@@ -2091,6 +2100,12 @@
 		}
 
 		saveSessionSelectedModels();
+		// Phase F: persist the chosen reasoning effort across the new-chat → /c/<id> remount
+		// (mirrors selectedModels; restored + cleared in the model-init cascade). Without this the
+		// effort silently resets to Auto after the first message.
+		try {
+			sessionStorage.selectedEffort = selectedEffort;
+		} catch (_) {}
 
 		await sendMessage(history, userMessageId);
 	};
