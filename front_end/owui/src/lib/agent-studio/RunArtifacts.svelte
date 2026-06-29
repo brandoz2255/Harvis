@@ -1,10 +1,11 @@
 <script lang="ts">
-	import { getContext, onMount, createEventDispatcher } from 'svelte';
+	import { getContext, onMount, onDestroy, createEventDispatcher } from 'svelte';
 	import {
 		getRunArtifacts,
 		getArtifact,
 		getRunRepo,
 		createPrForRun,
+		artifactRawBlobUrl,
 		type ArtifactMeta,
 		type RunRepo
 	} from '$lib/apis/agent-runs';
@@ -37,9 +38,17 @@
 	let changedFiles = '';
 	let loaded = false;
 	let open = true;
-	// Primary file to render as a live preview (above the diffs).
-	let primary: { name: string; content: string } | null = null;
+	// Primary file to render as a live preview (above the diffs). Binary files (image/pdf) carry a
+	// `rawUrl` object-URL fetched from /raw; text files carry their content.
+	let primary: { id?: string; name: string; content: string; is_binary?: boolean } | null = null;
+	let primaryRawUrl = '';
 	let previewOpen = true;
+	const _revokeRaw = () => {
+		if (primaryRawUrl) {
+			try { URL.revokeObjectURL(primaryRawUrl); } catch (_) {}
+			primaryRawUrl = '';
+		}
+	};
 	// Attached-repo Create-PR (HUMAN-only): gated on the run having a GitHub-backed
 	// attached repo + a real diff. The confirm + click is the only trigger.
 	let runRepo: RunRepo | null = null;
@@ -70,13 +79,19 @@
 		}
 	};
 
-	// index.html / any .html (largest if several) > largest file overall.
-	const pickPrimary = (files: { name: string; content: string }[]) => {
-		const nonEmpty = files.filter((f) => f.content && f.content.trim());
-		if (!nonEmpty.length) return null;
-		const html = nonEmpty.filter((f) => /\.html?$/i.test(f.name));
-		const pool = html.length ? html : nonEmpty;
-		return pool.reduce((a, b) => (b.content.length > a.content.length ? b : a));
+	// Prefer the most "showable" output: html > image > pdf > svg > markdown > csv > largest text.
+	type FileEntry = { id?: string; name: string; content: string; is_binary?: boolean };
+	const pickPrimary = (files: FileEntry[]) => {
+		const renderable = files.filter((f) => f.is_binary || (f.content && f.content.trim()));
+		if (!renderable.length) return null;
+		const order = ['html', 'htm', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'pdf', 'svg', 'md', 'markdown', 'csv'];
+		for (const ext of order) {
+			const m = renderable.filter((f) => f.name.toLowerCase().endsWith('.' + ext));
+			if (m.length) return m.reduce((a, b) => ((b.content?.length || 0) > (a.content?.length || 0) ? b : a));
+		}
+		const txt = renderable.filter((f) => !f.is_binary);
+		const pool = txt.length ? txt : renderable;
+		return pool.reduce((a, b) => ((b.content?.length || 0) > (a.content?.length || 0) ? b : a));
 	};
 
 	const hasContent = (c: string) => !!c && c.trim() && c.trim() !== '(no changes)';
@@ -101,15 +116,28 @@
 			diffs = diffs.filter((d) => (d.label.split(' · ')[0] || '').trim() === agentLabel);
 			changedFiles = '';
 		}
-		// Full file contents → pick the primary one to preview.
+		// File artifacts → pick the primary to preview. Binary files (image/pdf) get bytes from /raw
+		// (a blob URL), not the JSON content — only fetch text content here.
 		const fileMetas = artifacts.filter((a) => a.artifact_type === 'file');
 		const files = await Promise.all(
-			fileMetas.map(async (a) => ({
-				name: a.path || 'file',
-				content: (await getArtifact(a.id))?.content || ''
-			}))
+			fileMetas.map(async (a) => {
+				const isBin = !!a.is_binary;
+				return {
+					id: a.id,
+					name: a.path || 'file',
+					is_binary: isBin,
+					content: isBin ? '' : (await getArtifact(a.id))?.content || ''
+				};
+			})
 		);
 		primary = pickPrimary(files);
+		// Binary primary → fetch its bytes once as an object URL for inline <img>/PDF preview.
+		_revokeRaw();
+		if (primary?.is_binary && primary.id) {
+			try {
+				primaryRawUrl = await artifactRawBlobUrl(primary.id);
+			} catch (_) {}
+		}
 		loaded = true;
 		// Tell parents what's available so they can show/hide their cards.
 		const fl = changedFiles.split('\n').map((s) => s.trim()).filter(Boolean);
@@ -121,6 +149,7 @@
 	};
 
 	onMount(load);
+	onDestroy(_revokeRaw);
 
 	// Reload when the run transitions to done (artifacts get written at completion).
 	let wasDone = false;
@@ -189,10 +218,10 @@
 				{/if}
 				{#if fill}
 					<div class="flex-1 min-h-0">
-						<ArtifactPreview name={primary.name} content={primary.content} {fill} />
+						<ArtifactPreview name={primary.name} content={primary.content} rawUrl={primaryRawUrl} {fill} />
 					</div>
 				{:else}
-					<ArtifactPreview name={primary.name} content={primary.content} />
+					<ArtifactPreview name={primary.name} content={primary.content} rawUrl={primaryRawUrl} />
 				{/if}
 			</div>
 		{/if}

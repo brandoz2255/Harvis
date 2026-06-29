@@ -1,11 +1,16 @@
 <script lang="ts">
 	import { getContext } from 'svelte';
+	import { downloadArtifactFile } from '$lib/apis/agent-runs';
 
 	const i18n: any = getContext('i18n');
 
 	// Actions on a loaded artifact (name + content already fetched for the preview).
 	export let name = '';
 	export let content = '';
+	// For BINARY artifacts (image/pdf/office) the bytes aren't in `content` — pass the artifact id
+	// so Download fetches them from /download. Copy is disabled for binary (nothing text to copy).
+	export let artifactId = '';
+	export let isBinary = false;
 
 	const mimeFor = (n: string): string => {
 		const ext = (n.split('.').pop() || '').toLowerCase();
@@ -23,7 +28,16 @@
 	// from a file:// origin if the user later opens it — never Harvis's origin.
 	// (We deliberately do NOT "open in a new tab" via a blob: URL — that would
 	// inherit Harvis's origin and let the model's scripts escape the iframe sandbox.)
-	const download = () => {
+	const download = async () => {
+		// Binary: fetch the real bytes from /download (content is empty for binary artifacts).
+		if (isBinary && artifactId) {
+			try {
+				await downloadArtifactFile(artifactId, name || 'artifact');
+			} catch (_) {
+				/* best-effort */
+			}
+			return;
+		}
 		if (!content) return;
 		const blob = new Blob([content], { type: mimeFor(name) });
 		const url = URL.createObjectURL(blob);
@@ -55,7 +69,7 @@
 	<button type="button" class={btn} on:click={copy} disabled={!content}>
 		{copied ? $i18n.t('Copied') : $i18n.t('Copy')}
 	</button>
-	<button type="button" class={btn} on:click={download} disabled={!content}>
+	<button type="button" class={btn} on:click={download} disabled={!content && !(isBinary && artifactId)}>
 		{$i18n.t('Download')}
 	</button>
 </div>

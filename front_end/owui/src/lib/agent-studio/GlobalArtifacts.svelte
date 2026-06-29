@@ -1,6 +1,11 @@
 <script lang="ts">
-	import { onMount, getContext } from 'svelte';
-	import { getAllArtifacts, getArtifact, type GlobalArtifactMeta } from '$lib/apis/agent-runs';
+	import { onMount, onDestroy, getContext } from 'svelte';
+	import {
+		getAllArtifacts,
+		getArtifact,
+		artifactRawBlobUrl,
+		type GlobalArtifactMeta
+	} from '$lib/apis/agent-runs';
 	import ArtifactPreview from './ArtifactPreview.svelte';
 	import ArtifactActions from './ArtifactActions.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';
@@ -12,8 +17,15 @@
 
 	let items: GlobalArtifactMeta[] = [];
 	let loaded = false;
-	let selected: { name: string; content: string } | null = null;
+	let selected: { id?: string; name: string; content: string; is_binary?: boolean } | null = null;
+	let selectedRawUrl = '';
 	let loadingPreview = false;
+	const _revokeSel = () => {
+		if (selectedRawUrl) {
+			try { URL.revokeObjectURL(selectedRawUrl); } catch (_) {}
+			selectedRawUrl = '';
+		}
+	};
 
 	const load = async () => {
 		loaded = false;
@@ -21,12 +33,21 @@
 		loaded = true;
 	};
 	onMount(load);
+	onDestroy(_revokeSel);
 
 	const open = async (it: GlobalArtifactMeta) => {
 		loadingPreview = true;
-		selected = { name: it.path || 'artifact', content: '' };
+		_revokeSel();
+		selected = { id: it.id, name: it.path || 'artifact', content: '' };
 		const a = await getArtifact(it.id);
-		selected = { name: it.path || 'artifact', content: a?.content || '' };
+		const isBin = !!a?.is_binary;
+		selected = { id: it.id, name: it.path || 'artifact', content: a?.content || '', is_binary: isBin };
+		// Binary → fetch its bytes once as an object URL for the inline preview.
+		if (isBin) {
+			try {
+				selectedRawUrl = await artifactRawBlobUrl(it.id);
+			} catch (_) {}
+		}
 		loadingPreview = false;
 	};
 
@@ -59,9 +80,14 @@
 			<span class="text-sm font-medium text-gray-800 dark:text-gray-100 font-mono truncate">
 				{selected.name}
 			</span>
-			{#if !loadingPreview && selected.content}
+			{#if !loadingPreview && (selected.content || selected.is_binary)}
 				<div class="ml-auto shrink-0">
-					<ArtifactActions name={selected.name} content={selected.content} />
+					<ArtifactActions
+						name={selected.name}
+						content={selected.content}
+						artifactId={selected.id}
+						isBinary={selected.is_binary}
+					/>
 				</div>
 			{/if}
 		</div>
@@ -72,7 +98,7 @@
 					{$i18n.t('Loading…')}
 				</div>
 			{:else}
-				<ArtifactPreview name={selected.name} content={selected.content} fill />
+				<ArtifactPreview name={selected.name} content={selected.content} rawUrl={selectedRawUrl} fill />
 			{/if}
 		</div>
 	{:else}

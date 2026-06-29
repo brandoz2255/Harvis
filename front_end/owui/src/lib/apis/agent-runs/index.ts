@@ -6,10 +6,13 @@ const headers = () => ({ Authorization: `Bearer ${localStorage.token}` });
 
 export interface ArtifactMeta {
 	id: string;
-	artifact_type: string; // diff | changed_files | summary | log
+	artifact_type: string; // diff | changed_files | summary | log | file
 	path: string | null;
 	size: number;
 	created_at: string | null;
+	category?: string; // html | pdf | image | markdown | text | data | office | archive | unknown
+	mime?: string;
+	is_binary?: boolean; // content is base64 (image/pdf/office) — fetch /raw for bytes
 }
 
 export interface RunNode {
@@ -77,13 +80,42 @@ export const getRunArtifacts = async (runId: string): Promise<ArtifactMeta[]> =>
 
 export const getArtifact = async (
 	artifactId: string
-): Promise<{ content: string; artifact_type: string; path: string | null } | null> => {
+): Promise<{
+	content: string;
+	artifact_type: string;
+	path: string | null;
+	category?: string;
+	mime?: string;
+	is_binary?: boolean;
+} | null> => {
 	try {
 		const r = await fetch(`${BASE}/artifact/${artifactId}`, { headers: headers(), credentials: 'include' });
 		return r.ok ? await r.json() : null;
 	} catch (_) {
 		return null;
 	}
+};
+
+// Fetch a binary artifact's bytes (auth'd) → an object URL for <img>/<iframe> preview. The caller
+// MUST URL.revokeObjectURL() it when done. Text artifacts use their content directly (no /raw).
+export const artifactRawBlobUrl = async (artifactId: string): Promise<string> => {
+	const r = await fetch(`${BASE}/artifact/${artifactId}/raw`, { headers: headers(), credentials: 'include' });
+	if (!r.ok) throw new Error(`artifact raw ${r.status}`);
+	return URL.createObjectURL(await r.blob());
+};
+
+// Download any (non-secret) artifact as a file — fetch bytes auth'd → trigger a browser download.
+export const downloadArtifactFile = async (artifactId: string, name = 'artifact'): Promise<void> => {
+	const r = await fetch(`${BASE}/artifact/${artifactId}/download`, { headers: headers(), credentials: 'include' });
+	if (!r.ok) throw new Error(`artifact download ${r.status}`);
+	const url = URL.createObjectURL(await r.blob());
+	const a = document.createElement('a');
+	a.href = url;
+	a.download = name || 'artifact';
+	document.body.appendChild(a);
+	a.click();
+	a.remove();
+	setTimeout(() => URL.revokeObjectURL(url), 4000);
 };
 
 export interface AttachedRepo {
