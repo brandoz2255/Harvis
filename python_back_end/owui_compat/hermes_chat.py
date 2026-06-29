@@ -55,6 +55,61 @@ def is_hermes_chat_model(model_id: str | None) -> bool:
     return (model_id or "").strip() == HERMES_CHAT_MODEL_ID
 
 
+# ── Hermes Agent model resolution (the LLM the agent runtime runs on) ──────────────────────
+# This is the model INSIDE the Hermes Agent runtime — NOT the user's normal chat model. qwen3:4b
+# is only the tested default for the 8GB dev GPU; it is NOT "the Hermes model". Priority:
+#   1. per-user preference  2. HARVIS_HERMES_AGENT_DEFAULT_MODEL  3. a tool-capable recommended
+#   model that's installed  4. first installed model.
+_HERMES_RECOMMENDED = ["qwen3:8b", "qwen3:4b", "qwen2.5-coder:7b", "llama3.1:8b", "qwen3:14b"]
+
+
+async def _installed_ollama_models() -> list[str]:
+    url = (os.getenv("OLLAMA_URL", "http://ollama:11434")).rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=4.0) as client:
+            r = await client.get(f"{url}/api/tags")
+            return [m.get("name") for m in ((r.json() or {}).get("models") or []) if m.get("name")]
+    except Exception:
+        return []
+
+
+async def _hermes_model_pref(pool, user_id) -> str | None:
+    """Read settings.integrations.preferences.hermes_agent_model (per-user). Fail-soft None."""
+    if not pool or not user_id:
+        return None
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT settings FROM owui_user_settings WHERE user_id=$1", int(user_id))
+        if not row or not row["settings"]:
+            return None
+        s = row["settings"]
+        if isinstance(s, str):
+            s = json.loads(s)
+        val = ((s.get("integrations") or {}).get("preferences") or {}).get("hermes_agent_model")
+        return (val or "").strip() or None
+    except Exception:
+        return None
+
+
+async def resolve_hermes_model(pool=None, user_id=None) -> str:
+    """The Ollama model the Hermes Agent runtime runs on, per the priority above."""
+    env = (os.getenv("HARVIS_HERMES_AGENT_DEFAULT_MODEL") or "qwen3:4b").strip()
+    pref = await _hermes_model_pref(pool, user_id)
+    installed = await _installed_ollama_models()
+    # 1. per-user pref (use it if installed, or if we can't enumerate)
+    if pref and (not installed or pref in installed):
+        return pref
+    # 2. env default
+    if env and (not installed or env in installed):
+        return env
+    # 3. a recommended tool-capable model that's installed
+    for rec in _HERMES_RECOMMENDED:
+        if rec in installed:
+            return rec
+    # 4. first installed, else the env tag
+    return installed[0] if installed else env
+
+
 async def _sidecar_up() -> bool:
     """Cheap liveness probe so the model only lists when actually reachable (fail-closed)."""
     try:
@@ -89,17 +144,21 @@ async def hermes_chat_model_entry() -> dict | None:
     }
 
 
-async def proxy_hermes_chat(owui_body: dict):
+async def proxy_hermes_chat(owui_body: dict, pool=None, user_id=None):
     """Forward an OpenAI-shaped chat body to the Hermes API server (stream or non-stream).
 
-    Returns a FastAPI response (StreamingResponse for SSE, JSONResponse otherwise). The
-    request is sent verbatim except the model is normalized to a concrete Ollama tag the
-    Hermes app understands when the caller passed the sentinel id."""
-    body = dict(owui_body)
-    # The sidecar's configured default model handles the actual inference; if the caller
-    # sent our sentinel id as the model, drop to the sidecar default by sending its tag.
-    if is_hermes_chat_model(body.get("model")):
-        body["model"] = os.getenv("HARVIS_HERMES_AGENT_DEFAULT_MODEL", "qwen3:4b")
+    Returns a FastAPI response (StreamingResponse for SSE, JSONResponse otherwise). A clean
+    OpenAI body is sent; the model is the RESOLVED Hermes Agent model (per-user pref → env →
+    recommended → first-installed), regardless of the model id the caller picked — the user's
+    normal chat model never drives the Hermes runtime."""
+    resolved = await resolve_hermes_model(pool, user_id)
+    body = {
+        "model": resolved,
+        "messages": owui_body.get("messages") or [],
+        "stream": bool(owui_body.get("stream")),
+    }
+    if owui_body.get("temperature") is not None:
+        body["temperature"] = owui_body["temperature"]
     stream = bool(body.get("stream"))
     url = f"{_base_url()}/v1/chat/completions"
     headers = {"Authorization": f"Bearer {_api_key()}", "Content-Type": "application/json"}

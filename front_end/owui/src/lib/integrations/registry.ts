@@ -28,6 +28,11 @@ export interface CapabilityRegistry {
 	// Phase E1/E2/E4(B): per-engine Build readiness (opencode/codex/claude-code/hermes-agent/
 	// hermes-native → {ready, reason?}). The VibeCode engine selector reads this.
 	engine_readiness: Record<string, { ready: boolean; reason?: string }>;
+	// H1: installed Ollama tags (for the Hermes Agent model dropdown) + the Hermes runtime's
+	// RESOLVED model + the raw per-user preference (null = following env/recommended/first).
+	installed_models: string[];
+	hermes_agent_model: string | null;
+	hermes_agent_model_pref: string | null;
 }
 
 const PREF_KEY = (cap: string) => `harvis.integrations.preferences.${cap}`;
@@ -44,7 +49,10 @@ export const getCapabilityRegistry = async (token: string): Promise<CapabilityRe
 			preferences: d?.preferences ?? {},
 			default_model: d?.default_model ?? null,
 			generated_at: d?.generated_at ?? 0,
-			engine_readiness: d?.engine_readiness ?? {}
+			engine_readiness: d?.engine_readiness ?? {},
+			installed_models: Array.isArray(d?.installed_models) ? d.installed_models : [],
+			hermes_agent_model: d?.hermes_agent_model ?? null,
+			hermes_agent_model_pref: d?.hermes_agent_model_pref ?? null
 		};
 	} catch (_) {
 		return null;
@@ -72,6 +80,29 @@ export const saveDefaultModel = async (
 		return { ok: true, synced: res.ok };
 	} catch (_) {
 		return { ok: true, synced: false };
+	}
+};
+
+// H1: the Hermes Agent runtime's underlying Ollama model (NOT the user's chat model).
+// Server-only (no localStorage seam — it's a backend-resolved runtime setting). Returns the
+// freshly-resolved model so the caller can reflect it immediately.
+export const saveHermesModel = async (
+	model: string | null
+): Promise<{ ok: boolean; resolved: string | null }> => {
+	try {
+		const res = await fetch(`${WEBUI_BASE_URL}/api/owui/integrations/hermes-model`, {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				authorization: `Bearer ${localStorage.token}`
+			},
+			body: JSON.stringify({ model })
+		});
+		if (!res.ok) return { ok: false, resolved: null };
+		const d = await res.json();
+		return { ok: true, resolved: d?.hermes_agent_model ?? null };
+	} catch (_) {
+		return { ok: false, resolved: null };
 	}
 };
 

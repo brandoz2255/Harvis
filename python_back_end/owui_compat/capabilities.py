@@ -186,7 +186,7 @@ async def _read_integrations(pool, user_id: int) -> tuple[dict, Optional[str]]:
 def register_capabilities_routes(router: APIRouter, get_current_user: Callable) -> None:
     @router.get("/api/owui/capabilities")
     async def capabilities_registry(request: Request, user=Depends(get_current_user)):
-        services, _installed = await probe_services(request, user)
+        services, installed_models = await probe_services(request, user)
         pool = getattr(request.app.state, "pg_pool", None)
         uid = int(user.id)
         prefs, default_model = await _read_integrations(pool, uid)
@@ -213,11 +213,23 @@ def register_capabilities_routes(router: APIRouter, get_current_user: Callable) 
             if not _ready and _svc.get("reason"):
                 _entry["reason"] = _svc["reason"]
             engine_readiness[_eng] = _entry
+        # H1: the Hermes Agent runtime's OWN model (NOT the user's chat model). Surface the
+        # current preference + the resolved model (pref → env → recommended → first) + the
+        # installed Ollama tags so the Integrations drawer can offer a model dropdown.
+        hermes_agent_model = None
+        try:
+            from owui_compat.hermes_chat import resolve_hermes_model
+            hermes_agent_model = await resolve_hermes_model(pool, uid)
+        except Exception:
+            pass
         return {
             "capabilities": caps,
             "preferences": prefs,
             "default_model": default_model,
             "engine_readiness": engine_readiness,
+            "installed_models": installed_models,
+            "hermes_agent_model": hermes_agent_model,
+            "hermes_agent_model_pref": (prefs or {}).get("hermes_agent_model"),
             "generated_at": int(time.time()),
         }
 
@@ -318,3 +330,60 @@ def register_capabilities_routes(router: APIRouter, get_current_user: Callable) 
                     uid, json.dumps(settings),
                 )
         return {"default_model": model}
+
+    @router.post("/api/owui/integrations/hermes-model")
+    async def integrations_set_hermes_model(request: Request, user=Depends(get_current_user)):
+        """Persist the per-user Hermes Agent runtime model (H1). This is the Ollama model the
+        Hermes Agent RUNTIME runs on (Build + Chat Agent Mode) — NOT the user's normal chat
+        model (that's default_model). Stored at settings.integrations.preferences.hermes_agent_model.
+        null clears it → resolution falls back to env → recommended → first-installed."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        model = body.get("model")  # None clears it
+        if model is not None and (not isinstance(model, str) or not model.strip() or len(model.strip()) > 256):
+            raise HTTPException(status_code=400, detail="model must be a non-empty string (≤256 chars) or null")
+        model = model.strip() if isinstance(model, str) else None
+
+        pool = getattr(request.app.state, "pg_pool", None)
+        if pool is None:
+            raise HTTPException(status_code=503, detail="Database not ready")
+        uid = int(user.id)
+
+        # RMW preserving ALL sibling settings keys — mutate only preferences.hermes_agent_model.
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    "SELECT settings FROM owui_user_settings WHERE user_id=$1 FOR UPDATE", uid
+                )
+                settings = _as_dict(row["settings"]) if row else {}
+                integrations = settings.get("integrations")
+                if not isinstance(integrations, dict):
+                    integrations = {}
+                prefs = integrations.get("preferences")
+                if not isinstance(prefs, dict):
+                    prefs = {}
+                if model is None:
+                    prefs.pop("hermes_agent_model", None)
+                else:
+                    prefs["hermes_agent_model"] = model
+                integrations["preferences"] = prefs
+                settings["integrations"] = integrations
+                settings.setdefault("ui", {})
+                await conn.execute(
+                    "INSERT INTO owui_user_settings (user_id, settings, updated_at) "
+                    "VALUES ($1, $2::jsonb, NOW()) "
+                    "ON CONFLICT (user_id) DO UPDATE SET settings=EXCLUDED.settings, updated_at=NOW()",
+                    uid, json.dumps(settings),
+                )
+        # Echo the freshly-resolved model so the UI reflects the change immediately.
+        resolved = model
+        try:
+            from owui_compat.hermes_chat import resolve_hermes_model
+            resolved = await resolve_hermes_model(pool, uid)
+        except Exception:
+            pass
+        return {"hermes_agent_model": resolved, "hermes_agent_model_pref": model}

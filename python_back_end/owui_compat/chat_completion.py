@@ -384,10 +384,13 @@ async def run_chat_completion(request, owui_body: dict, user_id: int | None = No
     if is_cloud_chat_model(owui_body.get("model")):
         pool = getattr(request.app.state, "pg_pool", None)
         return await proxy_cloud_chat(owui_body, pool, user_id)
-    # Phase E4B: the Hermes-Agent chat model is the real app's OpenAI-compatible API server
-    # (a separate sidecar) — proxy it straight through, never entering the native router.
+    # H2: Hermes Agent as a Chat "Agent Mode" — the request carries harvis_agent_mode='hermes'
+    # (the user's picked model does NOT drive Hermes; its own runtime model does). The legacy
+    # sentinel-model path is kept for back-compat. Routed to the real app's API server (sidecar),
+    # never the native router. Uses the per-user resolved Hermes model.
     from .hermes_chat import is_hermes_chat_model, proxy_hermes_chat
-    if is_hermes_chat_model(owui_body.get("model")):
-        return await proxy_hermes_chat(owui_body)
+    if (owui_body.get("harvis_agent_mode") == "hermes") or is_hermes_chat_model(owui_body.get("model")):
+        pool = getattr(request.app.state, "pg_pool", None)
+        return await proxy_hermes_chat(owui_body, pool, user_id)
     proxy_body = owui_body_to_proxy(owui_body)
     return await execute_chat_completion(request, proxy_body)

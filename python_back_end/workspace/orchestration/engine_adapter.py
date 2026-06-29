@@ -341,8 +341,15 @@ async def run_external_engine_adapter(
         repo_config={"base_sha": base_sha, "repo_path": repo_path},
     )
     # Phase E4B: the Hermes Agent per-user profile home needs a provider config before the run.
+    # Its model is the runtime's OWN preference (per-user pref → env → recommended → first), NOT
+    # the generic Build session model — Hermes Agent is an agent runtime with its own model setting.
     if engine == "hermes-agent":
         await _ensure_hermes_home(container, user_id)
+        try:
+            from owui_compat.hermes_chat import resolve_hermes_model
+            model_name = await resolve_hermes_model(pool, user_id)
+        except Exception:
+            pass  # fail-soft: _build_hermes_command falls back to _HERMES_DEFAULT_MODEL
     cmd, model_id = _BUILDERS[engine](container, workspace_path, task_brief, model_name, api_key, user_id=user_id, auth_mode=auth_mode)
     mapper = _MAPPERS[engine]
     yield root_ev("log", {"message": f"Launching {label} on {os.path.basename(workspace_path)}…"})
