@@ -69,20 +69,35 @@ def _last_user_message(history: list[dict]) -> str:
     return ""
 
 
-def _marker_content(workspace_id: str, suggestion, needs_approval: bool = False) -> str:
+def _marker_content(
+    workspace_id: str,
+    suggestion,
+    needs_approval: bool = False,
+    *,
+    mode: str = "auto",
+    engine: str = "OpenClaw",
+) -> str:
     """Newline-fenced ``<details type="workspace_run">`` block so OWUI's marked
     extension parses it into a token the WorkspaceRunCard renders.
 
     NOTE: OWUI's ``parseAttributes`` regex only captures ``\\w+`` attribute keys
     (no hyphens), so we use word-only keys — and NOT ``data-task-type`` (would be
-    parsed as ``type`` and clobber the ``workspace_run`` discriminator)."""
+    parsed as ``type`` and clobber the ``workspace_run`` discriminator).
+
+    ``engine`` + ``launchmode`` surface on the card chip immediately (before the
+    stream confirms the executor), so the user sees e.g. "OpenClaw · Auto"."""
     label = html.escape(suggestion.task_type_label or "Workspace task", quote=True)
     ttype = html.escape(suggestion.task_type or "", quote=True)
     brief = html.escape((suggestion.task_brief or "")[:240], quote=True)
     approval_attr = ' needsapproval="1"' if needs_approval else ""
+    mode_label = {"auto": "Auto", "agent": "Agent", "orchestrate": "Orchestrate"}.get(
+        (mode or "auto").lower(), "Auto"
+    )
+    eng = html.escape(engine or "OpenClaw", quote=True)
     return (
         f'<details type="workspace_run" workspaceid="{workspace_id}" '
-        f'tasktype="{ttype}" tasklabel="{label}" taskbrief="{brief}"{approval_attr}>\n'
+        f'tasktype="{ttype}" tasklabel="{label}" taskbrief="{brief}" '
+        f'engine="{eng}" launchmode="{mode_label}"{approval_attr}>\n'
         f"<summary>Working in a Harvis Workspace…</summary>\n"
         f"</details>\n"
     )
@@ -289,8 +304,13 @@ async def maybe_handle_workspace(
             workspace_id, suggestion.confidence, suggestion.task_type,
         )
 
+    _engine_label = "Orchestrator" if mode == "orchestrate" else "OpenClaw"
     lines = _openai_sse_lines(
-        workspace_id, _marker_content(workspace_id, suggestion, needs_approval=needs_approval)
+        workspace_id,
+        _marker_content(
+            workspace_id, suggestion, needs_approval=needs_approval,
+            mode=mode, engine=_engine_label,
+        ),
     )
 
     async def _gen():

@@ -41,6 +41,11 @@
 
 	$: workspaceId = attributes?.workspaceid ?? '';
 	$: taskLabel = attributes?.tasklabel ?? 'Workspace task';
+	// Engine chip: the marker's engine hint (e.g. "OpenClaw") shows the instant the
+	// card pops; the stream-parsed `executor` refines it once the run connects.
+	$: engineLabel = executor || (attributes?.engine ?? '');
+	// Launch-mode chip ("Auto" / "Agent" / "Orchestrate") — set by the bridge marker.
+	$: launchMode = attributes?.launchmode ?? '';
 	$: taskBrief = attributes?.taskbrief ?? '';
 	// Opt-in approval gate (P1.5): the marker carries needsapproval="1" when the
 	// run is parked pending Approve. Read once — the marker doesn't change.
@@ -449,13 +454,21 @@
 		</span>
 
 		{#if phase !== 'awaiting'}
-			<div class="ml-auto flex items-center gap-2 min-w-0">
-				{#if executor}
+			<div class="ml-auto flex items-center gap-1.5 min-w-0">
+				{#if engineLabel}
 					<span
-						class="shrink-0 max-w-[170px] truncate text-[10px] px-1.5 py-0.5 rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-300 font-medium"
-						title={executor + (execModel ? ' · ' + execModel : '')}
+						class="shrink-0 max-w-[150px] truncate text-[10px] px-1.5 py-0.5 rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-300 font-medium"
+						title={engineLabel + (execModel ? ' · ' + execModel : '')}
 					>
-						{executor}{#if execModel} · {execModel}{/if}
+						{engineLabel}{#if execModel} · {execModel}{/if}
+					</span>
+				{/if}
+				{#if launchMode}
+					<span
+						class="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 font-medium"
+						title={'Launch mode: ' + launchMode}
+					>
+						{launchMode}
 					</span>
 				{/if}
 				<span class="shrink-0 text-xs text-gray-400 tabular-nums">
