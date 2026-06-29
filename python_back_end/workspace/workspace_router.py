@@ -338,13 +338,24 @@ class WorkspaceLiveBroadcaster:
     items and the terminal None sentinel — no stolen events.
     """
 
-    __slots__ = ("_subscribers",)
+    __slots__ = ("_subscribers", "_backlog")
+    # Keep recent (seq, event) items so a subscriber that connects AFTER emission has
+    # begun still receives them. Without this, the replay→subscribe gap in the SSE
+    # endpoint drops live events (put() no-ops when there are no subscribers yet) and
+    # the card sits on "Connecting…" until a manual reload replays from the DB.
+    _BACKLOG_MAX = 512
 
     def __init__(self) -> None:
         self._subscribers: list[asyncio.Queue] = []
+        self._backlog: list = []
 
     def subscribe(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue()
+        # Pre-load the backlog so a late subscriber catches up; the SSE endpoint
+        # de-dupes anything already replayed from the DB via `seq <= last_seq`.
+        # subscribe() is fully synchronous (no await) so put() can't interleave here.
+        for item in self._backlog:
+            q.put_nowait(item)
         self._subscribers.append(q)
         return q
 
@@ -355,6 +366,13 @@ class WorkspaceLiveBroadcaster:
             pass
 
     async def put(self, item) -> None:
+        if item is None:
+            # Run ended — DB replay covers any future reconnect; free the backlog.
+            self._backlog = []
+        else:
+            self._backlog.append(item)
+            if len(self._backlog) > self._BACKLOG_MAX:
+                self._backlog = self._backlog[-self._BACKLOG_MAX:]
         subs = list(self._subscribers)
         if not subs:
             return
@@ -366,6 +384,24 @@ _workspace_broadcasters: dict[str, WorkspaceLiveBroadcaster] = {}
 
 # asyncio.Task references so /cancel can cancel the background task.
 _workspace_tasks: dict[str, asyncio.Task] = {}
+
+
+# ─── OpenClaw single-agent artifact capture ─────────────────────────────────────
+# The OpenClaw / native single-agent lanes don't run the file collector that
+# vibecode / orchestrator / engine-adapter use. So we capture the files the agent
+# WRITES (the full body is in the write tool_call args) and persist them as `file`
+# artifacts — letting a plain chat "build me an html" auto-pop the Artifacts tab too.
+_OC_WRITE_TOOLS = {"write", "file_write", "create_file"}
+_OC_MAX_ARTIFACT_BYTES = 512 * 1024  # mirrors isolation._MAX_FILE_BYTES
+
+
+def _clean_oc_artifact_path(path: str) -> str:
+    """OpenClaw writes land under 'session-<id>/...'; strip that prefix for a clean
+    gallery name (matches how vibecode artifacts use a repo-relative path)."""
+    p = (path or "").strip()
+    p = re.sub(r"^\.?/+", "", p)            # drop a leading ./ or /
+    p = re.sub(r"^session-[^/]+/", "", p)   # drop the session-<id>/ prefix
+    return p or (path or "")
 
 
 # ─── Request / Response models ─────────────────────────────────────────────────
@@ -951,6 +987,30 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
     final_error: Optional[str] = None
     token_chunks: list[str] = []
 
+    # OpenClaw / native single-agent lanes: capture files the agent writes so chat
+    # builds produce artifacts (+ auto-pop) like vibecode/orchestrator already do.
+    # Excludes the lanes that already collect via _db_save_artifact internally.
+    _oc_writes: dict[str, str] = {}
+    _collect_writes = agent_id not in ("orchestrated", "vibecode-turn", "engine-adapter")
+
+    async def _flush_oc_writes() -> None:
+        if not (_collect_writes and _oc_writes):
+            return
+        try:
+            from .orchestration.isolation import _is_secret_artifact as _is_secret
+        except Exception:
+            def _is_secret(_n: str) -> bool:
+                return False
+        for _ap, _ac in list(_oc_writes.items()):
+            if _is_secret(_ap):
+                continue  # never expose .env / keys / credentials as artifacts
+            _save = _ac if len(_ac) <= _OC_MAX_ARTIFACT_BYTES else f"<{len(_ac)} bytes — not snapshotted>"
+            try:
+                await _db_save_artifact(pool, workspace_id, "file", path=_ap, content=_save)
+            except Exception as _exc:
+                logger.warning("[workspace:%s] artifact save failed for %r: %s", workspace_id, _ap, _exc)
+        _oc_writes.clear()
+
     # ── Select the event stream based on agent_id ────────────────────────────
     event_stream = None
     use_parallel = ws.get("parallel", True)
@@ -1105,6 +1165,13 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
                 _tname = (event.data or {}).get("tool", "")
                 if _tname not in _RETRIEVAL_ONLY_TOOLS:
                     executing_tool_call_count += 1
+                # Capture file writes (full body lives in the write tool_call args) so
+                # this lane produces artifacts. Latest content wins per path.
+                if _collect_writes and _tname in _OC_WRITE_TOOLS:
+                    _wargs = (event.data or {}).get("args") or {}
+                    _wpath, _wcontent = _wargs.get("path"), _wargs.get("content")
+                    if isinstance(_wpath, str) and _wpath and isinstance(_wcontent, str):
+                        _oc_writes[_clean_oc_artifact_path(_wpath)] = _wcontent
             elif event.type == "token":
                 tok = event.data.get("content")
                 if isinstance(tok, str) and tok:
@@ -1119,6 +1186,10 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
             if event.type in ("done", "cancelled", "error"):
                 terminal_status = event.type
                 ws["status"] = event.type
+                # Persist captured file writes as artifacts BEFORE the terminal event is
+                # broadcast, so the frontend auto-pop (fetches /run/{id}/artifacts on
+                # 'done') finds them. No-op for lanes that already collect.
+                await _flush_oc_writes()
                 if event.type == "done":
                     raw_summary = event.data.get("summary") or ""
                     if not raw_summary.strip():
@@ -1221,6 +1292,9 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
         seq += 1
 
     finally:
+        # Safety net: persist any captured writes not yet flushed (cancel/error paths
+        # skip the in-loop terminal block). No-op on the normal 'done' path.
+        await _flush_oc_writes()
         # None sentinel signals each subscriber that the stream has ended
         await broadcaster.put(None)
 

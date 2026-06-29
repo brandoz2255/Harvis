@@ -136,6 +136,12 @@ services:
       # error itself recommends this.) Harmless on the rig.
       PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
       OLLAMA_URL: "http://ollama:11434"
+      # Workspace task-detector model. Without this the resolver auto-picks the
+      # LARGEST installed model (e.g. gpt-oss:20b) which can't load in 15s on the
+      # 8GB GPU → detection times out → chat builds never launch. Pin a SMALL/fast
+      # model that fits the GPU alongside the chat model (qwen3:4b ≈ 2.5GB) so
+      # detection never evicts/thrashes the heavier chat model on the 8GB laptop.
+      WORKSPACE_DETECTOR_OLLAMA_MODEL: "${WORKSPACE_DETECTOR_OLLAMA_MODEL:-qwen3:4b}"
       # Optional desktop-GPU Ollama for the model picker. Surfaces models that
       # only exist on the desktop (e.g. gemma4-26b on the 5080) in /api/models.
       DESKTOP_OLLAMA_URL: "${DESKTOP_OLLAMA_URL:-}"

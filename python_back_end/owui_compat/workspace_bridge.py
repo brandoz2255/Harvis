@@ -164,6 +164,16 @@ async def maybe_handle_workspace(
     if mode == "chat":
         return None  # user forced fast chat
 
+    # Cloud chat models (Claude / GPT) generate build/code requests directly in chat
+    # — fast, zero GPU, and the OpenClaw workspace lane isn't wired to use a cloud
+    # model as its agent (it 502s). So in AUTO mode a cloud model stays in plain chat
+    # (the chat artifact preview auto-opens client-side). Forced agent/orchestrate
+    # still runs the workspace for users who explicitly chose it.
+    _model_id = str(owui_body.get("model") or "")
+    if mode == "auto" and _model_id.startswith(("anthropic/", "openai/")):
+        logger.info("owui workspace_bridge: cloud model %s in auto mode → plain chat", _model_id)
+        return None
+
     # Lazy imports — keep the package free of import-time coupling to workspace/.
     try:
         from workspace.task_detector import detect_workspace_task, WorkspaceSuggestion
