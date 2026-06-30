@@ -81,7 +81,7 @@ services:
       - "8000:8000"
     environment:
       DATABASE_URL: "postgresql://pguser:pgpassword@pgsql:5432/database"
-      JWT_SECRET: "***REMOVED***"
+      JWT_SECRET: "${JWT_SECRET:?JWT_SECRET must be set in .env}"
       OLLAMA_URL: "http://ollama:11434"
       BACKEND_URL: "http://backend:8000"
       HF_HOME: "/models-cache/huggingface"
@@ -138,7 +138,7 @@ services:
     environment:
       NODE_ENV: "production"
       NEXT_TELEMETRY_DISABLED: "1"
-      JWT_SECRET: "***REMOVED***"
+      JWT_SECRET: "${JWT_SECRET:?JWT_SECRET must be set in .env}"
       BACKEND_URL: "http://backend:8000"
       OLLAMA_URL: "http://ollama:11434"
     depends_on:

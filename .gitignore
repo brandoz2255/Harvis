@@ -172,3 +172,11 @@ ruvector.db
 front_end/owui/build/
 front_end/*/build/
 node_modules/
+# local UI prototype scratch (68M, not a deliverable — keep it out of the repo)
+front_end/harvis-ui-prototype/
+# runtime logs are never source (verify_*.log, uvicorn.log, deployment.log, etc.)
+*.log
+# stray scratch capture
+err.txt
+# k8s secret manifest (plural variant — singular already ignored above)
+k8s-manifests/overlays/prod/openclaw-secrets.yaml

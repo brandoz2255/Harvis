@@ -1,3 +1,0 @@
-INFO:__main__:🧪 Testing AudioGenerator with Chatterbox (expecting CPU fallback)...
-ERROR:open_notebook.podcast.audio:TTS service generation failed: [Errno -3] Temporary failure in name resolution
-ERROR:__main__:❌ Generation Failed: [Errno -3] Temporary failure in name resolution

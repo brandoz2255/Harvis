@@ -129,7 +129,7 @@ services:
       - "8000:8000"
     environment:
       DATABASE_URL: "postgresql://pguser:pgpassword@pgsql:5432/database"
-      JWT_SECRET: "***REMOVED***"
+      JWT_SECRET: "${JWT_SECRET:?JWT_SECRET must be set in .env}"
       # Let PyTorch reuse fragmented/reserved VRAM instead of OOMing on the
       # TTS generation's ~774MB activation alloc. Critical on the 8GB laptop GPU
       # where Whisper + TTS + desktop fragment the small free pool. (The CUDA-OOM
@@ -141,7 +141,10 @@ services:
       # 8GB GPU → detection times out → chat builds never launch. Pin a SMALL/fast
       # model that fits the GPU alongside the chat model (qwen3:4b ≈ 2.5GB) so
       # detection never evicts/thrashes the heavier chat model on the 8GB laptop.
-      WORKSPACE_DETECTOR_OLLAMA_MODEL: "${WORKSPACE_DETECTOR_OLLAMA_MODEL:-qwen3:4b}"
+      # Use a NON-thinking model: qwen3:4b emits a long <think> chain (~13s, ignores
+      # think:false) → 15s timeout on the 8GB GPU → detection silently fails → no workspace
+      # card. llama3.1:8b is non-thinking and with format:json answers in ~3s.
+      WORKSPACE_DETECTOR_OLLAMA_MODEL: "${WORKSPACE_DETECTOR_OLLAMA_MODEL:-llama3.1:8b}"
       # Optional desktop-GPU Ollama for the model picker. Surfaces models that
       # only exist on the desktop (e.g. gemma4-26b on the 5080) in /api/models.
       DESKTOP_OLLAMA_URL: "${DESKTOP_OLLAMA_URL:-}"
@@ -374,7 +377,7 @@ services:
     environment:
       NODE_ENV: "production"
       NEXT_TELEMETRY_DISABLED: "1"
-      JWT_SECRET: "***REMOVED***"
+      JWT_SECRET: "${JWT_SECRET:?JWT_SECRET must be set in .env}"
       BACKEND_URL: "http://backend:8000"
       OLLAMA_URL: "http://ollama:11434"
     depends_on:
