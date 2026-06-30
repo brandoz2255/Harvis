@@ -62,24 +62,8 @@ from .task_detector import detect_workspace_task
 logger = logging.getLogger(__name__)
 
 workspace_router = APIRouter(prefix="/api/workspace", tags=["workspace"])
-_DEBUG_LOG_PATH = "/home/user/Harvis/.cursor/debug-d007eb.log"
-
-
 def _append_debug_log(location: str, message: str, data: dict, run_id: str, hypothesis_id: str) -> None:
-    try:
-        with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps({
-                "sessionId": "d007eb",
-                "id": f"log_{int(time.time()*1000)}_{uuid.uuid4().hex[:8]}",
-                "timestamp": int(time.time() * 1000),
-                "location": location,
-                "message": message,
-                "data": data,
-                "runId": run_id,
-                "hypothesisId": hypothesis_id,
-            }, separators=(",", ":")) + "\n")
-    except Exception:
-        pass
+    return  # debug logging removed
 
 # ─── Provider probe URLs (read once at module load) ──────────────────────────
 _LOCAL_OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
@@ -826,6 +810,7 @@ async def _db_save_event(pool, workspace_id: str, seq: int, event: OpenClawEvent
             "summary", "fix_hint", "model", "parent_run_id",
             "run_id", "agent_label", "steps",
             "action_id", "risk", "approved",  # per-action permission gate (in-place)
+            "analysis_md",  # Build Result Narrator: full written analysis on the terminal event
         ):
             val = event.data.get(key)
             if val is not None:
@@ -859,6 +844,7 @@ async def _db_complete_run(
     started_epoch: float,
     prompt_tokens: int = 0,
     completion_tokens: int = 0,
+    analysis_md: Optional[str] = None,
 ) -> None:
     if pool is None:
         return
@@ -869,6 +855,8 @@ async def _db_complete_run(
             # value intact — so the bg loop completing a vibecode/main run (which sets its
             # own tokens elsewhere) never clobbers them, while orchestrated sub-agents
             # (which pass real counts) get attributed. Powers the Background-tasks table.
+            # analysis_md likewise: NULL leaves any prior value intact (non-Build runs don't
+            # narrate, so they never clobber a Build run's analysis).
             await conn.execute(
                 """
                 UPDATE workspace_runs
@@ -880,14 +868,106 @@ async def _db_complete_run(
                     final_summary     = $6,
                     error_message     = $7,
                     prompt_tokens     = COALESCE(NULLIF($8, 0), prompt_tokens),
-                    completion_tokens = COALESCE(NULLIF($9, 0), completion_tokens)
+                    completion_tokens = COALESCE(NULLIF($9, 0), completion_tokens),
+                    analysis_md       = COALESCE($10, analysis_md)
                 WHERE id = $1
                 """,
                 workspace_id, status, duration_ms, event_count, tool_calls,
                 summary, error, int(prompt_tokens or 0), int(completion_tokens or 0),
+                analysis_md,
             )
     except Exception as exc:
         logger.error("DB: failed to complete workspace_run %s: %s", workspace_id, exc)
+
+
+# ── Build Result Narrator helpers ─────────────────────────────────────────────────────────────
+_NARRATOR_ENGINE_LABELS = {
+    "opencode": "OpenCode", "codex": "Codex", "codex-local": "Codex", "codex-cloud": "Codex",
+    "claude-code": "Claude Code", "hermes-agent": "Hermes Agent", "hermes-native": "Hermes",
+    "native": "Native",
+}
+
+
+def _narrator_engine_label(ws: dict, agent_id: str) -> str:
+    """Human label for the engine that ran this Build turn (for 'Built with X')."""
+    eng = (ws.get("engine") or "").strip()
+    if eng:
+        return _NARRATOR_ENGINE_LABELS.get(eng, eng)
+    if (ws.get("vibecode_persona_engine") or "").strip() == "hermes":
+        return "Hermes"
+    if agent_id == "claude":
+        return "Claude Code"
+    if agent_id in ("vibecode-turn", "orchestrated"):
+        return "Native"
+    return "Harvis"
+
+
+async def _load_run_diff_summary(pool, workspace_id: str):
+    """Read the run's diff + changed-files + file-artifact count from workspace_artifacts.
+    Returns (changed_files: list[str], diff_text: str, file_count: int). Fail-soft → empties."""
+    changed_files: list[str] = []
+    diff_parts: list[str] = []
+    file_paths: list[str] = []
+    file_count = 0
+    if pool is None:
+        return changed_files, "", 0
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT artifact_type, content, path FROM workspace_artifacts WHERE workspace_id = $1",
+                workspace_id,
+            )
+        for r in rows:
+            at = r["artifact_type"]
+            content = r["content"] or ""
+            if at == "changed_files" and content:
+                changed_files = [x.strip() for x in content.split("\n") if x.strip()]
+            elif at == "diff" and content:
+                diff_parts.append(content)
+            elif at == "file":
+                file_count += 1
+                if r["path"]:
+                    file_paths.append(r["path"])
+    except Exception as exc:
+        logger.warning("narrator: failed to load artifacts for %s: %s", workspace_id, exc)
+    diff_text = "\n".join(diff_parts)
+    if not changed_files and diff_text:
+        changed_files = re.findall(r"^\+\+\+ b/(.+)$", diff_text, re.M)
+    # Lanes with no git diff (e.g. the cloud-Claude chat lane) only emit `file` artifacts —
+    # use their paths as the changed-files list so the analysis still names what was written.
+    if not changed_files and not diff_text and file_paths:
+        changed_files = file_paths
+    return changed_files, diff_text, file_count
+
+
+async def _compose_run_analysis(
+    pool, ws: dict, agent_id: str, model_name: str, *, status: str, raw_summary: str,
+    changed_files: list[str], diff_text: str, file_count: int, tool_calls: int,
+    started_epoch: float, error_message: str = "", fix_hint: str = "",
+) -> Optional[str]:
+    """Compose the written Build analysis (deterministic; AI when flagged on, with fallback)."""
+    from .build_narrator import (
+        compose_build_analysis, build_narrator_ai_enabled, narrate_build_ai,
+    )
+    engine_label = _narrator_engine_label(ws, agent_id)
+    rp = (ws.get("repo_path") or "").rstrip("/")
+    repo_name = rp.rsplit("/", 1)[-1] if rp else ""
+    task_brief = ws.get("task_brief") or ""
+    duration_ms = int((time.monotonic() - started_epoch) * 1000)
+    md = compose_build_analysis(
+        task_brief=task_brief, engine_label=engine_label, model_name=model_name, status=status,
+        raw_summary=raw_summary, changed_files=changed_files, diff_text=diff_text,
+        file_count=file_count, tool_calls=tool_calls, duration_ms=duration_ms,
+        error_message=error_message, fix_hint=fix_hint, repo_name=repo_name,
+    )
+    if status == "done" and build_narrator_ai_enabled():
+        ai = await narrate_build_ai(
+            deterministic_md=md, task_brief=task_brief, engine_label=engine_label,
+            raw_summary=raw_summary, diff_text=diff_text,
+        )
+        if ai:
+            md = ai
+    return md
 
 
 async def _db_mark_run_orphaned(pool, workspace_id: str, detail: str) -> None:
@@ -985,13 +1065,14 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
     terminal_status = "done"
     final_summary: Optional[str] = None
     final_error: Optional[str] = None
+    final_analysis_md: Optional[str] = None  # Build Result Narrator output (Build-like runs)
     token_chunks: list[str] = []
 
     # OpenClaw / native single-agent lanes: capture files the agent writes so chat
     # builds produce artifacts (+ auto-pop) like vibecode/orchestrator already do.
     # Excludes the lanes that already collect via _db_save_artifact internally.
     _oc_writes: dict[str, str] = {}
-    _collect_writes = agent_id not in ("orchestrated", "vibecode-turn", "engine-adapter")
+    _collect_writes = agent_id not in ("orchestrated", "vibecode-turn", "engine-adapter", "claude")
 
     async def _flush_oc_writes() -> None:
         if not (_collect_writes and _oc_writes):
@@ -1046,6 +1127,18 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
                 )
             else:
                 event_stream = stream_local_ollama_workspace(task_brief, chat_history, model=model_name)
+
+    elif agent_id == "claude":
+        # Cloud Claude as a workspace engine — `claude -p` (the user's verified subscription
+        # oauth or api_key) drives its OWN agentic tool-loop (web_search, exec, file ops) in
+        # the harvis-claude-code sidecar. Zero GPU; mirrors the Kimi lane but for Claude.
+        from .orchestration.engine_adapter import run_claude_chat_workspace
+        event_stream = run_claude_chat_workspace(
+            task_brief, chat_history,
+            model_name=model_name, pool=pool,
+            parent_workspace_id=workspace_id, user_id=ws["user_id"],
+            session_id=ws.get("session_id", ""),
+        )
 
     elif agent_id == "nvidia-kimi":
         nvidia_key = os.getenv("NVIDIA_API_KEY", "")
@@ -1180,12 +1273,16 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
                     if len(token_chunks) > 400:
                         token_chunks = token_chunks[-400:]
 
-            # Persist first — DB is the authoritative source for replays
-            await _db_save_event(pool, workspace_id, seq, event)
+            # Persist NON-terminal events first (authoritative for replays). TERMINAL events
+            # (done/cancelled/error) are saved AFTER the validators + Build narrator enrich
+            # event.data below, so a reload/replay carries the final summary + analysis_md.
+            if event.type not in ("done", "cancelled", "error"):
+                await _db_save_event(pool, workspace_id, seq, event)
 
             if event.type in ("done", "cancelled", "error"):
                 terminal_status = event.type
                 ws["status"] = event.type
+                structured = None  # set in the 'done' branch; referenced by the narrator below
                 # Persist captured file writes as artifacts BEFORE the terminal event is
                 # broadcast, so the frontend auto-pop (fetches /run/{id}/artifacts on
                 # 'done') finds them. No-op for lanes that already collect.
@@ -1255,7 +1352,45 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
                 elif event.type == "error":
                     final_error = event.data.get("message")
 
-                # Fan-out to live subscribers AFTER enriching event data
+                # ── Build Result Narrator: compose the full written analysis as the assistant
+                #    message. Scoped to Build-like runs (a git diff exists OR a VibeCode turn);
+                #    skips CTF (no diff) + research/document (structured source-card output).
+                #    Fail-soft: any error → no analysis_md, the short summary still renders.
+                try:
+                    from .build_narrator import build_narrator_enabled
+                    if build_narrator_enabled():
+                        _bn_changed, _bn_diff, _bn_fc = await _load_run_diff_summary(pool, workspace_id)
+                        # Build-like = a git diff (VibeCode/orchestrated) OR a VibeCode turn OR a
+                        # chat cloud-Claude build that wrote files (agent_id="claude" — distinct from
+                        # the OpenClaw CTF lane, so this never narrates hash/decode tasks).
+                        _build_like = bool(
+                            _bn_changed or _bn_diff or ws.get("vibecode_session_id")
+                            or (agent_id == "claude" and _bn_fc > 0)
+                        )
+                        if event.type == "done" and _build_like and structured is None:
+                            final_analysis_md = await _compose_run_analysis(
+                                pool, ws, agent_id, model_name, status="done",
+                                raw_summary=final_summary or "", changed_files=_bn_changed,
+                                diff_text=_bn_diff, file_count=_bn_fc,
+                                tool_calls=executing_tool_call_count, started_epoch=started_epoch,
+                            )
+                        elif event.type in ("error", "cancelled") and ws.get("vibecode_session_id"):
+                            final_analysis_md = await _compose_run_analysis(
+                                pool, ws, agent_id, model_name, status=event.type,
+                                raw_summary=final_summary or "", changed_files=[], diff_text="",
+                                file_count=0, tool_calls=executing_tool_call_count,
+                                started_epoch=started_epoch,
+                                error_message=final_error or event.data.get("message") or "",
+                                fix_hint=event.data.get("fix_hint") or "",
+                            )
+                        if final_analysis_md:
+                            event.data["analysis_md"] = final_analysis_md
+                except Exception as exc:
+                    logger.warning("[workspace:%s] Build narrator failed: %s", workspace_id, exc)
+
+                # Persist the ENRICHED terminal event (validated summary + analysis_md), then
+                # fan-out to live subscribers.
+                await _db_save_event(pool, workspace_id, seq, event)
                 await broadcaster.put((seq, event))
                 seq += 1
                 break
@@ -1301,6 +1436,7 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
         await _db_complete_run(
             pool, workspace_id, terminal_status,
             final_summary, final_error, tool_call_count, seq, started_epoch,
+            analysis_md=final_analysis_md,
         )
         _workspace_tasks.pop(workspace_id, None)
 
@@ -2123,6 +2259,7 @@ async def launch_workspace_internal(
     enable_interactive: bool = True,
     live_web: bool = True,
     attachments: list[dict] | None = None,
+    uniform_model: bool = False,
 ) -> dict:
     """
     Launch a workspace run without JWT (internal integrations).
@@ -2188,6 +2325,7 @@ async def launch_workspace_internal(
         model_name=model_name,
         live_web=live_web,
         interactive_context=interactive_context,
+        uniform_model=uniform_model,
     )
 
     try:
@@ -2446,30 +2584,6 @@ async def stream_workspace(
                                 payload = {}
                         else:
                             payload = {}
-                        # region agent log
-                        try:
-                            import os as _os, time as _time, uuid as _uuid
-                            _log_path = "/tmp/debug-d007eb.log"
-                            _os.makedirs(_os.path.dirname(_log_path), exist_ok=True)
-                            with open(_log_path, "a", encoding="utf-8") as _f:
-                                _f.write(json.dumps({
-                                    "sessionId": "d007eb",
-                                    "id": f"log_{int(_time.time()*1000)}_{_uuid.uuid4().hex[:8]}",
-                                    "timestamp": int(_time.time()*1000),
-                                    "location": "workspace_router.py:stream_workspace:replay",
-                                    "message": "sse_replay_row",
-                                    "data": {
-                                        "workspace_id": workspace_id,
-                                        "seq": last_seq,
-                                        "event_type": row["event_type"],
-                                        "raw_type": type(raw_payload).__name__,
-                                    },
-                                    "runId": "run_sse_replay",
-                                    "hypothesisId": "H8",
-                                }, separators=(",", ":")) + "\n")
-                        except Exception:
-                            pass
-                        # endregion
                         event_data = {"type": row["event_type"], **payload}
                         yield f"data: {json.dumps(event_data)}\n\n"
                         if row["event_type"] in ("done", "cancelled", "error"):
@@ -2651,32 +2765,6 @@ async def cancel_workspace(
     _task_was_done = result.get("task_was_done", True)
     _wait_outcome = result.get("wait_outcome", "n/a")
 
-    # region agent log
-    try:
-        import json as _json, os as _os, time as _time, uuid as _uuid
-        _log_path = "/tmp/debug-d007eb.log"
-        _os.makedirs(_os.path.dirname(_log_path), exist_ok=True)
-        with open(_log_path, "a", encoding="utf-8") as _f:
-            _f.write(_json.dumps({
-                "sessionId": "d007eb",
-                "id": f"log_{int(_time.time()*1000)}_{_uuid.uuid4().hex[:8]}",
-                "timestamp": int(_time.time()*1000),
-                "location": "workspace_router.py:cancel_workspace",
-                "message": "cancel_workspace_completed",
-                "data": {
-                    "workspace_id": workspace_id,
-                    "user_id": current_user.get("id"),
-                    "task_existed": _task_existed,
-                    "task_was_done": _task_was_done,
-                    "wait_outcome": _wait_outcome,
-                    "client_cancel_err": _client_cancel_err,
-                },
-                "runId": "run_cancel_button",
-                "hypothesisId": "H_cancel",
-            }, separators=(",", ":")) + "\n")
-    except Exception:
-        pass
-    # endregion
 
     return {"workspace_id": workspace_id, "status": result["status"]}
 
@@ -3398,7 +3486,7 @@ async def get_vibecode_session(
             SELECT r.id, r.task_brief, r.status, r.started_at, r.completed_at,
                    r.duration_ms, r.tool_calls, r.final_summary, r.error_message,
                    r.model_name, r.prompt_tokens, r.completion_tokens, r.context_window,
-                   r.attachments,
+                   r.attachments, r.analysis_md,
                    (SELECT COUNT(*) FROM workspace_runs c WHERE c.parent_run_id = r.id)
                      AS child_count
             FROM workspace_runs r
@@ -3419,6 +3507,9 @@ async def get_vibecode_session(
             "status": s.get("status"),
             "isolation_mode": s.get("isolation_mode") or "session",
             "permission_mode": s.get("permission_mode") or "ask",
+            # Which Build engine this session runs (native | opencode | codex | claude-code |
+            # hermes-*). Stored at create; surfaced so the thread can label "Built with X".
+            "engine": s.get("engine") or "native",
             "local_folder_name": local_folder_name,
             # No base_sha yet ⇒ the browser still needs to seed this local-folder session.
             "needs_seed": bool(local_folder_name) and not s.get("base_sha"),
@@ -4228,6 +4319,7 @@ async def list_workspace_history(
                 SELECT r.id, r.session_id, r.task_brief, r.status, r.parent_run_id,
                        r.started_at, r.completed_at, r.duration_ms,
                        r.event_count, r.tool_calls, r.final_summary, r.error_message,
+                       r.model_name, r.prompt_tokens, r.completion_tokens,
                        (SELECT COUNT(*) FROM workspace_runs c WHERE c.parent_run_id = r.id)
                          AS child_count
                 FROM workspace_runs r

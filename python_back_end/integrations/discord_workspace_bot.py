@@ -18,27 +18,8 @@ from plugins.models.resolver import resolve_default_local_model
 
 logger = logging.getLogger(__name__)
 
-_DEBUG_LOG_PATH = "/tmp/debug-d007eb.log"
-_DEBUG_SESSION_ID = "d007eb"
-
-
 def _debug_log(location: str, message: str, data: dict, run_id: str, hypothesis_id: str) -> None:
-    try:
-        os.makedirs(os.path.dirname(_DEBUG_LOG_PATH), exist_ok=True)
-        payload = {
-            "sessionId": _DEBUG_SESSION_ID,
-            "id": f"log_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}",
-            "timestamp": int(time.time() * 1000),
-            "location": location,
-            "message": message,
-            "data": data,
-            "runId": run_id,
-            "hypothesisId": hypothesis_id,
-        }
-        with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, separators=(",", ":")) + "\n")
-    except Exception:
-        pass
+    return  # debug logging removed
 
 
 @dataclass(frozen=True)
@@ -167,6 +148,113 @@ async def _get_user_model_preference(pool, user_id: int) -> tuple[str, str]:
 
     _model_pref_cache[user_id] = (now, res_agent, res_model)
     return res_agent, res_model
+
+
+# ── Workspace ENGINE preference (separate from the MODEL) ──────────────────
+# Engine = who performs the work (Native/OpenClaw tool loop vs Claude Code direct).
+# Model = the brain the engine uses. They are independent controls.
+_ENGINE_LABELS = {
+    "native": "Native (OpenClaw)",
+    "claude-code": "Claude Code",
+}
+_ENGINE_HINTS = {
+    "native": "Complex tasks run through OpenClaw's tool loop on your selected model.",
+    "claude-code": "Complex tasks run directly through Claude Code on your connected Claude credential.",
+}
+
+
+async def _get_user_engine_preference(pool, user_id: int) -> str:
+    """Return the user's saved workspace ENGINE — 'native' (OpenClaw tool loop)
+    or 'claude-code' (Claude Code direct engine). Fail-soft → 'native'."""
+    if not pool:
+        return "native"
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT engine FROM openclaw_llm_config WHERE user_id = $1 "
+                "ORDER BY updated_at DESC LIMIT 1",
+                user_id,
+            )
+        eng = ((row["engine"] if row else None) or "native").strip()
+        return eng or "native"
+    except Exception as exc:
+        logger.debug("Failed to fetch user engine preference: %s", exc)
+        return "native"
+
+
+async def _user_has_anthropic_provider(pool, user_id: int) -> bool:
+    """True when the user's OpenClaw model provider is Anthropic WITH an API key
+    stored — i.e. Path A is ready (OpenClaw runs its tool loop on Claude via the
+    Anthropic Messages API). When true, a Claude model is passed through to
+    OpenClaw rather than swapped for a local fallback."""
+    if not pool:
+        return False
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT provider_type, api_key_encrypted FROM openclaw_llm_config "
+                "WHERE user_id = $1 ORDER BY updated_at DESC LIMIT 1",
+                user_id,
+            )
+        return bool(row and (row["provider_type"] == "anthropic") and row["api_key_encrypted"])
+    except Exception:
+        return False
+
+
+async def _get_last_local_model(pool, user_id: int) -> str:
+    """The last LOCAL (non-cloud) model the user selected — used to restore their
+    actual pick when a cloud model falls back to the OpenClaw workspace lane."""
+    if not pool:
+        return ""
+    try:
+        async with pool.acquire() as conn:
+            v = await conn.fetchval(
+                "SELECT last_local_model_id FROM openclaw_llm_config WHERE user_id = $1 "
+                "ORDER BY updated_at DESC LIMIT 1",
+                user_id,
+            )
+        return (v or "").strip()
+    except Exception:
+        return ""
+
+
+async def _get_user_orchestrate_pref(pool, user_id: int) -> bool:
+    """Whether the user enabled multi-agent (orchestrate) for Discord workspaces."""
+    if not pool:
+        return False
+    try:
+        async with pool.acquire() as conn:
+            v = await conn.fetchval(
+                "SELECT orchestrate_enabled FROM openclaw_llm_config WHERE user_id = $1 "
+                "ORDER BY updated_at DESC LIMIT 1",
+                user_id,
+            )
+        return bool(v)
+    except Exception:
+        return False
+
+
+def _looks_multi_part(text: str) -> bool:
+    """Heuristic: does this task look multi-part / complex enough to fan out to
+    several agents? (Used only when the user has multi-agent ON — trivial workspace
+    tasks stay single-agent.)"""
+    t = (text or "").strip()
+    if len(t) >= 200 or "\n" in t:
+        return True
+    if re.search(
+        r"(?:\b\d+[\.\)]\s|\bstep\s*\d|\bthen\b|\balso\b|\bafter that\b"
+        r"|\bcompare\b|\bversus\b|\bvs\.?\b|\beach of\b)",
+        t,
+        re.IGNORECASE,
+    ):
+        return True
+    # multiple "and"-joined asks (e.g. "research X and compare A and B")
+    if len(re.findall(r"\band\b", t, re.IGNORECASE)) >= 2:
+        return True
+    # 2+ substantial sentence-like asks
+    parts = [s for s in re.split(r"[.!?]\s+", t) if len(s.strip()) > 15]
+    return len(parts) >= 2
+
 
 # One workspace at a time per (channel/thread id, user id) so OpenClaw sessionKey stays singular.
 _discord_workspace_locks: dict[tuple[int, int], asyncio.Lock] = {}
@@ -584,6 +672,59 @@ async def _fast_llm_reply(
         return ""
 
     return "".join(parts).strip()
+
+
+async def _cloud_chat_reply(
+    model: str,
+    content: str,
+    prior_history: list[dict],
+    pool,
+    user_id: "int | None",
+) -> str:
+    """Reply to a Discord message with a CLOUD chat model (e.g. Claude) IN-PROCESS.
+
+    OpenClaw/Ollama can't run cloud models, so a cloud pick routes conversationally
+    through the same path the web chat uses (``proxy_cloud_chat``), authenticated as
+    the default Discord user with their own verified credential — the secret is never
+    seen here. Returns plain text, or '' on failure so the caller can fall back to the
+    local routing.
+    """
+    try:
+        from owui_compat.cloud_chat import proxy_cloud_chat
+    except Exception as exc:  # pragma: no cover - import guard
+        logger.warning("cloud_chat_reply: import failed: %s", exc)
+        return ""
+    messages: list[dict] = []
+    for m in (prior_history or []):
+        role = m.get("role")
+        text = (m.get("content") or "").strip()
+        if text and role in ("user", "assistant"):
+            messages.append({"role": role, "content": text})
+    messages.append({"role": "user", "content": content})
+    body = {"model": model, "messages": messages, "stream": False}
+    try:
+        resp = await proxy_cloud_chat(body, pool, user_id)
+        raw = getattr(resp, "body", None)
+        if raw is None:
+            logger.warning(
+                "cloud_chat_reply: response has no body (status=%s)",
+                getattr(resp, "status_code", "?"),
+            )
+            return ""
+        if isinstance(raw, (bytes, bytearray)):
+            raw = raw.decode("utf-8", "replace")
+        data = json.loads(raw)
+        choices = data.get("choices")
+        if choices:
+            return ((choices[0] or {}).get("message") or {}).get("content") or ""
+        err = (data.get("error") or {}).get("message")
+        if err:
+            logger.warning("cloud_chat_reply: vendor error: %s", err)
+            return f"⚠️ {err}"
+        return ""
+    except Exception as exc:
+        logger.warning("cloud_chat_reply failed: %s", exc)
+        return ""
 
 
 async def _wait_for_workspace_completion(
@@ -1050,6 +1191,109 @@ async def _find_latest_screenshot_file(
     return (None, rel_path)
 
 
+_PREVIEW_IMG_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+_PREVIEW_HTML_EXTS = (".html", ".htm", ".svg")
+_BROWSER_RUNNER_URL = os.getenv("HARVIS_BROWSER_RUNNER_URL", "http://browser-runner:8765")
+
+
+def _looks_base64(s: str) -> bool:
+    s = (s or "").strip()
+    if len(s) < 16 or len(s) % 4 != 0:
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9+/=\s]+", s))
+
+
+async def _browser_render_html_to_png(html: str, out_path: str) -> bool:
+    """Render an HTML/SVG string to a PNG via the headless browser-runner service
+    (using a data: URL, since browser-runner can't read the artifact volume).
+    Returns True on success."""
+    import base64 as _b64
+    try:
+        b64 = _b64.b64encode((html or "").encode("utf-8")).decode()
+        data_url = f"data:text/html;charset=utf-8;base64,{b64}"
+        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
+            s = await client.post(f"{_BROWSER_RUNNER_URL}/session", json={"headless": True})
+            if s.status_code != 200:
+                return False
+            sid = (s.json() or {}).get("sessionId") or (s.json() or {}).get("id")
+            if not sid:
+                return False
+            try:
+                await client.post(f"{_BROWSER_RUNNER_URL}/navigate", json={"sessionId": sid, "url": data_url})
+                await asyncio.sleep(0.7)  # let it paint
+                shot = await client.post(f"{_BROWSER_RUNNER_URL}/screenshot", json={"sessionId": sid})
+                png_b64 = (shot.json() or {}).get("pngBase64") or ""
+                if not png_b64:
+                    return False
+                with open(out_path, "wb") as f:
+                    f.write(_b64.b64decode(png_b64))
+                return True
+            finally:
+                try:
+                    await client.post(f"{_BROWSER_RUNNER_URL}/close", json={"sessionId": sid})
+                except Exception:
+                    pass
+    except Exception as exc:
+        logger.warning("browser-runner render failed: %s", exc)
+        return False
+
+
+async def _render_preview_screenshot(request: Request, workspace_id: str) -> "tuple[str | None, str | None]":
+    """If a completed run produced a previewable artifact, return (png_abs_path,
+    label) of an image to post to Discord — an image artifact is used directly; an
+    HTML/SVG artifact is rendered to PNG via the browser-runner. Returns (None, None)
+    when nothing previewable (e.g. only code/diff/text). Never raises."""
+    import base64 as _b64
+    pool = getattr(request.app.state, "pg_pool", None)
+    if pool is None:
+        return (None, None)
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT path, content FROM workspace_artifacts "
+                "WHERE workspace_id = $1 AND artifact_type = 'file' "
+                "ORDER BY created_at DESC",
+                workspace_id,
+            )
+    except Exception as exc:
+        logger.debug("preview screenshot: artifact query failed: %s", exc)
+        return (None, None)
+    img_row = None
+    html_row = None
+    _secret_hints = (".env", "credential", "secret", ".key", ".pem", "id_rsa", "id_ed25519", "apikey", "api_key")
+    for r in rows:
+        p = (r["path"] or "").lower()
+        if any(h in p for h in _secret_hints):
+            continue  # never render/post a secret-looking file to a Discord channel
+        if img_row is None and p.endswith(_PREVIEW_IMG_EXTS):
+            img_row = r
+        elif html_row is None and p.endswith(_PREVIEW_HTML_EXTS):
+            html_row = r
+    out_dir = "/data/artifacts/discord-previews"
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+    except Exception:
+        out_dir = "/tmp"
+    # Prefer a direct image artifact (no render needed).
+    if img_row is not None:
+        try:
+            content = img_row["content"] or ""
+            data = _b64.b64decode(content) if _looks_base64(content) else content.encode("utf-8", "ignore")
+            ext = os.path.splitext(img_row["path"])[1] or ".png"
+            out = os.path.join(out_dir, f"{workspace_id}-preview{ext}")
+            with open(out, "wb") as f:
+                f.write(data)
+            return (out, os.path.basename(img_row["path"]))
+        except Exception as exc:
+            logger.debug("preview image decode failed: %s", exc)
+    # Else render an HTML/SVG artifact via the headless browser.
+    if html_row is not None:
+        out = os.path.join(out_dir, f"{workspace_id}-preview.png")
+        if await _browser_render_html_to_png(html_row["content"] or "", out):
+            return (out, os.path.basename(html_row["path"]))
+    return (None, None)
+
+
 async def _best_workspace_message(
     *, request: Request, workspace_id: str, final_summary: str | None
 ) -> str:
@@ -1318,23 +1562,6 @@ async def _apply_model_to_native_openclaw(model: str) -> str:
     ]
     notes: list[str] = []
     for label, path, provider, container in targets:
-        # region agent log
-        _debug_log(
-            "discord_workspace_bot.py:_apply_model_to_native_openclaw:entry",
-            "openclaw_model_sync_entry",
-            {
-                "label": label,
-                "path": path,
-                "has_path": bool(path),
-                "path_exists": bool(path and os.path.exists(path)),
-                "path_writable": bool(path and os.path.exists(path) and os.access(path, os.W_OK)),
-                "target_model": model,
-                "provider": provider,
-            },
-            "run_discord_workspace",
-            "H1",
-        )
-        # endregion
         if not path or not os.path.exists(path) or not os.access(path, os.W_OK):
             continue
         try:
@@ -1345,15 +1572,6 @@ async def _apply_model_to_native_openclaw(model: str) -> str:
                 "Rewrote %s OpenClaw default model → %s (%s, changed=%s)",
                 label, written, path, changed,
             )
-            # region agent log
-            _debug_log(
-                "discord_workspace_bot.py:_apply_model_to_native_openclaw:success",
-                "openclaw_model_sync_success",
-                {"label": label, "written_model": written, "path": path, "changed": changed},
-                "run_discord_workspace",
-                "H1",
-            )
-            # endregion
             if changed and container:
                 ok, detail = await asyncio.to_thread(
                     _restart_openclaw_container_sync, container
@@ -1361,15 +1579,6 @@ async def _apply_model_to_native_openclaw(model: str) -> str:
                 ready = False
                 if ok:
                     ready = await _wait_openclaw_ready()
-                # region agent log
-                _debug_log(
-                    "discord_workspace_bot.py:_apply_model_to_native_openclaw:restart",
-                    "openclaw_container_restart",
-                    {"label": label, "container": container, "ok": ok, "detail": detail, "ready": ready},
-                    "run_discord_workspace",
-                    "H1",
-                )
-                # endregion
                 notes.append(
                     f"{label}→`{written}` (restart {'ok' if ok else 'failed: ' + detail}"
                     f"{', ready' if ready else (', not-ready' if ok else '')})"
@@ -1378,15 +1587,6 @@ async def _apply_model_to_native_openclaw(model: str) -> str:
                 notes.append(f"{label}→`{written}`" + ("" if changed else " (unchanged)"))
         except Exception as exc:
             logger.warning("Failed to rewrite %s OpenClaw config at %s: %s", label, path, exc)
-            # region agent log
-            _debug_log(
-                "discord_workspace_bot.py:_apply_model_to_native_openclaw:error",
-                "openclaw_model_sync_error",
-                {"label": label, "path": path, "error": str(exc)[:240]},
-                "run_discord_workspace",
-                "H1",
-            )
-            # endregion
             notes.append(f"{label} error: {str(exc)[:80]}")
     if not notes:
         return "_(no OpenClaw config files writable — applied to fast-path + workspace routing only)_"
@@ -1406,6 +1606,16 @@ async def _persist_model_selection(
     _model_pref_cache.clear()
     logger.info("Discord model switched to: %s", new_model)
 
+    try:
+        from owui_compat.cloud_chat import is_cloud_chat_model
+        _is_cloud = is_cloud_chat_model(new_model)
+    except Exception:
+        _is_cloud = False
+    # Remember the last LOCAL model the user picked, so a cloud→local fallback
+    # restores their actual pick (not a generic default). A cloud pick leaves
+    # last_local_model_id unchanged (COALESCE on NULL).
+    _last_local = None if _is_cloud else new_model
+
     if pool:
         try:
             async with pool.acquire() as conn:
@@ -1413,28 +1623,110 @@ async def _persist_model_selection(
                     """
                     INSERT INTO openclaw_llm_config (
                         user_id, provider_url, api_key_encrypted,
-                        model_id, provider_type, is_active
+                        model_id, provider_type, is_active, last_local_model_id
                     )
-                    VALUES ($1, $2, NULL, $3, 'ollama', TRUE)
+                    VALUES ($1, $2, NULL, $3, 'ollama', TRUE, $4)
                     ON CONFLICT (user_id) DO UPDATE SET
                         provider_url = EXCLUDED.provider_url,
                         model_id = EXCLUDED.model_id,
                         provider_type = 'ollama',
                         is_active = TRUE,
+                        last_local_model_id = COALESCE($4, openclaw_llm_config.last_local_model_id),
                         updated_at = NOW()
                     """,
                     cfg.default_user_id,
                     ollama_url,
                     new_model,
+                    _last_local,
                 )
         except Exception as exc:
             logger.warning("Failed to persist model pref: %s", exc)
+
+    if _is_cloud:
+        # Cloud chat models (e.g. Claude) run through the user's verified
+        # credential, NOT OpenClaw — skip the native-model sync entirely.
+        return (
+            f"Switched to **`{new_model}`** (saved). Cloud chat model — "
+            "replies run on your connected credential."
+        )
 
     byo_note = await _apply_model_to_native_openclaw(new_model)
     msg = f"Switched to **`{new_model}`** (saved)."
     if byo_note:
         msg += f"\n{byo_note}"
     return msg
+
+
+async def _persist_engine_selection(
+    new_engine: str,
+    cfg: "DiscordWorkspaceConfig",
+    pool,
+    ollama_url: str,
+) -> str:
+    """Persist the user's workspace ENGINE choice (separate from the model).
+    Upserts the `engine` column on openclaw_llm_config without disturbing the
+    saved model."""
+    eng = (new_engine or "native").strip().lower()
+    if eng not in _ENGINE_LABELS:
+        opts = ", ".join(f"`{e}`" for e in _ENGINE_LABELS)
+        return f"Unknown engine `{new_engine}`. Choose one of: {opts}"
+    _model_pref_cache.clear()
+    if pool:
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO openclaw_llm_config (
+                        user_id, provider_url, api_key_encrypted,
+                        model_id, provider_type, is_active, engine
+                    )
+                    VALUES ($1, $2, NULL, '', 'ollama', TRUE, $3)
+                    ON CONFLICT (user_id) DO UPDATE SET
+                        engine = EXCLUDED.engine,
+                        updated_at = NOW()
+                    """,
+                    cfg.default_user_id, ollama_url, eng,
+                )
+        except Exception as exc:
+            logger.warning("Failed to persist engine pref: %s", exc)
+            return "Couldn't save the engine preference — try again."
+    hint = _ENGINE_HINTS.get(eng, "")
+    return f"Engine set to **{_ENGINE_LABELS[eng]}** (`{eng}`). {hint}".strip()
+
+
+async def _persist_orchestrate_pref(
+    enabled: bool,
+    cfg: "DiscordWorkspaceConfig",
+    pool,
+    ollama_url: str,
+) -> str:
+    """Persist the user's multi-agent (orchestrate) opt-in for Discord tasks."""
+    _model_pref_cache.clear()
+    if pool:
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO openclaw_llm_config (
+                        user_id, provider_url, api_key_encrypted,
+                        model_id, provider_type, is_active, orchestrate_enabled
+                    )
+                    VALUES ($1, $2, NULL, '', 'ollama', TRUE, $3)
+                    ON CONFLICT (user_id) DO UPDATE SET
+                        orchestrate_enabled = EXCLUDED.orchestrate_enabled,
+                        updated_at = NOW()
+                    """,
+                    cfg.default_user_id, ollama_url, enabled,
+                )
+        except Exception as exc:
+            logger.warning("Failed to persist orchestrate pref: %s", exc)
+            return "Couldn't save the multi-agent preference — try again."
+    if enabled:
+        return (
+            "**Multi-agent ON.** Complex tasks now fan out to several sub-agents working "
+            "in parallel (simple ones stay single-agent). Open a run to watch the agents."
+        )
+    return "**Multi-agent OFF.** Tasks run with a single agent."
 
 
 # `@bot set-model <name>` / `@bot set model <name>` / `@bot setmodel` — text
@@ -1527,6 +1819,26 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
                     names.append(n)
         return names
 
+    async def _selectable_models() -> list[str]:
+        """Models offered in /model + /set-model: local Ollama models PLUS the
+        cloud chat models (Claude / GPT) the default Discord user can use via
+        their verified Integrations credential. Fail-soft: cloud lookup errors
+        just leave the Ollama list unchanged."""
+        models = await _list_ollama_models()
+        try:
+            pool = getattr(app_request.app.state, "pg_pool", None)
+            if pool:
+                from owui_compat.cloud_chat import cloud_chat_model_entries
+
+                entries = await cloud_chat_model_entries(pool, cfg.default_user_id)
+                for e in entries:
+                    mid = e.get("id")
+                    if mid and mid not in models:
+                        models.append(mid)
+        except Exception as exc:
+            logger.debug("Discord: cloud model list unavailable: %s", exc)
+        return models
+
     class ModelSelectMenu(discord.ui.Select):
         def __init__(self, models: list[str], current: str):
             options = []
@@ -1552,7 +1864,7 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
 
     @tree.command(name="model", description="Pick which model Harvis runs on")
     async def model_command(interaction: discord.Interaction):
-        models = await _list_ollama_models()
+        models = await _selectable_models()
         if not models:
             await interaction.response.send_message("No models found — is Ollama running?")
             return
@@ -1569,7 +1881,7 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
     async def _model_autocomplete(
         interaction: discord.Interaction, current: str
     ) -> list[app_commands.Choice[str]]:
-        models = await _list_ollama_models()
+        models = await _selectable_models()
         lower = (current or "").lower()
         filtered = [m for m in models if lower in m.lower()] if lower else models
         return [app_commands.Choice(name=m, value=m) for m in filtered[:25]]
@@ -1583,7 +1895,7 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
     async def set_model_command(
         interaction: discord.Interaction, model: str
     ):
-        models = await _list_ollama_models()
+        models = await _selectable_models()
         if models and model not in models:
             # Accept substring match as a convenience.
             candidates = [m for m in models if model.lower() in m.lower()]
@@ -1609,10 +1921,71 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
         )
         await interaction.followup.send(reply)
 
+    @tree.command(
+        name="engine",
+        description="Pick which engine runs your workspace tasks (Native or Claude Code).",
+    )
+    @app_commands.describe(
+        engine="Native = OpenClaw tool loop · Claude Code = Claude runs it directly"
+    )
+    @app_commands.choices(
+        engine=[
+            app_commands.Choice(name="Native (OpenClaw)", value="native"),
+            app_commands.Choice(name="Claude Code", value="claude-code"),
+        ]
+    )
+    async def engine_command(
+        interaction: discord.Interaction, engine: app_commands.Choice[str]
+    ):
+        pool = getattr(app_request.app.state, "pg_pool", None)
+        await interaction.response.defer(thinking=True)
+        reply = await _persist_engine_selection(
+            engine.value, cfg, pool, _LOCAL_OLLAMA_URL
+        )
+        await interaction.followup.send(reply)
+
+    @tree.command(
+        name="agents",
+        description="Multi-agent: when ON, complex tasks fan out to several parallel sub-agents.",
+    )
+    @app_commands.describe(mode="on = complex tasks run multiple agents · off = single agent")
+    @app_commands.choices(
+        mode=[
+            app_commands.Choice(name="On", value="on"),
+            app_commands.Choice(name="Off", value="off"),
+        ]
+    )
+    async def agents_command(
+        interaction: discord.Interaction, mode: app_commands.Choice[str]
+    ):
+        pool = getattr(app_request.app.state, "pg_pool", None)
+        await interaction.response.defer(thinking=True)
+        reply = await _persist_orchestrate_pref(
+            mode.value == "on", cfg, pool, _LOCAL_OLLAMA_URL
+        )
+        await interaction.followup.send(reply)
+
     @client.event
     async def on_ready():
-        await tree.sync()
-        logger.info("Discord workspace bot online as %s — slash commands synced", getattr(client.user, "name", "unknown"))
+        # Sync slash commands to EACH guild the bot is in (instant), not just
+        # globally (which can take ~1 hour to propagate to clients). Without this,
+        # newly-added commands like /engine and /agents don't show up for a while.
+        guild_count = 0
+        for guild in list(getattr(client, "guilds", []) or []):
+            try:
+                tree.copy_global_to(guild=guild)
+                await tree.sync(guild=guild)
+                guild_count += 1
+            except Exception as exc:
+                logger.warning("Discord per-guild command sync failed for %s: %s", getattr(guild, "id", "?"), exc)
+        try:
+            await tree.sync()  # keep the global registry in sync too
+        except Exception as exc:
+            logger.warning("Discord global command sync failed: %s", exc)
+        logger.info(
+            "Discord workspace bot online as %s — slash commands synced (%d guild(s) + global)",
+            getattr(client.user, "name", "unknown"), guild_count,
+        )
 
     @client.event
     async def on_message(message: discord.Message):
@@ -1853,21 +2226,15 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
             # workspace model preference; that local path is text-only.
             if pref_model_name and pref_agent_id == "local":
                 pref_agent_id = "main"
-            # region agent log
-            _debug_log(
-                "discord_workspace_bot.py:on_message:pref_resolution",
-                "discord_pref_resolution",
-                {
-                    "cfg_agent_id": cfg.agent_id,
-                    "pref_agent_id": pref_agent_id,
-                    "cfg_model_name": cfg.model_name,
-                    "pref_model_name": pref_model_name,
-                    "has_model_override": bool(_model_override),
-                },
-                "run_discord_workspace",
-                "H2",
-            )
-            # endregion
+            # ── Engine preference (separate from the model): Native vs Claude Code ──
+            pref_engine = await _get_user_engine_preference(pool, cfg.default_user_id)
+            _use_claude_engine = pref_engine == "claude-code"
+            # Path A readiness: native engine + Claude model runs on OpenClaw via
+            # the Anthropic API key. When ready, don't swap the Claude model for a
+            # local one — let it flow through to OpenClaw → model_proxy → Anthropic.
+            _path_a_ready = await _user_has_anthropic_provider(pool, cfg.default_user_id)
+            # Multi-agent opt-in (the /agents toggle).
+            _orchestrate_enabled = await _get_user_orchestrate_pref(pool, cfg.default_user_id)
 
             # Force browser-capable OpenClaw path for visual tasks.
             # Local/Kimi workspace runners are text-only and can "simulate" screenshots.
@@ -1878,19 +2245,34 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
                     pref_agent_id,
                 )
                 pref_agent_id = "main"
-            # region agent log
-            _debug_log(
-                "discord_workspace_bot.py:on_message:visual_route",
-                "discord_visual_route_decision",
-                {
-                    "visual_task": visual_task,
-                    "routed_agent_id": pref_agent_id,
-                    "content_preview": content[:120],
-                },
-                "run_discord_workspace",
-                "H3",
-            )
-            # endregion
+
+            # ── Claude Code engine (Path B): run the task DIRECTLY through Claude ──
+            # Only for non-visual tasks — Claude Code can't take browser
+            # screenshots, so visual tasks stay on OpenClaw. The `claude` lane
+            # runs `claude -p` in the sidecar on the user's verified credential.
+            if _use_claude_engine and not visual_task and pref_agent_id != "claude":
+                logger.info(
+                    "Discord: Claude Code engine selected — routing workspace to "
+                    "agent=claude (was %s)",
+                    pref_agent_id,
+                )
+                pref_agent_id = "claude"
+
+            # ── Multi-agent (/agents ON): fan a complex task out to several parallel
+            # sub-agents. Native/OpenClaw only — Claude Code + visual tasks stay
+            # single. Trivial tasks fast-path before the workspace lane, so this
+            # only takes effect for real (multi-part) workspace tasks.
+            if (
+                _orchestrate_enabled
+                and pref_agent_id != "claude"
+                and not visual_task
+                and _looks_multi_part(content)
+            ):
+                logger.info(
+                    "Discord: multi-agent ON — routing workspace to orchestrate (was %s)",
+                    pref_agent_id,
+                )
+                pref_agent_id = "orchestrated"
 
             # Fetch history ONCE — both paths use it. Without this, fast-path
             # replies have no memory even though workspace-path replies do.
@@ -1941,6 +2323,19 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
                 await _send_long_message(message.channel, memory_meta_reply)
                 return
 
+            # ── Resolve the selected model + whether it's a cloud chat model ──
+            # A cloud model (e.g. Claude) can only do a conversational reply via
+            # the user's credential — it can't drive the OpenClaw/Ollama workspace
+            # tool loop. So a cloud pick is handled in the FAST path below (simple
+            # chat), while a COMPLEX task falls through to the workspace lane and
+            # runs on a local model (until Path A — OpenClaw→Claude — lands).
+            _resolved_model = (_model_override or pref_model_name or "").strip()
+            try:
+                from owui_compat.cloud_chat import is_cloud_chat_model
+                _model_is_cloud = is_cloud_chat_model(_resolved_model)
+            except Exception:
+                _model_is_cloud = False
+
             # ── Workspace-first mode or standard routing ──
             use_fast_path = False
             if discord_attachments:
@@ -1970,17 +2365,29 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
 
             # ── Fast path: simple questions → direct LLM call, no workspace ──
             if use_fast_path:
-                fast_model = (
-                    _model_override or _FAST_MODEL or pref_model_name
-                    or await resolve_default_local_model(pool=pool, user_id=cfg.default_user_id)
-                    or ""
-                )
-                logger.info(
-                    "Discord fast-path: model=%s history_turns=%d msg=%r",
-                    fast_model, len(prior_history), content[:80],
-                )
                 async with message.channel.typing():
-                    reply = await _fast_llm_reply(content, fast_model, prior_history)
+                    if _model_is_cloud:
+                        # Conversational reply via the user's cloud credential
+                        # (e.g. Claude). Only SIMPLE messages reach here; complex
+                        # tasks fall through to the workspace lane below.
+                        logger.info(
+                            "Discord fast-path (cloud): model=%s history_turns=%d msg=%r",
+                            _resolved_model, len(prior_history), content[:80],
+                        )
+                        reply = await _cloud_chat_reply(
+                            _resolved_model, content, prior_history, pool, cfg.default_user_id
+                        )
+                    else:
+                        fast_model = (
+                            _model_override or _FAST_MODEL or pref_model_name
+                            or await resolve_default_local_model(pool=pool, user_id=cfg.default_user_id)
+                            or ""
+                        )
+                        logger.info(
+                            "Discord fast-path: model=%s history_turns=%d msg=%r",
+                            fast_model, len(prior_history), content[:80],
+                        )
+                        reply = await _fast_llm_reply(content, fast_model, prior_history)
                 if reply:
                     # Split into chunks if longer than Discord's 2000-char limit
                     await _send_long_message(message.channel, reply)
@@ -2034,19 +2441,35 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
                 # Without this, OpenClaw may retain a stale default (e.g. gemma4:4b) and fail
                 # with "model not found" even when Discord is configured to another model.
                 effective_model_name = (_model_override or pref_model_name or "").strip()
-                # region agent log
-                _debug_log(
-                    "discord_workspace_bot.py:on_message:effective_model",
-                    "discord_effective_model",
-                    {
-                        "effective_model_name": effective_model_name,
-                        "pref_agent_id": pref_agent_id,
-                        "session_id": session_id,
-                    },
-                    "run_discord_workspace",
-                    "H2",
-                )
-                # endregion
+                # ── Cloud model can't drive the OpenClaw workspace tool loop ──
+                # (Path A — OpenClaw→Claude via Anthropic API key — isn't wired
+                # yet.) Fall back to a local model AND say so plainly, so a
+                # local-model run is never mistaken for "OpenClaw used Claude".
+                # The `claude` lane (Claude Code engine) DOES run the cloud model
+                # directly, so skip the fallback there. And when Path A is ready
+                # (Anthropic API key as the OpenClaw provider), OpenClaw itself
+                # routes the Claude model to Anthropic — so don't fall back either.
+                if _model_is_cloud and pref_agent_id != "claude" and not _path_a_ready:
+                    _cloud_pick = effective_model_name
+                    # Prefer the user's LAST LOCAL model (their actual pick before
+                    # they switched to a cloud model), then the configured fast
+                    # model, then a sensible installed default.
+                    effective_model_name = (
+                        await _get_last_local_model(pool, cfg.default_user_id)
+                        or _FAST_MODEL
+                        or await resolve_default_local_model(pool=pool, user_id=cfg.default_user_id)
+                        or ""
+                    )
+                    logger.info(
+                        "Discord workspace: cloud model %s can't run the OpenClaw loop — "
+                        "falling back to last-used local model %r",
+                        _cloud_pick, effective_model_name,
+                    )
+                    _fb_label = f"`{effective_model_name}`" if effective_model_name else "a local model"
+                    await message.channel.send(
+                        f"ℹ️ `{_cloud_pick}` is a cloud model and can't drive the OpenClaw "
+                        f"workspace yet — running this task with {_fb_label} instead."
+                    )
                 if pref_agent_id == "main" and effective_model_name:
                     sync_note = await _apply_model_to_native_openclaw(effective_model_name)
                     logger.info(
@@ -2054,33 +2477,11 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
                         effective_model_name,
                         sync_note or "",
                     )
-                    # region agent log
-                    _debug_log(
-                        "discord_workspace_bot.py:on_message:model_sync_note",
-                        "discord_model_sync_note",
-                        {"sync_note": sync_note[:240], "effective_model_name": effective_model_name},
-                        "run_discord_workspace",
-                        "H1",
-                    )
-                    # endregion
 
                 progress_msg = await message.channel.send(
                     f"**Workspace launching\u2026**\n\u23f3 Starting workspace\u2026"
                 )
 
-                # region agent log
-                _debug_log(
-                    "discord_workspace_bot.py:on_message:launch_params",
-                    "discord_workspace_launch_params",
-                    {
-                        "agent_id": pref_agent_id,
-                        "model_name": effective_model_name,
-                        "enable_interactive": cfg.enable_interactive,
-                    },
-                    "run_discord_workspace",
-                    "H4",
-                )
-                # endregion
                 # prior_history was fetched once at the top of on_message
                 data = await launch_workspace_internal(
                     request=app_request,
@@ -2092,6 +2493,9 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
                     session_id=session_id,
                     enable_interactive=cfg.enable_interactive,
                     attachments=discord_attachments,
+                    # Multi-agent: keep all sub-agents on the selected (local) model
+                    # so the 8GB box doesn't load heavy per-role profile models.
+                    uniform_model=(pref_agent_id == "orchestrated"),
                 )
                 workspace_id = data["workspace_id"]
 
@@ -2112,15 +2516,6 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
                         workspace_id, exc,
                     )
 
-                # region agent log
-                _debug_log(
-                    "discord_workspace_bot.py:on_message:launch_result",
-                    "discord_workspace_launch_result",
-                    {"workspace_id": workspace_id, "status": data.get("status"), "session_id": data.get("session_id")},
-                    "run_discord_workspace",
-                    "H4",
-                )
-                # endregion
 
                 status, summary, err = await _wait_with_progress(
                     request=app_request,
@@ -2154,21 +2549,6 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
                             workspace_id, effective_model_name,
                             alternate_model, escalation_reason,
                         )
-                        # region agent log
-                        _debug_log(
-                            "discord_workspace_bot.py:on_message:escalation_trigger",
-                            "model_escalation_trigger",
-                            {
-                                "from_model": effective_model_name,
-                                "to_model": alternate_model,
-                                "reason": escalation_reason,
-                                "original_workspace_id": workspace_id,
-                                "original_status": status,
-                            },
-                            "run_escalation",
-                            "H_scope1",
-                        )
-                        # endregion
                         try:
                             await message.channel.send(
                                 f"⤴ Default model `{effective_model_name}` couldn't "
@@ -2288,7 +2668,24 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
                             logger.warning("Discord file upload failed: %s", send_exc)
                             await _send_long_message(message.channel, msg)
                     else:
-                        await _send_long_message(message.channel, msg)
+                        # No agent screenshot — if the run produced a previewable
+                        # artifact (an image, or an HTML/SVG rendered via the
+                        # headless browser), screenshot it and post it with the result.
+                        preview_abs, _preview_label = await _render_preview_screenshot(
+                            request=app_request, workspace_id=workspace_id,
+                        )
+                        if preview_abs:
+                            try:
+                                await _send_long_message(
+                                    message.channel,
+                                    msg or "Here's the result:",
+                                    file=discord.File(preview_abs, filename=os.path.basename(preview_abs)),
+                                )
+                            except Exception as send_exc:
+                                logger.warning("Discord preview upload failed: %s", send_exc)
+                                await _send_long_message(message.channel, msg)
+                        else:
+                            await _send_long_message(message.channel, msg)
                 elif status == "cancelled":
                     await message.channel.send(f"Workspace `{workspace_id}` was cancelled.")
                 else:

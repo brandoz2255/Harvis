@@ -240,6 +240,30 @@ _MAPPERS = {
 }
 
 
+def _extract_usage(engine: str, obj: dict):
+    """Best-effort (prompt_tokens, completion_tokens) from a streamed engine line — so the Build
+    usage meter has real token counts for the cloud engines. Claude's `result` line carries
+    `usage`; others may not (then None → no capture, free/local engines just show 0). Cumulative
+    cache-read/creation input tokens count toward the prompt (they bill as input)."""
+    try:
+        if engine == "claude-code" and obj.get("type") == "result":
+            u = obj.get("usage") or {}
+            p = (int(u.get("input_tokens") or 0) + int(u.get("cache_read_input_tokens") or 0)
+                 + int(u.get("cache_creation_input_tokens") or 0))
+            c = int(u.get("output_tokens") or 0)
+            if p or c:
+                return p, c
+        u = obj.get("usage")  # generic fallback (codex/opencode if they emit it)
+        if isinstance(u, dict):
+            p = int(u.get("input_tokens") or u.get("prompt_tokens") or 0)
+            c = int(u.get("output_tokens") or u.get("completion_tokens") or 0)
+            if p or c:
+                return p, c
+    except Exception:
+        pass
+    return None
+
+
 def _kill_run(container: str, workspace_path: str) -> None:
     """Best-effort, synchronous per-run kill INSIDE the sidecar (robust during cancel):
     match by argv (opencode --dir / claude --add-dir carry the path) AND by cwd (codex
@@ -388,6 +412,8 @@ async def run_external_engine_adapter(
     proc: asyncio.subprocess.Process | None = None
     stderr_buf: list[str] = []
     tool_calls = 0
+    usage_p = 0  # captured input tokens (cloud engines: the result line's `usage`) — for the meter
+    usage_c = 0  # captured output tokens
     final_text_parts: list[str] = []
     is_text_engine = engine in _TEXT_ENGINES   # plain-text stdout (Hermes) → log lines + tail summary
     text_tail: list[str] = []
@@ -441,6 +467,9 @@ async def run_external_engine_adapter(
                     if len(text_tail) > 16:
                         del text_tail[: len(text_tail) - 16]
                 continue
+            _u = _extract_usage(engine, obj)
+            if _u:
+                usage_p, usage_c = _u
             try:
                 for ev in mapper(obj, root_ev):
                     if ev.type == "tool_call":
@@ -486,8 +515,10 @@ async def run_external_engine_adapter(
     try:
         async with pool.acquire() as conn:
             await conn.execute(
-                "UPDATE workspace_runs SET model_name=COALESCE(NULLIF($2,''), model_name) WHERE id=$1",
-                parent_workspace_id, model_id,
+                "UPDATE workspace_runs SET model_name=COALESCE(NULLIF($2,''), model_name), "
+                "prompt_tokens=COALESCE(NULLIF($3,0), prompt_tokens), "
+                "completion_tokens=COALESCE(NULLIF($4,0), completion_tokens) WHERE id=$1",
+                parent_workspace_id, model_id, int(usage_p or 0), int(usage_c or 0),
             )
     except Exception:
         pass
@@ -512,3 +543,180 @@ async def run_external_engine_adapter(
         wrap = "\n".join(text_tail[-8:]).strip()
     summary = (wrap[:1500] if wrap else "") or f"{label} finished — {n} file(s) changed."
     yield root_ev("done", {"summary": summary, "changed_files": files})
+
+
+async def run_claude_chat_workspace(
+    task_brief: str,
+    chat_history: list,  # unused — `claude -p` is one-shot; the brief carries the ask.
+    *,
+    model_name: str = "",
+    pool=None,
+    parent_workspace_id: str = "",
+    user_id: int = 0,
+    session_id: str = "",
+) -> AsyncGenerator[OpenClawEvent, None]:
+    """Run a CHAT workspace task through cloud Claude's OWN agentic loop — ``claude -p``
+    with its built-in tools (web_search, exec, file ops). No repo clone: a scratch workdir
+    under the shared artifact volume. This makes the workspace a universal tool runtime that
+    Claude drives (like Kimi via Moonshot), using the user's VERIFIED per-user credential
+    (subscription oauth OR api_key). Zero GPU — runs in the harvis-claude-code sidecar."""
+    from ..workspace_router import _db_create_run, _db_save_artifact
+    from .isolation import _is_secret_artifact
+    try:
+        from owui_compat.engine_auth import get_verified_engine_auth
+    except Exception:
+        get_verified_engine_auth = None  # type: ignore
+
+    label = "Claude"
+    run_id = parent_workspace_id
+    container = _CONTAINERS.get("claude-code", "harvis-claude-code")
+    sess = session_id or f"ws-{parent_workspace_id}"
+
+    def root_ev(etype: str, data: dict) -> OpenClawEvent:
+        e = OpenClawEvent(etype, {**data, "agent_label": label, "model": model_name})
+        e.run_id = run_id
+        e.agent_label = label
+        return e
+
+    await _db_create_run(pool, parent_workspace_id, user_id, sess, task_brief)
+
+    auth = None
+    if get_verified_engine_auth is not None:
+        try:
+            auth = await get_verified_engine_auth(pool, user_id, "claude-code")
+        except Exception:
+            auth = None
+    if not auth:
+        yield root_ev("error", {
+            "message": "Claude isn't connected.",
+            "fix_hint": "Connect + verify your Claude subscription or API key in Integrations.",
+        })
+        return
+    secret, auth_mode = auth
+
+    # Scratch workdir in the shared artifact volume (the sidecar mounts /data/artifacts).
+    workdir = f"/data/artifacts/claude-chat/{run_id or 'run'}"
+    try:
+        mk = await asyncio.create_subprocess_exec(
+            "docker", "exec", "-u", "1001", container, "mkdir", "-p", workdir,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(mk.wait(), timeout=10)
+    except Exception:
+        pass
+
+    claude_model = (model_name or "").split("/", 1)[-1].strip()  # strip 'anthropic/' prefix
+    if auth_mode == "oauth_token":
+        cred = ["-e", f"CLAUDE_CODE_OAUTH_TOKEN={secret}", "-e", "CLAUDE_CODE_SIMPLE="]
+    else:
+        cred = ["-e", f"ANTHROPIC_API_KEY={secret}", "-e", "CLAUDE_CODE_SIMPLE=1"]
+    cmd = ["docker", "exec", "-e", f"HARVIS_RUN_ID={run_id}", *cred,
+           "-u", "1001", "-w", workdir, container,
+           "claude", "-p", task_brief,
+           "--output-format", "stream-json", "--verbose",
+           "--add-dir", workdir, "--dangerously-skip-permissions"]
+    if claude_model:
+        cmd += ["--model", claude_model]
+
+    yield root_ev("log", {"message": f"Connected to Claude ({claude_model or 'subscription'}) — workspace tools active…"})
+
+    proc: asyncio.subprocess.Process | None = None
+    final_text_parts: list[str] = []
+    tool_calls = 0
+    timed_out = False
+    stderr_buf: list[str] = []
+
+    async def _drain(p) -> None:
+        try:
+            async for raw in p.stderr:
+                s = raw.decode("utf-8", "replace").rstrip()
+                if s:
+                    stderr_buf.append(s)
+                    if len(stderr_buf) > 30:
+                        del stderr_buf[: len(stderr_buf) - 30]
+        except Exception:
+            pass
+
+    try:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, limit=_STREAM_LIMIT,
+            )
+        except Exception as exc:
+            yield root_ev("error", {"message": f"Could not start Claude: {exc}",
+                                    "fix_hint": f"Is the {container} sidecar running?"})
+            return
+        stderr_task = asyncio.create_task(_drain(proc))
+        deadline = time.monotonic() + _TIMEOUT_S
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            try:
+                raw = await asyncio.wait_for(proc.stdout.readline(), timeout=remaining)
+            except asyncio.TimeoutError:
+                continue
+            if not raw:
+                break
+            line = raw.decode("utf-8", "replace").strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                yield root_ev("log", {"message": line[:400]})
+                continue
+            try:
+                for ev in _map_claude_line(obj, root_ev):
+                    if ev.type == "tool_call":
+                        tool_calls += 1
+                    elif ev.type == "token":
+                        final_text_parts.append(str((ev.data or {}).get("content") or ""))
+                    yield ev
+            except Exception:
+                yield root_ev("log", {"message": line[:300]})
+        if not timed_out:
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=10)
+            except Exception:
+                pass
+        stderr_task.cancel()
+    finally:
+        try:
+            if proc is not None and proc.returncode is None:
+                proc.kill()
+        except Exception:
+            pass
+        if run_id:
+            kill_run_by_marker(container, run_id)
+
+    # Capture any files Claude wrote (e.g. index.html) as artifacts BEFORE 'done' so the
+    # workspace Artifacts tab auto-pops with a preview. Text files only, secret-named skipped.
+    try:
+        lp = await asyncio.create_subprocess_exec(
+            "docker", "exec", "-u", "1001", container, "sh", "-c",
+            f"cd {workdir} 2>/dev/null && find . -type f -size -524288c 2>/dev/null | head -20",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await asyncio.wait_for(lp.communicate(), timeout=15)
+        for rel in (r.strip().lstrip("./") for r in out.decode("utf-8", "replace").splitlines()):
+            if not rel or _is_secret_artifact(rel):
+                continue
+            cp = await asyncio.create_subprocess_exec(
+                "docker", "exec", "-u", "1001", container, "cat", f"{workdir}/{rel}",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            )
+            cout, _ = await asyncio.wait_for(cp.communicate(), timeout=15)
+            await _db_save_artifact(pool, parent_workspace_id, "file", path=rel,
+                                    content=cout.decode("utf-8", "replace"))
+    except Exception as exc:
+        logger.warning("claude chat workspace: artifact capture failed: %s", exc)
+
+    if timed_out:
+        yield root_ev("error", {"message": f"Claude timed out after {_TIMEOUT_S}s.",
+                                "fix_hint": "Try a narrower task."})
+        return
+    summary = " ".join(p for p in final_text_parts if p).strip()
+    summary = (summary[:2000] if summary else "") or (stderr_buf[-1][:300] if stderr_buf else "Claude finished.")
+    yield root_ev("done", {"summary": summary})

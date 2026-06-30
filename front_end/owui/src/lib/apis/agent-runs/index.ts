@@ -45,6 +45,20 @@ export const getWorkspaceHistory = async (limit = 50): Promise<any[]> => {
 	}
 };
 
+// Latest RUNNING workspace for the current user (scoped by the JWT). Used by the
+// "Harvis on Discord is running" indicator. Returns the active run (with a
+// `source` field — "discord" for Discord-launched runs) or null.
+export const getActiveWorkspace = async (): Promise<any | null> => {
+	try {
+		const r = await fetch(`${BASE}/active`, { headers: headers() });
+		if (!r.ok) return null;
+		const j = await r.json();
+		return j?.active ?? null;
+	} catch {
+		return null;
+	}
+};
+
 // Cancel a running workspace/vibecode turn (best-effort).
 export const cancelWorkspaceRun = async (runId: string): Promise<void> => {
 	try {
@@ -297,6 +311,7 @@ export interface VibecodeSession {
 	status?: string;
 	isolation_mode?: string; // 'session' (clone) | 'inplace'
 	permission_mode?: string; // in-place ladder
+	engine?: string; // Build engine: native | opencode | codex | claude-code | hermes-*
 	local_folder_name?: string | null; // set ⇒ browser File System Access session
 	needs_seed?: boolean; // local-folder session awaiting its browser-supplied baseline
 	created_at?: string | null;
@@ -311,7 +326,8 @@ export interface VibecodeTurn {
 	completed_at?: string | null;
 	duration_ms?: number | null;
 	tool_calls?: number | null;
-	final_summary?: string | null;
+	final_summary?: string | null; // the short engine summary (titles/history previews)
+	analysis_md?: string | null; // Build Result Narrator: the full written analysis (the assistant message)
 	error_message?: string | null;
 	model_name?: string | null; // the model this turn ran on
 	prompt_tokens?: number | null; // ≈ context occupancy at the last step

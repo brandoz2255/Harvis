@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { toast } from 'svelte-sonner';
-	import { onMount, tick, getContext } from 'svelte';
+	import { onMount, onDestroy, tick, getContext } from 'svelte';
 	import { openDB, deleteDB } from 'idb';
 	import fileSaver from 'file-saver';
 	const { saveAs } = fileSaver;
@@ -14,6 +14,7 @@
 	import { getBanners } from '$lib/apis/configs';
 	import { getTerminalServers } from '$lib/apis/terminal';
 	import { getUserSettings } from '$lib/apis/users';
+	import { getActiveWorkspace } from '$lib/apis/agent-runs';
 
 	import { WEBUI_VERSION, WEBUI_API_BASE_URL } from '$lib/constants';
 	import { compareVersion } from '$lib/utils';
@@ -38,6 +39,7 @@
 		showSearch,
 		showSidebar,
 		showControls,
+		activeDiscordRun,
 		mobile
 	} from '$lib/stores';
 
@@ -192,6 +194,12 @@
 		tools.set(toolsData);
 	};
 
+	// App-wide poll timer for the "Harvis on Discord is running" indicator.
+	let _discordPollTimer: ReturnType<typeof setInterval> | null = null;
+	onDestroy(() => {
+		if (_discordPollTimer) clearInterval(_discordPollTimer);
+	});
+
 	onMount(async () => {
 		if ($user === undefined || $user === null) {
 			await goto('/auth');
@@ -213,6 +221,24 @@
 				]);
 			}).catch((e) => console.error('Failed to load user settings:', e))
 		]);
+
+		// ── "Harvis on Discord is running" indicator (app-wide poll) ──
+		// Surface a Discord-launched workspace run that is currently running for
+		// this user, so the top-bar chip can link straight to the live session.
+		const pollActiveDiscordRun = async () => {
+			try {
+				const active = await getActiveWorkspace();
+				if (active && active.status === 'running' && active.source === 'discord') {
+					activeDiscordRun.set({ id: active.id, task_brief: active.task_brief });
+				} else {
+					activeDiscordRun.set(null);
+				}
+			} catch (_) {
+				/* fail-soft: leave the chip as-is */
+			}
+		};
+		pollActiveDiscordRun();
+		_discordPollTimer = setInterval(pollActiveDiscordRun, 6000);
 
 		// Helper function to check if the pressed keys match the shortcut definition
 		const isShortcutMatch = (event: KeyboardEvent, shortcut): boolean => {

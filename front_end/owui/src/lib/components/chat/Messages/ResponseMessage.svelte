@@ -20,6 +20,7 @@
 		config,
 		models,
 		settings,
+		taskHeartbeats,
 		temporaryChatEnabled,
 		TTSWorker,
 		user
@@ -821,7 +822,16 @@
 							class="w-full flex flex-col relative {edit ? 'hidden' : ''}"
 							id="response-content-container"
 						>
-							{#if message.content === '' && !message.done && !message.error && !hasVisibleStatus}
+							{#if $taskHeartbeats[message.id]}
+								<!-- Task heartbeat: a human-readable status line shown the instant a
+								     (likely-)task message is sent, before any workspace run/card exists.
+								     Hands off to the WorkspaceRunCard the moment its marker arrives. -->
+								<div class="flex items-center gap-2 py-1 text-sm text-gray-500 dark:text-gray-400" id="task-heartbeat">
+									<span class="inline-block size-3 rounded-full border-2 border-gray-400/40 border-t-gray-500 dark:border-t-gray-300 animate-spin shrink-0"></span>
+									<span>{$taskHeartbeats[message.id]}</span>
+								</div>
+							{/if}
+							{#if message.content === '' && !message.done && !message.error && !hasVisibleStatus && !$taskHeartbeats[message.id]}
 								<Skeleton />
 							{:else if message.content && message.error !== true}
 								<!-- always show message contents even if there's an error -->

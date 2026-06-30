@@ -39,6 +39,11 @@ ALTER TABLE workspace_runs ADD COLUMN IF NOT EXISTS context_window    INTEGER;
 -- The user's original attachments (image/file refs) for a turn, so the chat thread can
 -- render them inline (the agent's brief carries the machine-readable refs separately).
 ALTER TABLE workspace_runs ADD COLUMN IF NOT EXISTS attachments       JSONB;
+
+-- Build Result Narrator: the full written, multi-section markdown analysis composed at run
+-- completion (Build-like runs). The chat thread renders THIS as the assistant message;
+-- final_summary stays the short engine summary (titles/history previews use it).
+ALTER TABLE workspace_runs ADD COLUMN IF NOT EXISTS analysis_md       TEXT;
 CREATE INDEX IF NOT EXISTS idx_workspace_runs_parent ON workspace_runs(parent_run_id);
 
 -- VibeCode sessions: the durable, named, multi-turn coding-session container. Each

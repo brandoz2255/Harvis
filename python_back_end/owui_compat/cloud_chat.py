@@ -44,16 +44,18 @@ logger = logging.getLogger(__name__)
 # local Ollama tag or the ``claude-code`` Build-engine id — the prefix is stripped to the real
 # Anthropic model id (``_api_model``) only at call time. ``max_thinking`` caps the effort budget;
 # ``supports_effort`` → the effort dropdown is offered AND the extended-thinking budget is applied.
+# `ctx` = context-window size; `pin`/`pout` = USD per MILLION input/output tokens (public list
+# rates, for the live cost ESTIMATE — for subscriptions it's shown as "≈ value at API rates").
 _CLAUDE_API_MODELS = [
-    {"id": "anthropic/claude-opus-4-8", "name": "Claude Opus 4.8", "supports_effort": True, "max_thinking": 32000},
-    {"id": "anthropic/claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "supports_effort": True, "max_thinking": 24000},
-    {"id": "anthropic/claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5", "supports_effort": False, "max_thinking": 0},
+    {"id": "anthropic/claude-opus-4-8", "name": "Claude Opus 4.8", "supports_effort": True, "max_thinking": 32000, "ctx": 200000, "pin": 15.0, "pout": 75.0},
+    {"id": "anthropic/claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "supports_effort": True, "max_thinking": 24000, "ctx": 200000, "pin": 3.0, "pout": 15.0},
+    {"id": "anthropic/claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5", "supports_effort": False, "max_thinking": 0, "ctx": 200000, "pin": 1.0, "pout": 5.0},
 ]
 # Subscription (CLI) path: the OAuth token bills the user's Pro/Max subscription. The CLI picks
 # the model via --model; effort isn't a clean CLI flag, so no effort here.
 _CLAUDE_SUB_MODELS = [
-    {"id": "anthropic/claude-opus-4-8", "name": "Claude Opus 4.8 (subscription)", "supports_effort": False, "max_thinking": 0},
-    {"id": "anthropic/claude-sonnet-4-6", "name": "Claude Sonnet 4.6 (subscription)", "supports_effort": False, "max_thinking": 0},
+    {"id": "anthropic/claude-opus-4-8", "name": "Claude Opus 4.8 (subscription)", "supports_effort": False, "max_thinking": 0, "ctx": 200000, "pin": 15.0, "pout": 75.0},
+    {"id": "anthropic/claude-sonnet-4-6", "name": "Claude Sonnet 4.6 (subscription)", "supports_effort": False, "max_thinking": 0, "ctx": 200000, "pin": 3.0, "pout": 15.0},
 ]
 
 _CLAUDE_BY_ID = {m["id"]: m for m in _CLAUDE_API_MODELS}
@@ -74,8 +76,8 @@ _ANTHROPIC_VERSION = "2023-06-01"
 # only — no oauth). Same provider-prefix discipline as Claude. The OpenAI Chat Completions API
 # IS the target wire format, so the proxy is near-passthrough + reasoning_effort.
 _OPENAI_MODELS = [
-    {"id": "openai/gpt-5", "name": "GPT-5", "supports_effort": True},
-    {"id": "openai/gpt-5-codex", "name": "GPT-5 Codex", "supports_effort": True},
+    {"id": "openai/gpt-5", "name": "GPT-5", "supports_effort": True, "ctx": 272000, "pin": 1.25, "pout": 10.0},
+    {"id": "openai/gpt-5-codex", "name": "GPT-5 Codex", "supports_effort": True, "ctx": 272000, "pin": 1.25, "pout": 10.0},
 ]
 _OPENAI_BY_ID = {m["id"]: m for m in _OPENAI_MODELS}
 _ALL_OPENAI_IDS = {m["id"] for m in _OPENAI_MODELS}
@@ -131,6 +133,10 @@ def _model_entry(m: dict, owned_by: str, mode: str) -> dict:
                 # Custom flags the frontend reads (OWUI ignores unknown meta keys):
                 "supports_effort": supports,
                 "cloud_provider": owned_by,
+                # The Build usage meter reads these: context window + per-MILLION-token price.
+                "context_length": m.get("ctx"),
+                "price_in": m.get("pin"),
+                "price_out": m.get("pout"),
             },
             "params": {},
         },

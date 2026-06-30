@@ -1601,19 +1601,7 @@ async def generate_standalone_podcast_stream(
             # Step 3: Audio generation via tts-service (SpeechT5 on GPU)
             transcript = result.get("transcript", [])
 
-            # #region agent log
-            def _dlog(msg, data=None, hyp=""):
-                import time as _t
-                try:
-                    with open("/tmp/debug_podcast.log", "a") as _f:
-                        _f.write(json.dumps({"timestamp": int(_t.time()*1000), "location": "router.py:stream", "message": msg, "data": data or {}, "hypothesisId": hyp}) + "\n")
-                except Exception as log_e:
-                    logger.debug("debug_podcast.log write failed: %s", log_e)
-            # #endregion
 
-            # #region agent log
-            _dlog("audio_gen_entry", {"generate_audio": getattr(podcast_request, "generate_audio", True), "transcript_len": len(transcript)}, "H2")
-            # #endregion
 
             if getattr(podcast_request, "generate_audio", True) and transcript:
                 yield f"event: progress\ndata: {json.dumps({'step': 'audio', 'message': 'Generating audio...'})}\n\n"
@@ -1635,9 +1623,6 @@ async def generate_standalone_podcast_stream(
                     # Map all speakers to default voice
                     voice_mapping = {name: "__default__" for name in speaker_names}
 
-                    # #region agent log
-                    _dlog("tts_request", {"url": tts_url, "num_segments": len(script_segments), "speakers": list(speaker_names)}, "H2")
-                    # #endregion
 
                     yield f"event: progress\ndata: {json.dumps({'step': 'audio', 'message': f'Synthesizing {len(script_segments)} segments...'})}\n\n"
 
@@ -1658,9 +1643,6 @@ async def generate_standalone_podcast_stream(
 
                     _tts_elapsed = _time_mod.time() - _tts_start
 
-                    # #region agent log
-                    _dlog("tts_response", {"status": resp.status_code, "elapsed_s": round(_tts_elapsed, 2), "body": resp.text[:300]}, "H2")
-                    # #endregion
 
                     if resp.status_code == 200:
                         tts_data = resp.json()
@@ -1683,9 +1665,6 @@ async def generate_standalone_podcast_stream(
                         result["status"] = "script_only"
 
                 except Exception as tts_err:
-                    # #region agent log
-                    _dlog("tts_error", {"error": str(tts_err), "type": type(tts_err).__name__}, "H2")
-                    # #endregion
                     logger.warning(f"Audio generation failed: {tts_err}")
                     result["status"] = "script_only"
             

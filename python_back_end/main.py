@@ -7373,6 +7373,23 @@ async def startup_event():
                         UNIQUE(user_id)
                     )
                 """)
+                # Per-user workspace ENGINE preference (separate from the model):
+                # 'native' = OpenClaw tool loop, 'claude-code' = Claude Code direct engine.
+                await conn.execute(
+                    "ALTER TABLE openclaw_llm_config "
+                    "ADD COLUMN IF NOT EXISTS engine TEXT DEFAULT 'native'"
+                )
+                # Last LOCAL model the user picked — restored as the fallback when
+                # a cloud model can't drive the OpenClaw workspace.
+                await conn.execute(
+                    "ALTER TABLE openclaw_llm_config "
+                    "ADD COLUMN IF NOT EXISTS last_local_model_id TEXT"
+                )
+                # Per-user multi-agent (orchestrate) opt-in for Discord workspaces.
+                await conn.execute(
+                    "ALTER TABLE openclaw_llm_config "
+                    "ADD COLUMN IF NOT EXISTS orchestrate_enabled BOOLEAN DEFAULT FALSE"
+                )
                 logger.info("✅ OpenClaw LLM config table initialized")
     except Exception as e:
         logger.error(f"Failed to initialize job queue: {e}")

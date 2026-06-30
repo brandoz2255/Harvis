@@ -146,6 +146,14 @@ async def _detect_workspace_task_ollama(conversation_text: str) -> WorkspaceSugg
                     {"role": "user", "content": f"Conversation:\n{conversation_text}"},
                 ],
                 "stream": False,
+                # Force JSON-only output. Without this, "thinking" detector models (qwen3/gemma3)
+                # emit a long <think> chain before the JSON — which blows past the 15s timeout on a
+                # contended GPU (empty ReadTimeout) → detection silently fails → the workspace card
+                # never auto-launches. `format:json` constrains output to a JSON object (a few tokens),
+                # so even a heavier model answers in ~3s. `think:false` is belt-and-suspenders (some
+                # Ollama builds ignore it). Pair with a NON-thinking pinned model for best latency.
+                "format": "json",
+                "think": False,
                 "options": {"num_ctx": 4096, "temperature": 0.1},
             })
             

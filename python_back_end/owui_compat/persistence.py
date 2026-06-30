@@ -136,20 +136,7 @@ def _debug_shape(chat_obj) -> dict:
 
 
 def _debug_log(hypothesis_id: str, location: str, message: str, data: dict) -> None:
-    try:
-        payload = {
-            "sessionId": "d007eb",
-            "runId": "pre-fix",
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "message": message,
-            "data": data,
-            "timestamp": int(time.time() * 1000),
-        }
-        with open("/home/user/Harvis/.cursor/debug-d007eb.log", "a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, default=str) + "\n")
-    except Exception:
-        pass
+    return  # debug logging removed
 
 
 def _as_uuid(chat_id) -> Optional[uuid.UUID]:
@@ -222,13 +209,6 @@ def _row_to_owui(row) -> dict:
 
 async def create_chat(pool, user_id: int, chat_obj: dict, folder_id: Optional[str] = None) -> dict:
     title = _title_for(chat_obj)
-    # region agent log
-    _debug_log("A,B", "owui_compat/persistence.py:create_chat", "create_chat incoming payload shape", {
-        "userId": user_id,
-        "folderIdPresent": folder_id is not None,
-        "chatShape": _debug_shape(chat_obj),
-    })
-    # endregion
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
@@ -282,14 +262,6 @@ async def get_chat(pool, user_id: int, chat_id: str) -> Optional[dict]:
             cid,
             user_id,
         )
-    # region agent log
-    _debug_log("B,D", "owui_compat/persistence.py:get_chat", "get_chat returned row shape", {
-        "userId": user_id,
-        "chatId": str(chat_id),
-        "rowExists": row is not None,
-        "chatShape": _debug_shape(row["chat"]) if row else None,
-    })
-    # endregion
     return _row_to_owui(row) if row else None
 
 
@@ -315,15 +287,6 @@ async def update_chat(pool, user_id: int, chat_id: str, chat_obj: dict) -> Optio
             json.dumps(chat_obj or {}),
             title,
         )
-    # region agent log
-    _debug_log("A,B", "owui_compat/persistence.py:update_chat:after", "update_chat stored row shape", {
-        "userId": user_id,
-        "chatId": str(chat_id),
-        "incomingShape": _debug_shape(chat_obj),
-        "rowExists": row is not None,
-        "storedShape": _debug_shape(row["chat"]) if row else None,
-    })
-    # endregion
     return _row_to_owui(row) if row else None
 
 

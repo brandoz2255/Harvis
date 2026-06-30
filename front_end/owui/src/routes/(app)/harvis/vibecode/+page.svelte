@@ -26,6 +26,8 @@
 		type PendingAction
 	} from '$lib/apis/agent-runs';
 	import RunView from '$lib/agent-studio/RunView.svelte';
+	import BuildActions from '$lib/agent-studio/BuildActions.svelte';
+	import { createWorkspaceStream } from '$lib/apis/streaming/workspace-stream';
 	import WorkflowInspector from '$lib/agent-studio/WorkflowInspector.svelte';
 	import { humanizeRunTitle } from '$lib/agent-studio/runFormat';
 	import PlanPanel from '$lib/agent-studio/PlanPanel.svelte';
@@ -406,32 +408,107 @@
 		);
 	const refreshFiles = () => loadDiff();
 
-	// ── Token / context usage — real per-turn OpenAI usage, summed across the session.
-	// prompt_tokens of the latest turn ≈ current context occupancy vs the model's window. ──
-	$: usageTurns = turns.filter((t) => (t.prompt_tokens ?? 0) > 0 || (t.completion_tokens ?? 0) > 0);
-	$: lastUsage = usageTurns.length ? usageTurns[usageTurns.length - 1] : null;
-	$: sessionTokens = usageTurns.reduce(
-		(s, t) => s + (t.prompt_tokens || 0) + (t.completion_tokens || 0),
-		0
-	);
-	$: ctxUsed = lastUsage?.prompt_tokens || 0;
-	$: ctxWindow = lastUsage?.context_window || 24576;
-	$: ctxPct = ctxWindow ? Math.min(100, Math.round((ctxUsed / ctxWindow) * 100)) : 0;
-	$: usageModel = lastUsage?.model_name || 'llama3.1:8b';
-	const fmtTok = (n: number) =>
-		n >= 10000 ? Math.round(n / 1000) + 'k' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
-
-	// The gauge is interactive: click the bar → full usage stats; click the model → a picker.
+	// ── Token / context / COST usage — real per-turn usage, summed across the session, with a
+	//    real-time tick while a turn streams. Engine-FLEXIBLE: each model's context window + price
+	//    come from its /api/models metadata (info.meta.context_length / price_in / price_out).
+	//    Local Ollama models carry no price → shown as Free. No hardcoded per-engine logic. ──
 	let showUsageStats = false;
 	let showModelMenu = false;
-	let selectedModel = ''; // '' ⇒ use the turn/session default; set ⇒ sent on every turn
-	$: displayModel = selectedModel || usageModel;
-	$: ctxAvail = Math.max(0, ctxWindow - ctxUsed);
-	$: modelOptions = ($models || []).filter((m: any) => m && m.id);
+	let selectedModel = ''; // '' ⇒ engine/turn default; set ⇒ sent on every turn
+	let liveCompletionTokens = 0; // streamed output tokens for the running turn (live tick)
+
+	// Engine → which model providers are relevant (Claude Code → Claude; OpenCode/Native/Hermes →
+	// local Ollama; Codex → GPT or local). Drives the picker + the meter.
+	const ENGINE_MODEL_OWNERS: Record<string, string[]> = {
+		'claude-code': ['anthropic'],
+		codex: ['openai', 'ollama'],
+		opencode: ['ollama'],
+		'hermes-agent': ['ollama'],
+		'hermes-native': ['ollama'],
+		native: ['ollama']
+	};
+	// The model the meter reads window+price from before the first turn lands (so a Claude session
+	// shows 200k + Claude pricing immediately).
+	const ENGINE_DEFAULT_MODEL: Record<string, string> = {
+		'claude-code': 'anthropic/claude-sonnet-4-6',
+		codex: 'openai/gpt-5'
+	};
+	const fmtTok = (n: number) =>
+		n >= 10000 ? Math.round(n / 1000) + 'k' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
+	const fmtCost = (n: number) => (n >= 1 ? '$' + n.toFixed(2) : n > 0 ? '$' + n.toFixed(3) : '$0');
 	const pickModel = (id: string) => {
 		selectedModel = id;
 		showModelMenu = false;
 	};
+
+	$: usageTurns = turns.filter((t) => (t.prompt_tokens ?? 0) > 0 || (t.completion_tokens ?? 0) > 0);
+	$: lastUsage = usageTurns.length ? usageTurns[usageTurns.length - 1] : null;
+	$: sessionTokens = usageTurns.reduce((s, t) => s + (t.prompt_tokens || 0) + (t.completion_tokens || 0), 0);
+
+	// Engine-filtered picker list (Claude Code → only Claude, etc.).
+	$: modelOptions = ($models || []).filter((m: any) => {
+		if (!m || !m.id) return false;
+		const owners = ENGINE_MODEL_OWNERS[selectedEngine] || ['ollama'];
+		return owners.includes((m.owned_by || 'ollama').toString().toLowerCase());
+	});
+	// Picked model no longer valid for the current engine (e.g. switched to Claude Code) → default.
+	$: if (selectedModel && modelOptions.length && !modelOptions.find((m: any) => m.id === selectedModel)) {
+		selectedModel = '';
+	}
+
+	// Meter reads window + price from: the picked model → the last turn's → the engine default.
+	$: meterModelId = selectedModel || lastUsage?.model_name || ENGINE_DEFAULT_MODEL[selectedEngine] || '';
+	$: meterEntry = ($models || []).find((m: any) => m?.id === meterModelId);
+	$: meterModelMeta = (meterEntry?.info?.meta as any) || {};
+	$: priceIn = Number(meterModelMeta.price_in || 0); // USD / million input tokens
+	$: priceOut = Number(meterModelMeta.price_out || 0); // USD / million output tokens
+	$: isFreeModel = priceIn === 0 && priceOut === 0; // local Ollama → no cost
+	$: isSubscriptionModel = /subscription/i.test(meterEntry?.name || '');
+	$: sessionCost = usageTurns.reduce(
+		(s, t) => s + ((t.prompt_tokens || 0) * priceIn + (t.completion_tokens || 0) * priceOut) / 1e6,
+		0
+	);
+
+	$: liveOn = runningTasks.length > 0; // a turn is streaming → tick the completion side live
+	$: ctxWindow = Number(meterModelMeta.context_length || lastUsage?.context_window || 24576);
+	$: ctxUsed = (lastUsage?.prompt_tokens || 0) + (liveOn ? liveCompletionTokens : 0);
+	$: ctxPct = ctxWindow ? Math.min(100, Math.round((ctxUsed / ctxWindow) * 100)) : 0;
+	$: ctxAvail = Math.max(0, ctxWindow - ctxUsed);
+	$: usageModel = meterModelId || lastUsage?.model_name || 'llama3.1:8b';
+	$: displayModel = meterEntry?.name || selectedModel || usageModel;
+	$: liveSessionTokens = sessionTokens + (liveOn ? liveCompletionTokens : 0);
+	$: liveCost = sessionCost + (liveOn ? (liveCompletionTokens * priceOut) / 1e6 : 0);
+
+	// Live tick: a lightweight 2nd stream consumer counts the running turn's streamed tokens.
+	let _liveCtrl: AbortController | null = null;
+	let _liveRunId = '';
+	$: _watchLive(runningTasks[0]?.id || '');
+	function _watchLive(runId: string) {
+		if (runId === _liveRunId) return;
+		_liveRunId = runId;
+		if (_liveCtrl) {
+			try { _liveCtrl.abort(); } catch (_) {}
+			_liveCtrl = null;
+		}
+		liveCompletionTokens = 0;
+		if (!runId) return;
+		const ctrl = new AbortController();
+		_liveCtrl = ctrl;
+		(async () => {
+			try {
+				for await (const ev of createWorkspaceStream(runId, localStorage.token, ctrl.signal)) {
+					if (ctrl.signal.aborted) break;
+					const c = (ev as any)?.content;
+					if ((ev as any)?.type === 'token' && c) liveCompletionTokens += Math.ceil(String(c).length / 4);
+				}
+			} catch (_) {}
+		})();
+	}
+	onDestroy(() => {
+		if (_liveCtrl) {
+			try { _liveCtrl.abort(); } catch (_) {}
+		}
+	});
 
 	const loadSession = async () => {
 		if (!sessionId) {
@@ -532,6 +609,24 @@
 		'claude-code': 'Claude Code',
 		'hermes-agent': 'Hermes Agent',
 		'hermes-native': 'Hermes Native'
+	};
+	// Display label for a session's engine ('native' / unset → "Native"); used by the
+	// Build-analysis card to label "Built with X".
+	const engineDisplay = (id?: string | null): string =>
+		!id || id === 'native' ? 'Native' : ENGINE_LABELS[id] || id;
+
+	// Some engines (e.g. Claude Code) emit their final summary twice — the assistant text and
+	// the result block carry the same sentence. Collapse an exact "X. X." double so the thread
+	// narrative reads once.
+	const cleanSummary = (s?: string | null): string => {
+		const v = (s || '').replace(/\s+/g, ' ').trim();
+		if (!v) return v;
+		const m = v.match(/^(.{12,}?[.!?])\s*\1\s*$/);
+		if (m) return m[1];
+		const mid = Math.floor(v.length / 2);
+		const a = v.slice(0, mid).trim();
+		const b = v.slice(mid).trim();
+		return a && a === b ? a : v;
 	};
 	// The backend engine_readiness ALREADY encodes each engine's flag (a ready entry implies
 	// its flag is on), so we gate the selector purely on "≥1 ready engine + clone-mode" — no
@@ -1271,7 +1366,10 @@
 								<div
 									class="w-full text-sm text-gray-100 markdown-prose markdown-prose-sm"
 								>
-									{#if t.status === 'error'}
+									{#if t.analysis_md}
+										<!-- Build Result Narrator: the full written analysis IS the assistant message. -->
+										<Markdown id={`vc-turn-${t.id}`} content={t.analysis_md} />
+									{:else if t.status === 'error'}
 										<span class="text-red-500 dark:text-red-400"
 											>{t.error_message || $i18n.t('This turn failed.')}</span
 										>
@@ -1282,26 +1380,18 @@
 												class="text-gray-500 animate-pulse">▍</span
 											></div>
 									{:else}
-										<Markdown id={`vc-turn-${t.id}`} content={t.final_summary || $i18n.t('Done.')} />
+										<Markdown id={`vc-turn-${t.id}`} content={cleanSummary(t.final_summary) || $i18n.t('Done.')} />
 									{/if}
 								</div>
-								<button
-									class="inline-flex items-center gap-1 text-[11px] text-gray-500 hover:text-gray-300 transition"
-									on:click={() => toggleRun(t.id)}
-								>
-									<svg
-										xmlns="http://www.w3.org/2000/svg"
-										viewBox="0 0 20 20"
-										fill="currentColor"
-										class="size-3 transition-transform {expandedRuns[t.id] ? 'rotate-90' : ''}"
-										><path
-											fill-rule="evenodd"
-											d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z"
-											clip-rule="evenodd"
-										/></svg
-									>
-									{expandedRuns[t.id] ? $i18n.t('Hide run') : $i18n.t('View run')}
-								</button>
+								{#if typingText[t.id] === undefined}
+									<!-- Actions row below the analysis: View run details · Create PR · Download. -->
+									<BuildActions
+										run={t}
+										{sessionId}
+										expanded={!!expandedRuns[t.id]}
+										onOpenRun={() => toggleRun(t.id)}
+									/>
+								{/if}
 								{#if expandedRuns[t.id]}
 									<div
 										class="w-full border border-white/8 overflow-hidden bg-[#0b101b]"
@@ -1856,10 +1946,10 @@
 							>
 								<div class="flex flex-col items-end leading-tight">
 									<span class="tabular-nums text-gray-500 dark:text-gray-400">{fmtTok(ctxUsed)} / {fmtTok(ctxWindow)} · {ctxPct}%</span>
-									<span class="text-gray-400 dark:text-gray-500">{fmtTok(sessionTokens)} tok</span>
+									<span class="text-gray-400 dark:text-gray-500 tabular-nums">{#if isFreeModel}{$i18n.t('Free')}{:else}{fmtCost(liveCost)}{/if} · {fmtTok(liveSessionTokens)} tok</span>
 								</div>
 								<div class="w-14 h-1.5 rounded-full bg-gray-200 dark:bg-gray-800 overflow-hidden">
-									<div class="h-full rounded-full transition-all {ctxPct > 85 ? 'bg-red-500' : 'bg-blue-500'}" style="width: {ctxPct}%"></div>
+									<div class="h-full rounded-full transition-all {liveOn ? 'animate-pulse ' : ''}{ctxPct > 85 ? 'bg-red-500' : 'bg-blue-500'}" style="width: {ctxPct}%"></div>
 								</div>
 							</button>
 							{#if showUsageStats}
@@ -1875,7 +1965,13 @@
 									<div class="flex justify-between text-gray-500"><span>{$i18n.t('Available')}</span><span class="tabular-nums">{ctxAvail.toLocaleString()} {$i18n.t('tokens')}</span></div>
 									<div class="border-t border-gray-100 dark:border-gray-800"></div>
 									<div class="flex justify-between text-gray-500"><span>{$i18n.t('Last turn')}</span><span class="tabular-nums">↑ {(lastUsage?.prompt_tokens || 0).toLocaleString()} · ↓ {(lastUsage?.completion_tokens || 0).toLocaleString()}</span></div>
-									<div class="flex justify-between text-gray-500"><span>{$i18n.t('Session total')}</span><span class="tabular-nums">{sessionTokens.toLocaleString()} · {usageTurns.length} {$i18n.t('turns')}</span></div>
+									<div class="flex justify-between text-gray-500"><span>{$i18n.t('Session total')}</span><span class="tabular-nums">{liveSessionTokens.toLocaleString()} · {usageTurns.length} {$i18n.t('turns')}</span></div>
+									<div class="flex justify-between text-gray-500">
+										<span>{$i18n.t('Est. cost')}</span>
+										<span class="tabular-nums text-gray-700 dark:text-gray-300">
+											{#if isFreeModel}{$i18n.t('Free · local')}{:else}{fmtCost(liveCost)}{#if isSubscriptionModel} <span class="text-gray-400">· {$i18n.t('at API rates')}</span>{/if}{/if}
+										</span>
+									</div>
 									<div class="flex justify-between text-gray-500"><span>{$i18n.t('Model')}</span><span class="truncate ml-2 text-gray-700 dark:text-gray-300">{displayModel}</span></div>
 								</div>
 							{/if}

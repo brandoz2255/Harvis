@@ -2,7 +2,7 @@
 	import { getContext, onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { WEBUI_BASE_URL } from '$lib/constants';
-	import { chatId } from '$lib/stores';
+	import { chatId, models } from '$lib/stores';
 	import {
 		createWorkspaceStream,
 		WORKSPACE_TERMINAL,
@@ -13,13 +13,11 @@
 	import ThoughtStream from './workflow/ThoughtStream.svelte';
 	import RunArtifacts from './RunArtifacts.svelte';
 	import RunTable from './RunTable.svelte';
+	import UsageMeter from './UsageMeter.svelte';
+	import HarvisClawMascot from '$lib/components/common/HarvisClawMascot.svelte';
 	import { toolLabel } from './workflow/humanizeTool';
 
 	const i18n: any = getContext('i18n');
-
-	// Background-tasks panel: the per-agent table is the default body; the SvelteFlow
-	// graph is one toggle away.
-	let view: 'table' | 'graph' = 'table';
 
 	// One component, two mounts: 'full' = the run page (side-by-side), 'dock' = a
 	// compact, stacked version that lives in the chat right-rail pane (half-screen).
@@ -39,7 +37,49 @@
 	let controller: AbortController | null = null;
 	let activeId = '';
 
+	// Full-page main pane: Preview (the artifact, big) is the default; the agent
+	// graph + the table are one tab away.
+	let mainTab: 'preview' | 'workflow' | 'table' = 'preview';
+
+	// Run metadata for the context/token meter (from the run record).
+	let runModel = '';
+	let runPromptTokens = 0;
+	let runCompletionTokens = 0;
+	let runContextWindow = 0;
+
 	$: running = phase === 'connecting' || phase === 'running';
+
+	// Live token estimate (chars/4) over EVERYTHING the agent streams — token
+	// deltas, tool-call args, tool outputs, logs, summaries — so the gauge moves
+	// with every AI action. (OpenClaw workspace runs don't attribute per-call
+	// token counts to the run record, so without this the meter would sit at 0.)
+	$: liveEstimate = (() => {
+		let chars = 0;
+		for (const e of events) {
+			const a: any = e;
+			if (a.content) chars += String(a.content).length;
+			if (a.args) chars += (typeof a.args === 'string' ? a.args : JSON.stringify(a.args)).length;
+			if (a.output) chars += String(a.output).length;
+			if (a.message) chars += String(a.message).length;
+			if (a.summary) chars += String(a.summary).length;
+		}
+		return Math.ceil(chars / 4);
+	})();
+
+	// Meter inputs: read the run's model from the catalog ($models) for the
+	// context window + price, then combine with the run's token totals + live tick.
+	$: meterEntry = ($models || []).find((m: any) => m?.id === runModel);
+	$: meterMeta = (meterEntry?.info?.meta as any) || {};
+	$: priceIn = Number(meterMeta.price_in || 0);
+	$: priceOut = Number(meterMeta.price_out || 0);
+	$: isFreeModel = priceIn === 0 && priceOut === 0;
+	$: ctxWindow = Number(meterMeta.context_length || runContextWindow || 24576);
+	// Use the persisted record totals when present (native/cloud runs); otherwise
+	// the live estimate (so OpenClaw/Discord runs still show a moving gauge).
+	$: ctxUsed = Math.max(runPromptTokens || 0, liveEstimate);
+	$: sessionTokens = Math.max((runPromptTokens || 0) + (runCompletionTokens || 0), liveEstimate);
+	$: costUsd = (ctxUsed * priceIn + (runCompletionTokens || 0) * priceOut) / 1e6;
+	$: isSubscriptionModel = /\(subscription\)/i.test(runModel) || /subscription/i.test(meterEntry?.name || '');
 
 	// A friendly "the agent is talking" status line, derived from the live event stream:
 	// orchestrated → "Spawned 3 agents · readme-content is writing a file…" / "2/3 agents
@@ -93,6 +133,10 @@
 				if (run) {
 					taskBrief = run.task_brief || '';
 					status = run.status || '';
+					runModel = run.model_name || run.model || '';
+					runPromptTokens = Number(run.prompt_tokens || 0);
+					runCompletionTokens = Number(run.completion_tokens || 0);
+					runContextWindow = Number(run.context_window || 0);
 				}
 			}
 		} catch (e) {
@@ -173,63 +217,102 @@
 		{#if !embedded}
 			<!-- full-page header (breadcrumb) -->
 			<div
-				class="flex items-center gap-2 px-4 py-2.5 border-b border-gray-100 dark:border-gray-850 shrink-0"
+				class="flex items-center gap-2 px-4 py-2 border-b border-gray-100 dark:border-gray-850 shrink-0"
 			>
-			<nav class="flex items-center gap-1 text-xs text-gray-400 shrink-0">
-				<button class="hover:text-gray-600 dark:hover:text-gray-200" on:click={backToChat}
-					>{$i18n.t('Chat')}</button
-				>
-				<span>›</span>
-				<button class="hover:text-gray-600 dark:hover:text-gray-200" on:click={goStudio}
-					>{$i18n.t('Agent Studio')}</button
-				>
-				<span>›</span>
-				<span class="text-gray-600 dark:text-gray-300">{$i18n.t('Run')}</span>
-			</nav>
-			<span class="size-2 rounded-full shrink-0 {statusDot(status, phase)}"></span>
-			<span class="text-sm font-medium text-gray-800 dark:text-gray-100 truncate">
-				{taskBrief || $i18n.t('Workspace run')}
-			</span>
-			<span class="ml-auto text-[11px] text-gray-400 tabular-nums shrink-0">{wsId}</span>
+			<HarvisClawMascot
+				size={44}
+				state={running ? 'working' : phase === 'error' ? 'angry' : 'idle'}
+				className="shrink-0 -my-1"
+			/>
+			<div class="min-w-0 flex-1 flex flex-col leading-tight">
+				<nav class="flex items-center gap-1 text-[11px] text-gray-400 shrink-0">
+					<button class="hover:text-gray-600 dark:hover:text-gray-200" on:click={backToChat}
+						>{$i18n.t('Chat')}</button
+					>
+					<span>›</span>
+					<button class="hover:text-gray-600 dark:hover:text-gray-200" on:click={goStudio}
+						>{$i18n.t('Agent Studio')}</button
+					>
+					<span>›</span>
+					<span class="text-gray-600 dark:text-gray-300">{$i18n.t('Run')}</span>
+				</nav>
+				<div class="flex items-center gap-2 min-w-0">
+					<span class="size-2 rounded-full shrink-0 {statusDot(status, phase)}"></span>
+					<span class="text-sm font-medium text-gray-800 dark:text-gray-100 truncate">
+						{taskBrief || $i18n.t('Workspace run')}
+					</span>
+				</div>
+			</div>
+			<div class="ml-auto flex items-center gap-3 shrink-0">
+				<UsageMeter
+					{ctxUsed}
+					{ctxWindow}
+					{sessionTokens}
+					{costUsd}
+					modelName={runModel}
+					isFree={isFreeModel}
+					live={running}
+					atApiRates={isSubscriptionModel}
+				/>
+				<span class="text-[11px] text-gray-400 tabular-nums">{wsId}</span>
+			</div>
 			</div>
 		{/if}
 		<div class="flex-1 min-h-0 flex flex-col lg:flex-row">
+			<!-- Left rail: live activity feed + the changes/diff list (compact). -->
 			<div
-				class="lg:w-96 max-h-56 lg:max-h-none lg:h-full overflow-y-auto border-b lg:border-b-0 lg:border-r border-gray-100 dark:border-gray-850 px-4 py-3 shrink-0"
+				class="lg:w-80 max-h-56 lg:max-h-none lg:h-full overflow-y-auto border-b lg:border-b-0 lg:border-r border-gray-100 dark:border-gray-850 px-3 py-3 shrink-0 space-y-3"
 			>
-				<RunArtifacts {wsId} done={!running} />
 				<ThoughtStream {events} {running} />
+				<RunArtifacts {wsId} done={!running} mode="changes" bare />
 			</div>
+			<!-- Main: a LARGE preview pane (default) with the agent graph + table as tabs. -->
 			<div class="flex-1 min-h-0 min-w-0 flex flex-col">
 				<div
-					class="flex items-center justify-end gap-2 px-3 py-1.5 border-b border-gray-100 dark:border-gray-850 shrink-0"
+					class="flex items-center justify-between gap-2 px-3 py-1.5 border-b border-gray-100 dark:border-gray-850 shrink-0"
 				>
 					<div
 						class="inline-flex items-center gap-0.5 text-[11px] rounded-md bg-gray-100 dark:bg-gray-850 p-0.5"
 					>
 						<button
 							type="button"
-							class="px-2 py-0.5 rounded transition {view === 'table'
+							class="px-2.5 py-0.5 rounded transition {mainTab === 'preview'
 								? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-50 shadow-sm'
 								: 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'}"
-							on:click={() => (view = 'table')}>{$i18n.t('Table')}</button
+							on:click={() => (mainTab = 'preview')}>{$i18n.t('Preview')}</button
 						>
 						<button
 							type="button"
-							class="px-2 py-0.5 rounded transition {view === 'graph'
+							class="px-2.5 py-0.5 rounded transition {mainTab === 'workflow'
 								? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-50 shadow-sm'
 								: 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'}"
-							on:click={() => (view = 'graph')}>{$i18n.t('Graph')}</button
+							on:click={() => (mainTab = 'workflow')}>{$i18n.t('Workflow')}</button
+						>
+						<button
+							type="button"
+							class="px-2.5 py-0.5 rounded transition {mainTab === 'table'
+								? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-50 shadow-sm'
+								: 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'}"
+							on:click={() => (mainTab = 'table')}>{$i18n.t('Table')}</button
 						>
 					</div>
+					{#if running && liveStatus}
+						<span class="text-[11px] text-blue-500/90 dark:text-blue-400/90 truncate"
+							>{liveStatus}</span
+						>
+					{/if}
 				</div>
-				{#if view === 'table'}
-					<div class="flex-1 min-h-0 overflow-y-auto px-4 py-3">
-						<RunTable {wsId} live={running} />
+				{#if mainTab === 'preview'}
+					<div class="flex-1 min-h-0 min-w-0 flex flex-col p-3">
+						<RunArtifacts {wsId} done={!running} mode="preview" bare fill />
 					</div>
-				{:else}
+				{:else if mainTab === 'workflow'}
 					<div class="flex-1 min-h-0 min-w-0">
 						<WorkflowCanvas {events} />
+					</div>
+				{:else}
+					<div class="flex-1 min-h-0 overflow-y-auto px-4 py-3">
+						<RunTable {wsId} live={running} />
 					</div>
 				{/if}
 			</div>

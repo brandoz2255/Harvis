@@ -31,6 +31,9 @@
 		socket,
 		audioQueue,
 		showControls,
+		dockedRunId,
+		workspaceControlsTab,
+		taskHeartbeats,
 		chatMode,
 		orchestrateUniformModel,
 		orchestrateRepoPath,
@@ -1178,6 +1181,96 @@
 	};
 
 	//////////////////////////
+	// Task heartbeat — a lightweight, human-readable status line shown the INSTANT a
+	// (likely-)task message is sent, BEFORE any workspace run or card exists, so the chat
+	// never looks stuck while the router classifies + launches. It reuses OWUI's existing
+	// statusHistory rendering (StatusHistory.svelte) and hands off to WorkspaceRunCard the
+	// moment its marker arrives. No backend changes; no raw debug text — clean wording only.
+	//////////////////////////
+	const _taskHeartbeats: Record<string, { startedAt: number; stage: number; timer: any; model: string }> = {};
+
+	// Task-ish intent — build/create/code/search/research/CTF/file-generation. A plain Q&A
+	// won't advance past "Understanding the request…" (which is true for any message).
+	const _TASKISH_RE =
+		/\b(build|create|make|generate|implement|refactor|scaffold|develop|search|research|look\s*up|browse|analy[sz]e|scrape|crawl|crack|decode|decrypt|cipher|hash|website|dashboard|landing\s*page|spreadsheet|diagram|pdf|docx|html?|app|page|component|script)\b|\.(?:html?|py|js|ts|css|md|csv|json)\b/i;
+
+	const _flattenText = (c: any): string =>
+		typeof c === 'string'
+			? c
+			: Array.isArray(c)
+				? c.map((p) => (typeof p === 'string' ? p : p?.text || '')).join(' ')
+				: '';
+
+	// Engine wording adapts to the selected model (the real engine isn't known on the
+	// client until the marker arrives — which hands off — so infer it from the model id).
+	const _engineCheck = (m: string) =>
+		m.startsWith('anthropic/') ? 'Checking Claude Code…' : m.startsWith('openai/') ? 'Checking GPT…' : 'Choosing an engine…';
+	const _engineStart = (m: string) =>
+		m.startsWith('anthropic/') ? 'Starting Claude…' : m.startsWith('openai/') ? 'Starting GPT…' : 'Starting OpenClaw…';
+	const _heartbeatStage = (stage: number, m: string): string =>
+		[
+			'Understanding the request…',
+			_engineCheck(m),
+			'Preparing workspace…',
+			_engineStart(m),
+			'Starting the run…',
+			'Still working…'
+		][Math.min(Math.max(stage, 0), 5)];
+	const _HEARTBEAT_AT = [0, 1500, 3500, 7000, 13000, 22000];
+
+	const _setHeartbeat = (messageId: string, text: string) => {
+		const m = history.messages[messageId];
+		if (!m || m.done || m.error) return;
+		taskHeartbeats.update((s) => ({ ...s, [messageId]: text }));
+	};
+
+	const _clearHeartbeat = (messageId: string) => {
+		const hb = _taskHeartbeats[messageId];
+		if (hb?.timer) clearTimeout(hb.timer);
+		delete _taskHeartbeats[messageId];
+		taskHeartbeats.update((s) => {
+			if (!(messageId in s)) return s;
+			const n = { ...s };
+			delete n[messageId];
+			return n;
+		});
+	};
+
+	const _startHeartbeat = (messageId: string, userText: string, model: string) => {
+		if (!messageId || !history.messages[messageId]) return;
+		_taskHeartbeats[messageId] = { startedAt: Date.now(), stage: 0, timer: null, model: model || '' };
+		_setHeartbeat(messageId, _heartbeatStage(0, model || ''));
+		if (!_TASKISH_RE.test(userText || '')) return; // plain Q&A: hold on stage 0, resolves on first token
+		const tick = () => {
+			const hb = _taskHeartbeats[messageId];
+			if (!hb) return;
+			// Self-terminate the instant the message is finished/errored or has the workspace
+			// marker — a catch-all for any completion path we didn't hook explicitly.
+			const msg = history.messages[messageId];
+			if (!msg || msg.done || msg.error || (msg.content || '').includes('<details type="workspace_run"')) {
+				_clearHeartbeat(messageId);
+				return;
+			}
+			const el = Date.now() - hb.startedAt;
+			let next = hb.stage;
+			while (next + 1 < _HEARTBEAT_AT.length && el >= _HEARTBEAT_AT[next + 1]) next++;
+			if (next !== hb.stage) {
+				hb.stage = next;
+				_setHeartbeat(messageId, _heartbeatStage(next, hb.model));
+			}
+			hb.timer = setTimeout(tick, 700);
+		};
+		_taskHeartbeats[messageId].timer = setTimeout(tick, 700);
+	};
+
+	// Hand off to the WorkspaceRunCard the instant its marker appears in the content.
+	const _heartbeatMaybeHandoff = (message: any) => {
+		if (message?.id && _taskHeartbeats[message.id] && (message.content || '').includes('<details type="workspace_run"')) {
+			_clearHeartbeat(message.id);
+		}
+	};
+
+	//////////////////////////
 	// Web functions
 	//////////////////////////
 
@@ -1304,9 +1397,13 @@
 			}
 		}
 
-		if ($mobile) {
-			await showControls.set(false);
-		}
+		// Reset the right-rail dock on every new chat — desktop included. Without this it
+		// stays open (sticky) across chats: a workspace/artifact run opens it, then the next
+		// plain chat inherits the open dock showing "No tasks for this chat yet". The
+		// call/Spotlight paths below re-open it intentionally when they need to.
+		await showControls.set(false);
+		await dockedRunId.set(null);
+		await workspaceControlsTab.set(null);
 		await showCallOverlay.set(false);
 		await showArtifacts.set(false);
 
@@ -1439,6 +1536,12 @@
 
 	const loadChat = async () => {
 		chatId.set(chatIdProp);
+
+		// Enter every chat with the right-rail dock closed — it only re-opens if THIS chat
+		// has a live workspace/artifact run (never carried over sticky from another chat).
+		showControls.set(false);
+		dockedRunId.set(null);
+		workspaceControlsTab.set(null);
 
 		if ($temporaryChatEnabled) {
 			temporaryChatEnabled.set(false);
@@ -2000,8 +2103,13 @@
 
 		history.messages[message.id] = message;
 
+		// Hand off the task heartbeat to the WorkspaceRunCard the moment its marker arrives.
+		_heartbeatMaybeHandoff(message);
+
 		if (done) {
 			message.done = true;
+			// Resolve the heartbeat on completion (plain-chat answer, or post-handoff cleanup).
+			_clearHeartbeat(message.id);
 
 			if ($settings.responseAutoCopy) {
 				copyToClipboard(message.content);
@@ -2335,6 +2443,14 @@
 
 		if (primaryModel && primaryResponseMessageId) {
 			const chatEventEmitter = await getChatEventEmitter(primaryModel.id, _chatId);
+
+			// Immediate task heartbeat: a human-readable status line appears the instant we
+			// send, before any workspace run/card exists, and hands off when the marker lands.
+			_startHeartbeat(
+				primaryResponseMessageId,
+				_flattenText(history.messages[parentId]?.content),
+				primaryModel.id
+			);
 
 			scrollToBottom();
 			await sendMessageSocket(
@@ -2674,6 +2790,7 @@
 			};
 
 			responseMessage.done = true;
+			_clearHeartbeat(responseMessageId);
 
 			history.messages[responseMessageId] = responseMessage;
 			history.currentId = responseMessageId;
@@ -2780,6 +2897,8 @@
 	};
 
 	const stopResponse = async (processQueue = true) => {
+		// Resolve any active task heartbeats — the run was stopped, don't leave them spinning.
+		Object.keys(_taskHeartbeats).forEach((id) => _clearHeartbeat(id));
 		if (taskIds) {
 			if ($chatId) {
 				await stopTasksByChatId(localStorage.token, $chatId).catch((error) => {

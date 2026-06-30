@@ -18,6 +18,7 @@ import html
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from typing import Optional
@@ -127,6 +128,21 @@ def _openai_sse_lines(workspace_id: str, content: str) -> list[str]:
 # Models that aren't a concrete pick — never sync these (they ARE the auto-route).
 _MODEL_SENTINELS = {"", "auto", "default", "user-pref", "dynamic", "harvis-workspace"}
 
+# A cloud model only takes the (slower) workspace lane for tasks that genuinely need live
+# tools — web search, current info, fetching, code execution. Simple generation a model can
+# do from its own knowledge stays in fast plain chat.
+_LIVE_TOOL_RE = re.compile(
+    r"\b(search|google|look\s?up|browse|web|internet|online|current|latest|news|today|"
+    r"recent|weather|stock|price|fetch|download|scrape|crawl|run\s+(the\s+)?(code|tests?)|execute)\b",
+    re.IGNORECASE,
+)
+
+
+def _needs_live_tools(suggestion, message: str) -> bool:
+    if (getattr(suggestion, "task_type", "") or "") in ("research", "multi_step"):
+        return True
+    return bool(_LIVE_TOOL_RE.search(message or ""))
+
 
 async def _sync_workspace_model(pool, model_name: str) -> None:
     """Make the OpenClaw workspace follow the model picked in the OWUI dropdown.
@@ -145,6 +161,8 @@ async def _sync_workspace_model(pool, model_name: str) -> None:
     m = (model_name or "").strip()
     if m.lower() in _MODEL_SENTINELS:
         return
+    if m.startswith(("anthropic/", "openai/")):
+        return  # cloud models don't run via OpenClaw→Ollama — the 'claude' lane handles them
     base = os.getenv("OLLAMA_URL", "http://ollama:11434")
     try:
         async with pool.acquire() as conn:
@@ -179,15 +197,9 @@ async def maybe_handle_workspace(
     if mode == "chat":
         return None  # user forced fast chat
 
-    # Cloud chat models (Claude / GPT) generate build/code requests directly in chat
-    # — fast, zero GPU, and the OpenClaw workspace lane isn't wired to use a cloud
-    # model as its agent (it 502s). So in AUTO mode a cloud model stays in plain chat
-    # (the chat artifact preview auto-opens client-side). Forced agent/orchestrate
-    # still runs the workspace for users who explicitly chose it.
     _model_id = str(owui_body.get("model") or "")
-    if mode == "auto" and _model_id.startswith(("anthropic/", "openai/")):
-        logger.info("owui workspace_bridge: cloud model %s in auto mode → plain chat", _model_id)
-        return None
+    _is_anthropic = _model_id.startswith("anthropic/")
+    _is_openai = _model_id.startswith("openai/")
 
     # Lazy imports — keep the package free of import-time coupling to workspace/.
     try:
@@ -219,6 +231,15 @@ async def maybe_handle_workspace(
             logger.exception("owui workspace_bridge: detect_workspace_task failed")
             return None
         if not (suggestion.should_suggest and suggestion.confidence >= _AUTO_LAUNCH_CONFIDENCE):
+            return None
+        # Cloud models: GPT has no workspace lane yet → plain chat. Cloud Claude takes the
+        # (slower, tool-driving) workspace lane ONLY for genuine tool tasks (web search,
+        # current info, code execution); simple generation stays in fast plain chat where
+        # the artifact preview auto-opens. Forced agent/orchestrate (above) always runs it.
+        if _is_openai:
+            return None
+        if _is_anthropic and not _needs_live_tools(suggestion, message):
+            logger.info("owui workspace_bridge: cloud Claude simple task → plain chat")
             return None
 
     pool = getattr(request.app.state, "pg_pool", None)
@@ -263,7 +284,11 @@ async def maybe_handle_workspace(
         # via HARVIS_OWUI_WORKSPACE_AGENT (e.g. "local" for the tool-less direct model).
         # 'orchestrate' mode → the P5 multi-agent orchestrator; otherwise the default
         # OpenClaw tool-loop agent (override via HARVIS_OWUI_WORKSPACE_AGENT).
-        agent_id=("orchestrated" if mode == "orchestrate" else os.getenv("HARVIS_OWUI_WORKSPACE_AGENT", "main")),
+        agent_id=(
+            "orchestrated" if mode == "orchestrate"
+            else "claude" if _is_anthropic   # cloud Claude drives its OWN tool-loop (claude -p)
+            else os.getenv("HARVIS_OWUI_WORKSPACE_AGENT", "main")
+        ),
         user_id=user_id,
         model_name=model_name,
         live_web=True,
@@ -304,7 +329,11 @@ async def maybe_handle_workspace(
             workspace_id, suggestion.confidence, suggestion.task_type,
         )
 
-    _engine_label = "Orchestrator" if mode == "orchestrate" else "OpenClaw"
+    _engine_label = (
+        "Orchestrator" if mode == "orchestrate"
+        else "Claude" if _is_anthropic
+        else "OpenClaw"
+    )
     lines = _openai_sse_lines(
         workspace_id,
         _marker_content(

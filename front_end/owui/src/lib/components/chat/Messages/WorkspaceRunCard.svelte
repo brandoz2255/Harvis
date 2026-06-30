@@ -11,6 +11,7 @@
 	import Markdown from './Markdown.svelte';
 	import HarvisClawMascot from '$lib/components/common/HarvisClawMascot.svelte';
 	import RunArtifacts from '$lib/agent-studio/RunArtifacts.svelte';
+	import RunProgressCard from '$lib/agent-studio/RunProgressCard.svelte';
 	import WorkflowInspector from '$lib/agent-studio/WorkflowInspector.svelte';
 	import { getRunArtifacts } from '$lib/apis/agent-runs';
 
@@ -64,6 +65,7 @@
 	let recent: { ok: boolean; text: string }[] = [];
 	let toolCount = 0;
 	let summary = '';
+	let analysis = ''; // Build Result Narrator: full written analysis (Build-like runs)
 	let errorMessage = '';
 	let fixHint = '';
 	let elapsed = 0;
@@ -85,6 +87,15 @@
 	let executor = ''; // "OpenClaw" — proves who's actually executing the task
 	let execModel = ''; // the model behind it
 	let feedEl: HTMLElement | null = null;
+
+	// ── Progress timeline (RunProgressCard) ──
+	// rawEvents = the unfolded event stream the stage machine reads (pure → reload
+	// replay reconstructs the same final timeline). lastEventAt + nowTick detect a
+	// stall (no events for a while while still running).
+	let rawEvents: WorkspaceEvent[] = [];
+	let lastEventAt = Date.now();
+	let nowTick = Date.now();
+	let artifactCount: number | null = null; // file-output artifacts, set on finish
 
 	let controller: AbortController | null = null;
 	let timer: ReturnType<typeof setInterval> | null = null;
@@ -108,6 +119,9 @@
 	})();
 
 	$: running = phase === 'connecting' || phase === 'thinking' || phase === 'executing';
+	// Quiet connection while still running → surface a "Retry stream" affordance so a
+	// stalled SSE never looks frozen. nowTick ticks every 1s (see startTimerAndStream).
+	$: stalled = running && nowTick - lastEventAt > 20000;
 	// Orchestrated runs are the ones whose sub-agents emit a parent_run_id-tagged
 	// agent_end → that's the gate for the rich completion block (single-agent runs
 	// never populate `agents`, so they keep the plain summary path).
@@ -180,6 +194,9 @@
 	};
 
 	const handle = (evt: WorkspaceEvent) => {
+		// Feed the progress timeline (every event, incl. replayed ones on reload).
+		rawEvents = [...rawEvents, evt];
+		lastEventAt = Date.now();
 		if (evt.model) execModel = evt.model;
 		switch (evt.type) {
 			case 'agent_start':
@@ -248,6 +265,10 @@
 			case 'done':
 				phase = 'done';
 				summary = evt.summary ?? '';
+				// Build Result Narrator: the full written analysis (Build-like runs). When present
+				// it IS the assistant message in this chat card. Reload-safe — the persisted done
+				// event (saved after enrichment) carries it on stream replay.
+				analysis = (evt as any).analysis_md ?? '';
 				if (Array.isArray(evt.changed_files)) changedFiles = evt.changed_files;
 				// The artifact now renders inline in this card's completion block, so we
 				// no longer force-open the dock Artifacts tab on finish (it was intrusive
@@ -337,10 +358,15 @@
 	const checkPreview = async () => {
 		try {
 			const arts = await getRunArtifacts(workspaceId);
+			// Count FILE outputs (not diffs/summaries) → drives the progress card's
+			// "Output ready" vs "No file output" stage. 0 = a clean, non-stuck end state.
+			artifactCount = (arts ?? []).filter((a) => a.artifact_type === 'file').length;
 			hasPreview = (arts ?? []).some(
 				(a) => a.artifact_type === 'file' && _PREVIEWABLE.test(a.path || '')
 			);
-		} catch (_) {}
+		} catch (_) {
+			artifactCount = 0;
+		}
 	};
 	$: if (phase === 'done' && workspaceId && !_checkedPreview) {
 		_checkedPreview = true;
@@ -362,8 +388,24 @@
 		// startedAt is the persisted run start (above) — do NOT reset it here, or
 		// re-entering a running workspace restarts the counter from 0.
 		timer = setInterval(() => {
-			if (running) elapsed = Date.now() - startedAt;
+			nowTick = Date.now();
+			if (running) elapsed = nowTick - startedAt;
 		}, 1000);
+		consume();
+	};
+
+	// "Retry stream" — drop the current (stalled) connection and re-attach. The backend
+	// replays all persisted events from the DB, so the feed + timeline rebuild from
+	// scratch and then continue live. Used by the progress card's stall affordance.
+	const retryStream = () => {
+		controller?.abort();
+		rawEvents = [];
+		steps = [];
+		toolCount = 0;
+		agents = [];
+		executor = '';
+		lastEventAt = Date.now();
+		if (phase !== 'done' && phase !== 'error') phase = 'connecting';
 		consume();
 	};
 
@@ -479,6 +521,25 @@
 		{/if}
 	</div>
 
+	<!-- Digestible progress timeline — always present (running AND done) so the card
+	     never looks frozen while the workspace/artifacts catch up. -->
+	{#if phase !== 'awaiting'}
+		<div class="mt-2">
+			<RunProgressCard
+				events={rawEvents}
+				{phase}
+				{engineLabel}
+				modelLabel={execModel}
+				elapsedMs={elapsed}
+				{errorMessage}
+				{artifactCount}
+				{stalled}
+				onRetry={retryStream}
+				onOpenArtifacts={previewRun}
+			/>
+		</div>
+	{/if}
+
 	{#if phase === 'error'}
 		<div class="mt-1.5 text-red-600 dark:text-red-400">{errorMessage}</div>
 		{#if fixHint}<div class="mt-1 text-xs text-gray-500">{fixHint}</div>{/if}
@@ -522,11 +583,19 @@
 					{/if}
 				{/each}
 			</div>
-		{:else if running}
-			<div class="mt-1.5 text-gray-600 dark:text-gray-300">{currentStep}</div>
 		{/if}
+		<!-- The vague "Connecting…" fallback was removed: the RunProgressCard above is now
+		     the live, human-readable status while the run works. -->
 
-		{#if phase === 'done' && isOrchestrated}
+		{#if phase === 'done' && analysis}
+			<!-- Build Result Narrator: the full written analysis IS the assistant message in the
+			     main chat. The raw diff/logs stay in this card's View / Open-run affordances. -->
+			<div
+				class="mt-2 pt-2 border-t border-gray-100 dark:border-gray-850 markdown-prose markdown-prose-sm text-sm text-gray-700 dark:text-gray-200"
+			>
+				<Markdown id={`ws-analysis-${workspaceId}`} content={analysis} />
+			</div>
+		{:else if phase === 'done' && isOrchestrated}
 			<!-- Completion moment (orchestrated): deterministic stats + STITCHED per-agent
 			     finish() summaries + the primary artifact rendered inline. Nothing generated. -->
 			<div class="mt-2 pt-2 border-t border-gray-100 dark:border-gray-850 space-y-2">

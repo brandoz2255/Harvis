@@ -64,28 +64,8 @@ logger = logging.getLogger(__name__)
 
 
 def _debug400831(location: str, message: str, data: dict, run_id: str, hypothesis_id: str) -> None:
-    # region agent log
-    try:
-        import json as _json
-        import time as _time
-        from pathlib import Path as _Path
+    return  # debug logging removed
 
-        payload = {
-            "sessionId": "400831",
-            "runId": run_id,
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "message": message,
-            "data": data,
-            "timestamp": int(_time.time() * 1000),
-        }
-        p = _Path("/home/user/Harvis/.cursor/debug-400831.log")
-        p.parent.mkdir(parents=True, exist_ok=True)
-        with p.open("a", encoding="utf-8") as f:
-            f.write(_json.dumps(payload, separators=(",", ":")) + "\n")
-    except Exception:
-        pass
-    # endregion
 
 OPENCLAW_URL = os.getenv("OPENCLAW_URL", "ws://harvis-ai-openclaw:18789")
 OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
@@ -1883,34 +1863,6 @@ class OpenClawClient:
 
                 msg_type = msg.get("type")
 
-                # region agent log — trace the first ~20 inbound frames and any chat terminal state
-                _oc_frame_count += 1
-                try:
-                    _ev = msg.get("event", "")
-                    _state = (msg.get("payload") or {}).get("state") if isinstance(msg.get("payload"), dict) else None
-                    if _oc_frame_count <= 20 or _ev == "chat":
-                        import json as _json5, time as _time5, uuid as _uuid5
-                        _log_path = "/tmp/debug-d007eb.log"
-                        with open(_log_path, "a", encoding="utf-8") as _f:
-                            _f.write(_json5.dumps({
-                                "sessionId": "d007eb",
-                                "id": f"log_{int(_time5.time()*1000)}_{_uuid5.uuid4().hex[:8]}",
-                                "timestamp": int(_time5.time()*1000),
-                                "location": "openclaw_client.py:stream:frame",
-                                "message": "oc_inbound_frame",
-                                "data": {
-                                    "workspace_id": self.workspace_id,
-                                    "frame_no": _oc_frame_count,
-                                    "msg_type": msg_type,
-                                    "event": _ev,
-                                    "state": _state,
-                                },
-                                "runId": "run_oc_stream",
-                                "hypothesisId": "H_stall",
-                            }, separators=(",", ":")) + "\n")
-                except Exception:
-                    pass
-                # endregion
 
                 # ── Handle incoming RPC requests from OpenClaw ──────────────
                 if msg_type == "req":

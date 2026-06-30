@@ -102,6 +102,14 @@ export const showControls = writable(false);
 export const workspaceControlsTab = writable<string | null>(null);
 // The workspace id the chat right-rail dock is currently showing (compact RunView).
 export const dockedRunId = writable<string | null>(null);
+// A workspace run launched from Discord that is currently running for this user.
+// Drives the top-bar "Harvis on Discord is running" indicator (polled app-wide).
+export const activeDiscordRun = writable<{ id: string; task_brief?: string } | null>(null);
+// Task heartbeat: a per-message ({messageId: humanStatusText}) inline status line shown the
+// instant a (likely-)task message is sent — BEFORE any workspace run/card exists — so the
+// chat never looks stuck while the router classifies + launches. Kept OUT of the message
+// object (which the send path structuredClones) so the SSE handler can't wipe it.
+export const taskHeartbeats = writable<Record<string, string>>({});
 // Deep Research dock: which research's overview/report the right rail shows.
 export const dockedResearchId = writable<string | null>(null);
 export const researchDockView = writable<'overview' | 'report'>('overview');

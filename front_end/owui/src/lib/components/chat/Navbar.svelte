@@ -17,7 +17,8 @@
 		showSidebar,
 		temporaryChatEnabled,
 		user,
-		researchEnabled
+		researchEnabled,
+		activeDiscordRun
 	} from '$lib/stores';
 
 	import { slide } from 'svelte/transition';
@@ -245,6 +246,28 @@
 								</div>
 							</button>
 						</Menu>
+					{/if}
+
+					{#if $activeDiscordRun}
+						<Tooltip
+							content={$activeDiscordRun.task_brief || 'Open the running Discord session'}
+						>
+							<button
+								class=" flex items-center gap-1.5 cursor-pointer pl-2 pr-2.5 py-1.5 rounded-xl bg-blue-500/10 hover:bg-blue-500/20 text-blue-600 dark:text-blue-400 transition"
+								on:click={() => goto('/harvis/agent-studio/run/' + $activeDiscordRun.id)}
+								aria-label="Harvis on Discord is running"
+							>
+								<span class="relative flex size-2">
+									<span
+										class="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"
+									></span>
+									<span class="relative inline-flex rounded-full size-2 bg-blue-500"></span>
+								</span>
+								<span class="hidden sm:inline text-xs font-medium whitespace-nowrap">
+									Harvis on Discord is running
+								</span>
+							</button>
+						</Tooltip>
 					{/if}
 
 					{#if $user?.role === 'admin' || ($user?.permissions.chat?.controls ?? true)}
