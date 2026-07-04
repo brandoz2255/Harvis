@@ -176,7 +176,8 @@ CREATE INDEX IF NOT EXISTS idx_notebook_transformations_source_id ON notebook_tr
 CREATE INDEX IF NOT EXISTS idx_notebook_transformations_type ON notebook_transformations(transformation_type);
 
 -- Notebook Studio artifacts (onb_compat) — generated, REVIEWABLE study artifacts
--- (quiz / flashcards / study_guide) produced by the per-notebook Studio rail.
+-- (quiz / flashcards + the report kinds study_guide / briefing / faq / timeline)
+-- produced by the per-notebook Studio rail.
 -- Persisted so the rail can LOG them and the user can reopen + review later.
 -- Podcasts live in standalone_podcasts (also notebook-scoped via its TEXT notebook_id)
 -- and are merged into the same log at read time.
@@ -184,15 +185,35 @@ CREATE TABLE IF NOT EXISTS onb_notebook_artifacts (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     notebook_id UUID NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
     user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    kind        TEXT NOT NULL CHECK (kind IN ('quiz', 'flashcards', 'study_guide')),
+    kind        TEXT NOT NULL CHECK (kind IN ('quiz', 'flashcards', 'study_guide', 'briefing', 'faq', 'timeline')),
     title       TEXT,
-    format      TEXT NOT NULL DEFAULT 'json',   -- 'json' (quiz/flashcards) | 'markdown' (study_guide)
+    format      TEXT NOT NULL DEFAULT 'json',   -- 'json' (quiz/flashcards) | 'markdown' (report kinds)
     content     JSONB NOT NULL,                  -- {questions:[…]} | {cards:[…]} | {markdown:"…"}
     model_used  TEXT,
     created_at  TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_onb_artifacts_notebook ON onb_notebook_artifacts(notebook_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_onb_artifacts_user ON onb_notebook_artifacts(user_id);
+
+-- Additive: widen the kind CHECK on DBs created before the briefing/faq/timeline
+-- report kinds existed (this file runs at every backend startup, so this
+-- self-heals the live DB). Only rewrites the constraint when it's missing a
+-- new kind — a no-op on already-current DBs.
+DO $$
+DECLARE def TEXT;
+BEGIN
+    SELECT pg_get_constraintdef(oid) INTO def
+      FROM pg_constraint
+     WHERE conrelid = 'onb_notebook_artifacts'::regclass
+       AND conname = 'onb_notebook_artifacts_kind_check';
+    IF def IS NULL OR def NOT LIKE '%faq%' THEN
+        ALTER TABLE onb_notebook_artifacts
+            DROP CONSTRAINT IF EXISTS onb_notebook_artifacts_kind_check;
+        ALTER TABLE onb_notebook_artifacts
+            ADD CONSTRAINT onb_notebook_artifacts_kind_check
+            CHECK (kind IN ('quiz', 'flashcards', 'study_guide', 'briefing', 'faq', 'timeline'));
+    END IF;
+END $$;
 
 -- Notebook Podcasts - generated podcast episodes
 CREATE TABLE IF NOT EXISTS notebook_podcasts (

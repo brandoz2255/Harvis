@@ -35,12 +35,18 @@
 		preferableCaps,
 		GROUP_ORDER,
 		GROUP_LABEL,
+		SECTION_ORDER,
+		SECTION_LABEL,
+		SECTION_HINT,
+		sectionOf,
+		type SectionKey,
 		type NormStatus,
 		type GroupKey,
 		type EngineReadiness
 	} from '$lib/integrations/status';
 	import ControlCard from '$lib/integrations/ControlCard.svelte';
 	import IntegrationDetailModal from '$lib/integrations/IntegrationDetailModal.svelte';
+	import IntegrationLogs from '$lib/integrations/IntegrationLogs.svelte';
 
 	const i18n: any = getContext('i18n');
 	const backToChat = () => goto($chatId ? `/c/${$chatId}` : '/');
@@ -76,6 +82,16 @@
 	$: searched = filterCatalog(merged, q);
 	$: counts = statusCounts(searched, engineReadiness);
 	$: cardsInGroup = (g: GroupKey) => searched.filter((d) => groupOf(d) === g);
+	// P6: the "all" layout renders the five named dashboard sections.
+	$: cardsInSection = (s: SectionKey) => searched.filter((d) => sectionOf(d) === s);
+
+	// P6: per-integration logs drawer.
+	let showLogs = false;
+	let logsDef: IntegrationDefinition | null = null;
+	const openLogs = (def: IntegrationDefinition) => {
+		logsDef = def;
+		showLogs = true;
+	};
 	$: flatCards = isGroupFilter(filter)
 		? cardsInGroup(filter)
 		: isStatusFilter(filter)
@@ -301,26 +317,40 @@
 			<span class="text-[11px] text-gray-400 sm:ml-auto">{$i18n.t('Pre-fills new Chat & Code sessions')}</span>
 		</div>
 
-		<!-- body -->
+		<!-- body — P6: five named dashboard sections (status contract unchanged) -->
 		{#if filter === 'all'}
-			{#each GROUP_ORDER as g (g)}
-				{#if cardsInGroup(g).length}
+			{#each SECTION_ORDER as s (s)}
+				{#if cardsInSection(s).length || s === 'ssh_remote'}
 					<section class="space-y-2">
-						<h2 class="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500">
-							{$i18n.t(GROUP_LABEL[g])}
-						</h2>
-						<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
-							{#each cardsInGroup(g) as def (def.id)}
-								<ControlCard {def} {engineReadiness} {prefs} on:open={(e) => openModal(e.detail)} on:setDefault={(e) => setAsDefault(e.detail)} />
-							{/each}
+						<div>
+							<h2 class="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500">
+								{$i18n.t(SECTION_LABEL[s])}
+							</h2>
+							<p class="text-[11px] text-gray-400/80 dark:text-gray-500/80">{$i18n.t(SECTION_HINT[s])}</p>
 						</div>
+						{#if cardsInSection(s).length}
+							<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+								{#each cardsInSection(s) as def (def.id)}
+									<ControlCard {def} {engineReadiness} {prefs} on:open={(e) => openModal(e.detail)} on:setDefault={(e) => setAsDefault(e.detail)} on:logs={(e) => openLogs(e.detail)} />
+								{/each}
+							</div>
+						{:else if s === 'ssh_remote'}
+							<!-- SSH ships scaffold-only (HARVIS_SSH_ENABLED off) — placeholder, no functionality -->
+							<div class="rounded-xl border border-dashed border-gray-200 dark:border-gray-800 px-4 py-3 flex items-center gap-3">
+								<svg class="size-4 text-gray-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" /><path d="m6 8 3 2.5L6 13M11 13h5" /></svg>
+								<div class="min-w-0">
+									<div class="text-sm text-gray-600 dark:text-gray-300">{$i18n.t('SSH remote workspaces')}</div>
+									<div class="text-[11px] text-gray-400">{$i18n.t('Coming soon — pending security review. Connection manager, folder mounts, and remote terminal are gated behind explicit approval.')}</div>
+								</div>
+							</div>
+						{/if}
 					</section>
 				{/if}
 			{/each}
 		{:else}
 			<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
 				{#each flatCards as def (def.id)}
-					<ControlCard {def} {engineReadiness} {prefs} on:open={(e) => openModal(e.detail)} on:setDefault={(e) => setAsDefault(e.detail)} />
+					<ControlCard {def} {engineReadiness} {prefs} on:open={(e) => openModal(e.detail)} on:setDefault={(e) => setAsDefault(e.detail)} on:logs={(e) => openLogs(e.detail)} />
 				{/each}
 			</div>
 			{#if !flatCards.length}
@@ -336,3 +366,6 @@
 	on:action={handleAction}
 	on:changed={() => refresh(false)}
 />
+
+<!-- P6: read-only recent-activity drawer -->
+<IntegrationLogs bind:show={showLogs} integrationId={logsDef?.id ?? ''} name={logsDef?.name ?? ''} />

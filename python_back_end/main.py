@@ -1317,6 +1317,11 @@ app.include_router(soul_router)
 app.include_router(memory_router)
 app.include_router(cron_router)
 
+# SSH remote-access SCAFFOLD (Phase 7) — flagged OFF: HARVIS_SSH_ENABLED absent/0 (the
+# default) → every endpoint 403s; connect/test is additionally a hard 501 stub (no SSH I/O).
+from remote.ssh_manager import ssh_router
+app.include_router(ssh_router)
+
 # Cookbook — hardware-aware model recommendation + download (per-node llmfit serve proxy)
 try:
     from cookbook.router import router as cookbook_router

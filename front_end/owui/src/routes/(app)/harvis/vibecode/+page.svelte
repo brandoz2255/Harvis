@@ -37,6 +37,8 @@
 	import WorkspaceMainPanel from '$lib/agent-studio/build/WorkspaceMainPanel.svelte';
 	import WorkspacePanel from '$lib/agent-studio/build/WorkspacePanel.svelte';
 	import BackgroundTaskCard from '$lib/agent-studio/build/BackgroundTaskCard.svelte';
+	import ShellTab from '$lib/agent-studio/build/ShellTab.svelte';
+	import Customize from '$lib/agent-studio/Customize.svelte';
 	import { PaneGroup, Pane, PaneResizer } from 'paneforge';
 	import Markdown from '$lib/components/chat/Messages/Markdown.svelte';
 	import {
@@ -57,9 +59,22 @@
 	const i18n: any = getContext('i18n');
 
 	$: enabled = $config?.features?.enable_harvis_vibecode ?? true;
+	// P2: manual Shell tab — flag default OFF (stop-gated); backend WS enforces it too.
+	$: shellEnabled = $config?.features?.enable_harvis_build_shell ?? false;
 
 	// ── URL-driven: the sidebar session list + New session set ?session. ──
 	$: sessionId = $page.url.searchParams.get('session') || '';
+
+	// Settings/Customize opens IN Build (right drawer) instead of bouncing to the
+	// Agent Studio hub. URL-synced (?panel=customize) so it deep-links + back-buttons
+	// cleanly; /harvis/agent-studio/customize still works for the full-page version.
+	$: showCustomize = $page.url.searchParams.get('panel') === 'customize';
+	const setCustomize = (open: boolean) => {
+		const url = new URL($page.url);
+		if (open) url.searchParams.set('panel', 'customize');
+		else url.searchParams.delete('panel');
+		goto(`${url.pathname}${url.search}`, { replaceState: !open, noScroll: true, keepFocus: true });
+	};
 
 	let session: VibecodeSession | null = null;
 	let turns: VibecodeTurn[] = [];
@@ -173,6 +188,12 @@
 	const onFileSelect = (path: string) => {
 		selectedFile = path;
 		mainTab = 'diff';
+		// Picking a file in the Explorer jumps the dock to the File tab (VS Code flow).
+		if (!panelVisible.br) {
+			panelVisible = { ...panelVisible, br: true };
+			persistPanels();
+		}
+		dockTab = 'br';
 	};
 	let artifacts: any[] = [];
 	const loadArtifacts = async () => {
@@ -188,6 +209,11 @@
 	};
 	const onArtifactSelect = (_id: string) => {
 		mainTab = 'diff';
+		if (!panelVisible.br) {
+			panelVisible = { ...panelVisible, br: true };
+			persistPanels();
+		}
+		dockTab = 'br';
 	};
 
 	// Right-rail "Agents" — a vibecode turn runs one coder agent; surface it.
@@ -318,7 +344,7 @@
 	// ── Dock panel visibility (the ⋯ menu) — conditional render so EVERY panel exits
 	// reliably. (PaneForge collapse() failed when both panes in a column were collapsed.)
 	let panelVisible: Record<string, boolean> = (() => {
-		const def = { tl: true, tr: true, bl: false, br: false };
+		const def = { tl: true, tr: true, bl: false, br: false, sh: true };
 		try {
 			return { ...def, ...JSON.parse(localStorage.getItem('harvis.vibecode.panels') || '{}') };
 		} catch {
@@ -364,8 +390,38 @@
 		{ key: 'tl', label: $i18n.t('Background tasks'), visible: panelVisible.tl },
 		{ key: 'tr', label: $i18n.t('Files'), visible: panelVisible.tr },
 		{ key: 'bl', label: $i18n.t('Plan'), visible: panelVisible.bl },
-		{ key: 'br', label: $i18n.t('File'), visible: panelVisible.br }
+		{ key: 'br', label: $i18n.t('File'), visible: panelVisible.br },
+		...(shellEnabled ? [{ key: 'sh', label: $i18n.t('Shell'), visible: panelVisible.sh }] : [])
 	];
+	// ── Tabbed dock (Claude-Code-Desktop style): ONE panel at a time, a tab strip on
+	// top. The ⋯ menu still controls WHICH tabs exist (panelVisible); this picks the
+	// active one. Order: Tasks · Plan · Files · File.
+	let dockTab: 'tl' | 'bl' | 'tr' | 'br' | 'sh' = (() => {
+		try {
+			const v = localStorage.getItem('harvis.vibecode.docktab');
+			return v === 'tl' || v === 'bl' || v === 'tr' || v === 'br' || v === 'sh' ? v : 'tl';
+		} catch {
+			return 'tl';
+		}
+	})();
+	const setDockTab = (k: 'tl' | 'bl' | 'tr' | 'br' | 'sh') => {
+		dockTab = k;
+		try {
+			localStorage.setItem('harvis.vibecode.docktab', k);
+		} catch {
+			/* ignore */
+		}
+	};
+	$: dockTabs = [
+		{ key: 'tl' as const, label: $i18n.t('Tasks'), visible: panelVisible.tl },
+		{ key: 'bl' as const, label: $i18n.t('Plan'), visible: panelVisible.bl },
+		{ key: 'tr' as const, label: $i18n.t('Files'), visible: panelVisible.tr },
+		{ key: 'br' as const, label: $i18n.t('File'), visible: panelVisible.br },
+		// P2: manual shell — only exists when the HARVIS_BUILD_SHELL flag is on.
+		{ key: 'sh' as const, label: $i18n.t('Shell'), visible: shellEnabled && panelVisible.sh }
+	].filter((t) => t.visible);
+	// If the active tab's panel gets hidden via the ⋯ menu, fall to the first visible one.
+	$: if (dockTabs.length && !dockTabs.some((t) => t.key === dockTab)) dockTab = dockTabs[0].key;
 	// When a NEW run starts, surface the Background tasks panel automatically (open the
 	// dock if it was hidden, show the panel if it was closed). Only on the rising edge —
 	// the user can still hide it mid-run.
@@ -385,6 +441,8 @@
 				panelVisible = { ...panelVisible, tl: true };
 				persistPanels();
 			}
+			// Bring the Tasks tab forward so the new run is immediately visible.
+			dockTab = 'tl';
 		}
 		prevRunningCount = n;
 	}
@@ -1307,7 +1365,7 @@
 			on:openRun={headerOpenRun}
 			on:togglePanel={(e) => togglePanel(e.detail.key)}
 			on:toggleDock={toggleDock}
-			on:settings={() => goto('/harvis/agent-studio')}
+			on:settings={() => setCustomize(true)}
 		/>
 
 		<!-- BW3 dock layout: main conversation (left, dominant) + resizable workspace dock (right) -->
@@ -1330,7 +1388,7 @@
 					{#each turns as t (t.id)}
 						<div class="flex justify-end">
 							<div
-								class="max-w-[68%] border border-white/8 bg-white/[0.03] px-3 py-2 text-gray-100"
+								class="max-w-[68%] rounded-2xl rounded-br-md border border-white/8 bg-white/[0.03] px-3.5 py-2 text-gray-100"
 							>
 								{#if t.attachments && t.attachments.length}
 									<!-- The user's attachments stay in the chat: images inline, other files as chips. -->
@@ -1344,7 +1402,7 @@
 												/>
 											{:else}
 												<span
-													class="inline-flex items-center gap-1 text-xs px-2 py-1 border border-white/8 bg-white/6 text-gray-300"
+													class="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-lg border border-white/8 bg-white/6 text-gray-300"
 													>📎 {att.name || $i18n.t('file')}</span
 												>
 											{/if}
@@ -1356,7 +1414,7 @@
 						</div>
 						{#if t.status === 'running'}
 							<!-- live run while Harvis works -->
-							<div class="border border-white/8 overflow-hidden bg-[#0b101b]">
+							<div class="rounded-xl border border-white/8 overflow-hidden bg-[#0b101b]">
 								{#key t.id}<RunView wsId={t.id} mode="dock" title={t.task_brief} />{/key}
 							</div>
 						{:else}
@@ -1394,7 +1452,7 @@
 								{/if}
 								{#if expandedRuns[t.id]}
 									<div
-										class="w-full border border-white/8 overflow-hidden bg-[#0b101b]"
+										class="w-full rounded-xl border border-white/8 overflow-hidden bg-[#0b101b]"
 									>
 										{#key t.id}<RunView wsId={t.id} mode="dock" title={t.task_brief} />{/key}
 									</div>
@@ -1642,7 +1700,9 @@
 							}}
 						></textarea>
 						<button
-							class="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-200 disabled:opacity-40 transition"
+							class="absolute right-2 bottom-1.5 size-7 rounded-lg flex items-center justify-center transition {composerDisabled || !prompt.trim()
+								? 'bg-white/6 text-gray-500 cursor-not-allowed'
+								: 'bg-blue-600 hover:bg-blue-500 text-white shadow-sm'}"
 							disabled={composerDisabled || !prompt.trim()}
 							on:click={submit}
 							aria-label={sessionId ? $i18n.t('Send') : $i18n.t('Start')}
@@ -1651,7 +1711,7 @@
 							{#if sending}
 								<svg class="size-4 animate-spin" viewBox="0 0 24 24" fill="none"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" /><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 0 1 8-8V0C5.4 0 0 5.4 0 12h4z" /></svg>
 							{:else}
-								<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="size-4"><path d="M20 5v6a3 3 0 0 1-3 3H5" stroke-linecap="round" stroke-linejoin="round" /><path d="M9 10l-4 4 4 4" stroke-linecap="round" stroke-linejoin="round" /></svg>
+								<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="size-4"><path d="M12 19V5M5 12l7-7 7 7" stroke-linecap="round" stroke-linejoin="round" /></svg>
 							{/if}
 						</button>
 					</div>
@@ -1728,7 +1788,7 @@
 						<div class="relative">
 							<button
 								type="button"
-								class="inline-flex items-center gap-1 text-xs px-2.5 py-1 border transition hover:opacity-90 {runMode ===
+								class="inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-full border transition hover:opacity-90 {runMode ===
 								'plan'
 									? 'border-white/8 bg-white/4 text-gray-300'
 									: runMode === 'full-auto'
@@ -1808,7 +1868,7 @@
 						     picks 3–10). The multi-agent run shows live in Background tasks. -->
 						<button
 							type="button"
-							class="inline-flex items-center gap-1 text-xs px-2.5 py-1 border transition hover:opacity-90 {orchestrate
+							class="inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-full border transition hover:opacity-90 {orchestrate
 								? 'border-violet-500/30 bg-violet-500/12 text-violet-300'
 								: 'border-white/8 bg-white/4 text-gray-400 hover:text-gray-200'}"
 							title={$i18n.t('Orchestrate — fan this task out to multiple task-delegated agents')}
@@ -1913,7 +1973,7 @@
 						<!-- model selector → pick from available models -->
 						<div class="relative">
 							<button
-								class="inline-flex items-center gap-1 text-[11px] px-2 py-1 border border-white/8 bg-white/4 text-gray-300 hover:bg-white/8 transition max-w-[10rem]"
+								class="inline-flex items-center gap-1 text-[11px] px-2 py-1 rounded-lg border border-white/8 bg-white/4 text-gray-300 hover:bg-white/8 transition max-w-[10rem]"
 								on:click={() => (showModelMenu = !showModelMenu)}
 								title={$i18n.t('Model')}
 							>
@@ -1995,97 +2055,100 @@
 						<div class="flex h-full min-h-0">
 						{#if topHasAny || bottomHasAny}
 						<div class="h-full min-h-0 min-w-0 overflow-hidden order-last {overlayRunId ? 'border-l border-white/8' : ''}" style={overlayRunId ? 'flex: 0 0 38%' : 'flex: 1 1 100%'}>
-							<!-- Rows-first island grid: top row (Background tl | Plan bl) stacks above the
-							     bottom row (Files tr | File br). One panel per column → top/bottom stack;
-							     all four → 2×2. Transparent resizers = small island gaps. -->
+							<!-- Tabbed dock (Claude-Code-Desktop style): a tab strip over ONE full-height
+							     panel. The ⋯ menu still decides which tabs exist; the strip switches. -->
 							<div class="h-full p-1">
-							<PaneGroup direction="vertical" class="w-full h-full">
-							{#if topHasAny}
-							<Pane defaultSize={50} minSize={18} class="min-h-0">
-							<PaneGroup direction="horizontal" class="w-full h-full">
-{#if panelVisible.tl}
-									<Pane class="min-h-0">
-										<WorkspacePanel title={$i18n.t('Background tasks')} on:dismiss={() => togglePanel('tl')}>
-											<div class="p-2 space-y-2">
-												{#if runningTasks.length}
-													<div class="px-1 text-[10px] uppercase tracking-wider text-gray-500">{$i18n.t('Running')}</div>
-													{#each runningTasks as t (t.id)}
-														<BackgroundTaskCard run={t} live autoExpand={(t.child_count || 0) > 1} on:stop={(e) => cancelRunId(e.detail.id)} on:openRun={(e) => headerOpenRunId(e.detail.id)} on:viewLogs={(e) => viewLogs(e.detail.id, e.detail.agentTab)} />
+							<div class="flex flex-col min-h-0 h-full bg-[#0c111d] rounded-xl border border-white/8 shadow-lg shadow-black/30 overflow-hidden text-gray-200">
+								<!-- tab strip -->
+								<div class="shrink-0 flex items-center gap-0 px-2 border-b border-white/8 bg-white/[0.015]">
+									{#each dockTabs as t (t.key)}
+										<button
+											type="button"
+											class="relative px-3 py-2 text-[11px] font-medium transition {dockTab === t.key
+												? 'text-gray-100'
+												: 'text-gray-500 hover:text-gray-300'}"
+											on:click={() => setDockTab(t.key)}
+										>
+											<span class="inline-flex items-center gap-1.5">
+												{t.label}
+												{#if t.key === 'tl' && runningTasks.length}
+													<span class="inline-flex items-center justify-center min-w-4 h-4 px-1 rounded-full bg-blue-500/20 text-blue-300 text-[10px] tabular-nums leading-none">{runningTasks.length}</span>
+												{/if}
+											</span>
+											{#if dockTab === t.key}
+												<span class="absolute left-2 right-2 -bottom-px h-px bg-sky-400"></span>
+											{/if}
+										</button>
+									{/each}
+									<button
+										type="button"
+										class="ml-auto shrink-0 text-gray-500 hover:text-gray-200 transition p-1.5"
+										aria-label={$i18n.t('Hide this panel')}
+										title={$i18n.t('Hide this panel')}
+										on:click={() => togglePanel(dockTab)}
+									>
+										<svg viewBox="0 0 20 20" fill="currentColor" class="size-3.5"><path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" /></svg>
+									</button>
+								</div>
+								<!-- active panel -->
+								{#if dockTab === 'tl'}
+									<div class="flex-1 min-h-0 overflow-y-auto">
+										<div class="p-2 space-y-2">
+											{#if runningTasks.length}
+												<div class="px-1 text-[10px] uppercase tracking-wider text-gray-500">{$i18n.t('Running')}</div>
+												{#each runningTasks as t (t.id)}
+													<BackgroundTaskCard run={t} live autoExpand={(t.child_count || 0) > 1} on:stop={(e) => cancelRunId(e.detail.id)} on:openRun={(e) => headerOpenRunId(e.detail.id)} on:viewLogs={(e) => viewLogs(e.detail.id, e.detail.agentTab)} />
+												{/each}
+											{/if}
+											{#if finishedTasks.length}
+												<div class="flex items-center justify-between px-1 pt-1">
+													<button class="flex items-center gap-1 text-[10px] uppercase tracking-wider text-gray-500 hover:text-gray-300 transition" on:click={() => (showFinished = !showFinished)}>
+														<svg class="size-3 transition-transform {showFinished ? 'rotate-90' : ''}" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.21 14.77a.75.75 0 0 1 .02-1.06L11.168 10 7.23 6.29a.75.75 0 1 1 1.04-1.08l4.5 4.25a.75.75 0 0 1 0 1.08l-4.5 4.25a.75.75 0 0 1-1.06-.02Z" clip-rule="evenodd" /></svg>
+														<span>{$i18n.t('Finished')} {finishedTasks.length}</span>
+													</button>
+													<button class="text-[10px] text-blue-400 hover:underline" on:click={clearBg}>{$i18n.t('Clear')}</button>
+												</div>
+												{#if showFinished}
+													{#each finishedTasks as t (t.id)}
+														<BackgroundTaskCard run={t} on:openRun={(e) => headerOpenRunId(e.detail.id)} on:viewLogs={(e) => viewLogs(e.detail.id, e.detail.agentTab)} />
 													{/each}
 												{/if}
-												{#if finishedTasks.length}
-													<div class="flex items-center justify-between px-1 pt-1">
-														<button class="flex items-center gap-1 text-[10px] uppercase tracking-wider text-gray-500 hover:text-gray-300 transition" on:click={() => (showFinished = !showFinished)}>
-															<svg class="size-3 transition-transform {showFinished ? 'rotate-90' : ''}" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.21 14.77a.75.75 0 0 1 .02-1.06L11.168 10 7.23 6.29a.75.75 0 1 1 1.04-1.08l4.5 4.25a.75.75 0 0 1 0 1.08l-4.5 4.25a.75.75 0 0 1-1.06-.02Z" clip-rule="evenodd" /></svg>
-															<span>{$i18n.t('Finished')} {finishedTasks.length}</span>
-														</button>
-														<button class="text-[10px] text-blue-400 hover:underline" on:click={clearBg}>{$i18n.t('Clear')}</button>
-													</div>
-													{#if showFinished}
-														{#each finishedTasks as t (t.id)}
-															<BackgroundTaskCard run={t} on:openRun={(e) => headerOpenRunId(e.detail.id)} on:viewLogs={(e) => viewLogs(e.detail.id, e.detail.agentTab)} />
-														{/each}
-													{/if}
-												{/if}
-												{#if !runningTasks.length && !finishedTasks.length}
-													<div class="text-xs text-gray-500 px-1 py-2">{$i18n.t('Nothing running.')}</div>
+											{/if}
+											{#if !runningTasks.length && !finishedTasks.length}
+												<div class="text-xs text-gray-500 px-1 py-2">{$i18n.t('Nothing running.')}</div>
+											{/if}
+										</div>
+									</div>
+								{:else if dockTab === 'bl'}
+									<div class="flex-1 min-h-0 overflow-y-auto">
+										{#if latestTurnId}
+											<div class="p-2"><PlanPanel wsId={latestTurnId} on:steps={(e) => (planStepCount = e.detail.count)} /></div>
+										{:else}
+											<div class="p-3 text-[11px] text-gray-500 leading-snug">{$i18n.t('No plan yet. Harvis will outline steps here once an agent starts working.')}</div>
+										{/if}
+									</div>
+								{:else if dockTab === 'tr'}
+									<div class="flex-1 min-h-0">
+										<WorkspaceFileRail bind:tab={fileTab} {changedFiles} {artifacts} {selectedFile} on:select={(e) => onFileSelect(e.detail.path)} on:selectArtifact={(e) => onArtifactSelect(e.detail.id)} />
+									</div>
+								{:else if dockTab === 'sh'}
+									<div class="flex-1 min-h-0">
+										<ShellTab {sessionId} />
+									</div>
+								{:else}
+									<div class="flex-1 min-h-0">
+										<WorkspaceMainPanel showChat={false} bind:tab={mainTab} {selectedFile} diffLines={selectedFileObj ? selectedFileObj.lines : []} hasRepo={!!sessionId} hasChanges={changedFiles.length > 0} on:refresh={refreshFiles}>
+											<div slot="logs" class="h-full overflow-auto">
+												{#if logsRunId || latestTurnId}
+													{#key logsRunId || latestTurnId}<RunView wsId={logsRunId || latestTurnId} mode="dock" />{/key}
+												{:else}
+													<div class="h-full flex items-center justify-center text-xs text-gray-500 px-4 text-center">{$i18n.t('No logs yet. Agent output and command results will appear here once work begins.')}</div>
 												{/if}
 											</div>
-										</WorkspacePanel>
-									</Pane>
-									{/if}
-							{#if panelVisible.tl && panelVisible.bl}
-							<PaneResizer class="w-1.5 shrink-0 bg-transparent hover:bg-blue-500/40 transition" />
-							{/if}
-{#if panelVisible.bl}
-									<Pane class="min-h-0">
-										<WorkspacePanel title={$i18n.t('Plan')} on:dismiss={() => togglePanel('bl')}>
-											{#if latestTurnId}
-												<div class="p-2"><PlanPanel wsId={latestTurnId} on:steps={(e) => (planStepCount = e.detail.count)} /></div>
-											{:else}
-												<div class="p-3 text-[11px] text-gray-500 leading-snug">{$i18n.t('No plan yet. Harvis will outline steps here once an agent starts working.')}</div>
-											{/if}
-										</WorkspacePanel>
-									</Pane>
-									{/if}
-							</PaneGroup>
-							</Pane>
-							{/if}
-							{#if topHasAny && bottomHasAny}
-							<PaneResizer class="h-1.5 shrink-0 bg-transparent hover:bg-blue-500/40 transition" />
-							{/if}
-							{#if bottomHasAny}
-							<Pane minSize={18} class="min-h-0">
-							<PaneGroup direction="horizontal" class="w-full h-full">
-{#if panelVisible.tr}
-									<Pane class="min-h-0">
-										<WorkspacePanel title={$i18n.t('Explorer')} scroll={false} on:dismiss={() => togglePanel('tr')}>
-											<WorkspaceFileRail bind:tab={fileTab} {changedFiles} {artifacts} {selectedFile} on:select={(e) => onFileSelect(e.detail.path)} on:selectArtifact={(e) => onArtifactSelect(e.detail.id)} />
-										</WorkspacePanel>
-									</Pane>
-									{/if}
-							{#if panelVisible.tr && panelVisible.br}
-							<PaneResizer class="w-1.5 shrink-0 bg-transparent hover:bg-blue-500/40 transition" />
-							{/if}
-{#if panelVisible.br}
-									<Pane class="min-h-0">
-										<WorkspacePanel title={$i18n.t('File')} scroll={false} on:dismiss={() => togglePanel('br')}>
-											<WorkspaceMainPanel showChat={false} bind:tab={mainTab} {selectedFile} diffLines={selectedFileObj ? selectedFileObj.lines : []} hasRepo={!!sessionId} hasChanges={changedFiles.length > 0} on:refresh={refreshFiles}>
-												<div slot="logs" class="h-full overflow-auto">
-													{#if logsRunId || latestTurnId}
-														{#key logsRunId || latestTurnId}<RunView wsId={logsRunId || latestTurnId} mode="dock" />{/key}
-													{:else}
-														<div class="h-full flex items-center justify-center text-xs text-gray-500 px-4 text-center">{$i18n.t('No logs yet. Agent output and command results will appear here once work begins.')}</div>
-													{/if}
-												</div>
-											</WorkspaceMainPanel>
-										</WorkspacePanel>
-									</Pane>
-									{/if}
-							</PaneGroup>
-							</Pane>
-							{/if}
-							</PaneGroup>
+										</WorkspaceMainPanel>
+									</div>
+								{/if}
+							</div>
 							</div>
 							</div>
 						{/if}
@@ -2203,6 +2266,41 @@
 				</div>
 			</div>
 		</div>
+	{/if}
+
+	<!-- Customize IN Build — right drawer hosting the Agent Studio Customize surface
+	     (dock mode). Opened by the header ⚙; URL-synced via ?panel=customize. -->
+	{#if showCustomize}
+		<button
+			class="fixed inset-0 z-40 bg-black/40 cursor-default"
+			aria-label={$i18n.t('Close')}
+			on:click={() => setCustomize(false)}
+		></button>
+		<aside
+			class="fixed right-0 top-0 bottom-0 z-50 w-full max-w-2xl bg-white dark:bg-gray-950 border-l border-gray-100 dark:border-gray-850 shadow-2xl flex flex-col"
+		>
+			<div class="shrink-0 flex items-center gap-2 px-4 py-3 border-b border-gray-100 dark:border-gray-850">
+				<div class="min-w-0">
+					<div class="text-sm font-semibold text-gray-800 dark:text-gray-100">{$i18n.t('Customize')}</div>
+					<div class="text-[11px] text-gray-400">{$i18n.t('Models, presets, skills & MCP — without leaving Build')}</div>
+				</div>
+				<a
+					class="ml-auto shrink-0 text-[11px] text-gray-400 hover:text-blue-500 transition"
+					href="/harvis/agent-studio/customize"
+					title={$i18n.t('Open as a full page')}>⤢ {$i18n.t('Full page')}</a
+				>
+				<button
+					class="shrink-0 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 p-1"
+					aria-label={$i18n.t('Close')}
+					on:click={() => setCustomize(false)}
+				>
+					<svg viewBox="0 0 20 20" fill="currentColor" class="size-4"><path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" /></svg>
+				</button>
+			</div>
+			<div class="flex-1 min-h-0 overflow-y-auto px-4 py-3">
+				<Customize mode="dock" />
+			</div>
+		</aside>
 	{/if}
 
 	<!-- GitHub: connect → pick a repo (or clone a public repo by name) → clone-mode session. -->

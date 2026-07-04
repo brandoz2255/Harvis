@@ -8,8 +8,21 @@ import { QuizView } from '@/components/studio/QuizView'
 import { FlashcardsView } from '@/components/studio/FlashcardsView'
 import { StudyGuideView } from '@/components/studio/StudyGuideView'
 import { useGenerateArtifact } from '@/lib/hooks/use-artifacts'
+import { useCreateNote } from '@/lib/hooks/use-notes'
 import type { ArtifactLogItem, GeneratableKind } from '@/lib/api/artifacts'
-import { Sparkles, FileQuestion, Layers, BookOpen, RotateCcw } from 'lucide-react'
+import {
+  Sparkles,
+  FileQuestion,
+  Layers,
+  BookOpen,
+  FileText,
+  HelpCircle,
+  History,
+  RotateCcw,
+  StickyNote,
+  Check,
+  Loader2,
+} from 'lucide-react'
 
 interface Props {
   open: boolean
@@ -20,20 +33,27 @@ interface Props {
   initialKind?: GeneratableKind | null
   /** Review an already-generated artifact instead of generating (log rows). */
   reviewItem?: ArtifactLogItem | null
+  /** Sources currently CHECKED in the Sources panel — generation grounds on these. */
+  selectedSourceIds?: string[]
+  /** Total sources in the notebook (for the "N of M sources" grounding line). */
+  totalSourceCount?: number
 }
 
 const KINDS: { id: GeneratableKind; label: string; desc: string; icon: typeof FileQuestion }[] = [
   { id: 'quiz', label: 'Quiz', desc: 'Multiple-choice questions', icon: FileQuestion },
   { id: 'flashcards', label: 'Flashcards', desc: 'Front / back study cards', icon: Layers },
   { id: 'study_guide', label: 'Study Guide', desc: 'Structured study notes', icon: BookOpen },
+  { id: 'briefing', label: 'Briefing Doc', desc: 'Themes, facts & quotes', icon: FileText },
+  { id: 'faq', label: 'FAQ', desc: 'Questions readers would ask', icon: HelpCircle },
+  { id: 'timeline', label: 'Timeline', desc: 'Events & cast of characters', icon: History },
 ]
 
 /** Renders the body of an artifact (review or freshly generated). */
 function ArtifactBody({ item }: { item: ArtifactLogItem }) {
   if (item.kind === 'quiz' && item.content?.questions) return <QuizView questions={item.content.questions} />
   if (item.kind === 'flashcards' && item.content?.cards) return <FlashcardsView cards={item.content.cards} />
-  if (item.kind === 'study_guide' && item.content?.markdown != null)
-    return <StudyGuideView markdown={item.content.markdown} />
+  // All report kinds (study_guide / briefing / faq / timeline) are Markdown.
+  if (item.content?.markdown != null) return <StudyGuideView markdown={item.content.markdown} />
   return <div className="text-sm text-muted-foreground py-4">Nothing to show.</div>
 }
 
@@ -44,11 +64,15 @@ export function NotebookStudioDialog({
   notebookTitle,
   initialKind,
   reviewItem,
+  selectedSourceIds,
+  totalSourceCount,
 }: Props) {
   const generate = useGenerateArtifact(notebookId)
+  const createNote = useCreateNote()
   const [kind, setKind] = useState<GeneratableKind | null>(null)
   const [result, setResult] = useState<ArtifactLogItem | null>(null)
   const [error, setError] = useState('')
+  const [savedNote, setSavedNote] = useState(false)
   const mounted = useRef(true)
   useEffect(() => {
     mounted.current = true
@@ -64,8 +88,9 @@ export function NotebookStudioDialog({
     setKind(k)
     setResult(null)
     setError('')
+    setSavedNote(false)
     try {
-      const item = await generate.mutateAsync({ kind: k })
+      const item = await generate.mutateAsync({ kind: k, sourceIds: selectedSourceIds })
       if (mounted.current) setResult(item)
     } catch (e) {
       if (!mounted.current) return
@@ -77,6 +102,7 @@ export function NotebookStudioDialog({
   // Seed mode from props each time the dialog opens.
   useEffect(() => {
     if (!open) return
+    setSavedNote(false)
     if (reviewItem) {
       setKind(reviewItem.kind === 'podcast' ? null : (reviewItem.kind as GeneratableKind))
       setResult(reviewItem)
@@ -95,7 +121,32 @@ export function NotebookStudioDialog({
     setKind(null)
     setResult(null)
     setError('')
+    setSavedNote(false)
   }
+
+  // Save a Markdown report to this notebook's Notes (NotebookLM "Save to note").
+  const canSaveToNote = !!result?.content?.markdown?.trim()
+  const handleSaveToNote = () => {
+    if (!result?.content?.markdown || savedNote) return
+    createNote.mutate(
+      {
+        title: result.title,
+        content: result.content.markdown,
+        note_type: 'ai',
+        notebook_id: notebookId,
+      },
+      { onSuccess: () => mounted.current && setSavedNote(true) },
+    )
+  }
+
+  // Grounding line: which sources this generation draws from.
+  const selCount = selectedSourceIds?.length ?? 0
+  const groundingLabel =
+    !isReview && selCount > 0
+      ? totalSourceCount != null && selCount < totalSourceCount
+        ? `Grounded in ${selCount} of ${totalSourceCount} selected ${totalSourceCount === 1 ? 'source' : 'sources'}`
+        : `Grounded in ${selCount} ${selCount === 1 ? 'source' : 'sources'}`
+      : null
 
   return (
     <Dialog
@@ -111,6 +162,9 @@ export function NotebookStudioDialog({
             <Sparkles className="h-4 w-4" />
             {isReview ? reviewItem!.title : `Create from ${notebookTitle || 'this notebook'}`}
           </DialogTitle>
+          {groundingLabel && (
+            <p className="text-xs text-muted-foreground">{groundingLabel}</p>
+          )}
         </DialogHeader>
 
         {/* Generate mode, no kind chosen → picker */}
@@ -146,14 +200,50 @@ export function NotebookStudioDialog({
           </div>
         )}
 
-        {/* Footer (generate mode only) */}
-        {!isReview && kind && !loading && (
+        {/* Footer */}
+        {!loading && (kind || isReview) && result && (
+          <div className="flex items-center justify-between pt-2 border-t border-border mt-2">
+            {!isReview ? (
+              <Button variant="ghost" size="sm" onClick={reset}>
+                <RotateCcw className="h-3.5 w-3.5 mr-1.5" /> Choose another
+              </Button>
+            ) : (
+              <span />
+            )}
+            <div className="flex items-center gap-2">
+              {canSaveToNote && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleSaveToNote}
+                  disabled={createNote.isPending || savedNote}
+                >
+                  {createNote.isPending ? (
+                    <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+                  ) : savedNote ? (
+                    <Check className="h-3.5 w-3.5 mr-1.5 text-green-500" />
+                  ) : (
+                    <StickyNote className="h-3.5 w-3.5 mr-1.5" />
+                  )}
+                  {savedNote ? 'Saved to notes' : 'Save to note'}
+                </Button>
+              )}
+              {!isReview && kind && (
+                <Button size="sm" onClick={() => runGenerate(kind)} disabled={loading}>
+                  Regenerate
+                </Button>
+              )}
+            </div>
+          </div>
+        )}
+        {/* Error-state footer (generate mode): allow retry / picking another kind */}
+        {!loading && !result && error && !isReview && kind && (
           <div className="flex items-center justify-between pt-2 border-t border-border mt-2">
             <Button variant="ghost" size="sm" onClick={reset}>
               <RotateCcw className="h-3.5 w-3.5 mr-1.5" /> Choose another
             </Button>
-            <Button size="sm" onClick={() => runGenerate(kind)} disabled={loading}>
-              Regenerate
+            <Button size="sm" onClick={() => runGenerate(kind)}>
+              Retry
             </Button>
           </div>
         )}

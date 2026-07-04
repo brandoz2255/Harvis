@@ -1,10 +1,27 @@
 import apiClient from './client'
 
 // Studio artifacts = the reviewable study material generated from a notebook.
-// quiz / flashcards / study_guide are persisted server-side (onb_notebook_artifacts);
-// podcasts come from standalone_podcasts and are merged into the same per-notebook log.
-export type ArtifactKind = 'quiz' | 'flashcards' | 'study_guide' | 'podcast'
-export type GeneratableKind = 'quiz' | 'flashcards' | 'study_guide'
+// quiz / flashcards + the Markdown "report" kinds (study_guide / briefing / faq /
+// timeline — the NotebookLM Reports set) are persisted server-side
+// (onb_notebook_artifacts); podcasts come from standalone_podcasts and are merged
+// into the same per-notebook log.
+export type ArtifactKind =
+  | 'quiz'
+  | 'flashcards'
+  | 'study_guide'
+  | 'briefing'
+  | 'faq'
+  | 'timeline'
+  | 'podcast'
+export type GeneratableKind = Exclude<ArtifactKind, 'podcast'>
+
+/** The report kinds — Markdown artifacts rendered with the shared markdown view. */
+export const MARKDOWN_KINDS: ReadonlyArray<ArtifactKind> = [
+  'study_guide',
+  'briefing',
+  'faq',
+  'timeline',
+]
 
 export interface QuizQuestion {
   q: string
@@ -45,10 +62,13 @@ export const artifactsApi = {
     notebookId: string,
     kind: GeneratableKind,
     modelId?: string,
+    sourceIds?: string[],
   ): Promise<ArtifactLogItem> => {
     const res = await apiClient.post<ArtifactLogItem>(`/notebooks/${notebookId}/generate`, {
       kind,
       model_id: modelId,
+      // Selected-source grounding (NotebookLM-style): only the checked sources.
+      source_ids: sourceIds && sourceIds.length > 0 ? sourceIds : undefined,
     })
     return res.data
   },

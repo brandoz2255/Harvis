@@ -25,7 +25,9 @@ static/pyodide/*
 
 # Distribution / packaging
 .Python
-build/
+# Anchored: bare `build/` also swallowed src/lib/agent-studio/build/ and
+# src/routes/(app)/harvis/build/ — source dirs that must be committed.
+/build/
 develop-eggs/
 dist/
 downloads/

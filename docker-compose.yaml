@@ -1,5 +1,11 @@
 version: "3.9"
 
+# Pin the compose project name so `docker compose up -d` from ANY checkout
+# (main or a git worktree) targets the SAME containers, networks, and — the
+# critical part — the same `harvis_*` named data volumes. Without this, running
+# from a worktree would silently create a parallel empty stack (fresh DB).
+name: harvis
+
 services:
   # Ollama LLM Service
   ollama:
@@ -288,6 +294,10 @@ services:
       - ./openclaw/config:/app/openclaw_config
       - ./python_back_end/notebooks:/app/notebooks:ro
       - ./python_back_end/vibecoding:/app/vibecoding:ro
+      # SSH scaffold (marathon P7) — main.py imports remote.ssh_manager; without
+      # this mount the backend crashes on boot with ModuleNotFoundError. The
+      # module is inert (HARVIS_SSH_ENABLED off → every route 403s).
+      - ./python_back_end/remote:/app/remote:ro
       - ./python_back_end/cookbook:/app/cookbook:ro
       - ./python_back_end/deep_research:/app/deep_research:ro
       - artifact_data:/data/artifacts

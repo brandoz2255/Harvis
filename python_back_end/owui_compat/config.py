@@ -80,6 +80,10 @@ def build_config() -> dict:
             "enable_inplace_on_browsed": _env_bool("HARVIS_INPLACE_ON_BROWSED", False),
             # P1.5: opt-in run-level approval gate for workspace tasks (default OFF).
             "enable_harvis_approvals": _env_bool("HARVIS_OWUI_APPROVALS", False),
+            # P2 (marathon): manual Shell tab in Build — a user-driven PTY into the
+            # SESSION's runner container (never the host). Default OFF pending the
+            # user's explicit enable (stop-gate). Backend WS enforces the same flag.
+            "enable_harvis_build_shell": _env_bool("HARVIS_BUILD_SHELL", False),
             "enable_version_update_check": False,
             "enable_google_drive_integration": False,
             "enable_onedrive_integration": False,

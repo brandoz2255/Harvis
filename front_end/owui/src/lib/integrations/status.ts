@@ -113,6 +113,54 @@ export function isPack(def: IntegrationDefinition): boolean {
 	return def.category === 'pack';
 }
 
+// ── Dashboard sections (Phase 6 refinement) ──────────────────────────────────────────────
+// ADDITIVE next to the GROUP_* purpose grouping above (kept intact for compat): the
+// Integrations dashboard renders these five named sections. The 6-status contract is
+// unchanged — sections only re-home the cards.
+export type SectionKey = 'agent_engines' | 'cloud_apis' | 'mcp_servers' | 'ssh_remote' | 'voice_other';
+
+export const SECTION_ORDER: SectionKey[] = [
+	'agent_engines',
+	'cloud_apis',
+	'mcp_servers',
+	'ssh_remote',
+	'voice_other'
+];
+
+export const SECTION_LABEL: Record<SectionKey, string> = {
+	agent_engines: 'Agent Engines',
+	cloud_apis: 'Cloud APIs',
+	mcp_servers: 'MCP Servers',
+	ssh_remote: 'SSH / Remote',
+	voice_other: 'Voice & Other'
+};
+
+// One-line section subtitle shown under the header.
+export const SECTION_HINT: Record<SectionKey, string> = {
+	agent_engines: 'Runtimes that execute Build & agent tasks',
+	cloud_apis: 'Provider credentials that unlock cloud models',
+	mcp_servers: 'Model Context Protocol tools & data sources',
+	ssh_remote: 'Remote execution targets',
+	voice_other: 'Models, repos, messaging and everything else'
+};
+
+const SECTION_OF: Record<string, SectionKey> = {
+	openclaw: 'agent_engines',
+	'claude-code': 'agent_engines',
+	opencode: 'agent_engines',
+	'codex-app': 'agent_engines',
+	'hermes-agent': 'agent_engines',
+	'anthropic-api': 'cloud_apis',
+	'openai-api': 'cloud_apis',
+	'kimi-api': 'cloud_apis',
+	mcp: 'mcp_servers',
+	ssh: 'ssh_remote'
+};
+
+export function sectionOf(def: IntegrationDefinition): SectionKey {
+	return SECTION_OF[def.id] ?? 'voice_other';
+}
+
 // ── Connect vs Default ───────────────────────────────────────────────────────────────────
 // The capability whose default a card's "Set default" controls (the most meaningful one).
 const PRIMARY_CAP_ORDER: IntegrationCapability[] = [

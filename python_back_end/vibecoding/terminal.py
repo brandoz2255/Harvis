@@ -84,7 +84,18 @@ async def terminal_websocket(
     """
     await websocket.accept()
     logger.info(f"🔌 Terminal WebSocket connection accepted for session: {session_id}")
-    
+
+    # Marathon P2: the Build Shell tab is gated by HARVIS_BUILD_SHELL (default OFF).
+    # Enforced HERE (not just by hiding the tab) so the WS can't be driven directly
+    # while the feature is disabled. Mirrors owui_compat/config.py's
+    # enable_harvis_build_shell flag.
+    if os.getenv("HARVIS_BUILD_SHELL", "").strip().lower() not in ("1", "true", "yes", "on"):
+        await websocket.send_json(
+            {"error": "Shell access is disabled (HARVIS_BUILD_SHELL is off, pending review)"}
+        )
+        await websocket.close(code=1008)
+        return
+
     exec_instance = None
     
     try:

@@ -6,6 +6,9 @@ import {
   FileQuestion,
   Layers,
   BookOpen,
+  FileText,
+  HelpCircle,
+  History,
   Mic,
   Trash2,
   Loader2,
@@ -25,6 +28,9 @@ const ICON: Record<ArtifactKind, typeof FileQuestion> = {
   quiz: FileQuestion,
   flashcards: Layers,
   study_guide: BookOpen,
+  briefing: FileText,
+  faq: HelpCircle,
+  timeline: History,
   podcast: Mic,
 }
 
@@ -161,7 +167,18 @@ export function NotebookStudioRail({ notebookId, onCreate, onReview }: Props) {
           <CreateBtn icon={FileQuestion} label="Quiz" onClick={() => onCreate('quiz')} />
           <CreateBtn icon={Layers} label="Flashcards" onClick={() => onCreate('flashcards')} />
           <CreateBtn icon={BookOpen} label="Study Guide" onClick={() => onCreate('study_guide')} />
-          <CreateBtn icon={Mic} label="Podcast" onClick={() => openPodcastDialog(notebookId)} />
+          <CreateBtn icon={FileText} label="Briefing Doc" onClick={() => onCreate('briefing')} />
+          <CreateBtn icon={HelpCircle} label="FAQ" onClick={() => onCreate('faq')} />
+          <CreateBtn icon={History} label="Timeline" onClick={() => onCreate('timeline')} />
+          <div className="col-span-2">
+            <button
+              onClick={() => openPodcastDialog(notebookId)}
+              className="w-full flex items-center justify-center gap-2 rounded-lg border border-border bg-card hover:border-primary/50 hover:bg-accent/50 transition py-2.5 text-xs font-medium"
+            >
+              <Mic className="h-4 w-4 text-muted-foreground" />
+              <span>Audio Overview</span>
+            </button>
+          </div>
         </div>
       </div>
 

@@ -33,8 +33,8 @@ export function useNotebookArtifacts(notebookId?: string) {
 export function useGenerateArtifact(notebookId: string) {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (vars: { kind: GeneratableKind; modelId?: string }) =>
-      artifactsApi.generate(notebookId, vars.kind, vars.modelId),
+    mutationFn: (vars: { kind: GeneratableKind; modelId?: string; sourceIds?: string[] }) =>
+      artifactsApi.generate(notebookId, vars.kind, vars.modelId, vars.sourceIds),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: QUERY_KEYS.notebookArtifacts(notebookId) })
     },

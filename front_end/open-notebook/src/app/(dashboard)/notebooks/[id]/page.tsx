@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useState, useEffect, useRef } from 'react'
+import { useCallback, useMemo, useState, useEffect, useRef } from 'react'
 import { useParams, useRouter, useSearchParams, usePathname } from 'next/navigation'
 import { useQueryClient } from '@tanstack/react-query'
 import { notebooksApi } from '@/lib/api/notebooks'
@@ -206,6 +206,16 @@ export default function NotebookPage() {
     }
   }, [notes])
 
+  // Sources currently CHECKED in the Sources panel (context mode ≠ 'off') — the
+  // Studio dialog grounds report generation on exactly these (NotebookLM-style).
+  const checkedSourceIds = useMemo(
+    () =>
+      (sources ?? [])
+        .filter((source) => contextSelections.sources[source.id] !== 'off')
+        .map((source) => source.id),
+    [sources, contextSelections.sources]
+  )
+
   // Handler to update context selection
   const handleContextModeChange = (itemId: string, mode: ContextMode, type: 'source' | 'note') => {
     setContextSelections(prev => ({
@@ -252,6 +262,8 @@ export default function NotebookPage() {
             notebookTitle={(notebook as { name?: string })?.name}
             initialKind={studioKind}
             reviewItem={reviewItem}
+            selectedSourceIds={checkedSourceIds}
+            totalSourceCount={sources?.length ?? 0}
           />
           {/* Mobile: Tabbed interface - only render on mobile to avoid double-mounting */}
           {!isDesktop && (

@@ -67,6 +67,14 @@
 			class="text-xs px-2 py-1 rounded-lg bg-gray-100 dark:bg-gray-850 hover:bg-gray-200 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-200 transition"
 			on:click={() => dispatch('open', def.id)}>{pack ? 'View details' : 'Manage'}</button
 		>
+		{#if !pack}
+			<button
+				type="button"
+				class="text-xs px-2 py-1 rounded-lg border border-gray-150 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-850 text-gray-600 dark:text-gray-300 transition"
+				title="Recent activity"
+				on:click={() => dispatch('logs', def)}>Logs</button
+			>
+		{/if}
 		{#if canSetDefault}
 			{#if isDef}
 				<span class="text-[11px] text-gray-400 dark:text-gray-500 px-1">In use by default</span>

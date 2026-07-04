@@ -11,8 +11,15 @@
 		toggleSkillById,
 		deleteSkillById
 	} from '$lib/apis/skills';
+	// P4/P5 (marathon): model routing matrix + agent presets + guided MCP wizard.
+	import ModelRoutingMatrix from './customize/ModelRoutingMatrix.svelte';
+	import AgentPresets from './customize/AgentPresets.svelte';
+	import McpWizard from './customize/McpWizard.svelte';
 
 	export let mode: 'full' | 'dock' = 'full';
+
+	// Guided MCP setup (wizard) — the quick-add form below stays for power users.
+	let showMcpWizard = false;
 
 	const i18n: any = getContext('i18n');
 	let token = '';
@@ -207,8 +214,40 @@
 		</div>
 	{/if}
 
+	<!-- Section nav — nothing buried: jump chips to every settings group. -->
+	<nav class="sticky top-0 z-10 -mx-1 px-1 py-1.5 bg-gray-50/90 dark:bg-gray-950/90 backdrop-blur flex flex-wrap gap-1.5">
+		{#each [
+			{ id: 'sec-routing', label: $i18n.t('Model routing') },
+			{ id: 'sec-presets', label: $i18n.t('Presets') },
+			{ id: 'sec-models', label: $i18n.t('Orchestration') },
+			{ id: 'sec-skills', label: $i18n.t('Skills') },
+			{ id: 'sec-tools', label: $i18n.t('Tools') },
+			{ id: 'sec-mcp', label: $i18n.t('MCP') }
+		] as chip (chip.id)}
+			<button
+				type="button"
+				class="text-[11px] px-2.5 py-1 rounded-full border border-gray-200 dark:border-gray-800 text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-100 hover:border-gray-300 dark:hover:border-gray-700 transition"
+				on:click={() => document.getElementById(chip.id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+				>{chip.label}</button
+			>
+		{/each}
+	</nav>
+
+	<!-- ── Models & routing ─────────────────────────────────────────────── -->
+	<!-- P4: task-type → model routing (explicit user config; never keyword auto-routing) -->
+	{#if token}
+		<section id="sec-routing" class="scroll-mt-12 rounded-2xl border border-gray-100 dark:border-gray-850 bg-gray-50 dark:bg-gray-900 p-5">
+			<ModelRoutingMatrix {token} />
+		</section>
+
+		<!-- P4: named agent presets (model + persona + engine + run-mode defaults) -->
+		<section id="sec-presets" class="scroll-mt-12 rounded-2xl border border-gray-100 dark:border-gray-850 bg-gray-50 dark:bg-gray-900 p-5">
+			<AgentPresets {token} />
+		</section>
+	{/if}
+
 	<!-- Orchestration models (the custom agent model pool) -->
-	<section class="rounded-2xl border border-gray-100 dark:border-gray-850 bg-gray-50 dark:bg-gray-900 p-5">
+	<section id="sec-models" class="scroll-mt-12 rounded-2xl border border-gray-100 dark:border-gray-850 bg-gray-50 dark:bg-gray-900 p-5">
 		<div class="flex items-center justify-between gap-2 mb-1">
 			<div class="flex items-center gap-2">
 				<svg class="size-5 text-violet-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="2.2" /><circle cx="5" cy="19" r="2.2" /><circle cx="19" cy="19" r="2.2" /><path d="M12 7.2v3m0 0-5 6.6m5-6.6 5 6.6" /></svg>
@@ -283,7 +322,7 @@
 	</section>
 
 	<!-- Skills -->
-	<section class="rounded-2xl border border-gray-100 dark:border-gray-850 bg-gray-50 dark:bg-gray-900 p-5">
+	<section id="sec-skills" class="scroll-mt-12 rounded-2xl border border-gray-100 dark:border-gray-850 bg-gray-50 dark:bg-gray-900 p-5">
 		<div class="flex items-center justify-between gap-2 mb-1">
 			<div class="flex items-center gap-2">
 				<svg class="size-5 text-blue-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.8H20l-4.9 3.6 1.9 5.8L12 14.6 7 18.2l1.9-5.8L4 8.8h6.1L12 3z" /></svg>
@@ -341,7 +380,7 @@
 	</section>
 
 	<!-- Tools (read-only catalog) -->
-	<section class="rounded-2xl border border-gray-100 dark:border-gray-850 bg-gray-50 dark:bg-gray-900 p-5">
+	<section id="sec-tools" class="scroll-mt-12 rounded-2xl border border-gray-100 dark:border-gray-850 bg-gray-50 dark:bg-gray-900 p-5">
 		<div class="flex items-center gap-2 mb-1">
 			<svg class="size-5 text-blue-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4l-2.7 2.7-2-2 2.7-2.7z" /></svg>
 			<h2 class="text-lg font-semibold text-gray-800 dark:text-gray-100">{$i18n.t('Tools')}</h2>
@@ -373,21 +412,43 @@
 	</section>
 
 	<!-- MCP Connections -->
-	<section class="rounded-2xl border border-gray-100 dark:border-gray-850 bg-gray-50 dark:bg-gray-900 p-5">
+	<section id="sec-mcp" class="scroll-mt-12 rounded-2xl border border-gray-100 dark:border-gray-850 bg-gray-50 dark:bg-gray-900 p-5">
 		<div class="flex items-center justify-between gap-2 mb-1">
 			<div class="flex items-center gap-2">
 				<svg class="size-5 text-blue-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6m6-6v6M5 8h14a2 2 0 0 1 2 2v2a7 7 0 0 1-7 7h-4a7 7 0 0 1-7-7v-2a2 2 0 0 1 2-2zM12 19v3" /></svg>
 				<h2 class="text-lg font-semibold text-gray-800 dark:text-gray-100">{$i18n.t('MCP Connections')}</h2>
 			</div>
-			<button
-				on:click={() => (showConnForm = !showConnForm)}
-				class="inline-flex items-center gap-1.5 rounded-full bg-blue-600 text-white px-3 py-1.5 text-xs font-medium hover:bg-blue-700 transition"
-			>
-				<svg class="size-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg>
-				{$i18n.t('Add connection')}
-			</button>
+			<div class="flex items-center gap-1.5">
+				<button
+					on:click={() => (showMcpWizard = !showMcpWizard)}
+					class="inline-flex items-center gap-1.5 rounded-full bg-blue-600 text-white px-3 py-1.5 text-xs font-medium hover:bg-blue-700 transition"
+				>
+					<svg class="size-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3m6.4-.4-2.1 2.1M21 12h-3m.4 6.4-2.1-2.1M12 18v3m-6.4-.4 2.1-2.1M3 12h3m-.4-6.4 2.1 2.1" /></svg>
+					{$i18n.t('Guided setup')}
+				</button>
+				<button
+					on:click={() => (showConnForm = !showConnForm)}
+					class="inline-flex items-center gap-1.5 rounded-full border border-gray-200 dark:border-gray-800 text-gray-600 dark:text-gray-300 px-3 py-1.5 text-xs font-medium hover:bg-gray-100 dark:hover:bg-gray-850 transition"
+				>
+					<svg class="size-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg>
+					{$i18n.t('Quick add')}
+				</button>
+			</div>
 		</div>
 		<p class="text-sm text-gray-500 mb-3">{$i18n.t('Connect an MCP server (plugin) to give your agents more tools.')}</p>
+
+		{#if showMcpWizard}
+			<div class="mb-3">
+				<McpWizard
+					{token}
+					on:saved={() => {
+						showMcpWizard = false;
+						loadConns();
+					}}
+					on:close={() => (showMcpWizard = false)}
+				/>
+			</div>
+		{/if}
 
 		{#if showConnForm}
 			<div class="rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-950 p-3 mb-3 space-y-2">

@@ -37,6 +37,15 @@ export const notebooksApi = {
     return response.data
   },
 
+  // NotebookLM-style suggested questions for the chat empty state, grounded in
+  // this notebook's sources. Returns { questions: [] } when there's no content yet.
+  suggestQuestions: async (id: string) => {
+    const response = await apiClient.post<{ questions: string[] }>(
+      `/notebooks/${id}/suggest-questions`
+    )
+    return response.data
+  },
+
   deletePreview: async (id: string) => {
     const response = await apiClient.get<NotebookDeletePreview>(
       `/notebooks/${id}/delete-preview`

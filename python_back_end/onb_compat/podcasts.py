@@ -417,9 +417,14 @@ async def _resolve_notebook_content(
     manager: NotebookManager,
     notebook_id: Optional[str],
     direct_content: Optional[str],
+    source_ids: Optional[List[UUID]] = None,
 ) -> str:
     """Fetch source/note text for a notebook when the request gives no direct
-    content. Mirrors the native _fetch_podcast_content fall-back."""
+    content. Mirrors the native _fetch_podcast_content fall-back.
+
+    When `source_ids` is given (Studio "generate from the SELECTED sources"),
+    only those sources are used — up to 12, notes excluded — so generation is
+    grounded strictly in what the user has checked in the Sources panel."""
     if direct_content and direct_content.strip():
         return direct_content
 
@@ -436,33 +441,45 @@ async def _resolve_notebook_content(
     parts: List[str] = []
     try:
         async with manager.db_pool.acquire() as conn:
-            src_rows = await conn.fetch(
-                """
-                SELECT title, content_text FROM notebook_sources
-                WHERE notebook_id = $1 AND content_text IS NOT NULL
-                ORDER BY created_at ASC LIMIT 5
-                """,
-                nb_uuid,
-            )
+            if source_ids:
+                src_rows = await conn.fetch(
+                    """
+                    SELECT title, content_text FROM notebook_sources
+                    WHERE notebook_id = $1 AND id = ANY($2::uuid[])
+                      AND content_text IS NOT NULL
+                    ORDER BY created_at ASC LIMIT 12
+                    """,
+                    nb_uuid, source_ids,
+                )
+            else:
+                src_rows = await conn.fetch(
+                    """
+                    SELECT title, content_text FROM notebook_sources
+                    WHERE notebook_id = $1 AND content_text IS NOT NULL
+                    ORDER BY created_at ASC LIMIT 5
+                    """,
+                    nb_uuid,
+                )
             for r in src_rows:
                 if r["content_text"]:
                     parts.append(
                         f"\n\n=== SOURCE: {r['title'] or 'Untitled'} ===\n{r['content_text']}"
                     )
 
-            note_rows = await conn.fetch(
-                """
-                SELECT title, content FROM notebook_notes
-                WHERE notebook_id = $1 AND content IS NOT NULL
-                ORDER BY created_at ASC LIMIT 5
-                """,
-                nb_uuid,
-            )
-            for r in note_rows:
-                if r["content"]:
-                    parts.append(
-                        f"\n\n=== NOTE: {r['title'] or 'Untitled'} ===\n{r['content']}"
-                    )
+            if not source_ids:
+                note_rows = await conn.fetch(
+                    """
+                    SELECT title, content FROM notebook_notes
+                    WHERE notebook_id = $1 AND content IS NOT NULL
+                    ORDER BY created_at ASC LIMIT 5
+                    """,
+                    nb_uuid,
+                )
+                for r in note_rows:
+                    if r["content"]:
+                        parts.append(
+                            f"\n\n=== NOTE: {r['title'] or 'Untitled'} ===\n{r['content']}"
+                        )
     except Exception as e:
         logger.warning("Failed to resolve notebook content for %s: %s", notebook_id, e)
 

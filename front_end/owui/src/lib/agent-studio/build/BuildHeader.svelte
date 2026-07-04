@@ -1,0 +1,192 @@
+<script lang="ts">
+	import { createEventDispatcher, getContext } from 'svelte';
+
+	const dispatch = createEventDispatcher();
+	const i18n: any = getContext('i18n');
+
+	export let projectName = '';
+	export let hasProject = false;
+	export let sourceLabel = '';
+	export let isolationLabel = '';
+	export let modeLabel = '';
+	export let model = '';
+	export let isRunning = false;
+	// Workspace-dock panel toggles for the ⋯ menu: [{ key, label, visible }].
+	export let panels: Array<{ key: string; label: string; visible: boolean }> = [];
+	export let dockOpen = true;
+
+	let panelsMenuOpen = false;
+
+	$: metaParts = [sourceLabel, isolationLabel, modeLabel, model].filter(
+		(p) => typeof p === 'string' && p.trim() !== ''
+	);
+</script>
+
+<div
+	class="h-11 px-4 flex items-center justify-between border-b border-white/8 bg-[#080c16]"
+>
+	<!-- LEFT -->
+	<div class="flex items-center gap-3 min-w-0">
+		<div class="flex items-center gap-1.5 text-sm shrink-0">
+			<span class="text-gray-500">{$i18n.t('Build')}</span>
+			{#if hasProject && projectName}
+				<span class="text-gray-700">/</span>
+				<span class="text-gray-100 font-medium truncate max-w-[16rem]">
+					{projectName}
+				</span>
+			{/if}
+		</div>
+
+		{#if hasProject}
+			{#if metaParts.length > 0}
+				<div class="flex items-center gap-1.5 min-w-0 text-[11px] text-gray-500">
+					<span
+						class="w-1.5 h-1.5 rounded-full shrink-0 {isRunning
+							? 'bg-blue-500 animate-pulse'
+							: 'bg-emerald-500'}"
+					/>
+					<span class="truncate">{metaParts.join(' · ')}</span>
+				</div>
+			{:else}
+				<div class="flex items-center gap-1.5 shrink-0">
+					<span
+						class="w-1.5 h-1.5 rounded-full {isRunning
+							? 'bg-blue-500 animate-pulse'
+							: 'bg-emerald-500'}"
+					/>
+				</div>
+			{/if}
+		{:else}
+			<span class="text-[11px] text-gray-500 truncate">
+				{$i18n.t('Choose a repo to start a coding session.')}
+			</span>
+		{/if}
+	</div>
+
+	<!-- RIGHT -->
+	<div class="flex items-center gap-1.5 shrink-0">
+		{#if hasProject}
+			{#if isRunning}
+				<button
+					class="text-xs px-2.5 py-1 rounded-lg text-red-400 border border-red-500/20 bg-red-500/8 hover:bg-red-500/14 transition"
+					on:click={() => dispatch('stop')}
+				>
+					{$i18n.t('Stop')}
+				</button>
+			{/if}
+
+			<button
+				class="text-xs px-2.5 py-1 rounded-lg text-gray-200 border border-white/8 bg-white/4 hover:bg-white/8 transition"
+				on:click={() => dispatch('createPR')}
+			>
+				{$i18n.t('Create PR')}
+			</button>
+
+			<button
+				class="text-xs px-2.5 py-1 rounded-lg text-white border border-sky-400/20 bg-sky-500/80 hover:bg-sky-500 transition"
+				on:click={() => dispatch('openRun')}
+			>
+				{$i18n.t('Open Run')}
+			</button>
+		{/if}
+
+		<!-- ⋯ menu: choose which workspace-dock panels are open -->
+		<div class="relative">
+			<button
+				class="p-1.5 rounded-lg transition hover:bg-white/4 {panelsMenuOpen
+					? 'text-gray-200'
+					: 'text-gray-500 hover:text-gray-200'}"
+				title={$i18n.t('Workspace panels')}
+				aria-label={$i18n.t('Workspace panels')}
+				on:click={() => (panelsMenuOpen = !panelsMenuOpen)}
+			>
+				<svg viewBox="0 0 20 20" fill="currentColor" class="w-4 h-4"
+					><path
+						d="M10 6a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Zm0 5.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Zm0 5.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z"
+					/></svg
+				>
+			</button>
+			{#if panelsMenuOpen}
+				<button
+					class="fixed inset-0 z-30 cursor-default"
+					aria-label={$i18n.t('Close')}
+					on:click={() => (panelsMenuOpen = false)}
+				></button>
+				<div
+					class="absolute right-0 top-full mt-1 z-40 w-56 rounded-lg bg-[#0d1220] border border-white/10 shadow-xl py-1 text-xs"
+				>
+					<div class="px-3 pt-1.5 pb-1 text-[10px] uppercase tracking-wider text-gray-500">
+						{$i18n.t('Workspace panels')}
+					</div>
+					{#each panels as p (p.key)}
+						<button
+							class="w-full flex items-center gap-2 px-3 py-1.5 text-gray-200 hover:bg-white/5 transition"
+							on:click={() => dispatch('togglePanel', { key: p.key })}
+						>
+							<span
+								class="size-3.5 rounded border flex items-center justify-center shrink-0 {p.visible
+									? 'bg-blue-600 border-blue-600'
+									: 'border-gray-600'}"
+							>
+								{#if p.visible}<svg viewBox="0 0 20 20" fill="white" class="size-2.5"
+										><path
+											fill-rule="evenodd"
+											d="M16.7 5.3a1 1 0 0 1 0 1.4l-7.5 7.5a1 1 0 0 1-1.4 0L3.3 9.7a1 1 0 1 1 1.4-1.4l3.1 3.1 6.8-6.8a1 1 0 0 1 1.4 0Z"
+											clip-rule="evenodd"
+										/></svg
+									>{/if}
+							</span>
+							<span class="flex-1 text-left">{p.label}</span>
+						</button>
+					{/each}
+					<div class="border-t border-white/8 my-1"></div>
+					<button
+						class="w-full flex items-center gap-2 px-3 py-1.5 text-gray-300 hover:bg-white/5 transition"
+						on:click={() => {
+							dispatch('toggleDock');
+							panelsMenuOpen = false;
+						}}
+					>
+						<svg
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="1.7"
+							class="size-3.5"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M15 4v16" /></svg
+						>
+						<span class="flex-1 text-left"
+							>{dockOpen ? $i18n.t('Hide workspace dock') : $i18n.t('Show workspace dock')}</span
+						>
+					</button>
+				</div>
+			{/if}
+		</div>
+
+		<button
+			class="p-1.5 rounded-lg text-gray-500 hover:text-gray-200 hover:bg-white/4 transition"
+			title={$i18n.t('Settings')}
+			aria-label={$i18n.t('Settings')}
+			on:click={() => dispatch('settings')}
+		>
+			<svg
+				xmlns="http://www.w3.org/2000/svg"
+				fill="none"
+				viewBox="0 0 24 24"
+				stroke-width="1.5"
+				stroke="currentColor"
+				class="w-4 h-4"
+			>
+				<path
+					stroke-linecap="round"
+					stroke-linejoin="round"
+					d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 0 1 1.37.49l1.296 2.247a1.125 1.125 0 0 1-.26 1.431l-1.003.827c-.293.241-.438.613-.43.992a7.723 7.723 0 0 1 0 .255c-.008.378.137.75.43.991l1.004.827c.424.35.534.955.26 1.43l-1.298 2.247a1.125 1.125 0 0 1-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.47 6.47 0 0 1-.22.128c-.331.183-.581.495-.644.869l-.213 1.281c-.09.543-.56.94-1.11.94h-2.594c-.55 0-1.019-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 0 1-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 0 1-1.369-.49l-1.297-2.247a1.125 1.125 0 0 1 .26-1.431l1.004-.827c.292-.241.437-.613.43-.992a6.932 6.932 0 0 1 0-.255c.007-.378-.138-.75-.43-.991l-1.004-.827a1.125 1.125 0 0 1-.26-1.43l1.297-2.247a1.125 1.125 0 0 1 1.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.086.22-.128.332-.183.582-.495.644-.869l.214-1.28Z"
+				/>
+				<path
+					stroke-linecap="round"
+					stroke-linejoin="round"
+					d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z"
+				/>
+			</svg>
+		</button>
+	</div>
+</div>

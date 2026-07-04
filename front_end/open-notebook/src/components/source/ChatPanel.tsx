@@ -25,6 +25,7 @@ import { SessionManager } from '@/components/source/SessionManager'
 import { MessageActions } from '@/components/source/MessageActions'
 import { convertCiteMarkers, createCiteLinkComponent } from '@/lib/utils/source-references'
 import { useModalManager } from '@/lib/hooks/use-modal-manager'
+import { useSuggestedQuestions } from '@/lib/hooks/use-suggested-questions'
 import { toast } from 'sonner'
 import { useTranslation } from '@/lib/hooks/use-translation'
 
@@ -94,6 +95,15 @@ export function ChatPanel({
   const scrollAreaRef = useRef<HTMLDivElement>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const { openModal } = useModalManager()
+
+  // NotebookLM-style suggested questions — chips on the notebook chat's empty
+  // state. Only fetched while the empty state is actually visible (LLM call).
+  const emptyNotebookChat = contextType === 'notebook' && messages.length === 0
+  const { data: suggestedQuestions = [] } = useSuggestedQuestions(
+    notebookId ?? '',
+    sourceCount ?? notebook?.source_count ?? 0,
+    emptyNotebookChat
+  )
 
   const handleReferenceClick = (type: string, id: string, locator?: string, claim?: string) => {
     const modalType = type === 'source_insight' ? 'insight' : type as 'source' | 'note' | 'insight'
@@ -220,6 +230,21 @@ export function ChatPanel({
                         <p className="text-sm text-muted-foreground/60 italic mt-4">
                           Generating an overview of your sources…
                         </p>
+                      )}
+                      {suggestedQuestions.length > 0 && (
+                        <div className="flex flex-wrap gap-2 mt-5">
+                          {suggestedQuestions.map((q) => (
+                            <button
+                              key={q}
+                              type="button"
+                              disabled={isStreaming}
+                              onClick={() => onSendMessage(q, modelOverride)}
+                              className="text-left text-xs px-3 py-1.5 rounded-full border border-border bg-card text-muted-foreground hover:text-foreground hover:border-primary/50 hover:bg-accent/50 transition disabled:opacity-50"
+                            >
+                              {q}
+                            </button>
+                          ))}
+                        </div>
                       )}
                     </div>
                   )

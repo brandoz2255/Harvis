@@ -1314,6 +1314,56 @@ async def _persist_and_return_artifact(
     return _artifact_row_to_log(row)
 
 
+# NotebookLM-style "Reports": every Markdown generator the Studio offers.
+# study_guide predates the rest; briefing / faq / timeline complete the set.
+_MARKDOWN_GENERATORS: Dict[str, Dict[str, str]] = {
+    "study_guide": {
+        "title": "Study Guide",
+        "prompt": (
+            "Create a structured study guide based ONLY on the following content, in clean "
+            "Markdown with these sections: ## Key Concepts (5-7 bullets), ## Detailed Notes "
+            "(per concept: a short explanation and an example), ## Key Terms (term: definition), "
+            "## Common Pitfalls, ## Practice Questions (3-5 with answers). Do not invent facts.\n\n"
+            "{content}"
+        ),
+    },
+    "briefing": {
+        "title": "Briefing Doc",
+        "prompt": (
+            "Write a briefing document based ONLY on the following content, in clean Markdown "
+            "with these sections: ## Overview (2-3 sentence executive summary), ## Key Themes "
+            "(the main themes, each with a short explanation), ## Important Facts & Figures "
+            "(bulleted, with concrete numbers/names/dates from the content), ## Notable Quotes "
+            "(verbatim quotes worth remembering, quoted and attributed to their source), "
+            "## Implications & Open Questions. Be precise and neutral. Do not invent facts.\n\n"
+            "{content}"
+        ),
+    },
+    "faq": {
+        "title": "FAQ",
+        "prompt": (
+            "Create a Frequently Asked Questions document based ONLY on the following content, "
+            "in clean Markdown. Write 8-12 questions a curious reader would actually ask, each "
+            "as a '### ' heading followed by a clear 2-4 sentence answer grounded strictly in "
+            "the content. Order them from fundamental to advanced. Do not invent facts.\n\n"
+            "{content}"
+        ),
+    },
+    "timeline": {
+        "title": "Timeline",
+        "prompt": (
+            "Create a timeline document based ONLY on the following content, in clean Markdown "
+            "with two sections: ## Timeline — a chronological bulleted list of events, each as "
+            "'**<date or ordering>** — <what happened>' (if the content has no explicit dates, "
+            "order events logically and say so); and ## Cast of Characters — the people/"
+            "organizations/entities involved, each with a one-line description of their role. "
+            "Do not invent facts.\n\n"
+            "{content}"
+        ),
+    },
+}
+
+
 @router.post("/notebooks/{notebook_id}/generate")
 async def onb_notebook_generate(
     notebook_id: str,
@@ -1322,38 +1372,57 @@ async def onb_notebook_generate(
     current_user: Dict = Depends(get_current_user_from_request),
     manager: NotebookManager = Depends(get_notebook_manager),
 ):
-    """Generate a grounded artifact from the WHOLE notebook's source + note content.
-    quiz / flashcards return STRUCTURED JSON (for an interactive UI); study_guide
-    returns Markdown."""
+    """Generate a grounded artifact from the notebook's source + note content —
+    or, when `source_ids` is given, from ONLY those (checked) sources.
+    quiz / flashcards return STRUCTURED JSON (for an interactive UI); the report
+    kinds (study_guide / briefing / faq / timeline) return Markdown."""
     import json
     import re
 
     from .podcasts import _resolve_notebook_content
 
     kind = (body or {}).get("kind") or ""
-    if kind not in ("quiz", "flashcards", "study_guide"):
+    if kind not in ("quiz", "flashcards") and kind not in _MARKDOWN_GENERATORS:
         raise HTTPException(status_code=400, detail=f"Unknown generator: {kind}")
-    content = await _resolve_notebook_content(manager, notebook_id, None)
+
+    # Ownership: 404 unless this notebook belongs to the caller (autoname pattern).
+    try:
+        nb_uuid = _clean_uuid(notebook_id)
+        await manager.get_notebook(nb_uuid, current_user["id"])
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid notebook id")
+    except NotebookNotFoundError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+    # Optional selected-source grounding (NotebookLM-style checkboxes).
+    raw_ids = (body or {}).get("source_ids")
+    source_ids: Optional[List[UUID]] = None
+    if isinstance(raw_ids, list) and raw_ids:
+        try:
+            source_ids = [_clean_uuid(str(s)) for s in raw_ids[:12]]
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="Invalid source id in source_ids")
+
+    content = await _resolve_notebook_content(manager, notebook_id, None, source_ids=source_ids)
     if not content or not content.strip():
         raise HTTPException(
-            status_code=400, detail="This notebook has no source content to generate from yet."
+            status_code=400,
+            detail=(
+                "The selected sources have no extracted content to generate from yet."
+                if source_ids
+                else "This notebook has no source content to generate from yet."
+            ),
         )
     model = (body or {}).get("model_id") or DEFAULT_CHAT_MODEL
 
-    if kind == "study_guide":
-        prompt = (
-            "Create a structured study guide based ONLY on the following content, in clean "
-            "Markdown with these sections: ## Key Concepts (5-7 bullets), ## Detailed Notes "
-            "(per concept: a short explanation and an example), ## Key Terms (term: definition), "
-            "## Common Pitfalls, ## Practice Questions (3-5 with answers). Do not invent facts.\n\n"
-            "{content}"
-        )
+    if kind in _MARKDOWN_GENERATORS:
+        gen = _MARKDOWN_GENERATORS[kind]
         try:
-            output = await _run_transformation_llm(prompt, content, model)
+            output = await _run_transformation_llm(gen["prompt"], content, model)
         except httpx.HTTPError as e:
             raise HTTPException(status_code=502, detail=f"Model request failed: {e}")
         return await _persist_and_return_artifact(
-            manager, notebook_id, current_user["id"], "study_guide", "Study Guide",
+            manager, notebook_id, current_user["id"], kind, gen["title"],
             "markdown", {"markdown": output}, model,
         )
 
@@ -1489,6 +1558,93 @@ async def onb_delete_artifact(
             aid, current_user["id"],
         )
     return {"status": "deleted"}
+
+
+# Structured-output schema for suggested questions (NotebookLM-style chips shown
+# on the notebook chat's empty state).
+_SUGGESTED_QUESTIONS_SCHEMA = {
+    "type": "object",
+    "properties": {"questions": {"type": "array", "items": {"type": "string"}}},
+    "required": ["questions"],
+}
+
+
+@router.post("/notebooks/{notebook_id}/suggest-questions")
+async def onb_suggest_questions(
+    notebook_id: str,
+    request: Request,
+    body: Optional[Dict[str, Any]] = None,
+    current_user: Dict = Depends(get_current_user_from_request),
+    manager: NotebookManager = Depends(get_notebook_manager),
+):
+    """Suggest 4-6 questions a reader could ask THIS notebook's sources —
+    rendered as clickable chips in the chat's empty state (NotebookLM parity).
+    Grounded in the sources; returns {"questions": []} when there's no content
+    (never a 5xx — the chips are decorative, the chat must keep working)."""
+    from .podcasts import _resolve_notebook_content
+
+    # Ownership: 404 unless this notebook belongs to the caller.
+    try:
+        nb_uuid = _clean_uuid(notebook_id)
+        await manager.get_notebook(nb_uuid, current_user["id"])
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid notebook id")
+    except NotebookNotFoundError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+    content = await _resolve_notebook_content(manager, notebook_id, None)
+    if not content or not content.strip():
+        return {"questions": []}
+
+    model = (body or {}).get("model_id") or DEFAULT_CHAT_MODEL
+    prompt = (
+        "You are looking at the source material of a research notebook. Suggest 5 "
+        "specific, interesting questions a curious reader could ask about this material. "
+        "Each question must be answerable FROM the content below (no outside knowledge), "
+        "under 90 characters, and phrased naturally. Return ONLY a JSON object exactly "
+        'like {"questions":["...","..."]}. No prose, no Markdown.\n\n'
+        + content[:6000]
+    )
+    try:
+        from notebooks.rag_chat import FALLBACK_MODELS
+    except Exception:
+        FALLBACK_MODELS = []
+    candidates = [model] + [m for m in FALLBACK_MODELS if m != model]
+    questions: List[str] = []
+    for m in candidates[:3]:
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(
+                    f"{_ONB_OLLAMA_URL}/api/generate",
+                    json={
+                        "model": m, "prompt": prompt, "stream": False,
+                        "format": _SUGGESTED_QUESTIONS_SCHEMA,
+                        "options": {"temperature": 0.5, "num_predict": 400, "num_ctx": 4096},
+                    },
+                )
+            if resp.status_code != 200:
+                continue
+            raw = (resp.json().get("response") or "").strip()
+            raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL | re.IGNORECASE).strip()
+            try:
+                data = json.loads(raw)
+            except Exception:
+                mm = re.search(r"\{.*\}", raw, re.DOTALL)
+                data = json.loads(mm.group(0)) if mm else {}
+            got = data.get("questions") if isinstance(data, dict) else None
+            if isinstance(got, list):
+                seen = set()
+                for q in got:
+                    q = " ".join(str(q).split()).strip()
+                    if q and len(q) <= 160 and q.lower() not in seen:
+                        seen.add(q.lower())
+                        questions.append(q)
+                if questions:
+                    break
+        except Exception as e:
+            logger.debug("onb suggest-questions model %s failed: %s", m, e)
+            continue
+    return {"questions": questions[:6]}
 
 
 @router.get("/transformations/{transformation_id}")
