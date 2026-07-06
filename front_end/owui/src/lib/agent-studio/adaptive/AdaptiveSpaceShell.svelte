@@ -72,6 +72,16 @@
 	let shapingLabel = ''; // detected template label shown during the shaping transition
 	let askShape: { text: string } | null = null; // ambiguous → one-question popup
 
+	// Composer attachments — an image rides into the new space as a REFERENCE
+	// resource; the mic records → Harvis Whisper STT → transcript into the intent.
+	let pendingImage: File | null = null;
+	let pendingImageUrl = '';
+	let composerFileInput: HTMLInputElement;
+	let recording = false;
+	let transcribing = false;
+	let mediaRecorder: MediaRecorder | null = null;
+	let audioChunks: Blob[] = [];
+
 	// Approval gate + request-in-flight
 	let gateStep: any = null;
 	let busy = false;
@@ -149,10 +159,65 @@
 		}
 	};
 
+	// ── Composer attachments ──
+	const onComposerFile = (e: Event) => {
+		const f = (e.target as HTMLInputElement).files?.[0];
+		if (!f) return;
+		if (pendingImageUrl) URL.revokeObjectURL(pendingImageUrl);
+		pendingImage = f;
+		pendingImageUrl = URL.createObjectURL(f);
+		(e.target as HTMLInputElement).value = '';
+	};
+	const clearPendingImage = () => {
+		if (pendingImageUrl) URL.revokeObjectURL(pendingImageUrl);
+		pendingImage = null;
+		pendingImageUrl = '';
+	};
+	const toggleMic = async () => {
+		if (recording) {
+			mediaRecorder?.stop();
+			return;
+		}
+		try {
+			const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+			audioChunks = [];
+			mediaRecorder = new MediaRecorder(stream);
+			mediaRecorder.ondataavailable = (ev) => {
+				if (ev.data.size) audioChunks.push(ev.data);
+			};
+			mediaRecorder.onstop = async () => {
+				stream.getTracks().forEach((t) => t.stop());
+				recording = false;
+				const blob = new Blob(audioChunks, { type: 'audio/webm' });
+				if (!blob.size) return;
+				transcribing = true;
+				try {
+					const fd = new FormData();
+					fd.append('file', blob, 'speech.webm');
+					const r = await fetch('/api/v1/audio/transcriptions', {
+						method: 'POST', headers: { Authorization: `Bearer ${localStorage.token}` }, credentials: 'include', body: fd
+					});
+					if (r.ok) {
+						const t = ((await r.json()).text || '').trim();
+						if (t) intent = intent ? `${intent} ${t}` : t;
+					}
+				} catch {
+					/* transcription unavailable — leave intent as-is */
+				}
+				transcribing = false;
+			};
+			mediaRecorder.start();
+			recording = true;
+		} catch {
+			/* mic permission denied / unsupported */
+		}
+	};
+
 	// ── Create (composer submit) — infers the shape, transitions the SAME canvas ──
 	const create = async () => {
-		const text = intent.trim();
-		if (creating || !text) return;
+		let text = intent.trim();
+		if (creating || (!text && !pendingImage)) return;
+		if (!text) text = 'Work with this reference image'; // image-only → sensible default intent
 		creating = true;
 		err = '';
 		const key = await inferShape(text);
@@ -176,6 +241,19 @@
 			});
 			if (!r.ok) throw new Error((await r.json())?.detail || 'Create failed');
 			const { id } = await r.json();
+			// Carry a composer-attached image into the new space as a reference resource.
+			if (pendingImage) {
+				try {
+					const fd = new FormData();
+					fd.append('file', pendingImage);
+					await fetch(`/api/adaptive/spaces/${id}/resource`, {
+						method: 'POST', headers: { Authorization: `Bearer ${localStorage.token}` }, credentials: 'include', body: fd
+					});
+				} catch {
+					/* image is optional — the space is created regardless */
+				}
+				clearPendingImage();
+			}
 			intent = '';
 			askShape = null;
 			await refreshList();
@@ -487,21 +565,51 @@
 		     same canvas transforms. No selector; a popup asks only if ambiguous. -->
 		<div class="shrink-0 px-5 pb-4 pt-2">
 			<div class="max-w-3xl mx-auto rounded-2xl border border-white/10 bg-[#0c111d]/95 backdrop-blur p-2 shadow-lg shadow-black/40">
-				<div class="flex items-end gap-2">
+				{#if pendingImageUrl}
+					<div class="flex items-center gap-2 mb-1.5 px-1" in:fade={{ duration: 150 }}>
+						<img src={pendingImageUrl} alt={$i18n.t('Attached reference')} class="size-9 rounded-lg object-cover border border-white/10" />
+						<span class="text-[10px] text-gray-400">{$i18n.t('Reference image')} · <span class="text-cyan-300/70">{$i18n.t('attached — not measured')}</span></span>
+						<button class="ml-auto text-gray-500 hover:text-gray-200 transition" on:click={clearPendingImage} aria-label={$i18n.t('Remove attachment')}>
+							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="size-3.5"><path d="M18 6 6 18M6 6l12 12" stroke-linecap="round" /></svg>
+						</button>
+					</div>
+				{/if}
+				<div class="flex items-end gap-1.5">
+					<button
+						class="shrink-0 size-8 rounded-xl flex items-center justify-center text-gray-400 hover:text-cyan-200 hover:bg-white/5 transition"
+						aria-label={$i18n.t('Attach reference image')}
+						title={$i18n.t('Attach reference image')}
+						on:click={() => composerFileInput?.click()}
+					>
+						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="size-4"><path d="M3 3h18v18H3z" /><path d="M3 15l5-5 4 4 3-3 6 6" stroke-linecap="round" stroke-linejoin="round" /><circle cx="8.5" cy="8.5" r="1.5" fill="currentColor" stroke="none" /></svg>
+					</button>
+					<input bind:this={composerFileInput} type="file" accept="image/png,image/jpeg,image/webp" class="hidden" on:change={onComposerFile} />
+					<button
+						class="shrink-0 size-8 rounded-xl flex items-center justify-center transition {recording ? 'bg-red-500/20 text-red-300' : transcribing ? 'text-cyan-300' : 'text-gray-400 hover:text-cyan-200 hover:bg-white/5'}"
+						aria-label={recording ? $i18n.t('Stop recording') : $i18n.t('Voice input')}
+						title={$i18n.t('Voice input')}
+						on:click={toggleMic}
+					>
+						{#if transcribing}
+							<svg class="size-4 animate-spin" viewBox="0 0 24 24" fill="none"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" /><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 0 1 8-8V0C5.4 0 0 5.4 0 12h4z" /></svg>
+						{:else}
+							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="size-4 {recording ? 'mic-live' : ''}"><path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z" /><path d="M19 10v1a7 7 0 0 1-14 0v-1M12 18v4M8 22h8" stroke-linecap="round" stroke-linejoin="round" /></svg>
+						{/if}
+					</button>
 					<textarea
 						rows="1"
 						class="flex-1 text-sm bg-transparent px-2 py-1.5 outline-none resize-none text-gray-100 placeholder:text-gray-500 leading-relaxed max-h-32"
-						placeholder={space ? $i18n.t('Describe the next task — a new space forms around it…') : $i18n.t('What should Harvis shape?')}
+						placeholder={recording ? $i18n.t('Listening…') : space ? $i18n.t('Describe the next task — a new space forms around it…') : $i18n.t('What should Harvis shape?')}
 						bind:value={intent}
 						on:keydown={(e) => {
 							if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); create(); }
 						}}
 					></textarea>
 					<button
-						class="shrink-0 size-8 rounded-xl flex items-center justify-center transition {intent.trim() && !creating
+						class="shrink-0 size-8 rounded-xl flex items-center justify-center transition {(intent.trim() || pendingImage) && !creating
 							? 'bg-cyan-600 hover:bg-cyan-500 text-white'
 							: 'bg-white/6 text-gray-500 cursor-not-allowed'}"
-						disabled={!intent.trim() || creating}
+						disabled={(!intent.trim() && !pendingImage) || creating}
 						aria-label={$i18n.t('Shape workspace')}
 						on:click={create}
 					>
@@ -514,7 +622,7 @@
 				</div>
 			</div>
 			<div class="max-w-3xl mx-auto mt-1 text-center text-[9px] text-gray-500">
-				{$i18n.t('Workspace shape is detected automatically · mock-first · approval-gated')}
+				{$i18n.t('Attach a reference image or speak · workspace shape is detected automatically · mock-first')}
 			</div>
 		</div>
 	</div>
@@ -576,6 +684,25 @@
 {/if}
 
 <style>
+	/* Mic recording — gentle live pulse on the icon while capturing audio. */
+	.mic-live {
+		animation: hv-mic 1.1s ease-in-out infinite;
+	}
+	@keyframes hv-mic {
+		0%,
+		100% {
+			opacity: 0.6;
+		}
+		50% {
+			opacity: 1;
+		}
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.mic-live {
+			animation: none;
+		}
+	}
+
 	/* Shaping-transition dots — a quiet "forming" pulse while the session loads. */
 	.shaping-dots {
 		display: inline-flex;
