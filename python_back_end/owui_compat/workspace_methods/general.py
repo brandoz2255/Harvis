@@ -81,6 +81,26 @@ def _image_to_3d() -> list:
     ]
 
 
+def _repo_runner() -> list:
+    from .. import fab_repo
+    run_status = "gated" if fab_repo.repo_run_enabled() else "setup"
+    return [
+        T("fetch_repo", "Fetch repo", purpose="Clone a public repo into an isolated per-space checkout.",
+          lane=wm.LANE_WORKSPACE_FILES, status="ready", real=True, inputs=["repo_url"], output="workspace"),
+        T("read_setup", "Read setup", purpose="Read the README + manifests and detect the stack + setup commands.",
+          lane=wm.LANE_UI_MOCK, status="ready", real=True, output="report"),
+        T("install_deps", "Install deps", purpose="Run the install command inside the sandbox.",
+          lane=wm.LANE_CONTAINER_TERMINAL, status=run_status, approval=True, output="terminal",
+          desc="Runs in an isolated sandbox — visible and logged. Enable HARVIS_ADAPTIVE_REPO_RUN_ENABLED to activate."),
+        T("run_app", "Build & start", purpose="Run build/start in the sandbox and surface a preview.",
+          lane=wm.LANE_CONTAINER_TERMINAL, status=run_status, approval=True, output="terminal + preview",
+          desc="Sandbox execution — approval-gated."),
+        T("app_preview", "App preview", purpose="Preview a dev server the app starts.",
+          lane=wm.LANE_LOCAL_DESKTOP, status="disabled", output="iframe",
+          desc="Port-forward preview — arrives with the sandbox run wiring."),
+    ]
+
+
 def _ssh_workspace() -> list:
     return [
         T("profile_setup", "Profile setup", purpose="Name the target machine — no connection is made.",
@@ -109,4 +129,5 @@ wm.register_pack("research-notebook", _research_notebook)
 wm.register_pack("social-post", _social_post)
 wm.register_pack("image-to-3d", _image_to_3d)
 wm.register_pack("ssh-workspace", _ssh_workspace)
+wm.register_pack("repo-runner", _repo_runner)
 wm.register_cues("image-to-3d", _image_cues)

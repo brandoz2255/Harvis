@@ -14,9 +14,11 @@
 	import { showSidebar } from '$lib/stores';
 	import AdaptiveCore from './AdaptiveCore.svelte';
 	import PrototypeTestPanel from './PrototypeTestPanel.svelte';
+	import RepoRunnerSurface from './RepoRunnerSurface.svelte';
 	import ResourceBoard from './ResourceBoard.svelte';
 	import ToolDock from './ToolDock.svelte';
 	import { methodFor } from './method';
+	import { surfaceFor } from './surfaces';
 
 	const i18n: any = getContext('i18n');
 
@@ -30,7 +32,8 @@
 		'ssh-workspace': { label: 'Remote Profile (mock)', icon: 'M2 3h20v14H2zM8 21h8M12 17v4m-6-9 3-2.5L6 7M13 12h5' },
 		'social-post': { label: 'Action Studio', icon: 'M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z', mock: true },
 		fabrication: { label: 'Physical Prototype Test', icon: 'M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4L15 12l-3-3 2.7-2.7z', mock: true },
-		'image-to-3d': { label: 'Image → 3D Pipeline', icon: 'M12 2 3 7v10l9 5 9-5V7l-9-5zM12 22V12M3 7l9 5 9-5', mock: true }
+		'image-to-3d': { label: 'Image → 3D Pipeline', icon: 'M12 2 3 7v10l9 5 9-5V7l-9-5zM12 22V12M3 7l9 5 9-5', mock: true },
+		'repo-runner': { label: 'Repo Runner', icon: 'M4 5h16a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zM7 10l3 2.5L7 15M13 15h4' }
 	};
 
 	type FlowStep = { title: string; gate: boolean };
@@ -86,6 +89,7 @@
 	let gateStep: any = null;
 	let busy = false;
 	let statusOpen = false; // anchored-orb status popover (hybrid layout)
+	let railOpen = false; // support rail (resource board + tool dock) is secondary — collapsed by default
 
 	onMount(async () => {
 		try {
@@ -315,6 +319,8 @@
 		return 'idle';
 	})();
 	$: method = space ? methodFor(space.template_key) : null;
+	$: surface = space ? surfaceFor(space.template_key) : 'generic_output';
+	$: surfaceLabel = surface === 'repo_runner' ? $i18n.t('Repo runner') : $i18n.t('Output & preview');
 	$: execStep = steps.find((s: any) => s.status === 'active' && isExecStep(s)) ?? null;
 
 	const rowDot = (s: string) => (s === 'done' ? 'bg-emerald-400' : s === 'abandoned' ? 'bg-gray-500' : 'bg-cyan-400');
@@ -416,7 +422,7 @@
 						{$i18n.t('Describe the task — the workspace forms around it automatically.')}
 					</p>
 					<div class="mt-4 flex flex-wrap justify-center gap-1.5 max-w-lg">
-						{#each ['Connect Harvis to my 3D printer', 'Prepare this video post', 'Turn this image into a printable 3D model', 'Build a new Harvis integration'] as ex}
+						{#each ['Clone and run a GitHub repo', 'Test this helmet hanger', 'Turn this image into a printable 3D model', 'Build a new Harvis integration'] as ex}
 							<button
 								type="button"
 								class="text-[11px] px-2.5 py-1 rounded-full border border-white/8 text-gray-400 hover:text-cyan-200 hover:border-cyan-400/30 transition"
@@ -493,19 +499,12 @@
 						</button>
 					{/if}
 
-					<!-- METHOD LAYER: resource board + tool dock (backend-routed) -->
-					{#if resources.length || tools.length}
-						<section class="relative w-full mt-5 grid lg:grid-cols-2 gap-3" in:fade={{ duration: 200 }}>
-							<ResourceBoard {resources} {cues} spaceId={space.id} on:updated={(e) => (space = { ...space, manifest: e.detail })} />
-							<ToolDock {tools} />
-						</section>
-					{/if}
-
-					<!-- OUTPUT & PREVIEW — the result takes the main stage -->
+					<!-- PRIMARY SURFACE — the canvas reshapes into the task's workbench.
+					     Resource Board + Tool Dock are demoted to a support rail below. -->
 					<section class="relative w-full mt-5">
 						<div class="flex items-center gap-2 text-[9px] uppercase tracking-[0.25em] text-cyan-300/70">
 							<span class="h-px w-6 bg-cyan-400/40"></span>
-							{$i18n.t('Output & preview')}
+							{surfaceLabel}
 							<span class="h-px flex-1 bg-cyan-400/15"></span>
 							{#if execStep && space?.status === 'active'}
 								<button
@@ -515,43 +514,68 @@
 								>
 							{/if}
 						</div>
-						<div class="mt-3 grid sm:grid-cols-2 gap-3">
-							{#if space.template_key === 'fabrication'}
-								<!-- PREINSTALLED MOCK: prototype stress-test proof of concept -->
-								<div class="sm:col-span-2">
-									{#key space.id}
-										<PrototypeTestPanel {space} />
-									{/key}
+						<div class="mt-3">
+							{#if surface === 'repo_runner'}
+								{#key space.id}
+									<RepoRunnerSurface {space} on:updated={(e) => (space = { ...space, manifest: e.detail })} />
+								{/key}
+							{:else if surface === 'physical_3d_stage'}
+								{#key space.id}
+									<PrototypeTestPanel {space} />
+								{/key}
+							{:else}
+								<div class="grid sm:grid-cols-2 gap-3">
+									{#each method?.outputs ?? [] as o, oi (o.title)}
+										<article class="hud-panel {o.tone === 'amber' ? 'amber' : ''}" in:fly={{ y: 14, duration: 300, delay: 120 + oi * 70 }}>
+											<span class="corner tl"></span><span class="corner tr"></span><span class="corner bl"></span><span class="corner br"></span>
+											<div class="flex items-center justify-between gap-2">
+												<h3 class="text-xs font-semibold {o.tone === 'amber' ? 'text-amber-200' : 'text-gray-100'}">{o.title}</h3>
+												<span class="text-[8px] uppercase tracking-widest {o.tone === 'amber' ? 'text-amber-300/80' : 'text-cyan-300/60'}">{o.tone === 'amber' ? $i18n.t('Gated') : $i18n.t('Mock')}</span>
+											</div>
+											<p class="mt-1.5 text-[11px] text-gray-400 leading-relaxed">{o.body}</p>
+										</article>
+									{/each}
 								</div>
 							{/if}
-							{#each space.template_key === 'fabrication' ? [] : method?.outputs ?? [] as o, oi (o.title)}
-								<article class="hud-panel {o.tone === 'amber' ? 'amber' : ''}" in:fly={{ y: 14, duration: 300, delay: 120 + oi * 70 }}>
-									<span class="corner tl"></span><span class="corner tr"></span><span class="corner bl"></span><span class="corner br"></span>
-									<div class="flex items-center justify-between gap-2">
-										<h3 class="text-xs font-semibold {o.tone === 'amber' ? 'text-amber-200' : 'text-gray-100'}">{o.title}</h3>
-										<span class="text-[8px] uppercase tracking-widest {o.tone === 'amber' ? 'text-amber-300/80' : 'text-cyan-300/60'}">{o.tone === 'amber' ? $i18n.t('Gated') : $i18n.t('Mock')}</span>
-									</div>
-									<p class="mt-1.5 text-[11px] text-gray-400 leading-relaxed">{o.body}</p>
-								</article>
-							{/each}
-							{#if linkedRuns.length}
-								<article class="hud-panel sm:col-span-2" in:fly={{ y: 14, duration: 300, delay: 260 }}>
-									<span class="corner tl"></span><span class="corner tr"></span><span class="corner bl"></span><span class="corner br"></span>
-									<h3 class="text-xs font-semibold text-gray-100">{$i18n.t('Activity')}</h3>
-									<div class="mt-1.5 space-y-1">
-										{#each linkedRuns.slice(-3).reverse() as r, ri (ri)}
-											<div class="flex items-center gap-2 text-[11px] text-gray-400">
-												<span class="size-1 rounded-full bg-cyan-400/70 shrink-0"></span>
-												<span class="min-w-0 truncate">{r.message ?? r.stage ?? 'event'}</span>
-												{#if r.mock}<span class="shrink-0 text-[8px] uppercase tracking-widest text-cyan-300/60">{$i18n.t('Mock')}</span>{/if}
-												<span class="ml-auto shrink-0 text-[9px] text-gray-600 tabular-nums">{fmtAt(r.at)}</span>
-											</div>
-										{/each}
-									</div>
-								</article>
-							{/if}
 						</div>
+						{#if linkedRuns.length}
+							<article class="hud-panel mt-3" in:fly={{ y: 14, duration: 300, delay: 120 }}>
+								<span class="corner tl"></span><span class="corner tr"></span><span class="corner bl"></span><span class="corner br"></span>
+								<h3 class="text-xs font-semibold text-gray-100">{$i18n.t('Activity')}</h3>
+								<div class="mt-1.5 space-y-1">
+									{#each linkedRuns.slice(-3).reverse() as r, ri (ri)}
+										<div class="flex items-center gap-2 text-[11px] text-gray-400">
+											<span class="size-1 rounded-full bg-cyan-400/70 shrink-0"></span>
+											<span class="min-w-0 truncate">{r.message ?? r.stage ?? r.kind ?? 'event'}</span>
+											{#if r.mock}<span class="shrink-0 text-[8px] uppercase tracking-widest text-cyan-300/60">{$i18n.t('Mock')}</span>{/if}
+											<span class="ml-auto shrink-0 text-[9px] text-gray-600 tabular-nums">{fmtAt(r.at)}</span>
+										</div>
+									{/each}
+								</div>
+							</article>
+						{/if}
 					</section>
+
+					<!-- SUPPORT RAIL — resource board + tool dock, secondary (collapsed by default) -->
+					{#if resources.length || tools.length}
+						<section class="relative w-full mt-4">
+							<button
+								class="w-full flex items-center gap-2 text-[9px] uppercase tracking-[0.25em] text-gray-500 hover:text-gray-300 transition"
+								aria-expanded={railOpen}
+								on:click={() => (railOpen = !railOpen)}
+							>
+								<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="size-2.5 transition-transform {railOpen ? 'rotate-90' : ''}"><path d="M9 6l6 6-6 6" stroke-linecap="round" stroke-linejoin="round" /></svg>
+								{$i18n.t('Resources & tools')} <span class="text-gray-600">({resources.length + tools.length})</span>
+								<span class="h-px flex-1 bg-white/6"></span>
+							</button>
+							{#if railOpen}
+								<div class="mt-3 grid lg:grid-cols-2 gap-3" transition:fade={{ duration: 150 }}>
+									<ResourceBoard {resources} {cues} spaceId={space.id} on:updated={(e) => (space = { ...space, manifest: e.detail })} />
+									<ToolDock {tools} />
+								</div>
+							{/if}
+						</section>
+					{/if}
 				</div>
 			{:else}
 				<div class="h-full flex flex-col items-center justify-center text-xs text-gray-500 gap-2">

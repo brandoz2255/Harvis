@@ -153,6 +153,21 @@ export const METHODS: Record<string, Method> = {
 			{ label: 'Connection', status: 'gated', desc: 'No sockets, no SSH libs, no credentials. Disabled.' }
 		],
 		outputs: [{ title: 'Status preview', body: 'Non-network status placeholder; live connect stays disabled.', tone: 'amber' }]
+	},
+	'repo-runner': {
+		label: 'Repo Runner',
+		icon: 'M4 5h16a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zM7 10l3 2.5L7 15M13 15h4',
+		criteria: [], // the Repo Runner surface handles the URL intake itself
+		tools: [
+			{ label: 'Fetch repo', status: 'ready', desc: 'Clone a public repo into an isolated per-space checkout.' },
+			{ label: 'Read setup', status: 'ready', desc: 'Read the README + manifests and detect the stack.' },
+			{ label: 'Install / run', status: 'gated', desc: 'Sandbox execution — approval-gated, off until the toolchain sandbox lands.' },
+			{ label: 'App preview', status: 'setup', desc: 'Port-forward preview arrives with the sandbox run wiring.' }
+		],
+		outputs: [
+			{ title: 'Workbench', body: 'File tree, real clone log, and detected setup render in the terminal surface.' },
+			{ title: 'Run gate', body: 'Install/build/start stay approval-gated — nothing from the repo runs until you approve it.', tone: 'amber' }
+		]
 	}
 };
 

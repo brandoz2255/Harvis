@@ -17,6 +17,7 @@ Design rules (locked):
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -29,6 +30,7 @@ from fastapi.responses import FileResponse
 
 from . import fab_stress
 from . import fab_cad
+from . import fab_repo
 from . import workspace_method as wm
 from .workspace_methods import fabrication as _fab_pack  # noqa: F401 — registers the pack
 from .workspace_methods import general as _gen_packs  # noqa: F401 — registers the other templates
@@ -70,6 +72,23 @@ TEMPLATES: dict[str, dict] = {
             {"key": "notes", "type": "notes", "title": "Plan notes"},
             {"key": "todo", "type": "todo", "title": "To-do (manual gaps)"},
             {"key": "runs", "type": "runs", "title": "Linked runs"},
+        ],
+        "todo": [],
+    },
+    "repo-runner": {
+        "name": "Run a repo",
+        "description": "Clone a repository into an isolated per-space checkout, read its setup, detect the stack, and — with your approval — run install/build/start in a sandbox: a live terminal workbench.",
+        "steps": [
+            {"id": "repo", "title": "Get the repo", "detail": "Provide a public Git URL; Harvis clones it into an isolated per-space checkout."},
+            {"id": "inspect", "title": "Read setup", "detail": "README + package files; detect the stack and setup commands."},
+            {"id": "install", "title": "Install dependencies", "detail": "Run install in the sandbox — visible and logged.", "gate": "approval"},
+            {"id": "run", "title": "Build & start", "detail": "Run build/start; show the app preview when it comes up.", "gate": "approval"},
+            {"id": "report", "title": "Report", "detail": "What worked, what failed, and suggested fixes."},
+        ],
+        "panels": [
+            {"key": "steps", "type": "checklist", "title": "Steps"},
+            {"key": "notes", "type": "notes", "title": "Notes"},
+            {"key": "runs", "type": "runs", "title": "Terminal runs"},
         ],
         "todo": [],
     },
@@ -202,6 +221,7 @@ _SUGGEST_HINTS = {
     "fabrication": ("test", "hanger", "helmet", "prototype", "fabricate", "hold", "weight", "stress", "bracket", "hook", "print"),
     "image-to-3d": ("image", "photo", "picture", "3d model", "printable", "mesh", "stl"),
     "social-post": ("post", "instagram", "youtube", "caption", "reel", "publish", "social"),
+    "repo-runner": ("repo", "clone", "github", "gitlab", "run the app", "runner", "running", "dev server", "localhost", "npm", "yarn"),
 }
 
 
@@ -635,6 +655,54 @@ def register_adaptive_space_routes(router: APIRouter, get_current_user: Callable
         await _save_manifest(pool, space_id, int(user.id), manifest)
         logger.info("adaptive: CAD part %s built for space %s (bbox %s)", rid, space_id, meta.get("bbox_mm"))
         return {"ok": True, "cad": manifest["cad"], "mesh_rid": rid, "manifest": wm.shape_manifest_method(manifest, row["template_key"])}
+
+    @router.post("/api/adaptive/spaces/{space_id}/repo/inspect")
+    async def repo_inspect(space_id: str, payload: dict, request: Request, user=Depends(get_current_user)):
+        """Repo Runner: clone a validated PUBLIC repo into the space's per-space
+        checkout dir and read its setup (README + stack + file tree). REAL + safe —
+        a shallow read-only clone; no repo code executes. Stores it in manifest.repo."""
+        url = str((payload or {}).get("url") or "").strip()
+        if not url:
+            raise HTTPException(status_code=400, detail="A public repository URL is required.")
+        pool = _pool(request)
+        await _ensure_schema(pool)
+        row = await _fetch_owned(pool, space_id, int(user.id))
+        result = await asyncio.to_thread(fab_repo.inspect, int(user.id), space_id, url)
+        if not result.get("ok"):
+            raise HTTPException(status_code=400, detail=result.get("error") or "Repo inspection failed.")
+        manifest = _as_manifest(row["manifest"])
+        manifest["repo"] = {
+            "name": result["name"], "url": result["url"], "stack": result["stack"],
+            "tree": result["tree"], "readme": result["readme"][:12000], "log": result["log"], "at": _now(),
+        }
+        kept = [r for r in manifest.get("resources", []) if not (isinstance(r, dict) and r.get("kind") == "repo")]
+        kept.append(wm.make_resource("repo", "artifact", result["name"], meta={"url": result["url"], "stack": (result["stack"] or {}).get("stack")}))
+        manifest["resources"] = kept
+        runs = [r for r in manifest.get("linked_runs", []) if r.get("kind") != "repo_clone"]
+        runs.append(wm.linked_run_entry(
+            "repo_clone", mock=False, name=result["name"], stack=(result["stack"] or {}).get("stack"),
+            message=f"Cloned {result['name']}",
+        ))
+        manifest["linked_runs"] = runs[-50:]
+        await _save_manifest(pool, space_id, int(user.id), manifest)
+        logger.info("adaptive: repo %s cloned for space %s", result["name"], space_id)
+        return {"ok": True, "repo": manifest["repo"], "manifest": wm.shape_manifest_method(manifest, row["template_key"])}
+
+    @router.post("/api/adaptive/spaces/{space_id}/repo/run")
+    async def repo_run(space_id: str, payload: dict, request: Request, user=Depends(get_current_user)):
+        """Run a setup command (install/build/start) in an ISOLATED sandbox. A
+        higher-lane capability gated OFF by default — running untrusted setup needs
+        a toolchain sandbox that isn't wired this pass, so it refuses honestly
+        rather than executing repo code in the backend container."""
+        await _fetch_owned(_pool(request), space_id, int(user.id))  # ownership 404
+        if not fab_repo.repo_run_enabled():
+            raise HTTPException(
+                status_code=403,
+                detail="Sandbox run isn't enabled. Clone + inspect work now; running install/build/start "
+                "safely needs the isolated toolchain sandbox (next pass). The detected commands are shown so "
+                "you can run them yourself.",
+            )
+        raise HTTPException(status_code=501, detail="Sandbox run wiring pending.")
 
     @router.post("/api/adaptive/spaces/{space_id}/notes")
     async def save_notes(space_id: str, payload: dict, request: Request, user=Depends(get_current_user)):
