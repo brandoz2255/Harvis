@@ -26,6 +26,8 @@ from typing import Callable
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from . import fab_stress
+from . import workspace_method as wm
+from .workspace_methods import fabrication as _fab_pack  # noqa: F401 — registers the pack
 
 logger = logging.getLogger(__name__)
 
@@ -275,13 +277,16 @@ def register_adaptive_space_routes(router: APIRouter, get_current_user: Callable
                 )
 
     def _space_dict(row) -> dict:
+        # shape_manifest_method adds the method layer (tools[] + resources[]) to the
+        # response — derived data regenerated per read; the stored row is untouched.
+        manifest = wm.shape_manifest_method(_as_manifest(row["manifest"]), row["template_key"])
         return {
             "id": row["id"],
             "title": row["title"],
             "intent": row["intent"],
             "template_key": row["template_key"],
             "status": row["status"],
-            "manifest": _as_manifest(row["manifest"]),
+            "manifest": manifest,
             "created_at": row["created_at"].isoformat() if row["created_at"] else None,
             "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
         }
@@ -398,7 +403,7 @@ def register_adaptive_space_routes(router: APIRouter, get_current_user: Callable
                     s["status"] = "active"
                     break
         await _save_manifest(pool, space_id, int(user.id), manifest)
-        return {"ok": True, "manifest": manifest}
+        return {"ok": True, "manifest": wm.shape_manifest_method(manifest, row["template_key"])}
 
     @router.post("/api/adaptive/spaces/{space_id}/todo")
     async def toggle_todo(space_id: str, payload: dict, request: Request, user=Depends(get_current_user)):
@@ -483,7 +488,7 @@ def register_adaptive_space_routes(router: APIRouter, get_current_user: Callable
         )
         manifest["linked_runs"] = runs[-50:]
         await _save_manifest(pool, space_id, int(user.id), manifest)
-        return {"ok": True, "analysis": result, "manifest": manifest}
+        return {"ok": True, "analysis": result, "manifest": wm.shape_manifest_method(manifest, row["template_key"])}
 
     @router.post("/api/adaptive/spaces/{space_id}/notes")
     async def save_notes(space_id: str, payload: dict, request: Request, user=Depends(get_current_user)):
@@ -529,7 +534,7 @@ def register_adaptive_space_routes(router: APIRouter, get_current_user: Callable
         }
         manifest.setdefault("linked_runs", []).append(entry)
         await _save_manifest(pool, space_id, int(user.id), manifest)
-        return {"ok": True, "manifest": manifest, **entry}
+        return {"ok": True, "manifest": wm.shape_manifest_method(manifest, row["template_key"]), **entry}
 
     @router.delete("/api/adaptive/spaces/{space_id}")
     async def delete_space(space_id: str, request: Request, user=Depends(get_current_user)):

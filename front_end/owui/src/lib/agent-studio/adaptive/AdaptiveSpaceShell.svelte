@@ -14,6 +14,8 @@
 	import { showSidebar } from '$lib/stores';
 	import AdaptiveCore from './AdaptiveCore.svelte';
 	import PrototypeTestPanel from './PrototypeTestPanel.svelte';
+	import ResourceBoard from './ResourceBoard.svelte';
+	import ToolDock from './ToolDock.svelte';
 	import { methodFor } from './method';
 
 	const i18n: any = getContext('i18n');
@@ -220,6 +222,8 @@
 	$: manifest = space?.manifest ?? {};
 	$: steps = manifest.steps ?? [];
 	$: linkedRuns = manifest.linked_runs ?? [];
+	$: tools = manifest.tools ?? []; // method layer — backend-routed capability registry
+	$: resources = manifest.resources ?? [];
 	$: doneSteps = steps.filter((s: any) => s.status === 'done').length;
 	$: activeStep = steps.find((s: any) => s.status === 'active') ?? null;
 	$: coreProgress = steps.length ? doneSteps / steps.length : 0;
@@ -408,6 +412,14 @@
 							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="size-3.5"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" stroke-linecap="round" stroke-linejoin="round" /></svg>
 							{$i18n.t('Waiting on your approval')} — {activeStep.title} · <span class="underline underline-offset-2">{$i18n.t('Review')}</span>
 						</button>
+					{/if}
+
+					<!-- METHOD LAYER: resource board + tool dock (backend-routed) -->
+					{#if resources.length || tools.length}
+						<section class="relative w-full mt-5 grid lg:grid-cols-2 gap-3" in:fade={{ duration: 200 }}>
+							<ResourceBoard {resources} />
+							<ToolDock {tools} />
+						</section>
 					{/if}
 
 					<!-- OUTPUT & PREVIEW — the result takes the main stage -->
