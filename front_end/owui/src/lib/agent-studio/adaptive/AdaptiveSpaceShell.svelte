@@ -224,6 +224,7 @@
 	$: linkedRuns = manifest.linked_runs ?? [];
 	$: tools = manifest.tools ?? []; // method layer — backend-routed capability registry
 	$: resources = manifest.resources ?? [];
+	$: cues = manifest.cues ?? [];
 	$: doneSteps = steps.filter((s: any) => s.status === 'done').length;
 	$: activeStep = steps.find((s: any) => s.status === 'active') ?? null;
 	$: coreProgress = steps.length ? doneSteps / steps.length : 0;
@@ -417,7 +418,7 @@
 					<!-- METHOD LAYER: resource board + tool dock (backend-routed) -->
 					{#if resources.length || tools.length}
 						<section class="relative w-full mt-5 grid lg:grid-cols-2 gap-3" in:fade={{ duration: 200 }}>
-							<ResourceBoard {resources} />
+							<ResourceBoard {resources} {cues} spaceId={space.id} on:updated={(e) => (space = { ...space, manifest: e.detail })} />
 							<ToolDock {tools} />
 						</section>
 					{/if}

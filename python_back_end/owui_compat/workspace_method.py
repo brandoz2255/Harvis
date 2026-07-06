@@ -172,6 +172,25 @@ def has_pack(template_key: str) -> bool:
     return template_key in _TOOL_PACKS
 
 
+# ── Visual-cue packs: what a method would ESTIMATE from an attached image ──
+# These are honest placeholders — "estimated, not measured" — that a future
+# vision model fills in. The panel structure is the contract; v1 seeds the list
+# per object type from the pack.
+_CUE_PACKS: dict[str, object] = {}
+
+
+def register_cues(template_key: str, cues_fn) -> None:
+    _CUE_PACKS[template_key] = cues_fn
+
+
+def cues_for(template_key: str) -> list:
+    fn = _CUE_PACKS.get(template_key)
+    try:
+        return list(fn()) if fn else []
+    except Exception:
+        return []
+
+
 def shape_manifest_method(manifest: dict, template_key: str) -> dict:
     """Idempotently give a manifest its method-layer shape for the response:
     a freshly-seeded ``tools`` list (derived data — regenerated each read so
@@ -187,6 +206,10 @@ def shape_manifest_method(manifest: dict, template_key: str) -> dict:
     manifest["method_version"] = 2
     manifest["tools"] = seed_tools_for(template_key)
     manifest["resources"] = _derive_resources(manifest)
+    # Visual cues appear only once a reference image is attached — "here is what
+    # Harvis would read from it", each honestly labeled estimated / not measured.
+    has_image = any(isinstance(r, dict) and r.get("kind") == "image" for r in manifest["resources"])
+    manifest["cues"] = cues_for(template_key) if has_image else []
     return manifest
 
 
@@ -196,8 +219,14 @@ def _derive_resources(manifest: dict) -> list:
     Type-guarded so a hand-edited or future-migrated manifest with a non-list
     ``resources`` or non-dict ``meta``/``analysis`` degrades rather than crashes.
     """
+    # Persisted resources (uploads etc.) — strip the server-side ``path`` so the
+    # filesystem location never reaches the client; it fetches by id via the API.
     existing = manifest.get("resources")
-    resources = list(existing) if isinstance(existing, list) else []
+    resources = [
+        {k: v for k, v in r.items() if k != "path"}
+        for r in existing
+        if isinstance(r, dict)
+    ] if isinstance(existing, list) else []
     meta = manifest.get("meta")
     meta = meta if isinstance(meta, dict) else {}
 

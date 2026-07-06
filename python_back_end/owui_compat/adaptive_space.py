@@ -19,11 +19,13 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import Callable
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse
 
 from . import fab_stress
 from . import workspace_method as wm
@@ -203,6 +205,17 @@ _SUGGEST_HINTS = {
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# Reference-image upload (Stage 1b) — images are VISUAL references only, never
+# measured. Stored under the appuser-owned artifact volume, per user + space.
+_IMG_EXTS = {"png", "jpg", "jpeg", "webp"}
+_MAX_IMG_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
+def _adaptive_artifact_dir(user_id: int, space_id: str) -> str:
+    base = os.getenv("ARTIFACT_STORAGE_DIR", "/data/artifacts")
+    return os.path.join(base, "adaptive", str(int(user_id)), space_id)
 
 
 def _new_manifest(template_key: str, intent: str) -> dict:
@@ -489,6 +502,78 @@ def register_adaptive_space_routes(router: APIRouter, get_current_user: Callable
         manifest["linked_runs"] = runs[-50:]
         await _save_manifest(pool, space_id, int(user.id), manifest)
         return {"ok": True, "analysis": result, "manifest": wm.shape_manifest_method(manifest, row["template_key"])}
+
+    @router.post("/api/adaptive/spaces/{space_id}/resource")
+    async def upload_resource(
+        space_id: str, request: Request, file: UploadFile = File(...), user=Depends(get_current_user)
+    ):
+        """Stage 1b: attach a REFERENCE image to the space. The image is a visual
+        reference ONLY — it is stored and shown, never measured and never fed to
+        the analysis. Ownership-scoped, type-whitelisted (png/jpg/webp), size-capped."""
+        fname = (file.filename or "image").strip()
+        ext = fname.rsplit(".", 1)[-1].lower() if "." in fname else ""
+        if ext == "jpe":
+            ext = "jpeg"
+        if ext not in _IMG_EXTS:
+            raise HTTPException(status_code=400, detail="Only png / jpg / webp images are accepted.")
+        # Read in bounded chunks and reject the moment we exceed the cap — never
+        # buffer an unbounded body in memory (auth-gated DoS otherwise).
+        data = b""
+        while True:
+            chunk = await file.read(1 << 20)  # 1 MB
+            if not chunk:
+                break
+            data += chunk
+            if len(data) > _MAX_IMG_BYTES:
+                raise HTTPException(status_code=400, detail="Image too large (max 10 MB).")
+        if not data:
+            raise HTTPException(status_code=400, detail="Empty file.")
+
+        pool = _pool(request)
+        await _ensure_schema(pool)
+        row = await _fetch_owned(pool, space_id, int(user.id))
+
+        ddir = _adaptive_artifact_dir(int(user.id), space_id)
+        os.makedirs(ddir, exist_ok=True)
+        rid = uuid.uuid4().hex[:12]
+        path = os.path.join(ddir, f"{rid}.{ext}")
+        with open(path, "wb") as fh:
+            fh.write(data)
+
+        manifest = _as_manifest(row["manifest"])
+        entry = wm.make_resource(
+            "image", "reference", fname[:80] or "Reference image",
+            id=rid, path=path, measured=False, meta={"ext": ext},
+        )
+        manifest.setdefault("resources", []).append(entry)
+        await _save_manifest(pool, space_id, int(user.id), manifest)
+        logger.info("adaptive: space %s got reference image %s (user %s)", space_id, rid, user.id)
+        return {"ok": True, "resource_id": rid, "manifest": wm.shape_manifest_method(manifest, row["template_key"])}
+
+    @router.get("/api/adaptive/spaces/{space_id}/resource/{rid}")
+    async def get_resource(space_id: str, rid: str, request: Request, user=Depends(get_current_user)):
+        """Stream a stored reference file back (ownership-scoped, path-guarded)."""
+        pool = _pool(request)
+        await _ensure_schema(pool)
+        row = await _fetch_owned(pool, space_id, int(user.id))
+        manifest = _as_manifest(row["manifest"])
+        res = next(
+            (r for r in manifest.get("resources", []) if isinstance(r, dict) and r.get("id") == rid and r.get("path")),
+            None,
+        )
+        if not res:
+            raise HTTPException(status_code=404, detail="Resource not found")
+        # Defense in depth: the real path must live inside this user+space dir.
+        base = os.path.realpath(_adaptive_artifact_dir(int(user.id), space_id))
+        real = os.path.realpath(res["path"])
+        if not (real == base or real.startswith(base + os.sep)) or not os.path.isfile(real):
+            raise HTTPException(status_code=404, detail="Resource not found")
+        # Serve with the server-controlled content type + nosniff so the browser can
+        # never sniff a stored file as HTML, even if the ext whitelist is widened later.
+        media = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "webp": "image/webp"}.get(
+            (res.get("meta") or {}).get("ext"), "application/octet-stream"
+        )
+        return FileResponse(real, media_type=media, headers={"X-Content-Type-Options": "nosniff"})
 
     @router.post("/api/adaptive/spaces/{space_id}/notes")
     async def save_notes(space_id: str, payload: dict, request: Request, user=Depends(get_current_user)):

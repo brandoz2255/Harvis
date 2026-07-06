@@ -42,11 +42,11 @@ def seed_tools() -> list:
             "Image reference",
             purpose="Attach a photo as a visual reference (never a measurement).",
             lane=wm.LANE_WORKSPACE_FILES,
-            status="setup",
-            real=False,
+            status="ready",
+            real=True,
             inputs=["image"],
             output="resource",
-            desc="Reference only — arrives in Stage 1b; the image is never measured.",
+            desc="Reference only — the image is stored and shown, never measured or fed to the analysis.",
         ),
         wm.make_tool(
             "cad_build123d",
@@ -107,5 +107,20 @@ def seed_tools() -> list:
     ]
 
 
+def visual_cues() -> list:
+    """What Harvis would ESTIMATE from a reference photo of a hanger/bracket —
+    honest placeholders (not real computer vision, never measurements). The panel
+    structure is the contract a future vision model fills in."""
+    return [
+        {"label": "Likely wall plate"},
+        {"label": "Likely support arm"},
+        {"label": "Likely mounting points"},
+        {"label": "Likely load direction"},
+        {"label": "Likely stress zone"},
+    ]
+
+
 # Register on import.
 wm.register_pack("fabrication", seed_tools)
+wm.register_cues("fabrication", visual_cues)
+
