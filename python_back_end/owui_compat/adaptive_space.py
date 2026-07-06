@@ -30,6 +30,7 @@ from fastapi.responses import FileResponse
 from . import fab_stress
 from . import workspace_method as wm
 from .workspace_methods import fabrication as _fab_pack  # noqa: F401 — registers the pack
+from .workspace_methods import general as _gen_packs  # noqa: F401 — registers the other templates
 
 logger = logging.getLogger(__name__)
 
