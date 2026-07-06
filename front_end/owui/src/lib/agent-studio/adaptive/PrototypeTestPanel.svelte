@@ -22,6 +22,26 @@
 	let analysis: any = space?.manifest?.analysis ?? null;
 	let analyzing = false;
 
+	// ── Stage 2: real parametric geometry (build123d CAD engine) ──
+	let cadMeshRid: string = space?.manifest?.cad?.mesh_rid ?? '';
+	let building = false;
+	$: cadTool = (space?.manifest?.tools ?? []).find((t: any) => t.key === 'cad_build123d');
+	$: cadReady = cadTool?.status === 'ready';
+	$: meshUrl = cadMeshRid && space?.id ? `/api/adaptive/spaces/${space.id}/resource/${cadMeshRid}` : '';
+	const buildReal = async () => {
+		if (!space?.id || building) return;
+		building = true;
+		try {
+			const r = await fetch(`/api/adaptive/spaces/${space.id}/cad/execute`, {
+				method: 'POST', headers: hdrs(), credentials: 'include', body: JSON.stringify({})
+			});
+			if (r.ok) cadMeshRid = (await r.json()).mesh_rid;
+		} catch {
+			/* honest failure — the viewer stays on whatever it had */
+		}
+		building = false;
+	};
+
 	// ── Criteria (chips) — read from meta, fall back to assumptions ──
 	const nOr = (v: any, d: number) => (Number.isFinite(parseFloat(v)) ? parseFloat(v) : d);
 	const metaW = parseFloat(meta().crit_load_lb ?? '');
@@ -156,10 +176,21 @@
 		<span class="corner tl"></span><span class="corner tr"></span><span class="corner bl"></span><span class="corner br"></span>
 		<div class="flex items-center justify-between gap-2">
 			<h3 class="text-xs font-semibold text-gray-100">{$i18n.t('Concept preview — helmet hanger')}</h3>
-			<span class="text-[8px] uppercase tracking-widest text-cyan-300/60">{$i18n.t('Mock geometry · illustrative overlay')}</span>
+			<div class="flex items-center gap-2">
+				<span class="text-[8px] uppercase tracking-widest {meshUrl ? 'text-emerald-300/70' : 'text-cyan-300/60'}">{meshUrl ? $i18n.t('Parametric CAD · illustrative overlay') : $i18n.t('Mock geometry · illustrative overlay')}</span>
+				{#if cadReady}
+					<button
+						class="text-[10px] px-2 py-0.5 rounded-lg border border-cyan-400/30 text-cyan-200 hover:bg-cyan-400/10 transition disabled:opacity-50"
+						disabled={building}
+						on:click={buildReal}>{building ? $i18n.t('Building…') : meshUrl ? $i18n.t('Rebuild') : $i18n.t('Build real geometry')}</button
+					>
+				{/if}
+			</div>
 		</div>
 		<div class="mt-2">
-			<HelmetHangerMockViewer load={w} />
+			{#key meshUrl}
+				<HelmetHangerMockViewer load={w} {meshUrl} />
+			{/key}
 		</div>
 	</article>
 

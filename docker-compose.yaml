@@ -235,6 +235,10 @@ services:
       # (comma-separated container paths). The agent only ever clones FROM these.
       # Phase E1 — external code engines (OpenCode sidecar). Flag default OFF.
       HARVIS_OWUI_EXTERNAL_ENGINES: "${HARVIS_OWUI_EXTERNAL_ENGINES:-}"
+      # Adaptive Workspace CAD engine (Stage 2). OFF by default — a gated capability.
+      # Set HARVIS_ADAPTIVE_CAD_ENABLED=true and bring up the cad-engine sidecar to activate.
+      HARVIS_ADAPTIVE_CAD_ENABLED: "${HARVIS_ADAPTIVE_CAD_ENABLED:-}"
+      HARVIS_ADAPTIVE_CAD_URL: "${HARVIS_ADAPTIVE_CAD_URL:-http://harvis-cad:8000}"
       HARVIS_OPENCODE_CONTAINER: "${HARVIS_OPENCODE_CONTAINER:-harvis-opencode}"
       HARVIS_OPENCODE_DEFAULT_MODEL: "${HARVIS_OPENCODE_DEFAULT_MODEL:-qwen3:4b}"
       HARVIS_OPENCODE_TIMEOUT_S: "${HARVIS_OPENCODE_TIMEOUT_S:-900}"
@@ -328,6 +332,7 @@ services:
     networks:
       - ollama-n8n-network
       - openclaw-internal
+      - cad-internal
     extra_hosts:
       # Allow backend container to reach host-installed openclaw gateway on :18790
       - "host.docker.internal:host-gateway"
@@ -989,10 +994,29 @@ services:
     networks:
       - ollama-n8n-network
 
+  # Adaptive Workspace CAD engine (Stage 2) — isolated build123d/OCP kernel.
+  # Kept out of the torch backend image so its numpy-2 / OCP stack can't conflict
+  # with the backend's numpy<2 / torch pins. Internal network only, no host port.
+  cad-engine:
+    build:
+      context: ./cad-engine
+      dockerfile: Dockerfile
+    image: harvis-cad:local
+    container_name: harvis-cad
+    restart: unless-stopped
+    # Dedicated INTERNAL network shared only with the backend. The sidecar has no
+    # auth and no host port; keeping it off the shared ollama-n8n-network means the
+    # internet-capable / prompt-injectable OpenClaw pod cannot reach it laterally.
+    networks:
+      - cad-internal
+
 networks:
   ollama-n8n-network:
     external: true
   openclaw-internal:
+    driver: bridge
+    internal: true
+  cad-internal:
     driver: bridge
     internal: true
 

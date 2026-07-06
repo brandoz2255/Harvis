@@ -28,6 +28,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 
 from . import fab_stress
+from . import fab_cad
 from . import workspace_method as wm
 from .workspace_methods import fabrication as _fab_pack  # noqa: F401 — registers the pack
 from .workspace_methods import general as _gen_packs  # noqa: F401 — registers the other templates
@@ -569,12 +570,71 @@ def register_adaptive_space_routes(router: APIRouter, get_current_user: Callable
         real = os.path.realpath(res["path"])
         if not (real == base or real.startswith(base + os.sep)) or not os.path.isfile(real):
             raise HTTPException(status_code=404, detail="Resource not found")
-        # Serve with the server-controlled content type + nosniff so the browser can
-        # never sniff a stored file as HTML, even if the ext whitelist is widened later.
-        media = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "webp": "image/webp"}.get(
-            (res.get("meta") or {}).get("ext"), "application/octet-stream"
-        )
+        # Serve with the server-controlled content type (from the on-disk extension)
+        # + nosniff so the browser can never sniff a stored file as HTML.
+        ext = os.path.splitext(real)[1].lstrip(".").lower()
+        media = {
+            "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "webp": "image/webp",
+            "stl": "model/stl", "step": "application/step",
+        }.get(ext, "application/octet-stream")
         return FileResponse(real, media_type=media, headers={"X-Content-Type-Options": "nosniff"})
+
+    @router.post("/api/adaptive/spaces/{space_id}/cad/execute")
+    async def cad_execute(space_id: str, payload: dict, request: Request, user=Depends(get_current_user)):
+        """Stage 2: generate REAL parametric geometry via the build123d sidecar.
+        Maps the space's criteria to a vetted recipe, calls the isolated CAD engine,
+        and stores the returned STL/STEP as a structural mesh resource. Gated by
+        HARVIS_ADAPTIVE_CAD_ENABLED; no CAD runs in this process."""
+        if not fab_cad.cad_enabled():
+            raise HTTPException(status_code=403, detail="The CAD engine is not enabled for this deployment.")
+        pool = _pool(request)
+        await _ensure_schema(pool)
+        row = await _fetch_owned(pool, space_id, int(user.id))
+        manifest = _as_manifest(row["manifest"])
+        overrides = payload.get("params") if isinstance(payload, dict) else None
+        params = fab_cad.params_from_meta(manifest.get("meta"), overrides if isinstance(overrides, dict) else None)
+        try:
+            result = await fab_cad.execute(params, want_step=True)
+        except Exception as e:
+            logger.error("adaptive: CAD engine error for space %s: %s", space_id, e)
+            raise HTTPException(status_code=502, detail=f"CAD engine error: {e}")
+        if not result.get("stl_bytes"):
+            raise HTTPException(status_code=502, detail="CAD engine returned no geometry.")
+
+        ddir = _adaptive_artifact_dir(int(user.id), space_id)
+        os.makedirs(ddir, exist_ok=True)
+        rid = uuid.uuid4().hex[:12]
+        stl_path = os.path.join(ddir, f"{rid}.stl")
+        with open(stl_path, "wb") as fh:
+            fh.write(result["stl_bytes"])
+        step_rid = None
+        if result.get("step_bytes"):
+            step_rid = uuid.uuid4().hex[:12]
+            with open(os.path.join(ddir, f"{step_rid}.step"), "wb") as fh:
+                fh.write(result["step_bytes"])
+
+        meta = result.get("meta", {})
+        # Keep only the LATEST part — drop previous mesh/step artifacts (reference
+        # images and other resources are preserved).
+        kept = [r for r in manifest.get("resources", []) if not (isinstance(r, dict) and r.get("kind") in ("mesh", "step"))]
+        kept.append(wm.make_resource(
+            "mesh", "artifact", "Parametric part (build123d)", id=rid, path=stl_path,
+            structural=True, meta={"format": "stl", "bbox_mm": meta.get("bbox_mm"),
+                                   "volume_mm3": meta.get("volume_mm3"), "recipe": fab_cad.RECIPE},
+        ))
+        if step_rid:
+            kept.append(wm.make_resource(
+                "step", "artifact", "STEP export", id=step_rid,
+                path=os.path.join(ddir, f"{step_rid}.step"), structural=True, meta={"format": "step"},
+            ))
+        manifest["resources"] = kept
+        manifest["cad"] = {"recipe": fab_cad.RECIPE, "params": params, "bbox_mm": meta.get("bbox_mm"), "mesh_rid": rid, "at": _now()}
+        runs = [r for r in manifest.get("linked_runs", []) if r.get("kind") != "cad"]
+        runs.append(wm.linked_run_entry("cad", mock=False, recipe=fab_cad.RECIPE, bbox_mm=meta.get("bbox_mm")))
+        manifest["linked_runs"] = runs[-50:]
+        await _save_manifest(pool, space_id, int(user.id), manifest)
+        logger.info("adaptive: CAD part %s built for space %s (bbox %s)", rid, space_id, meta.get("bbox_mm"))
+        return {"ok": True, "cad": manifest["cad"], "mesh_rid": rid, "manifest": wm.shape_manifest_method(manifest, row["template_key"])}
 
     @router.post("/api/adaptive/spaces/{space_id}/notes")
     async def save_notes(space_id: str, payload: dict, request: Request, user=Depends(get_current_user)):

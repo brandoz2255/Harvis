@@ -10,10 +10,17 @@
 	import * as THREE from 'three';
 	import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 	import { Lut } from 'three/addons/math/Lut.js';
+	import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 
 	const i18n: any = getContext('i18n');
 
 	export let load = 5; // assumed helmet load (lb) — drives the heatmap intensity
+	// When set, load a REAL parametric STL (build123d, Stage 2) instead of the
+	// procedural mock. The heatmap overlay stays illustrative either way.
+	export let meshUrl = '';
+
+	let realMode = false;
+	const authHdr = () => ({ Authorization: `Bearer ${localStorage.token}` });
 
 	let container: HTMLDivElement;
 	let ready = false;
@@ -71,9 +78,64 @@
 		geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
 	};
 
+	// Real-mesh heatmap: color by geometry-local X (min X = wall root = hottest).
+	// The recipe orients the arm along +X with the wall at min X, so this reads as
+	// a cantilever whose bending stress peaks at the fixed end — illustrative, not FEA.
+	const bakeStressReal = (mesh: THREE.Mesh, w: number) => {
+		const geo = mesh.geometry as THREE.BufferGeometry;
+		const pos = geo.getAttribute('position');
+		if (!geo.boundingBox) geo.computeBoundingBox();
+		const bb = geo.boundingBox!;
+		const minx = bb.min.x;
+		const span = bb.max.x - bb.min.x || 1;
+		const colors = new Float32Array(pos.count * 3);
+		const f = loadFactor(w);
+		for (let i = 0; i < pos.count; i++) {
+			const near = Math.pow(1 - (pos.getX(i) - minx) / span, 1.4);
+			const s = Math.max(0, Math.min(1, near * f));
+			const c = lut.getColor(s);
+			colors[i * 3] = c.r;
+			colors[i * 3 + 1] = c.g;
+			colors[i * 3 + 2] = c.b;
+		}
+		geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+	};
+
 	const applyStress = (w: number) => {
-		for (const m of heatMeshes) bakeStress(m, w);
+		for (const m of heatMeshes) (realMode ? bakeStressReal : bakeStress)(m, w);
 		render();
+	};
+
+	// Load the real STL (auth'd blob → STLLoader), stand it up (build123d Z-up →
+	// three Y-up), fit it to the scene, and heatmap it. Called only when meshUrl set.
+	const loadRealMesh = async (url: string) => {
+		try {
+			const r = await fetch(url, { headers: authHdr(), credentials: 'include' });
+			if (!r.ok) return;
+			const geo = new STLLoader().parse(await r.arrayBuffer());
+			geo.computeVertexNormals();
+			geo.computeBoundingBox();
+			const bb = geo.boundingBox!;
+			const size = new THREE.Vector3();
+			bb.getSize(size);
+			const sc = 3.0 / (Math.max(size.x, size.y, size.z) || 1);
+			const center = new THREE.Vector3();
+			bb.getCenter(center);
+			const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true }));
+			mesh.scale.setScalar(sc);
+			mesh.rotation.x = -Math.PI / 2; // Z-up (build123d) → Y-up (three)
+			// After rotation local (x,y,z)→(x,z,-y), so recenter with local-Z on world-Y
+			// (negated) and local-Y on world-Z — keeps the part centred for any dims.
+			mesh.position.set(-center.x * sc, -center.z * sc, center.y * sc);
+			scene.add(mesh);
+			heatMeshes.length = 0;
+			heatMeshes.push(mesh);
+			realMode = true;
+			applyStress(load);
+			render();
+		} catch {
+			/* fall back to whatever is in the scene */
+		}
 	};
 
 	const render = () => {
@@ -119,6 +181,7 @@
 
 		const heatMat = () => new THREE.MeshLambertMaterial({ vertexColors: true });
 
+		if (!meshUrl) {
 		// ── wall plate (heatmapped) ──
 		const plate = new THREE.Mesh(new THREE.BoxGeometry(0.16, 1.5, 0.6, 2, 20, 8), heatMat());
 		plate.position.set(-1.4, 0.15, 0);
@@ -198,6 +261,7 @@
 			}
 		}
 		applyStress(load);
+		}
 	};
 
 	const loop = () => {
@@ -223,6 +287,7 @@
 		container.appendChild(renderer.domElement);
 
 		buildScene();
+		if (meshUrl) loadRealMesh(meshUrl);
 
 		controls = new OrbitControls(camera, renderer.domElement);
 		controls.target.copy(INIT_TARGET);
@@ -268,11 +333,12 @@
 </script>
 
 <div class="relative w-full">
-	<div bind:this={container} class="hh-canvas w-full rounded-lg overflow-hidden" aria-label={$i18n.t('Mock 3D helmet hanger with stress heatmap')}></div>
+	<div bind:this={container} class="hh-canvas w-full rounded-lg overflow-hidden" aria-label={realMode ? $i18n.t('Real parametric 3D hanger with illustrative stress overlay') : $i18n.t('Mock 3D helmet hanger with stress heatmap')}></div>
 
-	<!-- stress spectrum legend (matches the SVG version) -->
+	<!-- stress spectrum legend. In real-mesh mode the geometry is genuine, so the
+	     colours must be explicitly flagged as illustrative, NOT a simulation of the part. -->
 	<div class="pointer-events-none absolute top-2 right-2 flex flex-col items-end gap-0.5">
-		<span class="text-[8px] uppercase tracking-widest text-gray-400">{$i18n.t('Stress spectrum (mock)')}</span>
+		<span class="text-[8px] uppercase tracking-widest text-gray-400">{realMode ? $i18n.t('Illustrative overlay — not FEA') : $i18n.t('Stress spectrum (mock)')}</span>
 		<div class="h-1.5 w-28 rounded-full" style="background:linear-gradient(90deg,#22c55e,#fcd34d,#f87171);"></div>
 		<div class="flex w-28 justify-between text-[8px] uppercase tracking-widest text-gray-500">
 			<span>{$i18n.t('low')}</span><span>{$i18n.t('high')}</span>
@@ -280,8 +346,11 @@
 	</div>
 
 	<!-- controls hint + reset -->
-	<div class="absolute bottom-2 left-2 flex items-center gap-2">
+	<div class="absolute bottom-2 left-2 flex flex-col gap-0.5">
 		<span class="text-[9px] uppercase tracking-widest text-cyan-300/60">{$i18n.t('Drag to orbit · scroll to zoom')}</span>
+		{#if realMode}
+			<span class="text-[8px] text-amber-300/70">{$i18n.t('Colours = a synthetic pattern, not a simulation of this part')}</span>
+		{/if}
 	</div>
 	<button
 		class="absolute bottom-2 right-2 text-[10px] px-2 py-1 rounded-lg border border-cyan-400/30 text-cyan-200 hover:bg-cyan-400/10 transition"

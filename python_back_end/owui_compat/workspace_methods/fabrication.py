@@ -12,6 +12,7 @@ capability is actually wired — never optimistic.
 from __future__ import annotations
 
 from .. import workspace_method as wm
+from .. import fab_cad
 
 
 def seed_tools() -> list:
@@ -53,11 +54,13 @@ def seed_tools() -> list:
             "Parametric CAD (build123d)",
             purpose="Generate real BREP geometry from a named-parameter recipe.",
             lane=wm.LANE_CONTAINER_TERMINAL,
-            status="disabled",
-            real=False,
+            status=fab_cad.cad_status(),
+            real=fab_cad.cad_enabled(),
             inputs=["recipe", "params"],
             output="mesh + STEP",
-            desc="Disabled until Stage 2 (adds the build123d backend).",
+            desc="Real parametric geometry via the isolated build123d CAD engine."
+            if fab_cad.cad_enabled()
+            else "Enable the CAD engine (HARVIS_ADAPTIVE_CAD_ENABLED + cad-engine sidecar) to build real geometry.",
         ),
         wm.make_tool(
             "generate_mesh",
