@@ -25,6 +25,8 @@ from typing import Callable
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
+from . import fab_stress
+
 logger = logging.getLogger(__name__)
 
 CREATE_ADAPTIVE_SPACES_SQL = """
@@ -184,13 +186,16 @@ TEMPLATES: dict[str, dict] = {
     },
 }
 
-# suggest() ranks by trivial keyword hits — the USER still picks (explicit-choice
-# rule); this never auto-selects.
+# suggest() ranks by trivial keyword hits; the frontend applies the TOP score
+# automatically and asks the user only when everything scores zero (ambiguous).
 _SUGGEST_HINTS = {
     "integration-scaffold": ("connect", "integration", "printer", "device", "api", "webhook", "plug"),
     "research-notebook": ("research", "learn", "sources", "paper", "study", "notebook", "summarize"),
     "ssh-workspace": ("ssh", "remote", "server", "machine", "host"),
     "feature-plan": ("feature", "build", "implement", "fix", "refactor", "plan"),
+    "fabrication": ("test", "hanger", "helmet", "prototype", "fabricate", "hold", "weight", "stress", "bracket", "hook", "print"),
+    "image-to-3d": ("image", "photo", "picture", "3d model", "printable", "mesh", "stl"),
+    "social-post": ("post", "instagram", "youtube", "caption", "reel", "publish", "social"),
 }
 
 
@@ -294,6 +299,10 @@ def register_adaptive_space_routes(router: APIRouter, get_current_user: Callable
                     "steps": len(t["steps"]),
                     "gates": sum(1 for s in t["steps"] if s.get("gate")),
                     "panels": [p["title"] for p in t["panels"]],
+                    # Ordered step titles + gate flags → the launcher's pipeline preview.
+                    "flow": [
+                        {"title": s["title"], "gate": bool(s.get("gate"))} for s in t["steps"]
+                    ],
                 }
                 for k, t in TEMPLATES.items()
             ]
@@ -409,6 +418,72 @@ def register_adaptive_space_routes(router: APIRouter, get_current_user: Callable
             todo[idx]["done"] = bool(payload.get("done", True))
         await _save_manifest(pool, space_id, int(user.id), manifest)
         return {"ok": True, "todo": todo}
+
+    @router.post("/api/adaptive/spaces/{space_id}/meta")
+    async def merge_meta(space_id: str, payload: dict, request: Request, user=Depends(get_current_user)):
+        """Merge small UI-method keys (criteria answers, assumption flags) into
+        manifest.meta. Ownership-scoped, size-capped, values coerced to short
+        strings — persistence for the task environment, no behavior enabled."""
+        patch = payload.get("meta")
+        if not isinstance(patch, dict) or not patch:
+            raise HTTPException(status_code=400, detail="meta object required")
+        pool = _pool(request)
+        await _ensure_schema(pool)
+        row = await _fetch_owned(pool, space_id, int(user.id))
+        manifest = _as_manifest(row["manifest"])
+        meta = manifest.setdefault("meta", {})
+        for k, v in list(patch.items())[:20]:
+            meta[str(k)[:64]] = str(v)[:300]
+        if len(meta) > 60:  # hard cap — this is criteria/flags, not a datastore
+            raise HTTPException(status_code=400, detail="meta too large")
+        await _save_manifest(pool, space_id, int(user.id), manifest)
+        return {"ok": True, "meta": meta}
+
+    @router.post("/api/adaptive/spaces/{space_id}/analyze")
+    async def analyze_space(space_id: str, payload: dict, request: Request, user=Depends(get_current_user)):
+        """Stage 1a-core: REAL first-order closed-form structural analysis for the
+        fabrication lane. Reads criteria from ``manifest.meta`` (``crit_*`` keys),
+        applies optional ``overrides`` from the body, computes a cantilever
+        bending + bolt-group estimate (sigma in MPa, safety factor vs. a material
+        allowable), and writes ``manifest.analysis``.
+
+        The SAFETY VERDICT is decided server-side (``verdict_code``); the frontend
+        renders phrasing from the code and never authors safety language — below
+        SF 2.0 no "looks safe" string exists. Pure math, no side effects beyond a
+        manifest write (same risk class as ``/meta``)."""
+        pool = _pool(request)
+        await _ensure_schema(pool)
+        row = await _fetch_owned(pool, space_id, int(user.id))
+        manifest = _as_manifest(row["manifest"])
+        overrides = payload.get("overrides") if isinstance(payload, dict) else None
+        result = fab_stress.analyze_from_meta(
+            manifest.get("meta"), overrides if isinstance(overrides, dict) else None
+        )
+        # overlay_version stamps the VISUAL heatmap (still the synthetic gradient
+        # in Stage 1a — only the NUMBERS are real); Stage 2 re-derives it from
+        # real geometry and bumps this. Nothing user-facing reads it yet.
+        result["display"] = {
+            "overlay_version": "synthetic-v1",
+            "overlay_note": "3D heatmap gradient is still illustrative; the numbers are real closed-form values.",
+        }
+        result["at"] = _now()
+        manifest["analysis"] = result
+        # The full analysis lives in manifest.analysis (overwritten each run). Keep
+        # only ONE analysis breadcrumb (the latest) in the activity feed and cap it
+        # — reactive chip tuning fires /analyze freely, so an unbounded append bloats.
+        runs = [r for r in manifest.get("linked_runs", []) if r.get("kind") != "analysis"]
+        runs.append(
+            {
+                "mock": False,
+                "kind": "analysis",
+                "model": result.get("model"),
+                "verdict_code": result.get("verdict_code"),
+                "at": result["at"],
+            }
+        )
+        manifest["linked_runs"] = runs[-50:]
+        await _save_manifest(pool, space_id, int(user.id), manifest)
+        return {"ok": True, "analysis": result, "manifest": manifest}
 
     @router.post("/api/adaptive/spaces/{space_id}/notes")
     async def save_notes(space_id: str, payload: dict, request: Request, user=Depends(get_current_user)):
