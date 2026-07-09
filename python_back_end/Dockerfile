@@ -83,9 +83,12 @@ RUN pip install --no-cache-dir --no-index --find-links=/wheels /wheels/* \
   && pip cache purge
 
 # Docker CLI for vibecoding container management + git for clone-local repo isolation
+# + openssh-client (ssh / ssh-keyscan / ssh-keygen) for the Phase 4 SSH target
+# registry — the governed probe/exec path shells out to the system ssh binary
+# (argv list, StrictHostKeyChecking=yes, pinned per-user known_hosts).
 # (kept in this late layer so the expensive pip-wheel layers above stay cached on rebuild)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-  docker.io git \
+  docker.io git openssh-client \
   && rm -rf /var/lib/apt/lists/*
 
 # Reinstall Python docker package to override any system docker-py conflict
@@ -110,6 +113,14 @@ RUN chmod +x /app/entrypoint.sh
 # Create cache directories
 RUN mkdir -p /home/appuser/.cache/whisper /home/appuser/.cache/huggingface \
   && chown -R appuser:appuser /home/appuser/.cache /app
+
+# Phase 4 SSH state dir (per-user known_hosts + temp keys, 0700). Pre-created
+# owned by appuser(1001) so a fresh `ssh_state` named volume mounted here
+# inherits that ownership (Docker copies the image dir's perms into an empty
+# volume) — otherwise the root-owned volume would be unwritable by uid 1001.
+RUN mkdir -p /data/ssh_state \
+  && chown -R appuser:appuser /data/ssh_state \
+  && chmod 700 /data/ssh_state
 
 # Switch to non-root user
 USER appuser

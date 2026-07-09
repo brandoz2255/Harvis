@@ -15,6 +15,7 @@ import os
 from owui_compat.workspace_method import (
     DEFAULT_SAFE_LANE,
     LANE_CONTAINER_TERMINAL,
+    LANE_EXTERNAL_SERVICES,
     LANE_UI_MOCK,
     LANE_WORKSPACE_FILES,
 )
@@ -130,6 +131,11 @@ _EXTRA_TOOL_LANES = {
     "run_code": LANE_CONTAINER_TERMINAL,
     "shell": LANE_CONTAINER_TERMINAL,
     "bash": LANE_CONTAINER_TERMINAL,
+    # Phase 4 SSH target registry (lane 5, external services). Governed by
+    # HARVIS_SSH_ENABLED at the lane gate; probe/exec live on remote.ssh_manager.
+    "ssh.targets.list": LANE_EXTERNAL_SERVICES,
+    "ssh.probe": LANE_EXTERNAL_SERVICES,
+    "ssh.exec": LANE_EXTERNAL_SERVICES,
 }
 
 

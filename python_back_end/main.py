@@ -1380,6 +1380,12 @@ app.include_router(cron_router)
 from remote.ssh_manager import ssh_router
 app.include_router(ssh_router)
 
+# Phase 4 (Execution Core): SSH TARGET REGISTRY — GET /api/harvis/targets lists
+# the sandbox container + this user's SSH host profiles (kind ssh, lane 5, NO
+# secrets). Read-only; the probe/trust/exec verbs live on ssh_router above.
+from remote.targets import targets_router
+app.include_router(targets_router)
+
 # Cookbook — hardware-aware model recommendation + download (per-node llmfit serve proxy)
 try:
     from cookbook.router import router as cookbook_router

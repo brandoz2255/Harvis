@@ -166,6 +166,15 @@ services:
       HARVIS_TERMINAL_DEFAULT_TIMEOUT_S: "${HARVIS_TERMINAL_DEFAULT_TIMEOUT_S:-30}"
       HARVIS_TERMINAL_MAX_TIMEOUT_S: "${HARVIS_TERMINAL_MAX_TIMEOUT_S:-600}"
       HARVIS_TERMINAL_IDLE_TIMEOUT_S: "${HARVIS_TERMINAL_IDLE_TIMEOUT_S:-1800}"
+      # Phase 4 SSH target registry (lane 5). Default OFF — every /api/remote/ssh
+      # route 403s until HARVIS_SSH_ENABLED is truthy AND a host is fingerprint-
+      # trusted. State dir holds per-user known_hosts (0700) + ephemeral 0600 key
+      # files; it rides the ssh_state named volume (see volumes: below). Optionally
+      # pass SSH_AUTH_SOCK through for 'agent' auth (the socket must ALSO be mounted
+      # into the container for agent auth to actually work).
+      HARVIS_SSH_ENABLED: "${HARVIS_SSH_ENABLED:-false}"
+      HARVIS_SSH_STATE_DIR: "/data/ssh_state"
+      SSH_AUTH_SOCK: "${SSH_AUTH_SOCK:-}"
       # Automations: the cron tick loop fires scheduled agent runs when true.
       HARVIS_CRON_ENABLED: "${HARVIS_CRON_ENABLED:-true}"
       BACKEND_URL: "http://backend:8000"
@@ -315,6 +324,11 @@ services:
       - ./python_back_end/deep_research:/app/deep_research:ro
       - artifact_data:/data/artifacts
       - openclaw-projects:/data/openclaw-projects
+      # Phase 4 SSH state — per-user pinned known_hosts (0700) + ephemeral 0600
+      # key temp files. Named volume so trust survives redeploys; the image
+      # pre-creates /data/ssh_state owned by appuser(1001) so the fresh volume
+      # inherits writable ownership.
+      - ssh_state:/data/ssh_state
       # Real local repo, READ-ONLY, for orchestrated clone-local "attached" isolation.
       # The agent only ever clones FROM this — it can never write the live repo.
       - ${HARVIS_ATTACH_REPO:-./harvis-fs-browse/demo-repo}:/data/attached-repos/harvis:ro
@@ -1051,5 +1065,6 @@ volumes:
   tts_rvc_assets:
   openclaw-data:
   openclaw-projects:
+  ssh_state:             # Phase 4: per-user SSH known_hosts + ephemeral key temp files (0700)
   hermes_gateway_home:   # Phase E4B: Hermes Agent gateway (Chat) profile/config/memory
   hermes_homes:          # Phase E4B: per-user Hermes Build profiles (HERMES_HOME per run)

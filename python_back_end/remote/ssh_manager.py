@@ -37,8 +37,10 @@ edit needed in main.py.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import uuid
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -108,19 +110,52 @@ CREATE INDEX IF NOT EXISTS idx_user_ssh_hosts_user
     ON user_ssh_hosts(user_id, updated_at DESC);
 """
 
+# Phase 4 (Execution Core): governed probe/exec columns, added additively so an
+# existing Phase-7-scaffold table upgrades in place with no data loss.
+#   jump_host_id          — optional ProxyJump through another owned profile
+#   auth_method           — how run_ssh authenticates: agent|key_file|stored_secret|manual
+#   host_key_fingerprint  — pinned SHA256 fp (NULL ⇒ never trusted ⇒ exec 409s)
+#   known_hosts_line      — the raw known_hosts text appended on /trust
+#   key_path              — relative path under HARVIS_SSH_KEYS_DIR for key_file auth
+#   allowed_cwds/commands — reserved allowlists (enforcement lands later)
+#   risk_lane             — permission lane (default 5 = external services)
+USER_SSH_HOSTS_PHASE4_SQL = """
+ALTER TABLE user_ssh_hosts ADD COLUMN IF NOT EXISTS jump_host_id INTEGER;
+ALTER TABLE user_ssh_hosts ADD COLUMN IF NOT EXISTS auth_method TEXT DEFAULT 'agent';
+ALTER TABLE user_ssh_hosts ADD COLUMN IF NOT EXISTS host_key_fingerprint TEXT;
+ALTER TABLE user_ssh_hosts ADD COLUMN IF NOT EXISTS known_hosts_line TEXT;
+ALTER TABLE user_ssh_hosts ADD COLUMN IF NOT EXISTS key_path TEXT;
+ALTER TABLE user_ssh_hosts ADD COLUMN IF NOT EXISTS allowed_cwds JSONB;
+ALTER TABLE user_ssh_hosts ADD COLUMN IF NOT EXISTS allowed_commands JSONB;
+ALTER TABLE user_ssh_hosts ADD COLUMN IF NOT EXISTS risk_lane INTEGER DEFAULT 5;
+"""
+
+# run_ssh authentication methods (distinct from auth_type key|password, which is
+# the credential SHAPE). auth_method selects HOW ssh authenticates.
+AUTH_METHODS = {"agent", "key_file", "stored_secret", "manual"}
+
+# All columns needed by the exec / trust paths — kept as one list so the SELECT
+# and the public wire shape stay in sync.
+_FULL_COLUMNS = (
+    "id, name, host, port, username, auth_type, credential_encrypted, "
+    "jump_host_id, auth_method, host_key_fingerprint, known_hosts_line, "
+    "key_path, risk_lane, created_at, updated_at"
+)
+
 _schema_ready = False
 
 
 async def ensure_ssh_schema(pool) -> None:
-    """Idempotently create user_ssh_hosts. Called lazily from the endpoints
-    (memoized per process) so main.py's lifespan needs no edit."""
+    """Idempotently create + upgrade user_ssh_hosts. Called lazily from the
+    endpoints (memoized per process) so main.py's lifespan needs no edit."""
     global _schema_ready
     if _schema_ready or pool is None:
         return
     async with pool.acquire() as conn:
         await conn.execute(USER_SSH_HOSTS_SCHEMA_SQL)
+        await conn.execute(USER_SSH_HOSTS_PHASE4_SQL)
     _schema_ready = True
-    logger.info("user_ssh_hosts schema ensured")
+    logger.info("user_ssh_hosts schema ensured (Phase 4 columns present)")
 
 
 # ─── Helpers ───────────────────────────────────────────────────────────────────
@@ -139,7 +174,18 @@ def _pool_or_503(request: Request):
 
 
 def _row_public(row) -> dict:
-    """Safe wire shape: NEVER includes the credential (only has_credential)."""
+    """Safe wire shape: NEVER includes the credential (only has_credential).
+
+    ``auth_method``/``trusted`` are surfaced additively — ``trusted`` is True iff
+    a host-key fingerprint has been pinned (via /test → /trust), which the exec
+    path requires. Rows read before the Phase-4 columns exist tolerate absence.
+    """
+    def _get(key, default=None):
+        try:
+            return row[key]
+        except (KeyError, IndexError):
+            return default
+
     return {
         "id": row["id"],
         "name": row["name"],
@@ -147,7 +193,11 @@ def _row_public(row) -> dict:
         "port": row["port"],
         "username": row["username"],
         "auth_type": row["auth_type"],
+        "auth_method": _get("auth_method") or "agent",
+        "risk_lane": _get("risk_lane") or 5,
         "has_credential": bool(row["credential_encrypted"]),
+        "trusted": bool(_get("host_key_fingerprint")),
+        "host_key_fingerprint": _get("host_key_fingerprint"),
         "created_at": row["created_at"].isoformat() if row["created_at"] else None,
         "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
     }
@@ -189,10 +239,33 @@ def _clean_credential(body: dict) -> Optional[str]:
     return credential
 
 
+def _clean_auth_method(body: dict, *, default: str) -> str:
+    """Validate an optional auth_method; fall back to the given default."""
+    am = body.get("auth_method")
+    if am is None:
+        return default
+    if not isinstance(am, str) or am not in AUTH_METHODS:
+        raise HTTPException(status_code=400, detail=f"auth_method must be one of {sorted(AUTH_METHODS)}")
+    return am
+
+
+def _clean_key_path(body: dict) -> Optional[str]:
+    """Validate an optional key_path (for key_file auth). Relative, no traversal;
+    the absolute confinement to the keys dir is re-checked at exec time."""
+    kp = body.get("key_path")
+    if kp is None:
+        return None
+    if not isinstance(kp, str) or not kp.strip():
+        raise HTTPException(status_code=400, detail="key_path must be a non-empty string")
+    kp = kp.strip()
+    if kp.startswith("/") or ".." in kp.split("/") or "\x00" in kp:
+        raise HTTPException(status_code=400, detail="key_path must be a relative path with no traversal")
+    return kp
+
+
 async def _fetch_owned(conn, user_id: int, host_id: int):
     row = await conn.fetchrow(
-        "SELECT id, name, host, port, username, auth_type, credential_encrypted, "
-        "created_at, updated_at FROM user_ssh_hosts WHERE id=$1 AND user_id=$2",
+        f"SELECT {_FULL_COLUMNS} FROM user_ssh_hosts WHERE id=$1 AND user_id=$2",
         host_id, user_id,
     )
     if row is None:
@@ -209,8 +282,7 @@ async def list_ssh_hosts(request: Request, user=Depends(get_current_user_optimiz
     await ensure_ssh_schema(pool)
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT id, name, host, port, username, auth_type, credential_encrypted, "
-            "created_at, updated_at FROM user_ssh_hosts WHERE user_id=$1 "
+            f"SELECT {_FULL_COLUMNS} FROM user_ssh_hosts WHERE user_id=$1 "
             "ORDER BY updated_at DESC",
             _uid(user),
         )
@@ -232,6 +304,8 @@ async def create_ssh_host(request: Request, user=Depends(get_current_user_optimi
     username = body.get("username")
     auth_type = body.get("auth_type", "key")
     _validate_profile_fields(name=name, host=host, port=port, username=username, auth_type=auth_type)
+    auth_method = _clean_auth_method(body, default="agent")
+    key_path = _clean_key_path(body)
 
     credential = _clean_credential(body)
     enc = _encrypt_credential(credential) if credential else None
@@ -241,10 +315,11 @@ async def create_ssh_host(request: Request, user=Depends(get_current_user_optimi
     try:
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
-                "INSERT INTO user_ssh_hosts (user_id, name, host, port, username, auth_type, credential_encrypted) "
-                "VALUES ($1, $2, $3, $4, $5, $6, $7) "
-                "RETURNING id, name, host, port, username, auth_type, credential_encrypted, created_at, updated_at",
-                _uid(user), name.strip(), host, int(port), username, auth_type, enc,
+                "INSERT INTO user_ssh_hosts "
+                "(user_id, name, host, port, username, auth_type, credential_encrypted, auth_method, key_path) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) "
+                f"RETURNING {_FULL_COLUMNS}",
+                _uid(user), name.strip(), host, int(port), username, auth_type, enc, auth_method, key_path,
             )
     except Exception as exc:
         if exc.__class__.__name__ == "UniqueViolationError":
@@ -284,6 +359,8 @@ async def update_ssh_host(host_id: int, request: Request, user=Depends(get_curre
         username = body.get("username", row["username"])
         auth_type = body.get("auth_type", row["auth_type"])
         _validate_profile_fields(name=name, host=host, port=port, username=username, auth_type=auth_type)
+        auth_method = _clean_auth_method(body, default=row["auth_method"] or "agent")
+        key_path = _clean_key_path(body) if "key_path" in body else row["key_path"]
 
         # Credential is write-only: present+non-empty → re-encrypt & replace;
         # clear_credential=true → null it out; absent → unchanged.
@@ -294,13 +371,21 @@ async def update_ssh_host(host_id: int, request: Request, user=Depends(get_curre
         elif body.get("clear_credential") is True:
             enc = None
 
+        # Any change to how we CONNECT (host/port/user/auth) invalidates a prior
+        # host-key trust — force a fresh /test + /trust before exec can run again.
+        connection_changed = (
+            host != row["host"] or int(port) != int(row["port"]) or username != row["username"]
+        )
+        fp_reset_sql = ", host_key_fingerprint=NULL, known_hosts_line=NULL" if connection_changed else ""
+
         try:
             updated = await conn.fetchrow(
                 "UPDATE user_ssh_hosts SET name=$3, host=$4, port=$5, username=$6, "
-                "auth_type=$7, credential_encrypted=$8, updated_at=NOW() "
+                "auth_type=$7, credential_encrypted=$8, auth_method=$9, key_path=$10, "
+                f"updated_at=NOW(){fp_reset_sql} "
                 "WHERE id=$1 AND user_id=$2 "
-                "RETURNING id, name, host, port, username, auth_type, credential_encrypted, created_at, updated_at",
-                host_id, uid, name.strip(), host, int(port), username, auth_type, enc,
+                f"RETURNING {_FULL_COLUMNS}",
+                host_id, uid, name.strip(), host, int(port), username, auth_type, enc, auth_method, key_path,
             )
         except Exception as exc:
             if exc.__class__.__name__ == "UniqueViolationError":
@@ -322,13 +407,345 @@ async def delete_ssh_host(host_id: int, request: Request, user=Depends(get_curre
     return {"ok": True, "deleted": host_id}
 
 
+# ─── Trace-run scoping + emit + audit (Phase 4 governance) ─────────────────────
+# SSH probe/exec trace events need a workspace_runs home so the FK-backed
+# workspace_events inserts succeed and the frontend can stream them via
+# /api/harvis/runs/{id}/stream. We upsert ONE deterministic per-user-per-host
+# run whose id embeds the caller's uid (no cross-user collision, mirrors
+# harvis_exec._resolve_scoped_workspace).
+
+
+def _ssh_run_id(user_id: int, host_id: int) -> str:
+    return f"ssh-u{int(user_id)}-h{int(host_id)}"
+
+
+async def _ensure_ssh_run(pool, user_id: int, host_id: int, host: str) -> str:
+    run_id = _ssh_run_id(user_id, host_id)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO workspace_runs (id, user_id, session_id, task_brief, status)
+            VALUES ($1, $2, $1, $3, 'ssh')
+            ON CONFLICT (id) DO NOTHING
+            """,
+            run_id, int(user_id), f"SSH target {host}",
+        )
+    return run_id
+
+
+async def _emit(pool, run_id: str, event_type: str, payload: dict) -> None:
+    from workspace.terminal_container import emit_terminal_event
+
+    await emit_terminal_event(pool, run_id, event_type=event_type, payload=payload)
+
+
+async def _audit_ssh(
+    pool, *, session_key: str, tool: str, input_obj: dict,
+    status_code: int, output_meta: Optional[dict] = None, error: Optional[str] = None,
+) -> None:
+    """Mirror tools.openclaw_proxy._audit — write one openclaw_tool_audit row.
+    Never breaks the call on logging failure."""
+    if pool is None:
+        return
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO openclaw_tool_audit(session_key, tool, input, output_meta, status_code, error) "
+                "VALUES ($1, $2, $3::jsonb, $4::jsonb, $5, $6)",
+                session_key, tool, json.dumps(input_obj), json.dumps(output_meta or {}),
+                status_code, error,
+            )
+    except Exception:
+        return
+
+
+# ─── Governed probe / trust / exec ─────────────────────────────────────────────
+
+
 @ssh_router.post("/hosts/{host_id}/test")
 async def test_ssh_host(host_id: int, request: Request, user=Depends(get_current_user_optimized)):
-    """Connect/test STUB — intentionally does NOTHING, even with the flag on.
+    """PROBE (TOFU step 1): ssh-keyscan the host, compute SHA256 fingerprints,
+    and present them as UNTRUSTED. Registers a pending approval + emits an
+    approval_request trace event. Nothing is persisted/trusted here — the user
+    must eyeball the fingerprint and confirm via POST /hosts/{id}/trust."""
+    from remote import ssh_exec
+    from workspace.orchestration.risk import register_pending
 
-    The scaffold ships with zero SSH I/O (no paramiko/asyncssh anywhere in the
-    codebase). Returning 501 unconditionally — before any DB lookup — also
-    avoids becoming an existence oracle for other users' profile ids. A real
-    implementation lands only after explicit user approval of the security
-    review (dependency choice, host-key verification, egress policy)."""
-    raise HTTPException(status_code=501, detail=SSH_CONNECT_STUB_DETAIL)
+    pool = _pool_or_503(request)
+    await ensure_ssh_schema(pool)
+    uid = _uid(user)
+    async with pool.acquire() as conn:
+        row = await _fetch_owned(conn, uid, host_id)
+
+    try:
+        known_hosts_line, fingerprints = await ssh_exec.keyscan(row["host"], int(row["port"]))
+    except PermissionError as exc:
+        # SSRF guard: loopback / link-local (incl. cloud metadata) targets are refused.
+        raise HTTPException(status_code=400, detail=str(exc))
+    except TimeoutError:
+        raise HTTPException(status_code=504, detail="ssh-keyscan timed out — host unreachable?")
+    except FileNotFoundError:
+        raise HTTPException(status_code=500, detail="ssh-keyscan not installed in this image")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"ssh-keyscan failed: {exc}")
+
+    if not fingerprints:
+        raise HTTPException(
+            status_code=502,
+            detail="no host key returned (host unreachable, or not running ssh on this port)",
+        )
+
+    run_id = await _ensure_ssh_run(pool, uid, host_id, row["host"])
+    # action_id MUST be prefixed with "<run_id>-" so risk.get_pending_for_run(run_id)
+    # (which matches aid.startswith(f"{run_id}-")) can find it on the /trust call.
+    action_id = f"{run_id}-probe-{uuid.uuid4().hex}"
+    register_pending(action_id, {
+        "tool": "ssh.probe",
+        "host_id": host_id,
+        "host": row["host"],
+        "port": int(row["port"]),
+        "fingerprints": fingerprints,
+        "known_hosts_line": known_hosts_line,
+    })
+    await _emit(pool, run_id, "approval_request", {
+        "action_id": action_id,
+        "tool": "ssh.probe",
+        "host": row["host"],
+        "port": int(row["port"]),
+        "fingerprints": fingerprints,
+        "reason": "First connection — verify the host key fingerprint before trusting.",
+        "run_id": run_id,
+    })
+    await _audit_ssh(
+        pool, session_key=run_id, tool="ssh.probe",
+        input_obj={"host": row["host"], "port": int(row["port"])},
+        status_code=200, output_meta={"fingerprints": fingerprints, "action_id": action_id},
+    )
+    return {
+        "status": "pending_fingerprint",
+        "action_id": action_id,
+        "run_id": run_id,
+        "fingerprints": fingerprints,
+    }
+
+
+@ssh_router.post("/hosts/{host_id}/trust")
+async def trust_ssh_host(host_id: int, request: Request, user=Depends(get_current_user_optimized)):
+    """TOFU step 2: resolve the pending probe. On approve, pin the scanned
+    known_hosts line into the per-user known_hosts file AND store the
+    fingerprint + line on the row (now exec-eligible). On deny, store nothing."""
+    from workspace.orchestration.risk import get_pending_for_run, resolve_action
+    from remote import ssh_exec
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="request body must be a JSON object")
+    action_id = body.get("action_id")
+    approved = body.get("approved")
+    if not isinstance(action_id, str) or not action_id:
+        raise HTTPException(status_code=400, detail="action_id is required")
+    if not isinstance(approved, bool):
+        raise HTTPException(status_code=400, detail="approved must be a boolean")
+
+    pool = _pool_or_503(request)
+    await ensure_ssh_schema(pool)
+    uid = _uid(user)
+    async with pool.acquire() as conn:
+        row = await _fetch_owned(conn, uid, host_id)  # ownership gate + 404
+
+    run_id = _ssh_run_id(uid, host_id)
+    # Defense in depth: the action_id is namespaced by the per-user-per-host run
+    # id, so it can only be resolved by its owner against its own host.
+    if not action_id.startswith(f"{run_id}-"):
+        raise HTTPException(status_code=400, detail="action_id does not belong to this host")
+    pending = get_pending_for_run(run_id)
+    if not pending or pending.get("action_id") != action_id:
+        raise HTTPException(status_code=404, detail="no matching pending fingerprint approval")
+
+    known_hosts_line = pending.get("known_hosts_line") or ""
+    fingerprints = pending.get("fingerprints") or []
+    primary_fp = fingerprints[0] if fingerprints else None
+
+    # Validate an approval has a scanned key BEFORE consuming the pending action, so a
+    # malformed pending can be retried rather than silently discarded on resolve.
+    if approved and (not known_hosts_line or not primary_fp):
+        raise HTTPException(status_code=409, detail="pending approval has no scanned key to trust")
+
+    resolve_action(action_id, approved)
+
+    if not approved:
+        await _emit(pool, run_id, "decision", {
+            "tool": "ssh.probe", "lane": 5, "policy": "deny",
+            "reason": "host key fingerprint rejected by user", "source": "fingerprint_trust",
+            "run_id": run_id,
+        })
+        await _audit_ssh(
+            pool, session_key=run_id, tool="ssh.trust",
+            input_obj={"host": row["host"], "approved": False},
+            status_code=200, output_meta={"trusted": False},
+        )
+        return {"ok": True, "trusted": False}
+
+    # Pin into the per-user known_hosts file + persist on the row (presence validated above).
+    ssh_exec.append_known_hosts(uid, known_hosts_line)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE user_ssh_hosts SET host_key_fingerprint=$3, known_hosts_line=$4, updated_at=NOW() "
+            "WHERE id=$1 AND user_id=$2",
+            host_id, uid, primary_fp, known_hosts_line,
+        )
+    await _emit(pool, run_id, "decision", {
+        "tool": "ssh.probe", "lane": 5, "policy": "allow",
+        "reason": "host key trusted (fingerprint pinned)", "source": "fingerprint_trust",
+        "fingerprint": primary_fp, "run_id": run_id,
+    })
+    await _audit_ssh(
+        pool, session_key=run_id, tool="ssh.trust",
+        input_obj={"host": row["host"], "approved": True},
+        status_code=200, output_meta={"trusted": True, "fingerprint": primary_fp},
+    )
+    return {"ok": True, "trusted": True, "fingerprint": primary_fp}
+
+
+@ssh_router.post("/hosts/{host_id}/exec")
+async def exec_ssh_host(host_id: int, request: Request, user=Depends(get_current_user_optimized)):
+    """Run one command on a TRUSTED host over ssh (lane 5, governed).
+
+    Preconditions: HARVIS_SSH_ENABLED on (router-level 403 otherwise) AND the
+    host's fingerprint pinned (409 otherwise). Routes through authorize_action
+    (lane 5) and lands the full decision → tool_call → terminal_output →
+    tool_result trace + an openclaw_tool_audit row."""
+    from workspace.orchestration.authz import authorize_action
+    from owui_compat.workspace_method import LANE_EXTERNAL_SERVICES
+    from remote import ssh_exec
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="request body must be a JSON object")
+    command = body.get("command")
+    if not isinstance(command, str) or not command.strip():
+        raise HTTPException(status_code=400, detail="command must be a non-empty string")
+    timeout = body.get("timeout_s", 60)
+    try:
+        timeout = int(timeout)
+    except (TypeError, ValueError):
+        timeout = 60
+    timeout = max(1, min(600, timeout))
+
+    pool = _pool_or_503(request)
+    await ensure_ssh_schema(pool)
+    uid = _uid(user)
+    async with pool.acquire() as conn:
+        row = await _fetch_owned(conn, uid, host_id)
+
+    if not row["host_key_fingerprint"]:
+        raise HTTPException(
+            status_code=409,
+            detail="host not trusted yet, run /test then /trust",
+        )
+
+    run_id = await _ensure_ssh_run(pool, uid, host_id, row["host"])
+
+    # Phase 2 choke point (lane 5). With the flag off this denies (the same gate
+    # the router-level 403 enforces) — belt-and-suspenders + a traced decision.
+    async def _emit_decision(payload: dict) -> None:
+        await _emit(pool, run_id, "decision", {**payload, "run_id": run_id})
+
+    res = await authorize_action(
+        tool_name="ssh.exec",
+        args={"command": command, "host": row["host"]},
+        lane=LANE_EXTERNAL_SERVICES,
+        permission_mode=None,
+        run_id=run_id,
+        emit=_emit_decision,
+    )
+    if not res.allowed:
+        await _audit_ssh(
+            pool, session_key=run_id, tool="ssh.exec",
+            input_obj={"host": row["host"], "command": command},
+            status_code=403, error=res.reason or "denied by execution policy",
+        )
+        raise HTTPException(status_code=403, detail=res.reason or "denied by execution policy")
+
+    # Resolve an optional jump host (must be another profile OWNED by the caller).
+    profile = dict(row)
+    if row["jump_host_id"]:
+        async with pool.acquire() as conn:
+            jrow = await conn.fetchrow(
+                f"SELECT {_FULL_COLUMNS} FROM user_ssh_hosts WHERE id=$1 AND user_id=$2",
+                int(row["jump_host_id"]), uid,
+            )
+        if jrow is None:
+            raise HTTPException(status_code=409, detail="configured jump host not found or not owned")
+        profile["jump"] = {
+            "username": jrow["username"], "host": jrow["host"], "port": int(jrow["port"]),
+        }
+
+    preview = command.strip().splitlines()[0][:120] if command.strip() else ""
+    await _emit(pool, run_id, "tool_call", {
+        "tool": "ssh.exec",
+        "args": {"command": command, "host": row["host"], "preview": preview},
+        "target": {"kind": "ssh", "id": host_id},
+        "run_id": run_id,
+    })
+
+    try:
+        result = await ssh_exec.run_ssh(profile, command, user_id=uid, timeout=timeout)
+    except Exception as exc:  # unexpected — argv build / spawn failure
+        logger.error("[ssh-exec:%s] run_ssh failed: %s", run_id, exc)
+        await _audit_ssh(
+            pool, session_key=run_id, tool="ssh.exec",
+            input_obj={"host": row["host"], "command": command},
+            status_code=502, error=str(exc),
+        )
+        raise HTTPException(status_code=502, detail=f"ssh exec failed: {exc}")
+
+    for stream in ("stdout", "stderr"):
+        text = result.get(stream) or ""
+        if text:
+            await _emit(pool, run_id, "terminal_output", {
+                "tool": "ssh.exec",
+                "stream": stream,
+                "text": text,
+                "target": {"kind": "ssh", "id": host_id},
+                "run_id": run_id,
+            })
+
+    exit_code = int(result.get("exit_code", -1))
+    await _emit(pool, run_id, "tool_result", {
+        "tool": "ssh.exec",
+        "success": exit_code == 0,
+        "summary": f"exit={exit_code} out={len(result.get('stdout') or '')}B err={len(result.get('stderr') or '')}B",
+        "args": {"command": command, "host": row["host"]},
+        "target": {"kind": "ssh", "id": host_id},
+        "output": {
+            "exit_code": exit_code,
+            "truncated": bool(result.get("truncated", False)),
+            "stdout_preview": (result.get("stdout") or "")[:400],
+            "stderr_preview": (result.get("stderr") or "")[:400],
+        },
+        "run_id": run_id,
+    })
+    await _audit_ssh(
+        pool, session_key=run_id, tool="ssh.exec",
+        input_obj={"host": row["host"], "port": int(row["port"]), "command": command},
+        status_code=200,
+        output_meta={
+            "exit_code": exit_code,
+            "truncated": bool(result.get("truncated", False)),
+            "stdout_bytes": len(result.get("stdout") or ""),
+            "stderr_bytes": len(result.get("stderr") or ""),
+        },
+    )
+    return {
+        "exit_code": exit_code,
+        "stdout": result.get("stdout", ""),
+        "stderr": result.get("stderr", ""),
+        "truncated": bool(result.get("truncated", False)),
+    }
