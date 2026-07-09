@@ -84,6 +84,31 @@
 				{#if d.durationMs}<span>· {fmtDur(d.durationMs)}</span>{/if}
 			</div>
 		</div>
+	{:else if d.kind === 'decision'}
+		<!-- lane/risk gate badge: allow ✓ / deny ✗ / gate ⛨ -->
+		<div class="flex items-center gap-1.5">
+			<span
+				class="shrink-0 {d.policy === 'allow'
+					? 'text-emerald-500'
+					: d.policy === 'deny'
+						? 'text-red-500'
+						: 'text-amber-500'}">{d.policy === 'allow' ? '✓' : d.policy === 'deny' ? '✗' : '⛨'}</span
+			>
+			<span class="font-medium text-gray-700 dark:text-gray-200 truncate">
+				{d.tool ? toolLabel(d.tool) : $i18n.t('Policy')} · {d.policy || 'gate'}
+			</span>
+		</div>
+		{#if d.reason}
+			<div class="mt-1 text-[10px] text-gray-400 line-clamp-2 break-words">{d.reason}</div>
+		{/if}
+	{:else if d.kind === 'artifact'}
+		<div class="flex items-center gap-1.5">
+			<span class="text-indigo-400 shrink-0">◆</span>
+			<span class="font-medium text-gray-700 dark:text-gray-200 truncate">{d.label || $i18n.t('Artifact')}</span>
+		</div>
+		{#if d.path}
+			<div class="mt-1 font-mono text-[10px] text-gray-400 truncate">{d.path}</div>
+		{/if}
 	{:else if d.kind === 'error'}
 		<div class="flex items-center gap-1.5">
 			<span class="text-red-500">!</span>

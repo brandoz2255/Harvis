@@ -177,68 +177,31 @@ async def voice_transcribe(file: UploadFile = File(...), model: str = DEFAULT_MO
 
 @router.post("/api/run-command", tags=["vibe-coding"])
 async def run_command(req: RunCommandRequest):
+    """DISABLED — superseded by the governed Execution Core.
+
+    This endpoint used to run ``subprocess.run`` on the backend HOST (cwd=os.getcwd())
+    with NO authentication, behind a trivially-bypassable string denylist — an
+    unauthenticated RCE. It never executes now. Use the governed sandbox shell
+    (``/api/harvis/exec``, lane 3) or SSH targets (lane 5). Local host shell (lane 4)
+    is parked behind ``HARVIS_EXEC_HOST_SHELL`` and is unimplemented in Execution Core v0.
     """
-    Execute terminal commands for vibe coding.
-    """
-    try:
-        logger.info(f"🔧 Executing command: {req.command}")
-        
-        # Security: Enhanced command filtering
-        dangerous_commands = ["rm -rf", "sudo", "chmod 777", "mkfs", "dd if=", "format", "fdisk", "sfdisk"]
-        dangerous_chars = [";", "&", "|", "`", "$", "$(", ")", ">", "<", ">>"]
-        
-        # Check for dangerous commands and characters
-        command_lower = req.command.lower()
-        if any(cmd in command_lower for cmd in dangerous_commands):
-            return {"output": "❌ Command blocked for security reasons", "error": True}
-        
-        if any(char in req.command for char in dangerous_chars):
-            return {"output": "❌ Command contains potentially dangerous characters", "error": True}
-        
-        # Execute command safely without shell=True
-        try:
-            # Split command into arguments safely
-            cmd_args = shlex.split(req.command)
-            result = subprocess.run(
-                cmd_args,
-                shell=False,  # Safer: no shell interpretation
-                capture_output=True,
-                text=True,
-                timeout=30,
-                cwd=os.getcwd()
-            )
-        except ValueError as e:
-            # shlex.split failed - command has invalid syntax
-            return {"output": f"❌ Invalid command syntax: {str(e)}", "error": True}
-        
-        output = result.stdout + result.stderr
-        return {"output": output, "error": result.returncode != 0}
-        
-    except subprocess.TimeoutExpired:
-        return {"output": "❌ Command timed out", "error": True}
-    except Exception as e:
-        logger.error(f"Command execution failed: {e}")
-        return {"output": f"❌ Error: {str(e)}", "error": True}
+    host_shell = (os.getenv("HARVIS_EXEC_HOST_SHELL") or "").strip().lower() in {"1", "true", "yes", "on"}
+    if not host_shell:
+        raise HTTPException(
+            status_code=410,
+            detail="Host command execution is disabled. Use the governed sandbox shell "
+                   "(/api/harvis/exec). Local host shell (lane 4) is parked pending review.",
+        )
+    raise HTTPException(
+        status_code=501,
+        detail="Host shell (lane 4) is not implemented in Execution Core v0.",
+    )
 
 @router.post("/api/save-file", tags=["vibe-coding"])
 async def save_file(req: SaveFileRequest):
-    """
-    Save file content for vibe coding.
-    """
-    try:
-        logger.info(f"💾 Saving file: {req.filename}")
-        
-        # Security: Basic path validation
-        if ".." in req.filename or req.filename.startswith("/"):
-            return {"success": False, "error": "Invalid filename"}
-        
-        # Save file in current working directory
-        filepath = os.path.join(os.getcwd(), req.filename)
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write(req.content)
-        
-        return {"success": True, "message": f"File {req.filename} saved successfully"}
-        
-    except Exception as e:
-        logger.error(f"File save failed: {e}")
-        return {"success": False, "error": str(e)}
+    """DISABLED — this wrote arbitrary files to the backend CWD with NO authentication.
+    Superseded by the governed workspace file tools (Execution Core lane 2)."""
+    raise HTTPException(
+        status_code=410,
+        detail="Direct file save is disabled. Use the governed workspace file tools.",
+    )

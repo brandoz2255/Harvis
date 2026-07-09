@@ -79,7 +79,8 @@ export function computeStages(events: RunEventLike[], opts: StageOpts): StageSta
 	const toolCalls = evts.filter((e) => e.type === 'tool_call');
 	const toolCount = toolCalls.length;
 	const lastTool = toolCount ? toolCalls[toolCount - 1].tool : '';
-	const sawWorking = evts.some((e) => e.type === 'token') || toolCount > 0;
+	const sawWorking =
+		evts.some((e) => e.type === 'token' || e.type === 'terminal_output') || toolCount > 0;
 	const fileActivity = toolCalls.some((e) => FILE_TOOLS.test(e.tool || ''));
 	const doneEvt = evts.find((e) => e.type === 'done');
 	const changedCount = (doneEvt?.changed_files || []).length;

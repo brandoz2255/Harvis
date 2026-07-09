@@ -19,6 +19,33 @@ export type WorkspaceEvent = {
 	run_id?: string;
 	structured_sources?: unknown[];
 	structured_artifact_id?: string;
+	// Harvis Execution Trace (Phase 1) event fields:
+	// terminal_output — {command_id, target, stream, content, exit_code?, duration_ms?, truncated?}
+	command_id?: string;
+	target?: { kind: string; id: string };
+	stream?: 'stdout' | 'stderr';
+	exit_code?: number;
+	duration_ms?: number;
+	truncated?: boolean;
+	// decision — {action_id?, tool, lane, tier, policy, reason, source}
+	lane?: string;
+	tier?: string;
+	policy?: 'allow' | 'deny' | 'gate';
+	reason?: string;
+	action_id?: string;
+	// artifact — {artifact_id, path, mime_type, size_bytes, label}
+	artifact_id?: string;
+	path?: string;
+	mime_type?: string;
+	size_bytes?: number;
+	label?: string;
+	// search_trace — {phase, query, provider, result_count, results, collapsed_by_default}
+	phase?: string;
+	query?: string;
+	provider?: string;
+	result_count?: number;
+	results?: { title?: string; domain?: string; url?: string; favicon?: string; snippet?: string }[];
+	collapsed_by_default?: boolean;
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	[key: string]: any;
 };

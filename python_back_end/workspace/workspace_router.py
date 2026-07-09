@@ -811,6 +811,14 @@ async def _db_save_event(pool, workspace_id: str, seq: int, event: OpenClawEvent
             "run_id", "agent_label", "steps",
             "action_id", "risk", "approved",  # per-action permission gate (in-place)
             "analysis_md",  # Build Result Narrator: full written analysis on the terminal event
+            # Harvis Execution Trace (Phase 1) — fields for the new event types
+            # terminal_output / artifact / decision / search_trace. Keys not in
+            # this whitelist are silently DROPPED at persist time.
+            "stream", "command_id", "target", "exit_code", "duration_ms",
+            "truncated", "lane", "tier", "policy", "reason",
+            "artifact_id", "path", "mime_type", "size_bytes", "label",
+            "phase", "query", "provider", "result_count", "results",
+            "collapsed_by_default",
         ):
             val = event.data.get(key)
             if val is not None:

@@ -5,7 +5,7 @@ import type { WorkspaceEvent } from '$lib/apis/streaming/workspace-stream';
 // ids are stable, so re-running this on a growing event array never reflows or
 // remounts existing nodes (no SvelteFlow "live-append jump").
 
-export type WfNodeKind = 'agent' | 'tool' | 'summary' | 'error';
+export type WfNodeKind = 'agent' | 'tool' | 'summary' | 'error' | 'decision' | 'artifact';
 
 export interface WfNodeData {
 	kind: WfNodeKind;
@@ -23,6 +23,12 @@ export interface WfNodeData {
 	cancelled?: boolean;
 	message?: string;
 	fixHint?: string;
+	// decision (lane/risk gate badge)
+	policy?: 'allow' | 'deny' | 'gate';
+	reason?: string;
+	// artifact leaf
+	path?: string;
+	mimeType?: string;
 }
 
 export interface WfNode {
@@ -137,10 +143,48 @@ export function eventsToGraph(events: WorkspaceEvent[]): { nodes: WfNode[]; edge
 					if (node) {
 						node.data.status = 'done';
 						node.data.ok = e.success !== false;
-						node.data.output = String(e.output ?? '').slice(0, 200);
+						// Keep any accumulated terminal_output tail if the result carries no
+						// output of its own (avoids blanking streamed shell output on completion).
+						const resultOut = String(e.output ?? '');
+						if (resultOut) node.data.output = resultOut.slice(0, 200);
 					}
 					pendingToolByLane.delete(laneKey);
 				}
+				break;
+			}
+			case 'terminal_output': {
+				// Fold shell output into the lane's active (or last) tool node rather than
+				// spawning a node per chunk — keeps ids/positions stable on live append.
+				const targetId = pendingToolByLane.get(laneKey) ?? tailByLane.get(laneKey);
+				const node = targetId ? byId.get(targetId) : undefined;
+				if (node && node.data.kind === 'tool') {
+					const text = String(e.content ?? '');
+					if (text) {
+						node.data.output = ((node.data.output ?? '') + text).slice(-200);
+					}
+				}
+				break;
+			}
+			case 'decision': {
+				const n = rowInLane.get(laneKey) ?? 0;
+				pushNode(laneKey, `decision:${laneKey}:${n}`, {
+					kind: 'decision',
+					tool: e.tool as string,
+					policy: (e.policy as WfNodeData['policy']) ?? 'gate',
+					reason: String(e.reason ?? '')
+				});
+				break;
+			}
+			case 'artifact': {
+				const n = rowInLane.get(laneKey) ?? 0;
+				const id = e.artifact_id ? `artifact:${e.artifact_id}` : `artifact:${laneKey}:${n}`;
+				if (byId.has(id)) break; // dedupe replays of the same artifact
+				pushNode(laneKey, id, {
+					kind: 'artifact',
+					label: (e.label as string) || (e.path as string) || 'Artifact',
+					path: e.path as string,
+					mimeType: e.mime_type as string
+				});
 				break;
 			}
 			case 'done': {

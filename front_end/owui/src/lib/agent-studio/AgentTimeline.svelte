@@ -19,7 +19,10 @@
 		| { kind: 'log'; text: string }
 		| { kind: 'result'; text: string }
 		| { kind: 'error'; text: string }
-		| { kind: 'cancelled' };
+		| { kind: 'cancelled' }
+		| { kind: 'term'; text: string; stream: 'stdout' | 'stderr' }
+		| { kind: 'decision'; policy: 'allow' | 'deny' | 'gate'; tool: string; reason: string }
+		| { kind: 'artifact'; label: string; path: string };
 
 	const build = (evs: WorkspaceEvent[]): Block[] => {
 		const out: Block[] = [];
@@ -44,6 +47,29 @@
 					break;
 				case 'log':
 					if (e.message) out.push({ kind: 'log', text: String(e.message) });
+					break;
+				case 'terminal_output':
+					if (e.content && String(e.content).trim())
+						out.push({
+							kind: 'term',
+							text: String(e.content).slice(0, 2000),
+							stream: e.stream === 'stderr' ? 'stderr' : 'stdout'
+						});
+					break;
+				case 'decision':
+					out.push({
+						kind: 'decision',
+						policy: e.policy === 'allow' || e.policy === 'deny' ? e.policy : 'gate',
+						tool: String(e.tool ?? ''),
+						reason: String(e.reason ?? '')
+					});
+					break;
+				case 'artifact':
+					out.push({
+						kind: 'artifact',
+						label: String(e.label || e.path || 'Artifact'),
+						path: String(e.path ?? '')
+					});
 					break;
 				case 'done':
 					if (e.summary) out.push({ kind: 'result', text: String(e.summary) });
@@ -105,6 +131,36 @@
 			<div class="text-red-400 leading-relaxed whitespace-pre-wrap break-words">{b.text}</div>
 		{:else if b.kind === 'cancelled'}
 			<div class="text-amber-400 text-xs">{$i18n.t('Cancelled.')}</div>
+		{:else if b.kind === 'term'}
+			<!-- sandbox/terminal output row -->
+			<div
+				class="rounded-md bg-black/30 px-2 py-1.5 font-mono text-[11px] whitespace-pre-wrap break-words {b.stream ===
+				'stderr'
+					? 'text-red-300'
+					: 'text-gray-300'}"
+			>{b.text}</div>
+		{:else if b.kind === 'decision'}
+			<div class="flex items-start gap-2 text-xs">
+				<span
+					class="mt-0.5 shrink-0 {b.policy === 'allow'
+						? 'text-emerald-400'
+						: b.policy === 'deny'
+							? 'text-red-400'
+							: 'text-amber-400'}">⛨</span
+				>
+				<div class="min-w-0 flex-1 text-gray-400">
+					<span class="uppercase tracking-wide">{b.policy}</span>
+					{#if b.tool}<span> · {toolLabel(b.tool)}</span>{/if}
+					{#if b.reason}
+						<div class="mt-0.5 text-[11px] text-gray-500 break-words line-clamp-2">{b.reason}</div>
+					{/if}
+				</div>
+			</div>
+		{:else if b.kind === 'artifact'}
+			<div class="inline-flex max-w-full items-center gap-1.5 rounded-full border border-indigo-500/30 bg-indigo-500/10 px-2.5 py-1 text-xs text-indigo-300">
+				<span class="shrink-0">◆</span>
+				<span class="truncate" title={b.path}>{b.label}</span>
+			</div>
 		{/if}
 	{/each}
 </div>

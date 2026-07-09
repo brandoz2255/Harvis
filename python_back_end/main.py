@@ -56,6 +56,7 @@ from workspace.kubectl_proxy import kubectl_proxy_router
 from workspace.repo_manager import repo_manager_router
 from vibecoding.auth_github import router as auth_github_router, auth_router as auth_github_callback_router
 from workspace.terminal_routes import router as workspace_terminal_router
+from workspace.harvis_trace import harvis_trace_router
 
 # Import tools routers
 from tools import maps_router, openclaw_proxy_router, browser_proxy_router, opencode_llm_router, discord_proxy_router
@@ -1311,6 +1312,9 @@ app.include_router(workspace_router)
 # on openclaw-internal so the agent can `curl` it for `exec` calls. Persistent
 # named volume per workspace_id (see workspace/terminal_container.py).
 app.include_router(workspace_terminal_router)
+# Include the Harvis Execution Trace facade (/api/harvis/*) — a clean namespace
+# that DELEGATES to workspace_router's store/stream (no new storage of its own).
+app.include_router(harvis_trace_router)
 # Include model proxy (OpenAI-compat endpoint for OpenClaw → Moonshot forwarding)
 # OpenClaw calls http://harvis-ai-merged-backend:8000/v1/chat/completions
 # so that the Moonshot API key never leaves the backend pod.
