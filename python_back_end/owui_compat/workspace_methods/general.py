@@ -89,15 +89,16 @@ def _repo_runner() -> list:
           lane=wm.LANE_WORKSPACE_FILES, status="ready", real=True, inputs=["repo_url"], output="workspace"),
         T("read_setup", "Read setup", purpose="Read the README + manifests and detect the stack + setup commands.",
           lane=wm.LANE_UI_MOCK, status="ready", real=True, output="report"),
-        T("install_deps", "Install deps", purpose="Run the install command inside the sandbox.",
+        T("install_deps", "Install deps", purpose="Run the install command inside the isolated sandbox.",
           lane=wm.LANE_CONTAINER_TERMINAL, status=run_status, approval=True, output="terminal",
-          desc="Runs in an isolated sandbox — visible and logged. Enable HARVIS_ADAPTIVE_REPO_RUN_ENABLED to activate."),
-        T("run_app", "Build & start", purpose="Run build/start in the sandbox and surface a preview.",
+          desc="Runs in a dedicated repo-sandbox container with no access to Harvis services — visible and logged. Enable HARVIS_ADAPTIVE_REPO_RUN_ENABLED to activate."),
+        T("run_app", "Run app", purpose="Start the dev server in the sandbox and surface a live preview.",
           lane=wm.LANE_CONTAINER_TERMINAL, status=run_status, approval=True, output="terminal + preview",
-          desc="Sandbox execution — approval-gated."),
-        T("app_preview", "App preview", purpose="Preview a dev server the app starts.",
-          lane=wm.LANE_LOCAL_DESKTOP, status="disabled", output="iframe",
-          desc="Port-forward preview — arrives with the sandbox run wiring."),
+          desc="Untrusted code in an isolated network (no DB/ollama/openclaw) — approval-gated, off by default."),
+        T("app_preview", "App preview", purpose="Live preview of the running dev server in a sandboxed iframe.",
+          lane=wm.LANE_CONTAINER_TERMINAL, status=("gated" if fab_repo.repo_run_enabled() else "disabled"),
+          approval=True, output="iframe",
+          desc="Served from the sandbox's own localhost-published port (its own origin) — isolated from Harvis. Works for any framework (Vite, Next.js, SvelteKit, Astro, Nuxt, generic)."),
     ]
 
 

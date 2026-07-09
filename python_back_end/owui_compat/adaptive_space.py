@@ -31,6 +31,7 @@ from fastapi.responses import FileResponse
 from . import fab_stress
 from . import fab_cad
 from . import fab_repo
+from . import repo_sandbox
 from . import workspace_method as wm
 from .workspace_methods import fabrication as _fab_pack  # noqa: F401 — registers the pack
 from .workspace_methods import general as _gen_packs  # noqa: F401 — registers the other templates
@@ -404,7 +405,25 @@ def register_adaptive_space_routes(router: APIRouter, get_current_user: Callable
     async def get_space(space_id: str, request: Request, user=Depends(get_current_user)):
         pool = _pool(request)
         await _ensure_schema(pool)
-        return _space_dict(await _fetch_owned(pool, space_id, int(user.id)))
+        row = await _fetch_owned(pool, space_id, int(user.id))
+        # Reconcile a persisted 'running' preview that has no live sandbox behind it:
+        # after a backend restart the manager's in-memory box is gone, so a green
+        # "Live" badge would linger over a dead container forever (the client stops
+        # polling once running). Only 'running' is reconciled here — the in-flight
+        # statuses can legitimately have no box for a sub-second launch window.
+        try:
+            manifest = _as_manifest(row["manifest"])
+            repo = manifest.get("repo")
+            preview = repo.get("preview") if isinstance(repo, dict) else None
+            if (isinstance(preview, dict) and preview.get("status") == "running"
+                    and repo_sandbox.get_manager().state(space_id) is None):
+                preview.update({"status": "stopped", "host_port": 0, "at": _now(),
+                                "error": preview.get("error") or "sandbox is no longer running (backend restarted)"})
+                await _save_manifest(pool, space_id, int(user.id), manifest)
+                row = await _fetch_owned(pool, space_id, int(user.id))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("adaptive: preview reconcile failed for %s: %s", space_id, exc)
+        return _space_dict(row)
 
     @router.post("/api/adaptive/spaces/{space_id}/step")
     async def advance_step(space_id: str, payload: dict, request: Request, user=Depends(get_current_user)):
@@ -671,10 +690,26 @@ def register_adaptive_space_routes(router: APIRouter, get_current_user: Callable
         if not result.get("ok"):
             raise HTTPException(status_code=400, detail=result.get("error") or "Repo inspection failed.")
         manifest = _as_manifest(row["manifest"])
+        prev_repo = manifest.get("repo") or {}
+        prev_preview = prev_repo.get("preview")
+        same_url = prev_repo.get("url") == result["url"]
         manifest["repo"] = {
             "name": result["name"], "url": result["url"], "stack": result["stack"],
             "tree": result["tree"], "readme": result["readme"][:12000], "log": result["log"], "at": _now(),
         }
+        # A re-clone must not orphan a running sandbox: rebuilding manifest.repo from
+        # scratch would drop the preview key, hiding a still-serving container (and its
+        # Stop control) from the UI. If the URL is unchanged, carry the live preview
+        # forward; if it changed, tear the old sandbox down so nothing keeps serving
+        # invisibly for up to the idle timeout.
+        if isinstance(prev_preview, dict) and prev_preview.get("status") in ("cloning", "installing", "starting", "running"):
+            if same_url:
+                manifest["repo"]["preview"] = prev_preview
+            else:
+                try:
+                    await repo_sandbox.get_manager().stop(space_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("adaptive: stop stale sandbox on re-inspect failed for %s: %s", space_id, exc)
         kept = [r for r in manifest.get("resources", []) if not (isinstance(r, dict) and r.get("kind") == "repo")]
         kept.append(wm.make_resource("repo", "artifact", result["name"], meta={"url": result["url"], "stack": (result["stack"] or {}).get("stack")}))
         manifest["resources"] = kept
@@ -690,19 +725,142 @@ def register_adaptive_space_routes(router: APIRouter, get_current_user: Callable
 
     @router.post("/api/adaptive/spaces/{space_id}/repo/run")
     async def repo_run(space_id: str, payload: dict, request: Request, user=Depends(get_current_user)):
-        """Run a setup command (install/build/start) in an ISOLATED sandbox. A
-        higher-lane capability gated OFF by default — running untrusted setup needs
-        a toolchain sandbox that isn't wired this pass, so it refuses honestly
-        rather than executing repo code in the backend container."""
-        await _fetch_owned(_pool(request), space_id, int(user.id))  # ownership 404
-        if not fab_repo.repo_run_enabled():
+        """Start the repo's dev server in the ISOLATED repo-sandbox and expose a
+        live preview. Untrusted code — so it runs in a dedicated container on a
+        network with NO Harvis service (can't reach the DB/ollama/openclaw), gated
+        OFF by default + explicit per-run approval. Launches in the background and
+        streams status into manifest.repo.preview; the client polls the space."""
+        pool = _pool(request)
+        await _ensure_schema(pool)
+        row = await _fetch_owned(pool, space_id, int(user.id))
+        if not repo_sandbox.run_enabled():
             raise HTTPException(
                 status_code=403,
-                detail="Sandbox run isn't enabled. Clone + inspect work now; running install/build/start "
-                "safely needs the isolated toolchain sandbox (next pass). The detected commands are shown so "
-                "you can run them yourself.",
+                detail="Live app preview isn't enabled on this deployment. It runs untrusted repo code, so "
+                "it stays off until an operator sets HARVIS_ADAPTIVE_REPO_RUN_ENABLED=true and the isolated "
+                "repo-sandbox network is up. Clone + inspect + the detected setup commands work now.",
             )
-        raise HTTPException(status_code=501, detail="Sandbox run wiring pending.")
+        manifest = _as_manifest(row["manifest"])
+        repo = manifest.get("repo")
+        if not repo:
+            raise HTTPException(status_code=400, detail="Clone the repository first.")
+        # Recompute the run plan from the on-disk clone so a stale stored plan
+        # (e.g. from before a detector fix) can't drive the launch.
+        dest = fab_repo.repo_dir(int(user.id), space_id)
+        if os.path.isdir(dest):
+            stack = fab_repo.detect_stack(dest)
+        else:
+            stack = repo.get("stack") or {}
+        plan = stack.get("run_plan") or {}
+        req = stack.get("requirements") or {}
+        if req.get("multi_service") or (req and req.get("runnable_now") is False and req.get("services")):
+            # Honest multi-service refusal: name what the app actually needs
+            # instead of pretending it's a CLI. Phase C (trusted service
+            # provisioning) is what would unlock this — design-only for now.
+            services = [s.get("name") for s in (req.get("services") or []) if isinstance(s, dict) and s.get("name")]
+            procs = [
+                f"{p.get('name')} ({p.get('role')})" if p.get("role") else str(p.get("name"))
+                for p in (req.get("processes") or []) if isinstance(p, dict) and p.get("name")
+            ]
+            needs = []
+            if services:
+                needs.append("services: " + ", ".join(services))
+            if procs:
+                needs.append("processes: " + ", ".join(procs))
+            env_req = [e for e in (req.get("env_required") or []) if e]
+            if env_req:
+                needs.append("env: " + ", ".join(env_req))
+            extra = " ".join(x for x in (req.get("blocked_reason"), req.get("provision_note")) if x)
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Detected a multi-service %s app. It needs %s. The sandbox can inspect it now and run "
+                    "simpler single-process apps, but fully opening this needs trusted service provisioning "
+                    "(coming).%s"
+                    % (req.get("runtime") or "app", "; ".join(needs) or "external services", (" " + extra) if extra else "")
+                ),
+            )
+        if not plan.get("web") or not plan.get("dev_cmd"):
+            raise HTTPException(status_code=400, detail="This repo has no runnable web dev server — it looks like a CLI or library.")
+        fw = plan.get("framework")
+        if not bool((payload or {}).get("approved")):
+            raise HTTPException(status_code=403, detail="Running the app needs your explicit approval.")
+        # Record WHY this untrusted-code run was approved — an explicit UI 'click', or
+        # the task text asking for it ('intent'). Audited so the approval is never a
+        # consent event that didn't happen.
+        consent = str((payload or {}).get("consent") or "click")
+        manifest.setdefault("approvals", []).append({
+            "kind": "repo_run", "consent": consent, "at": _now(),
+            "user_id": int(user.id), "url": repo.get("url"), "framework": fw,
+        })
+
+        cur = repo.get("preview") or {}
+        if cur.get("status") in ("cloning", "installing", "starting") and repo_sandbox.get_manager().state(space_id) is not None:
+            return {"ok": True, "preview": cur}  # genuinely in flight — don't double-launch
+        # If the manager has no live box, a persisted in-flight status is stale
+        # (backend restarted mid-run) — fall through and relaunch.
+
+        # Ready the sandbox network before launching so we fail loudly, not silently.
+        ready = await repo_sandbox.get_manager().probe()
+        if not ready.get("ready"):
+            raise HTTPException(status_code=503, detail=f"Repo sandbox not ready: {ready.get('reason')}")
+
+        # The dev server binds 0.0.0.0:3000 inside the sandbox and Docker
+        # publishes it to a 127.0.0.1 host port; the manager fills in
+        # preview.host_port via _persist once the app is up. No base path.
+        dev_cmd = plan["dev_cmd"]
+        install_cmd = stack.get("install") or "npm install"
+        clone_url = repo.get("url")
+
+        preview = {
+            "status": "cloning", "framework": fw,
+            "port": plan.get("port"),
+            "error": "", "log_tail": "", "at": _now(),
+        }
+        manifest["repo"]["preview"] = preview
+        await _save_manifest(pool, space_id, int(user.id), manifest)
+
+        async def _persist(status: str, fields: dict) -> None:
+            # Terminal statuses are the ones a stuck spinner can't recover from, so
+            # retry those a couple of times; the client keeps polling on the
+            # in-flight ones and will pick up a later write anyway.
+            attempts = 3 if status in ("running", "failed", "stopped") else 1
+            for i in range(attempts):
+                try:
+                    r = await _fetch_owned(pool, space_id, int(user.id))
+                    m = _as_manifest(r["manifest"])
+                    if not m.get("repo"):
+                        return
+                    prev = m["repo"].get("preview") or {}
+                    prev.update({"status": status, **(fields or {})})
+                    prev["at"] = _now()
+                    m["repo"]["preview"] = prev
+                    await _save_manifest(pool, space_id, int(user.id), m)
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("adaptive: preview persist failed for %s (attempt %d/%d): %s",
+                                   space_id, i + 1, attempts, exc)
+                    if i + 1 < attempts:
+                        await asyncio.sleep(0.5 * (i + 1))
+
+        asyncio.create_task(repo_sandbox.get_manager().run(
+            space_id, clone_url, install_cmd, dev_cmd, plan.get("env") or {}, fw, _persist,
+        ))
+        logger.info("adaptive: repo dev server launching for space %s (fw=%s)", space_id, fw)
+        return {"ok": True, "preview": preview}
+
+    @router.post("/api/adaptive/spaces/{space_id}/repo/stop")
+    async def repo_stop(space_id: str, request: Request, user=Depends(get_current_user)):
+        """Tear down the space's dev-server sandbox and mark the preview stopped."""
+        pool = _pool(request)
+        row = await _fetch_owned(pool, space_id, int(user.id))
+        await repo_sandbox.get_manager().stop(space_id)
+        manifest = _as_manifest(row["manifest"])
+        if manifest.get("repo") and manifest["repo"].get("preview"):
+            manifest["repo"]["preview"]["status"] = "stopped"
+            manifest["repo"]["preview"]["at"] = _now()
+            await _save_manifest(pool, space_id, int(user.id), manifest)
+        return {"ok": True}
 
     @router.post("/api/adaptive/spaces/{space_id}/notes")
     async def save_notes(space_id: str, payload: dict, request: Request, user=Depends(get_current_user)):

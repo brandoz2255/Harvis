@@ -520,6 +520,16 @@ async def lifespan(app: FastAPI):
         )
         logger.info("✅ Database connection pool created")
 
+        # Repo Runner: periodically reap idle / finished preview sandboxes so the
+        # advertised idle-teardown actually fires (only when the feature is on).
+        try:
+            from owui_compat import repo_sandbox as _repo_sandbox
+            if _repo_sandbox.run_enabled():
+                asyncio.create_task(_repo_sandbox.run_sweeper())
+                logger.info("✅ Repo-sandbox idle sweeper started")
+        except Exception as _exc:  # noqa: BLE001
+            logger.warning("repo-sandbox sweeper not started: %s", _exc)
+
         # Ensure OpenClaw web tool audit + prefs columns exist (idempotent)
         try:
             async with app.state.pg_pool.acquire() as conn:
@@ -1209,6 +1219,41 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── CSRF guard for the untrusted Repo Runner preview lane ──────────────────────
+# get_current_user reads the ambient `access_token` cookie, so a *same-site* origin
+# — e.g. a sandbox dev server on another localhost port — could otherwise drive
+# credentialed, state-changing API calls as the logged-in user (SameSite=Lax gives
+# no protection between two localhost ports). Reject unsafe /api/ requests whose
+# Origin is present and is neither same-origin nor on the trusted allowlist.
+# Same-origin requests, allowlisted (CORS) origins, and non-browser callers (no
+# Origin header, which are Bearer-authed and not a CSRF vector) all pass untouched.
+_CSRF_ALLOWED_NETLOCS = {
+    "harvis.dulc3.tech",
+    "localhost:9000", "127.0.0.1:9000",
+    "localhost:3000", "localhost:3001", "127.0.0.1:3000", "127.0.0.1:3001",
+    "frontend:3000", "nginx-proxy:80", "localhost:8000", "127.0.0.1:8000",
+}
+_CSRF_UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+@app.middleware("http")
+async def csrf_origin_guard(request: Request, call_next):
+    if request.method in _CSRF_UNSAFE_METHODS and request.url.path.startswith("/api/"):
+        origin = request.headers.get("origin")
+        if origin:
+            netloc = origin.split("://", 1)[-1]  # strip scheme → host[:port]
+            host = request.headers.get("host", "")
+            if netloc != host and netloc not in _CSRF_ALLOWED_NETLOCS:
+                logger.warning("CSRF guard blocked %s %s from origin %s (host %s)",
+                               request.method, request.url.path, origin, host)
+                from fastapi.responses import JSONResponse
+                return JSONResponse(
+                    {"detail": "Cross-origin request blocked (CSRF protection)."},
+                    status_code=403,
+                )
+    return await call_next(request)
+
 
 if os.path.exists(FRONTEND_DIR):
     app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")

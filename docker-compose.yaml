@@ -239,6 +239,15 @@ services:
       # Set HARVIS_ADAPTIVE_CAD_ENABLED=true and bring up the cad-engine sidecar to activate.
       HARVIS_ADAPTIVE_CAD_ENABLED: "${HARVIS_ADAPTIVE_CAD_ENABLED:-}"
       HARVIS_ADAPTIVE_CAD_URL: "${HARVIS_ADAPTIVE_CAD_URL:-http://harvis-cad:8000}"
+      # Adaptive Workspace Repo Runner — clone + run an untrusted repo in an isolated,
+      # cap-dropped sandbox on the repo-sandbox network. Flag default OFF (untrusted code).
+      # Build the polyglot image: docker build -t harvis-repo-sandbox:local ./repo-sandbox-engine
+      HARVIS_ADAPTIVE_REPO_RUN_ENABLED: "${HARVIS_ADAPTIVE_REPO_RUN_ENABLED:-false}"
+      HARVIS_ADAPTIVE_REPO_SANDBOX_IMAGE: "${HARVIS_ADAPTIVE_REPO_SANDBOX_IMAGE:-harvis-repo-sandbox:local}"
+      HARVIS_ADAPTIVE_REPO_SANDBOX_NETWORK: "${HARVIS_ADAPTIVE_REPO_SANDBOX_NETWORK:-harvis_repo-sandbox}"
+      HARVIS_ADAPTIVE_REPO_SANDBOX_CPUS: "${HARVIS_ADAPTIVE_REPO_SANDBOX_CPUS:-1.5}"
+      HARVIS_ADAPTIVE_REPO_SANDBOX_MEM: "${HARVIS_ADAPTIVE_REPO_SANDBOX_MEM:-1500m}"
+      HARVIS_ADAPTIVE_REPO_DEV_PORT: "${HARVIS_ADAPTIVE_REPO_DEV_PORT:-3000}"
       HARVIS_OPENCODE_CONTAINER: "${HARVIS_OPENCODE_CONTAINER:-harvis-opencode}"
       HARVIS_OPENCODE_DEFAULT_MODEL: "${HARVIS_OPENCODE_DEFAULT_MODEL:-qwen3:4b}"
       HARVIS_OPENCODE_TIMEOUT_S: "${HARVIS_OPENCODE_TIMEOUT_S:-900}"
@@ -333,6 +342,7 @@ services:
       - ollama-n8n-network
       - openclaw-internal
       - cad-internal
+      - repo-sandbox
     extra_hosts:
       # Allow backend container to reach host-installed openclaw gateway on :18790
       - "host.docker.internal:host-gateway"
@@ -1019,6 +1029,12 @@ networks:
   cad-internal:
     driver: bridge
     internal: true
+  # Repo Runner sandbox network — NOT internal:true (untrusted repo code needs the
+  # internet for npm/uv installs). No Harvis service is attached, so the sandbox can't
+  # reach pgsql/ollama/openclaw; the backend is dual-homed only to run the readiness
+  # probe. The live preview is a docker-published 127.0.0.1 host port hit directly.
+  repo-sandbox:
+    driver: bridge
 
 volumes:
   ollama-models:
