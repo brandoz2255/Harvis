@@ -12,6 +12,13 @@ import json
 import logging
 import os
 
+from owui_compat.workspace_method import (
+    DEFAULT_SAFE_LANE,
+    LANE_CONTAINER_TERMINAL,
+    LANE_UI_MOCK,
+    LANE_WORKSPACE_FILES,
+)
+
 from .isolation import validate_agent_path
 
 logger = logging.getLogger(__name__)
@@ -19,7 +26,9 @@ logger = logging.getLogger(__name__)
 _MAX_OUTPUT = 8000
 _EXEC_TIMEOUT = 60
 
-# OpenAI-format tool schema advertised to the model each step.
+# OpenAI-format tool schema advertised to the model each step. Each entry also
+# carries its Harvis permission ``lane`` (Execution Core Phase 2) — stripped
+# before the schema goes on the wire (see WIRE_TOOL_SCHEMA below).
 TOOL_SCHEMA = [
     {
         "type": "function",
@@ -32,6 +41,7 @@ TOOL_SCHEMA = [
                 "required": ["path"],
             },
         },
+        "lane": LANE_WORKSPACE_FILES,
     },
     {
         "type": "function",
@@ -51,6 +61,7 @@ TOOL_SCHEMA = [
                 "required": ["path", "content"],
             },
         },
+        "lane": LANE_WORKSPACE_FILES,
     },
     {
         "type": "function",
@@ -74,6 +85,7 @@ TOOL_SCHEMA = [
                 "required": ["path", "old_str", "new_str"],
             },
         },
+        "lane": LANE_WORKSPACE_FILES,
     },
     {
         "type": "function",
@@ -86,6 +98,7 @@ TOOL_SCHEMA = [
                 "required": ["command"],
             },
         },
+        "lane": LANE_CONTAINER_TERMINAL,
     },
     {
         "type": "function",
@@ -98,8 +111,39 @@ TOOL_SCHEMA = [
                 "required": ["summary"],
             },
         },
+        "lane": LANE_UI_MOCK,
     },
 ]
+
+# What actually goes ON THE WIRE to the model API — TOOL_SCHEMA minus Harvis-
+# internal keys ("lane"). Strict OpenAI-compatible upstreams can reject unknown
+# keys inside a tool entry, so the request body must stay byte-identical to the
+# pre-lane schema. Dict comprehension preserves key order → identical JSON.
+WIRE_TOOL_SCHEMA = [
+    {k: v for k, v in entry.items() if k != "lane"} for entry in TOOL_SCHEMA
+]
+
+# Tool names dispatched / risk-classified elsewhere but not advertised in
+# TOOL_SCHEMA (dispatch_tool accepts run_tests; risk.py knows these aliases).
+_EXTRA_TOOL_LANES = {
+    "run_tests": LANE_CONTAINER_TERMINAL,
+    "run_code": LANE_CONTAINER_TERMINAL,
+    "shell": LANE_CONTAINER_TERMINAL,
+    "bash": LANE_CONTAINER_TERMINAL,
+}
+
+
+def lane_for_tool(name: str) -> int:
+    """Permission lane for a tool name. Unknown tools default to the safe
+    ceiling (lane 3, sandbox terminal) — never accidentally lane-1 trivial."""
+    n = (name or "").lower()
+    for entry in TOOL_SCHEMA:
+        if ((entry.get("function") or {}).get("name") or "").lower() == n:
+            try:
+                return int(entry.get("lane", DEFAULT_SAFE_LANE))
+            except (TypeError, ValueError):
+                return DEFAULT_SAFE_LANE
+    return _EXTRA_TOOL_LANES.get(n, DEFAULT_SAFE_LANE)
 
 
 async def dispatch_tool(workspace_path: str, name: str, args: dict) -> tuple[str, bool]:

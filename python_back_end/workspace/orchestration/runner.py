@@ -20,10 +20,13 @@ import os
 import time
 from typing import AsyncGenerator
 
+from owui_compat.workspace_method import DEFAULT_SAFE_LANE
+
 from ..openclaw_client import OpenClawEvent
+from .authz import authorize_action
 from .model_router import ModelRouter
-from .risk import await_action_decision, gate_decision, register_pending
-from .tools import TOOL_SCHEMA, dispatch_tool, parse_tool_calls
+from .risk import await_action_decision, register_pending
+from .tools import WIRE_TOOL_SCHEMA, dispatch_tool, lane_for_tool, parse_tool_calls
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +127,7 @@ class SubAgentRunner:
             while steps < max_steps and (time.monotonic() - started) < max_runtime_seconds:
                 steps += 1
                 msg = await self.router.complete(
-                    model_name=model_name, messages=messages, tools=TOOL_SCHEMA, temperature=0.2
+                    model_name=model_name, messages=messages, tools=WIRE_TOOL_SCHEMA, temperature=0.2
                 )
                 _usage = msg.get("_usage") or {}
                 if _usage:
@@ -154,12 +157,34 @@ class SubAgentRunner:
                         completed = True
                         break
                     yield ev("tool_call", {"tool": name, "args": args})
-                    # In-place permission gate. Only active when permission_mode is set
-                    # (in-place sessions); clone-mode + the orchestrator pass None → no
-                    # gating, byte-for-byte unchanged.
-                    if permission_mode:
-                        decision, tier = gate_decision(name, args, permission_mode)
-                        if decision == "block":
+                    # Lane-unification choke point (Phase 2): authorize_action composes
+                    # the structural 6-lane gate with the per-action risk gate. Entered
+                    # under the OLD gate's condition (permission_mode set — in-place
+                    # sessions) OR for a lane>3 tool, so lane<=3 with no permission_mode
+                    # keeps today's exact control flow: no gating, byte-for-byte
+                    # unchanged (clone-mode + the orchestrator pass None).
+                    lane = lane_for_tool(name)
+                    if permission_mode or lane > DEFAULT_SAFE_LANE:
+                        decision_payloads: list[dict] = []
+                        res = await authorize_action(
+                            tool_name=name,
+                            args=args,
+                            lane=lane,
+                            permission_mode=permission_mode,
+                            run_id=run_id,
+                            emit=decision_payloads.append,
+                        )
+                        # 'decision' trace events ride the normal event pipeline
+                        # (workspace_events + SSE), same as tool_call/tool_result.
+                        for payload in decision_payloads:
+                            yield ev("decision", payload)
+                        if not res.allowed and res.tier is None:
+                            # Structural lane deny (lane>3 without its enabling flag) —
+                            # new in Phase 2; lane<=3 tools can never take this branch.
+                            yield ev("tool_result", {"output": f"DENIED: {res.reason}", "success": False})
+                            results_text.append(f"{name} DENIED ({res.reason})")
+                            continue
+                        if not res.allowed:
                             msg_b = (
                                 f"BLOCKED: '{name}' was NOT executed. This turn is PLAN MODE "
                                 "(read-only) — every edit and command will fail, so do NOT "
@@ -173,12 +198,12 @@ class SubAgentRunner:
                             yield ev("tool_result", {"output": msg_b, "success": False})
                             results_text.append(f"{name} BLOCKED (plan mode) — finish with a plan instead")
                             continue
-                        if decision == "gate":
+                        if res.needs_approval:
                             action_seq += 1
                             action_id = f"{run_id}-{steps}-{action_seq}"
-                            register_pending(action_id, {"tool": name, "args": args, "risk": tier})
+                            register_pending(action_id, {"tool": name, "args": args, "risk": res.tier})
                             yield ev("approval_request", {
-                                "action_id": action_id, "tool": name, "args": args, "risk": tier,
+                                "action_id": action_id, "tool": name, "args": args, "risk": res.tier,
                             })
                             approved = await await_action_decision(action_id)
                             yield ev("approval_resolved", {"action_id": action_id, "approved": approved})
