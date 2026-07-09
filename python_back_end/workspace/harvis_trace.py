@@ -43,7 +43,7 @@ harvis_trace_router = APIRouter(prefix="/api/harvis", tags=["harvis-trace"])
 # the sandbox shell / lane gates; anything else must go through the normal
 # OpenClawClient pipeline so _db_save_event's whitelist stays authoritative.
 _INTERNAL_EVENT_TYPES = frozenset(
-    {"terminal_output", "artifact", "decision", "search_trace", "log"}
+    {"terminal_output", "artifact", "decision", "search_trace", "final_message", "log"}
 )
 
 

@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { getContext, tick } from 'svelte';
 	import { toolLabel } from './workflow/humanizeTool';
+	import Collapsible from '$lib/components/common/Collapsible.svelte';
 	import type { WorkspaceEvent } from '$lib/apis/streaming/workspace-stream';
 
 	const i18n: any = getContext('i18n');
@@ -22,7 +23,14 @@
 		| { kind: 'cancelled' }
 		| { kind: 'term'; text: string; stream: 'stdout' | 'stderr' }
 		| { kind: 'decision'; policy: 'allow' | 'deny' | 'gate'; tool: string; reason: string }
-		| { kind: 'artifact'; label: string; path: string };
+		| { kind: 'artifact'; label: string; path: string }
+		| {
+				kind: 'search';
+				query: string;
+				provider: string;
+				count: number;
+				results: { title: string; domain: string; url: string }[];
+		  };
 
 	const build = (evs: WorkspaceEvent[]): Block[] => {
 		const out: Block[] = [];
@@ -71,6 +79,23 @@
 						path: String(e.path ?? '')
 					});
 					break;
+				case 'search_trace': {
+					const results = (Array.isArray(e.results) ? e.results : []).map((r) => ({
+						title: String(r?.title || r?.url || ''),
+						domain: String(r?.domain ?? ''),
+						url: String(r?.url ?? '')
+					}));
+					out.push({
+						kind: 'search',
+						query: String(e.query ?? ''),
+						provider: String(e.provider ?? ''),
+						count: Number(e.result_count ?? results.length) || results.length,
+						results
+					});
+					break;
+				}
+				// 'final_message' is a protocol event for non-UI consumers (Discord/CLI) —
+				// the 'done' case below already renders the answer, so we don't add a row.
 				case 'done':
 					if (e.summary) out.push({ kind: 'result', text: String(e.summary) });
 					break;
@@ -161,6 +186,34 @@
 				<span class="shrink-0">◆</span>
 				<span class="truncate" title={b.path}>{b.label}</span>
 			</div>
+		{:else if b.kind === 'search'}
+			<!-- web-search trace: collapsible "Searched: …" row with the hit list -->
+			<Collapsible
+				buttonClassName="w-full text-gray-400 hover:text-gray-300 transition"
+				chevron
+			>
+				<div class="flex min-w-0 flex-1 items-center gap-2 text-xs">
+					<span class="shrink-0">⌕</span>
+					<span class="truncate" title={b.query}>{$i18n.t('Searched')}: {b.query}</span>
+					<span
+						class="shrink-0 rounded-full bg-gray-500/20 px-1.5 py-0.5 text-[10px] text-gray-400"
+						title={b.provider}>{b.count}</span
+					>
+				</div>
+				<div slot="content" class="mt-1 space-y-1 pl-5">
+					{#each b.results as r, ri (ri)}
+						<div class="min-w-0 text-[11px]">
+							<a
+								href={r.url}
+								target="_blank"
+								rel="noopener noreferrer"
+								class="text-blue-400 hover:underline break-all">{r.title || r.url}</a
+							>
+							{#if r.domain}<span class="text-gray-500"> · {r.domain}</span>{/if}
+						</div>
+					{/each}
+				</div>
+			</Collapsible>
 		{/if}
 	{/each}
 </div>

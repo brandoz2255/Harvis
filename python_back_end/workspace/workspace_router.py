@@ -28,6 +28,7 @@ Architecture — Background Task + Queue + DB:
 import asyncio
 import json
 import logging
+import mimetypes
 import os
 import re
 import secrets
@@ -377,6 +378,15 @@ _workspace_tasks: dict[str, asyncio.Task] = {}
 # artifacts — letting a plain chat "build me an html" auto-pop the Artifacts tab too.
 _OC_WRITE_TOOLS = {"write", "file_write", "create_file"}
 _OC_MAX_ARTIFACT_BYTES = 512 * 1024  # mirrors isolation._MAX_FILE_BYTES
+
+
+def _is_search_tool(name: str) -> bool:
+    """True when a tool_call is a web-search-shaped tool (drives 'search_trace' events)."""
+    n = (name or "").lower()
+    # Exact allowlist — never substring-match: `"search" in n` would catch
+    # memory_search / repo search / research, and web_fetch is a fetch (carries a
+    # url, not a query), so none of those get a search_trace.
+    return n in ("web_search", "websearch", "search_web")
 
 
 def _clean_oc_artifact_path(path: str) -> str:
@@ -747,6 +757,11 @@ async def _db_save_artifact(
                 """,
                 artifact_id, workspace_id, artifact_type, path, content,
             )
+        # NOTE: the typed 'artifact' trace event is emitted by the run loop
+        # (_flush_oc_writes) on the loop's OWN seq counter — NOT here. This helper is
+        # called mid-stream from several lanes, and emit_terminal_event's independent
+        # DB seq (MAX(seq)+1) would collide with the loop counter and could drop the
+        # terminal 'done' event for a live subscriber.
         return artifact_id
     except Exception as exc:
         logger.error("DB: failed to save artifact for workspace %s: %s", workspace_id, exc)
@@ -1083,6 +1098,7 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
     _collect_writes = agent_id not in ("orchestrated", "vibecode-turn", "engine-adapter", "claude")
 
     async def _flush_oc_writes() -> None:
+        nonlocal seq
         if not (_collect_writes and _oc_writes):
             return
         try:
@@ -1095,9 +1111,29 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
                 continue  # never expose .env / keys / credentials as artifacts
             _save = _ac if len(_ac) <= _OC_MAX_ARTIFACT_BYTES else f"<{len(_ac)} bytes — not snapshotted>"
             try:
-                await _db_save_artifact(pool, workspace_id, "file", path=_ap, content=_save)
+                _aid = await _db_save_artifact(pool, workspace_id, "file", path=_ap, content=_save)
             except Exception as _exc:
                 logger.warning("[workspace:%s] artifact save failed for %r: %s", workspace_id, _ap, _exc)
+                continue
+            # Harvis Execution Trace: surface the written file as a typed 'artifact'
+            # event on the run's OWN seq counter (never emit_terminal_event — its DB
+            # seq would collide with the loop counter). size_bytes = true UTF-8 byte
+            # length of the FULL content (not the possibly-truncated snapshot).
+            if _aid:
+                try:
+                    _art = OpenClawEvent("artifact", {
+                        "run_id": workspace_id,
+                        "artifact_id": _aid,
+                        "path": _ap,
+                        "mime_type": (mimetypes.guess_type(_ap)[0] or "text/plain"),
+                        "size_bytes": len((_ac or "").encode("utf-8")),
+                        "label": os.path.basename(_ap) or "file",
+                    })
+                    await _db_save_event(pool, workspace_id, seq, _art)
+                    await broadcaster.put((seq, _art))
+                    seq += 1
+                except Exception as _exc:
+                    logger.warning("[workspace:%s] artifact event emit failed for %r: %s", workspace_id, _ap, _exc)
         _oc_writes.clear()
 
     # ── Select the event stream based on agent_id ────────────────────────────
@@ -1273,6 +1309,28 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
                     _wpath, _wcontent = _wargs.get("path"), _wargs.get("content")
                     if isinstance(_wpath, str) and _wpath and isinstance(_wcontent, str):
                         _oc_writes[_clean_oc_artifact_path(_wpath)] = _wcontent
+                # Harvis Execution Trace: surface web-search tool calls as typed
+                # 'search_trace' events on the run's OWN seq counter (additive; a
+                # failed emit never blocks the run).
+                if _is_search_tool(_tname):
+                    try:
+                        _sargs = (event.data or {}).get("args") or {}
+                        _st = OpenClawEvent("search_trace", {
+                            "run_id": workspace_id,
+                            "query": _sargs.get("query") or _sargs.get("q") or "",
+                            "provider": "web",
+                            "result_count": 0,
+                            "results": [],
+                            "phase": "searching",
+                        })
+                        await _db_save_event(pool, workspace_id, seq, _st)
+                        await broadcaster.put((seq, _st))
+                        seq += 1
+                    except Exception as exc:
+                        logger.warning(
+                            "[workspace:%s] failed to emit search_trace event: %s",
+                            workspace_id, exc,
+                        )
             elif event.type == "token":
                 tok = event.data.get("content")
                 if isinstance(tok, str) and tok:
@@ -1395,6 +1453,27 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
                             event.data["analysis_md"] = final_analysis_md
                 except Exception as exc:
                     logger.warning("[workspace:%s] Build narrator failed: %s", workspace_id, exc)
+
+                # Harvis Execution Trace: additionally emit the final answer as a typed
+                # 'final_message' envelope on the run's OWN seq counter, BEFORE the 'done'
+                # event below (so final_message gets seq N and done gets N+1 — no
+                # collision, no dropped 'done'). The 'done' event is unchanged; this is
+                # purely additive for non-UI consumers (Discord/CLI).
+                if event.type == "done":
+                    try:
+                        _final_content = event.data.get("summary") or ""
+                        if _final_content:
+                            _fm = OpenClawEvent("final_message", {
+                                "run_id": workspace_id, "content": _final_content,
+                            })
+                            await _db_save_event(pool, workspace_id, seq, _fm)
+                            await broadcaster.put((seq, _fm))
+                            seq += 1
+                    except Exception as exc:
+                        logger.warning(
+                            "[workspace:%s] failed to emit final_message event: %s",
+                            workspace_id, exc,
+                        )
 
                 # Persist the ENRICHED terminal event (validated summary + analysis_md), then
                 # fan-out to live subscribers.

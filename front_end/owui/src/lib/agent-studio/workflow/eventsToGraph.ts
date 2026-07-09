@@ -187,6 +187,23 @@ export function eventsToGraph(events: WorkspaceEvent[]): { nodes: WfNode[]; edge
 				});
 				break;
 			}
+			case 'search_trace': {
+				// Rendered like a completed tool node — the query + hit count as output.
+				const n = rowInLane.get(laneKey) ?? 0;
+				const count = Number(
+					e.result_count ?? (Array.isArray(e.results) ? e.results.length : 0)
+				);
+				pushNode(laneKey, `search:${laneKey}:${n}`, {
+					kind: 'tool',
+					tool: 'web_search',
+					status: 'done',
+					ok: true,
+					output: `"${String(e.query ?? '')}" · ${count} results`.slice(0, 200)
+				});
+				break;
+			}
+			// 'final_message' is a protocol event for non-UI consumers — the 'done' case
+			// below already pushes the single 'summary' node, so we don't duplicate it.
 			case 'done': {
 				if (!byId.has('summary')) {
 					pushNode(ROOT, 'summary', { kind: 'summary', summary: (e.summary as string) || '' });

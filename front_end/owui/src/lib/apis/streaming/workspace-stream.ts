@@ -46,6 +46,7 @@ export type WorkspaceEvent = {
 	result_count?: number;
 	results?: { title?: string; domain?: string; url?: string; favicon?: string; snippet?: string }[];
 	collapsed_by_default?: boolean;
+	// final_message — {content} (reuses `content` above)
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	[key: string]: any;
 };
