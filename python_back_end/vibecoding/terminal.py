@@ -68,19 +68,23 @@ async def authenticate_websocket(token: str = None, cookies: dict = None) -> dic
 async def terminal_websocket(
     websocket: WebSocket,
     session_id: str = Query(...),
-    token: str = Query(None)
+    token: str = Query(None),
+    harvis_sid: str = Query(None)
 ):
     """WebSocket endpoint for interactive terminal access to containers
-    
+
     Provides a PTY-based terminal session with:
     - Bidirectional byte streaming (client ↔ container)
     - Full terminal features (colors, cursor movement, line editing)
     - Graceful disconnect handling
     - JWT authentication
-    
+
     Query Parameters:
         session_id: VibeCode session identifier
         token: JWT authentication token
+        harvis_sid: optional Harvis terminal-session id (Phase 3) — reuse the
+            PTY exec pre-created via POST /api/harvis/terminal/sessions so the
+            REST resize endpoint can target it. Owner + container must match.
     """
     await websocket.accept()
     logger.info(f"🔌 Terminal WebSocket connection accepted for session: {session_id}")
@@ -123,9 +127,10 @@ async def terminal_websocket(
             await websocket.close(code=1008)
             return
         
-        # Verify user owns this session
+        # Verify user owns this session — fail CLOSED: a container with no user_id
+        # label (or a mismatched one) is never attachable.
         user_id_label = container.labels.get("user_id")
-        if user_id_label and str(user["id"]) != user_id_label:
+        if not user_id_label or str(user["id"]) != user_id_label:
             logger.error(f"❌ Unauthorized access attempt by user {user['id']} to session {session_id}")
             await websocket.send_json({"error": "Unauthorized"})
             await websocket.close(code=1008)
@@ -140,22 +145,41 @@ async def terminal_websocket(
             return
         
         logger.info(f"🐚 Creating PTY in container: {container.name}")
-        
-        # Create PTY exec instance
-        exec_instance = container.client.api.exec_create(
-            container.id,
-            cmd="/bin/bash -l",
-            stdin=True,
-            tty=True,
-            environment={
-                "TERM": "xterm-256color",
-                "COLORTERM": "truecolor",
-                "HOME": "/workspace",
-                "USER": "root"
-            },
-            workdir="/workspace"
-        )
-        
+
+        if harvis_sid:
+            # Phase 3: reuse the exec pre-created by the terminal-sessions REST
+            # (so POST .../sessions/{sid}/resize can find the exec_id). Must be
+            # owned by the SAME user and target the SAME container we resolved.
+            from .terminal_sessions import get_session
+
+            entry = get_session(harvis_sid)
+            if (
+                not entry
+                or int(entry.get("user_id", -1)) != int(user["id"])
+                or entry.get("container_id") != container.id
+            ):
+                logger.error(f"❌ Invalid harvis_sid {harvis_sid} for session {session_id}")
+                await websocket.send_json({"error": "Invalid terminal session"})
+                await websocket.close(code=1008)
+                return
+            exec_instance = {"Id": entry["exec_id"]}
+            entry["started"] = True
+        else:
+            # Create PTY exec instance
+            exec_instance = container.client.api.exec_create(
+                container.id,
+                cmd="/bin/bash -l",
+                stdin=True,
+                tty=True,
+                environment={
+                    "TERM": "xterm-256color",
+                    "COLORTERM": "truecolor",
+                    "HOME": "/workspace",
+                    "USER": "root"
+                },
+                workdir="/workspace"
+            )
+
         # Start exec and get socket
         exec_socket = container.client.api.exec_start(
             exec_instance['Id'],

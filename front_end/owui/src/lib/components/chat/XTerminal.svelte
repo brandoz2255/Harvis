@@ -13,6 +13,12 @@
 
 	export let overlay = false;
 	export let chatId: string | null = null;
+	// Harvis PTY session mode (additive): instead of an external terminal
+	// server, create a session via POST /api/harvis/terminal/sessions and
+	// connect to the backend's vibecoding PTY WebSocket. Resize goes over
+	// REST (docker exec_resize) because that WS is a raw byte pump.
+	export let harvis = false;
+	export let workspaceId: string | null = null;
 
 	let terminalEl: HTMLDivElement;
 	let term: Terminal | null = null;
@@ -22,6 +28,7 @@
 	export let connecting = false;
 	let resizeObserver: ResizeObserver | null = null;
 	let pingInterval: ReturnType<typeof setInterval> | null = null;
+	let harvisSessionId: string | null = null;
 
 	// Resolve the active terminal server's info for the WebSocket URL
 	const getTerminalInfo = (): { serverId: string; baseUrl: string } | null => {
@@ -44,8 +51,92 @@
 		return null;
 	};
 
+	// Push the current xterm dims to the Harvis PTY via REST (the raw byte-pump
+	// WS cannot carry a resize control message — any text sent lands in bash).
+	const sendHarvisResize = async (rows?: number, cols?: number) => {
+		if (!harvisSessionId || !term) return;
+		const token = localStorage.getItem('token') ?? '';
+		try {
+			await fetch(`/api/harvis/terminal/sessions/${harvisSessionId}/resize`, {
+				method: 'POST',
+				headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+				body: JSON.stringify({ rows: rows ?? term.rows, cols: cols ?? term.cols })
+			});
+		} catch {
+			// best-effort — a failed resize only affects reflow, not the session
+		}
+	};
+
+	const connectHarvis = async () => {
+		connecting = true;
+		const token = localStorage.getItem('token') ?? '';
+
+		try {
+			const res = await fetch('/api/harvis/terminal/sessions', {
+				method: 'POST',
+				headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+				body: JSON.stringify(
+					(workspaceId ?? chatId) ? { workspace_id: workspaceId ?? chatId } : {}
+				)
+			});
+			if (!res.ok) {
+				const detail = (await res.json().catch(() => null))?.detail;
+				throw new Error(detail ?? `Failed to create session: ${res.status}`);
+			}
+			const session = await res.json();
+			harvisSessionId = session.session_id;
+
+			const wsBase = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host;
+			ws = new WebSocket(`${wsBase}${session.ws_url}&token=${encodeURIComponent(token)}`);
+			ws.binaryType = 'arraybuffer';
+
+			ws.onopen = () => {
+				// Raw PTY pump: auth is the token query param — do NOT send the
+				// JSON auth/resize/ping frames the external-server path uses,
+				// they would be typed straight into bash.
+				connected = true;
+				connecting = false;
+				term?.focus();
+				sendHarvisResize();
+			};
+
+			ws.onmessage = (event) => {
+				if (term) {
+					if (event.data instanceof ArrayBuffer) {
+						term.write(new Uint8Array(event.data));
+					} else {
+						term.write(event.data);
+					}
+				}
+			};
+
+			ws.onclose = () => {
+				connected = false;
+				connecting = false;
+				if (term) {
+					term.write('\r\n\x1b[90m[Connection closed]\x1b[0m\r\n');
+				}
+			};
+
+			ws.onerror = () => {
+				connected = false;
+				connecting = false;
+			};
+		} catch (err) {
+			connecting = false;
+			if (term) {
+				term.write(`\r\n\x1b[31m[Error: ${err}]\x1b[0m\r\n`);
+			}
+		}
+	};
+
 	const connect = async () => {
 		if (ws) disconnect();
+
+		if (harvis) {
+			await connectHarvis();
+			return;
+		}
 
 		const info = getTerminalInfo();
 		if (!info) return;
@@ -164,6 +255,15 @@
 			ws.close();
 			ws = null;
 		}
+		if (harvisSessionId) {
+			// Best-effort registry cleanup; the PTY itself dies with the socket.
+			const token = localStorage.getItem('token') ?? '';
+			fetch(`/api/harvis/terminal/sessions/${harvisSessionId}`, {
+				method: 'DELETE',
+				headers: { Authorization: `Bearer ${token}` }
+			}).catch(() => {});
+			harvisSessionId = null;
+		}
 		connected = false;
 		connecting = false;
 	};
@@ -239,6 +339,12 @@
 
 		// Handle resize
 		term.onResize(({ cols, rows }) => {
+			if (harvis) {
+				// Harvis PTY: resize is a REST call (docker exec_resize) — the
+				// WS is a raw byte pump, JSON frames would be typed into bash.
+				sendHarvisResize(rows, cols);
+				return;
+			}
 			if (ws && ws.readyState === WebSocket.OPEN) {
 				ws.send(JSON.stringify({ type: 'resize', cols, rows }));
 			}
@@ -258,8 +364,9 @@
 		// handler would write a spurious "[Connection closed]" message.
 	};
 
-	// Reconnect when the selected terminal changes
-	$: if ($selectedTerminalId !== undefined && term) {
+	// Reconnect when the selected terminal changes (external-server mode only —
+	// Harvis sessions are pinned to their PTY and connect on mount).
+	$: if (!harvis && $selectedTerminalId !== undefined && term) {
 		// Clear the terminal screen and reconnect to the new server
 		disconnect();
 		term.clear();
@@ -270,6 +377,9 @@
 
 	onMount(() => {
 		initTerminal();
+		if (harvis) {
+			connect();
+		}
 	});
 
 	onDestroy(() => {
