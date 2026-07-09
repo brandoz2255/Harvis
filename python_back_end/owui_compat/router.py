@@ -36,6 +36,7 @@ from .schemas import (
 from .stubs import register_stub_routes
 from .knowledge import register_knowledge_routes
 from .skills import register_skill_routes
+from .skill_audit import register_skill_audit_routes
 from .connections import register_connection_routes
 from .mcp_wizard import register_mcp_wizard_routes
 from .integrations_status import register_integrations_status_routes
@@ -661,6 +662,7 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
     register_stub_routes(router, get_current_user)
     register_knowledge_routes(router, get_current_user)
     register_skill_routes(router, get_current_user)
+    register_skill_audit_routes(router, get_current_user)
     register_connection_routes(router, get_current_user)
     register_mcp_wizard_routes(router, get_current_user)
     register_integrations_status_routes(router, get_current_user)

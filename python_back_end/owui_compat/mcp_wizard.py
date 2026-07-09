@@ -238,12 +238,42 @@ def _slug(name: str, fallback: str) -> str:
     return s or re.sub(r"[^a-z0-9-]+", "", (fallback or "skill").lower())[:16] or "skill"
 
 
-def _skill_md(name: str, description: str, content: str) -> str:
+def _skill_md(name: str, description: str, content: str, meta: dict | None = None) -> str:
     # json.dumps produces YAML-safe double-quoted scalars for the frontmatter.
-    return (
-        f"---\nname: {json.dumps(name or '')}\n"
-        f"description: {json.dumps(description or '')}\n---\n\n{content or ''}\n"
-    )
+    lines = [
+        "---",
+        f"name: {json.dumps(name or '')}",
+        f"description: {json.dumps(description or '')}",
+    ]
+    # Governance frontmatter (Execution Core Phase 5): a skill DECLARES what it needs;
+    # the lane flags + authorize_action decide whether it may touch anything. These are
+    # descriptive metadata — they never grant a capability, tool, or lane.
+    m = meta if isinstance(meta, dict) else {}
+    req_caps = [str(c) for c in (m.get("requires_capabilities") or []) if c]
+    allowed_targets = [str(t) for t in (m.get("allowed_targets") or []) if t]
+    risk_lane = m.get("risk_lane")
+    if req_caps:
+        lines.append("requires_capabilities: [" + ", ".join(json.dumps(c) for c in req_caps) + "]")
+    if isinstance(risk_lane, int):
+        lines.append(f"risk_lane: {risk_lane}")
+    if allowed_targets:
+        lines.append("allowed_targets: [" + ", ".join(json.dumps(t) for t in allowed_targets) + "]")
+    return "\n".join(lines) + f"\n---\n\n{content or ''}\n"
+
+
+def _skill_meta_dict(raw) -> dict:
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _skill_verdict(raw) -> str:
+    """The human audit verdict stored at meta.audit.verdict, or '' if never audited."""
+    audit = (_skill_meta_dict(raw).get("audit") or {})
+    return str(audit.get("verdict") or "") if isinstance(audit, dict) else ""
 
 
 def _json_field(v, default):
@@ -279,7 +309,7 @@ def _atomic_write(path: Path, text: str) -> None:
 async def _sync_sources(pool, uid: int) -> tuple[list, list]:
     async with pool.acquire() as conn:
         skills = await conn.fetch(
-            "SELECT id, name, description, content FROM owui_skills "
+            "SELECT id, name, description, content, meta FROM owui_skills "
             "WHERE user_id=$1 AND enabled ORDER BY name",
             uid,
         )
@@ -291,13 +321,21 @@ async def _sync_sources(pool, uid: int) -> tuple[list, list]:
     return list(skills), list(conns)
 
 
-def _build_preview(skills, conns, mask: bool = True) -> dict:
+def _build_preview(skills, conns, mask: bool = True, require_verdict: bool = True) -> dict:
     cs = _config_set()
     candidates = _config_file_candidates()
     target_file = next((c for c in candidates if c.exists()), candidates[0])
     sdir = _skills_dir()
     skill_items = []
+    skipped_unverified: list[str] = []
     for s in skills:
+        meta = _skill_meta_dict(s["meta"])
+        # Human-gated publish: a skill reaches the live OpenClaw mount ONLY after a
+        # human audit verdict of 'supported'. Skills NEVER self-publish. An explicit
+        # override (require_verdict=False) can include un-audited skills deliberately.
+        if require_verdict and _skill_verdict(s["meta"]) != "supported":
+            skipped_unverified.append(s["name"])
+            continue
         slug = _slug(s["name"], str(s["id"]))
         skill_items.append(
             {
@@ -305,7 +343,7 @@ def _build_preview(skills, conns, mask: bool = True) -> dict:
                 "name": s["name"],
                 "slug": slug,
                 "relative_path": f"{slug}/SKILL.md",
-                "skill_md": _skill_md(s["name"], s["description"], s["content"]),
+                "skill_md": _skill_md(s["name"], s["description"], s["content"], meta),
             }
         )
     fragment = {"mcpServers": {c["server_name"]: _mcp_entry(c, mask) for c in conns}}
@@ -320,6 +358,12 @@ def _build_preview(skills, conns, mask: bool = True) -> dict:
         notes.append(
             "HARVIS_OPENCLAW_SKILLS_DIR is not set — skill files would be SKIPPED on "
             "apply until the openclaw/skills/<set> mount is added to the backend."
+        )
+    if skipped_unverified:
+        notes.append(
+            f"{len(skipped_unverified)} skill(s) skipped — no human audit verdict of 'supported': "
+            + ", ".join(skipped_unverified[:8]) + ("…" if len(skipped_unverified) > 8 else "")
+            + ". Audit each (POST /api/v1/skills/id/{id}/audit) then record a 'supported' verdict to publish."
         )
     if mask:
         notes.append("env values are masked in this preview; apply writes the stored values.")
@@ -413,12 +457,12 @@ def register_mcp_wizard_routes(router: APIRouter, get_current_user: Callable) ->
 
     # ── OpenClaw review & sync ────────────────────────────────────────────
     @router.get("/api/owui/openclaw/sync/preview")
-    async def openclaw_sync_preview(request: Request, user=Depends(get_current_user)):
+    async def openclaw_sync_preview(request: Request, override: bool = False, user=Depends(get_current_user)):
         skills, conns = await _sync_sources(_pool(request), int(user.id))
-        return _build_preview(skills, conns, mask=True)
+        return _build_preview(skills, conns, mask=True, require_verdict=not override)
 
     @router.post("/api/owui/openclaw/sync/apply")
-    async def openclaw_sync_apply(request: Request, user=Depends(get_current_user)):
+    async def openclaw_sync_apply(request: Request, override: bool = False, user=Depends(get_current_user)):
         if not _sync_enabled():
             raise HTTPException(
                 status_code=403,
@@ -427,7 +471,9 @@ def register_mcp_wizard_routes(router: APIRouter, get_current_user: Callable) ->
                        "to allow applying skills/MCP config to the OpenClaw mounts.",
             )
         skills, conns = await _sync_sources(_pool(request), int(user.id))
-        preview = _build_preview(skills, conns, mask=True)
+        # Human-gated publish: only skills with a 'supported' audit verdict sync unless
+        # override=true is explicitly passed (Execution Core Phase 5).
+        preview = _build_preview(skills, conns, mask=True, require_verdict=not override)
 
         # 1) skills → SKILL.md files
         skill_results = []

@@ -183,6 +183,26 @@ async def _read_integrations(pool, user_id: int) -> tuple[dict, Optional[str]]:
     )
 
 
+async def ready_capability_keys(request, user_id: int) -> set:
+    """The set of capability keys that currently have at least one READY provider —
+    used to gate skill injection (requires_capabilities). Fail-CLOSED: returns an
+    empty set on any error, so a skill that requires a capability is treated as
+    unavailable rather than silently injected. probe_services only reads user.id."""
+    try:
+        _user = type("_CapUser", (), {"id": int(user_id)})()
+        services, _models = await probe_services(request, _user)
+        pool = getattr(request.app.state, "pg_pool", None)
+        prefs, _dm = await _read_integrations(pool, int(user_id))
+        connection = await _openclaw_connection(pool, int(user_id))
+        caps = _build_registry(services, prefs, connection)
+        return {
+            cap for cap, rec in caps.items()
+            if any(p.get("ready") for p in rec.get("providers", []))
+        }
+    except Exception:
+        return set()
+
+
 def register_capabilities_routes(router: APIRouter, get_current_user: Callable) -> None:
     @router.get("/api/owui/capabilities")
     async def capabilities_registry(request: Request, user=Depends(get_current_user)):

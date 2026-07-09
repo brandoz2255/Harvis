@@ -270,17 +270,59 @@ async def _inject_skills(request, owui_body: dict, user_id: int | None = None) -
     try:
         async with pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT name, content FROM owui_skills WHERE user_id=$1 "
+                "SELECT name, content, meta FROM owui_skills WHERE user_id=$1 "
                 "AND id = ANY($2::text[]) AND enabled=TRUE",
                 int(user_id), [str(s) for s in skill_ids],
             )
     except Exception:
         return
+
+    def _skill_meta(raw) -> dict:
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except Exception:
+                return {}
+        return raw if isinstance(raw, dict) else {}
+
+    # A skill DECLARES what it needs (requires_capabilities, risk_lane); the flags +
+    # authorize_action decide whether that need is met. A skill NEVER grants a tool or
+    # raises a lane — it's guidance text, and if its declared need is unmet we inject an
+    # honest "unavailable" note instead of the body. Compute the ready-capability set
+    # once, and only if some attached skill actually declares capabilities.
+    metas = [_skill_meta(r["meta"]) for r in rows]
+    needs_caps = any(m.get("requires_capabilities") for m in metas)
+    ready_caps: set = set()
+    if needs_caps:
+        try:
+            from .capabilities import ready_capability_keys
+            ready_caps = await ready_capability_keys(request, int(user_id))
+        except Exception:
+            ready_caps = set()
+    try:
+        from workspace.orchestration.authz import _lane_flag_enabled
+    except Exception:
+        _lane_flag_enabled = lambda _lane: True  # noqa: E731 (fail-open only if authz missing)
+
     blocks: list[str] = []
     used = 0
-    for r in rows:
-        c = (r["content"] or "").strip()
-        body = f"### {r['name']}\n{c}" if c else f"### {r['name']}"
+    for r, meta in zip(rows, metas):
+        req_caps = [str(c) for c in (meta.get("requires_capabilities") or []) if c]
+        missing_caps = [c for c in req_caps if c not in ready_caps]
+        risk_lane = meta.get("risk_lane")
+        lane_ok = True
+        if isinstance(risk_lane, int):
+            lane_ok = _lane_flag_enabled(risk_lane)
+        if missing_caps or not lane_ok:
+            reason = []
+            if missing_caps:
+                reason.append("needs capabilities not ready: " + ", ".join(missing_caps))
+            if not lane_ok:
+                reason.append(f"needs lane {risk_lane} which is disabled here")
+            body = f"### {r['name']}\n_Skill unavailable — {'; '.join(reason)}. Do not attempt the steps it would describe._"
+        else:
+            c = (r["content"] or "").strip()
+            body = f"### {r['name']}\n{c}" if c else f"### {r['name']}"
         if used + len(body) > 6000 and blocks:
             break
         blocks.append(body)
