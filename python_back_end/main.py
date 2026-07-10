@@ -58,6 +58,7 @@ from vibecoding.auth_github import router as auth_github_router, auth_router as 
 from workspace.terminal_routes import router as workspace_terminal_router
 from workspace.harvis_trace import harvis_trace_router
 from workspace.harvis_exec import harvis_exec_router
+from workspace.harvis_jobs import harvis_jobs_router
 from vibecoding.terminal_sessions import router as harvis_terminal_sessions_router
 
 # Import tools routers
@@ -532,6 +533,24 @@ async def lifespan(app: FastAPI):
                 logger.info("✅ Repo-sandbox idle sweeper started")
         except Exception as _exc:  # noqa: BLE001
             logger.warning("repo-sandbox sweeper not started: %s", _exc)
+
+        # Workspace terminals: periodic janitor — stops idle terminal
+        # containers and prunes finished background-job records (Phase E1).
+        try:
+            from workspace.terminal_container import get_terminal_manager
+
+            async def _terminal_sweeper() -> None:
+                while True:
+                    await asyncio.sleep(300)
+                    try:
+                        await get_terminal_manager().sweep_idle()
+                    except Exception as _sweep_exc:  # noqa: BLE001
+                        logger.warning("terminal sweep_idle failed: %s", _sweep_exc)
+
+            asyncio.create_task(_terminal_sweeper())
+            logger.info("✅ Workspace-terminal idle sweeper started")
+        except Exception as _exc:  # noqa: BLE001
+            logger.warning("terminal sweeper not started: %s", _exc)
 
         # Ensure OpenClaw web tool audit + prefs columns exist (idempotent)
         try:
@@ -1321,6 +1340,11 @@ app.include_router(harvis_trace_router)
 # routes through authorize_action + emits the full decision/tool_call/
 # terminal_output/tool_result trace via workspace_events.
 app.include_router(harvis_exec_router)
+# Phase E1: NON-BLOCKING background jobs (lane 3) — POST /api/harvis/jobs
+# returns a job_id immediately; output streams as terminal_output events on
+# the existing /api/harvis/runs/{id}/stream SSE; DELETE kills via pidfile.
+# Registry is in-memory (does NOT survive restart — E2 adds persistence).
+app.include_router(harvis_jobs_router)
 # Phase 3: terminal-session REST over the VibeCode PTY — pre-created exec +
 # docker exec_resize side-channel. Gated by HARVIS_BUILD_SHELL like the WS.
 app.include_router(harvis_terminal_sessions_router)

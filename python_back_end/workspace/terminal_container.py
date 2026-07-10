@@ -23,6 +23,7 @@ import logging
 import os
 import shlex
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -41,6 +42,15 @@ _MAX_TIMEOUT_S = float(os.getenv("HARVIS_TERMINAL_MAX_TIMEOUT_S", "600"))
 _IDLE_TIMEOUT_S = float(os.getenv("HARVIS_TERMINAL_IDLE_TIMEOUT_S", "86400"))  # 24h
 _PERSISTENT = os.getenv("HARVIS_TERMINAL_PERSISTENT", "true").lower() in ("true", "1", "yes")
 _OUTPUT_CAP_BYTES = int(os.getenv("HARVIS_TERMINAL_OUTPUT_CAP", "65536"))
+# Background jobs (Phase E1): hard ceiling on how long a detached job may run
+# before the tail loop reaps it, and how long finished job records stay
+# queryable in the in-memory registry.
+_JOB_MAX_LIFETIME_S = float(os.getenv("HARVIS_JOB_MAX_LIFETIME_S", "3600"))
+_JOB_POLL_INTERVAL_S = float(os.getenv("HARVIS_JOB_POLL_INTERVAL_S", "1.0"))
+_JOB_RETENTION_S = float(os.getenv("HARVIS_JOB_RETENTION_S", "3600"))
+# Cap on-disk BASE.out growth (container layer) — chatty jobs past this
+# cumulative output size are reaped early by the tail loop.
+_JOB_MAX_OUTPUT_BYTES = int(os.getenv("HARVIS_JOB_MAX_OUTPUT_BYTES", "10485760"))  # 10 MB
 
 
 def is_enabled() -> bool:
@@ -89,6 +99,26 @@ class _TerminalState:
     last_used_at: float = field(default_factory=time.time)
 
 
+@dataclass
+class _JobState:
+    """One detached background job (Phase E1).
+
+    Lifecycle: running → done (exit 0) | exited (exit != 0) | killed (user
+    DELETE) | reaped (hit _JOB_MAX_LIFETIME_S) | error (tail loop crashed).
+    """
+    job_id: str
+    workspace_id: str
+    container_name: str
+    base: str  # /tmp/harvis-job-<jid> — .pid / .out / .exit live beside it
+    command: str
+    status: str = "running"
+    started: float = field(default_factory=time.time)
+    finished: Optional[float] = None
+    offset: int = 0  # bytes of BASE.out already streamed
+    exit_code: Optional[int] = None
+    tail_task: Optional[Any] = field(default=None, repr=False)
+
+
 class WorkspaceTerminalManager:
     """
     Owns the per-workspace terminal containers. One instance per backend process,
@@ -102,6 +132,12 @@ class WorkspaceTerminalManager:
             logger.error("WorkspaceTerminalManager: failed to init docker client: %s", exc)
             self._client = None
         self._terminals: dict[str, _TerminalState] = {}
+        # ⚠ E1 CAVEAT: the background-job registry is IN-MEMORY ONLY. It does
+        # NOT survive a backend restart — after a restart, job_id lookups 404
+        # and nothing tails the orphaned wrapper (which keeps running inside
+        # the container and still writes /tmp/harvis-job-<jid>.{out,exit}).
+        # E2 adds persistence (workspace_events already carries the trace).
+        self._jobs: dict[str, _JobState] = {}
         self._lock = asyncio.Lock()
         self._readiness: Optional[_ReadinessReport] = None
         self._readiness_ttl_s = 30.0  # re-probe at most this often
@@ -408,6 +444,384 @@ class WorkspaceTerminalManager:
             "container": state.container_name,
         }
 
+    # ── Background jobs (Phase E1 — non-blocking exec) ─────────────────────
+
+    async def exec_bg(
+        self,
+        workspace_id: str,
+        cmd: str,
+        workdir: str = "/workspace",
+        pool=None,
+    ) -> str:
+        """Start `cmd` DETACHED in the workspace container; return a job_id
+        immediately.
+
+        Mechanism: a pid/out/exit-file wrapper at BASE=/tmp/harvis-job-<jid>.
+        The wrapper (launched via a detached docker exec, so this call never
+        waits on the command) writes its own pid to BASE.pid, runs the user
+        command with stdout+stderr → BASE.out, then writes the exit status to
+        BASE.exit. A local asyncio task tails BASE.out incrementally and emits
+        terminal_output events (each chunk capped at _OUTPUT_CAP_BYTES); when
+        BASE.exit appears it emits ONE final tool_result and stops.
+
+        The wrapper is started under `setsid` (present in ubuntu base) so its
+        pid is the process-GROUP leader — that pgid is what kill_job signals.
+        """
+        if not cmd or not cmd.strip():
+            raise ValueError("empty command")
+        if self._client is None:
+            raise RuntimeError("docker client unavailable")
+
+        state = await self.ensure(workspace_id)
+        state.last_used_at = time.time()
+        container = await asyncio.to_thread(
+            self._client.containers.get, state.container_name
+        )
+
+        jid = uuid.uuid4().hex[:12]
+        base = f"/tmp/harvis-job-{jid}"
+        wrapper = (
+            f"echo $$ > {base}.pid; "
+            f": > {base}.out; "
+            f"sh -c {shlex.quote(cmd)} > {base}.out 2>&1; "
+            f"echo $? > {base}.exit"
+        )
+        # setsid → wrapper becomes session + process-group leader, so
+        # `kill -TERM -<pid>` reaches every descendant. Fallback keeps the
+        # job runnable on images without util-linux (pkill path in kill_job).
+        launcher = (
+            "if command -v setsid >/dev/null 2>&1; "
+            f"then exec setsid sh -c {shlex.quote(wrapper)}; "
+            f"else exec sh -c {shlex.quote(wrapper)}; fi"
+        )
+        try:
+            await asyncio.to_thread(
+                container.exec_run,
+                ["sh", "-c", launcher],
+                workdir=workdir,
+                detach=True,
+            )
+        except APIError as exc:
+            logger.error("[job:%s] detached exec launch failed: %s", jid, exc)
+            raise RuntimeError(f"job launch failed: {exc}")
+
+        job = _JobState(
+            job_id=jid,
+            workspace_id=workspace_id,
+            container_name=state.container_name,
+            base=base,
+            command=cmd,
+        )
+        self._jobs[jid] = job
+        job.tail_task = asyncio.create_task(self._tail_job(job, container, pool))
+        logger.info(
+            "[job:%s] started background job in %s (ws=%s)",
+            jid, state.container_name, workspace_id,
+        )
+        return jid
+
+    async def _tail_job(self, job: _JobState, container, pool) -> None:
+        """Poll BASE.out for new bytes + BASE.exit for completion.
+
+        Doubles as the max-lifetime guard (mirrors sweep_idle): a job older
+        than _JOB_MAX_LIFETIME_S is force-killed and marked 'reaped'. Also
+        bumps the terminal's last_used_at so sweep_idle never stops a
+        container mid-job.
+        """
+        target = {"kind": "sandbox", "id": job.container_name}
+        try:
+            while True:
+                await asyncio.sleep(_JOB_POLL_INTERVAL_S)
+
+                st = self._terminals.get(job.workspace_id)
+                if st:
+                    st.last_used_at = time.time()
+
+                if job.status != "running":  # kill_job flipped it
+                    break
+
+                # 1. Incremental chunk: only bytes past the stored offset,
+                #    capped per chunk at _OUTPUT_CAP_BYTES.
+                chunk_b = b""
+                try:
+                    res = await asyncio.to_thread(
+                        container.exec_run,
+                        ["sh", "-c",
+                         f"tail -c +{job.offset + 1} {job.base}.out 2>/dev/null"
+                         f" | head -c {_OUTPUT_CAP_BYTES}"],
+                        demux=False,
+                    )
+                    chunk_b = res.output or b""
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("[job:%s] tail read failed: %s", job.job_id, exc)
+                if chunk_b:
+                    job.offset += len(chunk_b)
+                    await emit_terminal_event(
+                        pool, job.workspace_id,
+                        event_type="terminal_output",
+                        payload={
+                            "tool": _TERMINAL_TOOL_NAME,
+                            "stream": "stdout",
+                            "content": chunk_b.decode("utf-8", errors="replace"),
+                            "target": target,
+                            "job_id": job.job_id,
+                        },
+                    )
+                    # On-disk cap: BASE.out grows in the container layer for
+                    # the job's whole life — reap chatty jobs early.
+                    if job.offset > _JOB_MAX_OUTPUT_BYTES:
+                        logger.warning(
+                            "[job:%s] output exceeded "
+                            "HARVIS_JOB_MAX_OUTPUT_BYTES=%s — reaping",
+                            job.job_id, _JOB_MAX_OUTPUT_BYTES,
+                        )
+                        await emit_terminal_event(
+                            pool, job.workspace_id,
+                            event_type="terminal_output",
+                            payload={
+                                "tool": _TERMINAL_TOOL_NAME,
+                                "stream": "stdout",
+                                "content": (
+                                    f"\n…[job {job.job_id} output exceeded "
+                                    f"{_JOB_MAX_OUTPUT_BYTES} bytes — reaped]\n"
+                                ),
+                                "target": target,
+                                "job_id": job.job_id,
+                            },
+                        )
+                        await self._signal_job(job, container)
+                        job.status = "reaped"
+                        break
+                    if len(chunk_b) >= _OUTPUT_CAP_BYTES:
+                        continue  # more buffered — drain before exit check
+
+                # 2. Done? BASE.exit only exists once the wrapper finished.
+                res = await asyncio.to_thread(
+                    container.exec_run,
+                    ["sh", "-c", f"cat {job.base}.exit 2>/dev/null"],
+                    demux=False,
+                )
+                raw = (res.output or b"").decode("utf-8", errors="replace").strip()
+                if raw:
+                    # Drain before recording exit: bytes written between the
+                    # chunk read above and this exit check would otherwise be
+                    # dropped — often the last (most important) lines.
+                    while True:
+                        try:
+                            res = await asyncio.to_thread(
+                                container.exec_run,
+                                ["sh", "-c",
+                                 f"tail -c +{job.offset + 1} {job.base}.out 2>/dev/null"
+                                 f" | head -c {_OUTPUT_CAP_BYTES}"],
+                                demux=False,
+                            )
+                            tail_b = res.output or b""
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning(
+                                "[job:%s] drain read failed: %s", job.job_id, exc,
+                            )
+                            break
+                        if not tail_b:
+                            break
+                        job.offset += len(tail_b)
+                        await emit_terminal_event(
+                            pool, job.workspace_id,
+                            event_type="terminal_output",
+                            payload={
+                                "tool": _TERMINAL_TOOL_NAME,
+                                "stream": "stdout",
+                                "content": tail_b.decode("utf-8", errors="replace"),
+                                "target": target,
+                                "job_id": job.job_id,
+                            },
+                        )
+                        if job.offset > _JOB_MAX_OUTPUT_BYTES:
+                            await emit_terminal_event(
+                                pool, job.workspace_id,
+                                event_type="terminal_output",
+                                payload={
+                                    "tool": _TERMINAL_TOOL_NAME,
+                                    "stream": "stdout",
+                                    "content": (
+                                        f"\n…[job {job.job_id} output exceeded "
+                                        f"{_JOB_MAX_OUTPUT_BYTES} bytes — "
+                                        f"remainder dropped]\n"
+                                    ),
+                                    "target": target,
+                                    "job_id": job.job_id,
+                                },
+                            )
+                            break
+                    try:
+                        job.exit_code = int(raw.split()[0])
+                    except ValueError:
+                        job.exit_code = -1
+                    job.status = "done" if job.exit_code == 0 else "exited"
+                    break
+
+                # 3. Max-lifetime guard — reap runaways.
+                if time.time() - job.started > _JOB_MAX_LIFETIME_S:
+                    logger.warning(
+                        "[job:%s] exceeded HARVIS_JOB_MAX_LIFETIME_S=%ss — reaping",
+                        job.job_id, _JOB_MAX_LIFETIME_S,
+                    )
+                    await self._signal_job(job, container)
+                    job.status = "reaped"
+                    break
+        except NotFound:
+            logger.warning("[job:%s] container vanished mid-job", job.job_id)
+            job.status = "error"
+        except asyncio.CancelledError:
+            job.status = "error"
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[job:%s] tail loop crashed: %s", job.job_id, exc)
+            job.status = "error"
+        finally:
+            job.finished = time.time()
+            code = job.exit_code if job.exit_code is not None else -1
+            duration_ms = int((job.finished - job.started) * 1000)
+            try:
+                await emit_terminal_event(
+                    pool, job.workspace_id,
+                    event_type="tool_result",
+                    payload={
+                        "tool": _TERMINAL_TOOL_NAME,
+                        "success": job.status == "done" and code == 0,
+                        "summary": (
+                            f"job {job.job_id} {job.status} "
+                            f"exit={code} dur={duration_ms}ms"
+                        ),
+                        "args": {"command": job.command},
+                        "output": {
+                            "exit_code": code,
+                            "duration_ms": duration_ms,
+                            "status": job.status,
+                        },
+                        "job_id": job.job_id,
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            # Janitor: BASE.{pid,out,exit} are dead weight in the container
+            # layer once the final tool_result is recorded.
+            try:
+                await asyncio.to_thread(
+                    container.exec_run,
+                    ["sh", "-c",
+                     f"rm -f {job.base}.pid {job.base}.out {job.base}.exit"],
+                    demux=False,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+    async def _signal_job(self, job: _JobState, container) -> bool:
+        """Terminate the wrapper AND its children via the pidfile.
+
+        Docker's exec API has no kill endpoint — the pidfile IS the kill
+        mechanism. The script waits briefly for the pidfile (a DELETE can land
+        in the sub-second window before the wrapper writes it), sends SIGTERM
+        to the negative pgid (wrapper is a setsid group leader) with
+        pkill -P / plain kill as fallback, escalates to SIGKILL after a short
+        grace, then VERIFIES death with `kill -0` and echoes a marker.
+        Returns True only when death was confirmed.
+        """
+        script = (
+            f'i=0; while [ ! -f {job.base}.pid ] && [ "$i" -lt 20 ]; do '
+            f'sleep 0.1; i=$((i + 1)); done; '
+            f'if [ ! -f {job.base}.pid ]; then echo HARVIS_NO_PIDFILE; exit 0; fi; '
+            f'p=$(cat {job.base}.pid); '
+            f'kill -TERM -"$p" 2>/dev/null; '
+            f'pkill -TERM -P "$p" 2>/dev/null; '
+            f'kill -TERM "$p" 2>/dev/null; '
+            f'sleep 1; '
+            f'kill -KILL -"$p" 2>/dev/null; '
+            f'pkill -KILL -P "$p" 2>/dev/null; '
+            f'kill -KILL "$p" 2>/dev/null; '
+            f'sleep 0.2; '
+            f'if kill -0 -"$p" 2>/dev/null || kill -0 "$p" 2>/dev/null; '
+            f'then echo HARVIS_STILL_ALIVE; else echo HARVIS_KILLED; fi'
+        )
+        res = await asyncio.to_thread(
+            container.exec_run, ["sh", "-c", script], demux=False,
+        )
+        out = (res.output or b"").decode("utf-8", errors="replace")
+        return "HARVIS_KILLED" in out
+
+    async def kill_job(self, job_id: str) -> bool:
+        """Kill a running background job.
+
+        Returns True only when the process group's death was CONFIRMED. If
+        the job already finished (BASE.exit present) this returns False and
+        leaves the tail loop to record the real exit code; on an unconfirmed
+        kill it leaves status='running' so the tail loop + lifetime reaper
+        stay armed.
+        """
+        job = self._jobs.get(job_id)
+        if job is None or job.status != "running":
+            return False
+        if self._client is None:
+            raise RuntimeError("docker client unavailable")
+        try:
+            container = await asyncio.to_thread(
+                self._client.containers.get, job.container_name
+            )
+        except NotFound:
+            # container gone → process is dead anyway
+            job.status = "killed"  # tail loop sees this, emits final tool_result
+            logger.info("[job:%s] container gone — marking killed", job_id)
+            return True
+
+        # Already finished? Don't stomp the real exit code — the tail loop
+        # records it on its next poll.
+        try:
+            res = await asyncio.to_thread(
+                container.exec_run,
+                ["sh", "-c", f"test -f {job.base}.exit && echo HARVIS_EXITED"],
+                demux=False,
+            )
+            if b"HARVIS_EXITED" in (res.output or b""):
+                return False
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[job:%s] exit-file check failed: %s", job_id, exc)
+
+        confirmed = False
+        try:
+            confirmed = await self._signal_job(job, container)
+        except NotFound:
+            confirmed = True  # container gone mid-kill → process is dead
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[job:%s] kill signal failed: %s", job_id, exc)
+        if not confirmed:
+            # No verified death → keep status='running' so the tail loop and
+            # the lifetime reaper keep watching the (possibly live) job.
+            logger.warning(
+                "[job:%s] kill not confirmed — leaving job running", job_id,
+            )
+            return False
+        job.status = "killed"  # tail loop sees this, emits final tool_result
+        logger.info("[job:%s] killed via pidfile signal (confirmed)", job_id)
+        return True
+
+    def get_job(self, job_id: str) -> Optional[_JobState]:
+        return self._jobs.get(job_id)
+
+    async def job_status(self, job_id: str) -> Optional[dict]:
+        job = self._jobs.get(job_id)
+        if job is None:
+            return None
+        out: dict[str, Any] = {
+            "job_id": job.job_id,
+            "status": job.status,
+            "started": job.started,
+            "workspace_id": job.workspace_id,
+        }
+        if job.exit_code is not None:
+            out["exit_code"] = job.exit_code
+        if job.finished is not None:
+            out["finished"] = job.finished
+        return out
+
     # ── Periodic janitor ───────────────────────────────────────────────────
 
     async def sweep_idle(self) -> int:
@@ -421,6 +835,14 @@ class WorkspaceTerminalManager:
         — stop + remove container, leave the volume in either mode.
         """
         now = time.time()
+
+        # Prune finished background-job records past retention. Running jobs
+        # are never pruned here — their tail loop owns their lifecycle (and
+        # enforces _JOB_MAX_LIFETIME_S itself).
+        for jid, job in list(self._jobs.items()):
+            if job.finished is not None and now - job.finished > _JOB_RETENTION_S:
+                self._jobs.pop(jid, None)
+
         stale = [
             wsid for wsid, state in list(self._terminals.items())
             if now - state.last_used_at > _IDLE_TIMEOUT_S
@@ -509,6 +931,18 @@ async def terminal_status(*, force_probe: bool = False) -> dict[str, Any]:
 
 _TERMINAL_TOOL_NAME = "harvis-terminal"
 
+# Per-workspace locks serializing seq allocation + insert: without them the
+# 1 Hz tail loops, parallel jobs, and foreground exec interleave MAX(seq)+1
+# reads and produce duplicate seq values (breaking SSE resume-by-seq).
+_event_seq_locks: dict[str, asyncio.Lock] = {}
+
+
+def _event_seq_lock(workspace_id: str) -> asyncio.Lock:
+    lock = _event_seq_locks.get(workspace_id)
+    if lock is None:
+        lock = _event_seq_locks.setdefault(workspace_id, asyncio.Lock())
+    return lock
+
 
 async def _next_event_seq(pool, workspace_id: str) -> int:
     """Pick the next monotonic seq for this workspace's event stream."""
@@ -554,15 +988,16 @@ async def emit_terminal_event(
     if pool is None:
         return
     try:
-        seq = await _next_event_seq(pool, workspace_id)
-        async with pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO workspace_events (workspace_id, seq, event_type, payload, ts)
-                VALUES ($1, $2, $3, $4::jsonb, NOW())
-                """,
-                workspace_id, seq, event_type, json.dumps(payload),
-            )
+        async with _event_seq_lock(workspace_id):
+            seq = await _next_event_seq(pool, workspace_id)
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO workspace_events (workspace_id, seq, event_type, payload, ts)
+                    VALUES ($1, $2, $3, $4::jsonb, NOW())
+                    """,
+                    workspace_id, seq, event_type, json.dumps(payload),
+                )
         await _broadcast_live(workspace_id, event_type, payload, seq)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
