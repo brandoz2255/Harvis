@@ -216,6 +216,38 @@ def compose_build_analysis(
         parts += ["", "**What I did**", summary or "Completed the request without editing the workspace."]
         return "\n".join(parts)
 
+    paths = [f["path"] for f in diff_files]
+
+    # ---- CHAT mode (no attached repo): a plain, friendly report — NOT a repo/PR narrative. A
+    #      regular chat just made file(s) in a temp workspace: there's nothing to PR, "Files changed"
+    #      is the wrong frame, and for a renderable file the auto-opened PREVIEW is the deliverable.
+    #      Keep it short + clean. (Build-area runs carry a repo_name → the full analysis below.)
+    if not repo_name:
+        _KIND = {
+            "html": "an HTML page", "htm": "an HTML page", "svg": "an SVG image",
+            "css": "a stylesheet", "js": "a JavaScript file", "ts": "a TypeScript file",
+            "jsx": "a React component", "tsx": "a React component", "py": "a Python script",
+            "json": "a JSON file", "yaml": "a YAML file", "yml": "a YAML file",
+            "md": "a Markdown doc", "markdown": "a Markdown doc", "txt": "a text file",
+            "csv": "a CSV file", "pdf": "a PDF", "png": "an image", "jpg": "an image",
+            "jpeg": "an image", "gif": "an image", "webp": "an image",
+        }
+        _RENDERABLE = {"html", "htm", "svg", "md", "markdown", "pdf", "png", "jpg", "jpeg", "gif", "webp", "csv"}
+        renderable = [p for p in paths if _ext(p) in _RENDERABLE]
+        if n == 1:
+            p = paths[0]
+            parts = [f"**Created `{p}`** — {_KIND.get(_ext(p), 'a file')}."]
+            if _ext(p) in _RENDERABLE:
+                parts += ["", "The preview is open on the right — use **Download** to save it."]
+        else:
+            parts = [f"**Created {n} files:**", ""]
+            parts += [f"- `{p}` — {_KIND.get(_ext(p), 'a file')}" for p in paths[:12]]
+            if n > 12:
+                parts.append(f"- …and {n - 12} more")
+            if renderable:
+                parts += ["", f"The preview for `{renderable[0]}` is open on the right — **Download** to save."]
+        return "\n".join(parts)
+
     # Headline + lead. (A VibeCode session's diff is cumulative vs the session base, so the file
     # set reflects the session's accumulated changes — avoid claiming "this turn".)
     plural = "file" if n == 1 else "files"
