@@ -138,20 +138,40 @@ def register_skill_routes(router: APIRouter, get_current_user: Callable) -> None
                             user=Depends(get_current_user)):
         pool = _pool(request)
         async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "UPDATE owui_skills SET "
-                "name = COALESCE($3, name), "
-                "description = COALESCE($4, description), "
-                "content = COALESCE($5, content), "
-                "emoji = COALESCE($6, emoji), "
-                "meta = CASE WHEN $7::jsonb IS NULL THEN meta ELSE $7::jsonb END, "
-                "updated_at = NOW() "
-                "WHERE id=$1 AND user_id=$2 RETURNING *",
-                skill_id, int(user.id), form.name, form.description, form.content,
-                form.emoji, json.dumps(form.meta) if form.meta is not None else None,
-            )
-        if not row:
-            raise HTTPException(status_code=404, detail="Skill not found")
+            async with conn.transaction():
+                cur = await conn.fetchrow(
+                    "SELECT content, meta FROM owui_skills WHERE id=$1 AND user_id=$2",
+                    skill_id, int(user.id),
+                )
+                if not cur:
+                    raise HTTPException(status_code=404, detail="Skill not found")
+                cur_meta = cur["meta"]
+                if isinstance(cur_meta, str):
+                    try:
+                        cur_meta = json.loads(cur_meta or "{}")
+                    except Exception:
+                        cur_meta = {}
+                new_meta = form.meta if form.meta is not None else (cur_meta if isinstance(cur_meta, dict) else {})
+                if not isinstance(new_meta, dict):
+                    new_meta = {}
+                # Governance (C1): if the BODY changed, the old human audit no longer applies —
+                # invalidate the 'supported' verdict so the skill must be RE-audited before it can
+                # inject (chat_completion._inject_skills gate) or publish (mcp_wizard) again.
+                content_changed = form.content is not None and form.content != (cur["content"] or "")
+                if content_changed and isinstance(new_meta.get("audit"), dict) and new_meta["audit"].get("verdict"):
+                    new_meta = {**new_meta, "audit": {**new_meta["audit"], "verdict": None, "stale_after_edit": True}}
+                row = await conn.fetchrow(
+                    "UPDATE owui_skills SET "
+                    "name = COALESCE($3, name), "
+                    "description = COALESCE($4, description), "
+                    "content = COALESCE($5, content), "
+                    "emoji = COALESCE($6, emoji), "
+                    "meta = $7::jsonb, "
+                    "updated_at = NOW() "
+                    "WHERE id=$1 AND user_id=$2 RETURNING *",
+                    skill_id, int(user.id), form.name, form.description, form.content,
+                    form.emoji, json.dumps(new_meta),
+                )
         return _skill_to_owui(row)
 
     @router.post("/api/v1/skills/id/{skill_id}/toggle")

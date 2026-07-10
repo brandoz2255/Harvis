@@ -1,4 +1,4 @@
-import { WEBUI_API_BASE_URL } from '$lib/constants';
+import { WEBUI_API_BASE_URL, WEBUI_BASE_URL } from '$lib/constants';
 
 export const createNewSkill = async (token: string, skill: object) => {
 	let error = null;
@@ -19,7 +19,7 @@ export const createNewSkill = async (token: string, skill: object) => {
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -50,7 +50,7 @@ export const getSkills = async (token: string = '') => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -81,7 +81,7 @@ export const getSkillList = async (token: string = '') => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -153,7 +153,7 @@ export const exportSkills = async (token: string = '') => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -184,7 +184,7 @@ export const getSkillById = async (token: string, id: string) => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -215,7 +215,7 @@ export const updateSkillById = async (token: string, id: string, skill: object) 
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -246,7 +246,7 @@ export const updateSkillAccessGrants = async (token: string, id: string, accessG
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -277,7 +277,179 @@ export const toggleSkillById = async (token: string, id: string) => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+// ── Skill governance (Execution Core Phase 5) — audit / self-edit / verdict ──
+// Backend: python_back_end/owui_compat/skill_audit.py
+
+export const auditSkill = async (token: string, id: string) => {
+	let error = null;
+
+	// Response: { run_id, runnable, findings: string[], analysis_md }
+	const res = await fetch(`${WEBUI_API_BASE_URL}/skills/id/${id}/audit`, {
+		method: 'POST',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail ?? err.message ?? 'Request failed';
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const selfEditSkill = async (token: string, id: string) => {
+	let error = null;
+
+	// Response: { ok, revision_count, note } — 409 if already self-edited this audit cycle
+	const res = await fetch(`${WEBUI_API_BASE_URL}/skills/id/${id}/self-edit`, {
+		method: 'POST',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail ?? err.message ?? 'Request failed';
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const setSkillVerdict = async (
+	token: string,
+	id: string,
+	// FactCheckVerdict vocabulary — only 'supported' makes the skill publishable
+	verdict:
+		| 'supported'
+		| 'partially_supported'
+		| 'unsupported'
+		| 'contradicted'
+		| 'insufficient_evidence',
+	notes: string | null = null
+) => {
+	let error = null;
+
+	// Response: { ok, verdict, publishable }
+	const res = await fetch(`${WEBUI_API_BASE_URL}/skills/id/${id}/verdict`, {
+		method: 'POST',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify({
+			verdict,
+			notes
+		})
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail ?? err.message ?? 'Request failed';
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+// ── OpenClaw skill/MCP sync — dry-run preview + explicit apply ──
+// Backend: python_back_end/owui_compat/mcp_wizard.py
+
+export const getSkillSyncPreview = async (token: string) => {
+	let error = null;
+
+	// Response: { flag, enabled, config_set, skills: { target_dir, items }, mcp, notes }
+	// notes includes the skipped-unverified summary when skills lack a 'supported' verdict
+	const res = await fetch(`${WEBUI_BASE_URL}/api/owui/openclaw/sync/preview`, {
+		method: 'GET',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail ?? err.message ?? 'Request failed';
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const applySkillSync = async (token: string, override: boolean = false) => {
+	let error = null;
+
+	// Response: { applied: { skills: [...], mcp }, config_set, note } — 403 when the
+	// server-side sync flag is off. override=true includes skills without a
+	// 'supported' verdict (explicit human choice).
+	const res = await fetch(
+		`${WEBUI_BASE_URL}/api/owui/openclaw/sync/apply${override ? '?override=true' : ''}`,
+		{
+			method: 'POST',
+			headers: {
+				Accept: 'application/json',
+				'Content-Type': 'application/json',
+				authorization: `Bearer ${token}`
+			}
+		}
+	)
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -308,7 +480,7 @@ export const deleteSkillById = async (token: string, id: string) => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});

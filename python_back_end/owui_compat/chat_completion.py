@@ -256,8 +256,10 @@ async def _inject_skills(request, owui_body: dict, user_id: int | None = None) -
     if user_id is None:
         return
     # Only skills EXPLICITLY attached to THIS chat (skill_ids) — NEVER all enabled
-    # ones. Global always-on bled e.g. a "pirate" skill into every chat. No UI
-    # populates skill_ids yet, so nothing injects until per-chat skill attach lands.
+    # ones. Global always-on bled e.g. a "pirate" skill into every chat. skill_ids is
+    # populated by the composer $-mention picker (and model-level attach); injection is
+    # additionally AUDIT-GATED below — only a skill a human marked 'supported' in
+    # Customize → Skills gets its body injected. Everything else gets an honest note.
     skill_ids = owui_body.get("skill_ids")
     if not isinstance(skill_ids, list) or not skill_ids:
         return
@@ -302,7 +304,8 @@ async def _inject_skills(request, owui_body: dict, user_id: int | None = None) -
     try:
         from workspace.orchestration.authz import _lane_flag_enabled
     except Exception:
-        _lane_flag_enabled = lambda _lane: True  # noqa: E731 (fail-open only if authz missing)
+        logger.warning("owui_compat: authz._lane_flag_enabled import failed — lane gate FAILS CLOSED")
+        _lane_flag_enabled = lambda _lane: False  # noqa: E731 (fail-CLOSED: withhold a lane-gated skill if we can't verify its lane)
 
     blocks: list[str] = []
     used = 0
@@ -313,12 +316,27 @@ async def _inject_skills(request, owui_body: dict, user_id: int | None = None) -
         lane_ok = True
         if isinstance(risk_lane, int):
             lane_ok = _lane_flag_enabled(risk_lane)
-        if missing_caps or not lane_ok:
+        # Fail-closed audit gate: only a human 'supported' verdict (skill_audit
+        # FactCheckVerdict) makes a skill body injectable. Missing/other => note only.
+        audit = meta.get("audit") if isinstance(meta.get("audit"), dict) else {}
+        verdict = audit.get("verdict")
+        verdict_ok = verdict == "supported"
+        if missing_caps or not lane_ok or not verdict_ok:
             reason = []
             if missing_caps:
                 reason.append("needs capabilities not ready: " + ", ".join(missing_caps))
             if not lane_ok:
                 reason.append(f"needs lane {risk_lane} which is disabled here")
+            if not verdict_ok:
+                if verdict:
+                    reason.append(
+                        f"audit verdict is '{verdict}' — only a human 'supported' verdict applies here; "
+                        "re-audit it in Customize -> Skills"
+                    )
+                else:
+                    reason.append(
+                        "not audited — a human must mark it 'supported' in Customize -> Skills before it applies"
+                    )
             body = f"### {r['name']}\n_Skill unavailable — {'; '.join(reason)}. Do not attempt the steps it would describe._"
         else:
             c = (r["content"] or "").strip()

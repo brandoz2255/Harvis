@@ -317,7 +317,7 @@
 			});
 
 			toolIds = model?.meta?.toolIds ?? [];
-			skillIds = model?.meta?.skillIds ?? [];
+			skillIds = model?.info?.meta?.skillIds ?? model?.meta?.skillIds ?? []; // save writes info.meta.skillIds (Chat.svelte reads the same) — try it first
 			filterIds = model?.meta?.filterIds ?? [];
 			defaultFilterIds = model?.meta?.defaultFilterIds ?? [];
 			actionIds = model?.meta?.actionIds ?? [];

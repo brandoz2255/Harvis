@@ -371,6 +371,7 @@ def _build_preview(skills, conns, mask: bool = True, require_verdict: bool = Tru
         "flag": SYNC_FLAG_ENV,
         "enabled": _sync_enabled(),
         "config_set": cs,
+        "skipped_unverified": skipped_unverified,
         "skills": {
             "target_dir": str(sdir) if sdir else None,
             "target_dir_note": f"host: openclaw/skills/{cs}/ (mounted into OpenClaw at /skills)",

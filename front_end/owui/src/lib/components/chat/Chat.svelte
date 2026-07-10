@@ -2692,6 +2692,12 @@
 			});
 		}
 
+		// Merge model-attached skills (model.info.meta.skillIds) with $-mention skills — union, de-duped
+		const modelSkillIds = Array.isArray(model?.info?.meta?.skillIds)
+			? model.info.meta.skillIds.map(String)
+			: [];
+		const allSkillIds = Array.from(new Set([...skillIds, ...modelSkillIds]));
+
 		// Use the user-selected terminal from the dropdown
 		const activeTerminalId = $selectedTerminalId ?? null;
 
@@ -2717,7 +2723,7 @@
 
 				filter_ids: selectedFilterIds.length > 0 ? selectedFilterIds : undefined,
 				tool_ids: toolIds.length > 0 ? toolIds : undefined,
-				skill_ids: skillIds.length > 0 ? skillIds : undefined,
+				skill_ids: allSkillIds.length > 0 ? allSkillIds : undefined,
 				terminal_id: terminalEnabled ? (activeTerminalId ?? undefined) : undefined,
 				tool_servers: [
 					...($toolServers ?? []).filter(
