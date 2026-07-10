@@ -1182,6 +1182,7 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
             model_name=model_name, pool=pool,
             parent_workspace_id=workspace_id, user_id=ws["user_id"],
             session_id=ws.get("session_id", ""),
+            launch_mode=ws.get("launch_mode", "user"),  # Phase D: auto → Claude sidecar read-only
         )
 
     elif agent_id == "nvidia-kimi":
@@ -1244,6 +1245,8 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
             # Attached-repo (clone-local) isolation when a repo is attached; else scratch.
             isolation_mode="attached" if _repo_path else "scratch",
             repo_config={"repo_path": _repo_path} if _repo_path else None,
+            # Offer-time tool policy: auto-detected launches get heavy tools withheld.
+            launch_mode=ws.get("launch_mode", "user"),
         )
 
     elif agent_id == "vibecode-turn":
@@ -1265,6 +1268,8 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
             permission_mode=ws.get("vibecode_permission_mode") or "ask",
             # Phase E4: "hermes" → SOUL persona + Hermes model; "" → plain native runner.
             persona_engine=ws.get("vibecode_persona_engine") or "",
+            # Offer-time tool policy: auto-detected launches get heavy tools withheld.
+            launch_mode=ws.get("launch_mode", "user"),
         )
 
     elif agent_id == "engine-adapter":
@@ -2260,6 +2265,7 @@ async def _start_workspace(
     engine_key: Optional[str] = None,
     engine_auth_mode: str = "api_key",
     vibecode_persona_engine: str = "",
+    launch_mode: str = "user",
 ) -> OpenClawClient:
     """
     Register a workspace in memory, create its queue, and start the background task.
@@ -2317,6 +2323,12 @@ async def _start_workspace(
         # Phase E4: "hermes" when this is a Hermes native-engine turn (SOUL persona +
         # Hermes model on the SubAgentRunner); "" for plain native / external engines.
         "vibecode_persona_engine": vibecode_persona_engine,
+        # Launch-path signal: "user" = explicitly user-initiated (pill, vibecode,
+        # build, internal integrations — the default); "auto" = auto-detected
+        # escalation. Auto runs carry no Tier-3 token and get heavy tools withheld.
+        # Fail-CLOSED for unrecognized non-empty values (a bad/typo signal → restricted);
+        # absent callers still get the param default "user" (legacy-compatible).
+        "launch_mode": launch_mode if launch_mode in ("user", "auto") else "auto",
         # Two-mode tracking
         "mode": config.mode,
         "allowed_capabilities": config.allowed_capabilities,

@@ -554,6 +554,7 @@ async def run_claude_chat_workspace(
     parent_workspace_id: str = "",
     user_id: int = 0,
     session_id: str = "",
+    launch_mode: str = "user",
 ) -> AsyncGenerator[OpenClawEvent, None]:
     """Run a CHAT workspace task through cloud Claude's OWN agentic loop — ``claude -p``
     with its built-in tools (web_search, exec, file ops). No repo clone: a scratch workdir
@@ -617,6 +618,13 @@ async def run_claude_chat_workspace(
            "--add-dir", workdir, "--dangerously-skip-permissions"]
     if claude_model:
         cmd += ["--model", claude_model]
+    if launch_mode == "auto":
+        # Phase D: an auto-escalated (NOT user-initiated) run is READ-ONLY — withhold the
+        # write/exec tools from Claude's own agentic loop, mirroring the native lane's
+        # offer-time withholding. Read/search tools (WebSearch, WebFetch, Read, Grep, Glob)
+        # stay. NOTE: verify the exact --disallowedTools spelling against the connected
+        # Claude Code CLI version; the tool NAMES are stable.
+        cmd += ["--disallowedTools", "Bash", "Edit", "Write", "MultiEdit", "NotebookEdit"]
 
     yield root_ev("log", {"message": f"Connected to Claude ({claude_model or 'subscription'}) — workspace tools active…"})
 

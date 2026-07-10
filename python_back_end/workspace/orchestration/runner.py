@@ -26,7 +26,7 @@ from ..openclaw_client import OpenClawEvent
 from .authz import authorize_action
 from .model_router import ModelRouter
 from .risk import await_action_decision, register_pending
-from .tools import WIRE_TOOL_SCHEMA, dispatch_tool, lane_for_tool, parse_tool_calls
+from .tools import WIRE_TOOL_SCHEMA, dispatch_tool, filter_wire_schema, lane_for_tool, parse_tool_calls
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +88,7 @@ class SubAgentRunner:
         max_runtime_seconds: int = 600,
         system_prompt: str | None = None,
         permission_mode: str | None = None,
+        launch_mode: str = "user",
     ) -> AsyncGenerator[OpenClawEvent, None]:
         def ev(etype: str, data: dict) -> OpenClawEvent:
             e = OpenClawEvent(
@@ -122,12 +123,18 @@ class SubAgentRunner:
         total_completion_tokens = 0
         total_tokens_sum = 0
         ctx_window = int(os.getenv("HARVIS_OLLAMA_NUM_CTX", "24576") or 24576)
+        # Offer-time tool policy: auto-detected launches never even SEE the heavy
+        # tools in the offered schema. authorize_action stays the runtime backstop.
+        # launch_mode == "user" (the default) → empty set → schema identical to today.
+        disabled: set[str] = (
+            {"exec", "edit_file", "str_replace"} if launch_mode == "auto" else set()
+        )
 
         try:
             while steps < max_steps and (time.monotonic() - started) < max_runtime_seconds:
                 steps += 1
                 msg = await self.router.complete(
-                    model_name=model_name, messages=messages, tools=WIRE_TOOL_SCHEMA, temperature=0.2
+                    model_name=model_name, messages=messages, tools=filter_wire_schema(disabled), temperature=0.2
                 )
                 _usage = msg.get("_usage") or {}
                 if _usage:
@@ -157,13 +164,30 @@ class SubAgentRunner:
                         completed = True
                         break
                     yield ev("tool_call", {"tool": name, "args": args})
+                    lane = lane_for_tool(name)
+                    # Phase D dispatch-time enforcement (the runtime backstop for the
+                    # offer-time policy): a tool WITHHELD from the schema on an auto launch
+                    # must ALSO be denied at dispatch — the model can still emit it via
+                    # prompt injection, hallucination, or the content-JSON fallback in
+                    # parse_tool_calls, and a lane<=3 tool would otherwise skip
+                    # authorize_action below and execute. `disabled` is empty for "user".
+                    if name in disabled:
+                        yield ev("decision", {
+                            "tool": name, "lane": lane, "policy": "deny",
+                            "reason": "withheld in auto-launched run", "source": "launch_mode",
+                        })
+                        yield ev("tool_result", {
+                            "output": f"DENIED: '{name}' is not available in auto-launched runs.",
+                            "success": False,
+                        })
+                        results_text.append(f"{name} DENIED (auto launch)")
+                        continue
                     # Lane-unification choke point (Phase 2): authorize_action composes
                     # the structural 6-lane gate with the per-action risk gate. Entered
                     # under the OLD gate's condition (permission_mode set — in-place
                     # sessions) OR for a lane>3 tool, so lane<=3 with no permission_mode
                     # keeps today's exact control flow: no gating, byte-for-byte
                     # unchanged (clone-mode + the orchestrator pass None).
-                    lane = lane_for_tool(name)
                     if permission_mode or lane > DEFAULT_SAFE_LANE:
                         decision_payloads: list[dict] = []
                         res = await authorize_action(

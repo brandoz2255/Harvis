@@ -148,6 +148,7 @@ async def run_vibecode_turn(
     isolation_mode: str = "session",   # 'session' (clone) | 'inplace' (real repo on a branch)
     permission_mode: str = "ask",      # in-place permission ladder: plan|ask|auto-accept|full-auto
     persona_engine: str = "",          # Phase E4: "hermes" → SOUL persona + Hermes model; "" → plain native
+    launch_mode: str = "user",         # "auto" (auto-detected launch) → heavy tools withheld from the offered schema
 ) -> AsyncGenerator[OpenClawEvent, None]:
     # Lazy import (avoid circular import at module load) — the FUNCTIONS, not the
     # re-exported APIRouter in workspace/__init__.py.
@@ -274,6 +275,7 @@ async def run_vibecode_turn(
             workspace_path=workspace_path,
             system_prompt=sys_prompt,
             permission_mode=gate_mode,
+            launch_mode=launch_mode,
         ):
             if ev.type == "tool_call":
                 tool_calls += 1

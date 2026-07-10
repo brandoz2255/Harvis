@@ -124,6 +124,18 @@ WIRE_TOOL_SCHEMA = [
     {k: v for k, v in entry.items() if k != "lane"} for entry in TOOL_SCHEMA
 ]
 
+
+def filter_wire_schema(disabled: set[str]) -> list[dict]:
+    """WIRE_TOOL_SCHEMA minus any tool whose function.name is in ``disabled``.
+    Returns a NEW list (the module constant is never mutated); whole entries are
+    dropped, nothing else changes. With an empty ``disabled`` set the result is
+    element-wise identical to WIRE_TOOL_SCHEMA (same entries, same order)."""
+    return [
+        entry
+        for entry in WIRE_TOOL_SCHEMA
+        if ((entry.get("function") or {}).get("name") or "") not in disabled
+    ]
+
 # Tool names dispatched / risk-classified elsewhere but not advertised in
 # TOOL_SCHEMA (dispatch_tool accepts run_tests; risk.py knows these aliases).
 _EXTRA_TOOL_LANES = {

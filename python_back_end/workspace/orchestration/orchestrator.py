@@ -90,6 +90,7 @@ async def run_orchestrated(
     model_pool: list[str] | None = None,
     isolation_mode: str = "scratch",
     repo_config: dict | None = None,
+    launch_mode: str = "user",   # "auto" (auto-detected launch) → heavy tools withheld from the offered schema
 ) -> AsyncGenerator[OpenClawEvent, None]:
     # Lazy import (avoid circular import at module load). Import the FUNCTIONS
     # from the submodule path — `from .. import workspace_router` would resolve to
@@ -178,6 +179,7 @@ async def run_orchestrated(
                     workspace_path=child["wsinfo"]["workspace_path"],
                     max_steps=int(child["profile"].get("max_steps", 12)),
                     max_runtime_seconds=int(child["profile"].get("max_runtime_seconds", 600)),
+                    launch_mode=launch_mode,
                 ):
                     await queue.put(ev)
             except Exception as exc:

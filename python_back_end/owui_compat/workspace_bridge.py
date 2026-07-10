@@ -196,6 +196,10 @@ async def maybe_handle_workspace(
     mode = str(owui_body.get("harvis_mode") or "auto").strip().lower()
     if mode == "chat":
         return None  # user forced fast chat
+    # Launch-path signal: explicit pill picks (agent/orchestrate) are user-initiated;
+    # 'auto'/absent goes through the auto-detector. Auto-detected launches run with
+    # heavy tools withheld (no Tier-3 capability token — see below).
+    launch_mode = "user" if mode in ("agent", "orchestrate") else "auto"
 
     _model_id = str(owui_body.get("model") or "")
     _is_anthropic = _model_id.startswith("anthropic/")
@@ -265,13 +269,23 @@ async def maybe_handle_workspace(
     started_epoch = time.monotonic()
 
     interactive_context = None
-    try:
-        cap = await _db_enable_interactive(
-            pool, workspace_id=workspace_id, user_id=user_id, ttl_seconds=3600
+    if launch_mode == "user":
+        try:
+            cap = await _db_enable_interactive(
+                pool, workspace_id=workspace_id, user_id=user_id, ttl_seconds=3600
+            )
+            interactive_context = {"workspace_id": workspace_id, "capability_token": cap}
+        except Exception:
+            logger.warning("owui workspace_bridge: enable_interactive failed for %s", workspace_id)
+    else:
+        # Auto-detected launch: withhold the Tier-3 capability token. Without a
+        # workspace_web_caps row, every /api/tools/browser/* call 403s in
+        # _require_interactive, and openclaw_client never injects the browser
+        # credentials hint — the run is restricted to base tools.
+        logger.info(
+            "owui workspace_bridge: auto launch %s — Tier-3 interactive withheld",
+            workspace_id,
         )
-        interactive_context = {"workspace_id": workspace_id, "capability_token": cap}
-    except Exception:
-        logger.warning("owui workspace_bridge: enable_interactive failed for %s", workspace_id)
 
     launch_kwargs = dict(
         workspace_id=workspace_id,
@@ -302,6 +316,9 @@ async def maybe_handle_workspace(
         # it and produces a real `git diff` vs HEAD. Only meaningful when orchestrated.
         repo_path=(owui_body.get("harvis_repo_path") or None),
         interactive_context=interactive_context,
+        # "user" (explicit agent/orchestrate pill) vs "auto" (auto-detected).
+        # Auto runs carry no Tier-3 token and get heavy tools withheld downstream.
+        launch_mode=launch_mode,
     )
 
     needs_approval = _approvals_enabled()

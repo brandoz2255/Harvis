@@ -32,6 +32,7 @@ async def stream_workspace_launch_as_chat(
     agent_id: str = "local",
     model_name: str = "",
     task_brief: Optional[str] = None,
+    launch_mode: str = "user",
 ) -> AsyncIterator[str]:
     """
     Launch a workspace task and yield chat-SSE lines the frontend can consume.
@@ -51,22 +52,29 @@ async def stream_workspace_launch_as_chat(
 
     started_epoch = time.monotonic()
     interactive_context = None
-    try:
-        cap_token = await _db_enable_interactive(
-            pool,
-            workspace_id=workspace_id,
-            user_id=user_id,
-            ttl_seconds=3600,
-        )
-        interactive_context = {
-            "workspace_id": workspace_id,
-            "capability_token": cap_token,
-        }
-    except Exception as exc:
-        logger.warning(
-            "chat_bridge: failed to enable interactive workspace %s: %s",
-            workspace_id,
-            exc,
+    if launch_mode == "user":
+        try:
+            cap_token = await _db_enable_interactive(
+                pool,
+                workspace_id=workspace_id,
+                user_id=user_id,
+                ttl_seconds=3600,
+            )
+            interactive_context = {
+                "workspace_id": workspace_id,
+                "capability_token": cap_token,
+            }
+        except Exception as exc:
+            logger.warning(
+                "chat_bridge: failed to enable interactive workspace %s: %s",
+                workspace_id,
+                exc,
+            )
+    else:
+        # Auto-detected escalation: withhold the Tier-3 capability token so the
+        # run stays on base tools (no /api/tools/browser/* access).
+        logger.info(
+            "chat_bridge: auto launch %s — Tier-3 interactive withheld", workspace_id
         )
 
     try:
@@ -83,6 +91,7 @@ async def stream_workspace_launch_as_chat(
             live_web=True,
             parallel=True,
             interactive_context=interactive_context,
+            launch_mode=launch_mode,
         )
     except Exception as exc:
         logger.error("chat_bridge: workspace launch failed: %s", exc)

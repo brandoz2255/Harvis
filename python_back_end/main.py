@@ -3083,6 +3083,9 @@ async def chat(
                     agent_id="local",
                     model_name="",
                     task_brief=suggestion.task_brief or current_message_content,
+                    # force_workspace = user explicitly asked → "user" (unchanged);
+                    # detector-driven escalation → "auto" (heavy tools withheld).
+                    launch_mode=("user" if force_workspace else "auto"),
                 ):
                     yield line
                 return
