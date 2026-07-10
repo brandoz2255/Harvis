@@ -427,6 +427,30 @@ export const getSkillSyncPreview = async (token: string) => {
 	return res;
 };
 
+export const saveRunAsSkill = async (token: string, runId: string) => {
+	// Phase F: distill a completed, user-owned run into a DRAFT skill (disabled +
+	// unaudited). Response: { skill_id, name, enabled:false, note }.
+	let error = null;
+	const res = await fetch(`${WEBUI_BASE_URL}/api/harvis/runs/${runId}/save-as-skill`, {
+		method: 'POST',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail ?? err.message ?? 'Request failed';
+			return null;
+		});
+	if (error) throw error;
+	return res;
+};
+
 export const applySkillSync = async (token: string, override: boolean = false) => {
 	let error = null;
 

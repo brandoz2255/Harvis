@@ -14,6 +14,8 @@
 	import RunProgressCard from '$lib/agent-studio/RunProgressCard.svelte';
 	import WorkflowInspector from '$lib/agent-studio/WorkflowInspector.svelte';
 	import { getRunArtifacts } from '$lib/apis/agent-runs';
+	import { saveRunAsSkill } from '$lib/apis/skills';
+	import { toast } from 'svelte-sonner';
 
 	const i18n: any = getContext('i18n');
 
@@ -384,6 +386,23 @@
 		previewRun();
 	}
 
+	// Phase F: distill THIS finished run into a DRAFT skill (disabled + unaudited — it
+	// won't apply in chat until the user audits it to 'supported' in Customize → Skills).
+	let _savingSkill = false;
+	const saveAsSkill = async () => {
+		if (_savingSkill) return;
+		_savingSkill = true;
+		try {
+			await saveRunAsSkill(localStorage.token, workspaceId);
+			toast.success(
+				$i18n.t('Draft skill created — review it in Customize → Skills, then mark it supported to enable.')
+			);
+		} catch (e) {
+			toast.error(`${e}`);
+		}
+		_savingSkill = false;
+	};
+
 	const startTimerAndStream = () => {
 		// startedAt is the persisted run start (above) — do NOT reset it here, or
 		// re-entering a running workspace restarts the counter from 0.
@@ -668,6 +687,14 @@
 				class="text-xs px-2 py-1 rounded-lg bg-gray-100 dark:bg-gray-850 hover:bg-gray-200 dark:hover:bg-gray-800 transition"
 				on:click={openStudio}>{$i18n.t('Open run')}</button
 			>
+			{#if phase === 'done'}
+				<button
+					class="text-xs px-2 py-1 rounded-lg bg-gray-100 dark:bg-gray-850 hover:bg-gray-200 dark:hover:bg-gray-800 transition disabled:opacity-40"
+					title={$i18n.t('Distill this run into a draft skill (disabled until you audit it)')}
+					disabled={_savingSkill}
+					on:click={saveAsSkill}>{_savingSkill ? $i18n.t('Saving…') : $i18n.t('Save as skill')}</button
+				>
+			{/if}
 		{/if}
 	</div>
 </div>

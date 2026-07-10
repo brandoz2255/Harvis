@@ -59,6 +59,7 @@ from workspace.terminal_routes import router as workspace_terminal_router
 from workspace.harvis_trace import harvis_trace_router
 from workspace.harvis_exec import harvis_exec_router
 from workspace.harvis_jobs import harvis_jobs_router
+from workspace.skill_extractor import harvis_skill_extract_router  # Phase F: run → draft skill
 from vibecoding.terminal_sessions import router as harvis_terminal_sessions_router
 
 # Import tools routers
@@ -1393,6 +1394,8 @@ app.include_router(harvis_exec_router)
 # the existing /api/harvis/runs/{id}/stream SSE; DELETE kills via pidfile.
 # Registry is in-memory (does NOT survive restart — E2 adds persistence).
 app.include_router(harvis_jobs_router)
+# Phase F: POST /api/harvis/runs/{id}/save-as-skill → a DRAFT (disabled, unaudited) skill.
+app.include_router(harvis_skill_extract_router)
 # Phase 3: terminal-session REST over the VibeCode PTY — pre-created exec +
 # docker exec_resize side-channel. Gated by HARVIS_BUILD_SHELL like the WS.
 app.include_router(harvis_terminal_sessions_router)
