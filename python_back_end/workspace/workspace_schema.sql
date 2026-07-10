@@ -30,16 +30,39 @@ CREATE INDEX IF NOT EXISTS idx_workspace_runs_parent
     ON workspace_runs(parent_run_id);
 
 -- P5 agent artifacts (diffs / changed-files / summaries produced by a sub-agent run)
+-- E2: content_bytes holds RAW binary artifacts (STL/3MF/G-code/PNG…) that don't
+-- decode as UTF-8 text; text artifacts keep using `content`. Exactly one is set.
 CREATE TABLE IF NOT EXISTS workspace_artifacts (
     id            TEXT PRIMARY KEY,
     workspace_id  TEXT NOT NULL REFERENCES workspace_runs(id) ON DELETE CASCADE,
     artifact_type TEXT NOT NULL,
     path          TEXT,
     content       TEXT,
+    content_bytes BYTEA,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_workspace_artifacts_ws
     ON workspace_artifacts(workspace_id, created_at);
+
+-- Phase E2: background-job persistence. The in-memory _jobs registry in
+-- WorkspaceTerminalManager dies with the backend process; this table is the
+-- durable record so job_status keeps answering after a restart and
+-- reattach_running_jobs() can resume tailing orphaned wrappers.
+CREATE TABLE IF NOT EXISTS workspace_jobs (
+    id             TEXT PRIMARY KEY,
+    workspace_id   TEXT NOT NULL,
+    user_id        INT,
+    command        TEXT,
+    workdir        TEXT,
+    status         TEXT,
+    exit_code      INT,
+    base_path      TEXT,
+    container_name TEXT,
+    started_at     TIMESTAMPTZ DEFAULT NOW(),
+    finished_at    TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_workspace_jobs_ws
+    ON workspace_jobs(workspace_id);
 
 CREATE TABLE IF NOT EXISTS workspace_events (
     id            SERIAL PRIMARY KEY,

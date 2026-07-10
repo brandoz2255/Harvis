@@ -20,14 +20,17 @@ before anything starts. GET/DELETE are ownership-scoped FAIL CLOSED: an
 unknown job_id, a missing workspace_runs row, or a row owned by someone else
 all return an identical 404.
 
-⚠ E1 CAVEAT: the job registry lives in WorkspaceTerminalManager._jobs —
-IN-MEMORY ONLY. A backend restart forgets every job (lookups 404) even though
-the detached wrapper keeps running inside the container. E2 adds persistence.
+E2 PERSISTENCE: every job is mirrored into the workspace_jobs table
+(insert on launch, update on every terminal state), so a backend restart no
+longer forgets jobs — GET falls back to the row, and a startup task
+(reattach_running_jobs) resumes tailing wrappers that are still alive inside
+their sandbox containers or finalizes ones that finished while we were down.
 """
 
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -65,17 +68,40 @@ async def _require_owned_job(pool, job_id: str, user_id: int):
 
     Missing job, missing run row, and foreign owner are indistinguishable —
     same 404, no existence leak (mirrors harvis_trace._require_owned_run).
+
+    E2: when the in-memory registry lost the job (backend restart, retention
+    prune) we fall back to the persisted workspace_jobs row and check BOTH
+    the owning run's user_id AND the user_id stamped on the job row —
+    fail closed on any mismatch or missing piece.
     """
     job = get_terminal_manager().get_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Job not found")
+    if job is not None:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT user_id FROM workspace_runs WHERE id = $1", job.workspace_id
+            )
+        if row is None or int(row["user_id"]) != int(user_id):
+            raise HTTPException(status_code=404, detail="Job not found")
+        return job
+
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT user_id FROM workspace_runs WHERE id = $1", job.workspace_id
+            """
+            SELECT j.id, j.workspace_id, j.user_id AS job_user,
+                   r.user_id AS ws_user
+            FROM workspace_jobs j
+            LEFT JOIN workspace_runs r ON r.id = j.workspace_id
+            WHERE j.id = $1
+            """,
+            job_id,
         )
-    if row is None or int(row["user_id"]) != int(user_id):
+    if row is None:
         raise HTTPException(status_code=404, detail="Job not found")
-    return job
+    if row["ws_user"] is None or int(row["ws_user"]) != int(user_id):
+        raise HTTPException(status_code=404, detail="Job not found")
+    if row["job_user"] is not None and int(row["job_user"]) != int(user_id):
+        raise HTTPException(status_code=404, detail="Job not found")
+    return SimpleNamespace(job_id=row["id"], workspace_id=row["workspace_id"])
 
 
 # ── Routes ───────────────────────────────────────────────────────────────────
@@ -123,7 +149,8 @@ async def create_job(
     )
     try:
         job_id = await mgr.exec_bg(
-            workspace_id, body.command, workdir=body.workdir, pool=pool
+            workspace_id, body.command, workdir=body.workdir, pool=pool,
+            user_id=user_id,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc))
@@ -150,7 +177,9 @@ async def get_job_status(
     """Job status — ownership-scoped, fail closed."""
     pool = _pool_of(request)
     await _require_owned_job(pool, job_id, int(current_user["id"]))
-    status = await get_terminal_manager().job_status(job_id)
+    # E2: pool lets job_status answer from the workspace_jobs row when the
+    # in-memory registry was lost (backend restart / retention prune).
+    status = await get_terminal_manager().job_status(job_id, pool=pool)
     if status is None:  # raced a registry prune
         raise HTTPException(status_code=404, detail="Job not found")
     return status

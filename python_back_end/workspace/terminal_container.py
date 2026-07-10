@@ -20,6 +20,7 @@ Design choices for MVP:
 import asyncio
 import json
 import logging
+import mimetypes
 import os
 import shlex
 import time
@@ -51,6 +52,13 @@ _JOB_RETENTION_S = float(os.getenv("HARVIS_JOB_RETENTION_S", "3600"))
 # Cap on-disk BASE.out growth (container layer) — chatty jobs past this
 # cumulative output size are reaped early by the tail loop.
 _JOB_MAX_OUTPUT_BYTES = int(os.getenv("HARVIS_JOB_MAX_OUTPUT_BYTES", "10485760"))  # 10 MB
+# Phase E2 — process artifacts: when a job finishes, files it wrote under its
+# workdir are captured as workspace_artifacts. Caps: at most this many files,
+# each at most _JOB_ARTIFACT_MAX_BYTES (default mirrors the existing 512 KiB
+# artifact snapshot cap in workspace_router/isolation); bigger files get a
+# placeholder row so the run record is still honest about what was produced.
+_JOB_MAX_ARTIFACTS = int(os.getenv("HARVIS_JOB_MAX_ARTIFACTS", "50"))
+_JOB_ARTIFACT_MAX_BYTES = int(os.getenv("HARVIS_JOB_ARTIFACT_MAX_BYTES", str(512 * 1024)))
 
 
 def is_enabled() -> bool:
@@ -111,6 +119,8 @@ class _JobState:
     container_name: str
     base: str  # /tmp/harvis-job-<jid> — .pid / .out / .exit live beside it
     command: str
+    workdir: str = "/workspace"  # E2: artifact capture scans under this
+    user_id: Optional[int] = None  # E2: persisted for post-restart ownership
     status: str = "running"
     started: float = field(default_factory=time.time)
     finished: Optional[float] = None
@@ -132,11 +142,11 @@ class WorkspaceTerminalManager:
             logger.error("WorkspaceTerminalManager: failed to init docker client: %s", exc)
             self._client = None
         self._terminals: dict[str, _TerminalState] = {}
-        # ⚠ E1 CAVEAT: the background-job registry is IN-MEMORY ONLY. It does
-        # NOT survive a backend restart — after a restart, job_id lookups 404
-        # and nothing tails the orphaned wrapper (which keeps running inside
-        # the container and still writes /tmp/harvis-job-<jid>.{out,exit}).
-        # E2 adds persistence (workspace_events already carries the trace).
+        # The in-memory job registry is the source of truth for the CURRENT
+        # process; E2 mirrors every lifecycle change into the workspace_jobs
+        # table (best-effort) and reattach_running_jobs() rebuilds this dict
+        # from it after a backend restart — resuming tails of live wrappers
+        # and finalizing ones that finished while the backend was down.
         self._jobs: dict[str, _JobState] = {}
         self._lock = asyncio.Lock()
         self._readiness: Optional[_ReadinessReport] = None
@@ -452,6 +462,7 @@ class WorkspaceTerminalManager:
         cmd: str,
         workdir: str = "/workspace",
         pool=None,
+        user_id: Optional[int] = None,
     ) -> str:
         """Start `cmd` DETACHED in the workspace container; return a job_id
         immediately.
@@ -511,8 +522,14 @@ class WorkspaceTerminalManager:
             container_name=state.container_name,
             base=base,
             command=cmd,
+            workdir=workdir,
+            user_id=user_id,
         )
         self._jobs[jid] = job
+        # E2: durable record — job_status + reattach_running_jobs survive a
+        # backend restart via this row. Best-effort: a DB hiccup never blocks
+        # the (already launched) job.
+        await self._db_job_insert(pool, job)
         job.tail_task = asyncio.create_task(self._tail_job(job, container, pool))
         logger.info(
             "[job:%s] started background job in %s (ws=%s)",
@@ -681,6 +698,23 @@ class WorkspaceTerminalManager:
             job.finished = time.time()
             code = job.exit_code if job.exit_code is not None else -1
             duration_ms = int((job.finished - job.started) * 1000)
+            # E2: persist the terminal state (done/exited/killed/reaped/error)
+            # so post-restart job_status lookups keep answering. Best-effort.
+            try:
+                await self._db_job_finish(pool, job)
+            except Exception:  # noqa: BLE001
+                pass
+            # E2: capture files the job wrote under its workdir as artifacts
+            # BEFORE the final tool_result (complete trace) and BEFORE the
+            # janitor below (BASE.pid is the find -newer marker). Skipped when
+            # the container vanished (status 'error'). Never crashes the job.
+            if job.status != "error":
+                try:
+                    await self._capture_job_artifacts(job, container, pool)
+                except Exception as _cap_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[job:%s] artifact capture failed: %s", job.job_id, _cap_exc,
+                    )
             try:
                 await emit_terminal_event(
                     pool, job.workspace_id,
@@ -806,21 +840,411 @@ class WorkspaceTerminalManager:
     def get_job(self, job_id: str) -> Optional[_JobState]:
         return self._jobs.get(job_id)
 
-    async def job_status(self, job_id: str) -> Optional[dict]:
+    async def job_status(self, job_id: str, pool=None) -> Optional[dict]:
         job = self._jobs.get(job_id)
-        if job is None:
+        if job is not None:
+            out: dict[str, Any] = {
+                "job_id": job.job_id,
+                "status": job.status,
+                "started": job.started,
+                "workspace_id": job.workspace_id,
+            }
+            if job.exit_code is not None:
+                out["exit_code"] = job.exit_code
+            if job.finished is not None:
+                out["finished"] = job.finished
+            return out
+        # E2 fallback: the in-memory registry died with the last backend
+        # process (or the record was retention-pruned) — answer from the
+        # persisted workspace_jobs row so GET-after-restart still works.
+        if pool is None:
             return None
-        out: dict[str, Any] = {
-            "job_id": job.job_id,
-            "status": job.status,
-            "started": job.started,
-            "workspace_id": job.workspace_id,
+        try:
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """
+                    SELECT id, workspace_id, status, exit_code,
+                           EXTRACT(EPOCH FROM started_at)  AS started,
+                           EXTRACT(EPOCH FROM finished_at) AS finished
+                    FROM workspace_jobs WHERE id = $1
+                    """,
+                    job_id,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[job:%s] status DB fallback failed: %s", job_id, exc)
+            return None
+        if row is None:
+            return None
+        out = {
+            "job_id": row["id"],
+            "status": row["status"] or "unknown",
+            "started": float(row["started"]) if row["started"] is not None else None,
+            "workspace_id": row["workspace_id"],
         }
-        if job.exit_code is not None:
-            out["exit_code"] = job.exit_code
-        if job.finished is not None:
-            out["finished"] = job.finished
+        if row["exit_code"] is not None:
+            out["exit_code"] = int(row["exit_code"])
+        if row["finished"] is not None:
+            out["finished"] = float(row["finished"])
         return out
+
+    # ── Job persistence (Phase E2) ─────────────────────────────────────────
+    # All DB writes here are BEST-EFFORT: a database hiccup must never crash
+    # a launched job or its tail loop — the in-memory registry stays the
+    # source of truth for the current process; the table is the restart net.
+
+    async def _db_job_insert(self, pool, job: _JobState) -> None:
+        if pool is None:
+            return
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO workspace_jobs
+                        (id, workspace_id, user_id, command, workdir, status,
+                         base_path, container_name, started_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, to_timestamp($9))
+                    ON CONFLICT (id) DO NOTHING
+                    """,
+                    job.job_id, job.workspace_id, job.user_id, job.command,
+                    job.workdir, job.status, job.base, job.container_name,
+                    job.started,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[job:%s] DB insert failed (job unaffected): %s", job.job_id, exc,
+            )
+
+    async def _db_job_finish(self, pool, job: _JobState) -> None:
+        if pool is None:
+            return
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE workspace_jobs SET status = $2, exit_code = $3, "
+                    "finished_at = to_timestamp($4) WHERE id = $1",
+                    job.job_id, job.status, job.exit_code,
+                    job.finished or time.time(),
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[job:%s] DB finish-update failed (job unaffected): %s",
+                job.job_id, exc,
+            )
+
+    async def _db_job_mark_lost(self, pool, job_id: str) -> None:
+        if pool is None:
+            return
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE workspace_jobs SET status = 'lost', finished_at = NOW() "
+                    "WHERE id = $1 AND status = 'running'",
+                    job_id,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[job:%s] DB lost-update failed: %s", job_id, exc)
+
+    # ── Process artifacts (Phase E2) ─────────────────────────────────────────
+
+    async def _capture_job_artifacts(self, job: _JobState, container, pool) -> None:
+        """Record files the finished job WROTE under its workdir as artifacts.
+
+        BASE.pid (written by the wrapper at launch, removed only by the tail
+        loop's janitor AFTER this runs) is the `find -newer` marker, so only
+        files touched during the job's lifetime are captured. Secret-named
+        files are never captured (fail closed: if the filter can't be
+        imported, nothing is). Caps: _JOB_MAX_ARTIFACTS files, each up to
+        _JOB_ARTIFACT_MAX_BYTES (larger files get an honest placeholder row).
+        UTF-8-decodable content → workspace_artifacts.content; binary
+        (STL/3MF/G-code/PNG…) → content_bytes. Each saved file emits the
+        Phase-B typed 'artifact' trace event on the job's workspace stream —
+        safe on emit_terminal_event's DB seq because sandbox-job workspaces
+        have no live run-loop seq counter to collide with.
+        """
+        if pool is None:
+            return
+        try:
+            from .workspace_router import _db_save_artifact  # noqa: WPS433
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[job:%s] artifact helper unavailable — skipping capture: %s",
+                job.job_id, exc,
+            )
+            return
+        try:
+            from .orchestration.isolation import _is_secret_artifact  # noqa: WPS433
+        except Exception as exc:  # noqa: BLE001
+            # No secret filter → capture nothing (never risk exposing keys).
+            logger.warning(
+                "[job:%s] secret filter unavailable — skipping capture: %s",
+                job.job_id, exc,
+            )
+            return
+
+        wd = (job.workdir or "/workspace").rstrip("/") or "/"
+        marker = f"{job.base}.pid"
+        list_cmd = (
+            f"test -f {marker} && find {shlex.quote(wd)} -xdev -type f "
+            f"-newer {marker} "
+            "-not -path '*/.git/*' -not -path '*/node_modules/*' "
+            "-not -path '*/__pycache__/*' -not -path '*/.venv/*' "
+            f"2>/dev/null | head -n {_JOB_MAX_ARTIFACTS * 4}"
+        )
+        res = await asyncio.to_thread(
+            container.exec_run, ["sh", "-c", list_cmd], demux=False,
+        )
+        listing = (res.output or b"").decode("utf-8", errors="replace")
+        paths = [p for p in (ln.strip() for ln in listing.splitlines()) if p]
+        if not paths:
+            return
+
+        captured = 0
+        for fp in paths:
+            if captured >= _JOB_MAX_ARTIFACTS:
+                logger.info(
+                    "[job:%s] artifact cap HARVIS_JOB_MAX_ARTIFACTS=%s reached",
+                    job.job_id, _JOB_MAX_ARTIFACTS,
+                )
+                break
+            rel = fp[len(wd):].lstrip("/") if fp.startswith(wd) else fp.lstrip("/")
+            name = rel.rsplit("/", 1)[-1]
+            if not rel or name.startswith("harvis-job-"):
+                continue  # never capture our own pid/out/exit plumbing
+            if _is_secret_artifact(rel):
+                continue  # never expose .env / keys / credentials
+
+            # One exec per file: first line = byte size, rest = base64 body
+            # (only when within the per-file cap). base64 keeps binary intact
+            # through the exec text channel.
+            read_cmd = (
+                f'f={shlex.quote(fp)}; s=$(wc -c < "$f" 2>/dev/null || echo -1); '
+                f'echo "$s"; if [ "$s" -ge 0 ] && [ "$s" -le {_JOB_ARTIFACT_MAX_BYTES} ]; '
+                'then base64 "$f" 2>/dev/null; fi'
+            )
+            try:
+                res = await asyncio.to_thread(
+                    container.exec_run, ["sh", "-c", read_cmd], demux=False,
+                )
+                out = (res.output or b"").decode("ascii", errors="replace")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[job:%s] artifact read failed for %r: %s",
+                    job.job_id, rel, exc,
+                )
+                continue
+            first, _, b64_body = out.partition("\n")
+            try:
+                size = int(first.strip())
+            except ValueError:
+                continue
+            if size < 0:
+                continue
+
+            content: Optional[str] = None
+            content_bytes: Optional[bytes] = None
+            if size > _JOB_ARTIFACT_MAX_BYTES:
+                content = f"<{size} bytes — not snapshotted>"
+            else:
+                import base64 as _b64  # noqa: WPS433
+                try:
+                    raw = _b64.b64decode("".join(b64_body.split()), validate=False)
+                except Exception:  # noqa: BLE001
+                    continue
+                try:
+                    content = raw.decode("utf-8", errors="strict")
+                except UnicodeDecodeError:
+                    content_bytes = raw  # binary → BYTEA column
+
+            try:
+                aid = await _db_save_artifact(
+                    pool, job.workspace_id, "file",
+                    path=rel, content=content, content_bytes=content_bytes,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[job:%s] artifact save failed for %r: %s",
+                    job.job_id, rel, exc,
+                )
+                continue
+            if not aid:
+                continue
+            captured += 1
+            mime = mimetypes.guess_type(rel)[0] or (
+                "application/octet-stream" if content_bytes is not None
+                else "text/plain"
+            )
+            await emit_terminal_event(
+                pool, job.workspace_id,
+                event_type="artifact",
+                payload={
+                    "run_id": job.workspace_id,
+                    "artifact_id": aid,
+                    "path": rel,
+                    "mime_type": mime,
+                    "size_bytes": size,
+                    "label": name or "file",
+                    "job_id": job.job_id,
+                },
+            )
+        if captured:
+            logger.info(
+                "[job:%s] captured %d artifact(s) from %s",
+                job.job_id, captured, wd,
+            )
+
+    # ── Restart reconnect (Phase E2) ─────────────────────────────────────────
+
+    async def reattach_running_jobs(self, pool) -> int:
+        """Reconnect to jobs that were 'running' when the backend last died.
+
+        The detached wrapper + its /tmp/harvis-job-<jid>.{pid,out,exit} files
+        survive inside the sandbox container across a backend restart; only
+        the in-memory registry is gone. For each workspace_jobs row still
+        marked running:
+
+          • container + BASE.exit present → the job finished while we were
+            down: finalize now (exit code, DB row, artifact capture, final
+            tool_result, janitor) WITHOUT re-streaming old output.
+          • container + BASE.out present → still live: re-register an
+            in-memory _JobState (offset 0, so output re-streams from the top)
+            and resume the tail loop.
+          • container or job files gone → mark the row 'lost'.
+
+        Returns how many jobs were re-registered or finalized. Best-effort:
+        called once from the main.py startup task; never raises upward.
+        """
+        if pool is None or self._client is None:
+            return 0
+        try:
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT id, workspace_id, user_id, command, workdir,
+                           base_path, container_name,
+                           EXTRACT(EPOCH FROM started_at) AS started
+                    FROM workspace_jobs WHERE status = 'running'
+                    """
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("job reattach: workspace_jobs query failed: %s", exc)
+            return 0
+
+        count = 0
+        for row in rows:
+            jid = row["id"]
+            if jid in self._jobs:
+                continue  # already tracked in this process
+            base = row["base_path"] or f"/tmp/harvis-job-{jid}"
+            try:
+                container = await asyncio.to_thread(
+                    self._client.containers.get, row["container_name"] or ""
+                )
+                if container.status != "running":
+                    await asyncio.to_thread(container.start)
+            except NotFound:
+                logger.info("[job:%s] reattach: container gone — marking lost", jid)
+                await self._db_job_mark_lost(pool, jid)
+                continue
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[job:%s] reattach: container unusable (%s) — marking lost",
+                    jid, exc,
+                )
+                await self._db_job_mark_lost(pool, jid)
+                continue
+
+            job = _JobState(
+                job_id=jid,
+                workspace_id=row["workspace_id"],
+                container_name=row["container_name"],
+                base=base,
+                command=row["command"] or "",
+                workdir=row["workdir"] or "/workspace",
+                user_id=row["user_id"],
+                started=(
+                    float(row["started"]) if row["started"] is not None
+                    else time.time()
+                ),
+            )
+
+            try:
+                res = await asyncio.to_thread(
+                    container.exec_run,
+                    ["sh", "-c",
+                     f"if [ -f {base}.exit ]; then echo \"EXIT:$(cat {base}.exit)\"; "
+                     f"elif [ -f {base}.out ]; then echo RUNNING; else echo GONE; fi"],
+                    demux=False,
+                )
+                probe = (res.output or b"").decode("utf-8", errors="replace").strip()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[job:%s] reattach: probe failed: %s", jid, exc)
+                continue
+
+            if probe.startswith("EXIT:"):
+                raw = probe[5:].strip()
+                try:
+                    job.exit_code = int(raw.split()[0])
+                except (ValueError, IndexError):
+                    job.exit_code = -1
+                job.status = "done" if job.exit_code == 0 else "exited"
+                job.finished = time.time()
+                self._jobs[jid] = job
+                await self._db_job_finish(pool, job)
+                try:
+                    await self._capture_job_artifacts(job, container, pool)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[job:%s] reattach: artifact capture failed: %s", jid, exc,
+                    )
+                duration_ms = int((job.finished - job.started) * 1000)
+                try:
+                    await emit_terminal_event(
+                        pool, job.workspace_id,
+                        event_type="tool_result",
+                        payload={
+                            "tool": _TERMINAL_TOOL_NAME,
+                            "success": job.exit_code == 0,
+                            "summary": (
+                                f"job {jid} {job.status} exit={job.exit_code} "
+                                f"dur={duration_ms}ms (finalized after backend restart)"
+                            ),
+                            "args": {"command": job.command},
+                            "output": {
+                                "exit_code": job.exit_code,
+                                "duration_ms": duration_ms,
+                                "status": job.status,
+                                "reattached": True,
+                            },
+                            "job_id": jid,
+                        },
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    await asyncio.to_thread(
+                        container.exec_run,
+                        ["sh", "-c", f"rm -f {base}.pid {base}.out {base}.exit"],
+                        demux=False,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                count += 1
+                logger.info(
+                    "[job:%s] reattach: finalized (exit=%s)", jid, job.exit_code,
+                )
+            elif probe == "RUNNING":
+                self._jobs[jid] = job
+                job.tail_task = asyncio.create_task(
+                    self._tail_job(job, container, pool)
+                )
+                count += 1
+                logger.info("[job:%s] reattach: resumed tail loop", jid)
+            else:
+                await self._db_job_mark_lost(pool, jid)
+                logger.info(
+                    "[job:%s] reattach: job files gone — marking lost", jid,
+                )
+        return count
 
     # ── Periodic janitor ───────────────────────────────────────────────────
 

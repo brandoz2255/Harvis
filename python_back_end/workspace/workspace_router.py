@@ -743,8 +743,13 @@ async def _db_create_run(
 async def _db_save_artifact(
     pool, workspace_id: str, artifact_type: str,
     *, path: Optional[str] = None, content: Optional[str] = None,
+    content_bytes: Optional[bytes] = None,
 ) -> Optional[str]:
-    """Persist an agent artifact (diff / changed_files / summary / log) and return its id."""
+    """Persist an agent artifact (diff / changed_files / summary / log) and return its id.
+
+    E2: pass ``content_bytes`` (instead of ``content``) for a BINARY artifact
+    (STL/3MF/G-code/PNG…) — it lands in the BYTEA column and the raw/download
+    endpoints serve it verbatim."""
     if pool is None:
         return None
     artifact_id = uuid.uuid4().hex[:16]
@@ -752,10 +757,10 @@ async def _db_save_artifact(
         async with pool.acquire() as conn:
             await conn.execute(
                 """
-                INSERT INTO workspace_artifacts (id, workspace_id, artifact_type, path, content)
-                VALUES ($1, $2, $3, $4, $5)
+                INSERT INTO workspace_artifacts (id, workspace_id, artifact_type, path, content, content_bytes)
+                VALUES ($1, $2, $3, $4, $5, $6)
                 """,
-                artifact_id, workspace_id, artifact_type, path, content,
+                artifact_id, workspace_id, artifact_type, path, content, content_bytes,
             )
         # NOTE: the typed 'artifact' trace event is emitted by the run loop
         # (_flush_oc_writes) on the loop's OWN seq counter — NOT here. This helper is
@@ -2992,7 +2997,9 @@ async def list_run_artifacts(
             raise HTTPException(status_code=404, detail="Run not found")
         rows = await conn.fetch(
             """
-            SELECT id, artifact_type, path, COALESCE(LENGTH(content), 0) AS size, created_at
+            SELECT id, artifact_type, path,
+                   COALESCE(LENGTH(content), OCTET_LENGTH(content_bytes), 0) AS size,
+                   created_at
             FROM workspace_artifacts
             WHERE workspace_id = $1
             ORDER BY created_at ASC
@@ -3029,7 +3036,8 @@ async def get_artifact(
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            SELECT a.id, a.artifact_type, a.path, a.content, a.created_at, r.user_id
+            SELECT a.id, a.artifact_type, a.path, a.content, a.created_at, r.user_id,
+                   (a.content_bytes IS NOT NULL) AS has_bytes
             FROM workspace_artifacts a
             JOIN workspace_runs r ON r.id = a.workspace_id
             WHERE a.id = $1
@@ -3051,17 +3059,18 @@ async def get_artifact(
         "content": content,
         "category": meta["category"],
         "mime": meta["mime"],
-        "is_binary": meta["is_binary"] or is_b64,
+        # E2: raw-bytes artifacts (content_bytes BYTEA) are binary by definition.
+        "is_binary": meta["is_binary"] or is_b64 or bool(row["has_bytes"]),
         "created_at": row["created_at"].isoformat() if row["created_at"] else None,
     }
 
 
 async def _fetch_owned_artifact(pool, artifact_id: str, uid):
-    """Fetch an artifact's (path, content) iff the run belongs to uid. Raises 404 otherwise."""
+    """Fetch an artifact's (path, content, content_bytes) iff the run belongs to uid. Raises 404 otherwise."""
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            SELECT a.path, a.content, r.user_id
+            SELECT a.path, a.content, a.content_bytes, r.user_id
             FROM workspace_artifacts a JOIN workspace_runs r ON r.id = a.workspace_id
             WHERE a.id = $1
             """,
@@ -3071,12 +3080,15 @@ async def _fetch_owned_artifact(pool, artifact_id: str, uid):
         raise HTTPException(status_code=404, detail="Artifact not found")
     if _artifact_is_secret(row["path"]):
         raise HTTPException(status_code=403, detail="This file type is not downloadable")
-    return row["path"], (row["content"] or "")
+    return row["path"], (row["content"] or ""), row["content_bytes"]
 
 
-def _artifact_bytes(path, content: str) -> tuple:
-    """Decode a stored artifact to (bytes, mime). Binary artifacts carry the base64 sentinel."""
+def _artifact_bytes(path, content: str, content_bytes=None) -> tuple:
+    """Decode a stored artifact to (bytes, mime). E2 raw-binary artifacts live in
+    content_bytes (served verbatim); legacy binary artifacts carry the base64 sentinel."""
     meta = _artifact_meta(path)
+    if content_bytes is not None:
+        return bytes(content_bytes), (meta["mime"] if meta["category"] != "unknown" else "application/octet-stream")
     if content.startswith(_ARTIFACT_B64_SENTINEL):
         import base64 as _b64
         try:
@@ -3100,8 +3112,8 @@ async def get_artifact_raw(
     pool = getattr(request.app.state, "pg_pool", None)
     if pool is None:
         raise HTTPException(status_code=503, detail="Database not available")
-    path, content = await _fetch_owned_artifact(pool, artifact_id, current_user.get("id"))
-    data, mime = _artifact_bytes(path, content)
+    path, content, content_bytes = await _fetch_owned_artifact(pool, artifact_id, current_user.get("id"))
+    data, mime = _artifact_bytes(path, content, content_bytes)
     # Never serve raw HTML/SVG with an active content-type at our origin (XSS) — force download type.
     if mime in ("text/html", "image/svg+xml"):
         mime = "application/octet-stream"
@@ -3120,8 +3132,8 @@ async def download_artifact_file(
     pool = getattr(request.app.state, "pg_pool", None)
     if pool is None:
         raise HTTPException(status_code=503, detail="Database not available")
-    path, content = await _fetch_owned_artifact(pool, artifact_id, current_user.get("id"))
-    data, mime = _artifact_bytes(path, content)
+    path, content, content_bytes = await _fetch_owned_artifact(pool, artifact_id, current_user.get("id"))
+    data, mime = _artifact_bytes(path, content, content_bytes)
     fname = _os.path.basename(path or "artifact") or "artifact"
     fname = "".join(c for c in fname if c.isalnum() or c in "._- ()") or "artifact"
     return Response(
@@ -3147,7 +3159,8 @@ async def list_all_artifacts(
         rows = await conn.fetch(
             """
             SELECT a.id, a.workspace_id, a.path,
-                   COALESCE(LENGTH(a.content), 0) AS size, a.created_at, r.task_brief
+                   COALESCE(LENGTH(a.content), OCTET_LENGTH(a.content_bytes), 0) AS size,
+                   a.created_at, r.task_brief
             FROM workspace_artifacts a
             JOIN workspace_runs r ON r.id = a.workspace_id
             WHERE r.user_id = $1 AND a.artifact_type = 'file'

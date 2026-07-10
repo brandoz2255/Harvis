@@ -667,6 +667,33 @@ async def lifespan(app: FastAPI):
                 from workspace.orchestration import ORCHESTRATION_SCHEMA_SQL
                 await conn.execute(ORCHESTRATION_SCHEMA_SQL)
 
+                # Phase E2: background-job persistence + binary artifact storage.
+                # workspace_jobs mirrors the in-memory _jobs registry so jobs
+                # survive a backend restart (reattach task below resumes tails);
+                # content_bytes stores raw binary artifacts (STL/PNG/…) that
+                # can't live in the TEXT content column.
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS workspace_jobs (
+                        id             TEXT PRIMARY KEY,
+                        workspace_id   TEXT NOT NULL,
+                        user_id        INT,
+                        command        TEXT,
+                        workdir        TEXT,
+                        status         TEXT,
+                        exit_code      INT,
+                        base_path      TEXT,
+                        container_name TEXT,
+                        started_at     TIMESTAMPTZ DEFAULT NOW(),
+                        finished_at    TIMESTAMPTZ
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_workspace_jobs_ws
+                        ON workspace_jobs(workspace_id);
+                    ALTER TABLE workspace_artifacts
+                        ADD COLUMN IF NOT EXISTS content_bytes BYTEA;
+                    """
+                )
+
                 # Open Notebook (RAG notebooks) — self-create the schema (the tables
                 # were never applied on this deploy). Idempotent CREATE TABLE/INDEX.
                 import os as _os
@@ -676,6 +703,27 @@ async def lifespan(app: FastAPI):
                 logger.info("✅ Notebook schema ensured")
         except Exception as e:
             logger.warning("⚠️ Failed to init OpenClaw audit/prefs schema: %s", e)
+
+        # Phase E2: reconnect to background jobs that were 'running' when the
+        # backend last died. The detached wrappers + their /tmp/harvis-job-*
+        # files survive inside the sandbox containers; this finalizes finished
+        # ones, resumes tailing live ones, and marks container-less ones lost.
+        # Best-effort — a failure here must never block startup. Runs AFTER the
+        # migration block above so workspace_jobs is guaranteed to exist.
+        try:
+            from workspace.terminal_container import get_terminal_manager as _get_term_mgr
+
+            async def _job_reattacher() -> None:
+                try:
+                    n = await _get_term_mgr().reattach_running_jobs(app.state.pg_pool)
+                    if n:
+                        logger.info("✅ Reattached %d background job(s) after restart", n)
+                except Exception as _re_exc:  # noqa: BLE001
+                    logger.warning("background-job reattach failed: %s", _re_exc)
+
+            asyncio.create_task(_job_reattacher())
+        except Exception as _exc:  # noqa: BLE001
+            logger.warning("job reattacher not started: %s", _exc)
 
         # Initialize ChatHistoryManager
         db_pool = app.state.pg_pool
