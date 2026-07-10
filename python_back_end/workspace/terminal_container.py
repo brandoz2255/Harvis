@@ -546,6 +546,9 @@ class WorkspaceTerminalManager:
         container mid-job.
         """
         target = {"kind": "sandbox", "id": job.container_name}
+        # Set when the task is CANCELLED (backend shutdown): the job is still running in
+        # the container, so we must NOT finalize/clean it up — reattach adopts it on boot.
+        _shutdown_cancel = False
         try:
             while True:
                 await asyncio.sleep(_JOB_POLL_INTERVAL_S)
@@ -689,65 +692,71 @@ class WorkspaceTerminalManager:
             logger.warning("[job:%s] container vanished mid-job", job.job_id)
             job.status = "error"
         except asyncio.CancelledError:
-            job.status = "error"
+            # Backend shutdown / task cancel — the job is STILL RUNNING in the sandbox
+            # container. Leave its pid/out/exit files AND the 'running' DB row intact so
+            # reattach_running_jobs adopts it on the next boot. Skip ALL cleanup below.
+            _shutdown_cancel = True
             raise
         except Exception as exc:  # noqa: BLE001
             logger.error("[job:%s] tail loop crashed: %s", job.job_id, exc)
             job.status = "error"
         finally:
-            job.finished = time.time()
-            code = job.exit_code if job.exit_code is not None else -1
-            duration_ms = int((job.finished - job.started) * 1000)
-            # E2: persist the terminal state (done/exited/killed/reaped/error)
-            # so post-restart job_status lookups keep answering. Best-effort.
-            try:
-                await self._db_job_finish(pool, job)
-            except Exception:  # noqa: BLE001
-                pass
-            # E2: capture files the job wrote under its workdir as artifacts
-            # BEFORE the final tool_result (complete trace) and BEFORE the
-            # janitor below (BASE.pid is the find -newer marker). Skipped when
-            # the container vanished (status 'error'). Never crashes the job.
-            if job.status != "error":
+            # On shutdown-cancellation the job is still alive in the container — do NONE
+            # of the finalize/janitor below, or reattach can't adopt it on the next boot.
+            if not _shutdown_cancel:
+                job.finished = time.time()
+                code = job.exit_code if job.exit_code is not None else -1
+                duration_ms = int((job.finished - job.started) * 1000)
+                # E2: persist the terminal state (done/exited/killed/reaped/error)
+                # so post-restart job_status lookups keep answering. Best-effort.
                 try:
-                    await self._capture_job_artifacts(job, container, pool)
-                except Exception as _cap_exc:  # noqa: BLE001
-                    logger.warning(
-                        "[job:%s] artifact capture failed: %s", job.job_id, _cap_exc,
-                    )
-            try:
-                await emit_terminal_event(
-                    pool, job.workspace_id,
-                    event_type="tool_result",
-                    payload={
-                        "tool": _TERMINAL_TOOL_NAME,
-                        "success": job.status == "done" and code == 0,
-                        "summary": (
-                            f"job {job.job_id} {job.status} "
-                            f"exit={code} dur={duration_ms}ms"
-                        ),
-                        "args": {"command": job.command},
-                        "output": {
-                            "exit_code": code,
-                            "duration_ms": duration_ms,
-                            "status": job.status,
+                    await self._db_job_finish(pool, job)
+                except Exception:  # noqa: BLE001
+                    pass
+                # E2: capture files the job wrote under its workdir as artifacts
+                # BEFORE the final tool_result (complete trace) and BEFORE the
+                # janitor below (BASE.pid is the find -newer marker). Skipped when
+                # the container vanished (status 'error'). Never crashes the job.
+                if job.status != "error":
+                    try:
+                        await self._capture_job_artifacts(job, container, pool)
+                    except Exception as _cap_exc:  # noqa: BLE001
+                        logger.warning(
+                            "[job:%s] artifact capture failed: %s", job.job_id, _cap_exc,
+                        )
+                try:
+                    await emit_terminal_event(
+                        pool, job.workspace_id,
+                        event_type="tool_result",
+                        payload={
+                            "tool": _TERMINAL_TOOL_NAME,
+                            "success": job.status == "done" and code == 0,
+                            "summary": (
+                                f"job {job.job_id} {job.status} "
+                                f"exit={code} dur={duration_ms}ms"
+                            ),
+                            "args": {"command": job.command},
+                            "output": {
+                                "exit_code": code,
+                                "duration_ms": duration_ms,
+                                "status": job.status,
+                            },
+                            "job_id": job.job_id,
                         },
-                        "job_id": job.job_id,
-                    },
-                )
-            except Exception:  # noqa: BLE001
-                pass
-            # Janitor: BASE.{pid,out,exit} are dead weight in the container
-            # layer once the final tool_result is recorded.
-            try:
-                await asyncio.to_thread(
-                    container.exec_run,
-                    ["sh", "-c",
-                     f"rm -f {job.base}.pid {job.base}.out {job.base}.exit"],
-                    demux=False,
-                )
-            except Exception:  # noqa: BLE001
-                pass
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                # Janitor: BASE.{pid,out,exit} are dead weight in the container
+                # layer once the final tool_result is recorded.
+                try:
+                    await asyncio.to_thread(
+                        container.exec_run,
+                        ["sh", "-c",
+                         f"rm -f {job.base}.pid {job.base}.out {job.base}.exit"],
+                        demux=False,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
 
     async def _signal_job(self, job: _JobState, container) -> bool:
         """Terminate the wrapper AND its children via the pidfile.
@@ -1139,8 +1148,19 @@ class WorkspaceTerminalManager:
                 container = await asyncio.to_thread(
                     self._client.containers.get, row["container_name"] or ""
                 )
-                if container.status != "running":
-                    await asyncio.to_thread(container.start)
+                # Refresh the cached status: a container fetched right after a backend
+                # restart can carry a STALE status, and start() on an already-running
+                # container raises 409 — which must NOT get a live job marked 'lost'.
+                # The file-probe below is the real liveness check.
+                try:
+                    await asyncio.to_thread(container.reload)
+                except Exception:  # noqa: BLE001
+                    pass
+                if container.status not in ("running", "restarting"):
+                    try:
+                        await asyncio.to_thread(container.start)
+                    except Exception as _sx:  # noqa: BLE001 (already running / transient)
+                        logger.info("[job:%s] reattach: container start skipped (%s)", jid, _sx)
             except NotFound:
                 logger.info("[job:%s] reattach: container gone — marking lost", jid)
                 await self._db_job_mark_lost(pool, jid)
