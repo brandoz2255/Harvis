@@ -113,9 +113,11 @@ async def probe_services(request: Request, user) -> tuple[dict, list]:
         {"status": "ready"} if os.getenv("DISCORD_BOT_TOKEN") else {"status": "available"}
     )
 
-    # ── External code engines (Phase E1/E2): ready ONLY when the global flag is on AND the
-    # sidecar is running AND — for CLOUD engines (codex/claude-code) — the current user has
-    # a verified API key. (opencode is local, no key.) Fail-closed to "available" on error.
+    # ── External code engines (Phase E1/E2): the card reflects USABILITY, the Build selector reads
+    # the strict build-readiness. A verified CLOUD key (codex/claude-code) makes the provider usable
+    # for CHAT even when the Build-engine flag is off → the card must read "Connected", never a scary
+    # "Unavailable". `status` stays the strict build sense (engine_readiness.ready is derived from it);
+    # `connected` is an ADDITIVE signal the Integrations card reads for the chat-usable case.
     # Keyed by service_key so the capability mirror reads them directly.
     _engines = (
         ("opencode", "HARVIS_OPENCODE_CONTAINER", "harvis-opencode", False),
@@ -124,34 +126,44 @@ async def probe_services(request: Request, user) -> tuple[dict, list]:
     )
     _flag_on = (os.getenv("HARVIS_OWUI_EXTERNAL_ENGINES") or "").strip().lower() in {"1", "true", "yes", "on"}
     for _eng, _cenv, _cdefault, _needs_auth in _engines:
-        services[_eng] = {"status": "available"}
-        if not _flag_on:
-            continue
-        try:
-            import docker
+        # Credential (cloud engines) — checked ALWAYS, independent of the Build-engine flag.
+        _authed = None
+        if _needs_auth:
+            try:
+                from .engine_auth import user_has_verified_engine
 
-            _running = docker.from_env().containers.get(os.getenv(_cenv, _cdefault)).status == "running"
-        except Exception:
-            _running = False
-        if not _running:
-            services[_eng] = {"status": "needs_setup", "detail": "Sidecar not running"}
-            continue
-        if not _needs_auth:
-            services[_eng] = {"status": "ready", "detail": "Engine ready"}
-            continue
-        _authed = False
-        try:
-            from .engine_auth import user_has_verified_engine
+                _authed = await user_has_verified_engine(
+                    getattr(request.app.state, "pg_pool", None), int(user.id), _eng
+                )
+            except Exception:
+                _authed = False
+        # Build readiness — the STRICT sense the Build selector consumes (flag + sidecar + credential).
+        _running = False
+        if _flag_on:
+            try:
+                import docker
 
-            _authed = await user_has_verified_engine(
-                getattr(request.app.state, "pg_pool", None), int(user.id), _eng
-            )
-        except Exception:
-            _authed = False
-        services[_eng] = (
-            {"status": "ready", "detail": "Connected"} if _authed
-            else {"status": "needs_setup", "detail": "Connect your API key", "reason": "missing_auth"}
-        )
+                _running = docker.from_env().containers.get(os.getenv(_cenv, _cdefault)).status == "running"
+            except Exception:
+                _running = False
+        _cred_ok = (not _needs_auth) or bool(_authed)
+        _build_ready = _flag_on and _running and _cred_ok
+        if _build_ready:
+            services[_eng] = {"status": "ready", "detail": "Connected" if _needs_auth else "Engine ready"}
+            if _needs_auth:
+                services[_eng]["connected"] = True
+        elif _needs_auth and _authed:
+            # Key verified → usable for chat; the Build engine just isn't turned on.
+            services[_eng] = {
+                "status": "needs_setup", "detail": "Connected · Build engine off",
+                "reason": "build_engine_off", "connected": True,
+            }
+        elif _needs_auth:
+            services[_eng] = {"status": "needs_setup", "detail": "Connect your API key", "reason": "missing_auth"}
+        elif not _flag_on:
+            services[_eng] = {"status": "needs_setup", "detail": "Enable external engines", "reason": "disabled"}
+        else:
+            services[_eng] = {"status": "needs_setup", "detail": "Sidecar not running", "reason": "sidecar_down"}
 
     # ── Hermes AGENT app engine (Phase E4B): the REAL NousResearch Hermes Agent runtime
     # in the harvis-hermes-agent sidecar. Its OWN flag (HARVIS_OWUI_HERMES_AGENT_ENGINE) +

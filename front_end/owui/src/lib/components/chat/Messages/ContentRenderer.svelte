@@ -3,8 +3,10 @@
 	const i18n = getContext('i18n');
 
 	import Markdown from './Markdown.svelte';
+	import SandboxPreview from './SandboxPreview.svelte';
 	import {
 		artifactCode,
+		artifactContents,
 		chatId,
 		mobile,
 		settings,
@@ -222,9 +224,133 @@
 	onDestroy(() => {
 		detachListeners();
 	});
+
+	// Sandbox-file preview: paths the assistant wrote inside the Claude sandbox
+	// (/tmp/harvis-chat/u<id>/…) become clickable → open a live preview fetched from the container.
+	let sandboxPreviewPath = '';
+	let showSandboxPreview = false;
+	const SANDBOX_RE = /\/tmp\/harvis-chat\/u\d+\/[^\s`<>"')]+\.[a-z0-9]+/gi;
+
+	const linkifySandboxPaths = (container) => {
+		if (!container) return;
+		if (!(container.textContent || '').includes('/tmp/harvis-chat/')) return; // fast path
+		try {
+			container.querySelectorAll('code:not([data-hp])').forEach((c) => {
+				const t = (c.textContent || '').trim();
+				SANDBOX_RE.lastIndex = 0;
+				if (/^\/tmp\/harvis-chat\/u\d+\//.test(t) && SANDBOX_RE.test(t)) {
+					c.setAttribute('data-hp', '1');
+					c.setAttribute('data-path', t);
+					c.classList.add('harvis-sandbox-path');
+				}
+			});
+			const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null);
+			const targets = [];
+			let node;
+			while ((node = walker.nextNode())) {
+				if (node.parentElement?.closest('.harvis-sandbox-path, a, button, pre')) continue;
+				SANDBOX_RE.lastIndex = 0;
+				if (SANDBOX_RE.test(node.nodeValue || '')) targets.push(node);
+			}
+			targets.forEach((n) => {
+				const s = n.nodeValue;
+				const frag = document.createDocumentFragment();
+				let last = 0;
+				let m;
+				SANDBOX_RE.lastIndex = 0;
+				while ((m = SANDBOX_RE.exec(s))) {
+					if (m.index > last) frag.appendChild(document.createTextNode(s.slice(last, m.index)));
+					const b = document.createElement('button');
+					b.className = 'harvis-sandbox-path';
+					b.setAttribute('data-path', m[0]);
+					b.textContent = m[0];
+					frag.appendChild(b);
+					last = m.index + m[0].length;
+				}
+				if (last < s.length) frag.appendChild(document.createTextNode(s.slice(last)));
+				n.parentNode?.replaceChild(frag, n);
+			});
+		} catch (_) {
+			/* linkify is best-effort */
+		}
+	};
+
+	const buildSandboxArtifact = (data) => {
+		const name = String(data?.name || '');
+		const isSvg = /\.svg$/i.test(name) || String(data?.mime).includes('svg');
+		const isHtml = /\.html?$/i.test(name) || String(data?.mime).includes('html');
+		if (data?.is_binary) {
+			return {
+				type: 'iframe',
+				content: `<!doctype html><html><body style="margin:0;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#fff"><img src="${data.data_url}" alt="preview" style="max-width:100%;height:auto"/></body></html>`
+			};
+		}
+		if (isSvg) return { type: 'svg', content: data.content };
+		if (isHtml) return { type: 'iframe', content: data.content };
+		const esc = String(data?.content ?? '')
+			.replaceAll('&', '&amp;')
+			.replaceAll('<', '&lt;')
+			.replaceAll('>', '&gt;');
+		return {
+			type: 'iframe',
+			content: `<!doctype html><html><body style="margin:0;padding:12px;font:13px/1.6 ui-monospace,Menlo,monospace;white-space:pre-wrap;word-break:break-word;background:#fff;color:#111">${esc}</body></html>`
+		};
+	};
+
+	// Click a sandbox path → open its live preview in the RIGHT-SIDE Artifacts rail (same panel as
+	// inline HTML previews). Falls back to the centered modal on mobile (no rail) or on error.
+	const onSandboxClick = async (e) => {
+		const t = e.target?.closest?.('.harvis-sandbox-path');
+		const p = t?.getAttribute?.('data-path');
+		if (!p) return;
+		e.preventDefault();
+		e.stopPropagation();
+		if ($mobile) {
+			sandboxPreviewPath = p;
+			showSandboxPreview = true;
+			return;
+		}
+		try {
+			const res = await fetch(`/api/owui/chat-file?path=${encodeURIComponent(p)}`, {
+				headers: { Authorization: `Bearer ${localStorage.token}` }
+			});
+			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			const data = await res.json();
+			artifactContents.set([buildSandboxArtifact(data)]);
+			showControls.set(true);
+			showArtifacts.set(true);
+			showEmbeds.set(false);
+		} catch (_) {
+			sandboxPreviewPath = p;
+			showSandboxPreview = true;
+		}
+	};
+
+	// The codespan is rendered by a child (Markdown) component AFTER this component's own update,
+	// so a plain afterUpdate misses it. A MutationObserver reliably re-linkifies on any DOM change.
+	let sandboxObserver;
+	onMount(() => {
+		if (!contentContainerElement) return;
+		let raf;
+		const run = () => {
+			cancelAnimationFrame(raf);
+			raf = requestAnimationFrame(() => linkifySandboxPaths(contentContainerElement));
+		};
+		run();
+		sandboxObserver = new MutationObserver(run);
+		sandboxObserver.observe(contentContainerElement, {
+			childList: true,
+			subtree: true,
+			characterData: true
+		});
+	});
+	onDestroy(() => sandboxObserver?.disconnect());
 </script>
 
-<div bind:this={contentContainerElement}>
+<SandboxPreview bind:show={showSandboxPreview} path={sandboxPreviewPath} />
+
+<!-- capture phase: intercept a path click BEFORE the codespan's copy-on-click handler -->
+<div bind:this={contentContainerElement} on:click|capture={onSandboxClick}>
 	{#if $settings?.renderMarkdownInAssistantMessages ?? true}
 		<Markdown
 			{id}
@@ -287,3 +413,24 @@
 		}}
 	/>
 {/if}
+
+<style>
+	:global(.harvis-sandbox-path) {
+		cursor: pointer;
+		color: rgb(37 99 235);
+		text-decoration: underline;
+		text-underline-offset: 2px;
+		word-break: break-all;
+		background: none;
+		border: none;
+		padding: 0;
+		margin: 0;
+		font: inherit;
+	}
+	:global(.dark .harvis-sandbox-path) {
+		color: rgb(96 165 250);
+	}
+	:global(.harvis-sandbox-path:hover) {
+		opacity: 0.8;
+	}
+</style>

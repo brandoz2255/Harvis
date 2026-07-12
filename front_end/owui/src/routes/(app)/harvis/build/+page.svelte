@@ -107,7 +107,16 @@
 				class="text-xs text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
 				on:click={backToChat}>← {$i18n.t('Back to chat')}</button
 			>
-			<h1 class="text-2xl font-semibold text-gray-800 dark:text-gray-100 mt-2">{$i18n.t('Build')}</h1>
+			<div class="flex items-center justify-between gap-3 mt-2">
+				<h1 class="text-2xl font-semibold text-gray-800 dark:text-gray-100">{$i18n.t('Build')}</h1>
+				<button
+					on:click={() => goto('/harvis/console')}
+					class="inline-flex items-center gap-1.5 rounded-full border border-gray-200 dark:border-gray-800 px-3 py-2 text-xs font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-850 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+				>
+					<svg class="size-3.5 text-blue-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="14" rx="2" /><path d="M8 21h8M9 8l3 3-3 3" /></svg>
+					{$i18n.t('Dev Console')}
+				</button>
+			</div>
 			<p class="text-sm text-gray-500 mt-1">
 				{$i18n.t(
 					'Build with Harvis agents. Use GitHub for web repo workflows or the Harvis CLI for local projects.'

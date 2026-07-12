@@ -168,6 +168,51 @@ async def create_job(
     }
 
 
+@harvis_jobs_router.get("/jobs")
+async def list_jobs(
+    request: Request,
+    limit: int = 50,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """The caller's background jobs, newest first — the Dev Console's job list.
+    Owner-scoped two ways (fail closed): the job's own user_id OR the owning run's
+    user_id must match. Persisted rows survive a backend restart, so this reflects
+    history, not just the in-memory registry."""
+    pool = _pool_of(request)
+    if pool is None:
+        return {"jobs": []}
+    uid = int(current_user["id"])
+    lim = max(1, min(int(limit or 50), 200))
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT j.id, j.workspace_id, j.command, j.status, j.exit_code,
+                   j.started_at, j.finished_at
+            FROM workspace_jobs j
+            LEFT JOIN workspace_runs r ON r.id = j.workspace_id
+            WHERE j.user_id = $1 OR r.user_id = $1
+            ORDER BY j.started_at DESC NULLS LAST
+            LIMIT $2
+            """,
+            uid, lim,
+        )
+    return {
+        "jobs": [
+            {
+                "id": r["id"],
+                "workspace_id": r["workspace_id"],
+                "command": r["command"],
+                "status": r["status"],
+                "exit_code": r["exit_code"],
+                "started_at": int(r["started_at"].timestamp()) if r["started_at"] else None,
+                "finished_at": int(r["finished_at"].timestamp()) if r["finished_at"] else None,
+                "stream_url": f"/api/harvis/runs/{r['workspace_id']}/stream",
+            }
+            for r in rows
+        ]
+    }
+
+
 @harvis_jobs_router.get("/jobs/{job_id}")
 async def get_job_status(
     job_id: str,

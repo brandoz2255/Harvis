@@ -1125,9 +1125,11 @@
 		let contents = [];
 		messages.forEach((message) => {
 			if (message?.role !== 'user' && message?.content) {
-				const { codeBlocks: codeBlocks, htmlGroups: htmlGroups } = getCodeBlockContents(
-					message.content
-				);
+				const {
+					codeBlocks: codeBlocks,
+					htmlGroups: htmlGroups,
+					canvasBlocks: canvasBlocks
+				} = getCodeBlockContents(message.content);
 
 				if (htmlGroups && htmlGroups.length > 0) {
 					htmlGroups.forEach((group) => {
@@ -1162,6 +1164,21 @@
 						if (block.lang === 'svg' || (block.lang === 'xml' && block.code.includes('<svg'))) {
 							contents = [...contents, { type: 'svg', content: block.code }];
 						}
+					}
+				}
+
+				// Typed ```canvas panels ALSO become rail artifacts — independent of the
+				// html/svg paths above. Only once the JSON parses (i.e. the block finished
+				// streaming); a malformed spec stays inline-only, where CanvasRenderer
+				// shows an honest error card instead of popping the rail.
+				for (const canvasJson of canvasBlocks ?? []) {
+					try {
+						const parsed = JSON.parse(canvasJson);
+						if (parsed && typeof parsed === 'object' && Array.isArray(parsed.blocks)) {
+							contents = [...contents, { type: 'canvas', content: canvasJson }];
+						}
+					} catch (e) {
+						// incomplete or invalid JSON — skip
 					}
 				}
 			}

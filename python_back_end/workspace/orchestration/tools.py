@@ -104,6 +104,51 @@ TOOL_SCHEMA = [
     {
         "type": "function",
         "function": {
+            "name": "propose_skill",
+            "description": (
+                "Save a reusable procedure you just demonstrated as a DRAFT skill for the human to "
+                "review. Use ONLY when you completed a genuinely reusable, repeatable procedure worth "
+                "keeping. The draft is NOT active and grants nothing — a human must mark it 'supported' "
+                "in Customize → Skills before it can ever be applied. Give a short kebab-case name, a "
+                "one-line description of WHEN to use it, and the procedure as markdown steps."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "kebab-case skill name, e.g. 'reset-postgres-schema'"},
+                    "description": {"type": "string", "description": "One line: when should this skill be used?"},
+                    "content": {"type": "string", "description": "The procedure, as markdown steps."},
+                },
+                "required": ["name", "description", "content"],
+            },
+        },
+        "lane": LANE_UI_MOCK,
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_image",
+            "description": (
+                "Generate an image from a text prompt (local diffusion). Use when the user "
+                "asks you to CREATE/DRAW/MAKE a picture/image. Returns a saved image "
+                "artifact shown in the run."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "description": "What the image should show."},
+                    "negative_prompt": {"type": "string", "description": "What to avoid in the image."},
+                    "width": {"type": "integer", "description": "Width in px (256-1024, default 512)."},
+                    "height": {"type": "integer", "description": "Height in px (256-1024, default 512)."},
+                },
+                "required": ["prompt"],
+            },
+        },
+        "lane": LANE_UI_MOCK,
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "finish",
             "description": "Finish the task. Provide a short summary of what you did.",
             "parameters": {
@@ -123,6 +168,17 @@ TOOL_SCHEMA = [
 WIRE_TOOL_SCHEMA = [
     {k: v for k, v in entry.items() if k != "lane"} for entry in TOOL_SCHEMA
 ]
+
+
+def wire_tool_names() -> set[str]:
+    """Every tool NAME actually offered on the wire (function.name). Used to turn a
+    sub-agent's allowed-tools ALLOWLIST into the offer-time WITHHOLD set the runner
+    consumes (disabled = all_offered - allowed). authorize_action stays the dispatch
+    authority regardless."""
+    return {
+        ((entry.get("function") or {}).get("name") or "")
+        for entry in WIRE_TOOL_SCHEMA
+    } - {""}
 
 
 def filter_wire_schema(disabled: set[str]) -> list[dict]:

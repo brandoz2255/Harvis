@@ -205,6 +205,17 @@ async def maybe_handle_workspace(
     _is_anthropic = _model_id.startswith("anthropic/")
     _is_openai = _model_id.startswith("openai/")
 
+    # FIX 5: OpenAI/GPT cloud models have no workspace tool lane. If the user FORCES
+    # agent/orchestrate on one, launching the native/OpenClaw loop would run on a model
+    # it can't drive — fall back to plain chat honestly (the auto path already returns
+    # None for _is_openai below). Cloud Claude keeps the lane (it has a workspace bridge).
+    if mode in ("agent", "orchestrate") and _is_openai:
+        logger.info(
+            "owui workspace_bridge: %s mode requested on an OpenAI model (no workspace lane) → plain chat",
+            mode,
+        )
+        return None
+
     # Lazy imports — keep the package free of import-time coupling to workspace/.
     try:
         from workspace.task_detector import detect_workspace_task, WorkspaceSuggestion

@@ -46,29 +46,115 @@ logger = logging.getLogger(__name__)
 # ``supports_effort`` → the effort dropdown is offered AND the extended-thinking budget is applied.
 # `ctx` = context-window size; `pin`/`pout` = USD per MILLION input/output tokens (public list
 # rates, for the live cost ESTIMATE — for subscriptions it's shown as "≈ value at API rates").
-_CLAUDE_API_MODELS = [
-    {"id": "anthropic/claude-opus-4-8", "name": "Claude Opus 4.8", "supports_effort": True, "max_thinking": 32000, "ctx": 200000, "pin": 15.0, "pout": 75.0},
-    {"id": "anthropic/claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "supports_effort": True, "max_thinking": 24000, "ctx": 200000, "pin": 3.0, "pout": 15.0},
-    {"id": "anthropic/claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5", "supports_effort": False, "max_thinking": 0, "ctx": 200000, "pin": 1.0, "pout": 5.0},
-]
-# Subscription (CLI) path: the OAuth token bills the user's Pro/Max subscription. The CLI picks
-# the model via --model; effort isn't a clean CLI flag, so no effort here.
-_CLAUDE_SUB_MODELS = [
-    {"id": "anthropic/claude-opus-4-8", "name": "Claude Opus 4.8 (subscription)", "supports_effort": False, "max_thinking": 0, "ctx": 200000, "pin": 15.0, "pout": 75.0},
-    {"id": "anthropic/claude-sonnet-4-6", "name": "Claude Sonnet 4.6 (subscription)", "supports_effort": False, "max_thinking": 0, "ctx": 200000, "pin": 3.0, "pout": 15.0},
-]
-
-_CLAUDE_BY_ID = {m["id"]: m for m in _CLAUDE_API_MODELS}
-# Every facade model id the facade may expose as a Claude chat model (both modes share ids).
-_ALL_CLAUDE_IDS = {m["id"] for m in _CLAUDE_API_MODELS} | {m["id"] for m in _CLAUDE_SUB_MODELS}
-
-
 def _api_model(facade_id: str) -> str:
     """Strip the ``anthropic/`` facade prefix → the real Anthropic model id for the API / CLI."""
     return facade_id.split("/", 1)[1] if "/" in facade_id else facade_id
 
 
-_DEFAULT_CLAUDE_MODEL = "anthropic/claude-sonnet-4-6"
+# Static metadata by REAL anthropic id — display name, context, pricing (USD per MILLION tokens),
+# and the extended-thinking cap. The catalog is fetched LIVE from Anthropic's /v1/models (ids +
+# display names); this table enriches each id with cost/context/effort. A model NOT listed here
+# still appears (via _CLAUDE_META_DEFAULT) so the list is genuinely self-updating — only its price
+# is unknown until added. `max_thinking` > 0 ⇒ the model supports the reasoning-effort control.
+_CLAUDE_META: dict[str, dict] = {
+    "claude-opus-4-8":            {"name": "Claude Opus 4.8",  "ctx": 200000, "pin": 15.0, "pout": 75.0, "max_thinking": 32000},
+    "claude-opus-4-7":            {"name": "Claude Opus 4.7",  "ctx": 200000, "pin": 15.0, "pout": 75.0, "max_thinking": 32000},
+    "claude-opus-4-6":            {"name": "Claude Opus 4.6",  "ctx": 200000, "pin": 15.0, "pout": 75.0, "max_thinking": 32000},
+    "claude-opus-4-5-20251101":   {"name": "Claude Opus 4.5",  "ctx": 200000, "pin": 15.0, "pout": 75.0, "max_thinking": 32000},
+    "claude-opus-4-1-20250805":   {"name": "Claude Opus 4.1",  "ctx": 200000, "pin": 15.0, "pout": 75.0, "max_thinking": 32000},
+    "claude-sonnet-5":            {"name": "Claude Sonnet 5",  "ctx": 200000, "pin": 3.0,  "pout": 15.0, "max_thinking": 32000},
+    "claude-sonnet-4-6":          {"name": "Claude Sonnet 4.6","ctx": 200000, "pin": 3.0,  "pout": 15.0, "max_thinking": 24000},
+    "claude-sonnet-4-5-20250929": {"name": "Claude Sonnet 4.5","ctx": 200000, "pin": 3.0,  "pout": 15.0, "max_thinking": 24000},
+    "claude-fable-5":             {"name": "Claude Fable 5",   "ctx": 200000, "pin": 1.0,  "pout": 5.0,  "max_thinking": 24000},
+    "claude-haiku-4-5-20251001":  {"name": "Claude Haiku 4.5", "ctx": 200000, "pin": 1.0,  "pout": 5.0,  "max_thinking": 0},
+}
+
+# The current-generation flagship 4 — the picker shows ONLY these by default; the rest of the live
+# catalog is revealed by a per-user "show all Claude models" setting. `meta.primary` carries this.
+_CLAUDE_PRIMARY = {"claude-opus-4-8", "claude-sonnet-5", "claude-fable-5", "claude-haiku-4-5-20251001"}
+_CLAUDE_META_DEFAULT = {"name": None, "ctx": 200000, "pin": None, "pout": None, "max_thinking": 16000}
+
+
+def _claude_spec(model_id: str) -> dict:
+    """Metadata for a facade Claude id (dynamic-safe): strip prefix → _CLAUDE_META, else default."""
+    meta = _CLAUDE_META.get(_api_model(model_id), _CLAUDE_META_DEFAULT)
+    return {**meta, "supports_effort": bool(meta.get("max_thinking"))}
+
+
+# Static FALLBACK id lists — used ONLY when the live /v1/models fetch fails (network down / rate
+# limit) so the picker never goes empty. When the fetch works, the LIVE list is the source of truth.
+_CLAUDE_API_FALLBACK = ["claude-opus-4-8", "claude-sonnet-5", "claude-haiku-4-5-20251001"]
+_CLAUDE_SUB_FALLBACK = ["claude-opus-4-8", "claude-sonnet-5", "claude-fable-5", "claude-haiku-4-5-20251001"]
+
+_DEFAULT_CLAUDE_MODEL = "anthropic/claude-sonnet-5"
+
+# Live-catalog cache: {"<user_id>:<mode>": (fetched_at, [{id, display_name, created_at}])}. Short TTL
+# so a newly-shipped model appears within minutes without hammering Anthropic on every picker load.
+_MODELS_CACHE: dict[str, tuple] = {}
+_MODELS_TTL = 300.0
+_MODELS_NEG_TTL = 60.0  # a failed fetch is cached briefly so a bad/revoked key doesn't re-decrypt +
+#                         re-hit Anthropic on every picker load (which could rate-limit the key).
+
+
+async def _fetch_anthropic_models(secret: str, mode: str) -> Optional[list[dict]]:
+    """Live GET /v1/models with the user's credential (Bearer=subscription, x-api-key=API key).
+    Returns claude ids newest-first, or None on any failure (→ caller falls back to the static list)."""
+    headers = {"anthropic-version": _ANTHROPIC_VERSION}
+    if mode == "oauth_token":
+        headers["Authorization"] = f"Bearer {secret}"
+    else:
+        headers["x-api-key"] = secret
+    out: list[dict] = []
+    url = "https://api.anthropic.com/v1/models?limit=100"
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=6.0)) as hc:
+            for _ in range(5):  # defensive pagination
+                r = await hc.get(url, headers=headers)
+                if r.status_code != 200:
+                    return None
+                data = r.json()
+                for m in data.get("data", []):
+                    mid = (m.get("id") or "").strip()
+                    if mid.startswith("claude"):
+                        out.append({"id": mid, "display_name": m.get("display_name") or mid,
+                                    "created_at": m.get("created_at") or ""})
+                if not data.get("has_more") or not data.get("last_id"):
+                    break
+                url = f"https://api.anthropic.com/v1/models?limit=100&after_id={data['last_id']}"
+    except Exception:
+        return None
+    out.sort(key=lambda m: m.get("created_at") or "", reverse=True)  # newest first
+    return out or None
+
+
+async def _live_claude_models(pool, user_id: int, mode: str) -> Optional[list[dict]]:
+    """Cached live model list for a user's Claude credential. Decrypts ONLY on a cache miss; the
+    cache key + fetch use the AUTHORITATIVE auth_mode from the DB (read without decrypting) so a
+    concurrent api_key↔oauth switch can't send the secret with the wrong header scheme."""
+    now = time.time()
+    try:
+        real_mode = await get_verified_auth_mode(pool, user_id, "claude-code")
+    except Exception:
+        real_mode = None
+    if real_mode not in ("api_key", "oauth_token"):
+        return None
+    key = f"{user_id}:{real_mode}"
+    hit = _MODELS_CACHE.get(key)
+    if hit:
+        ts, cached = hit
+        ttl = _MODELS_TTL if cached is not None else _MODELS_NEG_TTL
+        if now - ts < ttl:
+            return cached
+    # Cache miss → decrypt + fetch. Cache the result INCLUDING a failure (None) for the negative TTL.
+    try:
+        auth = await get_verified_engine_auth(pool, user_id, "claude-code")
+    except Exception:
+        auth = None
+    if not auth:
+        return None
+    models = await _fetch_anthropic_models(auth[0], real_mode)
+    _MODELS_CACHE[key] = (now, models)
+    return models
 _ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 _ANTHROPIC_VERSION = "2023-06-01"
 
@@ -93,16 +179,19 @@ _CLAUDE_CODE_CONTAINER = os.getenv("HARVIS_CLAUDE_CODE_CONTAINER", "harvis-claud
 
 # ── Detection ───────────────────────────────────────────────────────────────────────────
 def is_cloud_chat_model(model_id: Optional[str]) -> bool:
-    """True iff this model id is one of our cloud chat models (exact match — never a prefix,
-    so it can't accidentally swallow an Ollama tag or the ``claude-code`` Build engine id)."""
+    """True iff this is a facade cloud chat model. Facade ids are ALWAYS provider-prefixed
+    (``anthropic/…`` / ``openai/…``), so matching the prefix never swallows an Ollama tag or the
+    bare ``claude-code`` Build-engine id. The Claude set is DYNAMIC (live /v1/models) → matched by
+    prefix; the OpenAI set stays a fixed curated list → matched exactly."""
     mid = (model_id or "").strip()
-    return mid in _ALL_CLAUDE_IDS or mid in _ALL_OPENAI_IDS
+    return mid.startswith("anthropic/") or mid in _ALL_OPENAI_IDS
 
 
 def _provider_of(model_id: str) -> Optional[str]:
-    if model_id in _ALL_CLAUDE_IDS:
+    mid = (model_id or "").strip()
+    if mid.startswith("anthropic/"):
         return "anthropic"
-    if model_id in _ALL_OPENAI_IDS:
+    if mid in _ALL_OPENAI_IDS:
         return "openai"
     return None
 
@@ -133,6 +222,7 @@ def _model_entry(m: dict, owned_by: str, mode: str) -> dict:
                 # Custom flags the frontend reads (OWUI ignores unknown meta keys):
                 "supports_effort": supports,
                 "cloud_provider": owned_by,
+                "primary": bool(m.get("primary")),
                 # The Build usage meter reads these: context window + per-MILLION-token price.
                 "context_length": m.get("ctx"),
                 "price_in": m.get("pin"),
@@ -143,18 +233,42 @@ def _model_entry(m: dict, owned_by: str, mode: str) -> dict:
     }
 
 
+def _claude_entry_from_id(mid: str, display: Optional[str], mode: str) -> dict:
+    """Build one facade picker entry for a real Claude id + its (optional) live display name."""
+    meta = _CLAUDE_META.get(mid, _CLAUDE_META_DEFAULT)
+    name = display or meta.get("name") or mid
+    if mode == "oauth_token":
+        name = f"{name} (subscription)"
+    m = {
+        "id": f"anthropic/{mid}", "name": name,
+        "supports_effort": bool(meta.get("max_thinking")),
+        "max_thinking": meta.get("max_thinking", 0),
+        "ctx": meta.get("ctx"), "pin": meta.get("pin"), "pout": meta.get("pout"),
+        "primary": mid in _CLAUDE_PRIMARY,
+    }
+    return _model_entry(m, "anthropic", mode)
+
+
+async def _claude_entries(pool, user_id: int, mode: str) -> list[dict]:
+    """Claude picker entries from the LIVE /v1/models list (newest-first), or the static fallback."""
+    live = await _live_claude_models(pool, user_id, mode)
+    if live:
+        return [_claude_entry_from_id(m["id"], m.get("display_name"), mode) for m in live]
+    ids = _CLAUDE_API_FALLBACK if mode == "api_key" else _CLAUDE_SUB_FALLBACK
+    return [_claude_entry_from_id(mid, None, mode) for mid in ids]
+
+
 async def cloud_chat_model_entries(pool, user_id: Optional[int]) -> list[dict]:
     """Per-user cloud chat model entries. Fail-closed: any error → [] (model list never breaks).
-    Reads only verified_at + auth_mode — the secret is NEVER decrypted here."""
+    Claude models come from the LIVE Anthropic /v1/models catalog (cached, credential-scoped) so the
+    list self-updates as new models ship; falls back to a small static set if the fetch fails."""
     if pool is None or not user_id:
         return []
     out: list[dict] = []
     try:
         mode = await get_verified_auth_mode(pool, user_id, "claude-code")
-        if mode == "api_key":
-            out += [_model_entry(m, "anthropic", "api_key") for m in _CLAUDE_API_MODELS]
-        elif mode == "oauth_token":
-            out += [_model_entry(m, "anthropic", "oauth_token") for m in _CLAUDE_SUB_MODELS]
+        if mode in ("api_key", "oauth_token"):
+            out += await _claude_entries(pool, user_id, mode)
     except Exception:
         logger.debug("cloud_chat: claude model-list probe failed", exc_info=True)
     # Phase 2: OpenAI/GPT — gated on a verified ``codex`` (OpenAI) api_key credential.
@@ -163,6 +277,25 @@ async def cloud_chat_model_entries(pool, user_id: Optional[int]) -> list[dict]:
             out += [_model_entry(m, "openai", "api_key") for m in _OPENAI_MODELS]
     except Exception:
         logger.debug("cloud_chat: openai model-list probe failed", exc_info=True)
+    # Overlay per-user model profiles (custom display name + saved effort/budget). The frontend
+    # reads meta.profile_* to show the current mode label + prefill the Edit popover.
+    try:
+        from .model_profiles import get_model_profiles
+
+        profiles = await get_model_profiles(pool, user_id)
+        for e in out:
+            p = profiles.get(e["id"])
+            if not p:
+                continue
+            if p.get("display_name"):
+                e["name"] = p["display_name"]
+            meta = e["info"]["meta"]
+            if p.get("effort"):
+                meta["profile_effort"] = p["effort"]
+            if p.get("thinking_budget") is not None:
+                meta["profile_thinking_budget"] = p["thinking_budget"]
+    except Exception:
+        logger.debug("cloud_chat: profile overlay failed", exc_info=True)
     return out
 
 
@@ -176,6 +309,21 @@ async def proxy_cloud_chat(owui_body: dict, pool, user_id: Optional[int]):
     provider = _provider_of(model_id)
     if not provider:
         return JSONResponse(status_code=400, content={"error": {"message": f"Unknown cloud model {model_id!r}."}})
+
+    # No per-message effort? Use the model's saved profile default (the Cursor-style "mode").
+    budget_override = None
+    if pool and user_id:
+        try:
+            from .model_profiles import get_model_profiles
+
+            prof = (await get_model_profiles(pool, user_id)).get(model_id)
+            if prof:
+                if effort == "none" and prof.get("effort"):
+                    effort = _normalize_effort(prof["effort"])
+                if prof.get("thinking_budget") is not None:
+                    budget_override = int(prof["thinking_budget"])
+        except Exception:
+            logger.debug("cloud_chat: profile effort lookup failed", exc_info=True)
 
     engine = _PROVIDER_ENGINE[provider]
     auth = None
@@ -194,8 +342,8 @@ async def proxy_cloud_chat(owui_body: dict, pool, user_id: Optional[int]):
         if provider == "openai":
             return await _proxy_openai_api(owui_body, model_id, secret, effort)
         if mode == "oauth_token":
-            return await _proxy_claude_cli(owui_body, model_id, secret)
-        return await _proxy_claude_api(owui_body, model_id, secret, effort)
+            return await _proxy_claude_cli(owui_body, model_id, secret, user_id)
+        return await _proxy_claude_api(owui_body, model_id, secret, effort, budget_override)
     except Exception as exc:  # never leak the secret in the error
         logger.warning("cloud_chat: proxy failed (%s): %s", model_id, type(exc).__name__)
         return _err_response(owui_body, 502, "Cloud chat is unavailable right now. Please try again.")
@@ -207,7 +355,7 @@ def _normalize_effort(val) -> str:
 
 
 # ── Anthropic Messages API path (api_key) ───────────────────────────────────────────────
-def _to_anthropic_request(owui_body: dict, model_id: str, effort: str) -> dict:
+def _to_anthropic_request(owui_body: dict, model_id: str, effort: str, budget_override=None) -> dict:
     """Convert the OpenAI-shaped chat body to an Anthropic Messages request.
     - system messages → top-level `system`
     - content (str or list-of-parts) → flattened text (Phase 1 = text chat)
@@ -235,12 +383,13 @@ def _to_anthropic_request(owui_body: dict, model_id: str, effort: str) -> dict:
     if not msgs or msgs[0]["role"] != "user":
         msgs.insert(0, {"role": "user", "content": "."})
 
-    spec = _CLAUDE_BY_ID.get(model_id, {})  # catalog is keyed by the facade (prefixed) id
+    spec = _claude_spec(model_id)  # dynamic-safe metadata (strip prefix → _CLAUDE_META)
     payload: dict = {"model": _api_model(model_id), "messages": msgs, "stream": bool(owui_body.get("stream"))}
     if system_parts:
         payload["system"] = "\n\n".join(system_parts)
 
-    budget = _EFFORT_BUDGET.get(effort, 0)
+    # A saved per-model thinking budget (profile) overrides the effort→budget mapping.
+    budget = int(budget_override) if budget_override else _EFFORT_BUDGET.get(effort, 0)
     if budget and spec.get("supports_effort"):
         budget = min(budget, int(spec.get("max_thinking") or budget))
         payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
@@ -268,8 +417,8 @@ def _extract_text(content) -> str:
     return ""
 
 
-async def _proxy_claude_api(owui_body: dict, model_id: str, api_key: str, effort: str):
-    payload = _to_anthropic_request(owui_body, model_id, effort)
+async def _proxy_claude_api(owui_body: dict, model_id: str, api_key: str, effort: str, budget_override=None):
+    payload = _to_anthropic_request(owui_body, model_id, effort, budget_override)
     headers = {
         "x-api-key": api_key,
         "anthropic-version": _ANTHROPIC_VERSION,
@@ -485,11 +634,35 @@ def _flatten_to_prompt(owui_body: dict) -> str:
     return "\n\n".join(lines).strip() or "Hello"
 
 
-async def _proxy_claude_cli(owui_body: dict, model_id: str, token: str):
+_CHAT_SANDBOX_SYSTEM = (
+    "You are running inside Harvis, a chat assistant, in a DOCKERIZED SANDBOX. Environment facts you "
+    "must respect:\n"
+    "- The user CANNOT access this container's filesystem or open files on their own computer.\n"
+    "- When you create a file (HTML, SVG, image, document, …), save it in the CURRENT working "
+    "directory with a short descriptive filename, then state its FULL path. Harvis turns that path "
+    "into a clickable live preview rendered right here — the user does NOT (and can NOT) open it in a "
+    "browser or download it.\n"
+    "- NEVER tell the user to 'open the file in a browser', run a shell command, or navigate to a "
+    "local path. Just create the file and give its path.\n"
+    "- For very short snippets you may answer inline in a fenced code block instead. Be concise."
+)
+
+
+async def _proxy_claude_cli(owui_body: dict, model_id: str, token: str, user_id=None):
     """Run `claude -p` in the sidecar on the user's subscription OAuth token. Captures the final
-    text (no fragile stream-json parse) and returns it as a completion / SSE-wrapped single chunk."""
+    text (no fragile stream-json parse) and returns it as a completion / SSE-wrapped single chunk.
+
+    Files the model creates land in a PER-USER / PER-RUN sandbox dir inside the sidecar; the
+    response gets a clickable 'preview' footer (served by /api/owui/chat-file) so the user can view
+    them without the file ever leaving the container."""
+    from .chat_files import chat_workdir, mkdir_workdir, list_new_files
+
     prompt = _flatten_to_prompt(owui_body)
     run_id = uuid.uuid4().hex  # credit-safety: lets us hard-kill THIS run's subtree by env marker
+    # A sandboxed working dir for anything the model writes (isolated per user + per run).
+    workdir = "/tmp"
+    if user_id:
+        workdir = (await mkdir_workdir(user_id, run_id)) or "/tmp"
     argv = [
         "docker", "exec",
         # Credit-safety kill marker — children inherit it, so a Stop/timeout/disconnect can SIGKILL
@@ -500,9 +673,13 @@ async def _proxy_claude_cli(owui_body: dict, model_id: str, token: str):
         # ignores the OAuth token). The token is passed only to `docker exec -e` and never logged.
         "-e", f"CLAUDE_CODE_OAUTH_TOKEN={token}",
         "-e", "CLAUDE_CODE_SIMPLE=",
-        "-u", "1001", "-w", "/tmp", _CLAUDE_CODE_CONTAINER,
+        "-u", "1001", "-w", workdir, _CLAUDE_CODE_CONTAINER,
         "claude", "-p", prompt,
         "--output-format", "text", "--dangerously-skip-permissions",
+        # Chat, not build: allow FILE tools (so it can create the artifact the user previews) but
+        # NOT Bash/exec/web. It writes into `workdir` (its cwd); the response footer links each file.
+        "--allowedTools", "Read,Write,Edit,MultiEdit",
+        "--append-system-prompt", _CHAT_SANDBOX_SYSTEM,
         "--model", _api_model(model_id),
     ]
     want_stream = bool(owui_body.get("stream"))
@@ -550,6 +727,18 @@ async def _proxy_claude_cli(owui_body: dict, model_id: str, token: str):
         return _err_response(owui_body, 502, f"Claude (subscription) error: {_clip(detail)}")
     if not text:
         return _err_response(owui_body, 502, "Claude (subscription) returned no output.")
+
+    # Clickable preview footer: any file the model created in the sandbox → a path Harvis linkifies
+    # to a live preview (served by /api/owui/chat-file). Skipped if it already named them all.
+    if user_id and workdir != "/tmp":
+        try:
+            files = await list_new_files(user_id, run_id)
+            missing = [f for f in files if f not in text]
+            if missing:
+                lines = "\n".join(f"- `{f}`" for f in missing)
+                text = f"{text}\n\n**Preview** — click to open here:\n{lines}"
+        except Exception:
+            logger.debug("cloud_chat: preview footer failed", exc_info=True)
 
     if not want_stream:
         return JSONResponse(status_code=200, content={

@@ -3,6 +3,7 @@
 // "One component, two mounts": each surface takes a `mode: 'full' | 'dock'` prop.
 
 import Automations from './Automations.svelte';
+import Schedules from './Schedules.svelte';
 import Brain from './Brain.svelte';
 import GlobalMap from './GlobalMap.svelte';
 import ModelComparison from './ModelComparison.svelte';
@@ -10,6 +11,7 @@ import TuningPanel from './TuningPanel.svelte';
 import GlobalArtifacts from './GlobalArtifacts.svelte';
 import Cookbook from './Cookbook.svelte';
 import Customize from './Customize.svelte';
+import McpShop from './customize/McpShop.svelte';
 
 export interface Surface {
 	key: string;
@@ -19,7 +21,12 @@ export interface Surface {
 }
 
 export const surfaces: Surface[] = [
-	{ key: 'automations', label: 'Automations', component: Automations, modes: ['full'] },
+	// Renamed Automations → Routines (2026-07-12, coding lens of the cron store);
+	// key stays 'automations' — VibeCodeNav + the ops page link to it. 'routines'
+	// is an alias below. 'schedules' = the main-chat lens (same component with
+	// context='chat' — fires post the reply into a chat instead of running).
+	{ key: 'automations', label: 'Routines', component: Automations, modes: ['full'] },
+	{ key: 'schedules', label: 'Schedules', component: Schedules, modes: ['full'] },
 	{ key: 'brain', label: 'Brain', component: Brain, modes: ['full', 'dock'] },
 	// Renamed Neural Map (2026-06-11); key stays 'global-map' — the dock bridge
 	// values and the existing route depend on it. '/neural-map' is an alias below.
@@ -28,8 +35,14 @@ export const surfaces: Surface[] = [
 	{ key: 'activity', label: 'Artifacts', component: GlobalArtifacts, modes: ['full', 'dock'] },
 	{ key: 'cookbook', label: 'Models', component: Cookbook, modes: ['full', 'dock'] },
 	{ key: 'tuning', label: 'Tuning', component: TuningPanel, modes: ['full', 'dock'] },
-	{ key: 'customize', label: 'Customize', component: Customize, modes: ['full'] }
+	{ key: 'customize', label: 'Customize', component: Customize, modes: ['full'] },
+	{ key: 'mcp-shop', label: 'Connectors', component: McpShop, modes: ['full'] }
 ];
 
+const KEY_ALIASES: Record<string, string> = {
+	'neural-map': 'global-map',
+	routines: 'automations'
+};
+
 export const surfaceByKey = (key: string): Surface | undefined =>
-	surfaces.find((s) => s.key === (key === 'neural-map' ? 'global-map' : key));
+	surfaces.find((s) => s.key === (KEY_ALIASES[key] ?? key));

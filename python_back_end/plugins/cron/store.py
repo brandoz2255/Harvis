@@ -122,7 +122,7 @@ class CronJobStore(abc.ABC):
     async def get(self, job_id: UUID) -> Optional[CronJob]: ...
 
     @abc.abstractmethod
-    async def list_for_user(self, user_id: int) -> list[CronJob]: ...
+    async def list_for_user(self, user_id: int, *, context: Optional[str] = None) -> list[CronJob]: ...
 
     @abc.abstractmethod
     async def find_due(self, *, now: Optional[datetime] = None, limit: int = 50) -> list[CronJob]: ...
@@ -244,12 +244,21 @@ class PgCronJobStore(CronJobStore):
             return None
         return _row_to_job(row) if row else None
 
-    async def list_for_user(self, user_id: int) -> list[CronJob]:
+    async def list_for_user(self, user_id: int, *, context: Optional[str] = None) -> list[CronJob]:
+        # context = 'coding' | 'chat' filters on metadata->>'context'. Jobs that
+        # predate the split have no context key — they always launched workspace
+        # runs, so they count as 'coding'. context=None keeps the legacy "all" view.
         try:
             async with self._pool.acquire() as conn:
                 rows = await conn.fetch(
-                    f"SELECT {_SELECT_COLS} FROM cron_jobs WHERE user_id = $1 ORDER BY created_at DESC",
+                    f"""
+                    SELECT {_SELECT_COLS} FROM cron_jobs
+                    WHERE user_id = $1
+                      AND ($2::text IS NULL OR COALESCE(metadata->>'context', 'coding') = $2)
+                    ORDER BY created_at DESC
+                    """,
                     int(user_id),
+                    context,
                 )
         except Exception:
             logger.exception("cron.list_for_user failed for %s", user_id)

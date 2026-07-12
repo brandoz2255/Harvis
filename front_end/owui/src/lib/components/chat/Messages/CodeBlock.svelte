@@ -2,7 +2,15 @@
 	import hljs from 'highlight.js';
 	import { toast } from 'svelte-sonner';
 	import { getContext, onMount, tick, onDestroy } from 'svelte';
-	import { config, pyodideWorker as pyodideWorkerStore } from '$lib/stores';
+	import { get } from 'svelte/store';
+	import {
+		artifactCode,
+		artifactContents,
+		config,
+		pyodideWorker as pyodideWorkerStore,
+		showArtifacts,
+		showControls
+	} from '$lib/stores';
 
 	import PyodideWorker from '$lib/workers/pyodide.worker?worker';
 	import { executeCode } from '$lib/apis/utils';
@@ -19,6 +27,7 @@
 
 	import CodeEditor from '$lib/components/common/CodeEditor.svelte';
 	import SvgPanZoom from '$lib/components/common/SVGPanZoom.svelte';
+	import CanvasRenderer from '$lib/components/chat/Canvas/CanvasRenderer.svelte';
 
 	import ChevronUp from '$lib/components/icons/ChevronUp.svelte';
 	import ChevronUpDown from '$lib/components/icons/ChevronUpDown.svelte';
@@ -363,6 +372,23 @@
 		return await renderMermaidDiagram(mermaid, code);
 	};
 
+	// Typed ```canvas panel — rendered inline once the block finished streaming
+	// (same closing-fence check as mermaid/vega). While streaming, the raw JSON
+	// shows through the normal code path below.
+	$: canvasReady = lang === 'canvas' && (!token || (token?.raw ?? '').slice(-4).includes('```'));
+
+	// "Open in panel ⤢" — push this canvas to the right-side Artifacts rail
+	// (Chat.svelte's getContents also auto-adds it there; dedupe by content).
+	const openCanvasInPanel = () => {
+		const entries = get(artifactContents) ?? [];
+		if (!entries.some((e) => e?.type === 'canvas' && e?.content === code)) {
+			artifactContents.set([...entries, { type: 'canvas', content: code }]);
+		}
+		artifactCode.set(code);
+		showControls.set(true);
+		showArtifacts.set(true);
+	};
+
 	const render = async () => {
 		onUpdate(token);
 		if (lang === 'mermaid' && (token?.raw ?? '').slice(-4).includes('```')) {
@@ -437,7 +463,9 @@
 		class="relative {className} flex flex-col rounded-2xl border border-gray-100/30 dark:border-gray-850/30 my-0.5"
 		dir="ltr"
 	>
-		{#if ['mermaid', 'vega', 'vega-lite'].includes(lang)}
+		{#if canvasReady}
+			<CanvasRenderer spec={code} mode="inline" onOpen={openCanvasInPanel} />
+		{:else if ['mermaid', 'vega', 'vega-lite'].includes(lang)}
 			{#if renderHTML}
 				<SvgPanZoom
 					className=" rounded-2xl max-h-fit overflow-hidden"

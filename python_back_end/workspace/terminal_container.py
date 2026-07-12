@@ -1368,17 +1368,25 @@ async def terminal_status(*, force_probe: bool = False) -> dict[str, Any]:
 # When the terminal is invoked from inside a Harvis workspace task, we want the
 # progress banner (Discord, /api/workspaces/<id>/events SSE, chat bridge) to
 # show "💻 Harvis terminal: <cmd>" the same way it shows browser/exec calls.
-# OpenClawClient owns the in-memory `seq` counter for live events, but other
-# subscribers replay from the DB — so we pick the next seq via `MAX(seq)+1`,
-# write directly to `workspace_events`, and (best-effort) push the same payload
-# onto the live broadcaster if one is registered for this workspace.
+# `allocate_event_seq` below is THE single seq allocator for workspace_events:
+# both this module's emit_terminal_event AND workspace_router's run loop draw
+# from it, so terminal/trace side-channel events can never collide with the
+# run's own event stream (the old split — loop counter here, MAX(seq)+1 there —
+# produced duplicate (workspace_id, seq) pairs that broke SSE resume-by-seq).
 
 _TERMINAL_TOOL_NAME = "harvis-terminal"
 
-# Per-workspace locks serializing seq allocation + insert: without them the
-# 1 Hz tail loops, parallel jobs, and foreground exec interleave MAX(seq)+1
-# reads and produce duplicate seq values (breaking SSE resume-by-seq).
+# Per-workspace locks serializing seq allocation: without them the 1 Hz tail
+# loops, parallel jobs, and foreground exec interleave MAX(seq)+1 reads and
+# produce duplicate seq values (breaking SSE resume-by-seq).
 _event_seq_locks: dict[str, asyncio.Lock] = {}
+
+# Per-workspace next-seq cache. Seeded from the DB (MAX(seq)+1) on the first
+# allocation, then handed out strictly monotonically from memory under the
+# per-workspace lock. Entries are intentionally NEVER popped for the process
+# lifetime: an eager cleanup could race an allocated-but-not-yet-inserted seq
+# and re-issue it from a stale DB read. One int per run — negligible memory.
+_event_seq_next: dict[str, int] = {}
 
 
 def _event_seq_lock(workspace_id: str) -> asyncio.Lock:
@@ -1397,6 +1405,24 @@ async def _next_event_seq(pool, workspace_id: str) -> int:
             workspace_id,
         )
     return int(row["next_seq"]) if row else 0
+
+
+async def allocate_event_seq(pool, workspace_id: str) -> int:
+    """THE single collision-safe seq allocator for workspace_events.
+
+    Every writer (emit_terminal_event here, _db_save_event's callers in
+    workspace_router's run loop) MUST obtain its seq from this function.
+    Under the per-workspace asyncio.Lock: the first allocation seeds from the
+    DB's MAX(seq)+1, subsequent ones are handed out from the in-memory cache —
+    strictly monotonic, no duplicates within this process. (The backend is a
+    single uvicorn process; the guarded uq_workspace_events_ws_seq unique index
+    is the cross-process backstop.) pool=None (broadcast-only mode) seeds at 0."""
+    async with _event_seq_lock(workspace_id):
+        nxt = _event_seq_next.get(workspace_id)
+        if nxt is None:
+            nxt = await _next_event_seq(pool, workspace_id) if pool is not None else 0
+        _event_seq_next[workspace_id] = nxt + 1
+        return nxt
 
 
 async def _broadcast_live(workspace_id: str, event_type: str, payload: dict, seq: int) -> None:
@@ -1432,16 +1458,15 @@ async def emit_terminal_event(
     if pool is None:
         return
     try:
-        async with _event_seq_lock(workspace_id):
-            seq = await _next_event_seq(pool, workspace_id)
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    """
-                    INSERT INTO workspace_events (workspace_id, seq, event_type, payload, ts)
-                    VALUES ($1, $2, $3, $4::jsonb, NOW())
-                    """,
-                    workspace_id, seq, event_type, json.dumps(payload),
-                )
+        seq = await allocate_event_seq(pool, workspace_id)
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO workspace_events (workspace_id, seq, event_type, payload, ts)
+                VALUES ($1, $2, $3, $4::jsonb, NOW())
+                """,
+                workspace_id, seq, event_type, json.dumps(payload),
+            )
         await _broadcast_live(workspace_id, event_type, payload, seq)
     except Exception as exc:  # noqa: BLE001
         logger.warning(

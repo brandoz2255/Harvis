@@ -77,7 +77,9 @@
 	};
 	$: merged = mergeLiveStatus(CATALOG, live).map((d) => {
 		const ek = ENGINE_CARD_TO_READINESS[d.id];
-		return ek && engineReadiness[ek]?.ready ? { ...d, status: 'ready' as const } : d;
+		const er = ek ? engineReadiness[ek] : undefined;
+		// A verified cloud credential (connected) reads as "live" even when the Build engine is off.
+		return er && (er.ready || er.connected) ? { ...d, status: 'ready' as const } : d;
 	});
 	$: searched = filterCatalog(merged, q);
 	$: counts = statusCounts(searched, engineReadiness);

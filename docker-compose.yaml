@@ -271,6 +271,12 @@ services:
       HARVIS_HERMES_AGENT_CONTAINER: "${HARVIS_HERMES_AGENT_CONTAINER:-harvis-hermes-agent}"
       HARVIS_HERMES_OLLAMA_URL: "${HARVIS_HERMES_OLLAMA_URL:-http://ollama:11434/v1}"
       HARVIS_HERMES_AGENT_DEFAULT_MODEL: "${HARVIS_HERMES_AGENT_DEFAULT_MODEL:-qwen3:4b}"
+      # Image generation v0 — gated txt2img → workspace artifact. Providers probed at the
+      # ComfyUI/A1111 hostnames below; flag default OFF (honest 403 until a provider is up
+      # AND the flag is flipped). Enable per-deploy: HARVIS_OWUI_IMAGE_GENERATION=true.
+      HARVIS_OWUI_IMAGE_GENERATION: "${HARVIS_OWUI_IMAGE_GENERATION:-false}"
+      HARVIS_IMAGE_COMFYUI_URL: "${HARVIS_IMAGE_COMFYUI_URL:-http://harvis-comfyui:8188}"
+      HARVIS_IMAGE_A1111_URL: "${HARVIS_IMAGE_A1111_URL:-http://harvis-a1111:7860}"
       # E4B Chat: the facade proxies the "hermes-agent" chat model to the sidecar's
       # OpenAI-compatible API server (:8642). Key MUST match the sidecar's API_SERVER_KEY.
       HARVIS_HERMES_API_SERVER_KEY: "${HARVIS_HERMES_API_SERVER_KEY:-harvis-hermes-local-dev}"
@@ -307,6 +313,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./python_back_end/main.py:/app/main.py:ro
       - ./python_back_end/workspace:/app/workspace:ro
+      - ./python_back_end/image:/app/image:ro
       - ./python_back_end/tools:/app/tools:ro
       - ./python_back_end/integrations:/app/integrations:ro
       - ./python_back_end/plugins:/app/plugins:ro

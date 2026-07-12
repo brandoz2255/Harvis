@@ -31,6 +31,7 @@ from ..openclaw_client import OpenClawEvent
 from .isolation import WorkspaceIsolationManager
 from .profiles import get_profile
 from .runner import SubAgentRunner
+from .tools import wire_tool_names
 
 logger = logging.getLogger(__name__)
 
@@ -138,8 +139,14 @@ async def run_orchestrated(
     # See planner.plan_agents. (`_pick_model` above is the uniform/per-role policy
     # the planner now applies internally.)
     from .planner import plan_agents
+    from .subagent_defs import load_subagents
+    # Custom sub-agents (Customize → Sub-agents): the planner uses their name+description
+    # roster to auto-delegate a step to the right specialist; each resolved profile then
+    # carries that sub-agent's model / system prompt / tool-allowlist / skills / connectors.
+    subagents = await load_subagents(pool, user_id)
     plan: list[dict] = await plan_agents(
-        task_brief, model_name=model_name, uniform_model=uniform_model, model_pool=model_pool
+        task_brief, model_name=model_name, uniform_model=uniform_model,
+        model_pool=model_pool, subagents=subagents,
     )
 
     planned = "; ".join(f"{p['label']} on {p['model']}" for p in plan)
@@ -180,6 +187,11 @@ async def run_orchestrated(
                     max_steps=int(child["profile"].get("max_steps", 12)),
                     max_runtime_seconds=int(child["profile"].get("max_runtime_seconds", 600)),
                     launch_mode=launch_mode,
+                    system_prompt=child.get("system_prompt"),
+                    disabled_tools=child.get("disabled_tools"),
+                    skill_blocks=child.get("skill_blocks"),
+                    pool=pool,
+                    user_id=user_id,
                 ):
                     await queue.put(ev)
             except Exception as exc:
@@ -233,6 +245,32 @@ async def run_orchestrated(
             "prompt_tokens": 0,
             "completion_tokens": 0,
         }
+        # ── Custom sub-agent equipment (empty for generic delegated agents) ──
+        # allowed_tools is an ALLOWLIST → invert to the runner's offer-time WITHHOLD set
+        # (all offered - allowed - finish). authorize_action stays the dispatch authority.
+        prof = p["profile"]
+        _allowed = set(prof.get("allowed_tools") or [])
+        child["disabled_tools"] = (wire_tool_names() - _allowed - {"finish"}) if _allowed else set()
+        child["system_prompt"] = (prof.get("system_prompt") or "") or None
+        # Sub-agent skills through the SAME fail-closed gate as chat (human 'supported'
+        # verdict etc.). No capability resolver in the run context → capability-gated
+        # skills honestly degrade to an 'unavailable' note rather than injecting a body.
+        _skill_ids = prof.get("skill_ids") or []
+        child["skill_blocks"] = []
+        if _skill_ids:
+            try:
+                from owui_compat.skills import gated_skill_blocks
+                child["skill_blocks"] = await gated_skill_blocks(pool, user_id, _skill_ids)
+            except Exception:
+                logger.warning("orchestrator: sub-agent skill gate failed for %s", p["label"], exc_info=True)
+        # Connectors are stored + surfaced but NOT live in runs yet (Phase G) unless
+        # HARVIS_MCP_LIVE — say so honestly instead of silently dropping them.
+        _mcp_ids = prof.get("mcp_ids") or []
+        if _mcp_ids and os.getenv("HARVIS_MCP_LIVE", "").lower() not in ("1", "true", "yes", "on"):
+            yield root_ev("log", {
+                "message": f"{p['label']}: {len(_mcp_ids)} connector(s) attached (config only) — "
+                           "live MCP tool-calling is deferred.",
+            })
         children.append(child)
         tasks.append(asyncio.create_task(_drain(child)))
 

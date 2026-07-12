@@ -1872,7 +1872,97 @@ export const renderVegaVisualization = async (spec: string, i18n?: any) => {
 	return svg;
 };
 
-export const getCodeBlockContents = (content: string): object => {
+// ```canvas chart block ({chartType, categories, series:[{name,data}]}) → a
+// Vega-Lite spec, so canvas charts reuse the EXISTING renderVegaVisualization
+// path above (no new chart lib). Returns null when the block isn't chartable —
+// the caller shows an honest "chart could not be rendered" note instead.
+export const canvasChartToVegaLite = (
+	block: any,
+	{ dark = false }: { dark?: boolean } = {}
+): object | null => {
+	const chartType = String(block?.chartType ?? '').toLowerCase();
+	if (!['bar', 'line', 'pie'].includes(chartType)) return null;
+	const categories: string[] = Array.isArray(block?.categories)
+		? block.categories.map((c: any) => String(c))
+		: [];
+	const series: Array<{ name?: any; data: any[] }> = (
+		Array.isArray(block?.series) ? block.series : []
+	).filter((s: any) => s && Array.isArray(s.data));
+	if (categories.length === 0 || series.length === 0) return null;
+
+	const text = dark ? '#d1d5db' : '#374151';
+	const grid = dark ? '#374151' : '#e5e7eb';
+	const palette = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#f97316'];
+	const config = {
+		background: 'transparent',
+		axis: { labelColor: text, titleColor: text, gridColor: grid, domainColor: grid, tickColor: grid },
+		legend: { labelColor: text, titleColor: text },
+		range: { category: palette },
+		view: { stroke: 'transparent' }
+	};
+	const $schema = 'https://vega.github.io/schema/vega-lite/v5.json';
+
+	if (chartType === 'pie') {
+		// Pie uses the FIRST series only (one slice per category).
+		const first = series[0];
+		const values = categories
+			.map((category, i) => ({ category, value: Number(first.data[i]) }))
+			.filter((d) => Number.isFinite(d.value));
+		if (values.length === 0) return null;
+		return {
+			$schema,
+			config,
+			width: 260,
+			height: 220,
+			data: { values },
+			mark: { type: 'arc', tooltip: true },
+			encoding: {
+				theta: { field: 'value', type: 'quantitative', title: String(first.name ?? 'Value') },
+				color: { field: 'category', type: 'nominal', title: null }
+			}
+		};
+	}
+
+	const values: Array<{ category: string; series: string; value: number }> = [];
+	series.forEach((s, si) => {
+		const name = String(s.name ?? `Series ${si + 1}`);
+		categories.forEach((category, i) => {
+			const value = Number(s.data[i]);
+			if (Number.isFinite(value)) values.push({ category, series: name, value });
+		});
+	});
+	if (values.length === 0) return null;
+
+	const multi = series.length > 1;
+	return {
+		$schema,
+		config,
+		width: Math.min(600, Math.max(280, categories.length * (multi ? series.length * 26 + 18 : 48))),
+		height: 220,
+		data: { values },
+		mark:
+			chartType === 'bar'
+				? { type: 'bar', tooltip: true, ...(multi ? {} : { color: palette[0] }) }
+				: { type: 'line', point: true, tooltip: true, ...(multi ? {} : { color: palette[0] }) },
+		encoding: {
+			x: { field: 'category', type: 'nominal', sort: null, title: null, axis: { labelAngle: 0 } },
+			y: { field: 'value', type: 'quantitative', title: null },
+			...(multi ? { color: { field: 'series', type: 'nominal', title: null } } : {}),
+			...(multi && chartType === 'bar' ? { xOffset: { field: 'series' } } : {})
+		}
+	};
+};
+
+export const getCodeBlockContents = (
+	content: string
+): {
+	codeBlocks: Array<{ lang: string; code: string }>;
+	canvasBlocks: string[];
+	html: string;
+	css: string;
+	js: string;
+	htmlGroups: Array<{ html: string; css: string; js: string }>;
+} => {
 	// Strip thinking/reasoning and other detail blocks before extracting code
 	// to prevent code inside <details type="reasoning"> from being treated as artifacts
 	content = removeAllDetails(content);
@@ -1887,6 +1977,10 @@ export const getCodeBlockContents = (content: string): object => {
 	// separate html/css/js blocks meant to form a single page, while also
 	// allowing multiple distinct HTML blocks to produce separate artifacts.
 	let htmlGroups: Array<{ html: string; css: string; js: string }> = [];
+
+	// Typed ```canvas panels (JSON specs) — surfaced separately so Chat.svelte can
+	// auto-pop them into the Artifacts rail alongside html/svg.
+	let canvasBlocks: string[] = [];
 
 	const initDefaultGroup = () => {
 		if (htmlGroups.length === 0) {
@@ -1913,6 +2007,8 @@ export const getCodeBlockContents = (content: string): object => {
 			} else if (lang === 'javascript' || lang === 'js') {
 				initDefaultGroup();
 				htmlGroups[htmlGroups.length - 1].js += code + '\n';
+			} else if (lang === 'canvas') {
+				canvasBlocks.push(code);
 			}
 		});
 	} else {
@@ -1953,6 +2049,7 @@ export const getCodeBlockContents = (content: string): object => {
 
 	return {
 		codeBlocks: codeBlocks,
+		canvasBlocks: canvasBlocks,
 		html: htmlContent.trim(),
 		css: cssContent.trim(),
 		js: jsContent.trim(),

@@ -167,6 +167,16 @@ async def provider_catalog(request: Request, user=Depends(get_current_user_optim
         "reason": "" if term_on else "HARVIS_TERMINAL_ENABLED is off",
     })
 
+    # Local image generation (image-gen v0) — probes A1111 (:7860) then ComfyUI
+    # (:8188) and reports the FIRST ready one, or id 'none' with the per-provider
+    # reason (unreachable / no checkpoints). Honest, never a faked ready.
+    try:
+        from image.provider import readiness_summary as image_readiness_summary
+        providers.append(await image_readiness_summary())
+    except Exception as exc:  # noqa: BLE001
+        providers.append({"kind": "image", "id": "none", "ready": False,
+                          "reason": f"probe failed: {exc}"})
+
     return {
         "providers": providers,
         "note": "Read-only inventory. Turning a task into required→available→gap and auto-activating "

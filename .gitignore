@@ -180,3 +180,5 @@ front_end/harvis-ui-prototype/
 err.txt
 # k8s secret manifest (plural variant — singular already ignored above)
 k8s-manifests/overlays/prod/openclaw-secrets.yaml
+# vendored ComfyUI runtime + SD models (13GB) — provider container build context, never repo content
+/image-comfy/

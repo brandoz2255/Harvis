@@ -239,7 +239,8 @@ async def push_run_event(
 ):
     """Side-channel for trusted internal services (sandbox shell, lane gates,
     search proxy) to append trace events. Persists via emit_terminal_event
-    (MAX(seq)+1 row + live broadcast) so SSE subscribers see it immediately."""
+    (seq from the shared allocator + live broadcast) so SSE subscribers see it
+    immediately and it can never collide with the run loop's own events."""
     if body.event_type not in _INTERNAL_EVENT_TYPES:
         raise HTTPException(
             status_code=400,

@@ -232,6 +232,11 @@ def register_capabilities_routes(router: APIRouter, get_current_user: Callable) 
             _entry = {"ready": _ready}
             if not _ready and _svc.get("reason"):
                 _entry["reason"] = _svc["reason"]
+            # Additive: a verified cloud credential makes the provider usable for CHAT even when the
+            # Build engine isn't ready. The Integrations card reads this to show "Connected"; the Build
+            # selector ignores it and keeps gating on `ready` only.
+            if _svc.get("connected"):
+                _entry["connected"] = True
             engine_readiness[_eng] = _entry
         # When the user has a VERIFIED external Hermes connected, Chat routes there but Build can't
         # (the external server has no access to the Build workspace clone) — mark it unavailable.

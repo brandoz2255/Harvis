@@ -1,8 +1,9 @@
 <script lang="ts">
 	import { getContext, onMount, tick } from 'svelte';
 	import { fly } from 'svelte/transition';
+	import { goto } from '$app/navigation';
 
-	import { config, user, tools as _tools, mobile, knowledge, researchEnabled } from '$lib/stores';
+	import { config, user, tools as _tools, mobile, knowledge, researchEnabled, showSettings } from '$lib/stores';
 	import { getKnowledgeBases } from '$lib/apis/knowledge';
 
 	import { createPicker } from '$lib/utils/google-drive-picker';
@@ -28,6 +29,7 @@
 	import AttachWebpageModal from './AttachWebpageModal.svelte';
 	import GlobeAlt from '$lib/components/icons/GlobeAlt.svelte';
 	import Search from '$lib/components/icons/Search.svelte';
+	import Photo from '$lib/components/icons/Photo.svelte';
 
 	const i18n = getContext('i18n');
 
@@ -42,6 +44,8 @@
 
 	export let uploadGoogleDriveHandler: Function;
 	export let uploadOneDriveHandler: Function;
+
+	export let onCreateImage: Function;
 
 	export let onUpload: Function;
 	export let onClose: Function;
@@ -73,6 +77,40 @@
 		if (inputFiles && inputFiles.length > 0) {
 			console.log(inputFiles);
 			inputFilesHandler(inputFiles);
+		}
+	};
+
+	// ── Connectors subtab — saved MCP connections with inline on/off toggles ──
+	let connectors: any[] = [];
+	let connectorsLoading = false;
+	let connectorTogglingId: string | null = null;
+
+	const connectorHeaders = (): Record<string, string> => {
+		const token = localStorage.getItem('token');
+		return token ? { authorization: `Bearer ${token}` } : {};
+	};
+
+	const loadConnectors = async () => {
+		connectorsLoading = true;
+		const r = await fetch('/api/owui/mcp/connections', { headers: connectorHeaders() })
+			.then((x) => (x.ok ? x.json() : { items: [] }))
+			.catch(() => ({ items: [] }));
+		connectors = r?.items ?? [];
+		connectorsLoading = false;
+	};
+
+	const toggleConnector = async (c: any) => {
+		if (connectorTogglingId) return;
+		connectorTogglingId = c.id;
+		const updated = await fetch(`/api/owui/mcp/connections/${c.id}/toggle`, {
+			method: 'POST',
+			headers: connectorHeaders()
+		})
+			.then((x) => (x.ok ? x.json() : null))
+			.catch(() => null);
+		connectorTogglingId = null;
+		if (updated) {
+			connectors = connectors.map((x) => (x.id === updated.id ? updated : x));
 		}
 	};
 
@@ -137,6 +175,39 @@
 					>
 						<Search />
 						<div class="line-clamp-1">{$i18n.t('Deep Research')}</div>
+					</button>
+
+					<!-- Always shown — the backend gates generation honestly (flag + provider readiness). -->
+					<button
+						class="flex w-full gap-2 items-center px-3 py-1.5 text-sm select-none cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50 rounded-xl"
+						type="button"
+						on:click={() => {
+							onCreateImage();
+							show = false;
+						}}
+					>
+						<Photo />
+						<div class="line-clamp-1">{$i18n.t('Create Image')}</div>
+					</button>
+
+					<!-- Connectors — submenu with saved connections (quick toggles) + manage/browse. -->
+					<button
+						class="flex gap-2 w-full items-center px-3 py-1.5 text-sm select-none cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50 rounded-xl"
+						type="button"
+						on:click={() => {
+							tab = 'connectors';
+							loadConnectors();
+						}}
+					>
+						<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="size-4 shrink-0"><path d="M9 2v6M15 2v6M12 8v3m0 0a5 5 0 0 1 5 5v2H7v-2a5 5 0 0 1 5-5Z"/><path d="M7 18v2a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2v-2"/></svg>
+
+						<div class="flex items-center w-full justify-between">
+							<div class="line-clamp-1">{$i18n.t('Connectors')}</div>
+
+							<div class="text-gray-500">
+								<ChevronRight />
+							</div>
+						</div>
 					</button>
 
 					<Tooltip
@@ -492,6 +563,80 @@
 							</button>
 						{/if}
 					{/if}
+				</div>
+			{:else if tab === 'connectors'}
+				<div in:fly={{ x: 20, duration: 150 }}>
+					<button
+						class="flex w-full justify-between gap-2 items-center px-3 py-1.5 text-sm select-none cursor-pointer rounded-xl hover:bg-gray-50 dark:hover:bg-gray-800/50"
+						on:click={() => {
+							tab = '';
+						}}
+					>
+						<ChevronLeft />
+
+						<div class="flex items-center w-full justify-between">
+							<div>
+								{$i18n.t('Connectors')}
+							</div>
+						</div>
+					</button>
+
+					{#if connectorsLoading && !connectors.length}
+						<div class="px-3 py-1.5 text-xs text-gray-500">{$i18n.t('Loading…')}</div>
+					{:else if connectors.length}
+						{#each connectors as c (c.id)}
+							<div
+								class="flex w-full gap-2 items-center px-3 py-1.5 text-sm select-none hover:bg-gray-50 dark:hover:bg-gray-800/50 rounded-xl"
+							>
+								<div class="line-clamp-1 flex-1">{c.name}</div>
+								<button
+									type="button"
+									role="switch"
+									aria-checked={c.enabled}
+									aria-label={$i18n.t('Toggle {{name}}', { name: c.name })}
+									disabled={connectorTogglingId === c.id}
+									on:click|stopPropagation={() => toggleConnector(c)}
+									class="relative shrink-0 h-4 w-7 rounded-full transition disabled:opacity-40 {c.enabled
+										? 'bg-green-500'
+										: 'bg-gray-300 dark:bg-gray-700'}"
+								>
+									<span
+										class="absolute top-0.5 size-3 rounded-full bg-white shadow transition-all {c.enabled
+											? 'left-3.5'
+											: 'left-0.5'}"
+									></span>
+								</button>
+							</div>
+						{/each}
+					{:else}
+						<div class="px-3 py-1.5 text-xs text-gray-500">{$i18n.t('No connectors yet')}</div>
+					{/if}
+
+					<hr class="border-gray-100 dark:border-gray-800 my-1" />
+
+					<button
+						class="flex w-full gap-2 items-center px-3 py-1.5 text-sm select-none cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50 rounded-xl"
+						type="button"
+						on:click={() => {
+							showSettings.set('connectors');
+							show = false;
+						}}
+					>
+						<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="size-4 shrink-0"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>
+						<div class="line-clamp-1">{$i18n.t('Manage connectors')}</div>
+					</button>
+
+					<button
+						class="flex w-full gap-2 items-center px-3 py-1.5 text-sm select-none cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50 rounded-xl"
+						type="button"
+						on:click={() => {
+							goto('/harvis/agent-studio/mcp-shop');
+							show = false;
+						}}
+					>
+						<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" class="size-4 shrink-0"><path d="M12 5v14M5 12h14"/></svg>
+						<div class="line-clamp-1">{$i18n.t('Browse connectors')}</div>
+					</button>
 				</div>
 			{:else if tab === 'knowledge'}
 				<div in:fly={{ x: 20, duration: 150 }}>

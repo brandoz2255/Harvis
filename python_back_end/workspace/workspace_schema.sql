@@ -76,6 +76,13 @@ CREATE TABLE IF NOT EXISTS workspace_events (
 CREATE INDEX IF NOT EXISTS idx_workspace_events_ws
     ON workspace_events(workspace_id, seq ASC);
 
+-- Fresh installs (initdb) get the seq-uniqueness constraint from day one.
+-- Existing DBs get it via the guarded lifespan migration instead
+-- (workspace/events_seq_migration.py — skipped, never destructive, when
+-- pre-allocator duplicate rows exist).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_workspace_events_ws_seq
+    ON workspace_events(workspace_id, seq);
+
 CREATE TABLE IF NOT EXISTS proxy_usage_log (
     id         SERIAL PRIMARY KEY,
     model      TEXT NOT NULL,

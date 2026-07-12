@@ -22,6 +22,7 @@
 	import SvgPanZoom from '../common/SVGPanZoom.svelte';
 	import ArrowLeft from '../icons/ArrowLeft.svelte';
 	import Download from '../icons/Download.svelte';
+	import CanvasRenderer from './Canvas/CanvasRenderer.svelte';
 
 	export let overlay = false;
 
@@ -80,11 +81,14 @@
 	};
 
 	const downloadArtifact = () => {
-		const blob = new Blob([contents[selectedContentIdx].content], { type: 'text/html' });
+		const isCanvas = contents[selectedContentIdx].type === 'canvas';
+		const blob = new Blob([contents[selectedContentIdx].content], {
+			type: isCanvas ? 'application/json' : 'text/html'
+		});
 		const url = URL.createObjectURL(blob);
 		const a = document.createElement('a');
 		a.href = url;
-		a.download = `artifact-${$chatId}-${selectedContentIdx}.html`;
+		a.download = `artifact-${$chatId}-${selectedContentIdx}.${isCanvas ? 'json' : 'html'}`;
 		document.body.appendChild(a);
 		a.click();
 		document.body.removeChild(a);
@@ -261,6 +265,10 @@
 								className=" w-full h-full max-h-full overflow-hidden"
 								svg={contents[selectedContentIdx].content}
 							/>
+						{:else if contents[selectedContentIdx].type === 'canvas'}
+							<div class="w-full h-full overflow-y-auto">
+								<CanvasRenderer spec={contents[selectedContentIdx].content} mode="panel" />
+							</div>
 						{/if}
 					</div>
 				{:else}

@@ -276,6 +276,8 @@ async def run_vibecode_turn(
             system_prompt=sys_prompt,
             permission_mode=gate_mode,
             launch_mode=launch_mode,
+            pool=pool,
+            user_id=user_id,
         ):
             if ev.type == "tool_call":
                 tool_calls += 1

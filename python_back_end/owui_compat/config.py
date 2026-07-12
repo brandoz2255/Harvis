@@ -52,7 +52,10 @@ def build_config() -> dict:
             # implementing an OWUI-compatible Socket.IO server (owui_compat).
             "enable_websocket": False,
             "enable_web_search": False,
-            "enable_image_generation": False,
+            # Image-gen v0 (docs/plans/image-generation-v0.md): default OFF in code —
+            # the deploy flips this env once a local provider (ComfyUI/A1111) is
+            # confirmed ready. Gates POST /api/harvis/image/generate too.
+            "enable_image_generation": _env_bool("HARVIS_OWUI_IMAGE_GENERATION", False),
             "enable_admin_export": False,
             "enable_admin_chat_access": False,
             "enable_community_sharing": False,

@@ -29,6 +29,9 @@
 	// Optional title (the turn's task) so the dock card names itself immediately instead of
 	// falling back to "Workspace run" while the meta fetch is in flight.
 	export let title = '';
+	// Host override for the dock's '⤢ Full' button — lets embedding pages open their
+	// own in-place inspector instead of navigating away (goto stays as the fallback).
+	export let onOpenFull: (() => void) | null = null;
 
 	let events: WorkspaceEvent[] = [];
 	let phase: 'connecting' | 'running' | 'done' | 'error' | 'cancelled' = 'connecting';
@@ -202,7 +205,7 @@
 
 	const backToChat = () => goto($chatId ? `/c/${$chatId}` : '/');
 	const goStudio = () => goto('/harvis/agent-studio');
-	const openFull = () => goto(`/harvis/agent-studio/run/${wsId}`);
+	const openFull = () => (onOpenFull ? onOpenFull() : goto(`/harvis/agent-studio/run/${wsId}`));
 
 	const statusDot = (s: string, p: string) => {
 		if (p === 'done' || s === 'done') return 'bg-blue-500';

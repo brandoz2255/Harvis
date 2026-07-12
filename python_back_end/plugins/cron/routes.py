@@ -68,11 +68,17 @@ def _to_view(j) -> CronJobView:
 @router.get("")
 async def list_my_jobs(
     request: Request,
+    context: Optional[str] = None,
     current_user: dict = Depends(get_current_user_optimized),
 ) -> dict:
+    # ?context=coding|chat — the Routines (coding) and Schedules (main chat)
+    # lenses over the one cron store. No context → all jobs (legacy callers).
+    ctx = (context or "").strip().lower() or None
+    if ctx is not None and ctx not in ("coding", "chat"):
+        raise HTTPException(status_code=400, detail="context must be 'coding' or 'chat'")
     store = _store(request)
     user_id = current_user["id"]
-    jobs = await store.list_for_user(user_id)
+    jobs = await store.list_for_user(user_id, context=ctx)
     return {"jobs": [_to_view(j).model_dump() for j in jobs]}
 
 
@@ -84,6 +90,13 @@ async def create_my_job(
 ) -> dict:
     store = _store(request)
     user_id = current_user["id"]
+    # Stamp metadata.context so the two lenses (Routines=coding, Schedules=chat)
+    # can filter, and so the tick loop knows how to dispatch the fire. Anything
+    # that isn't explicitly 'chat' stays on the workspace-run path.
+    metadata = dict(body.metadata or {})
+    metadata["context"] = (
+        "chat" if str(metadata.get("context") or "").strip().lower() == "chat" else "coding"
+    )
     job = await store.create(
         user_id=user_id,
         name=body.name,
@@ -91,7 +104,7 @@ async def create_my_job(
         schedule_expr=body.schedule_expr,
         prompt=body.prompt,
         delivery=body.delivery,
-        metadata=body.metadata,
+        metadata=metadata,
     )
     if job is None:
         raise HTTPException(status_code=500, detail="job creation failed (check schedule_expr / DB connectivity)")

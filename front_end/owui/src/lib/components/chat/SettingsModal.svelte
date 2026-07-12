@@ -30,6 +30,14 @@
 	import Face from '../icons/Face.svelte';
 	import AppNotification from '../icons/AppNotification.svelte';
 	import UserBadgeCheck from '../icons/UserBadgeCheck.svelte';
+	import Bolt from '../icons/Bolt.svelte';
+	import Cube from '../icons/Cube.svelte';
+	import Wrench from '../icons/Wrench.svelte';
+	// Customize group panels — shared with /harvis/agent-studio/customize (one
+	// implementation, two mounts: the page sections and these modal tabs).
+	import SkillsPanel from '$lib/agent-studio/customize/SkillsPanel.svelte';
+	import ConnectorsPanel from '$lib/agent-studio/customize/ConnectorsPanel.svelte';
+	import PluginsPanel from '$lib/agent-studio/customize/PluginsPanel.svelte';
 
 	const i18n = getContext('i18n');
 
@@ -51,6 +59,30 @@
 		title: string;
 		keywords: string[];
 	}
+
+	// Grouped left nav (Claude-style settings shell): every tab belongs to one
+	// group; groups render as headed sections in the desktop nav column.
+	const navGroups = [
+		{ id: 'settings', label: 'Settings' },
+		{ id: 'integrations', label: 'Integrations' },
+		{ id: 'customize', label: 'Customize' }
+	];
+	const tabGroups: Record<string, string> = {
+		general: 'settings',
+		interface: 'settings',
+		personalization: 'settings',
+		audio: 'settings',
+		data_controls: 'settings',
+		account: 'settings',
+		about: 'settings',
+		connections: 'integrations',
+		tools: 'integrations',
+		workspace: 'integrations',
+		skills: 'customize',
+		connectors: 'customize',
+		plugins: 'customize'
+	};
+	const tabGroup = (id: string) => tabGroups[id] ?? 'settings';
 
 	const allSettings: SettingsTab[] = [
 		{
@@ -482,6 +514,53 @@
 				'version info',
 				'versioninfo'
 			]
+		},
+		// ── Customize group (shared panels with /harvis/agent-studio/customize) ──
+		{
+			id: 'skills',
+			title: 'Skills',
+			keywords: [
+				'skill',
+				'skills',
+				'audit',
+				'verdict',
+				'governance',
+				'openclaw sync',
+				'instructions',
+				'capability',
+				'customize'
+			]
+		},
+		{
+			id: 'connectors',
+			title: 'Connectors',
+			keywords: [
+				'connector',
+				'connectors',
+				'connect',
+				'mcp',
+				'mcp servers',
+				'model context protocol',
+				'marketplace',
+				'directory',
+				'attach',
+				'tools',
+				'customize'
+			]
+		},
+		{
+			id: 'plugins',
+			title: 'Plugins',
+			keywords: [
+				'plugin',
+				'plugins',
+				'built-in tools',
+				'builtin tools',
+				'capabilities',
+				'agent tools',
+				'web search',
+				'customize'
+			]
 		}
 	];
 
@@ -639,7 +718,16 @@
 					/>
 				</div>
 				{#if filteredSettings.length > 0}
-					{#each filteredSettings as tabId (tabId)}
+					{#each navGroups as group (group.id)}
+					{@const groupTabs = filteredSettings.filter((id) => tabGroup(id) === group.id)}
+					{#if groupTabs.length > 0}
+					<!-- Group header — desktop only (mobile keeps the flat horizontal strip). -->
+					<div
+						class="hidden md:block px-2.5 pt-2.5 pb-1 text-[10px] font-semibold uppercase tracking-wider text-gray-400 dark:text-gray-500 select-none"
+					>
+						{$i18n.t(group.label)}
+					</div>
+					{#each groupTabs as tabId (tabId)}
 						{#if tabId === 'general'}
 							<button
 								role="tab"
@@ -877,8 +965,82 @@
 								</div>
 								<div class=" self-center">{$i18n.t('About')}</div>
 							</button>
+						{:else if tabId === 'skills'}
+							<button
+								role="tab"
+								aria-controls="tab-skills"
+								aria-selected={selectedTab === 'skills'}
+								class={`px-0.5 md:px-2.5 py-1 min-w-fit rounded-xl flex-1 md:flex-none flex text-left transition
+								${
+									selectedTab === 'skills'
+										? ($settings?.highContrastMode ?? false)
+											? 'dark:bg-gray-800 bg-gray-200'
+											: ''
+										: ($settings?.highContrastMode ?? false)
+											? 'hover:bg-gray-200 dark:hover:bg-gray-800'
+											: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'
+								}`}
+								on:click={() => {
+									selectedTab = 'skills';
+								}}
+							>
+								<div class=" self-center mr-2">
+									<Bolt strokeWidth="2" className="size-4" />
+								</div>
+								<div class=" self-center">{$i18n.t('Skills')}</div>
+							</button>
+						{:else if tabId === 'connectors'}
+							<button
+								role="tab"
+								aria-controls="tab-connectors"
+								aria-selected={selectedTab === 'connectors'}
+								class={`px-0.5 md:px-2.5 py-1 min-w-fit rounded-xl flex-1 md:flex-none flex text-left transition
+								${
+									selectedTab === 'connectors'
+										? ($settings?.highContrastMode ?? false)
+											? 'dark:bg-gray-800 bg-gray-200'
+											: ''
+										: ($settings?.highContrastMode ?? false)
+											? 'hover:bg-gray-200 dark:hover:bg-gray-800'
+											: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'
+								}`}
+								on:click={() => {
+									selectedTab = 'connectors';
+								}}
+							>
+								<div class=" self-center mr-2">
+									<Cube strokeWidth="2" className="size-4" />
+								</div>
+								<div class=" self-center">{$i18n.t('Connectors')}</div>
+							</button>
+						{:else if tabId === 'plugins'}
+							<button
+								role="tab"
+								aria-controls="tab-plugins"
+								aria-selected={selectedTab === 'plugins'}
+								class={`px-0.5 md:px-2.5 py-1 min-w-fit rounded-xl flex-1 md:flex-none flex text-left transition
+								${
+									selectedTab === 'plugins'
+										? ($settings?.highContrastMode ?? false)
+											? 'dark:bg-gray-800 bg-gray-200'
+											: ''
+										: ($settings?.highContrastMode ?? false)
+											? 'hover:bg-gray-200 dark:hover:bg-gray-800'
+											: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'
+								}`}
+								on:click={() => {
+									selectedTab = 'plugins';
+								}}
+							>
+								<div class=" self-center mr-2">
+									<Wrench strokeWidth="2" className="size-4" />
+								</div>
+								<div class=" self-center">{$i18n.t('Plugins')}</div>
+							</button>
 						{/if}
 					{/each}
+					{/if}
+				{/each}
 				{:else}
 					<div class="text-center text-gray-500 mt-4">
 						{$i18n.t('No results found')}
@@ -961,6 +1123,12 @@
 							toast.success($i18n.t('Settings saved successfully!'));
 						}}
 					/>
+				{:else if selectedTab === 'skills'}
+					<SkillsPanel token={localStorage.token} />
+				{:else if selectedTab === 'connectors'}
+					<ConnectorsPanel token={localStorage.token} />
+				{:else if selectedTab === 'plugins'}
+					<PluginsPanel />
 				{:else if selectedTab === 'about'}
 					<About />
 				{/if}

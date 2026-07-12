@@ -61,6 +61,7 @@ from workspace.harvis_exec import harvis_exec_router
 from workspace.harvis_jobs import harvis_jobs_router
 from workspace.skill_extractor import harvis_skill_extract_router  # Phase F: run → draft skill
 from workspace.harvis_readiness import harvis_readiness_router  # Phases I/H/G: readiness + provider catalog
+from image.harvis_image import harvis_image_router  # Image-gen v0: gated txt2img → workspace artifact
 from vibecoding.terminal_sessions import router as harvis_terminal_sessions_router
 
 # Import tools routers
@@ -122,7 +123,7 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "10080"))  # 7 days
 
 # Temporary logging to verify JWT secret is loaded
-print(f"Backend JWT_SECRET loaded: {SECRET_KEY[:10]}... Length: {len(SECRET_KEY)}")
+print(f"Backend JWT_SECRET loaded: {'set' if SECRET_KEY and SECRET_KEY != 'key' else 'MISSING/DEFAULT'} (len {len(SECRET_KEY)})")
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -146,14 +147,10 @@ def encrypt_api_key(api_key: str) -> str:
         logger.warning("encrypt_api_key: Empty API key provided")
         return ""
 
-    logger.info(
-        f"encrypt_api_key: INPUT length={len(api_key)}, preview={api_key[:8]}...{api_key[-4:]}"
-    )
+    # SECURITY: never log key material (not even a preview/length) — logs are a lower-trust sink.
     encrypted = _api_key_cipher.encrypt(api_key.encode())
     encrypted_b64 = base64.urlsafe_b64encode(encrypted).decode()
-    logger.info(
-        f"encrypt_api_key: OUTPUT length={len(encrypted_b64)}, preview={encrypted_b64[:30]}..."
-    )
+    logger.debug("encrypt_api_key: encrypted a credential")
     return encrypted_b64
 
 
@@ -165,16 +162,10 @@ def decrypt_api_key(encrypted_key: str) -> str:
     try:
         encrypted_bytes = base64.urlsafe_b64decode(encrypted_key.encode())
         decrypted = _api_key_cipher.decrypt(encrypted_bytes)
-        decrypted_str = decrypted.decode()
-        logger.info(
-            f"decrypt_api_key: Successfully decrypted key, length={len(decrypted_str)}"
-        )
-        return decrypted_str
+        return decrypted.decode()
     except Exception as e:
-        logger.error(f"Failed to decrypt API key: {e}")
-        logger.error(
-            f"Encrypted key length: {len(encrypted_key)}, prefix: {encrypted_key[:20]}..."
-        )
+        # SECURITY: log only the failure TYPE — never the key material or its length/prefix.
+        logger.warning("decrypt_api_key: decryption failed (%s)", type(e).__name__)
         return ""
 
 
@@ -650,6 +641,7 @@ async def lifespan(app: FastAPI):
                     CREATE_OWUI_FOLDERS_SQL,
                     CREATE_OWUI_KNOWLEDGE_SQL,
                     CREATE_OWUI_SKILLS_SQL,
+                    CREATE_OWUI_SUBAGENTS_SQL,
                     CREATE_OWUI_USER_SETTINGS_SQL,
                     CREATE_OWUI_ORCH_POOL_SQL,
                 )
@@ -660,6 +652,7 @@ async def lifespan(app: FastAPI):
                 await conn.execute(CREATE_OWUI_COMPARISONS_SQL)
                 await conn.execute(CREATE_OWUI_KNOWLEDGE_SQL)
                 await conn.execute(CREATE_OWUI_SKILLS_SQL)
+                await conn.execute(CREATE_OWUI_SUBAGENTS_SQL)
                 await conn.execute(CREATE_OWUI_USER_SETTINGS_SQL)
                 await conn.execute(CREATE_OWUI_ORCH_POOL_SQL)
 
@@ -695,6 +688,15 @@ async def lifespan(app: FastAPI):
                         ADD COLUMN IF NOT EXISTS content_bytes BYTEA;
                     """
                 )
+
+                # Trace-correctness backstop: unique (workspace_id, seq) on
+                # workspace_events. GUARDED — skips (with a warning) when
+                # pre-allocator duplicate rows exist, never deletes history.
+                try:
+                    from workspace.events_seq_migration import ensure_events_seq_unique_index
+                    await ensure_events_seq_unique_index(conn)
+                except Exception as _seq_exc:  # noqa: BLE001
+                    logger.warning("⚠️ workspace_events seq-index migration failed: %s", _seq_exc)
 
                 # Open Notebook (RAG notebooks) — self-create the schema (the tables
                 # were never applied on this deploy). Idempotent CREATE TABLE/INDEX.
@@ -1399,6 +1401,10 @@ app.include_router(harvis_jobs_router)
 app.include_router(harvis_skill_extract_router)
 # Phases I/H/G: GET /api/harvis/readiness (per-lane, honest) + /api/harvis/providers (unified catalog).
 app.include_router(harvis_readiness_router)
+# Image-gen v0: POST /api/harvis/image/generate (gated on enable_image_generation + a ready
+# ComfyUI/A1111 provider) runs txt2img as a background workspace run; the PNG lands as a
+# binary artifact + 'artifact' trace event so the existing Artifacts rail previews it.
+app.include_router(harvis_image_router)
 # Phase 3: terminal-session REST over the VibeCode PTY — pre-created exec +
 # docker exec_resize side-channel. Gated by HARVIS_BUILD_SHELL like the WS.
 app.include_router(harvis_terminal_sessions_router)

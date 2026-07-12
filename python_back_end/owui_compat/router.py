@@ -36,6 +36,7 @@ from .schemas import (
 from .stubs import register_stub_routes
 from .knowledge import register_knowledge_routes
 from .skills import register_skill_routes
+from .subagents import register_subagent_routes
 from .skill_audit import register_skill_audit_routes
 from .connections import register_connection_routes
 from .mcp_wizard import register_mcp_wizard_routes
@@ -203,6 +204,14 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
     @router.post("/api/chat/completions")
     async def owui_chat_completions(request: Request, user=Depends(get_current_user)):
         owui_body = await request.json()
+        # Image generation first ("+ → Create Image" flag, or "generate an image
+        # of X" NL): launches a gated txt2img workspace run + returns the same
+        # run-card marker. Falls through when it's not an image request.
+        from .image_bridge import maybe_handle_image_generation
+
+        img = await maybe_handle_image_generation(request, owui_body, user)
+        if img is not None:
+            return img
         # Auto-detect workspace tasks → launch a run + return a WorkspaceRunCard
         # marker (the OWUI card attaches to /api/workspace/stream/{id}). Falls
         # through to a normal chat completion when it's not a workspace task.
@@ -676,6 +685,11 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
     register_hermes_import_routes(router, get_current_user)
     register_user_settings_routes(router, get_current_user)
     register_orchestration_pool_routes(router, get_current_user)
+    from .model_profiles import register_model_profile_routes
+    register_model_profile_routes(router, get_current_user)
+    from .chat_files import register_chat_file_routes
+    register_chat_file_routes(router, get_current_user)
+    register_subagent_routes(router, get_current_user)
 
     @router.get("/api/v1/chats/{chat_id}")
     async def owui_chat_get(chat_id: str, request: Request, user=Depends(get_current_user)):

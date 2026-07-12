@@ -54,116 +54,46 @@ logger = logging.getLogger(__name__)
 SYNC_FLAG_ENV = "HARVIS_OPENCLAW_SYNC"
 _MASK = "•••"
 
+# ── official MCP registry proxy (browse tier) ──────────────────────────────
+# Metadata-only: the backend fetches the public registry listing so the shop
+# can render a "From the MCP registry" section. Adding an entry still goes
+# through the SAME user-confirmed BYO wizard — nothing here connects, stores
+# secrets, or executes packages. Fail-closed: any error → empty list, HTTP 200.
+_REGISTRY_URL = "https://registry.modelcontextprotocol.io/v0/servers"
+_REGISTRY_TTL_S = 300.0
+_REGISTRY_CACHE_MAX = 64  # cap distinct (q, limit) entries so the cache can't grow unbounded
+_registry_cache: dict[tuple[str, int], tuple[float, list]] = {}
+
+
+def _registry_item(entry: dict) -> Optional[dict]:
+    srv = entry.get("server") if isinstance(entry, dict) else None
+    if not isinstance(srv, dict):
+        return None
+    name = str(srv.get("name") or "")
+    if not name:
+        return None
+    remotes = srv.get("remotes") if isinstance(srv.get("remotes"), list) else []
+    first = remotes[0] if remotes and isinstance(remotes[0], dict) else {}
+    return {
+        "id": name,
+        "name": str(srv.get("title") or name.rsplit("/", 1)[-1]),
+        "description": str(srv.get("description") or ""),
+        "transport": str(first.get("type") or "stdio") if remotes else "stdio",
+        "url": first.get("url") or None,
+        "has_package": bool(srv.get("packages")),
+        "publisher": "registry",
+    }
+
 # Compose-internal service hosts Harvis already talks to — allowed even though
 # they resolve to private addresses (see docker-compose.yaml service names).
 _INTERNAL_HOSTS = {"ollama", "pgsql", "pgsql-db", "backend", "frontend", "openclaw", "harvis-openclaw"}
 
-# ── wizard templates (static metadata; the wizard builds the command/url from
-#    these client-side and saves through the EXISTING /api/owui/mcp/connections) ──
-MCP_TEMPLATES: list[dict] = [
-    {
-        "id": "filesystem",
-        "name": "Filesystem",
-        "icon": "folder",
-        "description": "Read, search and edit files under one directory you choose.",
-        "transport": "stdio",
-        "command_template": "npx -y @modelcontextprotocol/server-filesystem {root}",
-        "fields": [
-            {
-                "key": "root", "label": "Root directory", "type": "text",
-                "placeholder": "/data/workspace", "required": True, "secret": False,
-                "help": "The server can only see files under this path.",
-            }
-        ],
-        "credentials": [],
-        "tools": [
-            {"name": "read_file", "desc": "Read a file's contents."},
-            {"name": "write_file", "desc": "Create or overwrite a file."},
-            {"name": "edit_file", "desc": "Make targeted line edits."},
-            {"name": "list_directory", "desc": "List a directory."},
-            {"name": "search_files", "desc": "Search files by pattern."},
-            {"name": "get_file_info", "desc": "Read file metadata."},
-        ],
-    },
-    {
-        "id": "github",
-        "name": "GitHub",
-        "icon": "github",
-        "description": "Repos, issues and pull requests through the official GitHub MCP server.",
-        "transport": "stdio",
-        "command_template": "npx -y @modelcontextprotocol/server-github",
-        "fields": [],
-        "credentials": [
-            {
-                "key": "GITHUB_PERSONAL_ACCESS_TOKEN",
-                "label": "Personal access token",
-                "secret": True,
-                "status": "pending_review",
-            }
-        ],
-        "tools": [
-            {"name": "search_repositories", "desc": "Search GitHub repositories."},
-            {"name": "get_file_contents", "desc": "Read a file from a repo."},
-            {"name": "create_issue", "desc": "Open an issue."},
-            {"name": "create_pull_request", "desc": "Open a pull request."},
-            {"name": "list_commits", "desc": "List branch commits."},
-        ],
-    },
-    {
-        "id": "memory",
-        "name": "Memory (knowledge graph)",
-        "icon": "brain",
-        "description": "A persistent knowledge-graph memory the agent can read and write.",
-        "transport": "stdio",
-        "command_template": "npx -y @modelcontextprotocol/server-memory",
-        "fields": [],
-        "credentials": [],
-        "tools": [
-            {"name": "create_entities", "desc": "Add entities to the graph."},
-            {"name": "create_relations", "desc": "Link entities together."},
-            {"name": "add_observations", "desc": "Attach facts to entities."},
-            {"name": "search_nodes", "desc": "Search the graph."},
-            {"name": "read_graph", "desc": "Read the whole graph."},
-        ],
-    },
-    {
-        "id": "custom-url",
-        "name": "Custom server (URL)",
-        "icon": "link",
-        "description": "Connect any remote MCP server over SSE or streamable HTTP.",
-        "transport": "sse",
-        "transports": ["sse", "streamable-http"],
-        "command_template": None,
-        "fields": [
-            {
-                "key": "url", "label": "Server URL", "type": "url",
-                "placeholder": "https://host/sse", "required": True, "secret": False,
-                "help": "Public hosts only — private/loopback addresses are blocked.",
-            }
-        ],
-        "credentials": [],
-        "tools": [],
-        "tools_note": "Tools are discovered from the server when the agent connects.",
-    },
-    {
-        "id": "custom-stdio",
-        "name": "Custom server (command)",
-        "icon": "terminal",
-        "description": "Run any MCP server as a local process (stdio transport).",
-        "transport": "stdio",
-        "command_template": "{command}",
-        "fields": [
-            {
-                "key": "command", "label": "Command", "type": "text",
-                "placeholder": "npx -y my-mcp-server --flag", "required": True, "secret": False,
-                "help": "Exact command line the runtime should execute.",
-            }
-        ],
-        "credentials": [],
-        "tools": [],
-        "tools_note": "Tools are discovered from the server when the agent connects.",
-    },
-]
+# ── wizard templates — single source of truth is the marketplace catalog
+#    (mcp_catalog.py). Same dict shape as before, extended with shop metadata
+#    (category/blurb/needs_secret); the wizard builds the command/url from these
+#    client-side and saves through the EXISTING /api/owui/mcp/connections. ──
+from .mcp_catalog import MCP_CATALOG as MCP_TEMPLATES  # noqa: E402
+from .mcp_catalog import MCP_CATEGORIES  # noqa: E402
 
 
 # ── SSRF guard ──────────────────────────────────────────────────────────────
@@ -402,9 +332,59 @@ def register_mcp_wizard_routes(router: APIRouter, get_current_user: Callable) ->
         return pool
 
     # ── templates ─────────────────────────────────────────────────────────
+    # Full marketplace catalog (category/blurb/transport/needs_secret included);
+    # `categories` is additive — existing wizard callers only read `templates`.
     @router.get("/api/owui/mcp/templates")
     async def mcp_templates(user=Depends(get_current_user)):
-        return {"templates": MCP_TEMPLATES}
+        return {"templates": MCP_TEMPLATES, "categories": MCP_CATEGORIES}
+
+    # ── official MCP registry (metadata-only browse) ──────────────────────
+    # Proxies registry.modelcontextprotocol.io so the browser never talks to
+    # it directly. The user's auth header is NEVER forwarded upstream (a fresh
+    # client with only a User-Agent is used). Fail-closed: any upstream error
+    # returns an empty list with HTTP 200 so the UI degrades to the built-in
+    # catalog. Responses cached in-memory for 5 minutes per (q, limit).
+    @router.get("/api/owui/mcp/registry")
+    async def mcp_registry(q: str = "", limit: int = 12, user=Depends(get_current_user)):
+        limit = max(1, min(30, limit))
+        q = (q or "").strip()
+        key = (q.lower(), limit)
+        now = time.monotonic()
+        cached = _registry_cache.get(key)
+        if cached and (now - cached[0]) < _REGISTRY_TTL_S:
+            return {"items": cached[1]}
+        params: dict = {"limit": str(limit)}
+        if q:
+            params["search"] = q
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(8.0), headers={"User-Agent": "harvis"}
+            ) as hc:
+                r = await hc.get(_REGISTRY_URL, params=params)
+                r.raise_for_status()
+                data = r.json()
+            items = []
+            seen: set[str] = set()
+            for entry in (data.get("servers") or []) if isinstance(data, dict) else []:
+                item = _registry_item(entry)
+                # The registry lists every published VERSION of a server, so the
+                # same server.name repeats — keep the first occurrence only
+                # (duplicate ids crash the frontend's keyed {#each}).
+                if item and item["id"] not in seen:
+                    seen.add(item["id"])
+                    items.append(item)
+            if len(_registry_cache) >= _REGISTRY_CACHE_MAX:
+                # drop the oldest entries so distinct queries can't grow this unbounded
+                for old_key, _ in sorted(_registry_cache.items(), key=lambda kv: kv[1][0])[
+                    : len(_registry_cache) - _REGISTRY_CACHE_MAX + 1
+                ]:
+                    _registry_cache.pop(old_key, None)
+            _registry_cache[key] = (now, items)
+            return {"items": items}
+        except Exception as e:
+            # Exception bodies can echo the user-supplied query — log type only.
+            logger.warning("mcp registry fetch failed: %s", type(e).__name__)
+            return {"items": [], "error": "registry unreachable"}
 
     # ── connection test ───────────────────────────────────────────────────
     @router.post("/api/owui/mcp/test")

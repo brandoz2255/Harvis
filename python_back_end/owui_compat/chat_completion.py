@@ -269,82 +269,25 @@ async def _inject_skills(request, owui_body: dict, user_id: int | None = None) -
     pool = getattr(request.app.state, "pg_pool", None)
     if pool is None:
         return
+
+    # THE fail-closed per-skill gate (capabilities ready + lane enabled + human
+    # 'supported' verdict, else an honest 'unavailable' note) lives in
+    # skills.gated_skill_blocks — SHARED with sub-agent runs (orchestrator), so
+    # both paths get byte-identical governance. Chat supplies the capability
+    # resolver (it has a request context to probe with).
+    async def _ready_caps() -> set:
+        from .capabilities import ready_capability_keys
+        return await ready_capability_keys(request, int(user_id))
+
     try:
-        async with pool.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT name, content, meta FROM owui_skills WHERE user_id=$1 "
-                "AND id = ANY($2::text[]) AND enabled=TRUE",
-                int(user_id), [str(s) for s in skill_ids],
-            )
+        from .skills import gated_skill_blocks
+
+        blocks = await gated_skill_blocks(
+            pool, int(user_id), skill_ids, ready_caps_resolver=_ready_caps
+        )
     except Exception:
+        logger.warning("owui_compat: skill gate failed — injecting nothing (fail-closed)", exc_info=True)
         return
-
-    def _skill_meta(raw) -> dict:
-        if isinstance(raw, str):
-            try:
-                raw = json.loads(raw)
-            except Exception:
-                return {}
-        return raw if isinstance(raw, dict) else {}
-
-    # A skill DECLARES what it needs (requires_capabilities, risk_lane); the flags +
-    # authorize_action decide whether that need is met. A skill NEVER grants a tool or
-    # raises a lane — it's guidance text, and if its declared need is unmet we inject an
-    # honest "unavailable" note instead of the body. Compute the ready-capability set
-    # once, and only if some attached skill actually declares capabilities.
-    metas = [_skill_meta(r["meta"]) for r in rows]
-    needs_caps = any(m.get("requires_capabilities") for m in metas)
-    ready_caps: set = set()
-    if needs_caps:
-        try:
-            from .capabilities import ready_capability_keys
-            ready_caps = await ready_capability_keys(request, int(user_id))
-        except Exception:
-            ready_caps = set()
-    try:
-        from workspace.orchestration.authz import _lane_flag_enabled
-    except Exception:
-        logger.warning("owui_compat: authz._lane_flag_enabled import failed — lane gate FAILS CLOSED")
-        _lane_flag_enabled = lambda _lane: False  # noqa: E731 (fail-CLOSED: withhold a lane-gated skill if we can't verify its lane)
-
-    blocks: list[str] = []
-    used = 0
-    for r, meta in zip(rows, metas):
-        req_caps = [str(c) for c in (meta.get("requires_capabilities") or []) if c]
-        missing_caps = [c for c in req_caps if c not in ready_caps]
-        risk_lane = meta.get("risk_lane")
-        lane_ok = True
-        if isinstance(risk_lane, int):
-            lane_ok = _lane_flag_enabled(risk_lane)
-        # Fail-closed audit gate: only a human 'supported' verdict (skill_audit
-        # FactCheckVerdict) makes a skill body injectable. Missing/other => note only.
-        audit = meta.get("audit") if isinstance(meta.get("audit"), dict) else {}
-        verdict = audit.get("verdict")
-        verdict_ok = verdict == "supported"
-        if missing_caps or not lane_ok or not verdict_ok:
-            reason = []
-            if missing_caps:
-                reason.append("needs capabilities not ready: " + ", ".join(missing_caps))
-            if not lane_ok:
-                reason.append(f"needs lane {risk_lane} which is disabled here")
-            if not verdict_ok:
-                if verdict:
-                    reason.append(
-                        f"audit verdict is '{verdict}' — only a human 'supported' verdict applies here; "
-                        "re-audit it in Customize -> Skills"
-                    )
-                else:
-                    reason.append(
-                        "not audited — a human must mark it 'supported' in Customize -> Skills before it applies"
-                    )
-            body = f"### {r['name']}\n_Skill unavailable — {'; '.join(reason)}. Do not attempt the steps it would describe._"
-        else:
-            c = (r["content"] or "").strip()
-            body = f"### {r['name']}\n{c}" if c else f"### {r['name']}"
-        if used + len(body) > 6000 and blocks:
-            break
-        blocks.append(body)
-        used += len(body)
     if not blocks:
         return
     messages.insert(
@@ -392,6 +335,37 @@ async def _inject_project_instructions(request, owui_body: dict) -> None:
     logger.info("owui_compat: injected project instructions (%d chars)", len(instructions))
 
 
+# Authoring contract for the typed ```canvas panel (rendered by the OWUI frontend:
+# CanvasRenderer.svelte inline in the message + auto-popped into the Artifacts
+# rail). COMPACT + OPT-IN ("MAY") so ordinary chat behaviour is unchanged, and
+# model-friendly enough for small local models to emit reliably.
+_CANVAS_CONTRACT = (
+    "Rich data panels: for data-heavy or analytical answers (metrics, tables, comparisons, "
+    "breakdowns) you MAY add one fenced ```canvas code block containing ONLY valid JSON:\n"
+    '{"title":"...","blocks":[\n'
+    '{"kind":"stat","label":"Total errors","value":"15","delta":"-12%","tone":"good"},\n'
+    '{"kind":"table","headers":["Service","Errors"],"rows":[["auth","12"],["chat","3"]]},\n'
+    '{"kind":"chart","chartType":"bar","categories":["auth","chat"],'
+    '"series":[{"name":"Errors","data":[12,3]}]},\n'
+    '{"kind":"callout","tone":"warning","text":"auth error rate rising"},\n'
+    '{"kind":"diff","language":"python","before":"x=1","after":"x=2"},\n'
+    '{"kind":"heading","text":"..."},\n'
+    '{"kind":"text","text":"..."}]}\n'
+    "chartType: bar|line|pie. tone: info|good|warning|danger. "
+    "Use plain markdown for simple replies; never wrap a whole answer in canvas."
+)
+
+
+def _inject_canvas_contract(owui_body: dict) -> None:
+    """Teach the model the typed ```canvas block (stat/table/chart/callout/diff
+    panels the OWUI frontend renders inline + in the Artifacts rail). Never
+    raises; a body without a messages list is left untouched."""
+    messages = owui_body.get("messages")
+    if not isinstance(messages, list):
+        return
+    messages.insert(0, {"role": "system", "content": _CANVAS_CONTRACT})
+
+
 # Sentinels that mean "no explicit model was chosen" — route these to the user's
 # saved Integrations default model (Phase D). A real model name is left untouched.
 _NO_MODEL_SENTINELS = {"", "auto", "default", "user-pref", "dynamic"}
@@ -437,7 +411,11 @@ async def run_chat_completion(request, owui_body: dict, user_id: int | None = No
     # below) — never globally. See _inject_skills.
     await _inject_skills(request, owui_body, user_id=user_id)
     await _inject_project_instructions(request, owui_body)
+    _inject_canvas_contract(owui_body)  # typed ```canvas panels (opt-in, compact)
     await _apply_default_model(request, owui_body, user_id)  # Phase D: pref → routing
+    # NOTE: model choice is strictly SELECTION-BASED — the picked model is always used. An
+    # auto-model-swap router was built + verified here (2026-07-10) and then removed at the
+    # user's request; see docs/handoffs/2026-07-10-model-picker-effort-slider.md if revisited.
     # Phase F: cloud chat models (Claude/GPT) routed to the vendor with the user's OWN verified
     # credential — full context already injected above; never enters the native Ollama router.
     from .cloud_chat import is_cloud_chat_model, proxy_cloud_chat

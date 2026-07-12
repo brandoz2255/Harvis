@@ -104,3 +104,4 @@ reportlab>=4.0.0
 
 # PDF/DOCX to image conversion for vision models
 PyMuPDF>=1.23.0
+croniter

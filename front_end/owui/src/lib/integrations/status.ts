@@ -30,7 +30,7 @@ export const ENGINE_READINESS_KEY: Record<string, string> = {
 	'hermes-agent': 'hermes-agent'
 };
 
-export type EngineReadiness = Record<string, { ready: boolean; reason?: string }>;
+export type EngineReadiness = Record<string, { ready: boolean; reason?: string; connected?: boolean }>;
 
 /**
  * Translate a (merged) definition + the engine-readiness map into ONE normalized status.
@@ -48,6 +48,9 @@ export function normalizeStatus(def: IntegrationDefinition, er: EngineReadiness 
 	const eng = engKey ? er?.[engKey] : undefined;
 	if (eng) {
 		if (eng.ready) return goodSource;
+		// A verified cloud credential makes the provider usable (for chat) even when the Build
+		// engine isn't ready — read as "Connected", never a scary "Unavailable".
+		if (eng.connected) return 'connected';
 		const reason = (eng.reason || '').toLowerCase();
 		if (reason.includes('disabled') || reason.includes('flag')) return 'disabled';
 		if (reason.includes('auth') || reason.includes('key') || reason.includes('no_') || reason.includes('model'))

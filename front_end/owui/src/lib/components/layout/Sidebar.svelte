@@ -126,7 +126,9 @@
 	$: activeMode = modeSwitcherEnabled
 		? (($page?.url?.pathname ?? '/').startsWith('/harvis/notebooks')
 				? 'notebook'
-				: ($page?.url?.pathname ?? '/').startsWith('/harvis/vibecode')
+				: ['/harvis/vibecode', '/harvis/build', '/harvis/agent-studio/run'].some((p) =>
+							($page?.url?.pathname ?? '/').startsWith(p)
+					  )
 					? 'code'
 					: 'chat')
 		: 'chat';
@@ -1179,7 +1181,25 @@
 					</div>
 
 						{#if modeSwitcherEnabled}
-							<!-- Chat-mode tools: Artifacts + Customize -->
+							<!-- Chat-mode tools: Schedules + Artifacts + Customize -->
+							<!-- Schedules — the chat lens over the cron store (VibeCodeNav's
+							     Routines button is the coding lens of the same store). -->
+							<a
+								href="/harvis/agent-studio/schedules"
+								class="group mx-[0.4375rem] flex items-center space-x-3 rounded-2xl px-2.5 py-2 text-gray-800 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-900 transition outline-none"
+								draggable="false"
+								aria-label={$i18n.t('Schedules')}
+								title={$i18n.t(
+									'Schedules run a prompt on a timer and post the reply into a chat.'
+								)}
+							>
+								<div class="self-center">
+									<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="size-4.5"><path d="M12 6v6l4 2M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z" /></svg>
+								</div>
+								<div class="flex flex-1 self-center translate-y-[0.5px]">
+									<div class=" self-center text-sm font-primary">{$i18n.t('Schedules')}</div>
+								</div>
+							</a>
 							<a
 								href="/harvis/agent-studio/activity"
 								class="group mx-[0.4375rem] flex items-center space-x-3 rounded-2xl px-2.5 py-2 text-gray-800 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-900 transition outline-none"
@@ -1193,10 +1213,10 @@
 									<div class=" self-center text-sm font-primary">{$i18n.t('Artifacts')}</div>
 								</div>
 							</a>
-							<a
-								href="/harvis/agent-studio/customize"
-								class="group mx-[0.4375rem] flex items-center space-x-3 rounded-2xl px-2.5 py-2 text-gray-800 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-900 transition outline-none"
-								draggable="false"
+							<button
+								type="button"
+								on:click={() => showSettings.set('skills')}
+								class="group w-full text-left mx-[0.4375rem] flex items-center space-x-3 rounded-2xl px-2.5 py-2 text-gray-800 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-900 transition outline-none"
 								aria-label={$i18n.t('Customize')}
 							>
 								<div class="self-center">
@@ -1205,7 +1225,7 @@
 								<div class="flex flex-1 self-center translate-y-[0.5px]">
 									<div class=" self-center text-sm font-primary">{$i18n.t('Customize')}</div>
 								</div>
-							</a>
+							</button>
 							<!-- More (bold) — tools, directly under Customize in chat mode. -->
 							<SidebarMore activePath={$page.url.pathname} bold />
 						{/if}

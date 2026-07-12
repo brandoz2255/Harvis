@@ -23,9 +23,13 @@ export interface CronJob {
 	metadata: Record<string, unknown>;
 }
 
-export const listCronJobs = async (): Promise<CronJob[]> => {
+// The two lenses over the one cron store: Routines (coding) and Schedules (chat).
+export type CronContext = 'coding' | 'chat';
+
+export const listCronJobs = async (context?: CronContext): Promise<CronJob[]> => {
 	try {
-		const r = await fetch(BASE, { headers: authHeaders(), credentials: 'include' });
+		const url = context ? `${BASE}?context=${encodeURIComponent(context)}` : BASE;
+		const r = await fetch(url, { headers: authHeaders(), credentials: 'include' });
 		return r.ok ? ((await r.json()).jobs ?? []) : [];
 	} catch (_) {
 		return [];
@@ -111,10 +115,32 @@ export const getCronStats = async (): Promise<AutomationStats> => {
 	}
 };
 
-// Human-readable schedule summary, e.g. "Every 30m", "Daily 9:00", "Once".
+// Human-readable schedule summary, e.g. "Every 30m", "Daily at 09:00", "Once".
+const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const hhmm = (h: number, m: number) =>
+	`${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+
 export const scheduleSummary = (j: Pick<CronJob, 'schedule_type' | 'schedule_expr'>): string => {
 	if (j.schedule_type === 'interval') return `Every ${j.schedule_expr}`;
 	if (j.schedule_type === 'once') return 'Once';
-	// cron — show the raw expression (a friendlier parse can come later).
+	// cron — friendly parse of the shapes the basic picker generates
+	// ("M H * * *" daily, "M H * * D" weekly); anything else shows raw.
+	// The stored cron is UTC (the picker converts local→UTC on save), so convert
+	// back to the viewer's LOCAL time here — "Daily at 9:00" means the user's 9:00.
+	const daily = j.schedule_expr.match(/^\s*(\d{1,2})\s+(\d{1,2})\s+\*\s+\*\s+\*\s*$/);
+	if (daily) {
+		const d = new Date();
+		d.setUTCHours(Number(daily[2]), Number(daily[1]), 0, 0);
+		return `Daily at ${hhmm(d.getHours(), d.getMinutes())}`;
+	}
+	const weekly = j.schedule_expr.match(/^\s*(\d{1,2})\s+(\d{1,2})\s+\*\s+\*\s+([0-6])\s*$/);
+	if (weekly) {
+		const d = new Date();
+		d.setUTCHours(Number(weekly[2]), Number(weekly[1]), 0, 0);
+		// anchor to the stored UTC weekday, then read the local weekday (may differ
+		// from the UTC one when the local time crosses midnight)
+		d.setUTCDate(d.getUTCDate() + (((Number(weekly[3]) - d.getUTCDay()) + 7) % 7));
+		return `Weekly on ${DAY_NAMES[d.getDay()]} at ${hhmm(d.getHours(), d.getMinutes())}`;
+	}
 	return j.schedule_expr;
 };

@@ -78,25 +78,50 @@ def _assign_models(
 
 
 def _build_plan(
-    agents: list[dict], model_name: str, uniform_model: bool, model_pool: list[str] | None = None
+    agents: list[dict],
+    model_name: str,
+    uniform_model: bool,
+    model_pool: list[str] | None = None,
+    subagents: list[dict] | None = None,
 ) -> list[dict]:
-    """Turn [{name, task}, …] into the spawn-ready plan dicts run_orchestrated wants:
-    {role, task, profile, model, label}. Each agent uses a generic coding profile
+    """Turn [{name, task, assignee?}, …] into the spawn-ready plan dicts
+    run_orchestrated wants: {role, task, profile, model, label}. A step whose
+    ``assignee`` (or name) matches one of the user's custom sub-agents gets THAT
+    definition's resolved profile (model / system prompt / tool withhold /
+    skills / connectors — see subagent_defs.resolve_profile); everything else —
+    unknown assignee, 'general', no roster — keeps the generic coding profile
     (the default 'backend' profile) re-labelled with its delegated name + model."""
+    by_name = {d["name"]: d for d in (subagents or []) if d.get("name")}
     models = _assign_models(len(agents), model_name, uniform_model, model_pool)
     plan: list[dict] = []
     for i, a in enumerate(agents):
         name = (a.get("name") or a.get("role") or f"agent-{i + 1}").strip()
         task = (a.get("task") or "").strip()
-        label = _label_from_name(name)
-        profile = get_profile("backend")  # generic coding agent (tools/limits)
-        profile["display_name"] = label
-        profile["model_name"] = models[i]
+        # Delegation match: explicit assignee first, then a name collision.
+        # Unknown assignees clamp to 'general' (the generic profile) — never crash.
+        assignee = str(a.get("assignee") or "").strip().lower()
+        defn = by_name.get(assignee) or (by_name.get(name.lower()) if not assignee else None)
+        if defn is not None:
+            from .subagent_defs import resolve_profile
+
+            profile = resolve_profile(
+                defn, model_name, uniform_model=uniform_model, model_pool=model_pool
+            )
+            label = profile["display_name"]
+            model = profile["model_name"]
+            role = _safe_role(defn["name"])
+        else:
+            label = _label_from_name(name)
+            profile = get_profile("backend")  # generic coding agent (tools/limits)
+            profile["display_name"] = label
+            profile["model_name"] = models[i]
+            model = models[i]
+            role = _safe_role(name)
         plan.append({
-            "role": _safe_role(name),
+            "role": role,
             "task": task or "(no task specified)",
             "profile": profile,
-            "model": models[i],
+            "model": model,
             "label": label,
         })
     return plan
@@ -141,8 +166,27 @@ _PROMPT = (
     "- Give each a single-sentence task describing exactly its responsibility.\n\n"
     'Respond with ONLY compact JSON: {"agents": [{"name": "kebab-name", "task": "one sentence"}, ...]}. '
     "No prose, no markdown, no code fences.\n\n"
-    "Task: "
 )
+
+
+def _roster_section(subagents: list[dict] | None) -> str:
+    """Custom sub-agent roster appended to the planning prompt so the LLM can
+    auto-delegate a step to the specialist whose DESCRIPTION matches it."""
+    if not subagents:
+        return ""
+    lines = "\n".join(
+        f"- {d['name']}: {' '.join((d.get('description') or '(no description)').split())[:200]}"
+        for d in subagents
+        if d.get("name")
+    )
+    if not lines:
+        return ""
+    return (
+        "Available specialist agents — assign a step to one when its DESCRIPTION "
+        "matches that step's work:\n" + lines + "\n\n"
+        'Add an "assignee" field to each agent object: the matching specialist\'s '
+        'name, or "general" when no specialist fits.\n\n'
+    )
 
 
 async def plan_agents(
@@ -151,15 +195,19 @@ async def plan_agents(
     model_name: str = "",
     uniform_model: bool = False,
     model_pool: list[str] | None = None,
+    subagents: list[dict] | None = None,
 ) -> list[dict]:
     """LLM-decided delegation → spawn-ready plan dicts. Falls back to the keyword
     split on any failure. Always returns at least one agent. `model_pool` (the user's
-    Customize pool) is round-robined across the agents when supplied + not uniform."""
+    Customize pool) is round-robined across the agents when supplied + not uniform.
+    `subagents` (Customize → Sub-agents, enabled defs) adds a specialist roster the
+    planner assigns steps to by description; unmatched steps keep the generic profile."""
     brief = (task_brief or "").strip()
     if not brief:
         return _fallback_plan(task_brief, model_name, uniform_model, model_pool)
 
-    prompt = _PROMPT + brief[:1500]  # concat (NOT .format — the prompt has literal { } JSON)
+    # concat (NOT .format — the prompt has literal { } JSON)
+    prompt = _PROMPT + _roster_section(subagents) + "Task: " + brief[:1500]
     for model in _PLANNER_MODELS:
         try:
             async with _httpx.AsyncClient(timeout=90.0) as c:
@@ -193,7 +241,7 @@ async def plan_agents(
                 "orchestrator planner: model=%s produced %d task-delegated agent(s): %s",
                 model, len(agents), ", ".join(a.get("name", "?") for a in agents),
             )
-            return _build_plan(agents, model_name, uniform_model, model_pool)
+            return _build_plan(agents, model_name, uniform_model, model_pool, subagents)
         except Exception as exc:
             logger.debug("orchestrator planner model %s failed: %s", model, exc)
             continue

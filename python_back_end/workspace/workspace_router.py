@@ -59,6 +59,7 @@ from .kimi_workspace import (
     stream_parallel_workspace,
 )
 from .task_detector import detect_workspace_task
+from .terminal_container import allocate_event_seq
 
 logger = logging.getLogger(__name__)
 
@@ -763,10 +764,11 @@ async def _db_save_artifact(
                 artifact_id, workspace_id, artifact_type, path, content, content_bytes,
             )
         # NOTE: the typed 'artifact' trace event is emitted by the run loop
-        # (_flush_oc_writes) on the loop's OWN seq counter — NOT here. This helper is
-        # called mid-stream from several lanes, and emit_terminal_event's independent
-        # DB seq (MAX(seq)+1) would collide with the loop counter and could drop the
-        # terminal 'done' event for a live subscriber.
+        # (_flush_oc_writes), not here — this helper is called mid-stream from
+        # several lanes that emit their own trace events. All emissions now draw
+        # seq from the single allocate_event_seq allocator, so there is no
+        # collision risk either way; keeping the emit in the loop just avoids
+        # duplicate 'artifact' events per save.
         return artifact_id
     except Exception as exc:
         logger.error("DB: failed to save artifact for workspace %s: %s", workspace_id, exc)
@@ -839,6 +841,10 @@ async def _db_save_event(pool, workspace_id: str, seq: int, event: OpenClawEvent
             "artifact_id", "path", "mime_type", "size_bytes", "label",
             "phase", "query", "provider", "result_count", "results",
             "collapsed_by_default",
+            # Replay parity: persist usage + final-text fields so a page reload
+            # replays the run identically to the live stream (usage meter + text).
+            "prompt_tokens", "completion_tokens", "total_tokens",
+            "context_window", "source", "text",
         ):
             val = event.data.get(key)
             if val is not None:
@@ -1077,7 +1083,12 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
     model_name: str = ws.get("model_name", "")
     broadcaster: WorkspaceLiveBroadcaster = _workspace_broadcasters[workspace_id]
 
-    seq = 0
+    # seq values come from the shared allocate_event_seq allocator (one monotonic
+    # counter per workspace, shared with emit_terminal_event — no collisions).
+    # `seq` holds the most recently allocated value; `event_count` counts this
+    # loop's own emissions (for the completion row / log, as before).
+    seq = -1
+    event_count = 0
     tool_call_count = 0
     executing_tool_call_count = 0
     _RETRIEVAL_ONLY_TOOLS = {
@@ -1103,7 +1114,7 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
     _collect_writes = agent_id not in ("orchestrated", "vibecode-turn", "engine-adapter", "claude")
 
     async def _flush_oc_writes() -> None:
-        nonlocal seq
+        nonlocal event_count
         if not (_collect_writes and _oc_writes):
             return
         try:
@@ -1121,8 +1132,7 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
                 logger.warning("[workspace:%s] artifact save failed for %r: %s", workspace_id, _ap, _exc)
                 continue
             # Harvis Execution Trace: surface the written file as a typed 'artifact'
-            # event on the run's OWN seq counter (never emit_terminal_event — its DB
-            # seq would collide with the loop counter). size_bytes = true UTF-8 byte
+            # event (seq from the shared allocator). size_bytes = true UTF-8 byte
             # length of the FULL content (not the possibly-truncated snapshot).
             if _aid:
                 try:
@@ -1134,9 +1144,10 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
                         "size_bytes": len((_ac or "").encode("utf-8")),
                         "label": os.path.basename(_ap) or "file",
                     })
-                    await _db_save_event(pool, workspace_id, seq, _art)
-                    await broadcaster.put((seq, _art))
-                    seq += 1
+                    _art_seq = await allocate_event_seq(pool, workspace_id)
+                    await _db_save_event(pool, workspace_id, _art_seq, _art)
+                    await broadcaster.put((_art_seq, _art))
+                    event_count += 1
                 except Exception as _exc:
                     logger.warning("[workspace:%s] artifact event emit failed for %r: %s", workspace_id, _ap, _exc)
         _oc_writes.clear()
@@ -1167,9 +1178,10 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
             fallback_event = OpenClawEvent("log", {
                 "message": "Kimi K2.5 API key not found. Falling back to local Ollama.",
             })
+            seq = await allocate_event_seq(pool, workspace_id)
             await _db_save_event(pool, workspace_id, seq, fallback_event)
             await broadcaster.put((seq, fallback_event))
-            seq += 1
+            event_count += 1
             if use_parallel:
                 event_stream = stream_parallel_workspace(
                     task_brief, chat_history, model=model_name, provider="local",
@@ -1208,9 +1220,10 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
             fallback_event = OpenClawEvent("log", {
                 "message": "NVIDIA NIM key not found. Falling back to local Ollama.",
             })
+            seq = await allocate_event_seq(pool, workspace_id)
             await _db_save_event(pool, workspace_id, seq, fallback_event)
             await broadcaster.put((seq, fallback_event))
-            seq += 1
+            event_count += 1
             event_stream = stream_local_ollama_workspace(task_brief, chat_history, model=model_name)
 
     elif agent_id in ("cloud-ollama", "gpt-oss"):
@@ -1320,8 +1333,8 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
                     if isinstance(_wpath, str) and _wpath and isinstance(_wcontent, str):
                         _oc_writes[_clean_oc_artifact_path(_wpath)] = _wcontent
                 # Harvis Execution Trace: surface web-search tool calls as typed
-                # 'search_trace' events on the run's OWN seq counter (additive; a
-                # failed emit never blocks the run).
+                # 'search_trace' events (seq from the shared allocator; a failed
+                # emit never blocks the run).
                 if _is_search_tool(_tname):
                     try:
                         _sargs = (event.data or {}).get("args") or {}
@@ -1333,9 +1346,10 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
                             "results": [],
                             "phase": "searching",
                         })
-                        await _db_save_event(pool, workspace_id, seq, _st)
-                        await broadcaster.put((seq, _st))
-                        seq += 1
+                        _st_seq = await allocate_event_seq(pool, workspace_id)
+                        await _db_save_event(pool, workspace_id, _st_seq, _st)
+                        await broadcaster.put((_st_seq, _st))
+                        event_count += 1
                     except Exception as exc:
                         logger.warning(
                             "[workspace:%s] failed to emit search_trace event: %s",
@@ -1353,6 +1367,7 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
             # (done/cancelled/error) are saved AFTER the validators + Build narrator enrich
             # event.data below, so a reload/replay carries the final summary + analysis_md.
             if event.type not in ("done", "cancelled", "error"):
+                seq = await allocate_event_seq(pool, workspace_id)
                 await _db_save_event(pool, workspace_id, seq, event)
 
             if event.type in ("done", "cancelled", "error"):
@@ -1465,8 +1480,8 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
                     logger.warning("[workspace:%s] Build narrator failed: %s", workspace_id, exc)
 
                 # Harvis Execution Trace: additionally emit the final answer as a typed
-                # 'final_message' envelope on the run's OWN seq counter, BEFORE the 'done'
-                # event below (so final_message gets seq N and done gets N+1 — no
+                # 'final_message' envelope BEFORE the 'done' event below (the shared
+                # allocator guarantees final_message gets seq N and done gets N+1 — no
                 # collision, no dropped 'done'). The 'done' event is unchanged; this is
                 # purely additive for non-UI consumers (Discord/CLI).
                 if event.type == "done":
@@ -1476,9 +1491,10 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
                             _fm = OpenClawEvent("final_message", {
                                 "run_id": workspace_id, "content": _final_content,
                             })
-                            await _db_save_event(pool, workspace_id, seq, _fm)
-                            await broadcaster.put((seq, _fm))
-                            seq += 1
+                            _fm_seq = await allocate_event_seq(pool, workspace_id)
+                            await _db_save_event(pool, workspace_id, _fm_seq, _fm)
+                            await broadcaster.put((_fm_seq, _fm))
+                            event_count += 1
                     except Exception as exc:
                         logger.warning(
                             "[workspace:%s] failed to emit final_message event: %s",
@@ -1487,18 +1503,20 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
 
                 # Persist the ENRICHED terminal event (validated summary + analysis_md), then
                 # fan-out to live subscribers.
+                seq = await allocate_event_seq(pool, workspace_id)
                 await _db_save_event(pool, workspace_id, seq, event)
                 await broadcaster.put((seq, event))
-                seq += 1
+                event_count += 1
                 break
 
             # Fan-out to all live subscribers (chat bridge, /stream SSE, etc.)
+            # — same seq the persist above used for this event.
             await broadcaster.put((seq, event))
-            seq += 1
+            event_count += 1
 
         logger.info(
             "[workspace:%s] Background task finished: status=%s events=%d tool_calls=%d",
-            workspace_id, terminal_status, seq, tool_call_count,
+            workspace_id, terminal_status, event_count, tool_call_count,
         )
 
     except asyncio.CancelledError:
@@ -1506,9 +1524,10 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
         terminal_status = "cancelled"
         ws["status"] = "cancelled"
         cancelled_event = OpenClawEvent("cancelled", {"message": "Workspace cancelled."})
+        seq = await allocate_event_seq(pool, workspace_id)
         await _db_save_event(pool, workspace_id, seq, cancelled_event)
         await broadcaster.put((seq, cancelled_event))
-        seq += 1
+        event_count += 1
 
     except Exception as exc:
         logger.error("[workspace:%s] Background task error: %s", workspace_id, exc)
@@ -1519,9 +1538,10 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
             "message": str(exc),
             "fix_hint": "An unexpected error occurred in the workspace background task. Check backend logs.",
         })
+        seq = await allocate_event_seq(pool, workspace_id)
         await _db_save_event(pool, workspace_id, seq, err_event)
         await broadcaster.put((seq, err_event))
-        seq += 1
+        event_count += 1
 
     finally:
         # Safety net: persist any captured writes not yet flushed (cancel/error paths
@@ -1532,7 +1552,7 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
 
         await _db_complete_run(
             pool, workspace_id, terminal_status,
-            final_summary, final_error, tool_call_count, seq, started_epoch,
+            final_summary, final_error, tool_call_count, event_count, started_epoch,
             analysis_md=final_analysis_md,
         )
         _workspace_tasks.pop(workspace_id, None)
@@ -2342,6 +2362,13 @@ async def _start_workspace(
     broadcaster = WorkspaceLiveBroadcaster()
     _workspace_broadcasters[workspace_id] = broadcaster
 
+    # FIX 2 (FK launch race): the workspace_runs row MUST exist before the bg task
+    # can emit events — workspace_events.workspace_id FKs workspace_runs.id, so any
+    # event racing ahead of the row is dropped, which is what produced "missing first
+    # trace events". Create it here, before create_task; the post-hoc _db_create_run
+    # calls in the launch handlers become idempotent no-ops (ON CONFLICT DO NOTHING).
+    await _db_create_run(pool, workspace_id, user_id, session_id, task_brief)
+
     task = asyncio.create_task(
         _run_workspace_bg(workspace_id, pool, started_epoch),
         name=f"workspace-{workspace_id}",
@@ -2632,6 +2659,11 @@ async def stream_workspace(
     ws = _workspaces.get(workspace_id)
     pool = getattr(request.app.state, "pg_pool", None)
 
+    # Ownership gate (live path): the in-memory workspace records its owner at
+    # launch — only that user may stream it. Same idiom as /interactive/enable.
+    if ws is not None and int(ws.get("user_id", -1)) != int(current_user["id"]):
+        raise HTTPException(status_code=403, detail="Workspace does not belong to current user")
+
     # Persistence: every event lives in workspace_events forever, but the in-memory
     # _workspaces entry is lost on cleanup / a backend restart. Don't 404 those —
     # verify ownership via the DB run row and serve the persisted history (replay
@@ -2857,6 +2889,13 @@ async def cancel_workspace(
     """Cancel a running workspace. Force-closes the OpenClaw websocket and
     cancels the background task, then waits briefly for cleanup so the
     response only returns once the workspace is truly idle."""
+    # Ownership gate: only the launching user may cancel (idiom from
+    # /interactive/enable). A missing in-memory ws falls through to the
+    # internal handler's not_found → 404 below.
+    ws = _workspaces.get(workspace_id)
+    if ws is not None and int(ws.get("user_id", -1)) != int(current_user["id"]):
+        raise HTTPException(status_code=403, detail="Workspace does not belong to current user")
+
     result = await cancel_workspace_internal(
         workspace_id,
         audit_actor=f"user:{current_user.get('id')}",
@@ -2881,6 +2920,9 @@ async def get_workspace_status(
     ws = _workspaces.get(workspace_id)
     if not ws:
         raise HTTPException(status_code=404, detail=f"Workspace {workspace_id} not found")
+    # Ownership gate: task_brief/session_id are private to the launching user.
+    if int(ws.get("user_id", -1)) != int(current_user["id"]):
+        raise HTTPException(status_code=403, detail="Workspace does not belong to current user")
     return WorkspaceStatus(
         workspace_id=workspace_id,
         status=ws["status"],

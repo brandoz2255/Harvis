@@ -98,6 +98,9 @@
 
 	let webSearch = null;
 
+	// Show the full live Claude catalog in the model picker (default: just the flagship 4).
+	let showAllCloudModels = false;
+
 	let iframeSandboxAllowSameOrigin = false;
 	let iframeSandboxAllowForms = false;
 
@@ -207,6 +210,7 @@
 
 		detectArtifacts = $settings?.detectArtifacts ?? true;
 		responseAutoCopy = $settings?.responseAutoCopy ?? false;
+		showAllCloudModels = $settings?.showAllCloudModels ?? false;
 
 		showUsername = $settings?.showUsername ?? false;
 		showUpdateToast = $settings?.showUpdateToast ?? true;
@@ -1134,6 +1138,25 @@
 							>{webSearch === 'always' ? $i18n.t('Always') : $i18n.t('Default')}</span
 						>
 					</button>
+				</div>
+			</div>
+
+			<div>
+				<div class=" py-0.5 flex w-full justify-between">
+					<div id="show-all-claude-models-label" class=" self-center text-xs">
+						{$i18n.t('Show all Claude models')}
+					</div>
+
+					<div class="flex items-center gap-2 p-1">
+						<Switch
+							ariaLabelledbyId="show-all-claude-models-label"
+							tooltip={true}
+							bind:state={showAllCloudModels}
+							on:change={() => {
+								saveSettings({ showAllCloudModels });
+							}}
+						/>
+					</div>
 				</div>
 			</div>
 

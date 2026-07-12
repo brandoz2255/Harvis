@@ -1415,7 +1415,7 @@
 						{#if t.status === 'running'}
 							<!-- live run while Harvis works -->
 							<div class="rounded-xl border border-white/8 overflow-hidden bg-[#0b101b]">
-								{#key t.id}<RunView wsId={t.id} mode="dock" title={t.task_brief} />{/key}
+								{#key t.id}<RunView wsId={t.id} mode="dock" title={t.task_brief} onOpenFull={() => headerOpenRunId(t.id)} />{/key}
 							</div>
 						{:else}
 							<!-- assistant reply: "the AI's domain" — unbubbled, full-width (matches the main
@@ -1454,7 +1454,7 @@
 									<div
 										class="w-full rounded-xl border border-white/8 overflow-hidden bg-[#0b101b]"
 									>
-										{#key t.id}<RunView wsId={t.id} mode="dock" title={t.task_brief} />{/key}
+										{#key t.id}<RunView wsId={t.id} mode="dock" title={t.task_brief} onOpenFull={() => headerOpenRunId(t.id)} />{/key}
 									</div>
 								{/if}
 							</div>
@@ -2140,7 +2140,7 @@
 										<WorkspaceMainPanel showChat={false} bind:tab={mainTab} {selectedFile} diffLines={selectedFileObj ? selectedFileObj.lines : []} hasRepo={!!sessionId} hasChanges={changedFiles.length > 0} on:refresh={refreshFiles}>
 											<div slot="logs" class="h-full overflow-auto">
 												{#if logsRunId || latestTurnId}
-													{#key logsRunId || latestTurnId}<RunView wsId={logsRunId || latestTurnId} mode="dock" />{/key}
+													{#key logsRunId || latestTurnId}<RunView wsId={logsRunId || latestTurnId} mode="dock" onOpenFull={() => headerOpenRunId(logsRunId || latestTurnId)} />{/key}
 												{:else}
 													<div class="h-full flex items-center justify-center text-xs text-gray-500 px-4 text-center">{$i18n.t('No logs yet. Agent output and command results will appear here once work begins.')}</div>
 												{/if}

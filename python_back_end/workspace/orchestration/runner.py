@@ -75,6 +75,106 @@ class SubAgentRunner:
     def __init__(self, router: ModelRouter | None = None):
         self.router = router or ModelRouter()
 
+    async def _propose_skill(self, pool, user_id, args: dict) -> str:
+        """Persist an agent-proposed DRAFT skill (enabled=FALSE, empty audit). The
+        draft is uninjectable/unpublishable until a HUMAN marks it 'supported'
+        (skills.gated_skill_blocks enforces the verdict gate) — the agent cannot
+        self-approve. Never raises; returns a human-readable result line."""
+        import json as _json
+        import re as _re
+        import uuid as _uuid
+
+        if pool is None or user_id is None:
+            return "ERROR: cannot save skills in this run context."
+        name = str((args or {}).get("name") or "").strip().lower()
+        desc = str((args or {}).get("description") or "").strip()
+        content = str((args or {}).get("content") or "").strip()
+        if not name or not content:
+            return "ERROR: propose_skill needs a kebab-case name and markdown content."
+        if len(name) > 40 or not _re.match(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$", name):
+            return "ERROR: skill name must be kebab-case (e.g. 'reset-schema'), max 40 chars."
+        content = content[:20000]
+        try:
+            async with pool.acquire() as conn:
+                exists = await conn.fetchval(
+                    "SELECT 1 FROM owui_skills WHERE user_id=$1 AND name=$2", int(user_id), name
+                )
+                if exists:
+                    return (
+                        f"A skill named '{name}' already exists — not creating a duplicate. "
+                        "Ask the human to review it in Customize → Skills."
+                    )
+                await conn.execute(
+                    "INSERT INTO owui_skills (id, user_id, name, description, content, meta, enabled) "
+                    "VALUES ($1,$2,$3,$4,$5,$6::jsonb,FALSE)",
+                    str(_uuid.uuid4()), int(user_id), name, desc, content,
+                    _json.dumps({"audit": {}, "source": "agent_proposed"}),
+                )
+        except Exception as exc:
+            logger.warning("propose_skill insert failed: %s", exc)
+            return "ERROR: could not save the draft skill."
+        return (
+            f"Drafted skill '{name}' for human review — it is NOT active and applies to nothing "
+            "until a human marks it 'supported' in Customize → Skills."
+        )
+
+    async def _generate_image(self, pool, run_id: str, args: dict, seq: int) -> tuple[str, dict | None]:
+        """Agent-initiated image generation — the in-run twin of
+        POST /api/harvis/image/generate: SAME enable flag, SAME provider
+        resolution, SAME _db_save_artifact path, but the PNG lands under the
+        agent's CURRENT run (no new run row). Handled in-runner (not
+        dispatch_tool) because it needs the pool. Never raises; returns
+        (result line, 'artifact' event payload | None)."""
+        try:
+            from image.harvis_image import _image_gen_enabled
+            from image.provider import GenSpec, resolve_provider
+            from workspace.workspace_router import _db_save_artifact
+        except Exception as exc:  # fail-closed if the image module is absent
+            logger.warning("generate_image: image module unavailable: %s", exc)
+            return ("ERROR: image generation is unavailable on this deployment.", None)
+        if pool is None:
+            return ("ERROR: image generation is unavailable in this run context.", None)
+        if not _image_gen_enabled():
+            return ("ERROR: image generation is disabled (enable_image_generation flag off).", None)
+        try:
+            spec = GenSpec(
+                prompt=str((args or {}).get("prompt") or ""),
+                negative_prompt=str((args or {}).get("negative_prompt") or ""),
+                width=(args or {}).get("width", 512),
+                height=(args or {}).get("height", 512),
+            )
+        except ValueError as exc:
+            return (f"ERROR: {exc}", None)
+        try:
+            provider = await resolve_provider()
+            if provider.id == "none":
+                report = await provider.readiness()
+                return (f"image generation isn't ready: {report.get('reason')}", None)
+            png = await provider.txt2img(spec)
+            if not png:
+                return (f"ERROR: {provider.id} returned empty image data.", None)
+            path = f"generated/{run_id}-{seq}.png"
+            artifact_id = await _db_save_artifact(pool, run_id, "file", path=path, content_bytes=png)
+            if not artifact_id:
+                return ("ERROR: could not persist the generated image artifact.", None)
+        except Exception as exc:
+            logger.warning("generate_image failed: %s", exc, exc_info=True)
+            return (f"ERROR: image generation failed: {exc}", None)
+        payload = {
+            "run_id": run_id,
+            "artifact_id": artifact_id,
+            "path": path,
+            "mime_type": "image/png",
+            "size_bytes": len(png),
+            "label": f"{run_id}-{seq}.png",
+        }
+        return (
+            f"Generated a {spec.width}x{spec.height} image via {provider.id} "
+            f"({spec.steps} steps) — saved as artifact {artifact_id}. Inline preview: "
+            f"![](/api/workspace/artifact/{artifact_id}/raw)",
+            payload,
+        )
+
     async def run(
         self,
         *,
@@ -89,6 +189,10 @@ class SubAgentRunner:
         system_prompt: str | None = None,
         permission_mode: str | None = None,
         launch_mode: str = "user",
+        disabled_tools: set[str] | None = None,
+        skill_blocks: list[str] | None = None,
+        pool=None,
+        user_id: int | None = None,
     ) -> AsyncGenerator[OpenClawEvent, None]:
         def ev(etype: str, data: dict) -> OpenClawEvent:
             e = OpenClawEvent(
@@ -102,8 +206,21 @@ class SubAgentRunner:
         started = time.monotonic()
         yield ev("agent_start", {"label": label})
 
+        # The default template carries a {label} placeholder; a CUSTOM sub-agent
+        # system prompt is used VERBATIM (it may contain literal braces — never
+        # .format it, or a code-heavy prompt would raise KeyError/ValueError).
+        sys_content = system_prompt if system_prompt else _SYSTEM.format(label=label)
+        if skill_blocks:
+            # Sub-agent skills — already run through the SAME fail-closed gate as chat
+            # (skills.gated_skill_blocks): a non-'supported' skill contributes an honest
+            # 'unavailable' note here, never its body.
+            sys_content = (
+                sys_content
+                + "\n\n## Attached skills — apply these when relevant:\n\n"
+                + "\n\n".join(skill_blocks)
+            )
         messages = [
-            {"role": "system", "content": (system_prompt or _SYSTEM).format(label=label)},
+            {"role": "system", "content": sys_content},
             {"role": "user", "content": task},
         ]
         summary = ""
@@ -117,6 +234,7 @@ class SubAgentRunner:
         made_edit = False
         idle = 0
         action_seq = 0  # per-action ids for the in-place permission gate
+        image_seq = 0  # per-run counter for generate_image artifact paths
         # Token accounting (real OpenAI usage surfaced by ModelRouter). The LAST step's
         # prompt_tokens ≈ current context occupancy; completion/total accumulate over steps.
         last_prompt_tokens = 0
@@ -129,6 +247,30 @@ class SubAgentRunner:
         disabled: set[str] = (
             {"exec", "edit_file", "str_replace"} if launch_mode == "auto" else set()
         )
+        # A custom sub-agent's allowed-tools ALLOWLIST arrives already inverted to a
+        # withhold set by the orchestrator; union it in. 'finish' is never withheld
+        # (the loop needs it to terminate). authorize_action at dispatch stays the
+        # backstop for anything the model emits despite the offer-time withhold.
+        if disabled_tools:
+            disabled |= {t for t in disabled_tools if t != "finish"}
+        # propose_skill (agent self-authorship) is offered ONLY on user-initiated runs
+        # with DB context — never auto-escalations (a user-intent signal, like heavy
+        # tools) and never when there's no pool/user to persist a DRAFT under. The draft
+        # is uninjectable until a HUMAN 'supported' verdict (gated_skill_blocks), so the
+        # agent can never self-approve.
+        if launch_mode != "user" or pool is None or user_id is None:
+            disabled.add("propose_skill")
+        # generate_image rides the SAME flag as /api/harvis/image/generate (never a
+        # bypass) and needs a pool to persist the PNG artifact. Unlike propose_skill
+        # it is NOT restricted to launch_mode == "user" — it's a benign creative tool
+        # (no code exec). Fail-closed if the image module can't even import.
+        try:
+            from image.harvis_image import _image_gen_enabled
+            _img_ready = _image_gen_enabled()
+        except Exception:
+            _img_ready = False
+        if not _img_ready or pool is None:
+            disabled.add("generate_image")
 
         try:
             while steps < max_steps and (time.monotonic() - started) < max_runtime_seconds:
@@ -181,6 +323,26 @@ class SubAgentRunner:
                             "success": False,
                         })
                         results_text.append(f"{name} DENIED (auto launch)")
+                        continue
+                    if name == "propose_skill":
+                        # Agent self-authorship: write a DRAFT skill (enabled=FALSE, empty
+                        # audit) the human must approve. Handled in-runner (not dispatch_tool)
+                        # because it needs the pool/user context; never grants a tool or lane.
+                        out = await self._propose_skill(pool, user_id, args)
+                        yield ev("tool_result", {"output": out, "success": not out.startswith("ERROR")})
+                        results_text.append(out)
+                        continue
+                    if name == "generate_image":
+                        # Agent-initiated image generation: same flag + provider gate as
+                        # the /api/harvis/image/generate endpoint, PNG saved under THIS
+                        # run. In-runner (not dispatch_tool) because it needs the pool.
+                        image_seq += 1
+                        out, art = await self._generate_image(pool, run_id, args, image_seq)
+                        if art:
+                            # 'artifact' trace event → the Artifacts rail previews the PNG.
+                            yield ev("artifact", art)
+                        yield ev("tool_result", {"output": out, "success": art is not None})
+                        results_text.append(out)
                         continue
                     # Lane-unification choke point (Phase 2): authorize_action composes
                     # the structural 6-lane gate with the per-action risk gate. Entered
