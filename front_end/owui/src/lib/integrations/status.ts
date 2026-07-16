@@ -52,6 +52,11 @@ export function normalizeStatus(def: IntegrationDefinition, er: EngineReadiness 
 		// engine isn't ready — read as "Connected", never a scary "Unavailable".
 		if (eng.connected) return 'connected';
 		const reason = (eng.reason || '').toLowerCase();
+		// A verified user-supplied EXTERNAL provider (e.g. BYO external Hermes) is a configured,
+		// working connection — Build simply can't use it (no workspace), which the detail drawer
+		// already explains. Read it as "Connected", not the scary "needs setup" the generic 'no_'
+		// heuristic below would otherwise return for reasons like "external_no_workspace".
+		if (reason.includes('external')) return 'connected';
 		if (reason.includes('disabled') || reason.includes('flag')) return 'disabled';
 		if (reason.includes('auth') || reason.includes('key') || reason.includes('no_') || reason.includes('model'))
 			return 'needs_setup';

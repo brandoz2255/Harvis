@@ -3,11 +3,8 @@
 	import { goto } from '$app/navigation';
 	import { WEBUI_BASE_URL } from '$lib/constants';
 	import { chatId, models } from '$lib/stores';
-	import {
-		createWorkspaceStream,
-		WORKSPACE_TERMINAL,
-		type WorkspaceEvent
-	} from '$lib/apis/streaming/workspace-stream';
+	import { type WorkspaceEvent } from '$lib/apis/streaming/workspace-stream';
+	import { subscribeRun } from '$lib/apis/streaming/runStream';
 	import { PaneGroup, Pane, PaneResizer } from 'paneforge';
 	import WorkflowCanvas from './workflow/WorkflowCanvas.svelte';
 	import ThoughtStream from './workflow/ThoughtStream.svelte';
@@ -15,14 +12,15 @@
 	import RunTable from './RunTable.svelte';
 	import UsageMeter from './UsageMeter.svelte';
 	import HarvisClawMascot from '$lib/components/common/HarvisClawMascot.svelte';
-	import { toolLabel } from './workflow/humanizeTool';
+	import { toolLabel, stepLabel } from './workflow/humanizeTool';
 
 	const i18n: any = getContext('i18n');
 
-	// One component, two mounts: 'full' = the run page (side-by-side), 'dock' = a
-	// compact, stacked version that lives in the chat right-rail pane (half-screen).
+	// One component, three mounts: 'full' = the run page (side-by-side), 'dock' = a
+	// compact stacked version (stream over canvas) for the right-rail pane, 'stream' =
+	// a lean Cursor-style step lineup only (no canvas) for the live turn INLINE in chat.
 	export let wsId: string = '';
-	export let mode: 'full' | 'dock' = 'full';
+	export let mode: 'full' | 'dock' | 'stream' = 'full';
 	// `embedded` = full layout WITHOUT the breadcrumb nav header (the host — e.g. the
 	// VibeCode run overlay — provides its own header + close, and we must NOT navigate away).
 	export let embedded = false;
@@ -37,7 +35,8 @@
 	let phase: 'connecting' | 'running' | 'done' | 'error' | 'cancelled' = 'connecting';
 	let taskBrief = '';
 	let status = '';
-	let controller: AbortController | null = null;
+	let _sub: ReturnType<typeof subscribeRun> | null = null;
+	let _unsubStore: (() => void) | null = null;
 	let activeId = '';
 
 	// Full-page main pane: Preview (the artifact, big) is the default; the agent
@@ -94,6 +93,7 @@
 		const subEnds = new Set<string>();
 		let sawPlan = false;
 		let lastTool = '';
+		let lastArgs: any = null;
 		let lastAgent = '';
 		for (const e of events) {
 			const rid = e.run_id as string | undefined;
@@ -104,12 +104,16 @@
 			if (e.type === 'plan') sawPlan = true;
 			else if (e.type === 'tool_call') {
 				lastTool = (e.tool as string) || lastTool;
+				// Reset to this call's own args (or none) — never carry the PREVIOUS tool's path,
+				// or "Writing" after a "read_file{path:a}" would mislabel as "Writing a".
+				lastArgs = (e as any).args ?? null;
 				lastAgent = (e.agent_label as string) || lastAgent;
 			}
 		}
 		const n = subStarts.size;
 		const done = subEnds.size;
-		const tool = lastTool ? toolLabel(lastTool).toLowerCase() : '';
+		// filename-aware: "Editing hello.txt" not "Using edit_file", matching the lineup rows.
+		const tool = lastTool ? stepLabel(lastTool, lastArgs).toLowerCase() : '';
 		if (n > 0) {
 			const base =
 				done >= n
@@ -119,7 +123,7 @@
 						: `Spawned ${n} agent${n > 1 ? 's' : ''}`;
 			return lastAgent && tool ? `${base} · ${lastAgent} ${tool}…` : `${base}…`;
 		}
-		if (tool) return `${toolLabel(lastTool)}…`;
+		if (tool) return `${stepLabel(lastTool, lastArgs)}…`;
 		if (sawPlan) return 'Planning the work…';
 		return 'Working…';
 	})();
@@ -147,46 +151,14 @@
 		}
 	};
 
-	const consume = async (id: string) => {
-		controller = new AbortController();
-		let failed = 0;
-		// Resume across dropped SSE connections: the backend replays the full DB
-		// history on each (re)connect, so the view PERSISTS instead of dying when
-		// the stream drops mid-run. A clean `stream_end` stops the loop.
-		while (activeId === id && !['done', 'error', 'cancelled'].includes(phase)) {
-			let cleanEnd = false;
-			let gotAny = false;
-			try {
-				for await (const evt of createWorkspaceStream(id, localStorage.token, controller.signal)) {
-					if (evt.type === 'stream_end') {
-						cleanEnd = true;
-						break;
-					}
-					gotAny = true;
-					events = [...events, evt];
-					if (evt.type === 'done') phase = 'done';
-					else if (evt.type === 'error') phase = 'error';
-					else if (evt.type === 'cancelled') phase = 'cancelled';
-					else if (phase === 'connecting') phase = 'running';
-					if (WORKSPACE_TERMINAL.has(evt.type)) break;
-				}
-			} catch (e: any) {
-				if (e?.name === 'AbortError') return;
-			}
-			if (cleanEnd || ['done', 'error', 'cancelled'].includes(phase) || activeId !== id) break;
-			failed = gotAny ? 0 : failed + 1;
-			if (failed > 20) break;
-			// Reconnect: replay rebuilds the full state, so clear to avoid dupes.
-			events = [];
-			phase = 'connecting';
-			await new Promise((r) => setTimeout(r, 1500));
-		}
-	};
-
-	// (Re)start whenever the target run changes — lets the SAME instance (the dock)
-	// switch runs without a remount.
+	// (Re)start whenever the target run changes — lets the SAME instance (the dock) switch runs
+	// without a remount. Consumes via the SHARED, throttled per-run stream store (one connection
+	// + one batched pipeline across every view of the run), instead of opening its own.
 	const start = (id: string) => {
-		controller?.abort();
+		_unsubStore?.();
+		_unsubStore = null;
+		_sub?.unsubscribe();
+		_sub = null;
 		events = [];
 		phase = 'connecting';
 		taskBrief = '';
@@ -194,14 +166,21 @@
 		activeId = id;
 		if (id) {
 			loadMeta(id);
-			consume(id);
+			_sub = subscribeRun(id);
+			_unsubStore = _sub.store.subscribe((s) => {
+				events = s.events;
+				phase = s.phase;
+			});
 		} else {
 			phase = 'error';
 		}
 	};
 	$: if (wsId !== activeId) start(wsId);
 
-	onDestroy(() => controller?.abort());
+	onDestroy(() => {
+		_unsubStore?.();
+		_sub?.unsubscribe();
+	});
 
 	const backToChat = () => goto($chatId ? `/c/${$chatId}` : '/');
 	const goStudio = () => goto('/harvis/agent-studio');
@@ -319,6 +298,42 @@
 					</div>
 				{/if}
 			</div>
+		</div>
+	{:else if mode === 'stream'}
+		<!-- lean live lineup: the Cursor-style step feed ONLY (no canvas), for the running
+		     turn inline in the Build chat + the review mirror. Full run (canvas/table) is a
+		     click away via ⤢ Full. -->
+		<div
+			class="flex items-center gap-2 px-3 py-2 border-b border-gray-100 dark:border-gray-850 shrink-0"
+		>
+			<span class="size-2 rounded-full shrink-0 {statusDot(status, phase)}"></span>
+			<div class="min-w-0 flex-1">
+				<div class="text-xs font-medium text-gray-700 dark:text-gray-200 truncate">
+					{title || taskBrief || $i18n.t('Workspace run')}
+				</div>
+				{#if running && liveStatus}
+					<div
+						class="mt-0.5 flex items-center gap-1.5 text-[11px] text-blue-500/90 dark:text-blue-400/90 truncate"
+					>
+						<span
+							class="inline-block size-1.5 rounded-full bg-blue-500 dark:bg-blue-400 animate-pulse shrink-0"
+						></span>
+						<span class="truncate">{liveStatus}</span>
+					</div>
+				{/if}
+			</div>
+			<button
+				class="ml-auto text-[11px] text-gray-400 hover:text-blue-500 transition shrink-0"
+				on:click={openFull}
+				title={$i18n.t('Open full')}>⤢ {$i18n.t('Full')}</button
+			>
+		</div>
+		<!-- Artifacts auto-pop when they exist (invisible while there are none). -->
+		<div class="shrink-0 max-h-[45%] overflow-y-auto px-3">
+			<RunArtifacts {wsId} done={!running} />
+		</div>
+		<div class="flex-1 min-h-0 overflow-y-auto px-3 py-2">
+			<ThoughtStream {events} {running} />
 		</div>
 	{:else}
 		<!-- compact dock: a stacked, half-screen version (stream capped over canvas) -->

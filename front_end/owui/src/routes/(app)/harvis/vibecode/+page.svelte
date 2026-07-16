@@ -2,8 +2,9 @@
 	import { getContext, onMount, onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
-	import { WEBUI_NAME, config, showSidebar, models } from '$lib/stores';
+	import { WEBUI_NAME, config, settings, showSidebar, models, showReviewMirror } from '$lib/stores';
 	import { WEBUI_BASE_URL } from '$lib/constants';
+	import { getModels } from '$lib/apis';
 	import { uploadFile } from '$lib/apis/files';
 	import { getCapabilityRegistry } from '$lib/integrations/registry';
 	import {
@@ -18,27 +19,35 @@
 		seedVibecodeLocalFolder,
 		getVibecodeWriteback,
 		getVibecodeSessionDiff,
+		getVibecodeSessionFiles,
+		getVibecodeSessionFile,
 		getRunArtifacts,
 		cancelWorkspaceRun,
+		getActiveDiscordSession,
+		getWorkspaceModel,
+		setWorkspaceModel,
 		type AttachedRepo,
 		type VibecodeSession,
 		type VibecodeTurn,
+		type VibecodeFileEntry,
 		type PendingAction
 	} from '$lib/apis/agent-runs';
 	import RunView from '$lib/agent-studio/RunView.svelte';
+	import BrowserPanel from '$lib/agent-studio/build/BrowserPanel.svelte';
 	import BuildActions from '$lib/agent-studio/BuildActions.svelte';
-	import { createWorkspaceStream } from '$lib/apis/streaming/workspace-stream';
 	import WorkflowInspector from '$lib/agent-studio/WorkflowInspector.svelte';
 	import { humanizeRunTitle } from '$lib/agent-studio/runFormat';
 	import PlanPanel from '$lib/agent-studio/PlanPanel.svelte';
 	import GitHubRepoModal from '$lib/agent-studio/GitHubRepoModal.svelte';
 	import BuildHeader from '$lib/agent-studio/build/BuildHeader.svelte';
+	import PrDrawer from '$lib/agent-studio/build/PrDrawer.svelte';
 	import WorkspaceFileRail from '$lib/agent-studio/build/WorkspaceFileRail.svelte';
 	import WorkspaceMainPanel from '$lib/agent-studio/build/WorkspaceMainPanel.svelte';
 	import WorkspacePanel from '$lib/agent-studio/build/WorkspacePanel.svelte';
 	import BackgroundTaskCard from '$lib/agent-studio/build/BackgroundTaskCard.svelte';
 	import ShellTab from '$lib/agent-studio/build/ShellTab.svelte';
 	import Customize from '$lib/agent-studio/Customize.svelte';
+	import Automations from '$lib/agent-studio/Automations.svelte';
 	import { PaneGroup, Pane, PaneResizer } from 'paneforge';
 	import Markdown from '$lib/components/chat/Messages/Markdown.svelte';
 	import {
@@ -76,9 +85,28 @@
 		goto(`${url.pathname}${url.search}`, { replaceState: !open, noScroll: true, keepFocus: true });
 	};
 
+	// Routines opens IN Build (right drawer) too — the coding lens of the cron store,
+	// no longer bouncing out to the Agent Studio hub. URL-synced (?panel=routines).
+	$: showRoutines = $page.url.searchParams.get('panel') === 'routines';
+	const setRoutines = (open: boolean) => {
+		const url = new URL($page.url);
+		if (open) url.searchParams.set('panel', 'routines');
+		else url.searchParams.delete('panel');
+		goto(`${url.pathname}${url.search}`, { replaceState: !open, noScroll: true, keepFocus: true });
+	};
+
 	let session: VibecodeSession | null = null;
 	let turns: VibecodeTurn[] = [];
 	let pollTimer: any = null;
+	// Discord ↔ Build mirror: an actively-running #harvis-code session (or null) →
+	// the header chip; and the shared model's last-adopted updated_at epoch so we
+	// only adopt a change newer than our own last pick/write (recency-wins).
+	let discordSession: any = null;
+	let discordPollTimer: any = null;
+	let lastModelSyncEpoch = 0;
+	// Set in onDestroy so the async onMount tail below (which runs after several awaits) can
+	// bail before registering background timers/listeners on an already-unmounted component.
+	let destroyed = false;
 	// Which finished turns have their full run (thought stream + canvas) expanded.
 	// Chat-style: a finished turn shows the model's summary as a bubble; the run is
 	// one click away. Running turns always show the live run.
@@ -121,6 +149,8 @@
 	// ── BW: Files + File panels — the session's changed files, parsed from its diff ──
 	let sessionDiff = '';
 	let selectedFile = '';
+	let showPrDrawer = false;
+	let sessionHasGithub = false;
 	const loadDiff = async () => {
 		if (!sessionId) {
 			sessionDiff = '';
@@ -129,6 +159,7 @@
 		try {
 			const r: any = await getVibecodeSessionDiff(sessionId);
 			sessionDiff = r?.diff ?? '';
+			sessionHasGithub = !!r?.has_github;
 		} catch {
 			sessionDiff = '';
 		}
@@ -152,6 +183,53 @@
 	}
 	$: changedFiles = parseDiffFiles(sessionDiff);
 	$: selectedFileObj = changedFiles.find((f) => f.path === selectedFile) || changedFiles[0] || null;
+
+	// ── Phase 2: the WHOLE workspace tree (read-only), not just touched files. Feeds
+	// the rail's Files sub-tab; the Changes sub-tab keeps its diff-parsed list. ──
+	let sessionFileEntries: VibecodeFileEntry[] = [];
+	let sessionFilesLoading = false;
+	const loadSessionFiles = async () => {
+		if (!sessionId) {
+			sessionFileEntries = [];
+			return;
+		}
+		const reqId = sessionId;
+		sessionFilesLoading = true;
+		try {
+			const r = await getVibecodeSessionFiles(reqId);
+			if (reqId !== sessionId) return; // switched sessions mid-fetch → drop
+			sessionFileEntries = r.entries;
+		} finally {
+			if (reqId === sessionId) sessionFilesLoading = false;
+		}
+	};
+	// The rail's tree builder takes flat FILE paths (dirs are implied by the paths).
+	$: sessionFilePaths = sessionFileEntries.filter((e) => e.type === 'file').map((e) => e.path);
+	// Re-fetch when the user opens the Files sub-tab (cheap listing; keeps it fresh).
+	$: if (fileTab === 'files' && sessionId) loadSessionFiles();
+
+	// ── Phase 2: real read-only file content for the main panel's Editor tab ──
+	let fileContent: string | null = null;
+	let fileLoading = false;
+	let fileBinary = false;
+	let fileTruncated = false;
+	const loadFileContent = async (path: string) => {
+		fileContent = null;
+		fileBinary = false;
+		fileTruncated = false;
+		if (!sessionId || !path) return;
+		fileLoading = true;
+		const req = path;
+		const r = await getVibecodeSessionFile(sessionId, path);
+		if (req !== selectedFile) return; // user clicked another file mid-fetch → drop
+		fileLoading = false;
+		if (r) {
+			fileContent = r.binary ? '' : (r.content ?? '');
+			fileBinary = !!r.binary;
+			fileTruncated = !!r.truncated;
+		}
+	};
+
 	// Refresh the workspace runs + session diff on load and whenever a turn completes.
 	$: {
 		doneTurns;
@@ -159,6 +237,7 @@
 		latestTurnId;
 		loadDiff();
 		loadArtifacts();
+		loadSessionFiles();
 	}
 	const clearBg = () => {
 		bgHidden = new Set([...bgHidden, ...finishedTasks.map((t) => t.id)]);
@@ -187,7 +266,11 @@
 	let mainTab: 'chat' | 'diff' | 'logs' | 'editor' | 'preview' = 'chat';
 	const onFileSelect = (path: string) => {
 		selectedFile = path;
-		mainTab = 'diff';
+		// Files sub-tab = browsing the repo → open the read-only Editor view; the
+		// Changes sub-tab keeps landing on the Diff view. Content is fetched either
+		// way so the Editor tab is ready.
+		mainTab = fileTab === 'files' ? 'editor' : 'diff';
+		loadFileContent(path);
 		// Picking a file in the Explorer jumps the dock to the File tab (VS Code flow).
 		if (!panelVisible.br) {
 			panelVisible = { ...panelVisible, br: true };
@@ -308,20 +391,27 @@
 		? humanizeRunTitle(turns.find((t) => t.id === overlayRunId) || { task_brief: '' })
 		: '';
 	const headerOpenRun = () => {
-		if (latestTurnId) {
-			overlayInitialTab = 'overview';
-			overlayRunId = latestTurnId;
-		}
+		if (latestTurnId) headerOpenRunId(latestTurnId);
 	};
 	const headerOpenRunId = (id: string) => {
-		if (id) {
-			overlayInitialTab = 'overview';
-			overlayRunId = id;
+		if (!id) return;
+		// The run inspector still pegs the main thread when opened on a LIVE run (the shared stream
+		// store fixed the connection budget but NOT this freeze — its cause is elsewhere in the
+		// inspector-on-live-run render path, still under investigation). Keep it gated to FINISHED
+		// runs; while running, follow the live view / mirror instead.
+		const t = turns.find((x) => x.id === id);
+		if (t && t.status === 'running') {
+			toast.info(
+				$i18n.t('The run inspector opens once the run finishes — follow it live in the panel for now.')
+			);
+			return;
 		}
+		overlayInitialTab = 'overview';
+		overlayRunId = id;
+		showReviewMirror.set(null);
 	};
 	const headerCreatePR = () => {
-		mainTab = 'chat';
-		toast.info($i18n.t('Use “Create PR” in the changes card below the conversation.'));
+		showPrDrawer = true;
 	};
 
 	// ── BW3: main conversation + resizable workspace dock (the quad lives in the dock) ─
@@ -344,7 +434,7 @@
 	// ── Dock panel visibility (the ⋯ menu) — conditional render so EVERY panel exits
 	// reliably. (PaneForge collapse() failed when both panes in a column were collapsed.)
 	let panelVisible: Record<string, boolean> = (() => {
-		const def = { tl: true, tr: true, bl: false, br: false, sh: true };
+		const def = { tl: true, tr: true, bl: false, br: false, sh: true, bw: false };
 		try {
 			return { ...def, ...JSON.parse(localStorage.getItem('harvis.vibecode.panels') || '{}') };
 		} catch {
@@ -391,20 +481,20 @@
 		{ key: 'tr', label: $i18n.t('Files'), visible: panelVisible.tr },
 		{ key: 'bl', label: $i18n.t('Plan'), visible: panelVisible.bl },
 		{ key: 'br', label: $i18n.t('File'), visible: panelVisible.br },
-		...(shellEnabled ? [{ key: 'sh', label: $i18n.t('Shell'), visible: panelVisible.sh }] : [])
+		...(shellEnabled ? [{ key: 'sh', label: $i18n.t('Shell'), visible: panelVisible.sh }] : []),
+		{ key: 'bw', label: $i18n.t('Browser'), visible: panelVisible.bw }
 	];
 	// ── Tabbed dock (Claude-Code-Desktop style): ONE panel at a time, a tab strip on
 	// top. The ⋯ menu still controls WHICH tabs exist (panelVisible); this picks the
 	// active one. Order: Tasks · Plan · Files · File.
-	let dockTab: 'tl' | 'bl' | 'tr' | 'br' | 'sh' = (() => {
+	let dockTab: string = (() => {
 		try {
-			const v = localStorage.getItem('harvis.vibecode.docktab');
-			return v === 'tl' || v === 'bl' || v === 'tr' || v === 'br' || v === 'sh' ? v : 'tl';
+			return localStorage.getItem('harvis.vibecode.docktab') || 'tl';
 		} catch {
 			return 'tl';
 		}
 	})();
-	const setDockTab = (k: 'tl' | 'bl' | 'tr' | 'br' | 'sh') => {
+	const setDockTab = (k: string) => {
 		dockTab = k;
 		try {
 			localStorage.setItem('harvis.vibecode.docktab', k);
@@ -412,14 +502,55 @@
 			/* ignore */
 		}
 	};
-	$: dockTabs = [
-		{ key: 'tl' as const, label: $i18n.t('Tasks'), visible: panelVisible.tl },
-		{ key: 'bl' as const, label: $i18n.t('Plan'), visible: panelVisible.bl },
-		{ key: 'tr' as const, label: $i18n.t('Files'), visible: panelVisible.tr },
-		{ key: 'br' as const, label: $i18n.t('File'), visible: panelVisible.br },
+	// User-rearrangeable tab order (drag the tab strip). Persisted; unknown/new keys are folded
+	// in at the end so adding a panel key later never strands it.
+	const DOCK_TAB_KEYS = ['tl', 'bl', 'tr', 'br', 'sh', 'bw'];
+	let dockOrder: string[] = (() => {
+		try {
+			const saved = JSON.parse(localStorage.getItem('harvis.vibecode.dockorder') || 'null');
+			if (Array.isArray(saved) && saved.length) {
+				const known = new Set(DOCK_TAB_KEYS);
+				const ordered = saved.filter((k: string) => known.has(k));
+				for (const k of DOCK_TAB_KEYS) if (!ordered.includes(k)) ordered.push(k);
+				return ordered;
+			}
+		} catch {
+			/* ignore */
+		}
+		return [...DOCK_TAB_KEYS];
+	})();
+	const persistDockOrder = () => {
+		try {
+			localStorage.setItem('harvis.vibecode.dockorder', JSON.stringify(dockOrder));
+		} catch {
+			/* ignore */
+		}
+	};
+	let dragKey: string | null = null;
+	const onTabDrop = (target: string) => {
+		if (!dragKey || dragKey === target) {
+			dragKey = null;
+			return;
+		}
+		const next = dockOrder.filter((k) => k !== dragKey);
+		const at = next.indexOf(target);
+		next.splice(at < 0 ? next.length : at, 0, dragKey);
+		dockOrder = next;
+		dragKey = null;
+		persistDockOrder();
+	};
+	$: dockTabDefs = {
+		tl: { label: $i18n.t('Tasks'), visible: panelVisible.tl },
+		bl: { label: $i18n.t('Plan'), visible: panelVisible.bl },
+		tr: { label: $i18n.t('Files'), visible: panelVisible.tr },
+		br: { label: $i18n.t('File'), visible: panelVisible.br },
 		// P2: manual shell — only exists when the HARVIS_BUILD_SHELL flag is on.
-		{ key: 'sh' as const, label: $i18n.t('Shell'), visible: shellEnabled && panelVisible.sh }
-	].filter((t) => t.visible);
+		sh: { label: $i18n.t('Shell'), visible: shellEnabled && panelVisible.sh },
+		bw: { label: $i18n.t('Browse & verify'), visible: panelVisible.bw }
+	} as Record<string, { label: string; visible: boolean }>;
+	$: dockTabs = dockOrder
+		.filter((k) => dockTabDefs[k]?.visible)
+		.map((k) => ({ key: k, label: dockTabDefs[k].label }));
 	// If the active tab's panel gets hidden via the ⋯ menu, fall to the first visible one.
 	$: if (dockTabs.length && !dockTabs.some((t) => t.key === dockTab)) dockTab = dockTabs[0].key;
 	// When a NEW run starts, surface the Background tasks panel automatically (open the
@@ -494,9 +625,99 @@
 	const fmtTok = (n: number) =>
 		n >= 10000 ? Math.round(n / 1000) + 'k' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
 	const fmtCost = (n: number) => (n >= 1 ? '$' + n.toFixed(2) : n > 0 ? '$' + n.toFixed(3) : '$0');
+	// A model's provider → the Build engine (lane) that can actually run it. Local Ollama
+	// models use the native OpenClaw loop; Claude/Hermes/OpenAI need their own engine.
+	const engineForOwner = (owner: string): string => {
+		const o = (owner || '').toLowerCase();
+		if (o.startsWith('anthropic')) return 'claude-code';
+		if (o.startsWith('hermes')) return 'hermes-agent';
+		if (o === 'openai') return 'codex';
+		return 'native';
+	};
+
 	const pickModel = (id: string) => {
 		selectedModel = id;
 		showModelMenu = false;
+		// The Build engine follows the picked model automatically (see the selectedEngine reactive
+		// below) — there is no separate engine pill. Picking a Claude model routes the run to the
+		// Claude Code lane; a local model runs on native.
+		// Push the pick to the shared workspace model so Discord /set-model (and any other
+		// Build tab) reflects it. Record the returned epoch so our own write isn't re-adopted
+		// on the next sync poll.
+		if (id) {
+			setWorkspaceModel(id)
+				.then((r) => {
+					if (r && r.updated_at) lastModelSyncEpoch = r.updated_at;
+				})
+				.catch(() => {});
+		}
+	};
+
+	// Independent poller (runs whenever Build is mounted, even with no session open):
+	// (a) surface a running Discord session as the header chip; (b) adopt the shared
+	// model when it changed more recently than our last pick — last-write-wins with Discord.
+	const pollDiscordAndModel = async () => {
+		try {
+			discordSession = await getActiveDiscordSession();
+		} catch (_) {
+			discordSession = null;
+		}
+		try {
+			const wm = await getWorkspaceModel();
+			if (wm && wm.updated_at > lastModelSyncEpoch) {
+				if (!wm.model_id) {
+					lastModelSyncEpoch = wm.updated_at; // shared model cleared — nothing to adopt
+				} else if ((modelOptions || []).some((m: any) => m?.id === wm.model_id)) {
+					// Adopt (and consume the epoch) ONLY if the model is valid for the CURRENT
+					// engine — checking the engine-filtered modelOptions, not the raw store. If it
+					// isn't (e.g. Discord picked an Ollama model while Build is on Claude Code), the
+					// reactive engine-filter would immediately wipe it, so we DON'T advance the epoch
+					// and instead retry after the user switches to a compatible engine.
+					if (wm.model_id !== selectedModel) selectedModel = wm.model_id;
+					lastModelSyncEpoch = wm.updated_at;
+				}
+				// else: model not loaded yet OR not valid for this engine — leave epoch, retry later
+			}
+		} catch (_) {}
+	};
+
+	// Chip click → jump into the live Discord session so the web thread mirrors it.
+	const openDiscordSession = () => {
+		if (discordSession?.session_id) goto(`/harvis/vibecode?session=${discordSession.session_id}`);
+	};
+
+	// Keep the picker current: the global `$models` store is loaded once at app mount and
+	// never refreshed in-browser, so a model pulled / connected after load wouldn't appear
+	// here. Re-fetch it on the triggers that matter — mount, a gentle 30s interval, window
+	// focus, and (forced, cache-busting) whenever the picker menu opens. `force` passes
+	// refresh=true so the backend bypasses its 60s model cache and returns a truly current
+	// list. Guarded so a transient empty/failed fetch never blanks the existing list.
+	let modelsRefreshTimer: any = null;
+	const refreshModels = async (force = false) => {
+		try {
+			const dc = $config?.features?.enable_direct_connections
+				? ($settings?.directConnections ?? null)
+				: null;
+			const next = await getModels(localStorage.token, dc, false, force);
+			if (Array.isArray(next) && next.length) {
+				// Only replace the store when the list actually changed (id/name/owner signature),
+				// so identical 30s refreshes don't churn store identity — which would re-render the
+				// open dropdown and reset a mid-selection hover/scroll.
+				const sig = (arr: any[]) =>
+					(arr || []).map((m: any) => `${m?.id}:${m?.name || ''}:${m?.owned_by || ''}`).join('|');
+				if (sig(next) !== sig($models)) models.set(next);
+			}
+		} catch (_) {
+			// leave the current list in place on a transient failure
+		}
+	};
+	const onWindowFocus = () => refreshModels(true);
+
+	// Toggle the model dropdown; force a fresh, cache-busting model fetch on the opening edge
+	// so the list the user is about to pick from is genuinely current.
+	const toggleModelMenu = () => {
+		showModelMenu = !showModelMenu;
+		if (showModelMenu) refreshModels(true);
 	};
 
 	$: usageTurns = turns.filter((t) => (t.prompt_tokens ?? 0) > 0 || (t.completion_tokens ?? 0) > 0);
@@ -504,11 +725,30 @@
 	$: sessionTokens = usageTurns.reduce((s, t) => s + (t.prompt_tokens || 0) + (t.completion_tokens || 0), 0);
 
 	// Engine-filtered picker list (Claude Code → only Claude, etc.).
-	$: modelOptions = ($models || []).filter((m: any) => {
-		if (!m || !m.id) return false;
-		const owners = ENGINE_MODEL_OWNERS[selectedEngine] || ['ollama'];
-		return owners.includes((m.owned_by || 'ollama').toString().toLowerCase());
-	});
+	// The picker shows ALL available models (local + Claude + Hermes + OpenAI) — same list the
+	// main chat has — because the ENGINE now follows the model (see pickModel), so a cross-engine
+	// pick routes to the right lane instead of being hidden. Making this the full set also makes
+	// the engine-filter wipe reactive below inert (a picked model is always present).
+	$: modelOptions = ($models || []).filter((m: any) => m && m.id);
+	// Provider groups for the picker menu (Local Ollama incl. 'ollama-desktop' rig-routed).
+	const OWNER_GROUPS: { label: string; test: (o: string) => boolean }[] = [
+		{ label: 'Local', test: (o) => o.startsWith('ollama') || o === '' },
+		{ label: 'Claude', test: (o) => o.startsWith('anthropic') },
+		{ label: 'Hermes', test: (o) => o.startsWith('hermes') },
+		{ label: 'OpenAI', test: (o) => o === 'openai' }
+	];
+	$: modelGroups = (() => {
+		const used = new Set<string>();
+		const groups: { label: string; models: any[] }[] = [];
+		for (const g of OWNER_GROUPS) {
+			const ms = modelOptions.filter((m: any) => g.test((m.owned_by || 'ollama').toString().toLowerCase()));
+			ms.forEach((m: any) => used.add(m.id));
+			if (ms.length) groups.push({ label: g.label, models: ms });
+		}
+		const rest = modelOptions.filter((m: any) => !used.has(m.id));
+		if (rest.length) groups.push({ label: 'Other', models: rest });
+		return groups;
+	})();
 	// Picked model no longer valid for the current engine (e.g. switched to Claude Code) → default.
 	$: if (selectedModel && modelOptions.length && !modelOptions.find((m: any) => m.id === selectedModel)) {
 		selectedModel = '';
@@ -537,36 +777,10 @@
 	$: liveSessionTokens = sessionTokens + (liveOn ? liveCompletionTokens : 0);
 	$: liveCost = sessionCost + (liveOn ? (liveCompletionTokens * priceOut) / 1e6 : 0);
 
-	// Live tick: a lightweight 2nd stream consumer counts the running turn's streamed tokens.
-	let _liveCtrl: AbortController | null = null;
-	let _liveRunId = '';
-	$: _watchLive(runningTasks[0]?.id || '');
-	function _watchLive(runId: string) {
-		if (runId === _liveRunId) return;
-		_liveRunId = runId;
-		if (_liveCtrl) {
-			try { _liveCtrl.abort(); } catch (_) {}
-			_liveCtrl = null;
-		}
-		liveCompletionTokens = 0;
-		if (!runId) return;
-		const ctrl = new AbortController();
-		_liveCtrl = ctrl;
-		(async () => {
-			try {
-				for await (const ev of createWorkspaceStream(runId, localStorage.token, ctrl.signal)) {
-					if (ctrl.signal.aborted) break;
-					const c = (ev as any)?.content;
-					if ((ev as any)?.type === 'token' && c) liveCompletionTokens += Math.ceil(String(c).length / 4);
-				}
-			} catch (_) {}
-		})();
-	}
-	onDestroy(() => {
-		if (_liveCtrl) {
-			try { _liveCtrl.abort(); } catch (_) {}
-		}
-	});
+	// (Removed the live token-tick 2nd SSE: it was a redundant per-run stream consumer that,
+	// stacked on the inline run view + the review mirror, pushed toward the browser's ~6-
+	// connection-per-host cap and could stall the run when a 3rd/4th view was opened. The cost
+	// meter now reflects the persisted per-turn totals; `liveCompletionTokens` stays 0.)
 
 	const loadSession = async () => {
 		if (!sessionId) {
@@ -650,9 +864,39 @@
 	type RunRung = 'plan' | 'ask' | 'auto-accept' | 'full-auto';
 	let runMode: RunRung = 'full-auto';
 	let pendingRunModeAfterAck: RunRung | '' = '';
-	// Orchestrate = fan this turn out to N task-delegated sub-agents (the planner picks
-	// 3–10, scaling to the task). Off ⇒ a single agent on the session's working copy.
-	let orchestrate = false;
+	// Agents mode — fan this turn out to N task-delegated sub-agents (planner picks 3–10):
+	//   'off'  ⇒ a single agent (default)
+	//   'on'   ⇒ always fan out
+	//   'auto' ⇒ a cheap classifier proposes fanning out; the user confirms (no surprise cost)
+	let agentsMode: 'off' | 'auto' | 'on' = 'off';
+	const cycleAgentsMode = () => {
+		agentsMode = agentsMode === 'off' ? 'auto' : agentsMode === 'auto' ? 'on' : 'off';
+	};
+	// Auto-mode: classify + confirm before the (expensive) fan-out.
+	let orchestrateSizing = false;
+	let orchestratePrompt: { agents: number; reason: string; resolve: (v: boolean | null) => void } | null = null;
+	const askSplit = (agents: number, reason: string) =>
+		new Promise<boolean | null>((resolve) => {
+			orchestratePrompt = { agents, reason, resolve };
+		});
+	const answerSplit = (v: boolean | null) => {
+		orchestratePrompt?.resolve(v);
+		orchestratePrompt = null;
+	};
+	const suggestOrchestrate = async (
+		brief: string
+	): Promise<{ suggest: boolean; agents: number; reason: string } | null> => {
+		try {
+			const r = await fetch('/api/vibecode/orchestrate-suggest', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json', authorization: `Bearer ${localStorage.getItem('token')}` },
+				body: JSON.stringify({ task_brief: brief })
+			});
+			return r.ok ? await r.json() : null;
+		} catch (_) {
+			return null;
+		}
+	};
 	// Phase E1/E2: external Build engine. 'native' = OpenClaw vibecode-turn runner; the others
 	// = sidecar CLIs (opencode = local; codex/claude-code = cloud, per-user key). Clone-mode
 	// only, flag-gated. Selector shows ONLY ready engines (per the registry engine_readiness).
@@ -697,10 +941,16 @@
 	// Surface the Hermes-Native "enabled but no model" reason even when the selector is hidden.
 	$: hermesNeedsModel =
 		isolationMode === 'session' && engineReadiness?.['hermes-native']?.reason === 'no_hermes_model';
-	// Force native whenever the selector isn't applicable (inplace / flag-off) or the selected
-	// engine is no longer ready (e.g. key disconnected, sidecar down).
-	$: if (!showEngineSelector && selectedEngine !== 'native') selectedEngine = 'native';
-	$: if (selectedEngine !== 'native' && !engineReadiness?.[selectedEngine]?.ready) selectedEngine = 'native';
+	// Engine follows the MODEL (there is no separate engine pill): the selected model's provider
+	// decides the Build lane — Claude→claude-code, Hermes→hermes-agent, OpenAI→codex, local→native —
+	// but only if that engine is READY, else fall back to native. Derived reactively so it tracks
+	// both an explicit pick AND a model adopted from the shared/Discord state.
+	$: {
+		const _pm = ($models || []).find((m: any) => m?.id === selectedModel);
+		const _eng = engineForOwner((_pm?.owned_by || '').toString());
+		const _target = _eng !== 'native' && engineReadiness?.[_eng]?.ready ? _eng : 'native';
+		if (selectedEngine !== _target) selectedEngine = _target;
+	}
 	// Apex → base (rendered top-to-bottom; base = safest = Plan, apex = most autonomy = Auto).
 	const RUN_LADDER: { mode: RunRung; label: string; desc: string }[] = [
 		{ mode: 'full-auto', label: 'Auto', desc: 'Runs everything automatically — no prompts.' },
@@ -1108,29 +1358,39 @@
 	// Fires for any GATING run mode (Ask / Accept-edits) — on the clone lane too, not just
 	// in-place. Plan blocks everything silently; Full-auto allows everything → neither pauses.
 	let pendingAction: PendingAction | null = null;
+	// Phase 2 backends can queue MULTIPLE gated actions; the modal shows the head
+	// as the active card and the rest as a small queue underneath.
+	let pendingQueue: PendingAction[] = [];
 	let approvalBusy = false;
 	$: isInplace = activeIso === 'inplace';
 
 	const pollPending = async () => {
 		if (!anyRunning) {
 			pendingAction = null;
+			pendingQueue = [];
 			return;
 		}
 		const running = turns.find((t) => t.status === 'running');
 		if (!running) {
 			pendingAction = null;
+			pendingQueue = [];
 			return;
 		}
-		pendingAction = await getPendingAction(running.id);
+		const p = await getPendingAction(running.id);
+		pendingQueue = Array.isArray(p) ? p : p ? [p] : [];
+		pendingAction = pendingQueue[0] ?? null;
 	};
 
-	const resolvePending = async (approve: boolean) => {
+	// scope 'session' = approve AND stop gating matching actions for this session.
+	const resolvePending = async (approve: boolean, scope?: 'once' | 'session') => {
 		const running = turns.find((t) => t.status === 'running');
 		if (!pendingAction || !running) return;
 		approvalBusy = true;
 		try {
-			await resolveAction(running.id, pendingAction.action_id, approve);
-			pendingAction = null;
+			await resolveAction(running.id, pendingAction.action_id, approve, scope);
+			// Advance to the next queued action locally; the poll re-syncs shortly.
+			pendingQueue = pendingQueue.slice(1);
+			pendingAction = pendingQueue[0] ?? null;
 		} catch (_) {
 		} finally {
 			approvalBusy = false;
@@ -1140,6 +1400,25 @@
 	const submit = async () => {
 		const text = prompt.trim();
 		if (!text || composerDisabled) return;
+
+		// Resolve whether THIS turn fans out. 'on' = always; 'off' = never; 'auto' =
+		// a cheap classifier proposes, the user confirms — the expensive fan-out is
+		// gated behind that confirm, never silent. Done BEFORE sending=true so the
+		// confirm bar stays interactive.
+		let orchestrate = agentsMode === 'on';
+		if (agentsMode === 'auto') {
+			orchestrateSizing = true;
+			const sug = await suggestOrchestrate(text);
+			orchestrateSizing = false;
+			if (sug?.suggest) {
+				const ok = await askSplit(sug.agents || 3, sug.reason || '');
+				if (ok === null) return; // dismissed → cancel the submit
+				orchestrate = !!ok;
+			} else {
+				orchestrate = false;
+			}
+		}
+
 		sending = true;
 		sendError = '';
 		stickBottom = true; // a new turn → follow the conversation down
@@ -1322,8 +1601,25 @@
 		await loadSession();
 		await relinkSessionFolder();
 		schedule();
+		// Discord chip + shared-model sync — independent of the per-session poll so the
+		// chip shows and the model stays in sync even on the Build landing page.
+		await pollDiscordAndModel();
+		// Keep the model picker current (see refreshModels): the store is otherwise load-once.
+		await refreshModels(false);
+		// Guard: if the component unmounted during the awaits above, onDestroy already ran
+		// (against null timers) — don't register orphan timers/listeners that would leak.
+		if (destroyed) return;
+		discordPollTimer = setInterval(pollDiscordAndModel, 5000);
+		modelsRefreshTimer = setInterval(() => refreshModels(false), 30000);
+		if (typeof window !== 'undefined') window.addEventListener('focus', onWindowFocus);
 	});
-	onDestroy(() => clearTimeout(pollTimer));
+	onDestroy(() => {
+		destroyed = true;
+		clearTimeout(pollTimer);
+		clearInterval(discordPollTimer);
+		clearInterval(modelsRefreshTimer);
+		if (typeof window !== 'undefined') window.removeEventListener('focus', onWindowFocus);
+	});
 </script>
 
 <svelte:window on:keydown={(e) => e.key === 'Escape' && overlayRunId && (overlayRunId = '')} />
@@ -1358,11 +1654,19 @@
 			modeLabel={hdrModeLabel}
 			model={displayModel}
 			isRunning={anyRunning}
+			repoLabel={session?.repo_display_path ?? null}
+			baseBranch={session?.base_branch ?? null}
+			workBranch={session?.work_branch ?? null}
+			headSha={session?.head_sha ?? null}
+			lifecycle={session?.lifecycle ?? ''}
+			preflight={session?.preflight ?? null}
 			panels={panelList}
 			{dockOpen}
+			{discordSession}
 			on:stop={cancelRun}
 			on:createPR={headerCreatePR}
 			on:openRun={headerOpenRun}
+			on:openDiscord={openDiscordSession}
 			on:togglePanel={(e) => togglePanel(e.detail.key)}
 			on:toggleDock={toggleDock}
 			on:settings={() => setCustomize(true)}
@@ -1413,9 +1717,11 @@
 							</div>
 						</div>
 						{#if t.status === 'running'}
-							<!-- live run while Harvis works -->
-							<div class="rounded-xl border border-white/8 overflow-hidden bg-[#0b101b]">
-								{#key t.id}<RunView wsId={t.id} mode="dock" title={t.task_brief} onOpenFull={() => headerOpenRunId(t.id)} />{/key}
+							<!-- live run while Harvis works: a lean Cursor-style step lineup (Editing
+							     hello.txt / Running: npm test …) that stays in the chat, not a blank
+							     canvas. Fixed height so the feed renders + scrolls; full run one click away. -->
+							<div class="h-80 rounded-xl border border-white/8 overflow-hidden bg-[#0b101b]">
+								{#key t.id}<RunView wsId={t.id} mode="stream" title={t.task_brief} onOpenFull={() => headerOpenRunId(t.id)} />{/key}
 							</div>
 						{:else}
 							<!-- assistant reply: "the AI's domain" — unbubbled, full-width (matches the main
@@ -1448,6 +1754,7 @@
 										{sessionId}
 										expanded={!!expandedRuns[t.id]}
 										onOpenRun={() => toggleRun(t.id)}
+										onCreatePr={() => (showPrDrawer = true)}
 									/>
 								{/if}
 								{#if expandedRuns[t.id]}
@@ -1681,6 +1988,26 @@
 						</div>
 					{/if}
 
+					<!-- Agents · Auto — the classifier proposes a fan-out; the user confirms here. -->
+					{#if orchestrateSizing}
+						<div class="flex items-center gap-2 mb-2 px-2.5 py-1.5 rounded-lg bg-amber-500/8 border border-amber-500/20 text-[11px] text-amber-300">
+							<svg class="size-3.5 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.2-8.5" stroke-linecap="round" /></svg>
+							{$i18n.t('Sizing the task…')}
+						</div>
+					{:else if orchestratePrompt}
+						<div class="flex items-start gap-2 mb-2 px-3 py-2 rounded-lg bg-violet-500/8 border border-violet-500/25">
+							<svg class="size-4 shrink-0 mt-0.5 text-violet-300" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="5" r="2" /><circle cx="5" cy="19" r="2" /><circle cx="19" cy="19" r="2" /><path d="M12 7v3m0 0-5 7m5-7 5 7" stroke-linecap="round" stroke-linejoin="round" /></svg>
+							<div class="min-w-0 flex-1">
+								<div class="text-xs font-medium text-gray-100">{$i18n.t('Split across ~{{n}} agents?', { n: orchestratePrompt.agents })}</div>
+								{#if orchestratePrompt.reason}<div class="text-[11px] text-gray-400 mt-0.5 leading-snug">{orchestratePrompt.reason}</div>{/if}
+							</div>
+							<div class="shrink-0 flex items-center gap-1.5">
+								<button type="button" class="text-[11px] px-2.5 py-1 rounded-md text-gray-400 hover:text-gray-200 transition" on:click={() => answerSplit(false)}>{$i18n.t('Keep single')}</button>
+								<button type="button" class="text-[11px] px-2.5 py-1 rounded-md border border-violet-500/30 bg-violet-500/15 text-violet-200 hover:bg-violet-500/25 transition" on:click={() => answerSplit(true)}>{$i18n.t('Split')}</button>
+							</div>
+						</div>
+					{/if}
+
 					<!-- input — clean single-line bar; subtle ⏎ (Enter sends, Shift+Enter = newline) -->
 					<div class="relative">
 						<textarea
@@ -1718,59 +2045,8 @@
 
 					<!-- toolbar -->
 					<div class="flex items-center gap-1.5 mt-2">
-						{#if showEngineSelector}
-							<!-- Phase E1/E2: external Build engine — Native (OpenClaw) + each ready engine. -->
-							<!-- Build-engine chip → dropdown. Defaults to your Integrations preference
-							     (Save preference on a card); this is the per-session override. -->
-							<div class="relative">
-								<button
-									type="button"
-									class="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border border-white/8 bg-white/4 hover:bg-white/8 transition {selectedEngine !==
-									'native'
-										? 'text-teal-300'
-										: 'text-gray-300'}"
-									title={$i18n.t('Build engine for this session')}
-									on:click={() => (showEngineMenu = !showEngineMenu)}
-								>
-									<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" class="size-3.5"><path d="M12 2 3 7v10l9 5 9-5V7l-9-5z" stroke-linejoin="round" /><path d="M3 7l9 5 9-5M12 12v10" stroke-linejoin="round" /></svg>
-									{selectedEngine === 'native' ? $i18n.t('Native') : ENGINE_LABELS[selectedEngine] || selectedEngine}
-									<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="size-3 text-gray-400"><path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 0 1 1.06.02L10 11.17l3.71-3.94a.75.75 0 1 1 1.08 1.04l-4.25 4.5a.75.75 0 0 1-1.08 0l-4.25-4.5a.75.75 0 0 1 .02-1.06z" clip-rule="evenodd" /></svg>
-								</button>
-								{#if showEngineMenu}
-									<div class="absolute bottom-full mb-1 left-0 z-30 w-56 rounded-xl bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 shadow-lg py-1 text-xs">
-										<div class="px-3 pt-1.5 pb-0.5 text-[10px] uppercase tracking-wide text-gray-400">
-											{$i18n.t('Build engine')}
-										</div>
-										<button
-											class="w-full flex items-center justify-between gap-2 px-3 py-1.5 hover:bg-gray-100 dark:hover:bg-gray-850"
-											on:click={() => {
-												selectedEngine = 'native';
-												showEngineMenu = false;
-											}}
-										>
-											<span>{$i18n.t('Native (OpenClaw)')}</span>
-											{#if selectedEngine === 'native'}<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="size-3.5 shrink-0 text-blue-500"><path d="M20 6 9 17l-5-5" stroke-linecap="round" stroke-linejoin="round" /></svg>{/if}
-										</button>
-										{#each readyEngineIds as eid}
-											<button
-												class="w-full flex items-center justify-between gap-2 px-3 py-1.5 hover:bg-gray-100 dark:hover:bg-gray-850"
-												on:click={() => {
-													selectedEngine = eid;
-													showEngineMenu = false;
-												}}
-											>
-												<span>{ENGINE_LABELS[eid] || eid}</span>
-												{#if selectedEngine === eid}<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="size-3.5 shrink-0 text-blue-500"><path d="M20 6 9 17l-5-5" stroke-linecap="round" stroke-linejoin="round" /></svg>{/if}
-											</button>
-										{/each}
-										<div class="border-t border-gray-100 dark:border-gray-800 my-1"></div>
-										<div class="px-3 py-1 text-[10px] text-gray-400">
-											{$i18n.t('Set a default in Integrations → Save preference.')}
-										</div>
-									</div>
-								{/if}
-							</div>
-						{/if}
+						<!-- Engine pill removed — the Build engine now follows the model dropdown
+						     (see the selectedEngine reactive); the model IS the single control. -->
 						{#if hermesNeedsModel}
 							<span class="text-[11px] text-amber-400/80"
 								>{$i18n.t('Pull a Hermes model to enable the Hermes engine.')}</span
@@ -1864,15 +2140,22 @@
 							{/if}
 						</div>
 
-						<!-- Orchestrate = fan this turn out to N task-delegated sub-agents (the planner
-						     picks 3–10). The multi-agent run shows live in Background tasks. -->
+						<!-- Agents — 3-state: Off (single agent) → Auto (classifier proposes, you
+						     confirm) → On (always fan out to N planner-picked sub-agents). Off is
+						     the default so a swarm is never a surprise; Auto lets the AI ask. -->
 						<button
 							type="button"
-							class="inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-full border transition hover:opacity-90 {orchestrate
+							class="inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-full border transition hover:opacity-90 {agentsMode === 'on'
 								? 'border-violet-500/30 bg-violet-500/12 text-violet-300'
-								: 'border-white/8 bg-white/4 text-gray-400 hover:text-gray-200'}"
-							title={$i18n.t('Orchestrate — fan this task out to multiple task-delegated agents')}
-							on:click={() => (orchestrate = !orchestrate)}
+								: agentsMode === 'auto'
+									? 'border-amber-500/30 bg-amber-500/12 text-amber-300'
+									: 'border-white/8 bg-white/4 text-gray-400 hover:text-gray-200'}"
+							title={agentsMode === 'auto'
+								? $i18n.t('Agents · Auto — Harvis proposes splitting multi-part tasks; you confirm')
+								: agentsMode === 'on'
+									? $i18n.t('Agents · On — always fan this task out to multiple agents')
+									: $i18n.t('Agents — click to cycle Off → Auto → On')}
+							on:click={cycleAgentsMode}
 						>
 							<svg
 								xmlns="http://www.w3.org/2000/svg"
@@ -1887,7 +2170,7 @@
 									r="2"
 								/><path d="M12 7v3m0 0-5 7m5-7 5 7" stroke-linecap="round" stroke-linejoin="round" /></svg
 							>
-							{$i18n.t('Agents')}
+							{$i18n.t('Agents')}{#if agentsMode === 'auto'}<span class="opacity-80">· {$i18n.t('Auto')}</span>{:else if agentsMode === 'on'}<span class="opacity-80">· {$i18n.t('On')}</span>{/if}
 						</button>
 						{/if}
 
@@ -1974,23 +2257,25 @@
 						<div class="relative">
 							<button
 								class="inline-flex items-center gap-1 text-[11px] px-2 py-1 rounded-lg border border-white/8 bg-white/4 text-gray-300 hover:bg-white/8 transition max-w-[10rem]"
-								on:click={() => (showModelMenu = !showModelMenu)}
+								on:click={toggleModelMenu}
 								title={$i18n.t('Model')}
 							>
 								<span class="truncate">{displayModel}</span>
 								<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="size-3 shrink-0"><path d="M6 9l6 6 6-6" stroke-linecap="round" /></svg>
 							</button>
 							{#if showModelMenu}
-								<div class="absolute bottom-full right-0 mb-1 z-40 w-60 max-h-64 overflow-y-auto rounded-xl bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 shadow-xl py-1 text-xs">
-									<div class="px-3 pt-1.5 pb-1 text-[10px] uppercase tracking-wider text-gray-400">{$i18n.t('Model')}</div>
+								<div class="absolute bottom-full right-0 mb-1 z-40 w-64 max-h-72 overflow-y-auto rounded-xl bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 shadow-xl py-1 text-xs">
 									{#if !modelOptions.length}
 										<div class="px-3 py-1.5 text-gray-400">{$i18n.t('No models available.')}</div>
 									{/if}
-									{#each modelOptions as m}
-										<button class="w-full flex items-center justify-between gap-2 text-left px-3 py-1.5 hover:bg-gray-100 dark:hover:bg-gray-850" on:click={() => pickModel(m.id)}>
-											<span class="truncate">{m.name || m.id}</span>
-											{#if displayModel === m.id}<span class="shrink-0 text-blue-500">✓</span>{/if}
-										</button>
+									{#each modelGroups as g}
+										<div class="px-3 pt-1.5 pb-1 text-[10px] uppercase tracking-wider text-gray-400">{g.label}</div>
+										{#each g.models as m}
+											<button class="w-full flex items-center justify-between gap-2 text-left px-3 py-1.5 hover:bg-gray-100 dark:hover:bg-gray-850" on:click={() => pickModel(m.id)}>
+												<span class="truncate">{m.name || m.id}</span>
+												{#if displayModel === m.id}<span class="shrink-0 text-blue-500">✓</span>{/if}
+											</button>
+										{/each}
 									{/each}
 								</div>
 							{/if}
@@ -2064,7 +2349,12 @@
 									{#each dockTabs as t (t.key)}
 										<button
 											type="button"
-											class="relative px-3 py-2 text-[11px] font-medium transition {dockTab === t.key
+											draggable="true"
+											on:dragstart={() => (dragKey = t.key)}
+											on:dragover|preventDefault
+											on:drop|preventDefault={() => onTabDrop(t.key)}
+											class="relative px-3 py-2 text-[11px] font-medium transition cursor-grab active:cursor-grabbing {dockTab ===
+											t.key
 												? 'text-gray-100'
 												: 'text-gray-500 hover:text-gray-300'}"
 											on:click={() => setDockTab(t.key)}
@@ -2110,7 +2400,7 @@
 												</div>
 												{#if showFinished}
 													{#each finishedTasks as t (t.id)}
-														<BackgroundTaskCard run={t} on:openRun={(e) => headerOpenRunId(e.detail.id)} on:viewLogs={(e) => viewLogs(e.detail.id, e.detail.agentTab)} />
+														<BackgroundTaskCard run={t} on:openRun={(e) => headerOpenRunId(e.detail.id)} on:viewLogs={(e) => viewLogs(e.detail.id, e.detail.agentTab)} on:retried={() => loadSession()} />
 													{/each}
 												{/if}
 											{/if}
@@ -2129,15 +2419,19 @@
 									</div>
 								{:else if dockTab === 'tr'}
 									<div class="flex-1 min-h-0">
-										<WorkspaceFileRail bind:tab={fileTab} {changedFiles} {artifacts} {selectedFile} on:select={(e) => onFileSelect(e.detail.path)} on:selectArtifact={(e) => onArtifactSelect(e.detail.id)} />
+										<WorkspaceFileRail bind:tab={fileTab} {changedFiles} {artifacts} {selectedFile} sessionFiles={sessionFilePaths} {sessionFilesLoading} on:select={(e) => onFileSelect(e.detail.path)} on:selectArtifact={(e) => onArtifactSelect(e.detail.id)} />
 									</div>
 								{:else if dockTab === 'sh'}
 									<div class="flex-1 min-h-0">
 										<ShellTab {sessionId} />
 									</div>
+								{:else if dockTab === 'bw'}
+									<div class="flex-1 min-h-0">
+										<BrowserPanel />
+									</div>
 								{:else}
 									<div class="flex-1 min-h-0">
-										<WorkspaceMainPanel showChat={false} bind:tab={mainTab} {selectedFile} diffLines={selectedFileObj ? selectedFileObj.lines : []} hasRepo={!!sessionId} hasChanges={changedFiles.length > 0} on:refresh={refreshFiles}>
+										<WorkspaceMainPanel showChat={false} bind:tab={mainTab} {selectedFile} diffLines={selectedFileObj ? selectedFileObj.lines : []} {fileContent} {fileLoading} {fileBinary} {fileTruncated} hasRepo={!!sessionId} hasChanges={changedFiles.length > 0} on:refresh={refreshFiles}>
 											<div slot="logs" class="h-full overflow-auto">
 												{#if logsRunId || latestTurnId}
 													{#key logsRunId || latestTurnId}<RunView wsId={logsRunId || latestTurnId} mode="dock" onOpenFull={() => headerOpenRunId(logsRunId || latestTurnId)} />{/key}
@@ -2234,6 +2528,12 @@
 								: 'text-gray-400'}">{pendingAction.risk}</span
 						>
 					</div>
+					{#if pendingAction.reason}
+						<p class="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
+							<span class="text-gray-400 dark:text-gray-500">{$i18n.t('Why')}:</span>
+							{pendingAction.reason}
+						</p>
+					{/if}
 					{#if pendingAction.args}
 						<pre
 							class="mt-1 max-h-40 overflow-auto rounded-lg bg-gray-50 dark:bg-gray-850 p-2 text-[11px] font-mono whitespace-pre-wrap">{JSON.stringify(
@@ -2248,11 +2548,35 @@
 						{$i18n.t('This can modify or destroy real files in your repo — review carefully.')}
 					</p>
 				{/if}
+				{#if pendingQueue.length > 1}
+					<div class="rounded-lg border border-gray-200 dark:border-gray-800 divide-y divide-gray-100 dark:divide-gray-850">
+						<div class="px-2 py-1 text-[10px] uppercase tracking-wide text-gray-400">
+							{$i18n.t('Waiting behind this one')} · {pendingQueue.length - 1}
+						</div>
+						{#each pendingQueue.slice(1) as q (q.action_id)}
+							<div class="flex items-center gap-2 px-2 py-1 text-[11px] text-gray-500 dark:text-gray-400">
+								<code class="font-mono truncate">{q.tool || $i18n.t('action')}</code>
+								<span
+									class="ml-auto shrink-0 text-[10px] uppercase tracking-wide {q.risk === 'high'
+										? 'text-red-500'
+										: 'text-gray-400'}">{q.risk || ''}</span
+								>
+							</div>
+						{/each}
+					</div>
+				{/if}
 				<div class="flex items-center justify-end gap-2">
 					<button
 						class="text-xs px-3 py-1.5 rounded-lg text-gray-500 hover:text-gray-700 dark:hover:text-gray-200"
 						disabled={approvalBusy}
 						on:click={() => resolvePending(false)}>{$i18n.t('Deny')}</button
+					>
+					<button
+						class="text-xs px-3 py-1.5 rounded-lg border border-gray-200 dark:border-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-850 disabled:opacity-50 transition"
+						disabled={approvalBusy}
+						title={$i18n.t('Approve and stop asking for matching actions this session')}
+						on:click={() => resolvePending(true, 'session')}
+						>{$i18n.t('Approve for this session')}</button
 					>
 					<button
 						class="text-xs px-3 py-1.5 rounded-lg text-white disabled:opacity-50 transition {pendingAction.risk ===
@@ -2270,37 +2594,77 @@
 
 	<!-- Customize IN Build — right drawer hosting the Agent Studio Customize surface
 	     (dock mode). Opened by the header ⚙; URL-synced via ?panel=customize. -->
+	<PrDrawer
+		bind:show={showPrDrawer}
+		{sessionId}
+		{session}
+		diff={sessionDiff}
+		hasGithub={sessionHasGithub}
+	/>
+
 	{#if showCustomize}
 		<button
-			class="fixed inset-0 z-40 bg-black/40 cursor-default"
+			class="fixed inset-0 z-40 bg-black/50 cursor-default"
 			aria-label={$i18n.t('Close')}
 			on:click={() => setCustomize(false)}
 		></button>
-		<aside
-			class="fixed right-0 top-0 bottom-0 z-50 w-full max-w-2xl bg-white dark:bg-gray-950 border-l border-gray-100 dark:border-gray-850 shadow-2xl flex flex-col"
-		>
-			<div class="shrink-0 flex items-center gap-2 px-4 py-3 border-b border-gray-100 dark:border-gray-850">
-				<div class="min-w-0">
-					<div class="text-sm font-semibold text-gray-800 dark:text-gray-100">{$i18n.t('Customize')}</div>
-					<div class="text-[11px] text-gray-400">{$i18n.t('Models, presets, skills & MCP — without leaving Build')}</div>
+		<!-- Customize IN Build — CENTERED MODAL (popup in the middle), not a right drawer. -->
+		<div class="fixed inset-0 z-50 flex items-center justify-center p-4 pointer-events-none">
+			<div
+				class="pointer-events-auto w-full max-w-3xl max-h-[85vh] rounded-2xl bg-white dark:bg-gray-950 border border-gray-100 dark:border-gray-850 shadow-2xl flex flex-col overflow-hidden"
+			>
+				<div class="shrink-0 flex items-center gap-2 px-4 py-3 border-b border-gray-100 dark:border-gray-850">
+					<div class="min-w-0">
+						<div class="text-sm font-semibold text-gray-800 dark:text-gray-100">{$i18n.t('Customize')}</div>
+						<div class="text-[11px] text-gray-400">{$i18n.t('Models, presets, skills & MCP — without leaving Build')}</div>
+					</div>
+					<a
+						class="ml-auto shrink-0 text-[11px] text-gray-400 hover:text-blue-500 transition"
+						href="/harvis/agent-studio/customize"
+						title={$i18n.t('Open as a full page')}>⤢ {$i18n.t('Full page')}</a
+					>
+					<button
+						class="shrink-0 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 p-1"
+						aria-label={$i18n.t('Close')}
+						on:click={() => setCustomize(false)}
+					>
+						<svg viewBox="0 0 20 20" fill="currentColor" class="size-4"><path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" /></svg>
+					</button>
 				</div>
-				<a
-					class="ml-auto shrink-0 text-[11px] text-gray-400 hover:text-blue-500 transition"
-					href="/harvis/agent-studio/customize"
-					title={$i18n.t('Open as a full page')}>⤢ {$i18n.t('Full page')}</a
-				>
+				<div class="flex-1 min-h-0 overflow-y-auto px-4 py-3">
+					<Customize mode="dock" />
+				</div>
+			</div>
+		</div>
+	{/if}
+
+	<!-- Routines IN Build — FULL-PAGE inside Build (fills the content area to the right of
+	     the main sidebar, not a right drawer). ?panel=routines. -->
+	{#if showRoutines}
+		<div
+			class="fixed top-0 right-0 bottom-0 left-0 z-50 flex flex-col bg-white dark:bg-[#080c16] {$showSidebar
+				? 'md:left-[var(--sidebar-width)]'
+				: ''}"
+		>
+			<div class="shrink-0 flex items-center gap-2 px-5 py-3 border-b border-gray-100 dark:border-white/8">
+				<div class="min-w-0">
+					<div class="text-sm font-semibold text-gray-800 dark:text-gray-100">{$i18n.t('Routines')}</div>
+					<div class="text-[11px] text-gray-400">{$i18n.t('Schedule agent tasks — without leaving Build')}</div>
+				</div>
 				<button
-					class="shrink-0 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 p-1"
+					class="ml-auto shrink-0 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 p-1"
 					aria-label={$i18n.t('Close')}
-					on:click={() => setCustomize(false)}
+					on:click={() => setRoutines(false)}
 				>
 					<svg viewBox="0 0 20 20" fill="currentColor" class="size-4"><path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" /></svg>
 				</button>
 			</div>
-			<div class="flex-1 min-h-0 overflow-y-auto px-4 py-3">
-				<Customize mode="dock" />
+			<div class="flex-1 min-h-0 overflow-y-auto px-5 py-4">
+				<div class="max-w-5xl mx-auto w-full">
+					<Automations mode="dock" embed context="coding" />
+				</div>
 			</div>
-		</aside>
+		</div>
 	{/if}
 
 	<!-- GitHub: connect → pick a repo (or clone a public repo by name) → clone-mode session. -->

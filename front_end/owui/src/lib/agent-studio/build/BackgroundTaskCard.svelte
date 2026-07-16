@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { createEventDispatcher, getContext, onDestroy } from 'svelte';
 	import RunTable from '$lib/agent-studio/RunTable.svelte';
+	import { retryWorkspaceJob } from '$lib/apis/agent-runs';
+	import { createWorkspaceStream } from '$lib/apis/streaming/workspace-stream';
 	import {
 		statusDot,
 		statusLabel,
@@ -34,6 +36,96 @@
 	$: agentCount = agentCountOf(run);
 	$: prompt = (run?.task_brief || run?.task || '').toString().trim();
 
+	// ── Phase 5: persisted background-job fields (workspace_jobs) — all optional.
+	// The record may carry command/exit_code/timeout_secs/log_tail directly; when it
+	// doesn't, exit_code + log tail are ROLLED UP once from the run's stored
+	// terminal_output SSE events (replay-only — finished runs end the stream at the
+	// terminal event, so this is a bounded fetch, done lazily on expand). ──
+	$: jobCommand = (run?.command || '').toString().trim();
+	$: timeoutSecs = run?.timeout_secs != null ? Number(run.timeout_secs) : null;
+
+	let rolledExit: number | null = null;
+	let rolledTail: string[] = [];
+	let _rolledFor = ''; // run id the rollup ran for (once per run)
+	let _rollCtrl: AbortController | null = null;
+	$: exitCode = run?.exit_code != null ? Number(run.exit_code) : rolledExit;
+	$: tailLines = (() => {
+		const t = run?.log_tail;
+		if (Array.isArray(t)) return t.slice(-40);
+		if (typeof t === 'string' && t) return t.split('\n').slice(-40);
+		return rolledTail;
+	})();
+
+	$: if (
+		expanded &&
+		!isRunning &&
+		run?.id &&
+		_rolledFor !== run.id &&
+		(run?.exit_code == null || run?.log_tail == null)
+	) {
+		_rolledFor = run.id;
+		rollUpFromEvents(run.id);
+	}
+	async function rollUpFromEvents(runId: string) {
+		if (_rollCtrl) {
+			try { _rollCtrl.abort(); } catch (_) {}
+		}
+		const ctrl = new AbortController();
+		_rollCtrl = ctrl;
+		const lines: string[] = [];
+		let exit: number | null = null;
+		try {
+			for await (const ev of createWorkspaceStream(runId, localStorage.token, ctrl.signal)) {
+				if (ctrl.signal.aborted || runId !== run?.id) return;
+				if (ev.type === 'terminal_output') {
+					// harvis_exec emits output lines under `text`; the vibecode runner under `content`.
+					const line = ev.content ?? (ev as any).text;
+					if (line) lines.push(...String(line).replace(/\n$/, '').split('\n'));
+					if (ev.exit_code != null) exit = Number(ev.exit_code);
+				} else if (ev.type === 'tool_result') {
+					// exit codes are persisted on tool_result under output.exit_code (not terminal_output).
+					const ec = (ev as any).output?.exit_code ?? (ev as any).exit_code;
+					if (ec != null) exit = Number(ec);
+				} else {
+					continue;
+				}
+			}
+		} catch (_) {
+			/* best-effort — card just omits the tail */
+		}
+		if (ctrl.signal.aborted || runId !== run?.id) return;
+		rolledTail = lines.slice(-40);
+		rolledExit = exit;
+	}
+	onDestroy(() => {
+		if (_rollCtrl) {
+			try { _rollCtrl.abort(); } catch (_) {}
+		}
+	});
+
+	// A test-style job gets a pass/fail summary line (exit 0 = passed).
+	$: isTestJob =
+		/(^|\s|&&|;)\s*(pytest|jest|vitest|go\s+test|cargo\s+test|(npm|pnpm|yarn|bun)\s+(run\s+)?test|make\s+test|run_tests)\b/i.test(
+			jobCommand
+		) || run?.tool === 'run_tests';
+
+	let showTail = false; // log tail collapsed by default
+	let retrying = false;
+	// harvis_jobs statuses: 'exited' (nonzero exit), 'reaped' (timed out), 'killed' (stopped) —
+	// plus the run-style done/error/failed/cancelled. Retry any non-running terminal state.
+	const canRetry = (s: string) =>
+		['done', 'error', 'failed', 'cancelled', 'exited', 'reaped', 'killed'].includes(s);
+	async function retry() {
+		if (retrying || !run?.id) return;
+		retrying = true;
+		try {
+			const res = await retryWorkspaceJob(run.id);
+			if (res?.job_id) dispatch('retried', { id: run.id, job_id: res.job_id });
+		} finally {
+			retrying = false;
+		}
+	}
+
 	// Live elapsed ticker for running tasks; finished tasks use the stored duration.
 	let nowTick = Date.now();
 	let timer: any = null;
@@ -46,8 +138,10 @@
 		}
 	}
 	onDestroy(() => timer && clearInterval(timer));
-	$: elapsedMs =
-		!isRunning && run?.duration_ms != null
+	$: elapsedMs = jobCommand && typeof run?.started_at === 'number'
+		? // job records (/api/harvis/jobs) carry unix-SECOND timestamps
+			((run?.finished_at ?? nowTick / 1000) - run.started_at) * 1000
+		: !isRunning && run?.duration_ms != null
 			? run.duration_ms
 			: run?.started_at
 				? nowTick - new Date(run.started_at).getTime()
@@ -72,6 +166,13 @@
 				>{humanizeRunTitle(run)}</span
 			>
 			{#if elapsed}<span class="text-[11px] text-gray-500 tabular-nums shrink-0">{elapsed}</span>{/if}
+			{#if !isRunning && exitCode != null}
+				<span
+					class="shrink-0 text-[10px] px-1.5 py-0.5 rounded tabular-nums {exitCode === 0
+						? 'text-emerald-400 bg-emerald-500/10'
+						: 'text-red-400 bg-red-500/10'}">exit {exitCode}</span
+				>
+			{/if}
 			{#if isRunning}
 				<button
 					class="shrink-0 text-gray-500 hover:text-red-400 transition"
@@ -106,6 +207,42 @@
 					{prompt}
 				</p>
 			{/if}
+			{#if jobCommand}
+				<!-- Persisted background-job surface: command · timeout · pass/fail -->
+				<div class="flex items-center gap-1.5 min-w-0">
+					<code
+						class="flex-1 truncate font-mono text-[11px] text-gray-300 bg-white/4 rounded px-1.5 py-1"
+						title={jobCommand}>{jobCommand}</code
+					>
+					{#if timeoutSecs != null}
+						<span class="shrink-0 text-[10px] text-gray-500 tabular-nums"
+							>{$i18n.t('timeout')} {timeoutSecs}s</span
+						>
+					{/if}
+				</div>
+			{/if}
+			{#if isTestJob && !isRunning && exitCode != null}
+				<div class="text-[11px] font-medium {exitCode === 0 ? 'text-emerald-400' : 'text-red-400'}">
+					{exitCode === 0
+						? `✓ ${$i18n.t('Tests passed')}`
+						: `✗ ${$i18n.t('Tests failed')} (exit ${exitCode})`}
+				</div>
+			{/if}
+			{#if tailLines.length}
+				<div>
+					<button
+						class="text-[11px] text-gray-500 hover:text-gray-200 transition"
+						on:click={() => (showTail = !showTail)}
+						>{showTail ? $i18n.t('Hide log tail') : $i18n.t('Show log tail')} ({tailLines.length})</button
+					>
+					{#if showTail}
+						<pre
+							class="mt-1 max-h-48 overflow-auto rounded bg-black/30 px-2 py-1.5 font-mono text-[10.5px] leading-snug text-gray-400 whitespace-pre-wrap break-all">{tailLines.join(
+								'\n'
+							)}</pre>
+					{/if}
+				</div>
+			{/if}
 			<!-- Agents + tokens/tools/time (reused RunTable; folds phases internally).
 			     Clicking an agent row opens the inspector focused on THAT agent's tab. -->
 			<RunTable
@@ -122,6 +259,13 @@
 					class="text-[11px] px-2 py-1 text-gray-300 hover:bg-white/4 transition"
 					on:click={() => dispatch('viewLogs', { id: run.id })}>{$i18n.t('View logs')}</button
 				>
+				{#if !isRunning && canRetry(status) && jobCommand}
+					<button
+						class="text-[11px] px-2 py-1 text-gray-300 hover:bg-white/4 transition disabled:opacity-50"
+						disabled={retrying}
+						on:click={retry}>{retrying ? $i18n.t('Retrying…') : $i18n.t('Retry')}</button
+					>
+				{/if}
 				{#if isRunning}
 					<button
 						class="text-[11px] px-2 py-1 text-red-400 hover:bg-white/4 transition"

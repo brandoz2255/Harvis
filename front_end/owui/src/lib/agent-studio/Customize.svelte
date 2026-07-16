@@ -1,6 +1,6 @@
 <script lang="ts">
 	// Customize — Agent Studio surface for routing, presets, sub-agents, the
-	// orchestration pool, and the shared Skills / Plugins / Connectors panels.
+	// orchestration pool, and the shared Skills / Connectors panels.
 	// The panels live in ./customize/* so the Settings modal ("Customize" group)
 	// and this full page mount ONE implementation each — no duplicated logic.
 	import { getContext, onMount } from 'svelte';
@@ -11,7 +11,6 @@
 	import SubAgents from './customize/SubAgents.svelte';
 	// Shared Customize panels (also mounted by SettingsModal's Customize group).
 	import SkillsPanel from './customize/SkillsPanel.svelte';
-	import PluginsPanel from './customize/PluginsPanel.svelte';
 	import ConnectorsPanel from './customize/ConnectorsPanel.svelte';
 
 	export let mode: 'full' | 'dock' = 'full';
@@ -87,7 +86,6 @@
 			{ id: 'sec-subagents', label: $i18n.t('Sub-agents') },
 			{ id: 'sec-models', label: $i18n.t('Orchestration') },
 			{ id: 'sec-skills', label: $i18n.t('Skills') },
-			{ id: 'sec-tools', label: $i18n.t('Plugins') },
 			{ id: 'sec-mcp', label: $i18n.t('Connectors') }
 		] as chip (chip.id)}
 			<button
@@ -195,11 +193,6 @@
 	<!-- Skills (shared panel — same component as Settings → Customize → Skills) -->
 	<section id="sec-skills" class="scroll-mt-12 rounded-2xl border border-gray-100 dark:border-gray-850 bg-gray-50 dark:bg-gray-900 p-5">
 		<SkillsPanel {token} />
-	</section>
-
-	<!-- Plugins (read-only built-in tool catalog; shared panel) -->
-	<section id="sec-tools" class="scroll-mt-12 rounded-2xl border border-gray-100 dark:border-gray-850 bg-gray-50 dark:bg-gray-900 p-5">
-		<PluginsPanel />
 	</section>
 
 	<!-- Connectors (MCP under the hood; shared panel) -->

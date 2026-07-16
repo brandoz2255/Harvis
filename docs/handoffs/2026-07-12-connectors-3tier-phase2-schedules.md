@@ -63,6 +63,14 @@ Dev Console; chat sandbox-file previews; croniter fix. See memory index + prior 
   never repo content).
 
 ## Known follow-ups (ranked)
+0. **TOMORROW — adjust the UI for connectors** (user flagged end of 2026-07-12 session, no detail
+   given yet — ask what specifically before touching code). Candidates already visible from tonight's
+   build to raise as options: Tier-1 submenu has no logos/empty-state CTA (see #2 below); the Tier-2
+   Manage table is dense/unstyled for a first pass (row spacing, sticky header, maybe collapse the
+   POPULAR row once >0 connectors exist); Tier-3 registry cards are plain text rows vs the catalog's
+   fuller cards (no logo variety — every registry hit uses the same generic mark); the sync banner
+   "N connector(s) connected — not yet live in OpenClaw" competes visually with the new registry
+   section. Get the user's actual complaint/reference first — don't guess a direction.
 1. **Registry connectors that need auth headers**: many registry remotes (e.g. Smithery) require
    `Authorization: Bearer <key>` at use time; the BYO custom-url flow has no header field yet, so an
    added registry connector can save but fail at connect. Add an optional headers/secret field to

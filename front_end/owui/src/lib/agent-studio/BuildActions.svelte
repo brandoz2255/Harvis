@@ -6,7 +6,6 @@
 	import {
 		getRunRepo,
 		getRunArtifacts,
-		createPrForVibecodeSession,
 		downloadArtifactFile,
 		type RunRepo,
 		type ArtifactMeta
@@ -19,17 +18,15 @@
 	export let sessionId = '';
 	export let expanded = false; // is "View run details" open
 	export let onOpenRun: () => void = () => {};
+	// Phase 4: Create-PR opens the shared PrDrawer (title/body/base + checklist) —
+	// this row no longer hosts its own inline title-only form.
+	export let onCreatePr: () => void = () => {};
 
 	let repo: RunRepo | null = null;
 	let fileArtifacts: ArtifactMeta[] = [];
 	let hasDiff = false;
 	let loaded = false;
 
-	let prOpen = false;
-	let prTitle = '';
-	let prBusy = false;
-	let prError = '';
-	let prResult: { pr_url?: string; pr_number?: number } | null = null;
 	let downloading = false;
 
 	const load = async () => {
@@ -51,19 +48,6 @@
 
 	$: canPr = !!(repo?.has_github && hasDiff && sessionId);
 	$: canDownload = fileArtifacts.length > 0;
-
-	const doPr = async () => {
-		prBusy = true;
-		prError = '';
-		try {
-			prResult = await createPrForVibecodeSession(sessionId, { title: prTitle || undefined });
-			prOpen = false;
-		} catch (e: any) {
-			prError = String(e?.message ?? e);
-		} finally {
-			prBusy = false;
-		}
-	};
 
 	const doDownload = async () => {
 		downloading = true;
@@ -90,7 +74,7 @@
 	</button>
 
 	{#if loaded && canPr}
-		<button type="button" class={BTN} on:click={() => (prOpen = !prOpen)}>
+		<button type="button" class={BTN} on:click={onCreatePr}>
 			<svg class="size-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/></svg>
 			{t('Create PR')}
 		</button>
@@ -104,26 +88,5 @@
 	{/if}
 </div>
 
-{#if prOpen}
-	<div class="mt-1.5 rounded-md border border-white/8 bg-white/[0.02] p-2 space-y-1.5">
-		<input
-			class="w-full text-xs rounded-md bg-white/5 border-0 px-2 py-1.5 text-gray-200 outline-none placeholder:text-gray-500"
-			placeholder={t('PR title (optional)')}
-			bind:value={prTitle}
-		/>
-		<div class="flex items-center gap-1.5 flex-wrap">
-			<button type="button" class="text-[11px] px-2.5 py-1 rounded-md bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-50 transition" disabled={prBusy} on:click={doPr}>
-				{prBusy ? t('Opening…') : t('Open pull request')}
-			</button>
-			<button type="button" class="text-[11px] px-2 py-1 rounded-md text-gray-400 hover:bg-white/5 transition" on:click={() => (prOpen = false)}>{t('Cancel')}</button>
-			<span class="text-[10px] text-gray-500">{t('Pushes a branch + opens a PR — refuses main/master.')}</span>
-		</div>
-		{#if prError}<div class="text-[11px] text-red-400">{prError}</div>{/if}
-	</div>
-{/if}
-
-{#if prResult?.pr_url}
-	<a href={prResult.pr_url} target="_blank" rel="noopener noreferrer" class="inline-block mt-1.5 text-[11px] text-blue-400 hover:underline">
-		{t('Pull request opened')} #{prResult.pr_number} →
-	</a>
-{/if}
+<!-- Phase 4: the inline PR form was replaced by the consolidated PrDrawer (opened via
+     the onCreatePr prop → the page's PrDrawer). The old prOpen/prTitle/doPr script was removed. -->

@@ -46,6 +46,10 @@ export type WorkspaceEvent = {
 	result_count?: number;
 	results?: { title?: string; domain?: string; url?: string; favicon?: string; snippet?: string }[];
 	collapsed_by_default?: boolean;
+	// agent_message — {role, label, content, run_id}: one agent-to-agent CONVERSATION post
+	// (coder ↔ reviewer review loop). Distinct from final_message — it's the agents talking,
+	// not the run's answer. Reuses `label`, `content`, `run_id` above.
+	role?: 'coder' | 'reviewer' | string;
 	// final_message — {content} (reuses `content` above)
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	[key: string]: any;

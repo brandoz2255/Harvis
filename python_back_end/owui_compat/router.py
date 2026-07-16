@@ -163,13 +163,40 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
 
     # ── models ────────────────────────────────────────────────────────────
     async def _owui_models(request: Request, user):
+        # Realtime refresh: the frontend appends ?refresh=true when it wants a genuinely
+        # current list (e.g. the Build model picker on menu-open / window focus). Bust BOTH
+        # in-process model caches so a just-added model surfaces immediately:
+        #   • native (main._models_cache, 60s TTL) — Ollama/llama-server/vLLM/desktop/external.
+        #   • cloud (cloud_chat._MODELS_CACHE, 300s TTL) — the per-user Claude /v1/models catalog,
+        #     which cloud_chat_model_entries() below serves from cache even though it's called live.
+        # Hermes (hermes_chat_model_entry) has no TTL cache, so it's always current.
+        if (request.query_params.get("refresh") or "").strip().lower() in ("1", "true", "yes"):
+            try:
+                import sys
+                _mm = sys.modules.get(getattr(deps.list_models, "__module__", ""))
+                if _mm is not None and hasattr(_mm, "_models_cache"):
+                    _mm._models_cache = {"data": None, "timestamp": 0}
+                else:
+                    logger.warning(
+                        "owui /api/models refresh: could not locate native _models_cache to bust"
+                    )
+            except Exception:
+                logger.warning("owui /api/models refresh: native cache reset failed", exc_info=True)
+            try:
+                from .cloud_chat import invalidate_models_cache
+                invalidate_models_cache(getattr(user, "id", None))
+            except Exception:
+                logger.warning("owui /api/models refresh: cloud cache reset failed", exc_info=True)
         native = await deps.list_models(request, user)
         data = harvis_models_to_owui(native)
-        # Phase E4B: surface the Hermes-Agent chat model when its engine flag is on AND the
-        # sidecar API server is reachable (fail-closed). Additive — never replaces a model.
+        # Phase E4B: surface the Hermes-Agent chat model when its engine flag is on AND a Hermes
+        # is reachable — this user's verified EXTERNAL (BYO) or the local sidecar (fail-closed).
+        # Additive — never replaces a model.
         try:
             from .hermes_chat import hermes_chat_model_entry
-            _hm = await hermes_chat_model_entry()
+            _hm = await hermes_chat_model_entry(
+                getattr(request.app.state, "pg_pool", None), getattr(user, "id", None)
+            )
             if _hm and not any((m or {}).get("id") == _hm["id"] for m in data):
                 data.append(_hm)
         except Exception:

@@ -1,10 +1,7 @@
 <script lang="ts">
 	import { onDestroy, getContext } from 'svelte';
-	import {
-		createWorkspaceStream,
-		WORKSPACE_TERMINAL,
-		type WorkspaceEvent
-	} from '$lib/apis/streaming/workspace-stream';
+	import { type WorkspaceEvent } from '$lib/apis/streaming/workspace-stream';
+	import { subscribeRun } from '$lib/apis/streaming/runStream';
 	import WorkflowCanvas from './workflow/WorkflowCanvas.svelte';
 	import ThoughtStream from './workflow/ThoughtStream.svelte';
 	import RunArtifacts from './RunArtifacts.svelte';
@@ -19,57 +16,36 @@
 
 	let events: WorkspaceEvent[] = [];
 	let phase: 'connecting' | 'running' | 'done' | 'error' | 'cancelled' = 'connecting';
-	let controller: AbortController | null = null;
+	let _sub: ReturnType<typeof subscribeRun> | null = null;
+	let _unsubStore: (() => void) | null = null;
 	let activeId = '';
 	$: running = phase === 'connecting' || phase === 'running';
 
-	const consume = async (id: string) => {
-		controller = new AbortController();
-		let failed = 0;
-		// Resume across dropped SSE connections: the backend replays the full DB
-		// history on each (re)connect, so the view PERSISTS instead of dying when
-		// the stream drops mid-run. A clean `stream_end` stops the loop.
-		while (activeId === id && !['done', 'error', 'cancelled'].includes(phase)) {
-			let cleanEnd = false;
-			let gotAny = false;
-			try {
-				for await (const evt of createWorkspaceStream(id, localStorage.token, controller.signal)) {
-					if (evt.type === 'stream_end') {
-						cleanEnd = true;
-						break;
-					}
-					gotAny = true;
-					events = [...events, evt];
-					if (evt.type === 'done') phase = 'done';
-					else if (evt.type === 'error') phase = 'error';
-					else if (evt.type === 'cancelled') phase = 'cancelled';
-					else if (phase === 'connecting') phase = 'running';
-					if (WORKSPACE_TERMINAL.has(evt.type)) break;
-				}
-			} catch (e: any) {
-				if (e?.name === 'AbortError') return;
-			}
-			if (cleanEnd || ['done', 'error', 'cancelled'].includes(phase) || activeId !== id) break;
-			failed = gotAny ? 0 : failed + 1;
-			if (failed > 20) break;
-			// Reconnect: replay rebuilds the full state, so clear to avoid dupes.
-			events = [];
-			phase = 'connecting';
-			await new Promise((r) => setTimeout(r, 1500));
-		}
-	};
-
-	// (Re)start whenever the docked run changes — same instance switches runs.
+	// (Re)start whenever the docked run changes — via the SHARED, throttled per-run stream store
+	// so this dock shares one connection + one batched pipeline with every other view of the run.
 	const start = (id: string) => {
-		controller?.abort();
+		_unsubStore?.();
+		_unsubStore = null;
+		_sub?.unsubscribe();
+		_sub = null;
 		events = [];
 		phase = 'connecting';
 		activeId = id;
-		if (id) consume(id);
-		else phase = 'error';
+		if (id) {
+			_sub = subscribeRun(id);
+			_unsubStore = _sub.store.subscribe((s) => {
+				events = s.events;
+				phase = s.phase;
+			});
+		} else {
+			phase = 'error';
+		}
 	};
 	$: if (wsId !== activeId) start(wsId);
-	onDestroy(() => controller?.abort());
+	onDestroy(() => {
+		_unsubStore?.();
+		_sub?.unsubscribe();
+	});
 
 	// Dismissible cards — the Overview "pick & choose" set, persisted per user.
 	// Order leads with Agents (the folded-phases table) since this mounts inside an

@@ -111,9 +111,9 @@
 						if (i < step) step = i;
 					}}
 					class="shrink-0 flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium transition {i === step
-						? 'bg-blue-600 text-white'
+						? 'bg-gray-900 text-white dark:bg-gray-100 dark:text-gray-900'
 						: i < step
-							? 'text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950'
+							? 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-850'
 							: 'text-gray-400'}"
 				>
 					<span class="font-mono">{i + 1}</span>
@@ -136,7 +136,7 @@
 				<button
 					on:click={() => pickTemplate(t)}
 					class="text-left rounded-xl border px-3 py-2.5 transition {template?.id === t.id
-						? 'border-blue-400 dark:border-blue-700'
+						? 'border-gray-400 dark:border-gray-500'
 						: 'border-gray-100 dark:border-gray-850 hover:border-gray-300 dark:hover:border-gray-700'}"
 				>
 					<div class="text-sm font-medium text-gray-800 dark:text-gray-100">{t.name}</div>
@@ -153,12 +153,12 @@
 			<input
 				bind:value={name}
 				placeholder={$i18n.t('Connection name')}
-				class="w-full rounded-lg border border-gray-200 dark:border-gray-800 bg-transparent px-3 py-1.5 text-sm outline-none focus:border-blue-500"
+				class="w-full rounded-lg border border-gray-200 dark:border-gray-800 bg-transparent px-3 py-1.5 text-sm outline-none focus:border-gray-400 dark:focus:border-gray-500"
 			/>
 			{#if (template?.transports ?? []).length > 1}
 				<select
 					bind:value={transport}
-					class="w-full rounded-lg border border-gray-200 dark:border-gray-800 bg-transparent dark:bg-gray-950 px-3 py-1.5 text-sm outline-none focus:border-blue-500"
+					class="w-full rounded-lg border border-gray-200 dark:border-gray-800 bg-transparent dark:bg-gray-950 px-3 py-1.5 text-sm outline-none focus:border-gray-400 dark:focus:border-gray-500"
 				>
 					{#each template.transports as tr}
 						<option value={tr}>{tr}</option>
@@ -172,7 +172,7 @@
 						id={`mcpw-${f.key}`}
 						bind:value={fieldValues[f.key]}
 						placeholder={f.placeholder ?? ''}
-						class="w-full rounded-lg border border-gray-200 dark:border-gray-800 bg-transparent px-3 py-1.5 text-sm outline-none focus:border-blue-500 font-mono"
+						class="w-full rounded-lg border border-gray-200 dark:border-gray-800 bg-transparent px-3 py-1.5 text-sm outline-none focus:border-gray-400 dark:focus:border-gray-500 font-mono"
 					/>
 					{#if f.help}<div class="text-[11px] text-gray-400 mt-0.5">{f.help}</div>{/if}
 				</div>
@@ -212,7 +212,7 @@
 			<div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
 				{#each template.tools as t (t.name)}
 					<div class="rounded-xl border border-gray-100 dark:border-gray-850 px-3 py-2">
-						<code class="text-xs font-mono text-blue-600 dark:text-blue-400">{t.name}</code>
+						<code class="text-xs font-mono text-gray-700 dark:text-gray-300">{t.name}</code>
 						<div class="text-xs text-gray-500 mt-0.5">{t.desc}</div>
 					</div>
 				{/each}
@@ -233,7 +233,7 @@
 				<button
 					on:click={runTest}
 					disabled={testing || !url}
-					class="rounded-lg bg-blue-600 text-white px-4 py-1.5 text-sm font-medium hover:bg-blue-700 disabled:opacity-40"
+					class="rounded-lg bg-gray-900 text-white hover:bg-gray-800 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white px-4 py-1.5 text-sm font-medium disabled:opacity-40"
 					>{testing ? $i18n.t('Testing…') : $i18n.t('Run connection test')}</button
 				>
 				<code class="text-xs font-mono text-gray-500 truncate">{url}</code>
@@ -282,14 +282,14 @@
 				<button
 					on:click={() => (step = step + 1)}
 					disabled={step === 1 && !configValid}
-					class="rounded-lg bg-blue-600 text-white px-4 py-1.5 text-sm font-medium hover:bg-blue-700 disabled:opacity-40"
+					class="rounded-lg bg-gray-900 text-white hover:bg-gray-800 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white px-4 py-1.5 text-sm font-medium disabled:opacity-40"
 					>{$i18n.t('Continue')}</button
 				>
 			{:else}
 				<button
 					on:click={save}
 					disabled={saving || !configValid}
-					class="rounded-lg bg-blue-600 text-white px-4 py-1.5 text-sm font-medium hover:bg-blue-700 disabled:opacity-40"
+					class="rounded-lg bg-gray-900 text-white hover:bg-gray-800 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white px-4 py-1.5 text-sm font-medium disabled:opacity-40"
 					>{saving ? $i18n.t('Saving…') : $i18n.t('Save connection')}</button
 				>
 			{/if}

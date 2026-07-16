@@ -105,6 +105,15 @@ export const dockedRunId = writable<string | null>(null);
 // A workspace run launched from Discord that is currently running for this user.
 // Drives the top-bar "Harvis on Discord is running" indicator (polled app-wide).
 export const activeDiscordRun = writable<{ id: string; task_brief?: string } | null>(null);
+// A running agent review (coder↔reviewer) for this user → the top-bar "Agent review live" chip;
+// clicking it opens the review side panel (showReviewMirror) that mirrors the conversation into Chat.
+export const activeReview = writable<{ run_id: string; task_brief?: string; title?: string } | null>(
+	null
+);
+// The review run id currently pinned open in the side panel (or null). Set when the chip is
+// clicked; persists (so the panel keeps showing the conversation after the review finishes) until
+// the user closes it.
+export const showReviewMirror = writable<string | null>(null);
 // Task heartbeat: a per-message ({messageId: humanStatusText}) inline status line shown the
 // instant a (likely-)task message is sent — BEFORE any workspace run/card exists — so the
 // chat never looks stuck while the router classifies + launches. Kept OUT of the message

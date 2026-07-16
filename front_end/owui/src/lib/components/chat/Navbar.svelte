@@ -18,7 +18,9 @@
 		temporaryChatEnabled,
 		user,
 		researchEnabled,
-		activeDiscordRun
+		activeDiscordRun,
+		activeReview,
+		showReviewMirror
 	} from '$lib/stores';
 
 	import { slide } from 'svelte/transition';
@@ -265,6 +267,26 @@
 								</span>
 								<span class="hidden sm:inline text-xs font-medium whitespace-nowrap">
 									Harvis on Discord is running
+								</span>
+							</button>
+						</Tooltip>
+					{/if}
+
+					{#if $activeReview}
+						<Tooltip content={$activeReview.task_brief || 'Open the live agent review'}>
+							<button
+								class=" flex items-center gap-1.5 cursor-pointer pl-2 pr-2.5 py-1.5 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 text-amber-600 dark:text-amber-400 transition"
+								on:click={() => showReviewMirror.set($activeReview.run_id)}
+								aria-label="Agent review is running"
+							>
+								<span class="relative flex size-2">
+									<span
+										class="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"
+									></span>
+									<span class="relative inline-flex rounded-full size-2 bg-amber-500"></span>
+								</span>
+								<span class="hidden sm:inline text-xs font-medium whitespace-nowrap">
+									Agent review live
 								</span>
 							</button>
 						</Tooltip>

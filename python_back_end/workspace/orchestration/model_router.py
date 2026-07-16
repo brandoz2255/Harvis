@@ -26,6 +26,7 @@ class ModelRouter:
         messages: list[dict],
         tools: list[dict] | None = None,
         temperature: float | None = None,
+        max_tokens: int | None = None,
         timeout: float = 240.0,
     ) -> dict:
         """One completion step. Returns the assistant message dict
@@ -45,6 +46,10 @@ class ModelRouter:
             body["tools"] = tools
         if temperature is not None:
             body["temperature"] = temperature
+        if max_tokens is not None:
+            # Bound the generation so a slow local model can't run all the way to the
+            # read-timeout (a critique needs hundreds of tokens, not thousands).
+            body["max_tokens"] = max_tokens
 
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0)) as client:
             resp = await client.post(target_url, json=body, headers=headers)

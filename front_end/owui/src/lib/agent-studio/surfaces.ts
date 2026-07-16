@@ -11,7 +11,7 @@ import TuningPanel from './TuningPanel.svelte';
 import GlobalArtifacts from './GlobalArtifacts.svelte';
 import Cookbook from './Cookbook.svelte';
 import Customize from './Customize.svelte';
-import McpShop from './customize/McpShop.svelte';
+import ConnectorsPanel from './customize/ConnectorsPanel.svelte';
 
 export interface Surface {
 	key: string;
@@ -36,7 +36,7 @@ export const surfaces: Surface[] = [
 	{ key: 'cookbook', label: 'Models', component: Cookbook, modes: ['full', 'dock'] },
 	{ key: 'tuning', label: 'Tuning', component: TuningPanel, modes: ['full', 'dock'] },
 	{ key: 'customize', label: 'Customize', component: Customize, modes: ['full'] },
-	{ key: 'mcp-shop', label: 'Connectors', component: McpShop, modes: ['full'] }
+	{ key: 'mcp-shop', label: 'Connectors', component: ConnectorsPanel, modes: ['full'] }
 ];
 
 const KEY_ALIASES: Record<string, string> = {

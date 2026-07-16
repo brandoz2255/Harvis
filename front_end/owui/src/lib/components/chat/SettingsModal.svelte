@@ -32,12 +32,10 @@
 	import UserBadgeCheck from '../icons/UserBadgeCheck.svelte';
 	import Bolt from '../icons/Bolt.svelte';
 	import Cube from '../icons/Cube.svelte';
-	import Wrench from '../icons/Wrench.svelte';
 	// Customize group panels — shared with /harvis/agent-studio/customize (one
 	// implementation, two mounts: the page sections and these modal tabs).
 	import SkillsPanel from '$lib/agent-studio/customize/SkillsPanel.svelte';
 	import ConnectorsPanel from '$lib/agent-studio/customize/ConnectorsPanel.svelte';
-	import PluginsPanel from '$lib/agent-studio/customize/PluginsPanel.svelte';
 
 	const i18n = getContext('i18n');
 
@@ -79,8 +77,7 @@
 		tools: 'integrations',
 		workspace: 'integrations',
 		skills: 'customize',
-		connectors: 'customize',
-		plugins: 'customize'
+		connectors: 'customize'
 	};
 	const tabGroup = (id: string) => tabGroups[id] ?? 'settings';
 
@@ -545,20 +542,9 @@
 				'directory',
 				'attach',
 				'tools',
-				'customize'
-			]
-		},
-		{
-			id: 'plugins',
-			title: 'Plugins',
-			keywords: [
-				'plugin',
 				'plugins',
 				'built-in tools',
-				'builtin tools',
 				'capabilities',
-				'agent tools',
-				'web search',
 				'customize'
 			]
 		}
@@ -1013,30 +999,6 @@
 								</div>
 								<div class=" self-center">{$i18n.t('Connectors')}</div>
 							</button>
-						{:else if tabId === 'plugins'}
-							<button
-								role="tab"
-								aria-controls="tab-plugins"
-								aria-selected={selectedTab === 'plugins'}
-								class={`px-0.5 md:px-2.5 py-1 min-w-fit rounded-xl flex-1 md:flex-none flex text-left transition
-								${
-									selectedTab === 'plugins'
-										? ($settings?.highContrastMode ?? false)
-											? 'dark:bg-gray-800 bg-gray-200'
-											: ''
-										: ($settings?.highContrastMode ?? false)
-											? 'hover:bg-gray-200 dark:hover:bg-gray-800'
-											: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'
-								}`}
-								on:click={() => {
-									selectedTab = 'plugins';
-								}}
-							>
-								<div class=" self-center mr-2">
-									<Wrench strokeWidth="2" className="size-4" />
-								</div>
-								<div class=" self-center">{$i18n.t('Plugins')}</div>
-							</button>
 						{/if}
 					{/each}
 					{/if}
@@ -1127,8 +1089,6 @@
 					<SkillsPanel token={localStorage.token} />
 				{:else if selectedTab === 'connectors'}
 					<ConnectorsPanel token={localStorage.token} />
-				{:else if selectedTab === 'plugins'}
-					<PluginsPanel />
 				{:else if selectedTab === 'about'}
 					<About />
 				{/if}

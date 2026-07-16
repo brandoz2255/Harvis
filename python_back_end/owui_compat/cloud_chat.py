@@ -155,6 +155,21 @@ async def _live_claude_models(pool, user_id: int, mode: str) -> Optional[list[di
     models = await _fetch_anthropic_models(auth[0], real_mode)
     _MODELS_CACHE[key] = (now, models)
     return models
+
+
+def invalidate_models_cache(user_id: Optional[int] = None) -> None:
+    """Drop the cached live /v1/models catalog so the next picker load re-fetches from Anthropic.
+
+    Used by ``/api/models?refresh=true`` so a newly-shipped cloud model surfaces on an explicit
+    refresh instead of lagging up to the 300s TTL. ``user_id=None`` clears every entry; otherwise
+    only this user's (api_key + oauth) entries. Cheap: the next call re-decrypts + re-hits Anthropic
+    once (the negative TTL still guards a bad/revoked key from being retried on every load)."""
+    if user_id is None:
+        _MODELS_CACHE.clear()
+        return
+    prefix = f"{user_id}:"
+    for k in [k for k in _MODELS_CACHE if k.startswith(prefix)]:
+        _MODELS_CACHE.pop(k, None)
 _ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 _ANTHROPIC_VERSION = "2023-06-01"
 

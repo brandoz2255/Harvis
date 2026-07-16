@@ -120,11 +120,22 @@ async def _sidecar_up() -> bool:
         return False
 
 
-async def hermes_chat_model_entry() -> dict | None:
-    """OWUI model dict for the picker — only when flag on AND sidecar reachable, else None."""
+async def hermes_chat_model_entry(pool=None, user_id=None) -> dict | None:
+    """OWUI model dict for the picker. Shown when the flag is on AND a Hermes is actually
+    reachable — either this user's VERIFIED external Hermes (BYO "Connect an external Hermes")
+    or the bundled local sidecar. Fail-closed: if neither is reachable, the model is hidden so
+    the picker never lists a dead engine. A connected external satisfies the gate on its own,
+    so the local sidecar can be removed without hiding Hermes from BYO users."""
     if not _flag_on():
         return None
-    if not await _sidecar_up():
+    reachable = False
+    try:
+        from .hermes_connect import is_external_active
+        if pool is not None and user_id is not None and await is_external_active(pool, user_id):
+            reachable = True
+    except Exception:
+        pass
+    if not reachable and not await _sidecar_up():
         return None
     return {
         "id": HERMES_CHAT_MODEL_ID,

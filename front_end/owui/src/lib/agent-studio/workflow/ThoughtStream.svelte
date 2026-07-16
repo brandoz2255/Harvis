@@ -1,14 +1,26 @@
 <script lang="ts">
 	import { getContext, afterUpdate } from 'svelte';
-	import { phrase } from './humanizeTool';
+	import { stepLabel } from './humanizeTool';
 	import type { WorkspaceEvent } from '$lib/apis/streaming/workspace-stream';
+	import Markdown from '$lib/components/chat/Messages/Markdown.svelte';
 
 	const i18n: any = getContext('i18n');
 
 	export let events: WorkspaceEvent[] = [];
 	export let running = false;
 
-	type Line = { kind: string; text: string; ok?: boolean; status?: 'running' | 'done' };
+	type Line = {
+		kind: string;
+		text: string;
+		ok?: boolean;
+		status?: 'running' | 'done';
+		role?: string;
+		label?: string;
+		prUrl?: string;
+		verdict?: 'approved' | 'changes' | 'comment';
+	};
+
+	const _VERDICT_RE = /\n*VERDICT\s*[:\-]\s*(APPROVED|CHANGES[_ ]REQUESTED|COMMENT)\s*\.?\s*$/i;
 
 	// Fold events into readable lines; pair each tool_call with its next tool_result.
 	$: lines = foldLines(events);
@@ -28,8 +40,47 @@
 				case 'log':
 					if (e.message) out.push({ kind: 'log', text: String(e.message) });
 					break;
+				case 'agent_message': {
+					// Review-loop negotiation post (coder ↔ reviewer, incl. Discord #harvis-code
+					// runs) — render as a labeled chat bubble (markdown-formatted) so the back-and-
+					// forth reads as a dialogue inline, not just in the full-run inspector overlay.
+					const raw = String(e.content ?? '');
+					if (raw.trim()) {
+						const vm = raw.match(_VERDICT_RE);
+						const _vt = vm ? vm[1].toUpperCase() : '';
+						const verdict: 'approved' | 'changes' | 'comment' | undefined = !vm
+							? undefined
+							: _vt.startsWith('APPROVED')
+								? 'approved'
+								: _vt.startsWith('COMMENT')
+									? 'comment'
+									: 'changes';
+						out.push({
+							kind: 'agent_msg',
+							// Pull the trailing "VERDICT: …" line out of the body — it's shown as a
+							// badge in the header instead, so the markdown reads cleanly.
+							text: verdict ? raw.replace(_VERDICT_RE, '').trim() : raw,
+							role:
+								e.role === 'reviewer'
+									? 'reviewer'
+									: e.role === 'coder'
+										? 'coder'
+										: String((e as any).role ?? 'agent'),
+							label: String(e.label || e.agent_label || (e as any).role || 'Agent'),
+							verdict,
+							...(typeof (e as any).pr_url === 'string' && (e as any).pr_url
+								? { prUrl: (e as any).pr_url }
+								: {})
+						});
+					}
+					break;
+				}
 				case 'tool_call':
-					out.push({ kind: 'tool', text: phrase(e.tool as string), status: 'running' });
+					out.push({
+						kind: 'tool',
+						text: stepLabel(e.tool as string, (e as any).args),
+						status: 'running'
+					});
 					lastTool = out.length - 1;
 					break;
 				case 'tool_result':
@@ -63,7 +114,7 @@
 	{#if lines.length === 0}
 		<div class="text-gray-400 py-2">{$i18n.t('Connecting…')}</div>
 	{/if}
-	{#each lines as l}
+	{#each lines as l, i}
 		{#if l.kind === 'tool'}
 			<div class="flex items-center gap-1.5">
 				{#if l.status === 'running'}
@@ -87,6 +138,75 @@
 			<div class="text-red-500 whitespace-pre-wrap break-words">{l.text}</div>
 		{:else if l.kind === 'cancelled'}
 			<div class="text-gray-500">{l.text}</div>
+		{:else if l.kind === 'agent_msg'}
+			<div
+				class="rounded-xl border px-3 py-2 break-words {l.role === 'reviewer'
+					? 'border-amber-500/25 bg-amber-500/[0.06]'
+					: l.role === 'coder'
+						? 'border-sky-500/20 bg-sky-500/[0.05]'
+						: 'border-white/10 bg-white/5'}"
+			>
+				<div class="flex items-center gap-1.5 mb-1.5">
+					<span
+						class="shrink-0 {l.role === 'reviewer'
+							? 'text-amber-500'
+							: l.role === 'coder'
+								? 'text-sky-400'
+								: 'text-gray-400'}"
+					>
+						{#if l.role === 'reviewer'}
+							<svg viewBox="0 0 20 20" fill="currentColor" class="size-3.5"
+								><path
+									fill-rule="evenodd"
+									d="M9 3.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11ZM2 9a7 7 0 1 1 12.452 4.391l3.328 3.329a.75.75 0 1 1-1.06 1.06l-3.329-3.328A7 7 0 0 1 2 9Z"
+									clip-rule="evenodd"
+								/></svg
+							>
+						{:else if l.role === 'coder'}
+							<svg viewBox="0 0 20 20" fill="currentColor" class="size-3.5"
+								><path
+									fill-rule="evenodd"
+									d="M6.28 5.22a.75.75 0 0 1 0 1.06L2.56 10l3.72 3.72a.75.75 0 0 1-1.06 1.06L.97 10.53a.75.75 0 0 1 0-1.06l4.25-4.25a.75.75 0 0 1 1.06 0Zm7.44 0a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 1 1-1.06-1.06L17.44 10l-3.72-3.72a.75.75 0 0 1 0-1.06ZM11.377 2.011a.75.75 0 0 1 .612.867l-2 11.5a.75.75 0 0 1-1.478-.257l2-11.5a.75.75 0 0 1 .867-.61Z"
+									clip-rule="evenodd"
+								/></svg
+							>
+						{/if}
+					</span>
+					<span
+						class="text-[10px] uppercase tracking-wider font-semibold {l.role === 'reviewer'
+							? 'text-amber-500/90'
+							: l.role === 'coder'
+								? 'text-sky-400/90'
+								: 'text-gray-400'}">{l.label}</span
+					>
+					{#if l.verdict}
+						<span
+							class="text-[9px] uppercase tracking-wide font-bold px-1.5 py-0.5 rounded-full {l.verdict ===
+							'approved'
+								? 'bg-emerald-500/15 text-emerald-500 dark:text-emerald-400'
+								: l.verdict === 'comment'
+									? 'bg-sky-500/15 text-sky-600 dark:text-sky-400'
+									: 'bg-amber-500/15 text-amber-600 dark:text-amber-400'}"
+							>{l.verdict === 'approved'
+								? '✓ ' + $i18n.t('Approved')
+								: l.verdict === 'comment'
+									? '💬 ' + $i18n.t('Comment')
+									: '✎ ' + $i18n.t('Changes requested')}</span
+						>
+					{/if}
+					{#if l.prUrl}
+						<a
+							href={l.prUrl}
+							target="_blank"
+							rel="noopener"
+							class="text-[10px] text-blue-500 hover:underline ml-auto">{$i18n.t('on GitHub PR')} ↗</a
+						>
+					{/if}
+				</div>
+				<div class="markdown-prose markdown-prose-sm text-xs leading-relaxed text-gray-600 dark:text-gray-300">
+					<Markdown id={`am-${i}`} content={l.text} />
+				</div>
+			</div>
 		{:else}
 			<div class="text-gray-500 dark:text-gray-400 whitespace-pre-wrap break-words">{l.text}</div>
 		{/if}

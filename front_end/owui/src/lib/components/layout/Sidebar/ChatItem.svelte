@@ -497,20 +497,13 @@
 			<div class="flex self-center flex-1 w-full min-w-0">
 				<div
 					dir="auto"
-					class="text-left self-center overflow-hidden w-full h-[20px] truncate {unread
-						? 'font-medium text-gray-900 dark:text-gray-100'
-						: ''}"
+					class="text-left self-center overflow-hidden w-full h-[20px] truncate text-[13px] font-normal {unread
+						? 'text-gray-700 dark:text-gray-200'
+						: 'text-gray-500 dark:text-gray-400'}"
 				>
 					{title}
 				</div>
 			</div>
-
-			<!-- Time ago indicator -->
-			{#if createdAt && !mouseOver}
-				<div class="shrink-0 self-center text-[10px] text-gray-400 dark:text-gray-500 pl-2">
-					{formatTimeAgo(createdAt)}
-				</div>
-			{/if}
 		</a>
 	{/if}
 

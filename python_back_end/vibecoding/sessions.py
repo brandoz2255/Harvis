@@ -467,3 +467,77 @@ async def delete_session(
         "message": "Session deleted" if not force else "Session permanently deleted",
         "success": success
     }
+
+# ─── Orchestrate-Auto classifier ────────────────────────────────────────────────
+# Powers the composer's Agents=Auto mode: a CHEAP small-model check that proposes
+# whether THIS task should fan out to parallel agents. The expensive fan-out only
+# happens after the user confirms in the UI. FAIL-OPEN: any error → suggest=false,
+# so a classifier hiccup never blocks a turn (it just runs single-agent).
+
+class OrchestrateSuggestBody(BaseModel):
+    task_brief: str = ""
+
+
+_ORCH_SUGGEST_PROMPT = (
+    "You decide whether a CODING task should be split across MULTIPLE parallel agents. "
+    "Suggest splitting ONLY when the task clearly has several INDEPENDENT sub-tasks that "
+    "can run at the same time (e.g. 'build the API AND the frontend AND write the tests'). "
+    "A single focused task — one bug fix, one component, one file, one refactor — must NOT "
+    "be split. Splitting is expensive, so be conservative and default to not splitting. "
+    'Respond with ONLY a JSON object: {"suggest": true|false, "agents": <integer 2-8>, '
+    '"reason": "<one short sentence naming the independent parts>"}.'
+)
+
+
+@router.post("/orchestrate-suggest")
+async def orchestrate_suggest(
+    body: OrchestrateSuggestBody,
+    user: Dict = Depends(get_current_user),
+):
+    brief = (body.task_brief or "").strip()
+    if len(brief) < 12:
+        return {"suggest": False, "agents": 0, "reason": ""}
+    try:
+        import json as _json
+        import httpx as _httpx
+        from workspace.task_detector import _resolve_detector_model, OLLAMA_URL
+
+        model = await _resolve_detector_model()
+        if not model:
+            return {"suggest": False, "agents": 0, "reason": ""}
+
+        async with _httpx.AsyncClient(timeout=_httpx.Timeout(12.0)) as client:
+            resp = await client.post(
+                f"{OLLAMA_URL.rstrip('/')}/api/chat",
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": _ORCH_SUGGEST_PROMPT},
+                        {"role": "user", "content": f"Task:\n{brief[:2000]}"},
+                    ],
+                    "stream": False,
+                    # JSON-only, non-thinking → a few tokens, fast even on a busy GPU.
+                    "format": "json",
+                    "think": False,
+                    "options": {"num_ctx": 4096, "temperature": 0.1},
+                },
+            )
+        if resp.status_code != 200:
+            return {"suggest": False, "agents": 0, "reason": ""}
+
+        content = ((resp.json().get("message") or {}).get("content") or "").strip()
+        if content.startswith("```"):
+            content = (
+                content.split("```json")[-1].split("```")[0]
+                if "```json" in content
+                else content.split("```")[1]
+            )
+        parsed = _json.loads(content.strip())
+        suggest = bool(parsed.get("suggest"))
+        agents = int(parsed.get("agents") or 0) if suggest else 0
+        agents = max(2, min(8, agents)) if suggest else 0
+        reason = str(parsed.get("reason") or "").strip()[:160]
+        return {"suggest": suggest, "agents": agents, "reason": reason}
+    except Exception:
+        logger.exception("orchestrate_suggest failed")
+        return {"suggest": False, "agents": 0, "reason": ""}

@@ -261,12 +261,11 @@
 		else applyError = r.body?.detail ?? $i18n.t('Apply failed.');
 	};
 
-	const badgeClass = (transport: string) =>
-		transport === 'stdio'
-			? 'bg-gray-100 dark:bg-gray-850 text-gray-500 dark:text-gray-400'
-			: 'bg-blue-50 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400';
+	// Neutral badges — the transport label itself conveys the value; no
+	// color-coding by transport (avoids a second, unrelated splash of color).
+	const badgeClass = (_transport: string) => 'bg-gray-100 dark:bg-gray-850 text-gray-500 dark:text-gray-400';
 	const focusRing =
-		'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-1 dark:focus-visible:ring-offset-gray-950';
+		'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-400 dark:focus-visible:ring-gray-500 focus-visible:ring-offset-1 dark:focus-visible:ring-offset-gray-950';
 </script>
 
 <div class="w-full {mode === 'full' ? 'max-w-4xl mx-auto' : ''} space-y-3">
@@ -278,7 +277,7 @@
 				bind:value={query}
 				placeholder={$i18n.t('Search connectors…')}
 				aria-label={$i18n.t('Search connectors')}
-				class="w-full min-h-[44px] rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-950 pl-9 pr-3 text-sm outline-none focus:border-blue-500 {focusRing}"
+				class="w-full min-h-[44px] rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-950 pl-9 pr-3 text-sm outline-none focus:border-gray-400 dark:focus:border-gray-500 {focusRing}"
 			/>
 		</div>
 		<div class="flex flex-wrap gap-1.5" role="group" aria-label={$i18n.t('Filter by category')}>
@@ -288,7 +287,7 @@
 					aria-pressed={activeCat === cat.id}
 					on:click={() => (activeCat = cat.id)}
 					class="min-h-[44px] px-3 rounded-full text-xs font-medium border transition {focusRing} {activeCat === cat.id
-						? 'border-blue-500 bg-blue-50 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400'
+						? 'border-gray-300 dark:border-gray-600 bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-50'
 						: 'border-gray-200 dark:border-gray-800 text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-700'}"
 					>{$i18n.t(cat.label)}</button
 				>
@@ -394,7 +393,7 @@
 									id={`mcpshop-${t.id}-${f.key}`}
 									bind:value={fieldValues[f.key]}
 									placeholder={f.placeholder ?? ''}
-									class="w-full min-h-[44px] rounded-lg border border-gray-200 dark:border-gray-800 bg-transparent px-3 text-sm outline-none focus:border-blue-500 font-mono {focusRing}"
+									class="w-full min-h-[44px] rounded-lg border border-gray-200 dark:border-gray-800 bg-transparent px-3 text-sm outline-none focus:border-gray-400 dark:focus:border-gray-500 font-mono {focusRing}"
 								/>
 								{#if f.help}<div class="text-[10px] text-gray-400 mt-0.5">{f.help}</div>{/if}
 							</div>
@@ -433,7 +432,7 @@
 							disabled={attachingId === t.id || (expandedId === t.id && !fieldsReady(t))}
 							class="w-full min-h-[44px] rounded-lg text-sm font-medium transition disabled:opacity-40 {focusRing} {t.needs_secret
 								? 'border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/40'
-								: 'bg-blue-600 text-white hover:bg-blue-700'}"
+								: 'border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 text-gray-800 dark:text-gray-100 hover:bg-gray-100 dark:hover:bg-gray-800'}"
 						>
 							{#if attachingId === t.id}{$i18n.t('Connecting…')}
 							{:else if expandedId === t.id}{$i18n.t('Confirm connect')}

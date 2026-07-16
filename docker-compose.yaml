@@ -230,6 +230,11 @@ services:
       DISCORD_HEARTBEAT_CHANNEL_ID: "${DISCORD_HEARTBEAT_CHANNEL_ID:-}"
       DISCORD_ALERTS_CHANNEL_ID: "${DISCORD_ALERTS_CHANNEL_ID:-}"
       DISCORD_GENERAL_CHANNEL_ID: "${DISCORD_GENERAL_CHANNEL_ID:-}"
+      # Build Space Phase 6 — Discord #harvis-code coding channel. DORMANT unless
+      # HARVIS_CODE_CHANNEL_ID is set. Approvals: anyone in the channel (no role gate).
+      HARVIS_CODE_CHANNEL_ID: "${HARVIS_CODE_CHANNEL_ID:-1526412856990502923}"
+      HARVIS_CODE_GUILD_ID: "${HARVIS_CODE_GUILD_ID:-1491563310699516044}"
+      HARVIS_CODE_APPROVER_ROLE_IDS: "${HARVIS_CODE_APPROVER_ROLE_IDS:-}"
       # Workspace routing — send most messages through OpenClaw
       DISCORD_PREFER_WORKSPACE: "${DISCORD_PREFER_WORKSPACE:-true}"
       # History turns — 0 prevents prior chat history from bleeding into
@@ -242,8 +247,10 @@ services:
       OPENCLAW_PROJECTS_DIR: "/data/openclaw-projects"
       # Real local repos bind-mounted READ-ONLY for orchestrated clone-local "attached" runs
       # (comma-separated container paths). The agent only ever clones FROM these.
-      # Phase E1 — external code engines (OpenCode sidecar). Flag default OFF.
-      HARVIS_OWUI_EXTERNAL_ENGINES: "${HARVIS_OWUI_EXTERNAL_ENGINES:-}"
+      # Phase E1 — external code engines (OpenCode/Codex/Claude Code sidecars). Default ON so
+      # a verified Claude/OpenAI credential makes those Build engines runnable (the picker
+      # already lists their models); still overridable via the env var.
+      HARVIS_OWUI_EXTERNAL_ENGINES: "${HARVIS_OWUI_EXTERNAL_ENGINES:-true}"
       # Adaptive Workspace CAD engine (Stage 2). OFF by default — a gated capability.
       # Set HARVIS_ADAPTIVE_CAD_ENABLED=true and bring up the cad-engine sidecar to activate.
       HARVIS_ADAPTIVE_CAD_ENABLED: "${HARVIS_ADAPTIVE_CAD_ENABLED:-}"
@@ -436,6 +443,38 @@ services:
     networks:
       - ollama-n8n-network
 
+  # Builds the OpenWebUI (Svelte) static frontend INSIDE Docker so a fresh clone
+  # needs no host Node/npm. Reuses the `build` stage of the owui Dockerfile
+  # (npm ci → npm run build → /app/build), then copies the static bundle into the
+  # host ./front_end/owui/build dir that nginx serves. Runs once and exits (0).
+  #
+  # Idempotent: skips the copy when a build is already present, so a host-side
+  # `npm run build` dev loop is left untouched. To force a refresh on a deploy:
+  # clear front_end/owui/build (or `docker compose build owui-builder`) then `up`.
+  # NOTE: the frontend build fetches pyodide, so it needs internet at BUILD time.
+  owui-builder:
+    build:
+      context: ./front_end/owui
+      dockerfile: Dockerfile
+      target: build
+    image: harvis-owui-builder:local
+    container_name: harvis-owui-builder
+    restart: "no"
+    volumes:
+      - ./front_end/owui/build:/out
+    command:
+      - sh
+      - -c
+      - >
+        if [ -f /out/index.html ]; then
+          echo 'owui build already present in ./front_end/owui/build — skipping (clear it to force a rebuild)';
+        else
+          echo 'Populating ./front_end/owui/build from the Docker build...';
+          cp -a /app/build/. /out/ && echo 'owui frontend build ready';
+        fi
+    networks:
+      - ollama-n8n-network
+
   # Nginx Reverse Proxy
   nginx:
     image: nginx:alpine
@@ -448,8 +487,14 @@ services:
       - ./front_end/owui/build:/usr/share/nginx/owui:ro
       - /tmp:/tmp:ro
     depends_on:
-      - frontend
-      - backend
+      # long-form so nginx waits for the one-shot owui-builder to finish
+      # populating the static bundle before it starts serving.
+      owui-builder:
+        condition: service_completed_successfully
+      frontend:
+        condition: service_started
+      backend:
+        condition: service_started
     deploy:
       resources:
         limits:

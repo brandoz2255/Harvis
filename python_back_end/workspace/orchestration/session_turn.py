@@ -278,6 +278,7 @@ async def run_vibecode_turn(
             launch_mode=launch_mode,
             pool=pool,
             user_id=user_id,
+            session_id=vibecode_session_id or None,  # approve-for-session scope
         ):
             if ev.type == "tool_call":
                 tool_calls += 1

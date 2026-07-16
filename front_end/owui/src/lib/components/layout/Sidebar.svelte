@@ -1226,6 +1226,10 @@
 									<div class=" self-center text-sm font-primary">{$i18n.t('Customize')}</div>
 								</div>
 							</button>
+							<!-- Adaptive Space hidden for the deployment cut (2026-07-12) — the
+							     feature isn't ready; the /harvis/adaptive route shows a "coming
+							     soon" placeholder. Re-add this nav link + restore the route's
+							     <AdaptiveSpaceShell/> mount to bring it back. -->
 							<!-- More (bold) — tools, directly under Customize in chat mode. -->
 							<SidebarMore activePath={$page.url.pathname} bold />
 						{/if}
@@ -1617,31 +1621,14 @@
 				></div>
 				<div class="flex flex-col font-primary">
 					{#if modeSwitcherEnabled}
-						<!-- Adaptive Space + Integrations — footer rows above the stack status. -->
+						<!-- Footer: stack status on top, then Integrations. -->
 						<div class="px-[0.4375rem] pt-2 mt-1 border-t border-gray-100 dark:border-gray-850">
-							<a
-								id="sidebar-adaptive-button"
-								href="/harvis/adaptive"
-								class="group flex items-center gap-3 rounded-2xl px-2.5 py-2 text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-900 hover:text-gray-900 dark:hover:text-gray-100 transition outline-none {($page.url.pathname ?? '').startsWith('/harvis/adaptive')
-									? 'bg-gray-100 dark:bg-gray-850 text-gray-900 dark:text-gray-100 font-medium'
-									: ''}"
-								draggable="false"
-								aria-label={$i18n.t('Adaptive Space')}
+							<div
+								class="flex items-center gap-2 px-2.5 py-1 text-xs text-gray-500 dark:text-gray-400"
 							>
-								<svg
-									xmlns="http://www.w3.org/2000/svg"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="currentColor"
-									stroke-width="2"
-									stroke-linecap="round"
-									stroke-linejoin="round"
-									class="size-4.5 shrink-0"
-								>
-									<path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" /><circle cx="12" cy="12" r="3.2" />
-								</svg>
-								<span class="flex-1 self-center translate-y-[0.5px]">{$i18n.t('Adaptive Space')}</span>
-							</a>
+								<span class="size-2 rounded-full bg-green-500 shrink-0"></span>
+								<span>Local stack ready</span>
+							</div>
 							<a
 								id="sidebar-integrations-button"
 								href="/harvis/integrations"
@@ -1665,12 +1652,6 @@
 								</svg>
 								<span class="flex-1 self-center translate-y-[0.5px]">{$i18n.t('Integrations')}</span>
 							</a>
-						</div>
-						<div
-							class="flex items-center gap-2 px-2.5 py-1.5 mb-0.5 text-xs text-gray-500 dark:text-gray-400"
-						>
-							<span class="size-2 rounded-full bg-green-500 shrink-0"></span>
-							<span>Local stack ready</span>
 						</div>
 					{/if}
 					{#if $user !== undefined && $user !== null}

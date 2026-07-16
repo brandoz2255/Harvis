@@ -684,6 +684,10 @@ async def lifespan(app: FastAPI):
                     );
                     CREATE INDEX IF NOT EXISTS idx_workspace_jobs_ws
                         ON workspace_jobs(workspace_id);
+                    -- Phase 5 (Build Space): per-job max lifetime, surfaced on the
+                    -- job record and enforced by the tail loop's reaper.
+                    ALTER TABLE workspace_jobs
+                        ADD COLUMN IF NOT EXISTS timeout_secs INT;
                     ALTER TABLE workspace_artifacts
                         ADD COLUMN IF NOT EXISTS content_bytes BYTEA;
                     """

@@ -24,32 +24,53 @@ sudo apt install docker-ce docker-ce-cli containerd.io docker-buildx-plugin dock
 <img width="760" height="163" alt="clone" src="https://github.com/user-attachments/assets/f0ddf838-296e-4ecd-bb91-e34414f0b930" />
     
 ## 2.  **Set up environment variables:**
-Create .env.local in front_end/jfrontend/ with:
-    
+Copy the example env files, then create a top-level `.env` for the values `docker-compose.yaml` reads:
+
 ```bash
-    DATABASE_URL=postgresql://user:password@localhost:5432/harvis
-    JWT_SECRET=your-jwt-secret-key
-    BACKEND_URL=http://backend:8000
+    cp python_back_end/.env.example python_back_end/.env
+    # top-level .env (docker-compose reads these):
+    JWT_SECRET=<a-long-random-secret>       # REQUIRED — compose fails to start without it
+    MOONSHOT_API_KEY=<kimi-key>             # optional — cloud planner/writer (Kimi K2.5)
+    OPENCLAW_GATEWAY_TOKEN=<token>          # optional — OpenClaw agent runtime
 ```
-<img width="862" height="67" alt="database" src="https://github.com/user-attachments/assets/95cdb166-c8d7-4fc2-8ea0-0b5f2a2500d4" />
+See `docker-compose.yaml` for the full list of variables.
 
-## 3.⚠️Make sure your GPU has the correct drivers (NVIDIA recommended
-https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html
+## 3.  **Choose your backend & run — `./install.sh`:**
+Run the installer and pick your inference backend. It writes the right compose selection
+(`COMPOSE_FILE`) and a generated `JWT_SECRET` into `.env`, ensures the docker network exists, and
+can launch the whole stack:
 
-## 5.  **Build and run with Docker Compose:**
-This is the recommended way to run the entire application stack.
-    
 ```bash
-    sudo apt install docker-compose-plugin -y
-    sudo docker-compose up --build -d
-    docker network create ollama-n8n-network
+    ./install.sh                        # interactive — detects your GPU and asks
+    # or non-interactive:
+    ./install.sh --backend cpu --yes    # nvidia | amd | cpu
 ```
-<img width="1389" height="140" alt="build" src="https://github.com/user-attachments/assets/175e2994-f92b-4d18-86e4-509f8d2144b6" />
 
-## 5.  **Access the application:**
-The web interface will be available at `http://localhost:3000`.
+| Backend | Requires | Accelerates | Notes |
+|---|---|---|---|
+| **nvidia** (default) | NVIDIA GPU + nvidia-container-toolkit | everything | fastest |
+| **amd** | ROCm-supported AMD GPU · `/dev/kfd`+`/dev/dri` · user in `video`+`render` groups | **Ollama only** | voice (TTS/STT) runs on CPU; some cards need `HSA_OVERRIDE_GFX_VERSION` in `.env` |
+| **cpu** | nothing | — | runs anywhere, slower; voice on CPU |
 
-<img width="1924" height="973" alt="image" src="https://github.com/user-attachments/assets/9b456d3d-efb7-4375-95c8-cd03a85dd4fd" />
+**Apple Silicon (M-series):** Docker on macOS can't reach the Mac GPU — pick **cpu**. For Metal
+acceleration, run **Ollama natively** on the Mac and set `OLLAMA_URL=http://host.docker.internal:11434`.
+
+<details><summary>Manual / advanced (skip the installer)</summary>
+
+```bash
+    docker network create ollama-n8n-network                                        # once (external network)
+    docker compose up --build -d                                                     # NVIDIA (default)
+    docker compose -f docker-compose.yaml -f docker-compose.cpu.yml up --build -d    # CPU
+    docker compose -f docker-compose.yaml -f docker-compose.amd.yml up --build -d    # AMD / ROCm
+```
+`JWT_SECRET` must be set in `.env` for any of these. Only the main `docker-compose.yaml` is
+multi-backend — the secondary `docker-compose.prebuilt.yml` / `-with-services.yaml` stacks are NVIDIA-only.
+</details>
+
+## 4.  **Access the application:**
+Open **`http://localhost:9000`** — Nginx serves the web UI and proxies all `/api/*` calls to the
+backend. Do **not** call the backend on `:8000` directly from the browser (CORS). The live UI is
+the Svelte app built from `front_end/owui/`.
 
 
 
@@ -74,9 +95,11 @@ The Harvis AI Project is a sophisticated, voice-activated AI assistant designed 
 <img width="1653" height="1392" alt="image" src="https://github.com/user-attachments/assets/36dd9d2d-9313-41bb-9491-313838ed5e97" />
 
 ### Frontend
-- **Framework:** Next.js (React)
-- **Language:** TypeScript
-- **Styling:** Tailwind CSS
+- **Live UI:** `front_end/owui/` — a forked **OpenWebUI (SvelteKit)** app, built to a static
+  bundle and served by Nginx at `/`. This is the current, canonical frontend.
+- **Language / Styling:** TypeScript · Tailwind CSS
+- *Legacy:* `front_end/newjfrontend/` (Next.js) is vestigial (see Deployment notes); the old
+  `front_end/jfrontend/` was removed.
 
 ### Backend
 - **API:** Python (FastAPI) & Node.js (Next.js API Routes)
@@ -104,9 +127,11 @@ The Harvis AI Project is a sophisticated, voice-activated AI assistant designed 
 
 ### Prerequisites
 
-- Docker and Docker Compose
-- An NVIDIA GPU with CUDA drivers is recommended for optimal performance, but not strictly required.
-- `ffmpeg` for audio processing.
+- Docker and Docker Compose (v2 / the `docker compose` plugin).
+- A GPU is **optional** — `./install.sh` supports **nvidia**, **amd** (ROCm), or **cpu**. Only the
+  `nvidia` backend needs an NVIDIA GPU + nvidia-container-toolkit; `cpu` runs anywhere. See the
+  "Choose your backend" section above.
+- `ffmpeg` for audio (voice) features.
 
 
 ## n8n Workflow Automation API
@@ -312,12 +337,12 @@ Harvis AI includes comprehensive web search and research capabilities powered by
 
 ## Project Structure
 
-- `front_end/jfrontend/`: Contains the Next.js frontend application.
-  - `app/`: Next.js app router pages and API routes
-  - `components/`: Reusable React components including UI components
-  - `lib/`: Utility functions, database connection, and authentication services
-  - `stores/`: Zustand state management for chat functionality
-- `python_back_end/`: The main Python backend, including the FastAPI server, AI logic, and automation scripts.
+- `front_end/owui/`: **The live frontend** — a forked OpenWebUI (SvelteKit) app. Built to a static
+  bundle and served by Nginx at `/`. Most UI work happens here (`src/lib/`, `src/routes/`).
+- `front_end/newjfrontend/`: Legacy Next.js frontend — vestigial (Nginx only proxies `/api/ai-chat`
+  to it, and the live UI never calls that route). Slated for removal.
+- `front_end/open-notebook/`: Vendored NotebookLM-style Next.js UI, served at `/onb`.
+- `python_back_end/`: The main Python backend — FastAPI server, AI logic, orchestration, automation.
   - `research/`: Web search and research functionality
   - `ollama_cli/vibe_agent.py`: AI-powered development environment
 - `rest_api/`: A separate FastAPI service.
@@ -327,27 +352,31 @@ Harvis AI includes comprehensive web search and research capabilities powered by
 
 ## Development Workflow
 
-### Frontend Development
+### Frontend Development (owui — the live UI)
+> First-time deploy needs none of this — `docker compose up --build` builds the owui
+> bundle inside Docker (the `owui-builder` service) and Nginx waits for it. The steps
+> below are only for a fast **local** edit loop, where a host build beats a container rebuild.
 ```bash
-cd front_end/jfrontend
+cd front_end/owui
 npm install
-npm run dev          # Start development server
-npm run build        # Build for production
-npm run lint         # Run ESLint
-npm run type-check   # Run TypeScript checking
+npm run build        # produce the static bundle Nginx serves at /
 ```
+After a build, reload Nginx to serve it: `docker restart nginx-proxy`.
+(The `owui-builder` step is idempotent — it skips when `front_end/owui/build` already
+exists, so your host build is never clobbered. Clear that dir to force a Docker rebuild.)
 
 ### Docker Operations
 ```bash
-docker-compose up --build -d    # Build and run entire stack
-docker-compose down             # Stop all services
-docker-compose logs -f [service] # View service logs
+docker compose up --build -d     # Build and run the entire stack (Nginx at :9000)
+docker compose down              # Stop all services
+docker compose logs -f [service] # View service logs
+docker restart harvis-backend    # Backend is bind-mounted — restart to pick up Python changes
 ```
 
 ### Key Development Commands
-- **Database setup:** `front_end/jfrontend/db_setup.sql`
-- **Type checking:** Always run before committing
-- **Git strategy:** Feature branches from `main` with conventional commits
+- **Type checking:** `npm run type-check` in `front_end/owui` before committing UI changes.
+- **Backend tests:** `docker exec harvis-backend python -m pytest tests/ -q`.
+- **Git strategy:** Feature branches from `main` with conventional commits.
 
 ## Recent Improvements & Changes
 
@@ -383,11 +412,9 @@ docker-compose logs -f [service] # View service logs
 ### Development Notes
 
 #### Change Tracking
-All modifications are documented in `/front_end/jfrontend/changes.md` with:
-- Timestamp and problem description
-- Root cause analysis
-- Solution implementation details
-- Files modified and results
+Design/architecture decisions and session handoffs are tracked in `docs/handoffs/` and the
+project's Obsidian vault; per-fix notes live alongside the code. (The former
+`front_end/jfrontend/changes.md` was removed with that directory.)
 
 #### Quality Assurance
 - All changes pass `npm run lint` and `npm run type-check`

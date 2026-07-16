@@ -163,6 +163,11 @@ async def _sync_workspace_model(pool, model_name: str) -> None:
         return
     if m.startswith(("anthropic/", "openai/")):
         return  # cloud models don't run via OpenClaw→Ollama — the 'claude' lane handles them
+    if m == "hermes-agent":
+        return  # Hermes Agent is a remote-proxied engine (its own OpenAI-compatible API server,
+                # local or BYO external), NOT an Ollama tag. Syncing it into the OpenClaw→Ollama
+                # config makes model_proxy fail to resolve it and silently fall back to qwen3.5 on
+                # the OpenClaw engine. The Chat lane (proxy_hermes_chat) routes it directly.
     base = os.getenv("OLLAMA_URL", "http://ollama:11434")
     try:
         async with pool.acquire() as conn:

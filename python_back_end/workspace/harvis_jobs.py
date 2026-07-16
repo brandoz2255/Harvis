@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 from types import SimpleNamespace
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -38,7 +39,7 @@ from pydantic import BaseModel, Field
 from auth_optimized import get_current_user_optimized
 from owui_compat.workspace_method import LANE_CONTAINER_TERMINAL
 
-from .harvis_exec import _resolve_scoped_workspace
+from .harvis_exec import _resolve_permission_mode, _resolve_scoped_workspace
 from .harvis_trace import _pool_of
 from .orchestration.authz import authorize_action
 from .terminal_container import (
@@ -59,6 +60,120 @@ class HarvisJobRequest(BaseModel):
     workspace_id: str = Field(..., min_length=1, max_length=128)
     command: str = Field(..., min_length=1)
     workdir: str = Field(default="/workspace", min_length=1, max_length=512)
+    # Phase 5: per-job max lifetime. None → the server default
+    # (HARVIS_JOB_MAX_LIFETIME_S); values above the ceiling are clamped.
+    timeout_secs: Optional[int] = Field(default=None, ge=1, le=86400)
+
+
+# Phase 5: log tails read back from persisted terminal_output events.
+_LOG_TAIL_LINES = 40
+
+
+async def _job_log_tail(pool, workspace_id: str, job_id: str) -> str:
+    """Last ~40 lines of a job's streamed output, rebuilt from the persisted
+    terminal_output events (survives the in-container janitor AND backend
+    restarts — the events table is the job's durable log store).
+
+    FAIL-SOFT: any error (missing table, bad payload, pool down) returns ''.
+    """
+    if pool is None:
+        return ""
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT payload->>'content' AS content
+                FROM workspace_events
+                WHERE workspace_id = $1
+                  AND event_type = 'terminal_output'
+                  AND payload->>'job_id' = $2
+                ORDER BY seq DESC
+                LIMIT 80
+                """,
+                workspace_id, job_id,
+            )
+        text = "".join((r["content"] or "") for r in reversed(rows))
+        return "\n".join(text.splitlines()[-_LOG_TAIL_LINES:])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[job:%s] log-tail read failed: %s", job_id, exc)
+        return ""
+
+
+async def _require_terminal_ready():
+    """Hard gate — same as harvis_exec: disabled/unready terminal 503s.
+    Called BEFORE _resolve_scoped_workspace so a disabled terminal never
+    upserts a sandbox run row (preserves create_job's original ordering)."""
+    if not is_enabled():
+        raise HTTPException(503, "terminal disabled (HARVIS_TERMINAL_ENABLED=false)")
+    mgr = get_terminal_manager()
+    report = await mgr.probe()
+    if not report.ready:
+        raise HTTPException(503, f"terminal not ready: {report.reason}")
+    return mgr
+
+
+async def _gate_and_launch(
+    pool,
+    mgr,
+    workspace_id: str,
+    command: str,
+    workdir: str,
+    user_id: int,
+    timeout_secs: Optional[int],
+) -> str:
+    """Shared launch path for POST /jobs and POST /jobs/{id}/retry.
+
+    Runs the SAME lane-3 authorize_action gate as the original start (a retry
+    is a fresh action — it never inherits a stale approval), emits the
+    tool_call trace event, and starts the detached job. Raises HTTPException
+    with the exact status codes create_job always used.
+    """
+    async def _emit_decision(payload: dict) -> None:
+        await emit_terminal_event(
+            pool, workspace_id, event_type="decision", payload=payload
+        )
+
+    permission_mode, vc_session_id = await _resolve_permission_mode(pool, workspace_id)
+    res = await authorize_action(
+        tool_name="exec",
+        args={"command": command},
+        lane=LANE_CONTAINER_TERMINAL,
+        permission_mode=permission_mode,
+        run_id=workspace_id,
+        emit=_emit_decision,
+        session_id=vc_session_id,
+        pool=pool,
+    )
+    if not res.allowed:
+        raise HTTPException(403, res.reason or "denied by execution policy")
+    if res.needs_approval:
+        # One-shot launch endpoint — no interactive approval loop, so a gated
+        # action is REFUSED (fail closed). Approve-for-session or a higher
+        # ladder rung lets it through.
+        raise HTTPException(
+            403,
+            f"requires approval under permission mode '{permission_mode}' "
+            f"(risk: {res.tier}): {res.reason or 'gated action'} — approve it for "
+            "the session in the Build UI or raise the session's permission mode.",
+        )
+
+    await emit_terminal_event(
+        pool, workspace_id,
+        event_type="tool_call",
+        payload=build_tool_call_payload(command),
+    )
+    try:
+        return await mgr.exec_bg(
+            workspace_id, command, workdir=workdir, pool=pool,
+            user_id=user_id, timeout_secs=timeout_secs,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+    except Exception as exc:  # docker APIError etc.
+        logger.error("[harvis-jobs:%s] launch failed: %s", workspace_id, exc)
+        raise HTTPException(503, f"job launch failed: {exc}")
 
 
 # ── Ownership (fail closed) ──────────────────────────────────────────────────
@@ -112,54 +227,19 @@ async def create_job(
     request: Request,
     current_user: dict = Depends(get_current_user_optimized),
 ):
-    """Start a detached background job in the caller's sandbox (lane 3)."""
-    # Hard gate — same as harvis_exec: disabled/unready terminal 503s.
-    if not is_enabled():
-        raise HTTPException(503, "terminal disabled (HARVIS_TERMINAL_ENABLED=false)")
-    mgr = get_terminal_manager()
-    report = await mgr.probe()
-    if not report.ready:
-        raise HTTPException(503, f"terminal not ready: {report.reason}")
+    """Start a detached background job in the caller's sandbox (lane 3).
 
+    Hard gate + Phase 2 choke point (lane-3 authorize_action with the session's
+    REAL permission mode, traced decision) live in _gate_and_launch — shared
+    verbatim with POST /jobs/{id}/retry.
+    """
+    mgr = await _require_terminal_ready()
     pool = _pool_of(request)
     user_id = int(current_user["id"])
     workspace_id = await _resolve_scoped_workspace(pool, body.workspace_id, user_id)
-
-    # Phase 2 choke point — lane-3 gate, traced decision.
-    async def _emit_decision(payload: dict) -> None:
-        await emit_terminal_event(
-            pool, workspace_id, event_type="decision", payload=payload
-        )
-
-    res = await authorize_action(
-        tool_name="exec",
-        args={"command": body.command},
-        lane=LANE_CONTAINER_TERMINAL,
-        permission_mode=None,
-        run_id=workspace_id,
-        emit=_emit_decision,
+    job_id = await _gate_and_launch(
+        pool, mgr, workspace_id, body.command, body.workdir, user_id, body.timeout_secs,
     )
-    if not res.allowed:
-        raise HTTPException(403, res.reason or "denied by execution policy")
-
-    await emit_terminal_event(
-        pool, workspace_id,
-        event_type="tool_call",
-        payload=build_tool_call_payload(body.command),
-    )
-    try:
-        job_id = await mgr.exec_bg(
-            workspace_id, body.command, workdir=body.workdir, pool=pool,
-            user_id=user_id,
-        )
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
-    except RuntimeError as exc:
-        raise HTTPException(503, str(exc))
-    except Exception as exc:  # docker APIError etc.
-        logger.error("[harvis-jobs:%s] launch failed: %s", workspace_id, exc)
-        raise HTTPException(503, f"job launch failed: {exc}")
-
     return {
         "job_id": job_id,
         "workspace_id": workspace_id,
@@ -187,7 +267,7 @@ async def list_jobs(
         rows = await conn.fetch(
             """
             SELECT j.id, j.workspace_id, j.command, j.status, j.exit_code,
-                   j.started_at, j.finished_at
+                   j.timeout_secs, j.started_at, j.finished_at
             FROM workspace_jobs j
             LEFT JOIN workspace_runs r ON r.id = j.workspace_id
             WHERE j.user_id = $1 OR r.user_id = $1
@@ -196,21 +276,22 @@ async def list_jobs(
             """,
             uid, lim,
         )
-    return {
-        "jobs": [
-            {
-                "id": r["id"],
-                "workspace_id": r["workspace_id"],
-                "command": r["command"],
-                "status": r["status"],
-                "exit_code": r["exit_code"],
-                "started_at": int(r["started_at"].timestamp()) if r["started_at"] else None,
-                "finished_at": int(r["finished_at"].timestamp()) if r["finished_at"] else None,
-                "stream_url": f"/api/harvis/runs/{r['workspace_id']}/stream",
-            }
-            for r in rows
-        ]
-    }
+    jobs = []
+    for r in rows:
+        jobs.append({
+            "id": r["id"],
+            "workspace_id": r["workspace_id"],
+            "command": r["command"],
+            "status": r["status"],
+            "exit_code": r["exit_code"],
+            "timeout_secs": r["timeout_secs"],
+            "started_at": int(r["started_at"].timestamp()) if r["started_at"] else None,
+            "finished_at": int(r["finished_at"].timestamp()) if r["finished_at"] else None,
+            # Phase 5: last ~40 lines for the task card — fail-soft to ''.
+            "log_tail": await _job_log_tail(pool, r["workspace_id"], r["id"]),
+            "stream_url": f"/api/harvis/runs/{r['workspace_id']}/stream",
+        })
+    return {"jobs": jobs}
 
 
 @harvis_jobs_router.get("/jobs/{job_id}")
@@ -227,7 +308,71 @@ async def get_job_status(
     status = await get_terminal_manager().job_status(job_id, pool=pool)
     if status is None:  # raced a registry prune
         raise HTTPException(status_code=404, detail="Job not found")
+    # Phase 5: attach the persisted log tail (fail-soft to '').
+    ws = status.get("workspace_id")
+    status["log_tail"] = await _job_log_tail(pool, ws, job_id) if ws else ""
     return status
+
+
+@harvis_jobs_router.post("/jobs/{job_id}/retry")
+async def retry_job(
+    job_id: str,
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """Re-run a finished/failed job with the SAME command, workdir, workspace
+    and timeout — as a NEW job. HUMAN-triggered only (a button, never an
+    auto-retry loop). Ownership fail-closed like every other job route, and
+    the launch passes through the SAME lane-3 authorize_action gate the
+    original start used — a retry never inherits a stale approval."""
+    mgr = await _require_terminal_ready()
+    pool = _pool_of(request)
+    user_id = int(current_user["id"])
+    await _require_owned_job(pool, job_id, user_id)
+
+    # Source of truth for what to re-run: the persisted row (survives
+    # restarts); fall back to the in-memory registry if the insert was lost.
+    row = None
+    if pool is not None:
+        try:
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """
+                    SELECT workspace_id, command, workdir, status, timeout_secs
+                    FROM workspace_jobs WHERE id = $1
+                    """,
+                    job_id,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[job:%s] retry lookup failed: %s", job_id, exc)
+    if row is not None:
+        workspace_id = row["workspace_id"]
+        command = row["command"]
+        workdir = row["workdir"] or "/workspace"
+        status = row["status"]
+        timeout_secs = row["timeout_secs"]
+    else:
+        mem = get_terminal_manager().get_job(job_id)
+        if mem is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        workspace_id, command = mem.workspace_id, mem.command
+        workdir, status, timeout_secs = mem.workdir, mem.status, mem.timeout_secs
+
+    if status == "running":
+        raise HTTPException(409, "Job is still running — stop it before retrying.")
+    if not (command or "").strip():
+        raise HTTPException(409, "Original command was not recorded — cannot retry.")
+
+    new_job_id = await _gate_and_launch(
+        pool, mgr, workspace_id, command, workdir, user_id, timeout_secs,
+    )
+    return {
+        "job_id": new_job_id,
+        "workspace_id": workspace_id,
+        "retried_from": job_id,
+        "status": "running",
+        "stream_url": f"/api/harvis/runs/{workspace_id}/stream",
+    }
 
 
 @harvis_jobs_router.get("/jobs/{job_id}/stream")

@@ -298,27 +298,6 @@
 			/>
 		</div>
 
-		<!-- default model — what Chat/Code use unless overridden -->
-		<div
-			class="flex flex-col sm:flex-row sm:items-center gap-2 rounded-xl border border-gray-100 dark:border-white/8 bg-gray-50/50 dark:bg-[#0f1626] px-4 py-2.5"
-		>
-			<label for="harvis-default-model" class="text-sm font-medium text-gray-700 dark:text-gray-200 shrink-0">
-				{$i18n.t('Default model')}
-			</label>
-			<select
-				id="harvis-default-model"
-				bind:value={defaultModel}
-				on:change={onDefaultModelChange}
-				class="text-sm rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-[#0a0e18] px-2.5 py-1.5 text-gray-700 dark:text-gray-200 outline-none focus:border-blue-500/40 sm:max-w-xs"
-			>
-				<option value="">{$i18n.t('Not set')}</option>
-				{#each modelOptions as m (m.id)}
-					<option value={m.id}>{m.name ?? m.id}</option>
-				{/each}
-			</select>
-			<span class="text-[11px] text-gray-400 sm:ml-auto">{$i18n.t('Pre-fills new Chat & Code sessions')}</span>
-		</div>
-
 		<!-- body — P6: five named dashboard sections (status contract unchanged) -->
 		{#if filter === 'all'}
 			{#each SECTION_ORDER as s (s)}

@@ -60,6 +60,35 @@ _JOB_MAX_OUTPUT_BYTES = int(os.getenv("HARVIS_JOB_MAX_OUTPUT_BYTES", "10485760")
 _JOB_MAX_ARTIFACTS = int(os.getenv("HARVIS_JOB_MAX_ARTIFACTS", "50"))
 _JOB_ARTIFACT_MAX_BYTES = int(os.getenv("HARVIS_JOB_ARTIFACT_MAX_BYTES", str(512 * 1024)))
 
+# ── Isolated per-session runner (Build Space Phase 3 — SECURITY) ─────────────
+# The AI's native `exec` / `run_tests` for a VIBECODE SESSION runs in this
+# hardened, SOCKET-LESS sibling container instead of inside the backend process
+# (which holds /var/run/docker.sock → effectively host root). The routing flag
+# lives in orchestration/tools.py (_isolated_runner_enabled,
+# HARVIS_BUILD_ISOLATED_RUNNER, default ON).
+#
+# Image: defaults to the polyglot repo-sandbox image (Node 20 + Python 3.11 +
+# uv + git) — the toolchain built for running untrusted repo code. Override
+# with HARVIS_BUILD_RUNNER_IMAGE.
+_RUNNER_IMAGE = os.getenv(
+    "HARVIS_BUILD_RUNNER_IMAGE",
+    os.getenv("HARVIS_ADAPTIVE_REPO_SANDBOX_IMAGE", "harvis-repo-sandbox:local"),
+)
+# Network mirrors the repo-sandbox: NO Harvis service rides it (the runner can
+# never reach pgsql / ollama / openclaw), but public package registries work.
+# If the network is missing at spawn time we FAIL CLOSED to network 'none' —
+# never onto an internal Harvis network.
+_RUNNER_NETWORK = os.getenv(
+    "HARVIS_BUILD_RUNNER_NETWORK",
+    os.getenv("HARVIS_ADAPTIVE_REPO_SANDBOX_NETWORK", "harvis_repo-sandbox"),
+)
+_RUNNER_MEM = os.getenv("HARVIS_BUILD_RUNNER_MEM", "1024m")
+_RUNNER_CPUS = float(os.getenv("HARVIS_BUILD_RUNNER_CPUS", "1.0"))
+_RUNNER_PIDS = int(os.getenv("HARVIS_BUILD_RUNNER_PIDS", "256"))
+# Match the backend/appuser uid so the bind-mounted session workspace (owned by
+# uid 1001) stays writable WITHOUT giving the container root.
+_RUNNER_USER = os.getenv("HARVIS_BUILD_RUNNER_USER", "1001:1001")
+
 
 def is_enabled() -> bool:
     """Default: ON. The env var is a kill-switch only.
@@ -126,6 +155,9 @@ class _JobState:
     finished: Optional[float] = None
     offset: int = 0  # bytes of BASE.out already streamed
     exit_code: Optional[int] = None
+    # Phase 5: per-job max lifetime (seconds), capped at _JOB_MAX_LIFETIME_S.
+    # None (legacy rows) → the global default applies.
+    timeout_secs: Optional[int] = None
     tail_task: Optional[Any] = field(default=None, repr=False)
 
 
@@ -151,6 +183,10 @@ class WorkspaceTerminalManager:
         self._lock = asyncio.Lock()
         self._readiness: Optional[_ReadinessReport] = None
         self._readiness_ttl_s = 30.0  # re-probe at most this often
+        # Cached Mounts of the backend's OWN container — used by the isolated
+        # runner to translate a backend path into the host path a sibling
+        # container can bind-mount (see _backend_mounts / host_path_of).
+        self._own_mounts: Optional[list] = None
 
     # ── Readiness probe ────────────────────────────────────────────────────
 
@@ -403,8 +439,14 @@ class WorkspaceTerminalManager:
         timeout = min(_MAX_TIMEOUT_S, max(1.0, timeout_s or _DEFAULT_TIMEOUT_S))
         state = await self.ensure(workspace_id)
         state.last_used_at = time.time()
+        return await self._exec_in_container(state.container_name, cmd, timeout, workdir)
 
-        container = await asyncio.to_thread(self._client.containers.get, state.container_name)
+    async def _exec_in_container(
+        self, container_name: str, cmd: str, timeout: float, workdir: str
+    ) -> dict:
+        """Shared docker-exec body for exec() and exec_isolated(): timeout-wrap,
+        run, decode + cap streams. Same result shape either way."""
+        container = await asyncio.to_thread(self._client.containers.get, container_name)
 
         # Wrap in `timeout` so the docker exec actually returns even if the
         # command hangs forever. Coreutils `timeout` is in ubuntu by default.
@@ -421,14 +463,14 @@ class WorkspaceTerminalManager:
                 tty=False,
             )
         except APIError as exc:
-            logger.warning("[terminal:%s] exec_run APIError: %s", workspace_id, exc)
+            logger.warning("[terminal:%s] exec_run APIError: %s", container_name, exc)
             return {
                 "stdout": "",
                 "stderr": f"exec_run failed: {exc}",
                 "exit_code": -1,
                 "duration_ms": int((time.time() - t0) * 1000),
                 "truncated": False,
-                "container": state.container_name,
+                "container": container_name,
             }
         duration_ms = int((time.time() - t0) * 1000)
 
@@ -451,8 +493,186 @@ class WorkspaceTerminalManager:
             "exit_code": exit_code,
             "duration_ms": duration_ms,
             "truncated": truncated,
-            "container": state.container_name,
+            "container": container_name,
         }
+
+    # ── Isolated per-session runner (Build Space Phase 3 — SECURITY) ────────
+    # A vibecode session's AI-issued shell commands run HERE: a hardened
+    # sibling container with the session workspace bind-mounted at /workspace,
+    # cap_drop=ALL, no-new-privileges, a pids limit, uid 1001, and — the whole
+    # point — NO /var/run/docker.sock and no host-sensitive mounts. Every
+    # failure RAISES; callers must surface an exec error, never fall back to
+    # in-process execution (fail closed).
+
+    @staticmethod
+    def _safe_id(raw: str) -> str:
+        return "".join(c if c.isalnum() or c in "_.-" else "-" for c in (raw or "")) or "x"
+
+    async def _backend_mounts(self) -> list:
+        """Mounts of the backend's OWN container (cached for the process life).
+
+        The runner is a SIBLING container (spawned via the host daemon), so a
+        bind mount needs the HOST path of the session workspace — which the
+        backend only knows as a path inside itself (e.g. /data/artifacts/…, a
+        named volume). Inspecting our own container's Mounts gives the
+        Destination→Source map to translate with."""
+        if self._own_mounts is not None:
+            return self._own_mounts
+        candidates = [
+            (os.getenv("HARVIS_BACKEND_CONTAINER") or "").strip(),
+            (os.getenv("HOSTNAME") or "").strip(),
+            "harvis-backend",
+        ]
+        last_exc: Exception | None = None
+        for cid in candidates:
+            if not cid:
+                continue
+            try:
+                me = await asyncio.to_thread(self._client.containers.get, cid)
+                self._own_mounts = (me.attrs or {}).get("Mounts") or []
+                return self._own_mounts
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+        raise RuntimeError(
+            f"cannot inspect the backend's own container (tried {candidates!r}): {last_exc}"
+        )
+
+    async def host_path_of(self, container_path: str) -> str:
+        """Translate a backend-container path to its HOST path via the backend's
+        own mount table (longest-Destination-prefix match). Raises when no mount
+        covers the path — the isolated runner then refuses to run (fail closed)."""
+        target = os.path.realpath(container_path)
+        best_dst = ""
+        best_src = ""
+        for m in await self._backend_mounts():
+            dst = (m.get("Destination") or "").rstrip("/")
+            src = m.get("Source") or ""
+            if not dst or not src:
+                continue
+            if (target == dst or target.startswith(dst + "/")) and len(dst) > len(best_dst):
+                best_dst, best_src = dst, src
+        if not best_dst:
+            raise RuntimeError(
+                f"no backend mount covers {container_path!r} — the isolated runner "
+                "cannot bind the session workspace into a sibling container"
+            )
+        rel = os.path.relpath(target, best_dst)
+        return best_src if rel == "." else os.path.join(best_src, rel)
+
+    async def ensure_isolated(self, session_id: str, workspace_path: str) -> _TerminalState:
+        """Get/create the session's hardened runner container. Lazy, idempotent."""
+        key = f"vc:{self._safe_id(session_id)}"
+        async with self._lock:
+            state = self._terminals.get(key)
+            if state:
+                try:
+                    c = await asyncio.to_thread(self._client.containers.get, state.container_name)
+                    if c.status == "running":
+                        return state
+                except NotFound:
+                    pass
+                self._terminals.pop(key, None)
+            return await self._spawn_isolated(key, session_id, workspace_path)
+
+    async def _spawn_isolated(self, key: str, session_id: str, workspace_path: str) -> _TerminalState:
+        if self._client is None:
+            raise RuntimeError("docker client unavailable")
+        if not os.path.isdir(workspace_path):
+            raise RuntimeError(f"session workspace {workspace_path!r} does not exist")
+        host_src = await self.host_path_of(workspace_path)
+        name = f"harvis-vc-run-{self._safe_id(session_id)[:40]}"
+
+        # Reuse a surviving container (backend restart) — but ONLY if its
+        # /workspace bind still points at the same host path; else recreate.
+        try:
+            existing = await asyncio.to_thread(self._client.containers.get, name)
+            mounts = (existing.attrs or {}).get("Mounts") or []
+            same = any(
+                m.get("Destination") == "/workspace" and m.get("Source") == host_src
+                for m in mounts
+            )
+            if same:
+                if existing.status != "running":
+                    await asyncio.to_thread(existing.start)
+                state = _TerminalState(
+                    workspace_id=key, container_name=name, created_at=time.time()
+                )
+                self._terminals[key] = state
+                logger.info("[vc-runner:%s] reused container %s", session_id, name)
+                return state
+            await asyncio.to_thread(existing.remove, force=True)
+        except NotFound:
+            pass
+
+        network = _RUNNER_NETWORK
+        try:
+            await asyncio.to_thread(self._client.networks.get, network)
+        except Exception:  # noqa: BLE001
+            # FAIL CLOSED on networking: sandbox network missing → NO network at
+            # all. Never fall back onto an internal Harvis network.
+            logger.warning(
+                "[vc-runner:%s] network %r missing — spawning with network 'none'",
+                session_id, network,
+            )
+            network = "none"
+
+        container = await asyncio.to_thread(
+            self._client.containers.run,
+            _RUNNER_IMAGE,
+            command=["sh", "-c", "tail -f /dev/null"],
+            name=name,
+            detach=True,
+            network=network,
+            mem_limit=_RUNNER_MEM,
+            nano_cpus=int(_RUNNER_CPUS * 1_000_000_000),
+            pids_limit=_RUNNER_PIDS,
+            # Untrusted, injection-prone code runs here — mirror the repo-sandbox
+            # hardening profile: strip every capability, block privilege
+            # escalation. uid 1001 (not root) matches the workspace's owner.
+            cap_drop=["ALL"],
+            security_opt=["no-new-privileges:true"],
+            user=_RUNNER_USER,
+            environment={"HOME": "/tmp"},
+            labels={
+                "harvis.role": "vibecode-runner",
+                "harvis.session_id": session_id,
+            },
+            working_dir="/workspace",
+            # The ONLY mount: the session's own workspace. No docker.sock, no
+            # host trees, no artifact volume.
+            volumes={host_src: {"bind": "/workspace", "mode": "rw"}},
+            auto_remove=False,
+        )
+        state = _TerminalState(workspace_id=key, container_name=name, created_at=time.time())
+        self._terminals[key] = state
+        logger.info(
+            "[vc-runner:%s] spawned hardened runner %s (image=%s net=%s mem=%s pids=%d src=%s)",
+            session_id, name, _RUNNER_IMAGE, network, _RUNNER_MEM, _RUNNER_PIDS, host_src,
+        )
+        return state
+
+    async def exec_isolated(
+        self,
+        *,
+        session_id: str,
+        workspace_path: str,
+        cmd: str,
+        timeout_s: Optional[float] = None,
+        workdir: str = "/workspace",
+    ) -> dict:
+        """Run one shell command in the session's hardened runner container.
+
+        Same result shape as exec(): {stdout, stderr, exit_code, duration_ms,
+        truncated, container}. Raises on ANY isolation failure — callers must
+        treat that as a refusal to run, never as a cue to execute in-process."""
+        if not cmd or not cmd.strip():
+            raise ValueError("empty command")
+        if self._client is None:
+            raise RuntimeError("docker client unavailable")
+        timeout = min(_MAX_TIMEOUT_S, max(1.0, timeout_s or _DEFAULT_TIMEOUT_S))
+        state = await self.ensure_isolated(session_id, workspace_path)
+        state.last_used_at = time.time()
+        return await self._exec_in_container(state.container_name, cmd, timeout, workdir)
 
     # ── Background jobs (Phase E1 — non-blocking exec) ─────────────────────
 
@@ -463,6 +683,7 @@ class WorkspaceTerminalManager:
         workdir: str = "/workspace",
         pool=None,
         user_id: Optional[int] = None,
+        timeout_secs: Optional[int] = None,
     ) -> str:
         """Start `cmd` DETACHED in the workspace container; return a job_id
         immediately.
@@ -516,6 +737,13 @@ class WorkspaceTerminalManager:
             logger.error("[job:%s] detached exec launch failed: %s", jid, exc)
             raise RuntimeError(f"job launch failed: {exc}")
 
+        # Phase 5: the timeout actually used is stamped on the job (and
+        # persisted) — a caller-supplied value is clamped to the global
+        # _JOB_MAX_LIFETIME_S ceiling; absent → the global default.
+        effective_timeout = (
+            int(_JOB_MAX_LIFETIME_S) if timeout_secs is None
+            else max(1, min(int(timeout_secs), int(_JOB_MAX_LIFETIME_S)))
+        )
         job = _JobState(
             job_id=jid,
             workspace_id=workspace_id,
@@ -524,6 +752,7 @@ class WorkspaceTerminalManager:
             command=cmd,
             workdir=workdir,
             user_id=user_id,
+            timeout_secs=effective_timeout,
         )
         self._jobs[jid] = job
         # E2: durable record — job_status + reattach_running_jobs survive a
@@ -679,11 +908,14 @@ class WorkspaceTerminalManager:
                     job.status = "done" if job.exit_code == 0 else "exited"
                     break
 
-                # 3. Max-lifetime guard — reap runaways.
-                if time.time() - job.started > _JOB_MAX_LIFETIME_S:
+                # 3. Max-lifetime guard — reap runaways. Phase 5: per-job
+                # timeout_secs (already clamped to the global ceiling) wins;
+                # legacy jobs without one use _JOB_MAX_LIFETIME_S unchanged.
+                _lifetime_s = float(job.timeout_secs or _JOB_MAX_LIFETIME_S)
+                if time.time() - job.started > _lifetime_s:
                     logger.warning(
-                        "[job:%s] exceeded HARVIS_JOB_MAX_LIFETIME_S=%ss — reaping",
-                        job.job_id, _JOB_MAX_LIFETIME_S,
+                        "[job:%s] exceeded timeout %ss — reaping",
+                        job.job_id, _lifetime_s,
                     )
                     await self._signal_job(job, container)
                     job.status = "reaped"
@@ -857,6 +1089,8 @@ class WorkspaceTerminalManager:
                 "status": job.status,
                 "started": job.started,
                 "workspace_id": job.workspace_id,
+                "command": job.command,
+                "timeout_secs": job.timeout_secs,
             }
             if job.exit_code is not None:
                 out["exit_code"] = job.exit_code
@@ -872,7 +1106,8 @@ class WorkspaceTerminalManager:
             async with pool.acquire() as conn:
                 row = await conn.fetchrow(
                     """
-                    SELECT id, workspace_id, status, exit_code,
+                    SELECT id, workspace_id, status, exit_code, command,
+                           timeout_secs,
                            EXTRACT(EPOCH FROM started_at)  AS started,
                            EXTRACT(EPOCH FROM finished_at) AS finished
                     FROM workspace_jobs WHERE id = $1
@@ -889,6 +1124,8 @@ class WorkspaceTerminalManager:
             "status": row["status"] or "unknown",
             "started": float(row["started"]) if row["started"] is not None else None,
             "workspace_id": row["workspace_id"],
+            "command": row["command"],
+            "timeout_secs": int(row["timeout_secs"]) if row["timeout_secs"] is not None else None,
         }
         if row["exit_code"] is not None:
             out["exit_code"] = int(row["exit_code"])
@@ -910,18 +1147,39 @@ class WorkspaceTerminalManager:
                     """
                     INSERT INTO workspace_jobs
                         (id, workspace_id, user_id, command, workdir, status,
-                         base_path, container_name, started_at)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, to_timestamp($9))
+                         base_path, container_name, started_at, timeout_secs)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, to_timestamp($9), $10)
                     ON CONFLICT (id) DO NOTHING
                     """,
                     job.job_id, job.workspace_id, job.user_id, job.command,
                     job.workdir, job.status, job.base, job.container_name,
-                    job.started,
+                    job.started, job.timeout_secs,
                 )
         except Exception as exc:  # noqa: BLE001
+            # Pre-migration DB (timeout_secs column missing) must not cost the
+            # restart net — fall back to the legacy column set.
             logger.warning(
-                "[job:%s] DB insert failed (job unaffected): %s", job.job_id, exc,
+                "[job:%s] DB insert with timeout_secs failed (%s) — retrying legacy shape",
+                job.job_id, exc,
             )
+            try:
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        INSERT INTO workspace_jobs
+                            (id, workspace_id, user_id, command, workdir, status,
+                             base_path, container_name, started_at)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, to_timestamp($9))
+                        ON CONFLICT (id) DO NOTHING
+                        """,
+                        job.job_id, job.workspace_id, job.user_id, job.command,
+                        job.workdir, job.status, job.base, job.container_name,
+                        job.started,
+                    )
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "[job:%s] DB insert failed (job unaffected): %s", job.job_id, exc,
+                )
 
     async def _db_job_finish(self, pool, job: _JobState) -> None:
         if pool is None:
@@ -1129,7 +1387,7 @@ class WorkspaceTerminalManager:
                 rows = await conn.fetch(
                     """
                     SELECT id, workspace_id, user_id, command, workdir,
-                           base_path, container_name,
+                           base_path, container_name, timeout_secs,
                            EXTRACT(EPOCH FROM started_at) AS started
                     FROM workspace_jobs WHERE status = 'running'
                     """
@@ -1181,6 +1439,10 @@ class WorkspaceTerminalManager:
                 command=row["command"] or "",
                 workdir=row["workdir"] or "/workspace",
                 user_id=row["user_id"],
+                timeout_secs=(
+                    int(row["timeout_secs"]) if row["timeout_secs"] is not None
+                    else None
+                ),
                 started=(
                     float(row["started"]) if row["started"] is not None
                     else time.time()

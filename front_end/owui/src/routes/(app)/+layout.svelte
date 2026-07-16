@@ -14,7 +14,7 @@
 	import { getBanners } from '$lib/apis/configs';
 	import { getTerminalServers } from '$lib/apis/terminal';
 	import { getUserSettings } from '$lib/apis/users';
-	import { getActiveWorkspace } from '$lib/apis/agent-runs';
+	import { getActiveWorkspace, getActiveReview } from '$lib/apis/agent-runs';
 
 	import { WEBUI_VERSION, WEBUI_API_BASE_URL } from '$lib/constants';
 	import { compareVersion } from '$lib/utils';
@@ -40,10 +40,13 @@
 		showSidebar,
 		showControls,
 		activeDiscordRun,
+		activeReview,
+		showReviewMirror,
 		mobile
 	} from '$lib/stores';
 
 	import Sidebar from '$lib/components/layout/Sidebar.svelte';
+	import ReviewMirror from '$lib/agent-studio/ReviewMirror.svelte';
 	import SettingsModal from '$lib/components/chat/SettingsModal.svelte';
 	import ChangelogModal from '$lib/components/ChangelogModal.svelte';
 	import AccountPending from '$lib/components/layout/Overlay/AccountPending.svelte';
@@ -236,7 +239,29 @@
 			} catch (_) {
 				/* fail-soft: leave the chip as-is */
 			}
+			// Mirror a running agent review into the Chat-side "Agent review live" chip. The chip
+			// only reflects a LIVE review; the side panel (showReviewMirror) persists independently
+			// so it keeps showing the conversation after the review finishes.
+			try {
+				const rev = await getActiveReview();
+				if (rev && rev.run_id) {
+					activeReview.set({ run_id: rev.run_id, task_brief: rev.task_brief, title: rev.title });
+					// Auto-open the mirror so you can FOLLOW the coder↔reviewer conversation live on
+					// the right the moment a review goes live — including one triggered from Discord.
+					// Once per review run: if you close it, it won't reappear for the same run; a NEW
+					// review (new run_id) opens it again.
+					if (rev.run_id !== _autoOpenedReview) {
+						_autoOpenedReview = rev.run_id;
+						showReviewMirror.set(rev.run_id);
+					}
+				} else {
+					activeReview.set(null);
+				}
+			} catch (_) {
+				/* fail-soft */
+			}
 		};
+		let _autoOpenedReview = '';
 		pollActiveDiscordRun();
 		_discordPollTimer = setInterval(pollActiveDiscordRun, 6000);
 
@@ -496,6 +521,9 @@
 			{/if}
 		</div>
 	</div>
+
+	<!-- App-wide: mirror a running agent review (coder↔reviewer) into a right-side panel. -->
+	<ReviewMirror />
 {/if}
 
 <style>

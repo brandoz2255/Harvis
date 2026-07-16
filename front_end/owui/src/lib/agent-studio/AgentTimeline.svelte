@@ -2,7 +2,10 @@
 	import { getContext, tick } from 'svelte';
 	import { toolLabel } from './workflow/humanizeTool';
 	import Collapsible from '$lib/components/common/Collapsible.svelte';
+	import Markdown from '$lib/components/chat/Messages/Markdown.svelte';
 	import type { WorkspaceEvent } from '$lib/apis/streaming/workspace-stream';
+
+	const _VERDICT_RE = /\n*VERDICT\s*[:\-]\s*(APPROVED|CHANGES[_ ]REQUESTED|COMMENT)\s*\.?\s*$/i;
 
 	const i18n: any = getContext('i18n');
 
@@ -16,6 +19,14 @@
 
 	type Block =
 		| { kind: 'msg'; text: string }
+		| {
+				kind: 'agent_msg';
+				role: 'coder' | 'reviewer' | string;
+				label: string;
+				text: string;
+				prUrl?: string;
+				verdict?: 'approved' | 'changes' | 'comment';
+		  }
 		| { kind: 'tool'; label: string; status: 'running' | 'done' | 'error'; output?: string }
 		| { kind: 'log'; text: string }
 		| { kind: 'result'; text: string }
@@ -41,6 +52,34 @@
 					if (e.content && String(e.content).trim())
 						out.push({ kind: 'msg', text: String(e.content) });
 					break;
+				case 'agent_message': {
+					// Review-loop conversation post (coder ↔ reviewer) — a labeled, markdown-
+					// formatted bubble so the back-and-forth reads like a dialogue (with the
+					// verdict pulled out into a header badge, same as the chat-side view).
+					const raw = String(e.content ?? '');
+					if (raw.trim()) {
+						const vm = raw.match(_VERDICT_RE);
+						const _vt = vm ? vm[1].toUpperCase() : '';
+						const verdict: 'approved' | 'changes' | 'comment' | undefined = !vm
+							? undefined
+							: _vt.startsWith('APPROVED')
+								? 'approved'
+								: _vt.startsWith('COMMENT')
+									? 'comment'
+									: 'changes';
+						out.push({
+							kind: 'agent_msg',
+							role: e.role === 'reviewer' ? 'reviewer' : e.role === 'coder' ? 'coder' : String(e.role ?? 'agent'),
+							label: String(e.label || e.agent_label || e.role || 'Agent'),
+							text: verdict ? raw.replace(_VERDICT_RE, '').trim() : raw,
+							verdict,
+							// github-mode reviews mirror this post to a real PR review/comment —
+							// the event then carries pr_url so the bubble can link to it.
+							...(typeof e.pr_url === 'string' && e.pr_url ? { prUrl: e.pr_url } : {})
+						});
+					}
+					break;
+				}
 				case 'tool_call':
 					out.push({ kind: 'tool', label: toolLabel(e.tool), status: 'running' });
 					lastTool = out.length - 1;
@@ -130,6 +169,52 @@
 		{#if b.kind === 'msg'}
 			<!-- the agent "talking" -->
 			<div class="text-gray-200 leading-relaxed whitespace-pre-wrap break-words">{b.text}</div>
+		{:else if b.kind === 'agent_msg'}
+			<!-- review-loop conversation bubble: coder vs reviewer visually distinct -->
+			<div
+				class="rounded-lg border px-3 py-2 {b.role === 'reviewer'
+					? 'border-amber-500/25 bg-amber-500/[0.06]'
+					: 'border-gray-500/25 bg-gray-500/[0.06]'}"
+			>
+				<div class="mb-1 flex items-center gap-1.5">
+					<span
+						class="shrink-0 rounded-full border px-1.5 py-px text-[10px] uppercase tracking-wide {b.role ===
+						'reviewer'
+							? 'border-amber-500/30 text-amber-400'
+							: 'border-gray-500/30 text-gray-400'}">{b.role}</span
+					>
+					{#if b.label && b.label.toLowerCase() !== b.role.toLowerCase()}
+						<span class="truncate text-[11px] text-gray-500">{b.label}</span>
+					{/if}
+					{#if b.verdict}
+						<span
+							class="shrink-0 rounded-full px-1.5 py-px text-[9px] uppercase tracking-wide font-bold {b.verdict ===
+							'approved'
+								? 'bg-emerald-500/15 text-emerald-400'
+								: b.verdict === 'comment'
+									? 'bg-sky-500/15 text-sky-400'
+									: 'bg-amber-500/15 text-amber-400'}"
+							>{b.verdict === 'approved'
+								? '✓ ' + $i18n.t('Approved')
+								: b.verdict === 'comment'
+									? '💬 ' + $i18n.t('Comment')
+									: '✎ ' + $i18n.t('Changes requested')}</span
+						>
+					{/if}
+					{#if b.prUrl}
+						<!-- github-mode review: this post also exists as a PR review/comment -->
+						<a
+							href={b.prUrl}
+							target="_blank"
+							rel="noopener noreferrer"
+							class="ml-auto shrink-0 rounded-full border border-gray-500/30 px-1.5 py-px text-[10px] text-gray-400 hover:text-gray-300 hover:border-gray-500/50 transition"
+						>{$i18n.t('on GitHub PR')} ↗</a>
+					{/if}
+				</div>
+				<div class="markdown-prose markdown-prose-sm text-sm leading-relaxed text-gray-200">
+					<Markdown id={`at-${i}`} content={b.text} />
+				</div>
+			</div>
 		{:else if b.kind === 'tool'}
 			<div class="flex items-start gap-2 text-xs">
 				{#if b.status === 'running'}

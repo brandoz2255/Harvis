@@ -11,14 +11,35 @@
 	export let modeLabel = '';
 	export let model = '';
 	export let isRunning = false;
+	// Branch-lock meta (Build Space preflight) — all optional; each chip hides when null
+	// so sessions created before preflight existed render the header unchanged.
+	export let repoLabel: string | null = null; // session.repo_display_path
+	export let baseBranch: string | null = null;
+	export let workBranch: string | null = null;
+	export let headSha: string | null = null;
+	export let lifecycle = ''; // created | ready | blocked | running
+	export let preflight: { clean?: boolean | null; dirty_count?: number } | null = null;
 	// Workspace-dock panel toggles for the ⋯ menu: [{ key, label, visible }].
 	export let panels: Array<{ key: string; label: string; visible: boolean }> = [];
 	export let dockOpen = true;
+	// A running #harvis-code (Discord-launched) session, or null. Shown as a live chip
+	// on the right → clicking it jumps the user into that session so the web thread
+	// mirrors what's happening in Discord. Independent of this tab's own session.
+	export let discordSession: any = null;
 
 	let panelsMenuOpen = false;
 
 	$: metaParts = [sourceLabel, isolationLabel, modeLabel, model].filter(
 		(p) => typeof p === 'string' && p.trim() !== ''
+	);
+
+	$: shortSha = headSha ? headSha.slice(0, 7) : '';
+	$: hasBranchMeta = !!(
+		(repoLabel && repoLabel !== projectName) ||
+		workBranch ||
+		shortSha ||
+		preflight ||
+		lifecycle
 	);
 </script>
 
@@ -56,6 +77,65 @@
 					/>
 				</div>
 			{/if}
+
+			<!-- Branch-lock meta strip: repo · base → work branch · HEAD sha · clean/dirty · lifecycle.
+			     Every chip guards its own null so pre-preflight sessions render nothing extra. -->
+			{#if hasBranchMeta}
+				<div class="hidden md:flex items-center gap-1 min-w-0 text-[10px] text-gray-400">
+					{#if repoLabel && repoLabel !== projectName}
+						<span
+							class="px-1.5 py-0.5 rounded border border-white/8 bg-white/4 truncate max-w-[12rem]"
+							title={repoLabel}>{repoLabel}</span
+						>
+					{/if}
+					{#if workBranch}
+						<span
+							class="px-1.5 py-0.5 rounded border border-white/8 bg-white/4 truncate max-w-[16rem]"
+							title={baseBranch ? `${baseBranch} → ${workBranch}` : workBranch}
+						>
+							{#if baseBranch}<span class="text-gray-500">{baseBranch}</span><span
+									class="text-gray-600 px-1">→</span
+								>{/if}<span class="text-gray-300">{workBranch}</span>
+						</span>
+					{/if}
+					{#if shortSha}
+						<span class="px-1.5 py-0.5 rounded border border-white/8 bg-white/4 font-mono text-gray-500"
+							>{shortSha}</span
+						>
+					{/if}
+					{#if preflight}
+						{#if preflight.clean}
+							<span
+								class="px-1.5 py-0.5 rounded border border-emerald-500/15 bg-emerald-500/8 text-emerald-400/90"
+								>{$i18n.t('clean')}</span
+							>
+						{:else}
+							<span
+								class="px-1.5 py-0.5 rounded border border-amber-500/15 bg-amber-500/8 text-amber-400/90"
+								>{preflight.dirty_count ?? 0} {$i18n.t('changed')}</span
+							>
+						{/if}
+					{/if}
+					{#if lifecycle}
+						<span
+							class="flex items-center gap-1 px-1.5 py-0.5 rounded border {lifecycle === 'blocked'
+								? 'border-amber-500/15 bg-amber-500/8 text-amber-400/90'
+								: 'border-white/8 bg-white/4 text-gray-400'}"
+						>
+							<span
+								class="w-1 h-1 rounded-full shrink-0 {lifecycle === 'running'
+									? 'bg-emerald-400 animate-pulse'
+									: lifecycle === 'blocked'
+										? 'bg-amber-500'
+										: lifecycle === 'ready'
+											? 'bg-emerald-500'
+											: 'bg-gray-500'}"
+							/>
+							{lifecycle}
+						</span>
+					{/if}
+				</div>
+			{/if}
 		{:else}
 			<span class="text-[11px] text-gray-500 truncate">
 				{$i18n.t('Choose a repo to start a coding session.')}
@@ -65,6 +145,20 @@
 
 	<!-- RIGHT -->
 	<div class="flex items-center gap-1.5 shrink-0">
+		{#if discordSession}
+			<button
+				class="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg text-indigo-200 border border-indigo-400/25 bg-indigo-500/12 hover:bg-indigo-500/20 transition"
+				on:click={() => dispatch('openDiscord')}
+				title={discordSession?.task_brief
+					? $i18n.t('Discord session running: {{brief}} — open it here', {
+							brief: String(discordSession.task_brief).slice(0, 80)
+						})
+					: $i18n.t('A Discord #harvis-code session is running — open it here')}
+			>
+				<span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+				{$i18n.t('Discord session live')}
+			</button>
+		{/if}
 		{#if hasProject}
 			{#if isRunning}
 				<button
@@ -76,18 +170,13 @@
 			{/if}
 
 			<button
-				class="text-xs px-2.5 py-1 rounded-lg text-gray-200 border border-white/8 bg-white/4 hover:bg-white/8 transition"
+				class="text-xs px-2.5 py-1 rounded-lg text-white border border-sky-400/20 bg-sky-500/80 hover:bg-sky-500 transition"
 				on:click={() => dispatch('createPR')}
 			>
 				{$i18n.t('Create PR')}
 			</button>
-
-			<button
-				class="text-xs px-2.5 py-1 rounded-lg text-white border border-sky-400/20 bg-sky-500/80 hover:bg-sky-500 transition"
-				on:click={() => dispatch('openRun')}
-			>
-				{$i18n.t('Open Run')}
-			</button>
+			<!-- "Open Run" removed: the run inspector overlay pegs the main thread when opened on a
+			     LIVE run (unpinned cause). Inspect a finished run via "View run details" on its turn. -->
 		{/if}
 
 		<!-- ⋯ menu: choose which workspace-dock panels are open -->

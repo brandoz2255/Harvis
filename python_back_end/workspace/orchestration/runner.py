@@ -13,6 +13,7 @@ Harvis tool-call-discipline concern.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -25,7 +26,7 @@ from owui_compat.workspace_method import DEFAULT_SAFE_LANE
 from ..openclaw_client import OpenClawEvent
 from .authz import authorize_action
 from .model_router import ModelRouter
-from .risk import await_action_decision, register_pending
+from .risk import await_action_decision, mark_pending_resolved, persist_pending, register_pending
 from .tools import WIRE_TOOL_SCHEMA, dispatch_tool, filter_wire_schema, lane_for_tool, parse_tool_calls
 
 logger = logging.getLogger(__name__)
@@ -34,13 +35,18 @@ logger = logging.getLogger(__name__)
 # stop a churning sub-agent (the finish-reluctance loop — re-reading/re-writing
 # the same file without ever calling finish). Tunable via env.
 _MAX_IDLE_STEPS = max(1, int(os.getenv("HARVIS_ORCH_MAX_IDLE_STEPS", "3")))
-_SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv"}
+_SKIP_DIRS = {
+    ".git", "__pycache__", "node_modules", ".venv", "venv", "dist", "build",
+    ".next", "target", "vendor", ".cache", "coverage", ".mypy_cache", ".pytest_cache",
+}
 _BASELINE_FILE = ".harvis-baseline.json"
 
 
 def _ws_fingerprint(path: str) -> str:
-    """SHA-256 over every (small) file in the workspace — lets the runner detect
-    when an agent has stopped producing real changes."""
+    """SHA-256 over the workspace's files — lets the runner detect when an agent has
+    stopped producing real changes. Large files (>1 MB) fingerprint by (size, mtime)
+    instead of by content so a big repo / binary can't make the scan slow. This is
+    synchronous heavyweight IO: callers MUST run it off the event loop (asyncio.to_thread)."""
     h = hashlib.sha256()
     try:
         for root, dirs, files in os.walk(path):
@@ -51,6 +57,11 @@ def _ws_fingerprint(path: str) -> str:
                 fp = os.path.join(root, fn)
                 try:
                     h.update(os.path.relpath(fp, path).encode("utf-8", "replace"))
+                    st = os.stat(fp)
+                    if st.st_size > 1024 * 1024:
+                        # Large file: fingerprint by metadata, don't read the content.
+                        h.update(f"{st.st_size}:{int(st.st_mtime)}".encode())
+                        continue
                     with open(fp, "rb") as f:
                         h.update(f.read(256 * 1024))
                 except Exception:
@@ -193,6 +204,7 @@ class SubAgentRunner:
         skill_blocks: list[str] | None = None,
         pool=None,
         user_id: int | None = None,
+        session_id: str | None = None,  # VibeCode session — enables approve-for-session
     ) -> AsyncGenerator[OpenClawEvent, None]:
         def ev(etype: str, data: dict) -> OpenClawEvent:
             e = OpenClawEvent(
@@ -230,7 +242,7 @@ class SubAgentRunner:
         # track completion, NOT "every tool call succeeded".
         completed = False
         steps = 0
-        last_fp = _ws_fingerprint(workspace_path)  # baseline (empty scratch dir)
+        last_fp = await asyncio.to_thread(_ws_fingerprint, workspace_path)  # baseline (off the event loop)
         made_edit = False
         idle = 0
         action_seq = 0  # per-action ids for the in-place permission gate
@@ -253,6 +265,12 @@ class SubAgentRunner:
         # backstop for anything the model emits despite the offer-time withhold.
         if disabled_tools:
             disabled |= {t for t in disabled_tools if t != "finish"}
+        # Phase 4: the tracked session tools exist ONLY inside a VibeCode session —
+        # non-session runs never even see them in the offered schema (dispatch_tool
+        # also refuses them without a session_id; belt-and-braces). Session runs are
+        # unaffected: the tools appear alongside edit_file/str_replace as today.
+        if not session_id:
+            disabled |= {"apply_patch", "git_commit"}
         # propose_skill (agent self-authorship) is offered ONLY on user-initiated runs
         # with DB context — never auto-escalations (a user-intent signal, like heavy
         # tools) and never when there's no pool/user to persist a DRAFT under. The draft
@@ -359,6 +377,8 @@ class SubAgentRunner:
                             permission_mode=permission_mode,
                             run_id=run_id,
                             emit=decision_payloads.append,
+                            session_id=session_id,
+                            pool=pool,
                         )
                         # 'decision' trace events ride the normal event pipeline
                         # (workspace_events + SSE), same as tool_call/tool_result.
@@ -387,26 +407,49 @@ class SubAgentRunner:
                         if res.needs_approval:
                             action_seq += 1
                             action_id = f"{run_id}-{steps}-{action_seq}"
-                            register_pending(action_id, {"tool": name, "args": args, "risk": res.tier})
+                            register_pending(action_id, {
+                                "tool": name, "args": args, "risk": res.tier,
+                                "reason": res.reason, "session_id": session_id,
+                            })
+                            # Durability mirror: a restart must not silently lose the
+                            # pending approval (fail-open — DB errors just log).
+                            await persist_pending(
+                                pool, action_id, run_id, session_id, name, args, res.tier, res.reason,
+                            )
                             yield ev("approval_request", {
-                                "action_id": action_id, "tool": name, "args": args, "risk": res.tier,
+                                "action_id": action_id, "tool": name, "args": args,
+                                "risk": res.tier, "reason": res.reason,
                             })
                             approved = await await_action_decision(action_id)
+                            # Covers the timeout-deny path too (the resolve endpoint only
+                            # marks rows it actually resolved).
+                            await mark_pending_resolved(
+                                pool, action_id, "approved" if approved else "denied",
+                            )
                             yield ev("approval_resolved", {"action_id": action_id, "approved": approved})
                             if not approved:
                                 yield ev("tool_result", {"output": "Denied by the user.", "success": False})
                                 results_text.append(f"{name} DENIED by user")
                                 continue
-                    result, ok = await dispatch_tool(workspace_path, name, args)
+                    # session_id (vibecode turns only) routes exec/run_tests into
+                    # the hardened per-session runner container (Phase 3 security);
+                    # orchestrated/generic runs pass None → unchanged in-process path.
+                    result, ok = await dispatch_tool(
+                        workspace_path, name, args, session_id=session_id,
+                        pool=pool, run_id=run_id,
+                    )
                     # NOTE: a single failed tool no longer marks the whole agent failed —
                     # the agent can (and often does) recover and finish. Success is decided
                     # by completion (finish() / real edits), not by per-tool `ok`.
                     # Count as a real edit only AFTER a successful dispatch — a blocked
                     # (Plan) or denied (Ask) edit never reached the filesystem, so it must
                     # not trip the no-progress guard.
-                    if ok and name in ("edit_file", "str_replace", "write"):
+                    if ok and name in ("edit_file", "str_replace", "write", "apply_patch"):
                         made_edit = True
-                    yield ev("tool_result", {"output": result, "success": ok})
+                    # `tool` rides along so the UI can special-case results
+                    # (e.g. a run_tests pass/fail summary line) without
+                    # re-pairing events. Additive — older consumers ignore it.
+                    yield ev("tool_result", {"tool": name, "output": result, "success": ok})
                     results_text.append(
                         f"{name}({json.dumps(args)[:140]}) -> {result[:500]}"
                     )
@@ -418,7 +461,7 @@ class SubAgentRunner:
                 # Only after a real edit, and only when the workspace has been
                 # unchanged for _MAX_IDLE_STEPS in a row — so edit→test→edit loops
                 # (which DO change files) keep going. ──────────────────────────────
-                fp = _ws_fingerprint(workspace_path)
+                fp = await asyncio.to_thread(_ws_fingerprint, workspace_path)
                 idle = idle + 1 if fp == last_fp else 0
                 last_fp = fp
                 if made_edit and idle >= _MAX_IDLE_STEPS:

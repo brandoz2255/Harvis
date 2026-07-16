@@ -10,7 +10,7 @@ from dataclasses import dataclass
 import discord
 from discord import app_commands
 import httpx
-from fastapi import Request
+from fastapi import HTTPException, Request
 
 from workspace.workspace_router import launch_workspace_internal, cancel_workspace_internal
 from workspace.task_detector import detect_workspace_task
@@ -771,29 +771,39 @@ async def _wait_for_workspace_completion(
 
 # ── Friendly tool name mapping for Discord progress updates ──────────────────
 
+# Cursor-style verbs (present tense; the filename/arg is appended by the formatter, and the
+# action↔result pairing turns each into "⏳ Writing hello.txt" → "✅ Writing hello.txt").
 _TOOL_LABELS: dict[str, str] = {
-    "exec": "Running command",
-    "read": "Reading file",
-    "write": "Writing file",
+    "exec": "Running",
+    "harvis-terminal": "Running",
+    "run_tests": "Running tests",
     "run_code": "Running code",
+    "read": "Reading",
+    "read_file": "Reading",
+    "list_files": "Listing",
+    "write": "Writing",
+    "write_file": "Writing",
+    "edit_file": "Writing",
+    "str_replace": "Editing",
+    "apply_patch": "Editing",
+    "git_commit": "Committing",
     "browser/session": "Opening browser",
-    "browser/navigate": "Navigating to page",
+    "browser/navigate": "Navigating to",
     "browser/screenshot": "Taking screenshot",
     "browser/act": "Interacting with page",
     "browser/close": "Closing browser",
-    "harvis-terminal": "Harvis terminal",
-    "web_search": "Web search",
+    "web_search": "Researching",
     "web_fetch": "Fetching",
-    "memory_search": "Memory search",
-    "memory_search_unified": "Memory search",
+    "memory_search": "Searching memory",
+    "memory_search_unified": "Searching memory",
     "memory_store": "Saving memory",
     "memory_get": "Recalling memory",
-    "local_rag": "RAG search",
-    "rag_search": "RAG search",
+    "local_rag": "Searching docs",
+    "rag_search": "Searching docs",
 }
 
 # Tools whose `args.command` should be shown inline next to the call banner.
-_TOOLS_WITH_INLINE_CMD = {"exec", "harvis-terminal"}
+_TOOLS_WITH_INLINE_CMD = {"exec", "harvis-terminal", "run_tests"}
 
 # Tools whose primary argument should be shown inline (in quotes for queries,
 # bare for URLs/paths). Maps tool name → arg-key tuple (first match wins).
@@ -861,6 +871,17 @@ class CancelWorkspaceView(discord.ui.View):
 _TOOLS_WITH_INLINE_ARG: dict[str, tuple[str, ...]] = {
     "web_search": ("query", "q"),
     "web_fetch": ("url", "href"),
+    # File tools carry the target under `path` — show the filename so a step reads
+    # "Writing hello.txt" / "Reading src/app.py", not a bare "Writing file".
+    "read_file": ("path", "file", "filename"),
+    "read": ("path", "file", "filename"),
+    "edit_file": ("path", "file", "filename"),
+    "write": ("path", "file", "filename"),
+    "write_file": ("path", "file", "filename"),
+    "str_replace": ("path", "file", "filename"),
+    "apply_patch": ("path", "file", "filename"),
+    "list_files": ("path", "dir"),
+    "browser/navigate": ("url", "href"),
     "memory_search": ("query", "q"),
     "memory_search_unified": ("query", "q"),
     "memory_get": ("key", "name"),
@@ -881,6 +902,8 @@ def _format_progress_line(event_type: str, payload: dict) -> str | None:
 
     if event_type == "tool_call":
         tool = payload.get("tool", "unknown")
+        if tool == "finish":
+            return None  # the agent wrapping up \u2014 not a step worth a line
         label = _TOOL_LABELS.get(tool, f"Using {tool}")
         emoji = "\U0001f4bb" if tool == "harvis-terminal" else "\u2699\ufe0f"
         args = payload.get("args") or {}
@@ -940,10 +963,17 @@ async def _wait_with_progress(
     workspace_id: str,
     timeout_s: int,
     progress_msg: discord.Message,
+    thread=None,
 ) -> tuple[str, str | None, str | None]:
     """
     Poll workspace_events and edit the Discord progress message with live updates.
     Returns (status, final_summary, error_message).
+
+    `thread` (optional, additive — None keeps every existing caller byte-identical):
+    a channel to post PERSISTENT messages into for 'agent_message' conversation
+    events (the coder ↔ reviewer review loop). Unlike progress lines (edited into
+    one throwaway message), these are the dialogue itself, so each gets its own
+    labeled post ("🧑‍💻 coder: …" / "🔎 reviewer: …") that stays in the thread.
     """
     pool = getattr(request.app.state, "pg_pool", None)
     if pool is None:
@@ -952,6 +982,7 @@ async def _wait_with_progress(
     deadline = asyncio.get_running_loop().time() + max(5, timeout_s)
     last_seq = -1
     progress_lines: list[str] = ["\u23f3 Starting workspace\u2026"]
+    last_tool_idx = -1  # index of the pending "\u23f3 <action>" line awaiting its result (paired)
     last_edit_text = ""
     edit_interval = 2.5  # seconds between Discord message edits (rate limit friendly)
     last_edit_time = 0.0
@@ -992,14 +1023,51 @@ async def _wait_with_progress(
                     payload = json.loads(str(payload))
                 except Exception:
                     payload = {}
+            etype = row["event_type"]
 
-            line = _format_progress_line(row["event_type"], payload)
-            if line:
-                progress_lines.append(line)
+            # agent_message (review loop): a coder↔reviewer CONVERSATION post — render
+            # it as its own persistent labeled message, not a throwaway progress line.
+            if row["event_type"] == "agent_message" and thread is not None:
+                _am_role = str(payload.get("role") or payload.get("label") or "agent").strip().lower()
+                _am_emoji = "\U0001f50e" if _am_role == "reviewer" else "\U0001f9d1\u200d\U0001f4bb"
+                _am_content = str(payload.get("content") or "").strip()
+                if _am_content:
+                    try:
+                        await _send_long_message(
+                            thread, f"{_am_emoji} **{_am_role}**: {_am_content}"
+                        )
+                    except Exception as exc:
+                        logger.warning("agent_message post failed for %s: %s", workspace_id, exc)
+
+            # Cursor-style pairing: a tool_call shows as a pending "⏳ <action> <target>" line;
+            # its tool_result marks THAT same line done in place (✅/❌) instead of adding a second
+            # line — so the feed reads "⏳ Writing hello.txt" → "✅ Writing hello.txt".
+            if etype == "tool_call":
+                line = _format_progress_line("tool_call", payload)
+                if line:
+                    body = line.split(" ", 1)[1] if " " in line else line
+                    progress_lines.append("⏳ " + body)
+                    last_tool_idx = len(progress_lines) - 1
+                    new_lines = True
+            elif etype == "tool_result" and 0 <= last_tool_idx < len(progress_lines):
+                success = payload.get("success", True)
+                base = progress_lines[last_tool_idx]
+                body = base.split(" ", 1)[1] if " " in base else base
+                progress_lines[last_tool_idx] = ("✅ " if success else "❌ ") + body
+                last_tool_idx = -1
                 new_lines = True
-                # Cap displayed lines to avoid exceeding Discord limit
-                if len(progress_lines) > 15:
-                    progress_lines = progress_lines[-15:]
+            elif etype != "agent_message":
+                line = _format_progress_line(etype, payload)
+                if line:
+                    progress_lines.append(line)
+                    new_lines = True
+                last_tool_idx = -1  # a non-tool event ends the current pairing
+
+            # Cap displayed lines; keep the pending-tool index valid if the head is trimmed.
+            if len(progress_lines) > 15:
+                _dropped = len(progress_lines) - 15
+                progress_lines = progress_lines[-15:]
+                last_tool_idx = last_tool_idx - _dropped if last_tool_idx >= _dropped else -1
 
         # Long task notification
         now_time = asyncio.get_running_loop().time()
@@ -1410,6 +1478,1208 @@ async def _send_long_message(
         if i == 0 and file is not None:
             kwargs["file"] = file
         await channel.send(**kwargs)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ── /harvis-code — dedicated coding channel (slash-command driven) ───────────
+#
+# Reuses the EXISTING VibeCode session backend (workspace_router endpoint
+# functions: create session / turn / diff / create-pr / approve-deny) — no
+# agent-loop reimplementation here, only Discord plumbing.
+#
+# DORMANT unless HARVIS_CODE_CHANNEL_ID is set: the command group is never
+# added to the tree and no component handler is installed, so the bot behaves
+# EXACTLY as before. Config is read once at import; invalid values degrade to
+# "not configured" (never crash startup).
+#
+# User mapping is the REAL per-Discord-user mapping (messaging_platforms via
+# plugins.messaging.dispatcher.resolve_user_id) — NOT DISCORD_DEFAULT_USER_ID.
+# Unmapped users get a refusal, never a default identity.
+
+
+def _code_env_int(name: str) -> int:
+    try:
+        return int((os.getenv(name, "") or "").strip() or "0")
+    except ValueError:
+        logger.warning("harvis-code: %s is not an integer — treating as unset", name)
+        return 0
+
+
+_CODE_CHANNEL_ID = _code_env_int("HARVIS_CODE_CHANNEL_ID")
+_CODE_GUILD_ID = _code_env_int("HARVIS_CODE_GUILD_ID")
+_CODE_APPROVER_ROLE_IDS = _parse_int_set(os.getenv("HARVIS_CODE_APPROVER_ROLE_IDS", ""))
+
+_CODE_LINK_HINT = (
+    "Your Discord account isn't linked to a Harvis user yet. Link it in Harvis "
+    "(messaging platform mapping) so I know whose repos and credentials to use — "
+    "I won't run coding sessions for unlinked accounts."
+)
+
+# thread id → vibecode session id. In-memory cache only; the session id is ALSO
+# embedded in the thread name ("… [xxxxxxxx-xxx]") so the mapping survives a
+# backend restart (recovered lazily by _code_session_for_thread).
+_CODE_SESSION_BY_THREAD: dict[int, str] = {}
+# Vibecode session ids are str(uuid4())[:12] → 8 hex chars, '-', 3 hex chars.
+_CODE_SESSION_ID_RE = re.compile(r"\[([0-9a-f]{8}-[0-9a-f]{3})\]\s*$")
+_CODE_GITHUB_REPO_RE = re.compile(
+    r"^(?:https?://github\.com/)?([\w.\-]+)/([\w.\-]+?)(?:\.git)?(?:#([\w./\-]+))?/?$"
+)
+
+
+def _code_channel_kind(channel) -> str:
+    """'channel' (the configured #harvis-code), 'thread' (a thread under it), or ''."""
+    if channel is None or not _CODE_CHANNEL_ID:
+        return ""
+    if getattr(channel, "id", None) == _CODE_CHANNEL_ID:
+        return "channel"
+    if isinstance(channel, discord.Thread) and getattr(channel, "parent_id", None) == _CODE_CHANNEL_ID:
+        return "thread"
+    return ""
+
+
+def _code_session_for_thread(channel) -> str | None:
+    """Resolve the vibecode session bound to a Discord thread — memory first,
+    then the '[<session-id>]' suffix in the thread name (restart-survivable)."""
+    tid = int(getattr(channel, "id", 0) or 0)
+    sid = _CODE_SESSION_BY_THREAD.get(tid)
+    if sid:
+        return sid
+    m = _CODE_SESSION_ID_RE.search(getattr(channel, "name", "") or "")
+    if m:
+        sid = m.group(1)
+        if tid:
+            _CODE_SESSION_BY_THREAD[tid] = sid
+        return sid
+    return None
+
+
+def _code_is_approver(user) -> bool:
+    """True when no approver roles are configured (everyone may approve), or the
+    member holds one of HARVIS_CODE_APPROVER_ROLE_IDS. Gates Approve + PR only."""
+    if not _CODE_APPROVER_ROLE_IDS:
+        return True
+    roles = getattr(user, "roles", None) or []
+    return any(int(getattr(r, "id", 0) or 0) in _CODE_APPROVER_ROLE_IDS for r in roles)
+
+
+async def _code_resolve_harvis_user(pool, interaction: discord.Interaction) -> int | None:
+    """The REAL Discord-user → Harvis-user mapping (messaging_platforms). Returns
+    None when unmapped or the DB is unavailable — callers refuse, never default."""
+    try:
+        from plugins.messaging.dispatcher import resolve_user_id
+        from plugins.messaging.types import Platform, SessionSource
+
+        source = SessionSource(
+            platform=Platform.DISCORD,
+            chat_id=str(getattr(interaction.channel, "id", "") or ""),
+            sender_id=str(interaction.user.id),
+        )
+        return await resolve_user_id(pool, source)
+    except Exception as exc:
+        logger.warning("harvis-code: user resolution failed for %s: %s", interaction.user.id, exc)
+        return None
+
+
+async def _code_active_run(pool, session_id: str) -> str | None:
+    """The session's currently-running turn (workspace_runs row id), if any."""
+    if pool is None:
+        return None
+    try:
+        async with pool.acquire() as conn:
+            return await conn.fetchval(
+                "SELECT id FROM workspace_runs WHERE session_id = $1 AND status = 'running' "
+                "ORDER BY started_at DESC LIMIT 1",
+                session_id,
+            )
+    except Exception as exc:
+        logger.warning("harvis-code: active-run lookup failed for %s: %s", session_id, exc)
+        return None
+
+
+def _code_session_create_request(repo: str, base: str | None, perm: str = ""):
+    """Parse the /harvis-code start `repo` argument into a VibecodeSessionCreate:
+    'owner/repo' (or a github.com URL, optionally '#branch') → GitHub clone;
+    an absolute path → allowlisted server repo (allowlist enforced by the endpoint).
+    `perm` sets the permission mode (default 'ask'); returns None when unparseable."""
+    from workspace.workspace_router import VibecodeSessionCreate
+
+    repo = (repo or "").strip()
+    if not repo:
+        return None
+    _perm = (perm or "").strip().lower()
+    _perm = _perm if _perm in ("plan", "ask", "auto-accept", "full-auto") else "ask"
+    if repo.startswith("/"):
+        return VibecodeSessionCreate(
+            repo_path=repo, title=os.path.basename(repo.rstrip("/")) or repo,
+            permission_mode=_perm,
+        )
+    m = _CODE_GITHUB_REPO_RE.match(repo)
+    if not m:
+        return None
+    owner, name, frag_branch = m.group(1), m.group(2), m.group(3)
+    return VibecodeSessionCreate(
+        github_owner=owner,
+        github_repo=name,
+        github_branch=((base or "").strip() or frag_branch or None),
+        title=f"{owner}/{name}",
+        permission_mode=_perm,
+    )
+
+
+def _code_controls_view(session_id: str) -> discord.ui.View:
+    """Session control row. Buttons are custom_id-routed through on_interaction
+    (see _register_harvis_code) so they keep working after a bot restart —
+    unlike CancelWorkspaceView, nothing here relies on an in-memory timeout."""
+    v = discord.ui.View(timeout=None)
+    v.add_item(discord.ui.Button(
+        label="Diff", style=discord.ButtonStyle.secondary, emoji="\U0001f4c4",
+        custom_id=f"harviscode:diff:{session_id}",
+    ))
+    v.add_item(discord.ui.Button(
+        label="Commit", style=discord.ButtonStyle.primary, emoji="\U0001f4be",
+        custom_id=f"harviscode:commit:{session_id}",
+    ))
+    v.add_item(discord.ui.Button(
+        label="PR", style=discord.ButtonStyle.success, emoji="\U0001f500",
+        custom_id=f"harviscode:pr:{session_id}",
+    ))
+    v.add_item(discord.ui.Button(
+        label="Stop", style=discord.ButtonStyle.danger, emoji="⛔",
+        custom_id=f"harviscode:stop:{session_id}",
+    ))
+    return v
+
+
+def _code_approval_view(run_id: str, action_id: str) -> discord.ui.View:
+    """Approve/Deny row for a gated action — custom_id-routed, restart-safe."""
+    v = discord.ui.View(timeout=None)
+    v.add_item(discord.ui.Button(
+        label="Approve", style=discord.ButtonStyle.success, emoji="✅",
+        custom_id=f"harviscode:approve:{run_id}:{action_id}",
+    ))
+    v.add_item(discord.ui.Button(
+        label="Deny", style=discord.ButtonStyle.danger, emoji="\U0001f6ab",
+        custom_id=f"harviscode:deny:{run_id}:{action_id}",
+    ))
+    return v
+
+
+async def _code_pending_action_poller(app_request: Request, thread, run_id: str) -> None:
+    """Watch a running turn for gated actions and surface each as an Approve/Deny
+    message in the session thread. Cancelled by the caller when the turn ends."""
+    from workspace.orchestration.risk import get_pending_for_run
+
+    posted: set[str] = set()
+    try:
+        while True:
+            await asyncio.sleep(2.0)
+            pending = get_pending_for_run(run_id)
+            if not pending:
+                continue
+            aid = str(pending.get("action_id") or "")
+            if not aid or aid in posted:
+                continue
+            posted.add(aid)
+            tool = pending.get("tool") or "action"
+            args = pending.get("args") or {}
+            try:
+                args_preview = json.dumps(args)[:180]
+            except Exception:
+                args_preview = str(args)[:180]
+            await thread.send(
+                f"⚠️ **Approval needed** — `{tool}` `{args_preview}`",
+                view=_code_approval_view(run_id, aid),
+            )
+    except asyncio.CancelledError:
+        return
+    except Exception as exc:
+        logger.warning("harvis-code: pending-action poller for %s stopped: %s", run_id, exc)
+
+
+async def _code_run_turn(
+    app_request: Request,
+    cfg: DiscordWorkspaceConfig,
+    thread,
+    uid: int,
+    session_id: str,
+    brief: str,
+) -> None:
+    """Run ONE vibecode turn for a code thread: launch via the existing
+    /vibecode/session/{id}/turn endpoint function, stream progress into the
+    thread (same helper the main bot uses), surface approval gates as buttons,
+    then post the final answer + the session control row. Never raises."""
+    try:
+        from workspace.workspace_router import VibecodeTurnRequest, start_vibecode_turn
+
+        try:
+            data = await start_vibecode_turn(
+                session_id=session_id,
+                req=VibecodeTurnRequest(task_brief=brief),
+                request=app_request,
+                current_user={"id": uid},
+            )
+        except HTTPException as exc:
+            await thread.send(f"Turn refused: {exc.detail}")
+            return
+        workspace_id = data["workspace_id"]
+
+        progress_msg = await thread.send(
+            f"**Turn `{workspace_id}`**\n⏳ Starting workspace…"
+        )
+        poller = asyncio.create_task(
+            _code_pending_action_poller(app_request, thread, workspace_id),
+            name=f"harvis-code-pending-{workspace_id}",
+        )
+        try:
+            status, summary, err = await _wait_with_progress(
+                request=app_request,
+                workspace_id=workspace_id,
+                timeout_s=cfg.max_wait_seconds,
+                progress_msg=progress_msg,
+                thread=thread,  # agent_message (review-loop) posts land in the thread
+            )
+        finally:
+            poller.cancel()
+        try:
+            await progress_msg.delete()
+        except discord.HTTPException:
+            pass
+
+        if status in ("done", "completed"):
+            msg = await _best_workspace_message(
+                request=app_request, workspace_id=workspace_id, final_summary=summary,
+            )
+            await _send_long_message(thread, msg)
+        elif status == "cancelled":
+            await thread.send(f"Turn `{workspace_id}` was cancelled.")
+        else:
+            await thread.send(
+                f"Turn `{workspace_id}` failed: {((err or 'Unknown error'))[:1500]}"
+            )
+        await thread.send("Session controls:", view=_code_controls_view(session_id))
+    except Exception as exc:
+        logger.exception("harvis-code: turn on session %s errored: %s", session_id, exc)
+        try:
+            await thread.send(f"Turn error: {str(exc)[:1500]}")
+        except Exception:
+            pass
+
+
+async def _code_session_review_status(pool, session_id: str) -> str:
+    """The session's current review_status ('off' when unknown). Best-effort."""
+    if pool is None:
+        return "off"
+    try:
+        async with pool.acquire() as conn:
+            return await conn.fetchval(
+                "SELECT review_status FROM vibecode_sessions WHERE id = $1", session_id,
+            ) or "off"
+    except Exception as exc:
+        logger.warning("harvis-code: review-status lookup failed for %s: %s", session_id, exc)
+        return "off"
+
+
+async def _code_run_review(
+    app_request: Request,
+    cfg: DiscordWorkspaceConfig,
+    thread,
+    uid: int,
+    session_id: str,
+    mode: str = "thread",
+    base: str = "",
+    reviewer_ids: list[str] | None = None,
+) -> None:
+    """Run the OPT-IN agent review conversation (coder ↔ reviewer) for a code
+    thread's session: launch via the /vibecode/session/{id}/review endpoint
+    function, stream progress + the agents' dialogue into the thread (each
+    agent_message becomes a labeled post), surface approval gates as buttons,
+    then report the outcome ('agreed' unlocks the PR gate; 'needs_human' asks
+    the human to decide). Mirrors _code_run_turn; never raises."""
+    try:
+        from workspace.workspace_router import VibecodeReviewRequest, start_vibecode_review
+
+        try:
+            data = await start_vibecode_review(
+                session_id=session_id,
+                req=VibecodeReviewRequest(mode=mode, base=base, reviewer_ids=reviewer_ids or []),
+                request=app_request,
+                current_user={"id": uid},
+            )
+        except HTTPException as exc:
+            await thread.send(f"Review refused: {exc.detail}")
+            return
+        workspace_id = data["workspace_id"]
+
+        progress_msg = await thread.send(
+            f"**Review `{workspace_id}`**\n\U0001f50e Coder and reviewer are going "
+            "over the session's changes…"
+        )
+        poller = asyncio.create_task(
+            _code_pending_action_poller(app_request, thread, workspace_id),
+            name=f"harvis-code-review-pending-{workspace_id}",
+        )
+        try:
+            status, summary, err = await _wait_with_progress(
+                request=app_request,
+                workspace_id=workspace_id,
+                timeout_s=cfg.max_wait_seconds,
+                progress_msg=progress_msg,
+                thread=thread,  # the coder↔reviewer dialogue posts land here
+            )
+        finally:
+            poller.cancel()
+        try:
+            await progress_msg.delete()
+        except discord.HTTPException:
+            pass
+
+        pool = getattr(app_request.app.state, "pg_pool", None)
+        review_status = await _code_session_review_status(pool, session_id)
+        if status in ("done", "completed"):
+            if review_status == "agreed":
+                await thread.send(
+                    f"✅ **Agents agreed** — {(summary or 'the reviewer approved the changes.')[:1500]}\n"
+                    "The PR gate is unlocked."
+                )
+            else:
+                await thread.send(
+                    f"\U0001f9d1‍⚖️ **Needs a human** — {(summary or 'no agreement was reached.')[:1500]}\n"
+                    "Keep iterating (`/harvis-code prompt`, then `/harvis-code review` "
+                    "again), or open the PR anyway with the Override button when the PR "
+                    "gate refuses."
+                )
+        elif status == "cancelled":
+            await thread.send(f"Review `{workspace_id}` was cancelled.")
+        else:
+            await thread.send(
+                f"Review `{workspace_id}` failed: {((err or 'Unknown error'))[:1500]}\n"
+                "Review status is `needs a human` — re-run it, or override on PR."
+            )
+        await thread.send("Session controls:", view=_code_controls_view(session_id))
+    except Exception as exc:
+        logger.exception("harvis-code: review on session %s errored: %s", session_id, exc)
+        try:
+            await thread.send(f"Review error: {str(exc)[:1500]}")
+        except Exception:
+            pass
+
+
+async def _code_send_diff(interaction: discord.Interaction, app_request: Request, uid: int, session_id: str) -> None:
+    """Post the session's accumulated diff (file list + fenced, chunked, capped).
+    Caller must have deferred the interaction already."""
+    from workspace.workspace_router import get_vibecode_session_diff
+
+    data = await get_vibecode_session_diff(
+        session_id=session_id, request=app_request, current_user={"id": uid},
+    )
+    files = data.get("files") or []
+    diff = (data.get("diff") or "").strip()
+    if diff == "(no changes)":
+        diff = ""
+    if not diff and not files:
+        await interaction.followup.send("No changes yet in this session.")
+        return
+    header_lines = [f"**Changes** ({len(files)} file(s))"]
+    for f in files[:20]:
+        header_lines.append(f"`{(f.get('status') or 'M')}` {f.get('path') or '?'}")
+    if len(files) > 20:
+        header_lines.append(f"… and {len(files) - 20} more")
+    await interaction.followup.send("\n".join(header_lines)[:1990])
+    chunk_size, max_chunks = 1800, 3
+    for i in range(0, min(len(diff), chunk_size * max_chunks), chunk_size):
+        await interaction.channel.send(f"```diff\n{diff[i:i + chunk_size]}\n```")
+    if len(diff) > chunk_size * max_chunks:
+        await interaction.channel.send(
+            "… diff truncated — open the session in the Harvis Build UI for the full view."
+        )
+
+
+async def _code_commit_session(app_request: Request, uid: int, session_id: str, message: str) -> str:
+    """Local-only commit of the session workspace on its WORK branch — the same
+    _git_commit_workspace policy the agent tool uses (refuses main/master, never
+    pushes). Returns a user-facing note."""
+    if not message:
+        return "Commit message is required."
+    pool = getattr(app_request.app.state, "pg_pool", None)
+    from workspace.workspace_router import _vibecode_session_row
+
+    sess = await _vibecode_session_row(pool, session_id, uid)
+    if not sess:
+        return "Session not found (or it isn't yours)."
+    wp = dict(sess).get("workspace_path")
+    if not wp or not os.path.isdir(wp):
+        return "The session workspace is no longer available."
+    from workspace.orchestration.tools import _git_commit_workspace
+
+    out, ok = await _git_commit_workspace(wp, message)
+    if not ok:
+        return f"Commit failed: {out[:500]}"
+    try:
+        data = json.loads(out)
+    except Exception:
+        data = {}
+    if data.get("committed"):
+        return f"\U0001f4be Committed `{data.get('sha')}` — {message}"
+    return f"Nothing to commit ({data.get('message') or 'no changes'})."
+
+
+# Title typed into the PR modal, remembered per session so the Override button can
+# reuse it (in-memory only — after a restart the override falls back to the default
+# title, which is harmless).
+_CODE_PENDING_PR_TITLE: dict[str, str] = {}
+
+
+def _code_pr_override_view(session_id: str) -> discord.ui.View:
+    """Shown when the agent-review gate refuses a PR: the human's explicit choices —
+    run (another) review, or override the gate. custom_id-routed, restart-safe."""
+    v = discord.ui.View(timeout=None)
+    v.add_item(discord.ui.Button(
+        label="Run agent review", style=discord.ButtonStyle.primary, emoji="\U0001f50e",
+        custom_id=f"harviscode:review:{session_id}",
+    ))
+    v.add_item(discord.ui.Button(
+        label="Override — open PR anyway", style=discord.ButtonStyle.danger, emoji="⚠️",
+        custom_id=f"harviscode:proverride:{session_id}",
+    ))
+    return v
+
+
+async def _code_create_pr(
+    app_request: Request, uid: int, session_id: str, title: str, *, override: bool = False,
+) -> tuple[str, bool]:
+    """HUMAN-ONLY PR from the session's accumulated diff — the existing endpoint
+    function (refuses main/master head, needs a connected GitHub token). Returns
+    (note, review_gated): review_gated=True means the agent-review gate refused
+    (409) and the caller should offer the Override / Run-review buttons."""
+    from workspace.workspace_router import VibecodeCreatePrRequest, create_pr_for_vibecode_session
+
+    try:
+        result = await create_pr_for_vibecode_session(
+            session_id=session_id,
+            req=VibecodeCreatePrRequest(title=(title or None), override=override),
+            request=app_request,
+            current_user={"id": uid},
+        )
+    except HTTPException as exc:
+        if exc.status_code == 409 and "review" in str(exc.detail).lower():
+            # Agent-review gate — remember the typed title so Override reuses it.
+            _CODE_PENDING_PR_TITLE[session_id] = title or ""
+            return (f"\U0001f512 {exc.detail}", True)
+        return (f"PR failed: {exc.detail}", False)
+    return (
+        f"\U0001f500 PR opened: {result.get('pr_url')} "
+        f"(branch `{result.get('branch')}` → `{result.get('base')}`)"
+        + (" — review gate overridden by you." if override else ""),
+        False,
+    )
+
+
+async def _code_stop_active_run(app_request: Request, uid: int, session_id: str, *, actor: str) -> str:
+    """Cancel the session's running turn (same cancel path as everything else)."""
+    pool = getattr(app_request.app.state, "pg_pool", None)
+    from workspace.workspace_router import _vibecode_session_row
+
+    sess = await _vibecode_session_row(pool, session_id, uid)
+    if not sess:
+        return "Session not found (or it isn't yours)."
+    run_id = await _code_active_run(pool, session_id)
+    if not run_id:
+        return "No turn is running on this session."
+    try:
+        result = await cancel_workspace_internal(run_id, audit_actor=actor)
+    except Exception as exc:
+        return f"Cancel failed: {str(exc)[:300]}"
+    if result.get("status") == "cancelled":
+        return f"⛔ Stopped turn `{run_id}`."
+    return f"Turn `{run_id}` is already {result.get('current', 'done')}."
+
+
+def _register_harvis_code(
+    client: discord.Client,
+    tree: app_commands.CommandTree,
+    app_request: Request,
+    cfg: DiscordWorkspaceConfig,
+) -> None:
+    """Install the /harvis-code command group + the persistent component router.
+    Called ONLY when HARVIS_CODE_CHANNEL_ID is configured."""
+
+    async def _thread_context(interaction: discord.Interaction) -> tuple[str | None, int | None]:
+        """(session_id, harvis_uid) for a command inside a code thread — or
+        (None, None) after sending the appropriate ephemeral refusal."""
+        if _code_channel_kind(interaction.channel) != "thread":
+            await interaction.response.send_message(
+                f"Use this inside a `/harvis-code start` thread in <#{_CODE_CHANNEL_ID}>.",
+                ephemeral=True,
+            )
+            return None, None
+        sid = _code_session_for_thread(interaction.channel)
+        if not sid:
+            await interaction.response.send_message(
+                "This thread isn't linked to a coding session — start one with "
+                "`/harvis-code start` in the code channel.",
+                ephemeral=True,
+            )
+            return None, None
+        pool = getattr(app_request.app.state, "pg_pool", None)
+        if pool is None:
+            await interaction.response.send_message(
+                "Backend database isn't ready — try again shortly.", ephemeral=True,
+            )
+            return None, None
+        uid = await _code_resolve_harvis_user(pool, interaction)
+        if uid is None:
+            await interaction.response.send_message(_CODE_LINK_HINT, ephemeral=True)
+            return None, None
+        return sid, uid
+
+    group = app_commands.Group(
+        name="harvis-code",
+        description="Coding sessions in the code channel (repo → thread → prompt/diff/commit/PR)",
+    )
+
+    # ── Autocomplete: let the user PICK from DETECTED repos/branches instead of
+    # typing blind and hoping (or getting denied). Best-effort + fast (Discord
+    # times out at 3s) — every callback fails to an empty list, never errors. ──
+    async def _ac_token(interaction):
+        pool = getattr(app_request.app.state, "pg_pool", None)
+        if pool is None:
+            return None
+        uid = await _code_resolve_harvis_user(pool, interaction)
+        if uid is None:
+            return None
+        try:
+            from workspace.repo_manager import _get_github_token
+            return await _get_github_token(pool, uid)
+        except Exception:
+            return None
+
+    def _ac_repo_full(raw: str) -> str:
+        s = (raw or "").strip().split("#", 1)[0].strip()
+        if not s:
+            return ""
+        m = re.search(r"github\.com[:/]([^/]+/[^/]+?)(?:\.git)?/?$", s)
+        if m:
+            return m.group(1)
+        return s if s.count("/") == 1 else ""
+
+    async def _ac_gh_get(interaction, url):
+        tok = await _ac_token(interaction)
+        if not tok:
+            return None
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=2.5) as _c:
+                r = await _c.get(url, headers={"Authorization": f"Bearer {tok}",
+                                               "Accept": "application/vnd.github+json"})
+            return r.json() if r.status_code == 200 else None
+        except Exception:
+            return None
+
+    async def _ac_repos(interaction: discord.Interaction, current: str):
+        data = await _ac_gh_get(interaction, "https://api.github.com/user/repos?per_page=100&sort=updated")
+        if not isinstance(data, list):
+            return []
+        cur = (current or "").lower()
+        names = [x.get("full_name") for x in data if isinstance(x, dict) and x.get("full_name")]
+        return [app_commands.Choice(name=n, value=n) for n in names if cur in n.lower()][:25]
+
+    async def _ac_branches(interaction, current, full):
+        if not full or "/" not in full:
+            return []
+        owner, repo = full.split("/", 1)
+        data = await _ac_gh_get(interaction, f"https://api.github.com/repos/{owner}/{repo}/branches?per_page=100")
+        if not isinstance(data, list):
+            return []
+        cur = (current or "").lower()
+        brs = [b.get("name") for b in data if isinstance(b, dict) and b.get("name")]
+        return [app_commands.Choice(name=b, value=b) for b in brs if cur in b.lower()][:25]
+
+    async def _ac_start_base(interaction: discord.Interaction, current: str):
+        raw = getattr(getattr(interaction, "namespace", None), "repo", "") or ""
+        return await _ac_branches(interaction, current, _ac_repo_full(raw))
+
+    async def _ac_review_base(interaction: discord.Interaction, current: str):
+        try:
+            pool = getattr(app_request.app.state, "pg_pool", None)
+            sid = _code_session_for_thread(interaction.channel)
+            if not (pool and sid):
+                return []
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT workspace_path FROM vibecode_sessions WHERE id=$1", sid)
+            if not row or not row["workspace_path"]:
+                return []
+            from workspace.orchestration.review_github import resolve_owner_repo
+            owner, repo = await resolve_owner_repo(row["workspace_path"])
+            if not owner:
+                return []
+            return await _ac_branches(interaction, current, f"{owner}/{repo}")
+        except Exception:
+            return []
+
+    @group.command(name="start", description="Start a coding session on a repo (creates a thread)")
+    @app_commands.describe(
+        repo="Start typing to pick one of your GitHub repos (or paste owner/repo, a URL, or a server path)",
+        base="Start typing to pick a branch of the chosen repo (default: the repo's default)",
+        task="Optional first task to run immediately",
+        perm="Permission mode (default: Ask). Auto won't prompt per action — the diff/PR is the gate.",
+    )
+    @app_commands.choices(
+        perm=[
+            app_commands.Choice(name="Ask — approve each action", value="ask"),
+            app_commands.Choice(name="Auto — auto-accept, review the diff", value="auto-accept"),
+            app_commands.Choice(name="Full-auto — no prompts at all", value="full-auto"),
+            app_commands.Choice(name="Plan — read-only, drafts a plan", value="plan"),
+        ]
+    )
+    @app_commands.autocomplete(repo=_ac_repos, base=_ac_start_base)
+    async def code_start(
+        interaction: discord.Interaction,
+        repo: str,
+        base: str | None = None,
+        task: str | None = None,
+        perm: app_commands.Choice[str] | None = None,
+    ):
+        if _code_channel_kind(interaction.channel) != "channel":
+            await interaction.response.send_message(
+                f"Use this in <#{_CODE_CHANNEL_ID}> (not inside a thread).", ephemeral=True,
+            )
+            return
+        pool = getattr(app_request.app.state, "pg_pool", None)
+        if pool is None:
+            await interaction.response.send_message(
+                "Backend database isn't ready — try again shortly.", ephemeral=True,
+            )
+            return
+        uid = await _code_resolve_harvis_user(pool, interaction)
+        if uid is None:
+            await interaction.response.send_message(_CODE_LINK_HINT, ephemeral=True)
+            return
+        req = _code_session_create_request(repo, base, perm.value if perm else "")
+        if req is None:
+            await interaction.response.send_message(
+                "Couldn't parse `repo` — use `owner/repo`, a github.com URL, or an absolute server path.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(thinking=True)
+        from workspace.workspace_router import create_vibecode_session
+        try:
+            data = await create_vibecode_session(
+                req=req, request=app_request, current_user={"id": uid},
+            )
+        except HTTPException as exc:
+            await interaction.followup.send(f"Session refused: {exc.detail}")
+            return
+        sid = data["id"]
+        label = req.github_repo or os.path.basename((req.repo_path or "repo").rstrip("/"))
+        await interaction.followup.send(
+            f"**Coding session `{sid}`** on `{repo}`"
+            + (f" (base `{base}`)" if base else "")
+            + f"\nMode: `{data.get('isolation_mode')}` · permission `{data.get('permission_mode')}`"
+        )
+        try:
+            msg = await interaction.original_response()
+            thread = await msg.create_thread(
+                name=f"{label} [{sid}]"[:100], auto_archive_duration=1440,
+            )
+        except Exception as exc:
+            await interaction.followup.send(
+                f"Session `{sid}` was created but I couldn't open a thread for it "
+                f"({str(exc)[:200]}) — check my Create Threads permission."
+            )
+            return
+        _CODE_SESSION_BY_THREAD[thread.id] = sid
+        # Persist the Discord origin so the web Build UI can show a "Discord session
+        # online" chip while this session has a running turn (see /active-discord).
+        try:
+            _pool = getattr(app_request.app.state, "pg_pool", None)
+            if _pool is not None:
+                async with _pool.acquire() as _conn:
+                    await _conn.execute(
+                        "UPDATE vibecode_sessions SET discord_channel_id=$1 WHERE id=$2",
+                        str(thread.id), sid,
+                    )
+        except Exception:
+            logger.warning("harvis-code: couldn't mark session %s discord-launched", sid, exc_info=True)
+        await thread.send(
+            "Session ready — use `/harvis-code prompt` here for follow-ups.",
+            view=_code_controls_view(sid),
+        )
+        if task and task.strip():
+            asyncio.create_task(
+                _code_run_turn(app_request, cfg, thread, uid, sid, task.strip()),
+                name=f"harvis-code-turn-{sid}",
+            )
+
+    @group.command(name="set-perm", description="Set this session's permission mode (Auto = don't prompt per action)")
+    @app_commands.describe(mode="How much the agent does without asking")
+    @app_commands.choices(
+        mode=[
+            app_commands.Choice(name="Ask — approve each action", value="ask"),
+            app_commands.Choice(name="Auto — auto-accept, review the diff", value="auto-accept"),
+            app_commands.Choice(name="Full-auto — no prompts at all", value="full-auto"),
+            app_commands.Choice(name="Plan — read-only, drafts a plan", value="plan"),
+        ]
+    )
+    async def code_set_perm(
+        interaction: discord.Interaction, mode: app_commands.Choice[str]
+    ):
+        pool = getattr(app_request.app.state, "pg_pool", None)
+        if pool is None:
+            await interaction.response.send_message(
+                "Backend database isn't ready — try again shortly.", ephemeral=True,
+            )
+            return
+        session_id = _code_session_for_thread(interaction.channel)
+        if not session_id:
+            await interaction.response.send_message(
+                "Use this **inside a `/harvis-code` session thread**.", ephemeral=True,
+            )
+            return
+        uid = await _code_resolve_harvis_user(pool, interaction)
+        if uid is None:
+            await interaction.response.send_message(_CODE_LINK_HINT, ephemeral=True)
+            return
+        _mode = mode.value if mode.value in ("plan", "ask", "auto-accept", "full-auto") else "ask"
+        try:
+            async with pool.acquire() as conn:
+                res = await conn.execute(
+                    "UPDATE vibecode_sessions SET permission_mode=$1, updated_at=NOW() "
+                    "WHERE id=$2 AND user_id=$3",
+                    _mode, session_id, uid,
+                )
+        except Exception as exc:
+            await interaction.response.send_message(
+                f"Couldn't update the permission mode: {str(exc)[:200]}", ephemeral=True,
+            )
+            return
+        if isinstance(res, str) and res.rsplit(" ", 1)[-1] == "0":
+            await interaction.response.send_message(
+                "This session isn't yours (or wasn't found).", ephemeral=True,
+            )
+            return
+        _label = {
+            "ask": "Ask", "auto-accept": "Auto (auto-accept)",
+            "full-auto": "Full-auto", "plan": "Plan (read-only)",
+        }.get(_mode, _mode)
+        _extra = (
+            " The agent works on a clone; the diff/PR is still your review gate."
+            if _mode in ("auto-accept", "full-auto") else ""
+        )
+        await interaction.response.send_message(
+            f"Permission mode set to **{_label}** — applies to the next turn.{_extra}"
+        )
+
+    @group.command(name="prompt", description="Send the next coding instruction to this session")
+    @app_commands.describe(text="What the agent should do next")
+    async def code_prompt(interaction: discord.Interaction, text: str):
+        sid, uid = await _thread_context(interaction)
+        if not sid:
+            return
+        pool = getattr(app_request.app.state, "pg_pool", None)
+        active = await _code_active_run(pool, sid)
+        if active:
+            await interaction.response.send_message(
+                f"Turn `{active}` is still running — wait for it or `/harvis-code stop` first.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(f"\U0001f6e0️ Queued: {text[:150]}")
+        asyncio.create_task(
+            _code_run_turn(app_request, cfg, interaction.channel, uid, sid, text.strip()),
+            name=f"harvis-code-turn-{sid}",
+        )
+
+    @group.command(name="tests", description="Run the project's test suite in this session")
+    async def code_tests(interaction: discord.Interaction):
+        sid, uid = await _thread_context(interaction)
+        if not sid:
+            return
+        pool = getattr(app_request.app.state, "pg_pool", None)
+        active = await _code_active_run(pool, sid)
+        if active:
+            await interaction.response.send_message(
+                f"Turn `{active}` is still running — wait for it or `/harvis-code stop` first.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message("\U0001f9ea Running the test suite…")
+        brief = (
+            "Run this project's test suite using the run_tests tool (or the standard test "
+            "command for this repo) and report the results: pass/fail counts and details of "
+            "any failures. Do not modify any files."
+        )
+        asyncio.create_task(
+            _code_run_turn(app_request, cfg, interaction.channel, uid, sid, brief),
+            name=f"harvis-code-tests-{sid}",
+        )
+
+    @group.command(name="status", description="Status of this thread's session (or your recent sessions)")
+    async def code_status(interaction: discord.Interaction):
+        kind = _code_channel_kind(interaction.channel)
+        if not kind:
+            await interaction.response.send_message(
+                f"Use this in <#{_CODE_CHANNEL_ID}> or one of its session threads.", ephemeral=True,
+            )
+            return
+        pool = getattr(app_request.app.state, "pg_pool", None)
+        if pool is None:
+            await interaction.response.send_message(
+                "Backend database isn't ready — try again shortly.", ephemeral=True,
+            )
+            return
+        uid = await _code_resolve_harvis_user(pool, interaction)
+        if uid is None:
+            await interaction.response.send_message(_CODE_LINK_HINT, ephemeral=True)
+            return
+        if kind == "thread":
+            sid = _code_session_for_thread(interaction.channel)
+            if not sid:
+                await interaction.response.send_message(
+                    "This thread isn't linked to a coding session.", ephemeral=True,
+                )
+                return
+            from workspace.workspace_router import _vibecode_session_row
+            sess = await _vibecode_session_row(pool, sid, uid)
+            if not sess:
+                await interaction.response.send_message(
+                    "Session not found (or it isn't yours).", ephemeral=True,
+                )
+                return
+            s = dict(sess)
+            run_id = await _code_active_run(pool, sid)
+            await interaction.response.send_message(
+                f"**Session `{sid}`** — {s.get('title') or 'untitled'}\n"
+                f"State: `{s.get('lifecycle') or s.get('status')}`"
+                + (f" · running turn `{run_id}`" if run_id else "")
+                + f"\nMode: `{s.get('isolation_mode')}` · permission `{s.get('permission_mode')}`\n"
+                f"Branch: `{s.get('work_branch') or '-'}` (base `{s.get('base_branch') or '-'}`)"
+            )
+            return
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id, title, lifecycle, status FROM vibecode_sessions "
+                "WHERE user_id = $1 AND status != 'deleted' ORDER BY updated_at DESC LIMIT 5",
+                uid,
+            )
+        if not rows:
+            await interaction.response.send_message(
+                "No coding sessions yet — start one with `/harvis-code start`.",
+            )
+            return
+        lines = ["**Your recent coding sessions:**"] + [
+            f"• `{r['id']}` — {r['title'] or 'untitled'} (`{r['lifecycle'] or r['status']}`)"
+            for r in rows
+        ]
+        await interaction.response.send_message("\n".join(lines)[:1990])
+
+    @group.command(name="diff", description="Show this session's accumulated diff")
+    async def code_diff(interaction: discord.Interaction):
+        sid, uid = await _thread_context(interaction)
+        if not sid:
+            return
+        await interaction.response.defer(thinking=True)
+        try:
+            await _code_send_diff(interaction, app_request, uid, sid)
+        except HTTPException as exc:
+            await interaction.followup.send(f"Diff failed: {exc.detail}")
+
+    @group.command(name="stop", description="Stop this session's running turn")
+    async def code_stop(interaction: discord.Interaction):
+        sid, uid = await _thread_context(interaction)
+        if not sid:
+            return
+        await interaction.response.defer(thinking=True)
+        note = await _code_stop_active_run(
+            app_request, uid, sid, actor=f"discord:harvis-code:{interaction.user.id}",
+        )
+        await interaction.followup.send(note)
+
+    @group.command(name="commit", description="Commit the session's changes on its work branch (local only)")
+    @app_commands.describe(message="Commit message")
+    async def code_commit(interaction: discord.Interaction, message: str):
+        sid, uid = await _thread_context(interaction)
+        if not sid:
+            return
+        await interaction.response.defer(thinking=True)
+        note = await _code_commit_session(app_request, uid, sid, message.strip())
+        await interaction.followup.send(note)
+
+    @group.command(name="pr", description="Open a GitHub PR from this session's accumulated diff")
+    @app_commands.describe(title="PR title")
+    async def code_pr(interaction: discord.Interaction, title: str):
+        sid, uid = await _thread_context(interaction)
+        if not sid:
+            return
+        if not _code_is_approver(interaction.user):
+            await interaction.response.send_message(
+                "You need an approver role to open PRs.", ephemeral=True,
+            )
+            return
+        await interaction.response.defer(thinking=True)
+        note, review_gated = await _code_create_pr(app_request, uid, sid, title.strip())
+        if review_gated:
+            # Agent-review gate refused — offer the human's two explicit outs.
+            await interaction.followup.send(note, view=_code_pr_override_view(sid))
+        else:
+            await interaction.followup.send(note)
+
+    @group.command(
+        name="review",
+        description="Agent code review of this session — coder and reviewer talk it out here",
+    )
+    async def code_review(interaction: discord.Interaction):
+        sid, uid = await _thread_context(interaction)
+        if not sid:
+            return
+        pool = getattr(app_request.app.state, "pg_pool", None)
+        active = await _code_active_run(pool, sid)
+        if active:
+            await interaction.response.send_message(
+                f"Turn `{active}` is still running — wait for it or `/harvis-code stop` first.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            "\U0001f50e Starting the agent review — the coder and reviewer will discuss "
+            "the session's changes in this thread (up to 5 rounds). PRs stay gated "
+            "until they agree (you can always override)."
+        )
+        asyncio.create_task(
+            _code_run_review(app_request, cfg, interaction.channel, uid, sid),
+            name=f"harvis-code-review-{sid}",
+        )
+
+    async def _ac_subagents(interaction: discord.Interaction, current: str):
+        """Autocomplete: the user's ENABLED custom sub-agents (by name) for the review-github
+        `reviewers` field. The name(s) are resolved to sub-agent ids server-side."""
+        try:
+            pool = getattr(app_request.app.state, "pg_pool", None)
+            if pool is None:
+                return []
+            uid = await _code_resolve_harvis_user(pool, interaction)
+            if uid is None:
+                return []
+            from workspace.orchestration.subagent_defs import load_subagents
+            cur = (current or "").rsplit(",", 1)[-1].strip().lower()
+            names = [(d.get("name") or "").strip() for d in await load_subagents(pool, uid)]
+            names = [n for n in names if n and cur in n.lower()][:25]
+            return [app_commands.Choice(name=n, value=n) for n in names]
+        except Exception:
+            return []
+
+    @group.command(
+        name="review-github",
+        description="Review on a real GitHub draft PR — agents discuss + approve there",
+    )
+    @app_commands.describe(
+        base="Start typing to pick the PR's target branch (default: this session's base)",
+        reviewers="Optional: your custom review agent(s) by name, comma-separated. Blank = the built-in reviewer.",
+    )
+    @app_commands.autocomplete(base=_ac_review_base, reviewers=_ac_subagents)
+    async def code_review_github(interaction: discord.Interaction, base: str = "", reviewers: str = ""):
+        sid, uid = await _thread_context(interaction)
+        if not sid:
+            return
+        pool = getattr(app_request.app.state, "pg_pool", None)
+        active = await _code_active_run(pool, sid)
+        if active:
+            await interaction.response.send_message(
+                f"Turn `{active}` is still running — wait for it or `/harvis-code stop` first.",
+                ephemeral=True,
+            )
+            return
+        # Resolve custom reviewer names → sub-agent ids (unknown names are ignored).
+        reviewer_ids: list[str] = []
+        _names = [n.strip() for n in (reviewers or "").split(",") if n.strip()]
+        if _names and pool is not None:
+            try:
+                from workspace.orchestration.subagent_defs import load_subagents
+                _by_name = {(d.get("name") or "").strip().lower(): d["id"] for d in await load_subagents(pool, uid)}
+                reviewer_ids = [_by_name[n.lower()] for n in _names if n.lower() in _by_name]
+            except Exception:
+                reviewer_ids = []
+        _base_note = f" targeting `{base}`" if base.strip() else " (targeting this session's base branch)"
+        _rev_note = (
+            f" with your custom reviewer(s): {', '.join(_names)}" if reviewer_ids
+            else (" (couldn't match that reviewer name — using the built-in reviewer)" if _names else "")
+        )
+        await interaction.response.send_message(
+            f"\U0001f419 Opening a draft PR{_base_note} and running the review THERE{_rev_note} — the "
+            "coder and reviewer(s) discuss the changes as PR comments, and it's marked ready-for-review "
+            "when they agree. You still merge."
+        )
+        asyncio.create_task(
+            _code_run_review(
+                app_request, cfg, interaction.channel, uid, sid,
+                mode="github", base=base.strip(), reviewer_ids=reviewer_ids or None,
+            ),
+            name=f"harvis-code-review-github-{sid}",
+        )
+
+    if _CODE_GUILD_ID:
+        tree.add_command(group, guild=discord.Object(id=_CODE_GUILD_ID))
+    else:
+        tree.add_command(group)
+
+    # ── Persistent component router ──────────────────────────────────────────
+    # Buttons carry all state in their custom_id ("harviscode:<kind>:...") and
+    # are routed here from the raw interaction event — so they keep working
+    # after a bot restart, with no reliance on the in-memory view store or the
+    # 700s View timeout the CancelWorkspaceView uses.
+    def _commit_modal(uid: int, session_id: str) -> discord.ui.Modal:
+        class _CommitModal(discord.ui.Modal, title="Commit session changes"):
+            message = discord.ui.TextInput(
+                label="Commit message", placeholder="What changed?", max_length=200,
+            )
+
+            async def on_submit(self, modal_itx: discord.Interaction) -> None:
+                await modal_itx.response.defer(thinking=True)
+                note = await _code_commit_session(
+                    app_request, uid, session_id, str(self.message.value or "").strip(),
+                )
+                await modal_itx.followup.send(note)
+
+        return _CommitModal()
+
+    def _pr_modal(uid: int, session_id: str) -> discord.ui.Modal:
+        class _PrModal(discord.ui.Modal, title="Open a GitHub PR"):
+            pr_title = discord.ui.TextInput(
+                label="PR title", placeholder="Harvis: …", max_length=200,
+            )
+
+            async def on_submit(self, modal_itx: discord.Interaction) -> None:
+                await modal_itx.response.defer(thinking=True)
+                note, review_gated = await _code_create_pr(
+                    app_request, uid, session_id, str(self.pr_title.value or "").strip(),
+                )
+                if review_gated:
+                    await modal_itx.followup.send(note, view=_code_pr_override_view(session_id))
+                else:
+                    await modal_itx.followup.send(note)
+
+        return _PrModal()
+
+    async def _handle_code_component(interaction: discord.Interaction, cid: str) -> None:
+        parts = cid.split(":")
+        kind = parts[1] if len(parts) > 1 else ""
+        pool = getattr(app_request.app.state, "pg_pool", None)
+        uid = await _code_resolve_harvis_user(pool, interaction)
+        if uid is None:
+            await interaction.response.send_message(_CODE_LINK_HINT, ephemeral=True)
+            return
+
+        if kind in ("approve", "deny") and len(parts) >= 4:
+            run_id = parts[2]
+            action_id = ":".join(parts[3:])
+            if kind == "approve" and not _code_is_approver(interaction.user):
+                await interaction.response.send_message(
+                    "You need an approver role to approve actions.", ephemeral=True,
+                )
+                return
+            from workspace.workspace_router import _resolve_run_action
+            try:
+                result = await _resolve_run_action(
+                    app_request, {"id": uid}, run_id, action_id, kind == "approve",
+                )
+            except HTTPException as exc:
+                await interaction.response.send_message(
+                    f"Couldn't resolve the action: {exc.detail}", ephemeral=True,
+                )
+                return
+            verdict = "✅ Approved" if kind == "approve" else "\U0001f6ab Denied"
+            resumed = " — agent resuming." if result.get("resumed") else "."
+            await interaction.response.send_message(
+                f"{verdict} by {interaction.user.mention}{resumed}"
+            )
+            return
+
+        session_id = parts[2] if len(parts) > 2 else ""
+        if not session_id:
+            await interaction.response.send_message("Malformed button.", ephemeral=True)
+            return
+        if kind == "diff":
+            await interaction.response.defer(thinking=True)
+            try:
+                await _code_send_diff(interaction, app_request, uid, session_id)
+            except HTTPException as exc:
+                await interaction.followup.send(f"Diff failed: {exc.detail}")
+            return
+        if kind == "stop":
+            await interaction.response.defer(thinking=True)
+            note = await _code_stop_active_run(
+                app_request, uid, session_id,
+                actor=f"discord:harvis-code:{interaction.user.id}",
+            )
+            await interaction.followup.send(note)
+            return
+        if kind == "commit":
+            await interaction.response.send_modal(_commit_modal(uid, session_id))
+            return
+        if kind == "pr":
+            if not _code_is_approver(interaction.user):
+                await interaction.response.send_message(
+                    "You need an approver role to open PRs.", ephemeral=True,
+                )
+                return
+            await interaction.response.send_modal(_pr_modal(uid, session_id))
+            return
+        if kind == "review":
+            # Kick off the agent review conversation (same as /harvis-code review).
+            active = await _code_active_run(pool, session_id)
+            if active:
+                await interaction.response.send_message(
+                    f"Turn `{active}` is still running — wait for it or `/harvis-code stop` first.",
+                    ephemeral=True,
+                )
+                return
+            await interaction.response.send_message(
+                "\U0001f50e Starting the agent review — coder and reviewer will discuss "
+                "the changes in this thread."
+            )
+            asyncio.create_task(
+                _code_run_review(app_request, cfg, interaction.channel, uid, session_id),
+                name=f"harvis-code-review-{session_id}",
+            )
+            return
+        if kind == "proverride":
+            # Explicit HUMAN bypass of the agent-review PR gate — approver-only,
+            # reuses the title typed into the refused PR attempt (if remembered).
+            if not _code_is_approver(interaction.user):
+                await interaction.response.send_message(
+                    "You need an approver role to override the review gate.", ephemeral=True,
+                )
+                return
+            await interaction.response.defer(thinking=True)
+            title = _CODE_PENDING_PR_TITLE.pop(session_id, "")
+            note, _gated = await _code_create_pr(
+                app_request, uid, session_id, title, override=True,
+            )
+            await interaction.followup.send(note)
+            return
+        await interaction.response.send_message("Unknown action.", ephemeral=True)
+
+    @client.event
+    async def on_interaction(interaction: discord.Interaction) -> None:
+        # Only component clicks with our prefix are handled here; slash commands
+        # and other views are dispatched by discord.py exactly as before.
+        try:
+            if interaction.type != discord.InteractionType.component:
+                return
+            cid = str((interaction.data or {}).get("custom_id") or "")
+            if not cid.startswith("harviscode:"):
+                return
+            await _handle_code_component(interaction, cid)
+        except Exception as exc:
+            logger.exception("harvis-code: component handler error: %s", exc)
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(
+                        f"Error: {str(exc)[:300]}", ephemeral=True,
+                    )
+            except Exception:
+                pass
 
 
 # ── Native BYO OpenClaw config write-through ────────────────────────────────
@@ -1964,6 +3234,22 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
             mode.value == "on", cfg, pool, _LOCAL_OLLAMA_URL
         )
         await interaction.followup.send(reply)
+
+    # ── /harvis-code coding channel — DORMANT unless HARVIS_CODE_CHANNEL_ID is
+    # set. Registration failure is logged and swallowed: the rest of the bot
+    # (on_message, /model, /engine, /agents) must start exactly as before.
+    if _CODE_CHANNEL_ID:
+        try:
+            _register_harvis_code(client, tree, app_request, cfg)
+            logger.info(
+                "harvis-code: enabled (channel=%s guild=%s approver_roles=%s)",
+                _CODE_CHANNEL_ID, _CODE_GUILD_ID or "global",
+                sorted(_CODE_APPROVER_ROLE_IDS) or "any",
+            )
+        except Exception as exc:
+            logger.exception("harvis-code: registration failed — feature disabled: %s", exc)
+    else:
+        logger.info("harvis-code: dormant (HARVIS_CODE_CHANNEL_ID not set)")
 
     @client.event
     async def on_ready():

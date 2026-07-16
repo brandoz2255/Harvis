@@ -56,6 +56,42 @@ class HarvisExecRequest(BaseModel):
     timeout_s: Optional[float] = Field(default=None, ge=1, le=600)
 
 
+# ── Permission-mode resolution (Build Space Phase 3) ─────────────────────────
+
+_LADDER_MODES = ("plan", "ask", "auto-accept", "full-auto")
+
+
+async def _resolve_permission_mode(pool, workspace_id: str) -> tuple[str, Optional[str]]:
+    """(permission_mode, vibecode_session_id) governing this workspace's exec.
+
+    A vibecode turn's run row carries session_id = the vibecode session, whose
+    stored ladder rung governs it. Anything else (per-user sandbox ids, generic
+    runs) has no stored rung → DEFAULT 'ask'. This closes the old bypass where
+    permission_mode=None skipped the friction gate entirely (authz.py) — every
+    /api/harvis/exec and /api/harvis/jobs call now runs the risk ladder like a
+    turn. Fail-safe on DB errors: ('ask', None)."""
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT s.id AS session_id, s.permission_mode
+                FROM workspace_runs r
+                JOIN vibecode_sessions s ON s.id = r.session_id
+                WHERE r.id = $1
+                """,
+                workspace_id,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[harvis-exec:%s] permission-mode lookup failed (defaulting to 'ask'): %s",
+            workspace_id, exc,
+        )
+        row = None
+    if row and (row["permission_mode"] or "") in _LADDER_MODES:
+        return row["permission_mode"], row["session_id"]
+    return "ask", (row["session_id"] if row else None)
+
+
 # ── Ownership scoping ────────────────────────────────────────────────────────
 
 def _sanitize_id(raw: str) -> str:
@@ -135,24 +171,39 @@ async def harvis_exec(
     user_id = int(current_user["id"])
     workspace_id = await _resolve_scoped_workspace(pool, body.workspace_id, user_id)
 
-    # b. Phase 2 choke point. permission_mode=None: a direct authenticated user
-    # action is its own consent for lane 3 — the lane gate still runs and the
-    # decision is still traced.
+    # b. Phase 2 choke point — now with the REAL permission mode (Phase 3):
+    # the session's stored ladder rung when the run belongs to a vibecode
+    # session, else 'ask'. permission_mode=None (the old friction-gate bypass)
+    # is gone. tool_name 'exec' (not 'terminal.exec') so risk.py classifies the
+    # actual COMMAND (med ordinary / high destructive) instead of med-always.
     async def _emit_decision(payload: dict) -> None:
         await emit_terminal_event(
             pool, workspace_id, event_type="decision", payload=payload
         )
 
+    permission_mode, vc_session_id = await _resolve_permission_mode(pool, workspace_id)
     res = await authorize_action(
-        tool_name="terminal.exec",
+        tool_name="exec",
         args={"command": body.command},
         lane=LANE_CONTAINER_TERMINAL,
-        permission_mode=None,
+        permission_mode=permission_mode,
         run_id=workspace_id,
         emit=_emit_decision,
+        session_id=vc_session_id,
+        pool=pool,
     )
     if not res.allowed:
         raise HTTPException(403, res.reason or "denied by execution policy")
+    if res.needs_approval:
+        # One-shot REST call — there is no interactive approval loop here, so a
+        # gated action is REFUSED (fail closed), with the risk tier + why. Approve
+        # it for the session in the Build UI or raise the session's permission mode.
+        raise HTTPException(
+            403,
+            f"requires approval under permission mode '{permission_mode}' "
+            f"(risk: {res.tier}): {res.reason or 'gated action'} — approve it for "
+            "the session in the Build UI or raise the session's permission mode.",
+        )
 
     # c. tool_call banner BEFORE running, then ensure + exec.
     await emit_terminal_event(

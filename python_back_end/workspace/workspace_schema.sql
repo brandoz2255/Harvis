@@ -58,11 +58,15 @@ CREATE TABLE IF NOT EXISTS workspace_jobs (
     exit_code      INT,
     base_path      TEXT,
     container_name TEXT,
+    timeout_secs   INT,
     started_at     TIMESTAMPTZ DEFAULT NOW(),
     finished_at    TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_workspace_jobs_ws
     ON workspace_jobs(workspace_id);
+-- Idempotent backfill for tables created before timeout_secs existed
+-- (main.py's startup migration also applies this on every boot).
+ALTER TABLE workspace_jobs ADD COLUMN IF NOT EXISTS timeout_secs INT;
 
 CREATE TABLE IF NOT EXISTS workspace_events (
     id            SERIAL PRIMARY KEY,

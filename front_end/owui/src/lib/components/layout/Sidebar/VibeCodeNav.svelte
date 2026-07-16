@@ -62,6 +62,14 @@
 		markViewed(id);
 		goto(`/harvis/vibecode?session=${id}`);
 	};
+	// Routines / Customize open as in-Build right drawers (the vibecode page reads
+	// ?panel=…) — they stay inside the coding area instead of bouncing to Agent Studio.
+	const openPanel = (panel: 'routines' | 'customize') => {
+		const q = new URLSearchParams();
+		if (activeSession) q.set('session', activeSession);
+		q.set('panel', panel);
+		goto(`/harvis/vibecode?${q.toString()}`, { noScroll: true, keepFocus: true });
+	};
 
 	const startRename = (s: VibecodeSession) => {
 		editingId = s.id;
@@ -117,7 +125,7 @@
 	     live in the footer "More".) -->
 	<button
 		type="button"
-		on:click={() => goto('/harvis/agent-studio/automations')}
+		on:click={() => openPanel('routines')}
 		class="w-full flex items-center gap-3 rounded-2xl px-2.5 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-900 transition outline-none"
 		aria-label={$i18n.t('Routines')}
 	>
@@ -126,7 +134,7 @@
 	</button>
 	<button
 		type="button"
-		on:click={() => goto('/harvis/agent-studio/customize')}
+		on:click={() => openPanel('customize')}
 		class="w-full flex items-center gap-3 rounded-2xl px-2.5 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-900 transition outline-none"
 		aria-label={$i18n.t('Customize')}
 	>

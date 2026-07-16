@@ -31,6 +31,12 @@ export interface RunNode {
 	completion_tokens?: number | null;
 	summary: string | null;
 	error: string | null;
+	// Phase 5 background-job fields (workspace_jobs) — present only when the record
+	// is (or carries) a persisted background job; all optional / additive.
+	command?: string | null;
+	exit_code?: number | null;
+	timeout_secs?: number | null;
+	log_tail?: string | string[] | null; // last ~40 lines of the job's output
 }
 
 // All workspace/orchestration runs (account-wide) — feeds the Build Background-tasks panel.
@@ -59,6 +65,65 @@ export const getActiveWorkspace = async (): Promise<any | null> => {
 	}
 };
 
+// A Discord-launched (#harvis-code) session that's actively running for this user,
+// or null. Powers the Build header's "Discord session online" chip → clicking it
+// jumps the user into that live session so the web UI mirrors Discord.
+export const getActiveDiscordSession = async (): Promise<any | null> => {
+	try {
+		const r = await fetch(`${BASE}/active-discord`, { headers: headers() });
+		if (!r.ok) return null;
+		const j = await r.json();
+		return j?.active ?? null;
+	} catch {
+		return null;
+	}
+};
+
+// The user's currently-running agent review (coder↔reviewer), or null. Powers the main-Chat
+// "Agent review live" chip + the side panel that mirrors the review conversation into Chat.
+export const getActiveReview = async (): Promise<any | null> => {
+	try {
+		const r = await fetch(`${BASE}/active-review`, { headers: headers() });
+		if (!r.ok) return null;
+		const j = await r.json();
+		return j?.active ?? null;
+	} catch {
+		return null;
+	}
+};
+
+// Shared workspace model (openclaw_llm_config, last-write-wins). Discord /set-model
+// and the Build picker both write it; both read it → the selection follows whichever
+// surface changed it most recently. `updated_at` is a unix epoch (seconds).
+export const getWorkspaceModel = async (): Promise<{ model_id: string; updated_at: number }> => {
+	try {
+		const r = await fetch(`${BASE}/workspace-model`, { headers: headers() });
+		if (!r.ok) return { model_id: '', updated_at: 0 };
+		return await r.json();
+	} catch {
+		return { model_id: '', updated_at: 0 };
+	}
+};
+
+// Point the shared workspace model at the Build picker's selection (so Discord
+// reflects it). Returns the new updated_at epoch (0 on failure) so the caller can
+// avoid re-adopting its own write on the next poll.
+export const setWorkspaceModel = async (
+	modelId: string
+): Promise<{ ok: boolean; updated_at: number }> => {
+	try {
+		const r = await fetch(`${BASE}/workspace-model`, {
+			method: 'POST',
+			headers: { ...headers(), 'Content-Type': 'application/json' },
+			body: JSON.stringify({ model_id: modelId })
+		});
+		if (!r.ok) return { ok: false, updated_at: 0 };
+		return await r.json();
+	} catch {
+		return { ok: false, updated_at: 0 };
+	}
+};
+
 // Cancel a running workspace/vibecode turn (best-effort).
 export const cancelWorkspaceRun = async (runId: string): Promise<void> => {
 	try {
@@ -69,6 +134,24 @@ export const cancelWorkspaceRun = async (runId: string): Promise<void> => {
 		});
 	} catch (_) {
 		/* best-effort */
+	}
+};
+
+// Re-run a finished/failed background job with the SAME command under a NEW job id
+// (harvis_jobs.py → POST /api/harvis/jobs/{id}/retry — human-triggered). Returns the
+// new { job_id } or null on failure (endpoint missing / not owned / still running).
+export const retryWorkspaceJob = async (jobId: string): Promise<{ job_id: string } | null> => {
+	try {
+		const r = await fetch(`/api/harvis/jobs/${encodeURIComponent(jobId)}/retry`, {
+			method: 'POST',
+			headers: headers(),
+			credentials: 'include'
+		});
+		if (!r.ok) return null;
+		const j = await r.json();
+		return j?.job_id ? { job_id: j.job_id } : null;
+	} catch (_) {
+		return null;
 	}
 };
 
@@ -268,10 +351,14 @@ export interface PendingAction {
 	tool?: string;
 	args?: Record<string, any>;
 	risk?: 'low' | 'med' | 'high';
+	reason?: string; // Phase 2: WHY the gate fired (policy/rule text), shown in the modal
 }
 
-// The gated action (if any) awaiting approval for a turn run — poll while in-place.
-export const getPendingAction = async (runId: string): Promise<PendingAction | null> => {
+// The gated action(s) awaiting approval for a turn run — poll while in-place.
+// Phase 2 backends may return a QUEUE (array); older ones return a single object.
+export const getPendingAction = async (
+	runId: string
+): Promise<PendingAction | PendingAction[] | null> => {
 	try {
 		const r = await fetch(`${BASE}/run/${runId}/pending-action`, {
 			headers: headers(),
@@ -283,14 +370,20 @@ export const getPendingAction = async (runId: string): Promise<PendingAction | n
 	}
 };
 
+// scope 'session' = "approve for this session" — the backend remembers the rule and
+// stops gating matching actions for the rest of the session. Omitted = one-shot.
 export const resolveAction = async (
 	runId: string,
 	actionId: string,
-	approve: boolean
+	approve: boolean,
+	scope?: 'once' | 'session'
 ): Promise<void> => {
-	const r = await fetch(`${BASE}/run/${runId}/action/${actionId}/${approve ? 'approve' : 'deny'}`, {
+	// Backend reads `scope` from the QUERY STRING (approve_run_action: scope: str = "once"),
+	// not the body — send it there. Only meaningful on approve; deny ignores it.
+	const qs = approve && scope === 'session' ? '?scope=session' : '';
+	const r = await fetch(`${BASE}/run/${runId}/action/${actionId}/${approve ? 'approve' : 'deny'}${qs}`, {
 		method: 'POST',
-		headers: headers(),
+		headers: { ...headers() },
 		credentials: 'include'
 	});
 	if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -300,6 +393,20 @@ export const resolveAction = async (
 // A session is a durable, named coding conversation holding a THREAD of turns that
 // build on ONE persistent working clone. Separate from the main chat ($chats).
 // Backend: workspace_router.py → /api/workspace/vibecode/*.
+
+// run_preflight() report — attached to a session by the backend (null on legacy sessions).
+export interface VibecodePreflightReport {
+	repo_ok?: boolean;
+	remote_ok?: boolean | null;
+	remote_url?: string | null;
+	base_branch?: string | null;
+	current_branch?: string | null;
+	head_sha?: string | null;
+	clean?: boolean | null;
+	dirty_count?: number;
+	blockers?: { code?: string; message?: string }[];
+	ok?: boolean;
+}
 
 export interface VibecodeSession {
 	id: string;
@@ -314,6 +421,14 @@ export interface VibecodeSession {
 	engine?: string; // Build engine: native | opencode | codex | claude-code | hermes-*
 	local_folder_name?: string | null; // set ⇒ browser File System Access session
 	needs_seed?: boolean; // local-folder session awaiting its browser-supplied baseline
+	// Branch-lock (Build Space preflight) — null/absent on sessions created before it.
+	work_branch?: string | null; // the harvis/* branch the session works on
+	head_sha?: string | null; // HEAD at session creation
+	lifecycle?: string; // created | ready | blocked | running
+	// Agent review loop (opt-in per session; absent on older backends/sessions).
+	review_enabled?: boolean; // false/absent ⇒ review mode off, no PR gating
+	review_status?: string; // 'off' | 'pending' | 'agreed' | 'needs_human'
+	preflight?: VibecodePreflightReport | null;
 	created_at?: string | null;
 	updated_at?: string | null;
 }
@@ -429,6 +544,24 @@ export const listUserGithubRepos = async (): Promise<GitHubRepoItem[]> => {
 		return d.repos || [];
 	} catch (_) {
 		return [];
+	}
+};
+
+// Detected branches for a GitHub repo (owner/name) so the repo-attach UI can let the user pick
+// which branch/worktree to work in. Returns {default_branch, branches[]} with default first.
+export const getRepoBranches = async (
+	owner: string,
+	name: string
+): Promise<{ default_branch: string; branches: string[] }> => {
+	try {
+		const r = await fetch(
+			`${BASE}/repo-branches?owner=${encodeURIComponent(owner)}&repo=${encodeURIComponent(name)}`,
+			{ headers: headers(), credentials: 'include' }
+		);
+		if (!r.ok) return { default_branch: '', branches: [] };
+		return await r.json();
+	} catch (_) {
+		return { default_branch: '', branches: [] };
 	}
 };
 
@@ -595,11 +728,68 @@ export const getVibecodeSessionDiff = async (
 	}
 };
 
+// ── Read-only workspace browsing (Phase 2) ──
+// The session's WHOLE workspace tree (not just touched files). Read-only; .git is
+// hidden server-side and the listing is capped (~5000 entries).
+export interface VibecodeFileEntry {
+	path: string; // relative to the workspace root
+	type: 'file' | 'dir';
+	size?: number;
+}
+
+export const getVibecodeSessionFiles = async (
+	sessionId: string,
+	subpath?: string
+): Promise<{ entries: VibecodeFileEntry[] }> => {
+	try {
+		const qs = subpath ? `?subpath=${encodeURIComponent(subpath)}` : '';
+		const r = await fetch(`${BASE}/vibecode/session/${sessionId}/files${qs}`, {
+			headers: headers(),
+			credentials: 'include'
+		});
+		if (!r.ok) return { entries: [] };
+		const j = await r.json();
+		return { entries: Array.isArray(j?.entries) ? j.entries : [] };
+	} catch (_) {
+		return { entries: [] };
+	}
+};
+
+// ONE file's content, read-only. Content is capped (~512KB → truncated:true);
+// binary files come back with content:'' + binary:true. null = fetch failed.
+export const getVibecodeSessionFile = async (
+	sessionId: string,
+	path: string
+): Promise<{
+	path: string;
+	content: string;
+	truncated: boolean;
+	binary: boolean;
+	size: number;
+} | null> => {
+	try {
+		const r = await fetch(
+			`${BASE}/vibecode/session/${sessionId}/file?path=${encodeURIComponent(path)}`,
+			{
+				headers: headers(),
+				credentials: 'include'
+			}
+		);
+		return r.ok ? await r.json() : null;
+	} catch (_) {
+		return null;
+	}
+};
+
 // HUMAN-only: open ONE PR from the session's accumulated diff. Throws Error(detail).
 // Backend refuses main/master + requires the source to have a GitHub origin.
+// `base` (optional, additive) = the PR TARGET branch; older backends ignore it and
+// fall back to the session's base_branch.
+// `override` (optional, additive) = explicit human bypass of the agent-review gate
+// (review_enabled sessions refuse Create-PR until review_status='agreed' unless set).
 export const createPrForVibecodeSession = async (
 	sessionId: string,
-	body: { branch?: string; title?: string; body?: string }
+	body: { branch?: string; title?: string; body?: string; base?: string; override?: boolean }
 ): Promise<{ pr_url?: string; pr_number?: number; branch?: string; base?: string }> => {
 	const r = await fetch(`${BASE}/vibecode/session/${sessionId}/create-pr`, {
 		method: 'POST',
@@ -615,4 +805,124 @@ export const createPrForVibecodeSession = async (
 		throw new Error(detail);
 	}
 	return await r.json();
+};
+
+// Kick off (or re-run) the coder↔reviewer agent review loop for a session.
+// Backend flips review_status → 'pending' and streams agent_message events on the
+// session's runs. Throws Error(detail) so callers can surface it.
+// `mode` (additive, default 'thread' = today's in-thread loop): 'github' runs the
+// SAME loop on a real GitHub DRAFT PR — the backend opens a draft PR from the
+// session's diff (persisted to code_pull_requests with status 'draft'), posts each
+// reviewer critique as a PR review and each coder reply as a PR comment, and marks
+// the PR ready-for-review on agreement. The session therefore carries a draft PR
+// while a github review is running; the human still merges.
+export const startVibecodeSessionReview = async (
+	sessionId: string,
+	mode: 'thread' | 'github' = 'thread',
+	reviewerIds: string[] = []
+): Promise<{ review_status?: string; pr_url?: string; pr_number?: number }> => {
+	const r = await fetch(`${BASE}/vibecode/session/${sessionId}/review`, {
+		method: 'POST',
+		headers: { ...headers(), 'Content-Type': 'application/json' },
+		credentials: 'include',
+		// reviewer_ids = custom sub-agents that join the coder↔reviewer loop as extra
+		// reviewers (each with its own persona/model). Empty ⇒ the built-in reviewer.
+		body: JSON.stringify({ mode, reviewer_ids: reviewerIds.filter(Boolean) })
+	});
+	if (!r.ok) {
+		let detail = `HTTP ${r.status}`;
+		try {
+			detail = (await r.json()).detail || detail;
+		} catch (_) {}
+		throw new Error(detail);
+	}
+	return await r.json();
+};
+
+// Custom sub-agents (owui_subagents) — used to populate the reviewer roster picker.
+export interface SubAgentLite {
+	id: string;
+	name: string;
+	description?: string;
+	model?: string | null;
+	enabled?: boolean;
+}
+export const listSubagents = async (): Promise<SubAgentLite[]> => {
+	try {
+		const r = await fetch(`/api/owui/subagents`, { headers: headers(), credentials: 'include' });
+		if (!r.ok) return [];
+		const data = await r.json();
+		return Array.isArray(data?.items) ? data.items : [];
+	} catch (_) {
+		return [];
+	}
+};
+
+// ── Phase 4: tracked AI edits + persisted PRs (per-session audit trail) ──────
+// Backed by code_file_changes / code_pull_requests (orchestration schema).
+
+// One row per tracked AI edit (apply_patch etc.) in the session.
+export interface CodeFileChange {
+	id: string;
+	session_id: string;
+	run_id: string | null;
+	file_path: string;
+	change_type: string; // create | modify | delete
+	patch_id: string | null;
+	before_sha: string | null;
+	after_sha: string | null;
+	created_at: string | null;
+}
+
+// A PR opened from this session, persisted server-side. Usually human-opened
+// (status 'open'/'merged'/'closed'); a github-mode agent review additionally
+// persists its DRAFT PR here with status 'draft' — it flips to 'open' when the
+// reviewer approves and the PR is marked ready-for-review.
+export interface CodePullRequest {
+	id: string;
+	session_id: string;
+	provider: string;
+	pr_url: string | null;
+	pr_number: number | null;
+	base_branch: string | null;
+	head_branch: string | null;
+	title: string | null;
+	status: string | null;
+	created_at: string | null;
+	updated_at: string | null;
+}
+
+// Per-file audit list of the session's tracked AI edits. Fail-soft: [] until the
+// backend endpoint exists / the session has no tracked edits.
+export const getVibecodeSessionChanges = async (
+	sessionId: string
+): Promise<{ changes: CodeFileChange[] }> => {
+	try {
+		const r = await fetch(`${BASE}/vibecode/session/${sessionId}/changes`, {
+			headers: headers(),
+			credentials: 'include'
+		});
+		if (!r.ok) return { changes: [] };
+		const j = await r.json();
+		return { changes: Array.isArray(j?.changes) ? j.changes : [] };
+	} catch (_) {
+		return { changes: [] };
+	}
+};
+
+// PRs previously opened from this session (persisted records). Fail-soft: [].
+export const getVibecodeSessionPullRequests = async (
+	sessionId: string
+): Promise<{ pull_requests: CodePullRequest[] }> => {
+	try {
+		const r = await fetch(`${BASE}/vibecode/session/${sessionId}/pull-requests`, {
+			headers: headers(),
+			credentials: 'include'
+		});
+		if (!r.ok) return { pull_requests: [] };
+		const j = await r.json();
+		return { pull_requests: Array.isArray(j?.pull_requests) ? j.pull_requests : [] };
+	} catch (_) {
+		return { pull_requests: [] };
+	}
 };

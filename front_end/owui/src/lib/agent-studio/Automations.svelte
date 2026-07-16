@@ -36,13 +36,12 @@
 	$: lensBlurb =
 		context === 'chat'
 			? 'Schedules run a prompt on a timer and post the reply into a chat.'
-			: 'Routines run agent tasks on a schedule — they run server-side while Harvis is up.';
+			: 'Routines run agent tasks on a schedule — hands-off, on repeat.';
 
 	// ── Cron jobs for this lens ──
 	let jobs: CronJob[] = [];
 	let stats: AutomationStats = { successful_7d: 0, failed_7d: 0, recent: [] };
 	let loaded = false;
-	let scope: 'mine' | 'team' = 'mine';
 
 	const load = async () => {
 		loaded = false;
@@ -63,6 +62,16 @@
 	$: successful = stats.successful_7d;
 	$: failed = stats.failed_7d;
 
+	// ── Status filter tabs (All | Paused) + include-completed toggle ──
+	// 'completed' is a real terminal status (once-schedules land there after firing).
+	let statusFilter: 'all' | 'paused' = 'all';
+	let includeCompleted = true;
+	$: pausedCount = jobs.filter((j) => j.status === 'paused').length;
+	$: completedCount = jobs.filter((j) => j.status === 'completed').length;
+	$: visibleJobs = (
+		statusFilter === 'paused' ? jobs.filter((j) => j.status === 'paused') : jobs
+	).filter((j) => includeCompleted || j.status !== 'completed');
+
 	const relTime = (iso: string | null): string => {
 		if (!iso) return '';
 		const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
@@ -82,12 +91,55 @@
 	};
 	const runStatusColor = (s: string): string =>
 		s === 'done'
-			? 'text-green-500'
+			? 'text-emerald-500'
 			: s === 'error'
 				? 'text-red-500'
 				: s === 'cancelled'
 					? 'text-amber-500'
-					: 'text-blue-500';
+					: 'text-gray-400';
+
+	// Cadence badge — derived from the job's REAL schedule fields (schedule_type +
+	// schedule_expr), same source scheduleSummary() reads. No invented metadata.
+	const cadenceBadge = (j: CronJob): string => {
+		if (j.schedule_type === 'once') return 'Once';
+		if (j.schedule_type === 'interval') return `Every ${j.schedule_expr}`;
+		const e = j.schedule_expr.trim();
+		if (/^\d{1,2}\s+\d{1,2}\s+\*\s+\*\s+\*$/.test(e)) return 'Daily';
+		if (/^\d{1,2}\s+\d{1,2}\s+\*\s+\*\s+[0-6]$/.test(e)) return 'Weekly';
+		return 'Cron';
+	};
+	// Lens badge — derived from the component's context prop (= metadata.context
+	// the job was created with). Every routine runs server-side; there is no
+	// cloud/local split to badge.
+	$: lensBadge = context === 'chat' ? 'Chat' : 'Coding';
+
+	// ── NL composer — seeds the New-Routine modal (no fake AI drafting) ──
+	let draft = '';
+	$: composerPlaceholder =
+		context === 'chat'
+			? 'What should Harvis answer on a timer?'
+			: 'What do you want automated?';
+	$: suggestionChips =
+		context === 'chat'
+			? [
+					'Give me a morning briefing of my day at 8am',
+					'Quiz me on one flashcard topic every evening',
+					'Post a weekly summary of AI news every Monday'
+				]
+			: [
+					'Summarize my open PRs every weekday morning',
+					'Triage new issues and flag duplicates each morning',
+					'Draft release notes every Friday afternoon'
+				];
+	const draftFromComposer = () => {
+		const text = draft.trim();
+		if (!text) {
+			openNew();
+			return;
+		}
+		const title = text.charAt(0).toUpperCase() + text.slice(1);
+		openNew({ title: title.length > 60 ? `${title.slice(0, 57)}…` : title, prompt: text });
+	};
 
 	// ── Template gallery ──
 	let templateTab: TemplateTab = 'Popular';
@@ -112,13 +164,14 @@
 		if (await deleteCronJob(j.id)) await load();
 	};
 
+	// Neutral chrome: emerald = live/success, amber = paused, red = error.
 	const statusColor = (s: string): string =>
 		({
-			scheduled: 'text-blue-600 dark:text-blue-300 bg-blue-500/10',
-			running: 'text-blue-600 dark:text-blue-300 bg-blue-500/10',
-			paused: 'text-gray-500 dark:text-gray-400 bg-gray-500/10',
-			completed: 'text-green-600 dark:text-green-300 bg-green-500/10',
-			error: 'text-red-600 dark:text-red-300 bg-red-500/10'
+			scheduled: 'text-emerald-600 dark:text-emerald-400 bg-emerald-500/10',
+			running: 'text-emerald-600 dark:text-emerald-400 bg-emerald-500/10',
+			paused: 'text-amber-600 dark:text-amber-400 bg-amber-500/10',
+			completed: 'text-gray-500 dark:text-gray-400 bg-gray-500/10',
+			error: 'text-red-600 dark:text-red-400 bg-red-500/10'
 		})[s] || 'text-gray-500 bg-gray-500/10';
 
 	// ── New Routine/Schedule modal ──
@@ -173,7 +226,7 @@
 		return { type: 'cron', expr: `${d.getUTCMinutes()} ${d.getUTCHours()} * * ${d.getUTCDay()}` };
 	};
 
-	const openNew = (seed?: AutomationTemplate) => {
+	const openNew = (seed?: { title?: string; prompt?: string }) => {
 		nName = seed?.title ?? '';
 		nPrompt = seed?.prompt ?? '';
 		pMode = 'daily';
@@ -218,181 +271,261 @@
 </script>
 
 <div class={embed ? '' : 'w-full h-full overflow-y-auto'}>
-	<div class={embed ? 'space-y-6' : 'max-w-5xl mx-auto px-5 py-6 space-y-6'}>
+	<div class={embed ? 'space-y-5' : 'max-w-4xl mx-auto px-5 py-6 space-y-5'}>
 		{#if !embed}
-			<!-- Header -->
-			<header>
+			<!-- Header: title row + New button, Claude-Routines style -->
+			<header class="space-y-1">
 				<button
 					class="text-xs text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
 					on:click={() => goto('/harvis/agent-studio')}>← {$i18n.t('Agent Studio')}</button
 				>
-				<h1 class="text-2xl font-semibold text-gray-800 dark:text-gray-100 mt-2">
-					{$i18n.t(lensTitle)}
-				</h1>
-				<p class="text-sm text-gray-500 mt-1">
-					{context === 'chat'
-						? $i18n.t(lensBlurb)
-						: $i18n.t(
-								'Automate repetitive tasks with agents that run on a schedule — or launch one now from a template.'
-							)}
-				</p>
+				<div class="flex items-center justify-between gap-3 pt-1">
+					<h1
+						class="text-2xl font-semibold text-gray-800 dark:text-gray-100 flex items-center gap-2"
+					>
+						{#if context === 'chat'}
+							<svg class="size-5 text-gray-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>
+						{:else}
+							<svg class="size-5 text-amber-500" viewBox="0 0 24 24" fill="currentColor"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z" /></svg>
+						{/if}
+						{$i18n.t(lensTitle)}
+					</h1>
+					<button
+						class="flex items-center gap-1.5 text-sm px-3.5 py-1.5 rounded-lg bg-gray-900 hover:bg-gray-700 text-white dark:bg-gray-100 dark:hover:bg-white dark:text-gray-900 transition shrink-0"
+						on:click={() => openNew()}
+					>
+						<span class="text-base leading-none">+</span>
+						{$i18n.t(`New ${lensNoun}`)}
+					</button>
+				</div>
+				<p class="text-sm text-gray-500">{$i18n.t(lensBlurb)}</p>
 			</header>
 		{/if}
 
-		<!-- Stat cards — workspace-run outcomes; only the coding lens launches runs. -->
-		{#if context === 'coding'}
-		<div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
-			<div class="rounded-xl border border-gray-100 dark:border-gray-850 p-4">
-				<div class="text-xs text-gray-500">{$i18n.t('Total Routines')}</div>
-				<div class="text-2xl font-semibold text-gray-800 dark:text-gray-100 mt-1 tabular-nums">
-					{loaded ? total : '—'}
+		<!-- NL composer — prefills the New-Routine modal (chips + Draft button seed it) -->
+		<div
+			class="rounded-2xl border border-gray-200 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-900/40 p-3.5 space-y-3"
+		>
+			<textarea
+				bind:value={draft}
+				rows="2"
+				placeholder={$i18n.t(composerPlaceholder)}
+				class="w-full px-3 py-2.5 rounded-xl bg-white dark:bg-gray-850 border border-gray-200 dark:border-gray-800 text-sm text-gray-800 dark:text-gray-100 placeholder-gray-400 outline-none focus:border-gray-400 dark:focus:border-gray-600 resize-none"
+			></textarea>
+			<div class="flex items-end gap-2 flex-wrap">
+				<div class="flex items-center gap-1.5 flex-wrap flex-1 min-w-0">
+					{#each suggestionChips as chip}
+						<button
+							class="text-xs px-2.5 py-1 rounded-full border border-gray-200 dark:border-gray-800 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-850 transition"
+							on:click={() => (draft = chip)}>{$i18n.t(chip)}</button
+						>
+					{/each}
 				</div>
+				<button
+					class="text-sm px-3.5 py-1.5 rounded-lg bg-gray-900 hover:bg-gray-700 text-white dark:bg-gray-100 dark:hover:bg-white dark:text-gray-900 transition shrink-0 ml-auto"
+					on:click={draftFromComposer}>{$i18n.t(`Draft ${lensNoun.toLowerCase()}`)}</button
+				>
 			</div>
-			<div class="rounded-xl border border-gray-100 dark:border-gray-850 p-4">
-				<div class="text-xs text-gray-500">{$i18n.t('Successful')}</div>
-				<div class="text-2xl font-semibold text-green-600 dark:text-green-400 mt-1 tabular-nums">
-					{loaded ? successful : '—'}
-				</div>
-			</div>
-			<div class="rounded-xl border border-gray-100 dark:border-gray-850 p-4">
-				<div class="text-xs text-gray-500">{$i18n.t('Failed')}</div>
-				<div class="text-2xl font-semibold text-red-500 mt-1 tabular-nums">
-					{loaded ? failed : '—'}
-				</div>
-			</div>
-			<a
-				href="/harvis/agent-studio/global-map"
-				class="rounded-xl border border-gray-100 dark:border-gray-850 p-4 hover:border-blue-500/40 hover:bg-blue-500/5 transition flex flex-col"
-			>
-				<div class="text-xs text-gray-500 flex items-center gap-1">
-					{$i18n.t('Run History')}
-					<span class="text-blue-500">→</span>
-				</div>
-				<div class="text-sm text-gray-600 dark:text-gray-300 mt-auto pt-3">
-					{$i18n.t('View all runs')}
-				</div>
-			</a>
 		</div>
-		{/if}
 
-		<!-- Scope tabs + New Routine/Schedule -->
-		<div class="flex items-center justify-between">
+		<!-- Status tabs + include-completed toggle (+ New button when embedded) -->
+		<div class="flex items-center justify-between gap-2 flex-wrap">
 			<div class="flex items-center gap-1 text-sm">
 				<button
-					class="px-3 py-1 rounded-full transition {scope === 'mine'
+					class="px-3 py-1 rounded-full transition {statusFilter === 'all'
 						? 'bg-gray-100 dark:bg-gray-850 text-gray-800 dark:text-gray-100 font-medium'
 						: 'text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'}"
-					on:click={() => (scope = 'mine')}
+					on:click={() => (statusFilter = 'all')}
 				>
-					{$i18n.t('Mine')}
+					{$i18n.t('All')}
 					<span class="text-xs text-gray-400">{loaded ? total : 0}</span>
 				</button>
 				<button
-					class="px-3 py-1 rounded-full transition {scope === 'team'
+					class="px-3 py-1 rounded-full transition {statusFilter === 'paused'
 						? 'bg-gray-100 dark:bg-gray-850 text-gray-800 dark:text-gray-100 font-medium'
-						: 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300'}"
-					on:click={() => (scope = 'team')}
+						: 'text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'}"
+					on:click={() => (statusFilter = 'paused')}
 				>
-					{$i18n.t('Team')}
-					<span class="text-xs text-gray-400">0</span>
+					{$i18n.t('Paused')}
+					<span class="text-xs text-gray-400">{loaded ? pausedCount : 0}</span>
 				</button>
 			</div>
-			<button
-				class="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white transition"
-				on:click={() => openNew()}
-			>
-				<span class="text-base leading-none">+</span>
-				{$i18n.t(`New ${lensNoun}`)}
-			</button>
+			<div class="flex items-center gap-2">
+				{#if completedCount > 0}
+					<label
+						class="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 cursor-pointer select-none"
+					>
+						<input type="checkbox" bind:checked={includeCompleted} class="accent-gray-600" />
+						{$i18n.t('Include completed')}
+					</label>
+				{/if}
+				{#if embed}
+					<button
+						class="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg bg-gray-900 hover:bg-gray-700 text-white dark:bg-gray-100 dark:hover:bg-white dark:text-gray-900 transition"
+						on:click={() => openNew()}
+					>
+						<span class="text-base leading-none">+</span>
+						{$i18n.t(`New ${lensNoun}`)}
+					</button>
+				{/if}
+			</div>
 		</div>
 
-		<!-- Automation list / empty state -->
-		{#if scope === 'team'}
-			<div class="rounded-xl border border-gray-100 dark:border-gray-850 py-12 text-center">
-				<div class="text-sm font-medium text-gray-700 dark:text-gray-200">
-					{$i18n.t(`No team ${lensTitle.toLowerCase()}`)}
-				</div>
-				<p class="text-xs text-gray-500 mt-1">
-					{$i18n.t(`Shared ${lensTitle.toLowerCase()} will appear here.`)}
-				</p>
-			</div>
-		{:else if !loaded}
-			<div class="rounded-xl border border-gray-100 dark:border-gray-850 py-12 text-center text-sm text-gray-400">
+		<!-- Honest info banner — routines fire from the backend cron tick, not the user's machine -->
+		<div
+			class="rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900/60 px-3.5 py-2.5 flex items-start gap-2.5"
+		>
+			<svg class="size-4 text-gray-400 shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9" /><path d="M12 16v-5" /><path d="M12 8h.01" /></svg>
+			<p class="text-xs text-gray-500 dark:text-gray-400 leading-relaxed">
+				{context === 'chat'
+					? $i18n.t(
+							'Schedules run server-side while Harvis is online — each fire posts its reply into a chat. Your computer does not need to be awake.'
+						)
+					: $i18n.t(
+							'Routines run server-side on a schedule while Harvis is online — they do not depend on your computer being awake.'
+						)}
+			</p>
+		</div>
+
+		<!-- Routine list / empty state -->
+		{#if !loaded}
+			<div
+				class="rounded-xl border border-gray-100 dark:border-gray-850 py-12 text-center text-sm text-gray-400"
+			>
 				{$i18n.t('Loading…')}
 			</div>
-		{:else if jobs.length === 0}
+		{:else if visibleJobs.length === 0}
 			<div class="rounded-xl border border-gray-100 dark:border-gray-850 py-12 px-4 text-center">
 				<div class="text-base font-medium text-gray-700 dark:text-gray-200">
-					{$i18n.t(`No ${lensTitle} Yet`)}
+					{statusFilter === 'paused'
+						? $i18n.t(`No paused ${lensTitle.toLowerCase()}`)
+						: $i18n.t(`No ${lensTitle} Yet`)}
 				</div>
 				<p class="text-sm text-gray-500 mt-1 max-w-md mx-auto">
-					{context === 'chat'
-						? $i18n.t(lensBlurb)
-						: $i18n.t('Run agents on a schedule or automatically in response to events.')}
+					{statusFilter === 'paused'
+						? $i18n.t(`Paused ${lensTitle.toLowerCase()} will appear here.`)
+						: $i18n.t(lensBlurb)}
 				</p>
-				<button
-					class="mt-4 text-sm px-3.5 py-1.5 rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-850 transition text-gray-700 dark:text-gray-200"
-					on:click={() => openNew()}>{$i18n.t(`New ${lensNoun}`)}</button
-				>
+				{#if statusFilter === 'all'}
+					<button
+						class="mt-4 text-sm px-3.5 py-1.5 rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-850 transition text-gray-700 dark:text-gray-200"
+						on:click={() => openNew()}>{$i18n.t(`New ${lensNoun}`)}</button
+					>
+				{/if}
 			</div>
 		{:else}
 			<div class="space-y-2">
-				{#each jobs as j (j.id)}
-					<div
-						class="rounded-xl border border-gray-100 dark:border-gray-850 px-4 py-3 flex items-center gap-3"
-					>
-						<div class="min-w-0 flex-1">
-							<div class="flex items-center gap-2">
-								<span class="text-sm font-medium text-gray-800 dark:text-gray-100 truncate"
-									>{j.name}</span
-								>
-								<span
-									class="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded-full shrink-0 {statusColor(
-										j.status
-									)}">{j.status}</span
-								>
-							</div>
-							<div class="text-xs text-gray-500 mt-0.5 truncate">{j.prompt}</div>
-							<div class="text-[11px] text-gray-400 mt-1 flex items-center gap-2 flex-wrap">
-								<span>{scheduleSummary(j)}</span>
-								<span>·</span>
-								<span>{j.run_count} {j.run_count === 1 ? $i18n.t('run') : $i18n.t('runs')}</span>
-								{#if j.next_run_at && j.status === 'scheduled'}
-									<span>· {$i18n.t('next')} {inTime(j.next_run_at)}</span>
-								{/if}
-								{#if j.last_run_at}
-									<span>· {$i18n.t('last')} {relTime(j.last_run_at)}</span>
-								{/if}
+				{#each visibleJobs as j (j.id)}
+					<div class="rounded-xl border border-gray-100 dark:border-gray-850 px-4 py-3">
+						<div class="flex items-start gap-3">
+							<div class="min-w-0 flex-1">
+								<div class="flex items-center gap-2 min-w-0">
+									<span class="text-sm font-semibold text-gray-800 dark:text-gray-100 truncate"
+										>{j.name}</span
+									>
+									{#if j.status !== 'scheduled'}
+										<span
+											class="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded-full shrink-0 {statusColor(
+												j.status
+											)}">{j.status}</span
+										>
+									{/if}
+								</div>
+								<div class="text-xs text-gray-500 mt-1 flex items-center gap-2 flex-wrap">
+									<span>{scheduleSummary(j)}</span>
+									{#if j.next_run_at && j.status === 'scheduled'}
+										<span>· {$i18n.t('next')} {inTime(j.next_run_at)}</span>
+									{/if}
+									<span
+										>· {j.run_count}
+										{j.run_count === 1 ? $i18n.t('run') : $i18n.t('runs')}</span
+									>
+									{#if j.last_run_at}
+										<span>· {$i18n.t('last')} {relTime(j.last_run_at)}</span>
+									{/if}
+								</div>
 								{#if j.error_message}
-									<span class="text-red-500 truncate">· {j.error_message}</span>
+									<div class="text-xs text-red-500 mt-1 truncate">{j.error_message}</div>
 								{/if}
 							</div>
-						</div>
-						<div class="flex items-center gap-1 shrink-0">
-							<button
-								class="text-xs px-2 py-1 rounded-lg bg-gray-100 dark:bg-gray-850 hover:bg-gray-200 dark:hover:bg-gray-800 transition"
-								on:click={() => runNow(j)}>{$i18n.t('Run now')}</button
-							>
-							<button
-								class="text-xs px-2 py-1 rounded-lg bg-gray-100 dark:bg-gray-850 hover:bg-gray-200 dark:hover:bg-gray-800 transition"
-								on:click={() => togglePause(j)}
-								>{j.status === 'paused' ? $i18n.t('Resume') : $i18n.t('Pause')}</button
-							>
-							<button
-								class="text-xs px-2 py-1 rounded-lg text-red-600 hover:bg-red-50 dark:hover:bg-red-950 transition"
-								on:click={() => remove(j)}>{$i18n.t('Delete')}</button
-							>
+							<div class="flex flex-col items-end gap-1.5 shrink-0">
+								<!-- Badges derived from real fields: cadence ← schedule_type/expr, lens ← metadata.context -->
+								<div class="flex items-center gap-1">
+									<span
+										class="text-[10px] px-1.5 py-0.5 rounded-full border border-gray-200 dark:border-gray-800 text-gray-500 dark:text-gray-400"
+										>{cadenceBadge(j)}</span
+									>
+									<span
+										class="text-[10px] px-1.5 py-0.5 rounded-full bg-gray-100 dark:bg-gray-850 text-gray-500 dark:text-gray-400"
+										>{$i18n.t(lensBadge)}</span
+									>
+								</div>
+								<div class="flex items-center gap-1">
+									<button
+										class="text-xs px-2 py-1 rounded-lg bg-gray-100 dark:bg-gray-850 hover:bg-gray-200 dark:hover:bg-gray-800 transition"
+										on:click={() => runNow(j)}>{$i18n.t('Run now')}</button
+									>
+									<button
+										class="text-xs px-2 py-1 rounded-lg bg-gray-100 dark:bg-gray-850 hover:bg-gray-200 dark:hover:bg-gray-800 transition"
+										on:click={() => togglePause(j)}
+										>{j.status === 'paused' ? $i18n.t('Resume') : $i18n.t('Pause')}</button
+									>
+									<button
+										class="text-xs px-2 py-1 rounded-lg text-red-600 hover:bg-red-50 dark:hover:bg-red-950 transition"
+										on:click={() => remove(j)}>{$i18n.t('Delete')}</button
+									>
+								</div>
+							</div>
 						</div>
 					</div>
 				{/each}
 			</div>
 		{/if}
 
-		<p class="text-[11px] text-gray-400">
-			{context === 'chat'
-				? $i18n.t('Schedules run a prompt on a timer and post the reply into a chat.')
-				: $i18n.t('Routines run server-side while Harvis is up.')}
-		</p>
+		<!-- Activity — workspace-run outcomes; only the coding lens launches runs. -->
+		{#if context === 'coding'}
+			<section class="pt-2">
+				<h2 class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
+					{$i18n.t('Last 7 days')}
+				</h2>
+				<div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+					<div class="rounded-xl border border-gray-100 dark:border-gray-850 p-4">
+						<div class="text-xs text-gray-500">{$i18n.t('Total Routines')}</div>
+						<div
+							class="text-2xl font-semibold text-gray-800 dark:text-gray-100 mt-1 tabular-nums"
+						>
+							{loaded ? total : '—'}
+						</div>
+					</div>
+					<div class="rounded-xl border border-gray-100 dark:border-gray-850 p-4">
+						<div class="text-xs text-gray-500">{$i18n.t('Successful')}</div>
+						<div
+							class="text-2xl font-semibold text-emerald-600 dark:text-emerald-400 mt-1 tabular-nums"
+						>
+							{loaded ? successful : '—'}
+						</div>
+					</div>
+					<div class="rounded-xl border border-gray-100 dark:border-gray-850 p-4">
+						<div class="text-xs text-gray-500">{$i18n.t('Failed')}</div>
+						<div class="text-2xl font-semibold text-red-500 mt-1 tabular-nums">
+							{loaded ? failed : '—'}
+						</div>
+					</div>
+					<a
+						href="/harvis/agent-studio/global-map"
+						class="rounded-xl border border-gray-100 dark:border-gray-850 p-4 hover:border-gray-300 dark:hover:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-900/60 transition flex flex-col"
+					>
+						<div class="text-xs text-gray-500 flex items-center gap-1">
+							{$i18n.t('Run History')}
+							<span class="text-gray-400">→</span>
+						</div>
+						<div class="text-sm text-gray-600 dark:text-gray-300 mt-auto pt-3">
+							{$i18n.t('View all runs')}
+						</div>
+					</a>
+				</div>
+			</section>
+		{/if}
 
 		<!-- Recent runs — the workspace runs the coding-lens fires launched -->
 		{#if context === 'coding' && stats.recent.length}
@@ -412,8 +545,11 @@
 							<span class="text-sm text-gray-700 dark:text-gray-200 truncate flex-1"
 								>{r.task_brief || $i18n.t('Automation run')}</span
 							>
-							<span class="text-[10px] uppercase tracking-wide text-gray-400 shrink-0">{r.status}</span>
-							<span class="text-xs text-gray-400 shrink-0 tabular-nums">{relTime(r.started_at)}</span>
+							<span class="text-[10px] uppercase tracking-wide text-gray-400 shrink-0"
+								>{r.status}</span
+							>
+							<span class="text-xs text-gray-400 shrink-0 tabular-nums">{relTime(r.started_at)}</span
+							>
 						</a>
 					{/each}
 				</div>
@@ -422,45 +558,45 @@
 
 		<!-- Template gallery — agent/ops task seeds; coding lens only -->
 		{#if context === 'coding'}
-		<section class="pt-2">
-			<h2 class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
-				{$i18n.t('Templates')}
-			</h2>
-			<div class="flex items-center gap-1 flex-wrap mb-3 text-sm">
-				{#each TEMPLATE_TABS as t}
-					<button
-						class="px-3 py-1 rounded-full transition {templateTab === t
-							? 'bg-gray-100 dark:bg-gray-850 text-gray-800 dark:text-gray-100 font-medium'
-							: 'text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'}"
-						on:click={() => (templateTab = t)}>{$i18n.t(t)}</button
-					>
-				{/each}
-			</div>
-			<div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-				{#each templates as t (t.id)}
-					<div
-						class="rounded-xl border border-gray-100 dark:border-gray-850 p-4 flex flex-col gap-2"
-					>
-						<div class="flex items-center gap-2 text-gray-400">
-							<svg class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>
-							<span class="text-[10px] uppercase tracking-wide">{$i18n.t(t.category)}</span>
+			<section class="pt-2">
+				<h2 class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
+					{$i18n.t('Templates')}
+				</h2>
+				<div class="flex items-center gap-1 flex-wrap mb-3 text-sm">
+					{#each TEMPLATE_TABS as t}
+						<button
+							class="px-3 py-1 rounded-full transition {templateTab === t
+								? 'bg-gray-100 dark:bg-gray-850 text-gray-800 dark:text-gray-100 font-medium'
+								: 'text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'}"
+							on:click={() => (templateTab = t)}>{$i18n.t(t)}</button
+						>
+					{/each}
+				</div>
+				<div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+					{#each templates as t (t.id)}
+						<div
+							class="rounded-xl border border-gray-100 dark:border-gray-850 p-4 flex flex-col gap-2"
+						>
+							<div class="flex items-center gap-2 text-gray-400">
+								<svg class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>
+								<span class="text-[10px] uppercase tracking-wide">{$i18n.t(t.category)}</span>
+							</div>
+							<div class="text-sm font-medium text-gray-800 dark:text-gray-100">{t.title}</div>
+							<div class="text-xs text-gray-500 leading-relaxed">{t.description}</div>
+							<div class="flex items-center gap-2 mt-1">
+								<button
+									class="text-xs px-2.5 py-1 rounded-lg bg-gray-100 dark:bg-gray-850 hover:bg-gray-200 dark:hover:bg-gray-800 transition"
+									on:click={() => useTemplate(t)}>{$i18n.t('Use')}</button
+								>
+								<button
+									class="text-xs px-2.5 py-1 rounded-lg text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition"
+									on:click={() => openNew(t)}>{$i18n.t('Schedule')}</button
+								>
+							</div>
 						</div>
-						<div class="text-sm font-medium text-gray-800 dark:text-gray-100">{t.title}</div>
-						<div class="text-xs text-gray-500 leading-relaxed">{t.description}</div>
-						<div class="flex items-center gap-2 mt-1">
-							<button
-								class="text-xs px-2.5 py-1 rounded-lg bg-gray-100 dark:bg-gray-850 hover:bg-blue-500/10 hover:text-blue-600 dark:hover:text-blue-300 transition"
-								on:click={() => useTemplate(t)}>{$i18n.t('Use')}</button
-							>
-							<button
-								class="text-xs px-2.5 py-1 rounded-lg text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition"
-								on:click={() => openNew(t)}>{$i18n.t('Schedule')}</button
-							>
-						</div>
-					</div>
-				{/each}
-			</div>
-		</section>
+					{/each}
+				</div>
+			</section>
 		{/if}
 	</div>
 </div>
@@ -479,7 +615,10 @@
 				<h2 class="text-base font-semibold text-gray-800 dark:text-gray-100">
 					{$i18n.t(`New ${lensNoun}`)}
 				</h2>
-				<button class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300" on:click={() => (showNew = false)}>✕</button>
+				<button
+					class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
+					on:click={() => (showNew = false)}>✕</button
+				>
 			</div>
 
 			<label class="block">
@@ -487,7 +626,7 @@
 				<input
 					bind:value={nName}
 					placeholder={$i18n.t('Nightly bug scan')}
-					class="w-full mt-1 px-3 py-2 rounded-lg bg-gray-50 dark:bg-gray-850 border border-gray-100 dark:border-gray-800 text-sm outline-none focus:border-blue-500/50"
+					class="w-full mt-1 px-3 py-2 rounded-lg bg-gray-50 dark:bg-gray-850 border border-gray-100 dark:border-gray-800 text-sm outline-none focus:border-gray-400 dark:focus:border-gray-600"
 				/>
 			</label>
 
@@ -503,7 +642,7 @@
 					placeholder={context === 'chat'
 						? $i18n.t('What should Harvis answer on this timer?')
 						: $i18n.t('Describe what the agents should do…')}
-					class="w-full mt-1 px-3 py-2 rounded-lg bg-gray-50 dark:bg-gray-850 border border-gray-100 dark:border-gray-800 text-sm outline-none focus:border-blue-500/50 resize-none"
+					class="w-full mt-1 px-3 py-2 rounded-lg bg-gray-50 dark:bg-gray-850 border border-gray-100 dark:border-gray-800 text-sm outline-none focus:border-gray-400 dark:focus:border-gray-600 resize-none"
 				></textarea>
 			</label>
 
@@ -513,7 +652,7 @@
 					<span class="text-xs text-gray-500">{$i18n.t('Schedule')}</span>
 					<select
 						bind:value={pMode}
-						class="w-full mt-1 px-2 py-2 rounded-lg bg-gray-50 dark:bg-gray-850 border border-gray-100 dark:border-gray-800 text-sm outline-none focus:border-blue-500/50"
+						class="w-full mt-1 px-2 py-2 rounded-lg bg-gray-50 dark:bg-gray-850 border border-gray-100 dark:border-gray-800 text-sm outline-none focus:border-gray-400 dark:focus:border-gray-600"
 					>
 						<option value="daily">{$i18n.t('Daily at…')}</option>
 						<option value="weekly">{$i18n.t('Weekly on…')}</option>
@@ -527,7 +666,7 @@
 						<input
 							type="time"
 							bind:value={pTime}
-							class="w-full mt-1 px-3 py-2 rounded-lg bg-gray-50 dark:bg-gray-850 border border-gray-100 dark:border-gray-800 text-sm outline-none focus:border-blue-500/50"
+							class="w-full mt-1 px-3 py-2 rounded-lg bg-gray-50 dark:bg-gray-850 border border-gray-100 dark:border-gray-800 text-sm outline-none focus:border-gray-400 dark:focus:border-gray-600"
 						/>
 					</label>
 				{:else if pMode === 'weekly'}
@@ -535,7 +674,7 @@
 						<span class="text-xs text-gray-500">{$i18n.t('Day')}</span>
 						<select
 							bind:value={pDay}
-							class="w-full mt-1 px-2 py-2 rounded-lg bg-gray-50 dark:bg-gray-850 border border-gray-100 dark:border-gray-800 text-sm outline-none focus:border-blue-500/50"
+							class="w-full mt-1 px-2 py-2 rounded-lg bg-gray-50 dark:bg-gray-850 border border-gray-100 dark:border-gray-800 text-sm outline-none focus:border-gray-400 dark:focus:border-gray-600"
 						>
 							{#each DAYS as d (d.value)}
 								<option value={d.value}>{$i18n.t(d.label)}</option>
@@ -547,7 +686,7 @@
 						<input
 							type="time"
 							bind:value={pTime}
-							class="w-full mt-1 px-3 py-2 rounded-lg bg-gray-50 dark:bg-gray-850 border border-gray-100 dark:border-gray-800 text-sm outline-none focus:border-blue-500/50"
+							class="w-full mt-1 px-3 py-2 rounded-lg bg-gray-50 dark:bg-gray-850 border border-gray-100 dark:border-gray-800 text-sm outline-none focus:border-gray-400 dark:focus:border-gray-600"
 						/>
 					</label>
 				{:else if pMode === 'hours'}
@@ -558,7 +697,7 @@
 							min="1"
 							step="1"
 							bind:value={pHours}
-							class="w-full mt-1 px-3 py-2 rounded-lg bg-gray-50 dark:bg-gray-850 border border-gray-100 dark:border-gray-800 text-sm outline-none focus:border-blue-500/50"
+							class="w-full mt-1 px-3 py-2 rounded-lg bg-gray-50 dark:bg-gray-850 border border-gray-100 dark:border-gray-800 text-sm outline-none focus:border-gray-400 dark:focus:border-gray-600"
 						/>
 					</label>
 				{:else}
@@ -566,7 +705,7 @@
 						<span class="text-xs text-gray-500">{$i18n.t('Type')}</span>
 						<select
 							bind:value={nType}
-							class="w-full mt-1 px-2 py-2 rounded-lg bg-gray-50 dark:bg-gray-850 border border-gray-100 dark:border-gray-800 text-sm outline-none focus:border-blue-500/50"
+							class="w-full mt-1 px-2 py-2 rounded-lg bg-gray-50 dark:bg-gray-850 border border-gray-100 dark:border-gray-800 text-sm outline-none focus:border-gray-400 dark:focus:border-gray-600"
 						>
 							<option value="interval">{$i18n.t('Every…')}</option>
 							<option value="cron">{$i18n.t('Cron')}</option>
@@ -578,7 +717,7 @@
 						<input
 							bind:value={nExpr}
 							placeholder={exprPlaceholder[nType]}
-							class="w-full mt-1 px-3 py-2 rounded-lg bg-gray-50 dark:bg-gray-850 border border-gray-100 dark:border-gray-800 text-sm font-mono outline-none focus:border-blue-500/50"
+							class="w-full mt-1 px-3 py-2 rounded-lg bg-gray-50 dark:bg-gray-850 border border-gray-100 dark:border-gray-800 text-sm font-mono outline-none focus:border-gray-400 dark:focus:border-gray-600"
 						/>
 					</label>
 				{/if}
@@ -592,7 +731,7 @@
 					on:click={() => (showNew = false)}>{$i18n.t('Cancel')}</button
 				>
 				<button
-					class="text-sm px-3.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white transition disabled:opacity-50"
+					class="text-sm px-3.5 py-1.5 rounded-lg bg-gray-900 hover:bg-gray-700 text-white dark:bg-gray-100 dark:hover:bg-white dark:text-gray-900 transition disabled:opacity-50"
 					disabled={nSaving}
 					on:click={createAutomation}
 					>{nSaving ? $i18n.t('Creating…') : $i18n.t(`Create ${lensNoun}`)}</button

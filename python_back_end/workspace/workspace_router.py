@@ -845,6 +845,9 @@ async def _db_save_event(pool, workspace_id: str, seq: int, event: OpenClawEvent
             # replays the run identically to the live stream (usage meter + text).
             "prompt_tokens", "completion_tokens", "total_tokens",
             "context_window", "source", "text",
+            # agent_message (review loop): which persona is speaking (coder|reviewer);
+            # label/content/run_id are already whitelisted above.
+            "role",
         ):
             val = event.data.get(key)
             if val is not None:
@@ -1290,6 +1293,31 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
             launch_mode=ws.get("launch_mode", "user"),
         )
 
+    elif agent_id == "vibecode-review":
+        # Agent Review Conversation (opt-in): coder ↔ reviewer dialogue over the
+        # session's ACCUMULATED diff, in the session's OWN workspace. Emits
+        # 'agent_message' conversation events + the usual tool/approval stream;
+        # sets vibecode_sessions.review_status ('agreed' | 'needs_human'). See
+        # orchestration/review.py. Same OpenClawEvent stream → unchanged
+        # persist/broadcast.
+        from .orchestration.review import run_review_conversation
+        event_stream = run_review_conversation(
+            task_brief, chat_history,
+            model_name=model_name, pool=pool,
+            parent_workspace_id=workspace_id, user_id=ws["user_id"],
+            session_id=ws.get("session_id") or f"ws-{workspace_id}",
+            vibecode_session_id=ws.get("vibecode_session_id") or "",
+            workspace_path=ws.get("workspace_path") or "",
+            base_sha=ws.get("base_sha") or "",
+            repo_path=ws.get("repo_path") or "",
+            isolation_mode=ws.get("vibecode_isolation_mode") or "session",
+            permission_mode=ws.get("vibecode_permission_mode") or "ask",
+            launch_mode=ws.get("launch_mode", "user"),
+            base_branch=ws.get("vibecode_review_base") or "",
+            mode=ws.get("vibecode_review_mode") or "thread",
+            reviewer_ids=ws.get("vibecode_reviewer_ids") or None,
+        )
+
     elif agent_id == "engine-adapter":
         # External code engine (Phase E1, e.g. OpenCode): run an external CLI against the
         # session's clone via the sidecar; same OpenClawEvent stream → unchanged persist/
@@ -1555,6 +1583,51 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
             final_summary, final_error, tool_call_count, event_count, started_epoch,
             analysis_md=final_analysis_md,
         )
+        # Build Space lifecycle: a vibecode turn reached a terminal status (done/error/
+        # cancelled) → flip the session back to 'ready'. Guarded on lifecycle='running'
+        # so a 'blocked' session is never overwritten. Fail-open.
+        _vib_sid = ws.get("vibecode_session_id")
+        if _vib_sid and pool is not None:
+            try:
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE vibecode_sessions SET lifecycle = 'ready', updated_at = NOW() "
+                        "WHERE id = $1 AND lifecycle = 'running'",
+                        _vib_sid,
+                    )
+            except Exception as exc:
+                logger.warning("vibecode: lifecycle reset failed for %s: %s", _vib_sid, exc)
+        # Agent-review safety net: a review run that ended WITHOUT the loop writing a
+        # terminal review_status (cancelled mid-conversation, task killed) must not
+        # wedge the PR gate at 'pending' forever → land it on 'needs_human'. The WHERE
+        # makes this a no-op after a normal finish ('agreed'/'needs_human' already set).
+        if agent_id == "vibecode-review" and _vib_sid and pool is not None:
+            try:
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE vibecode_sessions SET review_status = 'needs_human', "
+                        "updated_at = NOW() WHERE id = $1 AND review_status = 'pending'",
+                        _vib_sid,
+                    )
+            except Exception as exc:
+                logger.warning("vibecode: review-status repair failed for %s: %s", _vib_sid, exc)
+        # Gate re-lock: a COMPLETED coding turn (not a review) produces new changes that
+        # invalidate a prior 'agreed' review — the reviewers approved the OLD diff, so shipping
+        # now would pass changes nobody reviewed. Flip 'agreed' → 'stale' so Create-PR re-blocks
+        # until a fresh review runs. The WHERE makes it a no-op unless the review was agreed.
+        # 'engine-adapter' = an external-engine (opencode/codex/claude-code/hermes) coding turn on
+        # the SAME session tree, so it invalidates a prior agreement exactly like a native turn.
+        # 'orchestrated' is excluded (sub-agents work on isolated clones); 'vibecode-review' too.
+        if agent_id in ("vibecode-turn", "engine-adapter") and terminal_status == "done" and _vib_sid and pool is not None:
+            try:
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE vibecode_sessions SET review_status = 'stale', "
+                        "updated_at = NOW() WHERE id = $1 AND review_status = 'agreed'",
+                        _vib_sid,
+                    )
+            except Exception as exc:
+                logger.warning("vibecode: review-gate re-lock failed for %s: %s", _vib_sid, exc)
         _workspace_tasks.pop(workspace_id, None)
 
 
@@ -2290,6 +2363,9 @@ async def _start_workspace(
     engine_key: Optional[str] = None,
     engine_auth_mode: str = "api_key",
     vibecode_persona_engine: str = "",
+    vibecode_review_mode: str = "thread",
+    vibecode_review_base: str = "",
+    vibecode_reviewer_ids: Optional[list[str]] = None,
     launch_mode: str = "user",
 ) -> OpenClawClient:
     """
@@ -2348,6 +2424,9 @@ async def _start_workspace(
         # Phase E4: "hermes" when this is a Hermes native-engine turn (SOUL persona +
         # Hermes model on the SubAgentRunner); "" for plain native / external engines.
         "vibecode_persona_engine": vibecode_persona_engine,
+        "vibecode_review_mode": vibecode_review_mode,
+        "vibecode_review_base": vibecode_review_base,
+        "vibecode_reviewer_ids": vibecode_reviewer_ids,
         # Launch-path signal: "user" = explicitly user-initiated (pill, vibecode,
         # build, internal integrations — the default); "auto" = auto-detected
         # escalation. Auto runs carry no Tier-3 token and get heavy tools withheld.
@@ -3394,12 +3473,34 @@ class VibecodeSeedRequest(BaseModel):
     files: list[dict] = []
 
 
+class CodeProjectUpsert(BaseModel):
+    """Build Space repo registry entry (code_projects). One row per (user, repo_url):
+    which repos coding sessions may target and under what branch rules."""
+    repo_url: str
+    name: Optional[str] = None
+    provider: str = "github"
+    default_base_branch: str = "main"
+    allowed_base_branches: list[str] = []
+    branch_prefix: str = "harvis/code/"
+
+
 class VibecodeTurnRequest(BaseModel):
     task_brief: str
     model_name: str = ""
     run_mode: str = ""  # per-turn: 'plan' (read-only → draft a plan) | 'auto'/'' (execute)
     attachments: list[dict] = []  # image/file refs ({url|path|file_id, name, mime_type})
     orchestrate: bool = False  # fan the turn out to N task-delegated sub-agents (multi-agent)
+
+
+class VibecodeReviewRequest(BaseModel):
+    """Agent Review Conversation kickoff — everything defaults so `{}` works (the
+    frontend posts an empty body). model_name overrides the reviewer/coder model.
+    mode='thread' (default) converses in the session thread; mode='github' opens a
+    draft PR and the agents converse there as PR comments."""
+    model_name: str = ""
+    mode: str = "thread"
+    base: str = ""  # override the PR base branch (else the session's base_branch, else repo default)
+    reviewer_ids: list[str] = []  # custom sub-agent ids to use as reviewers (else the built-in reviewer)
 
 
 async def _vibecode_session_row(pool, session_id: str, user_id: int):
@@ -3410,6 +3511,148 @@ async def _vibecode_session_row(pool, session_id: str, user_id: int):
             "SELECT * FROM vibecode_sessions WHERE id = $1 AND user_id = $2",
             session_id, user_id,
         )
+
+
+def _parse_preflight_col(raw):
+    """vibecode_sessions.preflight (JSONB) → dict|None. asyncpg may hand it back as a
+    JSON string (no codec) or an already-decoded dict — handle both."""
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            v = json.loads(raw)
+            return v if isinstance(v, dict) else None
+        except Exception:
+            return None
+    return None
+
+
+async def _match_code_project(
+    pool, uid: int, repo_path: Optional[str],
+    github_owner: Optional[str] = None, github_repo: Optional[str] = None,
+):
+    """Match this session's repo against the user's code_projects registry.
+    GitHub-clone sessions match on owner/repo inside the normalized remote; local
+    paths match on directory basename == repo-name tail (best-effort — we only have
+    a path here, not a remote). Returns (project_id, repo_url) or (None, None)."""
+    if pool is None:
+        return None, None
+    try:
+        from .orchestration.preflight import normalize_remote
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id, repo_url FROM code_projects WHERE user_id = $1", uid
+            )
+        for r in rows:
+            norm = normalize_remote(r["repo_url"])  # host/owner/repo
+            if not norm:
+                continue
+            if github_owner and github_repo:
+                if norm.endswith(f"/{github_owner.lower()}/{github_repo.lower()}"):
+                    return r["id"], r["repo_url"]
+            elif repo_path:
+                name = os.path.basename(repo_path.rstrip("/")).lower()
+                if name and norm.rsplit("/", 1)[-1] == name:
+                    return r["id"], r["repo_url"]
+    except Exception as exc:
+        logger.warning("vibecode: code_projects match failed for user=%s: %s", uid, exc)
+    return None, None
+
+
+# ─── Build Space: code_projects registry CRUD ─────────────────────────────────
+# The per-user repo REGISTRY (see orchestration/__init__.py DDL): which repos a
+# coding session may target + branch rules. UPSERT keyed on (user_id, repo_url).
+
+def _code_project_to_dict(r) -> dict:
+    d = dict(r)
+    raw = d.get("allowed_base_branches")
+    if isinstance(raw, str):
+        try:
+            d["allowed_base_branches"] = json.loads(raw) or []
+        except Exception:
+            d["allowed_base_branches"] = []
+    elif raw is None:
+        d["allowed_base_branches"] = []
+    return d
+
+
+@workspace_router.post("/vibecode/projects")
+async def upsert_code_project(
+    req: CodeProjectUpsert,
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """Register (or update) a repo in the user's Build Space registry."""
+    pool = getattr(request.app.state, "pg_pool", None)
+    if pool is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    uid = current_user["id"]
+    repo_url = (req.repo_url or "").strip()
+    if not repo_url:
+        raise HTTPException(status_code=400, detail="repo_url is required")
+    project_id = str(uuid.uuid4())[:12]
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO code_projects
+                (id, user_id, name, repo_url, provider, default_base_branch,
+                 allowed_base_branches, branch_prefix)
+            VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
+            ON CONFLICT (user_id, repo_url) DO UPDATE SET
+                name                  = EXCLUDED.name,
+                provider              = EXCLUDED.provider,
+                default_base_branch   = EXCLUDED.default_base_branch,
+                allowed_base_branches = EXCLUDED.allowed_base_branches,
+                branch_prefix         = EXCLUDED.branch_prefix,
+                updated_at            = NOW()
+            RETURNING *
+            """,
+            project_id, uid, (req.name or "").strip() or None, repo_url,
+            (req.provider or "github").strip() or "github",
+            (req.default_base_branch or "main").strip() or "main",
+            json.dumps(req.allowed_base_branches or []),
+            (req.branch_prefix or "harvis/code/").strip() or "harvis/code/",
+        )
+    return {"project": _code_project_to_dict(row)}
+
+
+@workspace_router.get("/vibecode/projects")
+async def list_code_projects(
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """The user's registered Build Space repos (newest-touched first)."""
+    pool = getattr(request.app.state, "pg_pool", None)
+    if pool is None:
+        return {"projects": []}
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM code_projects WHERE user_id = $1 ORDER BY updated_at DESC",
+            current_user["id"],
+        )
+    return {"projects": [_code_project_to_dict(r) for r in rows]}
+
+
+@workspace_router.delete("/vibecode/projects/{project_id}")
+async def delete_code_project(
+    project_id: str,
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """Remove a repo from the user's registry (ownership-scoped hard delete)."""
+    pool = getattr(request.app.state, "pg_pool", None)
+    if pool is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    async with pool.acquire() as conn:
+        res = await conn.execute(
+            "DELETE FROM code_projects WHERE id = $1 AND user_id = $2",
+            project_id, current_user["id"],
+        )
+    if res == "DELETE 0":
+        raise HTTPException(status_code=404, detail="Project not found")
+    return {"deleted": project_id}
 
 
 @workspace_router.post("/vibecode/sessions")
@@ -3426,6 +3669,7 @@ async def create_vibecode_session(
         _run_git, create_or_attach_session_workspace, create_inplace_session_workspace,
         create_local_folder_session_workspace,
     )
+    from .orchestration.preflight import run_preflight
     pool = getattr(request.app.state, "pg_pool", None)
     uid = current_user["id"]
     if pool is None:
@@ -3552,19 +3796,63 @@ async def create_vibecode_session(
                 detail="Hermes Native needs an installed Hermes model — pull one (e.g. `ollama pull hermes3:3b`) first",
             )
         engine_val = "hermes-native"
+
+    # ── Build Space Phase 1: preflight + lifecycle ────────────────────────────
+    # Capture a persisted preflight report on the prepared working copy BEFORE any
+    # AI work. Fail-OPEN: a preflight crash must never break session creation.
+    # Local-folder sessions have NO repo until the browser seeds them → skip
+    # preflight and keep lifecycle='created' (needs_seed already signals the state).
+    work_branch = (info.get("branch_name") if isinstance(info, dict) else None) or base_branch or None
+    project_id, expected_remote = await _match_code_project(
+        pool, uid, repo_path, github_owner=github_owner, github_repo=github_repo,
+    )
+    pf = None
+    lifecycle = "created"
+    if not local_folder_name:
+        try:
+            pf = await run_preflight(
+                workspace_path or repo_path,
+                expected_remote=expected_remote,
+                base_branch=base_branch or None,
+                require_clean=(isolation_mode == "inplace"),
+            )
+        except Exception as exc:
+            logger.warning("vibecode: preflight failed (fail-open) for %s: %s", session_id, exc)
+            pf = None
+        # BLOCK only where it can't regress today's flows: a REGISTERED repo (the
+        # user opted into governance) or in-place (edits the real repo). Unregistered
+        # clone-mode repos just record the report.
+        if pf and pf.get("blockers") and (expected_remote is not None or isolation_mode == "inplace"):
+            if isolation_mode == "inplace":
+                # The session branch was already created on the real repo — roll it back
+                # (same teardown as the 23505 race path) before refusing.
+                from .orchestration.isolation import cleanup_inplace_session
+                safe = "".join(c for c in session_id if c.isalnum() or c in "-_")[:64] or "session"
+                try:
+                    await cleanup_inplace_session(repo_path, base_branch, f"vibecode/{safe}")
+                except Exception:
+                    pass
+            raise HTTPException(status_code=409, detail=pf["blockers"][0]["message"])
+        lifecycle = "blocked" if (pf and pf.get("blockers")) else "ready"
+    head_sha = (pf.get("head_sha") if pf else None) or base_sha
+
     try:
         async with pool.acquire() as conn:
             await conn.execute(
                 """
                 INSERT INTO vibecode_sessions
                     (id, user_id, title, repo_path, base_branch, workspace_path, base_sha,
-                     isolation_mode, permission_mode, local_folder_name, engine, source, status)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'vibecode', 'active')
+                     isolation_mode, permission_mode, local_folder_name, engine, source, status,
+                     project_id, work_branch, head_sha, lifecycle, preflight)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'vibecode', 'active',
+                        $12, $13, $14, $15, $16::jsonb)
                 """,
                 session_id, uid,
                 req.title or local_folder_name or (f"{github_owner}/{github_repo}" if github_repo else None),
                 repo_path, base_branch or None,
                 workspace_path, base_sha, isolation_mode, permission_mode, local_folder_name, engine_val,
+                project_id, work_branch, head_sha, lifecycle,
+                json.dumps(pf) if pf else None,
             )
     except Exception as exc:
         # Partial-unique-index (23505) → another in-place session raced us onto this repo.
@@ -3596,6 +3884,11 @@ async def create_vibecode_session(
         # Local-folder sessions must be seeded by the browser before the first turn.
         "needs_seed": bool(local_folder_name),
         "status": "active",
+        # Build Space Phase 1: session state machine + preflight report.
+        "work_branch": work_branch,
+        "head_sha": head_sha,
+        "lifecycle": lifecycle,
+        "preflight": pf,
     }
 
 
@@ -3611,7 +3904,8 @@ async def list_vibecode_sessions(
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT id, title, emoji, repo_path, status, created_at, updated_at
+            SELECT id, title, emoji, repo_path, status, lifecycle, created_at, updated_at,
+                   review_enabled, review_status
             FROM vibecode_sessions
             WHERE user_id = $1 AND status != 'deleted'
             ORDER BY updated_at DESC
@@ -3667,6 +3961,14 @@ async def get_vibecode_session(
             "local_folder_name": local_folder_name,
             # No base_sha yet ⇒ the browser still needs to seed this local-folder session.
             "needs_seed": bool(local_folder_name) and not s.get("base_sha"),
+            # Build Space Phase 1: session state machine + persisted preflight report.
+            "work_branch": s.get("work_branch"),
+            "head_sha": s.get("head_sha"),
+            "lifecycle": s.get("lifecycle") or "created",
+            "preflight": _parse_preflight_col(s.get("preflight")),
+            # Agent Review Conversation (opt-in): drives the PrDrawer gate + chips.
+            "review_enabled": bool(s.get("review_enabled")),
+            "review_status": s.get("review_status") or "off",
         },
         "turns": [_vibecode_turn_to_dict(t) for t in turns],
     }
@@ -3806,7 +4108,10 @@ async def start_vibecode_turn(
         await _db_set_run_attachments(pool, workspace_id, req.attachments or [])
         async with pool.acquire() as conn:
             await conn.execute(
-                "UPDATE vibecode_sessions SET updated_at = NOW() WHERE id = $1", session_id
+                # Build Space lifecycle: a turn is now executing. The bg-task finally
+                # block flips it back to 'ready' on any terminal status.
+                "UPDATE vibecode_sessions SET lifecycle = 'running', updated_at = NOW() WHERE id = $1",
+                session_id,
             )
     except Exception as exc:
         logger.error("vibecode: turn bookkeeping failed for %s: %s", workspace_id, exc)
@@ -3906,6 +4211,108 @@ async def start_vibecode_turn(
     return {"workspace_id": workspace_id, "session_id": session_id, "status": "running"}
 
 
+@workspace_router.post("/vibecode/session/{session_id}/review")
+async def start_vibecode_review(
+    session_id: str,
+    req: VibecodeReviewRequest,
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """OPT-IN Agent Review Conversation: turn review mode ON for this session and run
+    a coder ↔ reviewer dialogue over its ACCUMULATED diff as a background run (same
+    streaming as a turn — the caller streams /api/workspace/stream/{workspace_id}).
+    Sets review_enabled=TRUE + review_status='pending'; the loop lands on 'agreed'
+    (reviewer APPROVED) or 'needs_human' (round cap / error). Ownership-scoped.
+    Sessions that never call this stay review_enabled=FALSE → zero behavior change."""
+    pool = getattr(request.app.state, "pg_pool", None)
+    uid = current_user["id"]
+    sess = await _vibecode_session_row(pool, session_id, uid)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    s = dict(sess)
+    wp = s.get("workspace_path")
+    if not wp or not os.path.isdir(wp):
+        raise HTTPException(status_code=404, detail="The session workspace is no longer available.")
+    if req.mode == "github" and not s.get("repo_path"):
+        raise HTTPException(
+            status_code=400,
+            detail="Review-on-GitHub needs a GitHub-connected repo session — start one with a GitHub repo.",
+        )
+    if s.get("local_folder_name") and not s.get("base_sha"):
+        raise HTTPException(
+            status_code=409,
+            detail="This folder hasn't finished loading yet — try again in a moment.",
+        )
+
+    workspace_id = str(uuid.uuid4())[:8]
+    started_epoch = time.monotonic()
+    task_brief = "Agent review of this session's accumulated changes"
+    try:
+        await _db_create_run(pool, workspace_id, uid, session_id, task_brief)
+        await _db_set_run_source(pool, workspace_id, "vibecode")
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE vibecode_sessions SET review_enabled = TRUE, review_status = 'pending', "
+                "lifecycle = 'running', updated_at = NOW() WHERE id = $1",
+                session_id,
+            )
+    except Exception as exc:
+        logger.error("vibecode: review bookkeeping failed for %s: %s", workspace_id, exc)
+
+    await _start_workspace(
+        workspace_id=workspace_id,
+        session_id=session_id,
+        # The reviewer judges the diff AGAINST the session's original task — give it
+        # the most recent real turn brief when one exists.
+        task_brief=await _latest_vibecode_turn_brief(pool, session_id) or task_brief,
+        chat_history=[],
+        agent_id="vibecode-review",
+        user_id=uid,
+        pool=pool,
+        started_epoch=started_epoch,
+        model_name=req.model_name or "",
+        live_web=False,
+        parallel=False,
+        repo_path=s.get("repo_path"),
+        vibecode_session_id=session_id,
+        workspace_path=wp,
+        base_sha=s.get("base_sha"),
+        vibecode_isolation_mode=s.get("isolation_mode") or "session",
+        vibecode_permission_mode=s.get("permission_mode") or "ask",
+        vibecode_review_mode=req.mode if req.mode in ("thread", "github") else "thread",
+        vibecode_review_base=(req.base or s.get("base_branch") or ""),
+        vibecode_reviewer_ids=[r for r in (req.reviewer_ids or []) if r] or None,
+    )
+    logger.info("vibecode: review %s on session %s (user=%s, mode=%s, base=%s)",
+                workspace_id, session_id, uid, req.mode, req.base or s.get("base_branch") or "(default)")
+    return {
+        "workspace_id": workspace_id,
+        "session_id": session_id,
+        "status": "running",
+        "review_status": "pending",
+    }
+
+
+async def _latest_vibecode_turn_brief(pool, session_id: str) -> str:
+    """The most recent REAL turn's task_brief (skipping review runs' placeholder) —
+    the review prompt's 'what was the agent asked to do'. Best-effort."""
+    if pool is None:
+        return ""
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchval(
+                "SELECT task_brief FROM workspace_runs WHERE session_id = $1 "
+                "AND source = 'vibecode' AND task_brief IS NOT NULL "
+                "AND task_brief NOT LIKE 'Agent review of%' "
+                "ORDER BY started_at DESC LIMIT 1",
+                session_id,
+            )
+        return (row or "").strip()
+    except Exception as exc:
+        logger.warning("vibecode: latest-turn-brief lookup failed for %s: %s", session_id, exc)
+        return ""
+
+
 @workspace_router.delete("/vibecode/session/{session_id}")
 async def delete_vibecode_session(
     session_id: str,
@@ -3944,6 +4351,14 @@ async def delete_vibecode_session(
         for r in running:
             for aid in [a for a in list(_PENDING_ACTIONS) if a.startswith(f"{r['id']}-")]:
                 resolve_action(aid, False)
+        # Durable mirror: close out any surviving pending rows for this session so
+        # the DB fallback never resurfaces them after the session is gone.
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE workspace_pending_approvals SET resolved = TRUE, decision = 'denied' "
+                "WHERE session_id = $1 AND NOT resolved",
+                session_id,
+            )
     except Exception as exc:
         logger.warning("vibecode: delete %s pending-deny failed: %s", session_id, exc)
     # 3. Take the per-session lock (bounded) so cleanup can't run while a turn is mid-write
@@ -4292,10 +4707,19 @@ async def create_pr_for_run(
     )
 
 
-async def _resolve_run_action(request: Request, current_user: dict, run_id: str, action_id: str, approved: bool):
+async def _resolve_run_action(
+    request: Request, current_user: dict, run_id: str, action_id: str, approved: bool,
+    scope: str = "once",
+):
     """Resolve a gated in-place action (HUMAN-only — the acknowledge-popup). Ownership-
-    scoped; resumes the paused agent turn via the in-memory pending-actions registry."""
-    from .orchestration.risk import resolve_action
+    scoped; resumes the paused agent turn via the in-memory pending-actions registry,
+    with the durable workspace_pending_approvals row as the restart-survivable fallback.
+    scope='session' (approve only) additionally records the action's pattern so matching
+    commands auto-approve for the REST of the session (no re-prompt)."""
+    from .orchestration.risk import (
+        _PENDING_ACTIONS, add_session_approval, get_pending_row,
+        mark_pending_resolved, resolve_action,
+    )
     pool = getattr(request.app.state, "pg_pool", None)
     uid = current_user["id"]
     if pool is None:
@@ -4310,9 +4734,30 @@ async def _resolve_run_action(request: Request, current_user: dict, run_id: str,
     # action_id is namespaced by run_id (f"{run_id}-{step}-{seq}") — defense-in-depth.
     if not action_id.startswith(f"{run_id}-"):
         raise HTTPException(status_code=400, detail="action_id does not belong to this run")
-    if not resolve_action(action_id, approved):
-        raise HTTPException(status_code=404, detail="No pending action with that id (expired or already resolved)")
-    return {"ok": True, "approved": approved}
+    scope = scope if scope in ("once", "session") else "once"
+    # Grab the in-memory meta BEFORE resolving (await_action_decision pops the entry).
+    entry_exists = action_id in _PENDING_ACTIONS
+    meta = (_PENDING_ACTIONS.get(action_id) or {}).get("meta") or {}
+    db_row = None
+    if not entry_exists:
+        # Restart-survivable path: the awaiting coroutine is gone, but the durable row
+        # lets us still record the decision (and a 'session' scope, so a re-run of the
+        # same command auto-approves) instead of a silent 404.
+        db_row = await get_pending_row(pool, action_id)
+        if not db_row or db_row.get("resolved"):
+            raise HTTPException(status_code=404, detail="No pending action with that id (expired or already resolved)")
+    if approved and scope == "session":
+        sess_id = meta.get("session_id") or (db_row or {}).get("session_id")
+        tool = meta.get("tool") or (db_row or {}).get("tool")
+        args = meta.get("args") or (db_row or {}).get("args") or {}
+        if sess_id and tool:
+            await add_session_approval(pool, sess_id, tool, args)
+    decision = "approved-session" if (approved and scope == "session") else ("approved" if approved else "denied")
+    # Record the decision BEFORE waking the paused runner so a richer scope
+    # ('approved-session') isn't raced out by the runner's own 'approved' mark.
+    await mark_pending_resolved(pool, action_id, decision)
+    resumed = resolve_action(action_id, approved) if entry_exists else False
+    return {"ok": True, "approved": approved, "scope": scope, "resumed": resumed}
 
 
 @workspace_router.get("/run/{run_id}/pending-action")
@@ -4321,8 +4766,11 @@ async def get_pending_action(
     current_user: dict = Depends(get_current_user_optimized),
 ):
     """The gated action (if any) awaiting approval for this run — polled by the in-place
-    UI to raise the acknowledge-popup. Reload-safe (the pending entry lives until resolved)."""
-    from .orchestration.risk import get_pending_for_run
+    UI to raise the acknowledge-popup. Reload-safe (the pending entry lives until resolved),
+    and RESTART-safe: when the in-memory registry is empty, the durable
+    workspace_pending_approvals row is returned (tagged stale:true — the paused turn
+    itself did not survive the restart, but the request is not silently lost)."""
+    from .orchestration.risk import get_pending_for_run, get_pending_for_run_db
     pool = getattr(request.app.state, "pg_pool", None)
     uid = current_user["id"]
     if pool is None:
@@ -4334,16 +4782,21 @@ async def get_pending_action(
         )
     if not row:
         raise HTTPException(status_code=404, detail="Run not found")
-    return {"pending": get_pending_for_run(run_id)}
+    pending = get_pending_for_run(run_id)
+    if pending is None:
+        pending = await get_pending_for_run_db(pool, run_id)
+    return {"pending": pending}
 
 
 @workspace_router.post("/run/{run_id}/action/{action_id}/approve")
 async def approve_run_action(
     run_id: str, action_id: str, request: Request,
+    scope: str = "once",
     current_user: dict = Depends(get_current_user_optimized),
 ):
-    """Approve a gated in-place action → the paused agent turn resumes + dispatches it."""
-    return await _resolve_run_action(request, current_user, run_id, action_id, True)
+    """Approve a gated in-place action → the paused agent turn resumes + dispatches it.
+    ?scope=session additionally whitelists the action's pattern for the whole session."""
+    return await _resolve_run_action(request, current_user, run_id, action_id, True, scope=scope)
 
 
 @workspace_router.post("/run/{run_id}/action/{action_id}/deny")
@@ -4362,8 +4815,9 @@ async def get_vibecode_session_diff(
     current_user: dict = Depends(get_current_user_optimized),
 ):
     """The session's LIVE ACCUMULATED diff (working tree vs the fixed base_sha) — the
-    union of every turn's edits. `has_github` gates the Create-PR button (the source
-    needs a GitHub origin)."""
+    union of every turn's edits. `files` is the status-classified change list (M/A/D/R —
+    so DELETED files render even though the unified diff is their only trace). `has_github`
+    gates the Create-PR button (the source needs a GitHub origin)."""
     from .orchestration.isolation import (
         WorkspaceIsolationManager, SESSION_WORKSPACE_ROOT, _run_git,
     )
@@ -4375,12 +4829,17 @@ async def get_vibecode_session_diff(
     s = dict(sess)
     wp = s.get("workspace_path")
     if not wp or not os.path.isdir(os.path.join(wp, ".git")):
-        return {"diff": "", "has_github": False, "repo": None}
+        return {"diff": "", "files": [], "has_github": False, "repo": None}
     iso = WorkspaceIsolationManager(
         root=SESSION_WORKSPACE_ROOT, isolation_mode="session",
         repo_config={"base_sha": s.get("base_sha")},
     )
     diff = await iso.collect_diff(wp)
+    try:
+        files = await iso.collect_changed_files_status(wp)
+    except Exception as exc:
+        logger.warning("vibecode: changed-files status failed (%s): %s", session_id, exc)
+        files = []
     has_github = False
     rp = s.get("repo_path")
     if rp and os.path.isdir(os.path.join(rp, ".git")):
@@ -4392,15 +4851,121 @@ async def get_vibecode_session_diff(
             pass
     return {
         "diff": diff or "",
+        "files": files,
         "has_github": has_github,
         "repo": os.path.basename(rp.rstrip("/")) if rp else None,
     }
+
+
+# ── Read-only workspace browse (Build Space Phase 2) ──────────────────────────
+_BROWSE_MAX_ENTRIES = 5000
+_BROWSE_MAX_FILE_BYTES = 512 * 1024
+
+
+def _vibecode_browse_root(sess: dict) -> str | None:
+    """The session's on-disk workspace root (realpath) — or None if it's gone."""
+    wp = (sess or {}).get("workspace_path")
+    if not wp or not os.path.isdir(wp):
+        return None
+    return os.path.realpath(wp)
+
+
+@workspace_router.get("/vibecode/session/{session_id}/files")
+async def list_vibecode_session_files(
+    session_id: str,
+    request: Request,
+    subpath: str = "",
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """READ-ONLY tree of the session's workspace (ownership-scoped). `subpath` narrows
+    the walk to a sub-directory. `.git` is hidden; entries are capped (`truncated`
+    signals the cap). Paths are relative to the workspace root."""
+    from .orchestration.isolation import validate_agent_path
+    pool = getattr(request.app.state, "pg_pool", None)
+    uid = current_user["id"]
+    sess = await _vibecode_session_row(pool, session_id, uid)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    root = _vibecode_browse_root(dict(sess))
+    if not root:
+        return {"entries": [], "truncated": False}
+    rel = (subpath or "").strip().strip("/")
+    base = os.path.realpath(os.path.join(root, rel)) if rel else root
+    if not validate_agent_path(root, base):
+        raise HTTPException(status_code=400, detail="Path escapes the session workspace")
+    if not os.path.isdir(base):
+        raise HTTPException(status_code=404, detail="Not a directory in this workspace")
+    entries: list[dict] = []
+    truncated = False
+    for droot, dirs, files in os.walk(base):
+        dirs[:] = sorted(d for d in dirs if d != ".git")
+        for d in dirs:
+            entries.append({"path": os.path.relpath(os.path.join(droot, d), root), "type": "dir"})
+        for fn in sorted(files):
+            fp = os.path.join(droot, fn)
+            try:
+                size = os.path.getsize(fp)
+            except OSError:
+                size = 0
+            entries.append({"path": os.path.relpath(fp, root), "type": "file", "size": size})
+        if len(entries) >= _BROWSE_MAX_ENTRIES:
+            truncated = True
+            break
+    return {"entries": entries[:_BROWSE_MAX_ENTRIES], "truncated": truncated}
+
+
+@workspace_router.get("/vibecode/session/{session_id}/file")
+async def get_vibecode_session_file(
+    session_id: str,
+    request: Request,
+    path: str = "",
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """READ-ONLY content of ONE workspace file (ownership-scoped, realpath-contained).
+    Text capped at 512KB (`truncated`); binary files return content:'' + binary:true;
+    secret-named files (.env / keys) return content:'' + secret:true — same deny-list
+    as artifacts (browse must never exfiltrate credentials)."""
+    from .orchestration.isolation import validate_agent_path
+    pool = getattr(request.app.state, "pg_pool", None)
+    uid = current_user["id"]
+    sess = await _vibecode_session_row(pool, session_id, uid)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    root = _vibecode_browse_root(dict(sess))
+    if not root:
+        raise HTTPException(status_code=404, detail="The session workspace is no longer available.")
+    rel = (path or "").strip().strip("/")
+    if not rel:
+        raise HTTPException(status_code=400, detail="path is required")
+    if rel == ".git" or rel.startswith(".git/") or "/.git/" in rel:
+        raise HTTPException(status_code=400, detail="Path escapes the session workspace")
+    if not validate_agent_path(root, rel):
+        raise HTTPException(status_code=400, detail="Path escapes the session workspace")
+    fp = os.path.realpath(os.path.join(root, rel))
+    if not os.path.isfile(fp):
+        raise HTTPException(status_code=404, detail="File not found in this workspace")
+    size = os.path.getsize(fp)
+    if _artifact_is_secret(rel):
+        return {"path": rel, "content": "", "truncated": False, "binary": False,
+                "secret": True, "size": size}
+    with open(fp, "rb") as fh:
+        raw = fh.read(_BROWSE_MAX_FILE_BYTES + 1)
+    if b"\x00" in raw[:8192]:
+        return {"path": rel, "content": "", "truncated": False, "binary": True, "size": size}
+    truncated = len(raw) > _BROWSE_MAX_FILE_BYTES
+    content = raw[:_BROWSE_MAX_FILE_BYTES].decode("utf-8", errors="replace")
+    return {"path": rel, "content": content, "truncated": truncated, "binary": False, "size": size}
 
 
 class VibecodeCreatePrRequest(BaseModel):
     branch: Optional[str] = None
     title: Optional[str] = None
     body: Optional[str] = None
+    base: Optional[str] = None  # PR target/base branch (drawer selector); falls back to the session's base_branch
+    # Explicit HUMAN bypass of the agent-review gate: a review_enabled session whose
+    # review_status isn't 'agreed' refuses Create-PR unless this is true. The human
+    # override is always allowed; review_enabled=FALSE sessions ignore it entirely.
+    override: bool = False
 
 
 @workspace_router.post("/vibecode/session/{session_id}/create-pr")
@@ -4422,6 +4987,20 @@ async def create_pr_for_vibecode_session(
     if not sess:
         raise HTTPException(status_code=404, detail="Session not found")
     s = dict(sess)
+    # ── Agent-review PR gate (opt-in) ── review_enabled sessions wait for the
+    # agents' agreement before a PR can open; the HUMAN override always wins.
+    # review_enabled=FALSE (the default) ⇒ this block is a no-op — zero change.
+    _review_status = (s.get("review_status") or "off").strip().lower()
+    if s.get("review_enabled") and _review_status not in ("agreed", "off") and not req.override:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"The agents haven't agreed on this change yet (review status: "
+                f"{_review_status}). Run a review — `/harvis-code review` on Discord or "
+                "the Run agent review button in the PR drawer — until the reviewer "
+                "approves, or pass override=true to open the PR anyway (your call)."
+            ),
+        )
     repo_path = s.get("repo_path")
     wp = s.get("workspace_path")
     if not repo_path:
@@ -4434,11 +5013,99 @@ async def create_pr_for_vibecode_session(
     )
     diff_text = await iso.collect_diff(wp)
     head = (req.branch or f"harvis/vibecode/{session_id}").strip()
-    return await _open_pr_from_diff(
+    result = await _open_pr_from_diff(
         pool, uid, repo_path, diff_text, head, req.title, req.body,
         source_label=f"VibeCode session `{session_id}`",
-        base_branch=s.get("base_branch"),
+        base_branch=(req.base or s.get("base_branch")),
     )
+    # Phase 4: persist the PR record. UPSERT by (session_id, head_branch) — a
+    # re-create for the same session+branch UPDATES the existing row (url/number/
+    # status) instead of duplicating. FAIL-OPEN: the PR already exists on GitHub;
+    # a bookkeeping failure must never turn that success into an error.
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO code_pull_requests
+                    (id, session_id, provider, pr_url, pr_number, base_branch, head_branch, title, status)
+                VALUES ($1, $2, 'github', $3, $4, $5, $6, $7, 'open')
+                ON CONFLICT (session_id, head_branch) DO UPDATE SET
+                    pr_url      = EXCLUDED.pr_url,
+                    pr_number   = EXCLUDED.pr_number,
+                    base_branch = EXCLUDED.base_branch,
+                    title       = EXCLUDED.title,
+                    status      = 'open',
+                    updated_at  = NOW()
+                """,
+                uuid.uuid4().hex, session_id,
+                result.get("pr_url"), result.get("pr_number"),
+                result.get("base"), result.get("branch"),
+                (req.title or f"Harvis: VibeCode session `{session_id}`").strip(),
+            )
+    except Exception as exc:
+        logger.warning("code_pull_requests upsert failed (fail-open): %s", exc)
+    return result
+
+
+@workspace_router.get("/vibecode/session/{session_id}/changes")
+async def list_vibecode_session_changes(
+    session_id: str,
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """Per-file audit trail of the session's TRACKED AI edits (code_file_changes
+    rows written by the apply_patch tool). Ownership-scoped; newest first."""
+    pool = getattr(request.app.state, "pg_pool", None)
+    uid = current_user["id"]
+    if pool is None:
+        raise HTTPException(status_code=500, detail="Database not available")
+    sess = await _vibecode_session_row(pool, session_id, uid)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, session_id, run_id, file_path, change_type, patch_id, "
+            "before_sha, after_sha, created_at FROM code_file_changes "
+            "WHERE session_id = $1 ORDER BY created_at DESC LIMIT 500",
+            session_id,
+        )
+    return {"changes": [
+        {**dict(r), "created_at": r["created_at"].isoformat() if r["created_at"] else None}
+        for r in rows
+    ]}
+
+
+@workspace_router.get("/vibecode/session/{session_id}/pull-requests")
+async def list_vibecode_session_pull_requests(
+    session_id: str,
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """The session's persisted PR records (code_pull_requests). Ownership-scoped;
+    most recently updated first."""
+    pool = getattr(request.app.state, "pg_pool", None)
+    uid = current_user["id"]
+    if pool is None:
+        raise HTTPException(status_code=500, detail="Database not available")
+    sess = await _vibecode_session_row(pool, session_id, uid)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, session_id, provider, pr_url, pr_number, base_branch, "
+            "head_branch, title, status, created_at, updated_at "
+            "FROM code_pull_requests WHERE session_id = $1 "
+            "ORDER BY updated_at DESC LIMIT 100",
+            session_id,
+        )
+    return {"pull_requests": [
+        {
+            **dict(r),
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
+        }
+        for r in rows
+    ]}
 
 
 @workspace_router.get("/history")
@@ -4707,6 +5374,158 @@ async def get_active_workspace(
     except Exception as exc:
         logger.error("DB: failed to fetch active workspace: %s", exc)
         return {"active": None}
+
+
+@workspace_router.get("/active-discord")
+async def get_active_discord_session(
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """Is a Discord-launched (#harvis-code) session actively running for this user?
+
+    A session gets ``discord_channel_id`` set when it's started via ``/harvis-code start``
+    (the run's own ``session_id`` is a normal vibecode id, so the ``discord-`` prefix
+    heuristic in ``/active`` can't detect it). Powers the Build header's
+    "Discord session online" chip → click jumps the user into the live session so the
+    web UI mirrors what's happening in Discord.
+    """
+    pool = getattr(request.app.state, "pg_pool", None)
+    if pool is None:
+        return {"active": None}
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT r.id AS run_id, r.session_id, r.task_brief, r.started_at,
+                       s.title, s.discord_channel_id
+                FROM workspace_runs r
+                JOIN vibecode_sessions s ON s.id = r.session_id
+                WHERE r.user_id = $1
+                  AND r.status = 'running'
+                  AND s.discord_channel_id IS NOT NULL
+                ORDER BY r.started_at DESC
+                LIMIT 1
+                """,
+                current_user["id"],
+            )
+        if not row:
+            return {"active": None}
+        d = dict(row)
+        d["started_at"] = d["started_at"].isoformat() if d.get("started_at") else None
+        return {"active": d}
+    except Exception as exc:
+        logger.error("DB: failed to fetch active discord session: %s", exc)
+        return {"active": None}
+
+
+@workspace_router.get("/active-review")
+async def get_active_review(
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """The user's currently-running agent review (coder↔reviewer), if any. Powers the main-Chat
+    "Agent review live" chip + the review side panel that MIRRORS the review conversation into
+    the Chat app. Identified by the session's `review_status='pending'` + a running run.
+    """
+    pool = getattr(request.app.state, "pg_pool", None)
+    if pool is None:
+        return {"active": None}
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT r.id AS run_id, r.session_id, r.task_brief, r.started_at,
+                       s.title, s.review_status
+                FROM workspace_runs r
+                JOIN vibecode_sessions s ON s.id = r.session_id
+                WHERE r.user_id = $1
+                  AND r.status = 'running'
+                  AND s.review_status = 'pending'
+                ORDER BY r.started_at DESC
+                LIMIT 1
+                """,
+                current_user["id"],
+            )
+        if not row:
+            return {"active": None}
+        d = dict(row)
+        d["started_at"] = d["started_at"].isoformat() if d.get("started_at") else None
+        return {"active": d}
+    except Exception as exc:
+        logger.error("DB: failed to fetch active review: %s", exc)
+        return {"active": None}
+
+
+# ── Shared workspace model (Discord ↔ Build sync) ────────────────────────────
+# The per-user openclaw_llm_config row (UNIQUE(user_id)) is the single lever both
+# Discord's /set-model and the Build model picker write. Last-write-wins by
+# updated_at: whichever surface changed the model most recently takes over. These
+# endpoints let the Build UI READ the shared model (reflect a Discord change) and
+# WRITE it (so a Build pick shows up in Discord) — the reverse was already wired.
+
+class WorkspaceModelRequest(BaseModel):
+    model_id: str = ""
+
+
+@workspace_router.get("/workspace-model")
+async def get_workspace_model(
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """Return the current shared model + its updated_at epoch (0 if unset)."""
+    pool = getattr(request.app.state, "pg_pool", None)
+    if pool is None:
+        return {"model_id": "", "updated_at": 0}
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT model_id, EXTRACT(EPOCH FROM updated_at) AS epoch "
+                "FROM openclaw_llm_config WHERE user_id = $1 "
+                "ORDER BY updated_at DESC LIMIT 1",
+                current_user["id"],
+            )
+        if not row:
+            return {"model_id": "", "updated_at": 0}
+        return {"model_id": row["model_id"] or "", "updated_at": float(row["epoch"] or 0)}
+    except Exception as exc:
+        logger.error("DB: failed to read shared workspace model: %s", exc)
+        return {"model_id": "", "updated_at": 0}
+
+
+@workspace_router.post("/workspace-model")
+async def set_workspace_model_endpoint(
+    req: WorkspaceModelRequest,
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """Point the shared model at the Build picker's selection — the SAME per-user
+    openclaw_llm_config row Discord /set-model writes (bumps updated_at=NOW() so it
+    wins). ON CONFLICT only touches model_id + updated_at, preserving provider_url /
+    provider_type / engine on an existing row. Returns the new updated_at epoch so the
+    caller can avoid re-adopting its own write on the next poll.
+    """
+    pool = getattr(request.app.state, "pg_pool", None)
+    m = (req.model_id or "").strip()
+    if pool is None or not m:
+        return {"ok": False, "updated_at": 0}
+    ollama_url = os.getenv("OLLAMA_URL", "http://ollama:11434")
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO openclaw_llm_config (user_id, provider_url, model_id, provider_type, is_active)
+                VALUES ($1, $2, $3, 'ollama', TRUE)
+                ON CONFLICT (user_id) DO UPDATE SET
+                    model_id = EXCLUDED.model_id,
+                    updated_at = NOW()
+                RETURNING EXTRACT(EPOCH FROM updated_at) AS epoch
+                """,
+                current_user["id"], ollama_url, m,
+            )
+        return {"ok": True, "model_id": m, "updated_at": float(row["epoch"] or 0) if row else 0}
+    except Exception as exc:
+        logger.error("DB: failed to set shared workspace model: %s", exc)
+        return {"ok": False, "updated_at": 0}
 
 
 # ── BYO OpenClaw config endpoints ────────────────────────────────────────────

@@ -36,7 +36,7 @@ from owui_compat.workspace_method import (
     tool_can_execute,
 )
 
-from .risk import gate_decision
+from .risk import gate_decision_ex, is_session_approved
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +96,8 @@ async def authorize_action(
     permission_mode: str | None,
     run_id: str,
     emit,
+    session_id: str | None = None,
+    pool=None,
 ) -> AuthzResult:
     """The choke point: lane gate first, then the friction gate. Emits exactly
     one 'decision' payload {tool, lane, tier, policy, reason, source} per call."""
@@ -120,7 +122,7 @@ async def authorize_action(
     # Only when permission_mode is set — clone-mode + the orchestrator pass
     # None and have never been risk-gated; that behavior is preserved.
     if permission_mode:
-        decision, tier = gate_decision(tool_name, args, permission_mode)
+        decision, tier, risk_reason = gate_decision_ex(tool_name, args, permission_mode)
         if decision == "block":
             reason = f"blocked by permission mode '{permission_mode}' (risk: {tier})"
             await _emit_decision(emit, {
@@ -129,11 +131,21 @@ async def authorize_action(
             })
             return AuthzResult(allowed=False, reason=reason, tier=tier, needs_approval=False)
         if decision == "gate":
+            # Approve-for-session FIRST: an action the user already approved for the
+            # whole session auto-allows without re-prompting (Build Space Phase 2).
+            if session_id and await is_session_approved(pool, session_id, tool_name, args):
+                await _emit_decision(emit, {
+                    "tool": tool_name, "lane": lane, "tier": tier,
+                    "policy": "allow", "reason": "pre-approved for this session",
+                    "source": "session_approval",
+                })
+                return AuthzResult(allowed=True, reason="pre-approved for this session",
+                                   tier=tier, needs_approval=False)
             await _emit_decision(emit, {
                 "tool": tool_name, "lane": lane, "tier": tier,
-                "policy": "gate", "reason": "requires human approval", "source": "risk_gate",
+                "policy": "gate", "reason": risk_reason, "source": "risk_gate",
             })
-            return AuthzResult(allowed=True, reason="requires human approval", tier=tier, needs_approval=True)
+            return AuthzResult(allowed=True, reason=risk_reason, tier=tier, needs_approval=True)
         await _emit_decision(emit, {
             "tool": tool_name, "lane": lane, "tier": tier,
             "policy": "allow", "reason": "", "source": "risk_gate",

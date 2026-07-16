@@ -134,6 +134,44 @@ def _openclaw_repo_path(owner: str, repo: str) -> str:
     return f"{OPENCLAW_PROJECTS_PATH}/{owner}/{repo}"
 
 
+async def _resolve_pr_base(pool, user_id: int, owner: str, repo: str, gh_token: str) -> str:
+    """Unified PR base-branch policy: (1) the user's code_projects registry row for
+    this repo (default_base_branch) when one exists, else (2) the repo's ACTUAL
+    default branch from GitHub, else (3) 'main'. Never raises — every step falls
+    through on failure."""
+    try:
+        from .orchestration.preflight import normalize_remote
+
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT repo_url, default_base_branch FROM code_projects WHERE user_id = $1",
+                user_id,
+            )
+        tail = f"/{owner.lower()}/{repo.lower()}"
+        for r in rows:
+            norm = normalize_remote(r["repo_url"]) or ""
+            if norm.endswith(tail) and (r["default_base_branch"] or "").strip():
+                return r["default_base_branch"].strip()
+    except Exception as exc:
+        logger.debug("code_projects base lookup failed for %s/%s: %s", owner, repo, exc)
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                f"https://api.github.com/repos/{owner}/{repo}",
+                headers={
+                    "Authorization": f"Bearer {gh_token}",
+                    "Accept": "application/vnd.github.v3+json",
+                },
+            )
+        if resp.status_code == 200:
+            default_branch = (resp.json().get("default_branch") or "").strip()
+            if default_branch:
+                return default_branch
+    except Exception as exc:
+        logger.debug("GitHub default-branch lookup failed for %s/%s: %s", owner, repo, exc)
+    return "main"
+
+
 async def _run_git(cmd: list[str], cwd: str, env: Optional[dict] = None) -> tuple[int, str, str]:
     """Run a git command async and return (returncode, stdout, stderr)."""
     full_env = os.environ.copy()
@@ -345,6 +383,10 @@ async def push_changes(req: PushChangesRequest, request: Request, user=Depends(g
 
     # Optionally create a PR
     if req.create_pr:
+        # Base branch resolved (not hardcoded): code_projects.default_base_branch
+        # when the repo is registered → the repo's real default branch → 'main'.
+        # The head guard above already refuses main/master as the PR head.
+        pr_base = await _resolve_pr_base(pool, uid, req.owner, req.repo, gh_token)
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 resp = await client.post(
@@ -357,7 +399,7 @@ async def push_changes(req: PushChangesRequest, request: Request, user=Depends(g
                         "title": req.pr_title or req.commit_message,
                         "body": req.pr_body or f"Changes made by Harvis AI workspace.",
                         "head": req.branch,
-                        "base": "main",
+                        "base": pr_base,
                     },
                 )
             if resp.status_code in (200, 201):
@@ -444,6 +486,60 @@ async def list_user_github_repos(request: Request, user=Depends(get_current_user
         page += 1
 
     return {"repos": [r.model_dump() for r in repos]}
+
+
+@repo_manager_router.get("/repo-branches")
+async def list_repo_branches(
+    owner: str, repo: str, request: Request, user=Depends(get_current_user_optimized)
+):
+    """List branches for a GitHub repo so the repo-attach UI can let the user PICK the branch
+    (worktree) to work in instead of always using the default. Uses the user's GitHub token when
+    present (needed for private repos); falls back to unauthenticated for public repos. Returns
+    {default_branch, branches:[...]} with the default branch first. Fail-soft → empty on any error."""
+    pool = getattr(request.app.state, "pg_pool", None)
+    owner = (owner or "").strip()
+    repo = (repo or "").strip().removesuffix(".git")
+    if not owner or not repo:
+        return {"default_branch": "", "branches": []}
+    gh_token = ""
+    try:
+        if pool:
+            gh_token = await _get_github_token(pool, _user_id(user))
+    except Exception:
+        gh_token = ""
+    headers = {"Accept": "application/vnd.github.v3+json"}
+    if gh_token:
+        headers["Authorization"] = f"Bearer {gh_token}"
+    default_branch = ""
+    branches: list[str] = []
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r0 = await client.get(f"https://api.github.com/repos/{owner}/{repo}", headers=headers)
+            if r0.status_code == 200:
+                default_branch = (r0.json().get("default_branch") or "").strip()
+            for page in (1, 2):  # up to 200 branches
+                rb = await client.get(
+                    f"https://api.github.com/repos/{owner}/{repo}/branches?per_page=100&page={page}",
+                    headers=headers,
+                )
+                if rb.status_code != 200:
+                    break
+                batch = rb.json()
+                if not isinstance(batch, list) or not batch:
+                    break
+                branches.extend((b.get("name") or "").strip() for b in batch if b.get("name"))
+                if len(batch) < 100:
+                    break
+    except Exception as exc:
+        logger.debug("repo-branches lookup failed for %s/%s: %s", owner, repo, exc)
+    # Default branch first, then the rest, de-duplicated with order preserved.
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for name in ([default_branch] if default_branch else []) + branches:
+        if name and name not in seen:
+            seen.add(name)
+            ordered.append(name)
+    return {"default_branch": default_branch, "branches": ordered}
 
 
 @repo_manager_router.delete("/repos/{repo_id}")

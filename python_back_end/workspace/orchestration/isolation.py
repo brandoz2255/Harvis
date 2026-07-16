@@ -289,6 +289,57 @@ class WorkspaceIsolationManager:
         changed |= {rel for rel in baseline if rel not in current}  # deletions
         return sorted(changed)
 
+    async def collect_changed_files_status(self, workspace_path: str) -> list[dict]:
+        """STATUS-CLASSIFIED changed files: [{path, status, old_path?, untracked?}]
+        with status ∈ 'M' (modified) | 'A' (added) | 'D' (deleted) | 'R' (renamed).
+
+        Additive companion to ``collect_changed_files`` (same change set) so the
+        frontend can render DELETED files (which have no content to preview) and
+        distinguish brand-new ('??' before staging) files. Untracked files are
+        captured from ``git status --porcelain`` BEFORE the ``add -A`` stages them."""
+        if self.isolation_mode not in ("attached", "session", "inplace"):
+            baseline = self._baseline(workspace_path)
+            current = _snapshot(workspace_path)
+            out: list[dict] = []
+            for rel in sorted(set(baseline) | set(current)):
+                if rel not in current:
+                    out.append({"path": rel, "status": "D"})
+                elif rel not in baseline:
+                    out.append({"path": rel, "status": "A", "untracked": True})
+                elif baseline.get(rel) != current.get(rel):
+                    out.append({"path": rel, "status": "M"})
+            return out
+        # Untracked ('??') set from porcelain BEFORE staging — after `add -A` they
+        # are indistinguishable from any other 'A' in the baseline diff.
+        untracked: set[str] = set()
+        _rc, porc, _e = await _run_git(["git", "status", "--porcelain"], cwd=workspace_path)
+        for ln in porc.splitlines():
+            if ln.startswith("??"):
+                untracked.add(ln[2:].strip().strip('"'))
+        await _run_git(["git", "add", "-A"], cwd=workspace_path)
+        if self.isolation_mode in ("session", "inplace"):
+            base = (self.repo_config or {}).get("base_sha") or "HEAD"
+            _rc, out_ns, _e = await _run_git(["git", "diff", base, "--name-status"], cwd=workspace_path)
+        else:
+            _rc, out_ns, _e = await _run_git(["git", "diff", "--cached", "--name-status"], cwd=workspace_path)
+        files: list[dict] = []
+        for ln in out_ns.splitlines():
+            parts = ln.split("\t")
+            if len(parts) < 2 or not parts[0].strip():
+                continue
+            code = parts[0].strip()[0].upper()  # 'R100' → 'R', 'C75' → 'C'
+            if code in ("R", "C") and len(parts) >= 3:
+                entry = {"path": parts[2].strip(), "status": "R" if code == "R" else "A",
+                         "old_path": parts[1].strip()}
+            else:
+                status = code if code in ("M", "A", "D") else "M"
+                entry = {"path": parts[1].strip(), "status": status}
+            if entry["path"] in untracked:
+                entry["status"] = "A"
+                entry["untracked"] = True
+            files.append(entry)
+        return files
+
     async def collect_file_contents(self, workspace_path: str) -> dict[str, str]:
         """Current content of every CHANGED file, for live artifact previews/downloads.
 

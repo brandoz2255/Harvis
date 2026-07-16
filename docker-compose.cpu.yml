@@ -1,0 +1,45 @@
+# CPU-only override — no GPU required. Runs the whole stack on any machine.
+#
+#   ./install.sh --backend cpu          # writes COMPOSE_FILE into .env for you
+#   # or manually:
+#   docker compose -f docker-compose.yaml -f docker-compose.cpu.yml up -d
+#
+# Neutralizes all four GPU-touching services from the NVIDIA base:
+#   ollama / llmfit / backend  → runtime: runc (drop the nvidia runtime)
+#   ollama / llmfit / tts-service → `devices: !reset []` clears the base's
+#   `driver: nvidia` reservation. NOTE: a plain `devices: []` does NOT work —
+#   compose keeps the base list; the `!reset` YAML tag (Compose ≥ 2.24) is required.
+#
+# Honest expectations on CPU:
+#   - Ollama inference runs but is MUCH slower; prefer small models.
+#   - Voice (TTS/Whisper) falls back to CPU (torch.cuda guards audited) — slow.
+#   - llmfit's NVIDIA_* env vars are inert without the nvidia runtime (left as-is).
+#   - Apple Silicon: Docker can't reach the Mac GPU. For Metal speed, run Ollama
+#     NATIVELY on the Mac and set OLLAMA_URL=http://host.docker.internal:11434.
+services:
+  ollama:
+    runtime: runc
+    deploy:
+      resources:
+        reservations:
+          devices: !reset []
+
+  llmfit:
+    runtime: runc
+    deploy:
+      resources:
+        reservations:
+          devices: !reset []
+
+  # Only blocker was the compose-level nvidia runtime; the image itself is
+  # CPU-bootable (all torch device picks are cuda-guarded, model loads are lazy).
+  backend:
+    runtime: runc
+
+  tts-service:
+    environment:
+      TTS_FORCE_GPU: "false"
+    deploy:
+      resources:
+        reservations:
+          devices: !reset []

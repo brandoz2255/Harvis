@@ -1,10 +1,7 @@
 <script lang="ts">
 	import { getContext, onDestroy, createEventDispatcher } from 'svelte';
-	import {
-		createWorkspaceStream,
-		WORKSPACE_TERMINAL,
-		type WorkspaceEvent
-	} from '$lib/apis/streaming/workspace-stream';
+	import { type WorkspaceEvent } from '$lib/apis/streaming/workspace-stream';
+	import { subscribeRun } from '$lib/apis/streaming/runStream';
 	import { getRunTree, type RunNode } from '$lib/apis/agent-runs';
 	import { statusDot } from './runFormat';
 	import AgentSession from './AgentSession.svelte';
@@ -26,7 +23,8 @@
 	let run: RunNode | null = null;
 	let children: RunNode[] = [];
 	let activeTab = initialTab;
-	let controller: AbortController | null = null;
+	let _sub: ReturnType<typeof subscribeRun> | null = null;
+	let _unsubStore: (() => void) | null = null;
 	let treeTimer: any = null;
 	let activeId = '';
 
@@ -50,38 +48,10 @@
 		(c.task ? c.task.slice(0, 24) : 'Agent');
 	const childFor = (id: string): RunNode | null => children.find((c) => c.id === id) || null;
 
-	// ── shared stream (lifted from RunView.consume: resume-on-drop, replay-rebuilds) ──
-	const consume = async (id: string) => {
-		controller = new AbortController();
-		let failed = 0;
-		while (activeId === id && !['done', 'error', 'cancelled'].includes(phase)) {
-			let cleanEnd = false;
-			let gotAny = false;
-			try {
-				for await (const evt of createWorkspaceStream(id, localStorage.token, controller.signal)) {
-					if (evt.type === 'stream_end') {
-						cleanEnd = true;
-						break;
-					}
-					gotAny = true;
-					events = [...events, evt];
-					if (evt.type === 'done') phase = 'done';
-					else if (evt.type === 'error') phase = 'error';
-					else if (evt.type === 'cancelled') phase = 'cancelled';
-					else if (phase === 'connecting') phase = 'running';
-					if (WORKSPACE_TERMINAL.has(evt.type)) break;
-				}
-			} catch (e: any) {
-				if (e?.name === 'AbortError') return;
-			}
-			if (cleanEnd || ['done', 'error', 'cancelled'].includes(phase) || activeId !== id) break;
-			failed = gotAny ? 0 : failed + 1;
-			if (failed > 20) break;
-			events = []; // reconnect → replay rebuilds, so clear to avoid dupes
-			phase = 'connecting';
-			await new Promise((r) => setTimeout(r, 1500));
-		}
-	};
+	// The event stream comes from the SHARED, throttled per-run store (subscribeRun) — one
+	// connection + one batched pipeline shared with every other view of this run. This is what
+	// makes opening the inspector on a LIVE run safe: it adds no extra connection and re-renders
+	// at the store's bounded cadence instead of pegging the main thread per streamed event.
 
 	// ── agent tree (lifted from RunTable: poll every 3s while running) ──
 	const loadTree = async () => {
@@ -90,9 +60,17 @@
 		run = t.run;
 		children = t.children || [];
 	};
+	let destroyed = false;
 	const scheduleTree = () => {
 		clearTimeout(treeTimer);
-		if (running && wsId) treeTimer = setTimeout(async () => { await loadTree(); scheduleTree(); }, 3000);
+		// `!destroyed` guard: onDestroy's clearTimeout only cancels a PENDING timer, not an
+		// in-flight loadTree callback — without this, closing the inspector mid-fetch lets the
+		// resumed callback re-schedule a 3s poll forever on the dead instance.
+		if (!destroyed && running && wsId)
+			treeTimer = setTimeout(async () => {
+				await loadTree();
+				scheduleTree();
+			}, 3000);
 	};
 	// one final refresh when the run finishes (final tokens / summary / diffs)
 	let lastRunning = false;
@@ -102,7 +80,10 @@
 	}
 
 	const start = (id: string) => {
-		controller?.abort();
+		_unsubStore?.();
+		_unsubStore = null;
+		_sub?.unsubscribe();
+		_sub = null;
 		clearTimeout(treeTimer);
 		events = [];
 		phase = 'connecting';
@@ -112,12 +93,18 @@
 		activeId = id;
 		if (id) {
 			loadTree().then(scheduleTree);
-			consume(id);
+			_sub = subscribeRun(id);
+			_unsubStore = _sub.store.subscribe((s) => {
+				events = s.events;
+				phase = s.phase;
+			});
 		}
 	};
 	$: if (wsId !== activeId) start(wsId);
 	onDestroy(() => {
-		controller?.abort();
+		destroyed = true;
+		_unsubStore?.();
+		_sub?.unsubscribe();
 		clearTimeout(treeTimer);
 	});
 </script>

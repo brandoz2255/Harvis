@@ -133,21 +133,40 @@ async def resolve_external_target(pool, user_id) -> Optional[dict]:
 
 
 async def _probe(url: str, token: Optional[str]) -> dict:
-    """Health-probe an external Hermes Agent API server. Tries /health then /v1/models."""
+    """Probe an external Hermes Agent API server, VALIDATING the key.
+
+    Hits the AUTHENTICATED endpoint (/v1/models) first so a missing/wrong token is actually
+    caught — /health is usually public and would green-light a keyless connection that then
+    401s on the first real chat. /health is only a reachability fallback if /v1/models can't
+    be reached at the transport level (never to override an auth rejection)."""
     base = url.rstrip("/")
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     try:
         async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
-            for path in ("/health", "/v1/models"):
-                try:
-                    r = await client.get(f"{base}{path}", headers=headers)
-                    if r.status_code < 400:
+            models_reached = False
+            try:
+                r = await client.get(f"{base}/v1/models", headers=headers)
+                models_reached = True
+                if r.status_code in (401, 403):
+                    return {"ok": False, "error": "Authentication failed — check the API key."}
+                if r.status_code < 400:
+                    return {"ok": True}
+            except httpx.RequestError:
+                pass
+            # /v1/models unreachable (not an auth failure) → fall back to /health for liveness.
+            try:
+                r = await client.get(f"{base}/health", headers=headers)
+                if r.status_code in (401, 403):
+                    return {"ok": False, "error": "Authentication failed — check the API key."}
+                if r.status_code < 400:
+                    # Reachable, but we couldn't validate the key against /v1/models. Only treat
+                    # this as OK when no token was expected; otherwise the key is unproven.
+                    if not token:
                         return {"ok": True}
-                    if r.status_code in (401, 403):
-                        return {"ok": False, "error": "Authentication failed — check the token."}
-                except httpx.RequestError:
-                    continue
-        return {"ok": False, "error": "Could not reach the Hermes Agent API at that URL."}
+                    return {"ok": False, "error": "Reachable, but the API key could not be validated."}
+            except httpx.RequestError:
+                pass
+            return {"ok": False, "error": "Could not reach the Hermes Agent API at that URL."}
     except Exception as e:
         return {"ok": False, "error": f"Probe failed: {type(e).__name__}"}
 

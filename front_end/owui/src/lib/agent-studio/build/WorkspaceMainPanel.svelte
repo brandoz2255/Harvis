@@ -7,8 +7,15 @@
 	// The dominant center workspace. Pure props — no fetch, no stores.
 	export let tab: 'chat' | 'diff' | 'logs' | 'editor' | 'preview' = 'chat';
 	export let selectedFile = '';
-	// Unified-diff hunk lines for the selected file (DIFF + EDITOR share these).
+	// Unified-diff hunk lines for the selected file (DIFF view; EDITOR falls back to
+	// these only when no real content was supplied).
 	export let diffLines: string[] = [];
+	// Real read-only file content for the EDITOR tab (Phase 2 workspace browsing).
+	// null = not fetched (fall back to diff hunks); '' is a legit empty file.
+	export let fileContent: string | null = null;
+	export let fileLoading = false;
+	export let fileBinary = false;
+	export let fileTruncated = false;
 	export let hasRepo = false;
 	export let hasConversation = false;
 	// Bottom-right quadrant context: the project name (for the "Ready to build in X"
@@ -40,6 +47,9 @@
 		tab = id;
 		dispatch('tab', { tab: id });
 	};
+
+	// Editor: split fetched content into numbered lines (read-only viewer).
+	$: contentLines = fileContent !== null && !fileBinary ? fileContent.split('\n') : [];
 
 	// Per-line diff coloring shared by DIFF + EDITOR views.
 	const lineClass = (line: string): string => {
@@ -159,17 +169,59 @@
 			{#if selectedFile}
 				<div class="flex flex-col min-h-0 h-full">
 					<div
-						class="shrink-0 px-3 py-1.5 border-b border-white/8 bg-[#0c111d]"
+						class="shrink-0 flex items-center gap-2 px-3 py-1.5 border-b border-white/8 bg-[#0c111d]"
 					>
-						<span class="font-mono text-[11px] text-gray-400 truncate block">{selectedFile}</span>
+						<span class="font-mono text-[11px] text-gray-400 truncate block min-w-0">{selectedFile}</span>
+						<span
+							class="ml-auto shrink-0 text-[10px] uppercase tracking-wide text-gray-600 border border-white/8 rounded px-1.5 py-0.5"
+							>{$i18n.t('Read-only')}</span
+						>
 					</div>
-					<div class="flex-1 min-h-0 overflow-auto px-3 py-2 font-mono">
-						{#each diffLines as line, i (i)}
-							<div class="whitespace-pre text-[11px] leading-[1.45] {lineClass(line)}">
-								{line || ' '}
+					{#if fileLoading}
+						<div class="flex-1 flex items-center justify-center text-xs text-gray-500">
+							{$i18n.t('Loading file…')}
+						</div>
+					{:else if fileBinary}
+						<div class="flex-1 flex flex-col items-center justify-center text-center px-6 py-10">
+							<div class="text-sm text-gray-300">{$i18n.t('Binary file')}</div>
+							<div class="mt-1 text-xs text-gray-500">
+								{$i18n.t('This file cannot be displayed as text.')}
 							</div>
-						{/each}
-					</div>
+						</div>
+					{:else if fileContent !== null}
+						{#if fileTruncated}
+							<div
+								class="shrink-0 px-3 py-1 text-[10px] text-amber-500/90 border-b border-white/8 bg-[#0c111d]"
+							>
+								{$i18n.t('Truncated at 512KB — showing the beginning of the file.')}
+							</div>
+						{/if}
+						<div class="flex-1 min-h-0 overflow-auto py-2 font-mono">
+							{#each contentLines as line, i (i)}
+								<div class="flex text-[11px] leading-[1.45]">
+									<span
+										class="shrink-0 w-10 pr-2 text-right text-gray-600 select-none tabular-nums"
+										>{i + 1}</span
+									>
+									<span class="whitespace-pre text-gray-300 flex-1">{line || ' '}</span>
+								</div>
+							{/each}
+						</div>
+					{:else}
+						<!-- No fetched content (legacy host / fetch failed) → fall back to diff hunks. -->
+						<div class="flex-1 min-h-0 overflow-auto px-3 py-2 font-mono">
+							{#each diffLines as line, i (i)}
+								<div class="whitespace-pre text-[11px] leading-[1.45] {lineClass(line)}">
+									{line || ' '}
+								</div>
+							{/each}
+							{#if !diffLines.length}
+								<div class="px-1 py-2 text-xs text-gray-500">
+									{$i18n.t('File content unavailable.')}
+								</div>
+							{/if}
+						</div>
+					{/if}
 				</div>
 			{:else}
 				<div class="h-full flex flex-col items-center justify-center text-center px-6 py-10">

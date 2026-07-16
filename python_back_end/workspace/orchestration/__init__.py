@@ -126,6 +126,120 @@ CREATE TABLE IF NOT EXISTS github_tokens (
     access_token TEXT NOT NULL,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Build Space v1 · Phase 1 ─────────────────────────────────────────────────────
+-- code_projects: the per-user repo REGISTRY that governs which repos a coding
+-- session may touch and under what branch rules. Replaces three fragmented policy
+-- layers (env HARVIS_ATTACHED_REPOS[_RW], the github_proxy hardcoded frozenset,
+-- and ad-hoc workspace_repos reads) with one source of truth. allowed_base_branches
+-- is a JSON array of branch names a session may branch FROM (empty ⇒ default only);
+-- branch_prefix namespaces AI work branches (e.g. 'harvis/code/').
+CREATE TABLE IF NOT EXISTS code_projects (
+    id                   TEXT PRIMARY KEY,
+    user_id              INTEGER NOT NULL,
+    name                 TEXT,
+    repo_url             TEXT NOT NULL,
+    provider             TEXT NOT NULL DEFAULT 'github',
+    default_base_branch  TEXT NOT NULL DEFAULT 'main',
+    allowed_base_branches JSONB NOT NULL DEFAULT '[]'::jsonb,
+    branch_prefix        TEXT NOT NULL DEFAULT 'harvis/code/',
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_code_projects_user ON code_projects(user_id, updated_at DESC);
+-- One registry row per (user, repo_url) so the same repo isn't registered twice.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_code_projects_user_repo ON code_projects(user_id, repo_url);
+
+-- Build Space session lifecycle + preflight. Kept in a SEPARATE `lifecycle` column
+-- (NOT the existing `status`, which is active/deleted and backs the
+-- uq_vibecode_active_inplace index — repurposing it would break that). The preflight
+-- JSONB persists the report {repo_ok, remote_ok, base_branch, work_branch, head_sha,
+-- clean, blockers:[...]} captured at session start; head_sha is the CURRENT HEAD
+-- (distinct from base_sha, the fixed cumulative-diff baseline). project_id links to
+-- code_projects when the session was started against a registered repo.
+ALTER TABLE vibecode_sessions ADD COLUMN IF NOT EXISTS project_id  TEXT;
+ALTER TABLE vibecode_sessions ADD COLUMN IF NOT EXISTS work_branch TEXT;
+ALTER TABLE vibecode_sessions ADD COLUMN IF NOT EXISTS head_sha    TEXT;
+ALTER TABLE vibecode_sessions ADD COLUMN IF NOT EXISTS lifecycle   TEXT NOT NULL DEFAULT 'created';
+ALTER TABLE vibecode_sessions ADD COLUMN IF NOT EXISTS preflight   JSONB;
+-- Discord ↔ Build link: the #harvis-code thread/channel a session was started from
+-- (set by /harvis-code start). NON-NULL ⇒ Discord-launched → the Build header shows a
+-- "Discord session online" chip while it has a running turn.
+ALTER TABLE vibecode_sessions ADD COLUMN IF NOT EXISTS discord_channel_id TEXT;
+
+-- Build Space v1 · Phase 2 ─────────────────────────────────────────────────────
+-- Durable approvals: the in-memory pending-actions registry (orchestration/risk.py)
+-- stays the fast path; these rows are its durability mirror so a backend restart
+-- doesn't silently lose a gated action (the UI can still show WHAT was pending and
+-- WHY). decision ∈ 'approved' | 'approved-session' | 'denied' once resolved.
+CREATE TABLE IF NOT EXISTS workspace_pending_approvals (
+    id          TEXT PRIMARY KEY,           -- action_id (f"{run_id}-{step}-{seq}")
+    session_id  TEXT,                       -- vibecode session (NULL for non-session runs)
+    run_id      TEXT NOT NULL,
+    tool        TEXT NOT NULL,
+    args        JSONB,
+    reason      TEXT,                       -- matched-rule reason (why this was gated)
+    risk        TEXT,                       -- 'med' | 'high'
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    resolved    BOOLEAN NOT NULL DEFAULT FALSE,
+    decision    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_wpa_run ON workspace_pending_approvals(run_id, resolved);
+CREATE INDEX IF NOT EXISTS idx_wpa_session ON workspace_pending_approvals(session_id, resolved);
+-- Approve-for-session: canonical action patterns (risk.action_pattern) the user has
+-- approved for the WHOLE session — gate_decision consults these before re-prompting.
+ALTER TABLE vibecode_sessions ADD COLUMN IF NOT EXISTS approved_patterns JSONB NOT NULL DEFAULT '[]'::jsonb;
+
+-- Build Space v1 · Phase 4 ─────────────────────────────────────────────────────
+-- code_file_changes: one row per TRACKED AI edit (the apply_patch tool) — the
+-- session's per-file audit trail. before/after_sha are short git blob ids of the
+-- file content around the edit. Inserts are FAIL-OPEN (a logging failure never
+-- blocks the edit itself).
+CREATE TABLE IF NOT EXISTS code_file_changes (
+    id          TEXT PRIMARY KEY,
+    session_id  TEXT,
+    run_id      TEXT,
+    file_path   TEXT,
+    change_type TEXT,                -- 'add' | 'modify' | 'delete'
+    patch_id    TEXT,
+    before_sha  TEXT,
+    after_sha   TEXT,
+    created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_cfc_session ON code_file_changes(session_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_cfc_run     ON code_file_changes(run_id);
+
+-- code_pull_requests: the persisted PR record for a session. PR creation stays
+-- HUMAN-triggered (the drawer button); a re-create for the same session+head
+-- branch UPDATES the row (status/url) instead of duplicating — enforced by the
+-- unique index below, which also powers the ON CONFLICT upsert.
+CREATE TABLE IF NOT EXISTS code_pull_requests (
+    id          TEXT PRIMARY KEY,
+    session_id  TEXT,
+    provider    TEXT,
+    pr_url      TEXT,
+    pr_number   INT,
+    base_branch TEXT,
+    head_branch TEXT,
+    title       TEXT,
+    status      TEXT,
+    created_at  TIMESTAMPTZ DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_cpr_session ON code_pull_requests(session_id, updated_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_cpr_session_head
+    ON code_pull_requests(session_id, head_branch);
+
+-- Agent Review Conversation (opt-in per session) ───────────────────────────────
+-- review_enabled: the user turned review mode ON for this session (default OFF ⇒
+-- zero behavior change anywhere). review_status: 'off' (review mode disabled) |
+-- 'pending' (a coder↔reviewer conversation is running) | 'agreed' (the reviewer's
+-- structured verdict was APPROVED) | 'needs_human' (round cap hit or the review
+-- errored — a human must decide). The Create-PR endpoint refuses while a
+-- review_enabled session's status is NOT IN ('agreed','off'), unless the human
+-- passes the explicit override flag.
+ALTER TABLE vibecode_sessions ADD COLUMN IF NOT EXISTS review_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE vibecode_sessions ADD COLUMN IF NOT EXISTS review_status  TEXT NOT NULL DEFAULT 'off';
 """
 
 __all__ = ["ORCHESTRATION_SCHEMA_SQL"]
