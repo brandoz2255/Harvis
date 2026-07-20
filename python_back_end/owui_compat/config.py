@@ -46,7 +46,10 @@ def build_config() -> dict:
             "auth": True,
             "auth_trusted_header": False,
             "enable_ldap": False,
-            "enable_signup": _env_bool("HARVIS_OWUI_ENABLE_SIGNUP", True),
+            # Default False to match the server-side gate in main.py's
+            # _signup_with_connection — once an admin exists, signup stays
+            # closed unless the operator explicitly enables it.
+            "enable_signup": _env_bool("HARVIS_OWUI_ENABLE_SIGNUP", False),
             "enable_login_form": True,
             # OPTION A: HTTP-SSE chat, no Socket.IO. Do not flip without also
             # implementing an OWUI-compatible Socket.IO server (owui_compat).

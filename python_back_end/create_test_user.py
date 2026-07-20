@@ -12,6 +12,15 @@ async def create_test_user():
     
     pool = await asyncpg.create_pool(dsn=database_url, min_size=1, max_size=2)
     
+    # Never claim an unclaimed instance: the first row in users becomes
+    # the admin, and this script uses public credentials.
+    async with pool.acquire() as conn:
+        user_count = await conn.fetchval("SELECT COUNT(*) FROM users")
+    if user_count == 0:
+        print("✋ Refusing: users table is empty. The first account (the admin) must be created via signup with the HARVIS_SETUP_CODE, not with public test credentials.")
+        await pool.close()
+        return
+
     async with pool.acquire() as conn:
         # Check if test user exists
         user = await conn.fetchrow(

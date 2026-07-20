@@ -48,10 +48,19 @@ _FLATTEN_PARAMS = (
 )
 
 
+# Admin id persisted in instance_settings (the user who claimed the instance).
+# Loaded by main.py's startup-ensure block; extended live on first signup.
+_persisted_admin_ids: set[int] = set()
+
+
+def add_persisted_admin_id(uid: int) -> None:
+    _persisted_admin_ids.add(uid)
+
+
 def _admin_user_ids() -> set[int]:
     """User ids treated as OWUI ``admin`` (default: the first registrant)."""
     raw = os.getenv("HARVIS_OWUI_ADMIN_USER_IDS", "1")
-    ids: set[int] = set()
+    ids: set[int] = set(_persisted_admin_ids)
     for part in raw.split(","):
         part = part.strip()
         if part.isdigit():

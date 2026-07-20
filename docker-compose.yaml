@@ -251,6 +251,14 @@ services:
       # a verified Claude/OpenAI credential makes those Build engines runnable (the picker
       # already lists their models); still overridable via the env var.
       HARVIS_OWUI_EXTERNAL_ENGINES: "${HARVIS_OWUI_EXTERNAL_ENGINES:-true}"
+      # First-signup gate: the first account (the admin) can only be created
+      # with this code in the X-Setup-Code header. GENERATED into .env by the
+      # installer — never hard-code it.
+      HARVIS_SETUP_CODE: "${HARVIS_SETUP_CODE:-}"
+      # Server-enforced (main.py signup gate) AND read by the frontend config.
+      # Default OFF: once the admin exists, signup stays closed until the
+      # operator explicitly enables it.
+      HARVIS_OWUI_ENABLE_SIGNUP: "${HARVIS_OWUI_ENABLE_SIGNUP:-false}"
       # Adaptive Workspace CAD engine (Stage 2). OFF by default — a gated capability.
       # Set HARVIS_ADAPTIVE_CAD_ENABLED=true and bring up the cad-engine sidecar to activate.
       HARVIS_ADAPTIVE_CAD_ENABLED: "${HARVIS_ADAPTIVE_CAD_ENABLED:-}"

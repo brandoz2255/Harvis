@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, Res
 from fastapi.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
 import asyncio, uvicorn, os, sys, tempfile, uuid, base64, io, logging, re, requests, random, json, httpx
+import hmac
 from PIL import Image
 
 # Import optimized auth module
@@ -568,6 +569,24 @@ async def lifespan(app: FastAPI):
                 with open(_core_schema_path, "r") as _csf:
                     await conn.execute(_csf.read())
                 logger.info("✅ Core schema ensured (all_schemas_safe.sql)")
+
+                # Instance-level key/value settings (admin_user_id, …).
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS instance_settings (
+                      key TEXT PRIMARY KEY,
+                      value TEXT,
+                      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    );
+                    """
+                )
+                _admin_id_row = await conn.fetchval(
+                    "SELECT value FROM instance_settings WHERE key = 'admin_user_id'"
+                )
+                if _admin_id_row and str(_admin_id_row).isdigit():
+                    from owui_compat import translate as _owui_translate
+                    _owui_translate.add_persisted_admin_id(int(_admin_id_row))
+                    logger.info(f"✅ Persisted admin user id loaded: {_admin_id_row}")
 
                 await conn.execute(
                     """
@@ -2556,40 +2575,91 @@ async def add_message_to_session(
 async def signup(request: SignupRequest, app_request: Request):
     # Use connection pool if available
     pool = getattr(app_request.app.state, "pg_pool", None)
+    setup_code = app_request.headers.get("x-setup-code")
 
     if pool:
         async with pool.acquire() as conn:
-            return await _signup_with_connection(request, conn)
+            return await _signup_with_connection(request, conn, setup_code=setup_code)
     else:
         conn = await asyncpg.connect(DATABASE_URL, timeout=10)
         try:
-            return await _signup_with_connection(request, conn)
+            return await _signup_with_connection(request, conn, setup_code=setup_code)
         finally:
             await conn.close()
 
 
-async def _signup_with_connection(request: SignupRequest, conn):
+# Serializes concurrent first-signups so exactly one can claim admin.
+_FIRST_SIGNUP_LOCK_KEY = 0x48415256  # "HARV"
+
+
+def _signup_enabled() -> bool:
+    return os.getenv("HARVIS_OWUI_ENABLE_SIGNUP", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+async def _signup_with_connection(request: SignupRequest, conn, setup_code: str | None = None):
     try:
-        # Check if user already exists
-        existing_user = await conn.fetchrow(
-            "SELECT id FROM users WHERE email = $1 OR username = $2",
-            request.email,
-            request.username,
-        )
-        if existing_user:
-            raise HTTPException(
-                status_code=409,
-                detail="User with this email or username already exists",
+        async with conn.transaction():
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock($1)", _FIRST_SIGNUP_LOCK_KEY
+            )
+            user_count = await conn.fetchval("SELECT COUNT(*) FROM users")
+
+            if user_count == 0:
+                # First signup claims the instance: requires the setup code.
+                expected = os.getenv("HARVIS_SETUP_CODE", "")
+                if not expected:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Instance setup code not configured — set HARVIS_SETUP_CODE on the backend before claiming this instance",
+                    )
+                if not setup_code or not hmac.compare_digest(
+                    expected.encode(), setup_code.encode()
+                ):
+                    raise HTTPException(
+                        status_code=403,
+                        detail="First signup requires a valid setup code (X-Setup-Code header)",
+                    )
+            elif not _signup_enabled():
+                raise HTTPException(
+                    status_code=403,
+                    detail="Signup is disabled on this instance",
+                )
+
+            # Check if user already exists
+            existing_user = await conn.fetchrow(
+                "SELECT id FROM users WHERE email = $1 OR username = $2",
+                request.email,
+                request.username,
+            )
+            if existing_user:
+                raise HTTPException(
+                    status_code=409,
+                    detail="User with this email or username already exists",
+                )
+
+            # Hash password and create user
+            hashed_password = get_password_hash(request.password)
+            user_id = await conn.fetchval(
+                "INSERT INTO users (username, email, password) VALUES ($1, $2, $3) RETURNING id",
+                request.username,
+                request.email,
+                hashed_password,
             )
 
-        # Hash password and create user
-        hashed_password = get_password_hash(request.password)
-        user_id = await conn.fetchval(
-            "INSERT INTO users (username, email, password) VALUES ($1, $2, $3) RETURNING id",
-            request.username,
-            request.email,
-            hashed_password,
-        )
+            if user_count == 0:
+                await conn.execute(
+                    """
+                    INSERT INTO instance_settings (key, value)
+                    VALUES ('admin_user_id', $1)
+                    ON CONFLICT (key) DO NOTHING
+                    """,
+                    str(user_id),
+                )
+                from owui_compat import translate as _owui_translate
+                _owui_translate.add_persisted_admin_id(int(user_id))
+                logger.info(f"🔐 Instance claimed: user {user_id} is the admin")
 
         # Create access token
         access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)

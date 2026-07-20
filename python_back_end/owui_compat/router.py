@@ -58,7 +58,7 @@ class OwuiDeps:
 
     get_current_user: Callable          # FastAPI dependency → UserResponse
     list_models: Callable               # async (request, user) → {"models": [...]}
-    signup_with_connection: Callable    # async (SignupRequest, conn) → TokenResponse
+    signup_with_connection: Callable    # async (SignupRequest, conn, setup_code=None) → TokenResponse
     signup_request_cls: type            # main.SignupRequest
     verify_password: Callable           # (plain, hashed) → bool
     create_access_token: Callable       # (data, expires_delta) → jwt str
@@ -123,7 +123,9 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
             username=payload.name, email=payload.email, password=payload.password
         )
         async with pool.acquire() as conn:
-            token_resp = await deps.signup_with_connection(signup_req, conn)
+            token_resp = await deps.signup_with_connection(
+                signup_req, conn, setup_code=request.headers.get("x-setup-code")
+            )
             user = await conn.fetchrow(
                 "SELECT id, username, email, avatar FROM users WHERE email = $1",
                 payload.email,

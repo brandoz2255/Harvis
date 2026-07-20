@@ -372,5 +372,15 @@ FROM document_jobs
 GROUP BY user_id, job_type, status;
 
 -- =====================================================
+-- Instance settings (key/value; admin_user_id = the user
+-- who claimed the instance via first signup)
+-- =====================================================
+CREATE TABLE IF NOT EXISTS instance_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- =====================================================
 -- Done! All tables created safely.
 -- =====================================================
