@@ -70,6 +70,17 @@ case "$BACKEND" in
   amd)    COMPOSE_FILE="docker-compose.yaml:docker-compose.amd.yml" ;;
   cpu)    COMPOSE_FILE="docker-compose.yaml:docker-compose.cpu.yml" ;;
 esac
+# Compose auto-loads docker-compose.override.yml ONLY when COMPOSE_FILE is unset.
+# The moment we set it above, a developer's gitignored override silently stops
+# applying — and the symptom (dead host services, untuned GPU) looks nothing like
+# the cause. Re-add it explicitly, last so it still wins. Clean installs don't
+# have the file, so their behaviour is unchanged.
+if [ -f docker-compose.override.yml ]; then
+  COMPOSE_FILE="${COMPOSE_FILE}:docker-compose.override.yml"
+  HAS_OVERRIDE=1
+else
+  HAS_OVERRIDE=0
+fi
 
 # ── 5. Write .env (preserve existing values) ────────────────────────────────
 touch .env
@@ -84,7 +95,17 @@ if ! grep -q '^JWT_SECRET=' .env; then
   printf 'JWT_SECRET=%s\n' "$secret" >> .env
   echo "✓ Generated a JWT_SECRET"
 fi
+# FERNET_KEY — encrypts stored GitHub OAuth tokens. Compose defaults it to empty
+# and the backend only logs a warning, so without this GitHub sign-in fails in a
+# way that looks like a broken button rather than missing config.
+# Fernet requires 32 bytes as URL-SAFE base64 (-_ not +/), NOT hex like the above.
+if ! grep -q '^FERNET_KEY=' .env; then
+  fkey="$(openssl rand -base64 32 2>/dev/null | tr '+/' '-_' || head -c 32 /dev/urandom | base64 | tr '+/' '-_')"
+  printf 'FERNET_KEY=%s\n' "$fkey" >> .env
+  echo "✓ Generated a FERNET_KEY (GitHub OAuth token encryption)"
+fi
 echo "✓ Wrote .env  (COMPOSE_FILE=${COMPOSE_FILE})"
+[ "$HAS_OVERRIDE" -eq 1 ] && echo "  ↳ including your local docker-compose.override.yml"
 
 # ── 6. Network + optional launch ────────────────────────────────────────────
 docker network inspect ollama-n8n-network >/dev/null 2>&1 || docker network create ollama-n8n-network >/dev/null
