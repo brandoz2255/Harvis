@@ -22,6 +22,9 @@ MERGED_JSON=""
 CHECK_FAILED=0
 CHECK_ROWS=()
 
+HEALTH_URL="http://localhost:9000/api/health/services"
+SETUP_URL="http://localhost:9000/api/setup/status"
+
 parse_args() {
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -267,6 +270,13 @@ write_env() {
     printf 'FERNET_KEY=%s\n' "$fkey" >> .env
     echo "✓ Generated a FERNET_KEY (GitHub OAuth token encryption)"
   fi
+  # HARVIS_SETUP_CODE — one-time first-signup gate: the first (admin) account can
+  # only be created by whoever holds this code.
+  setup_code="$(rand_hex 6 | sed 's/\(....\)/\1-/g; s/-$//')"
+  ensure_env_secret HARVIS_SETUP_CODE "$setup_code" "a HARVIS_SETUP_CODE (first-admin signup gate)"
+  # OPENCLAW_GATEWAY_TOKEN — SHARED across backend/openclaw/harvis-mcp; a running
+  # stack authenticated with the old value breaks if this ever regenerates.
+  ensure_env_secret OPENCLAW_GATEWAY_TOKEN "$(rand_hex 32)" "an OPENCLAW_GATEWAY_TOKEN"
   echo "✓ Wrote .env  (COMPOSE_FILE=${COMPOSE_FILE})"
   [ "$HAS_OVERRIDE" -eq 1 ] && echo "  ↳ including your local docker-compose.override.yml" || true
 }
@@ -277,6 +287,69 @@ write_env() {
 ensure_network() {
   docker network inspect ollama-n8n-network >/dev/null 2>&1 || docker network create ollama-n8n-network >/dev/null
   echo "✓ docker network 'ollama-n8n-network' ready"
+}
+
+# ── Startup poll — report what was OBSERVED, not what was hoped ─────────────
+print_setup_code() {
+  # The setup code must never land in captured output (tee'd logs, CI transcripts),
+  # so it is written to the terminal directly; with no terminal, point at .env.
+  local code_line="HARVIS_SETUP_CODE is in .env — view it with:  grep '^HARVIS_SETUP_CODE=' .env"
+  # `-w /dev/tty` only checks permission bits; actually opening it is the real
+  # "do we have a controlling terminal" probe.
+  if ( : > /dev/tty ) 2>/dev/null; then
+    code="$(grep '^HARVIS_SETUP_CODE=' .env | head -1 | cut -d= -f2-)"
+    printf '  First-admin setup code: %s\n' "$code" > /dev/tty
+    echo "  (setup code printed to your terminal only — it is also in .env)"
+  else
+    echo "  $code_line"
+  fi
+}
+
+poll_health() {
+  echo ""
+  echo "Waiting for the stack to come up (polling ${HEALTH_URL}) ..."
+  local deadline=$((SECONDS + 180)) body="" overall=""
+  while [ $SECONDS -lt $deadline ]; do
+    body="$(curl -s -m 8 "$HEALTH_URL" 2>/dev/null || true)"
+    overall="$(printf '%s' "$body" | sed -n 's/^{"status":"\([a-z]*\)".*/\1/p')"
+    [ "$overall" = "healthy" ] && break
+    sleep 5
+  done
+  echo ""
+  if [ -n "$body" ]; then
+    echo "Service status (from /api/health/services):"
+    printf '%s' "$body" \
+      | grep -oE '"[a-z0-9-]+":\{"status":"[a-z]+"' \
+      | sed 's/":{"status":"/ /; s/"//g' \
+      | while read -r name state; do
+          case "$state" in
+            up) printf '  ✓ %-16s up\n' "$name" ;;
+            *)  printf '  ✗ %-16s %s\n' "$name" "$state" ;;
+          esac
+        done
+  fi
+  if [ "$overall" = "healthy" ]; then
+    echo ""
+    echo "✓ Harvis is up → http://localhost:9000"
+    local needs
+    needs="$(curl -s -m 8 "$SETUP_URL" 2>/dev/null | sed -n 's/^{"needs_setup":\(true\|false\)}$/\1/p')"
+    case "$needs" in
+      true)  print_setup_code ;;
+      false) echo "  Instance already has an admin — no setup code needed." ;;
+      *)     echo "  Could not confirm setup state (${SETUP_URL} unreachable) — if this is a"
+             echo "  fresh install, the first signup will ask for the setup code from .env." ;;
+    esac
+    return 0
+  fi
+  echo ""
+  if [ -z "$body" ]; then
+    echo "✗ No response from ${HEALTH_URL} after 180s — nginx (or the backend behind it) never came up."
+  else
+    echo "✗ Stack did not reach 'healthy' within 180s — see per-service status above."
+  fi
+  echo "  Inspect with:  docker compose ps"
+  echo "                 docker compose logs --tail=100 backend nginx pgsql"
+  return 1
 }
 
 launch() {
@@ -295,8 +368,7 @@ launch() {
   if [ "$ASSUME_YES" -eq 1 ]; then run="y"; else read -rp "Build and start the stack now? [y/N]: " run || true; fi
   if [[ "${run:-N}" =~ ^[Yy]$ ]]; then
     docker compose up --build -d
-    echo ""
-    echo "✓ Harvis is starting → http://localhost:9000"
+    poll_health
   else
     echo ""
     echo "When ready, run:  docker compose up --build -d   (.env selects the ${BACKEND} backend)"
