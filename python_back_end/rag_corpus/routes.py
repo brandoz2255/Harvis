@@ -15,7 +15,20 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
 
+from auth_utils import get_current_user
+from owui_compat.authz import make_require_admin
+
 logger = logging.getLogger(__name__)
+
+# Every mutating route below changes SERVER-WIDE corpus state — adding/removing
+# documentation sources, rebuilding the index, deleting a source's ingested data.
+# None of it is per-user, so all of it is administrator territory.
+#
+# These were previously unauthenticated entirely: `GET /api/rag/sources` answered
+# 200 to an anonymous caller and `POST /api/rag/sources/config` reached request
+# validation without ever checking a token. Reads are left open for now (changing
+# them is a separate, wider decision); the writes are closed here.
+require_admin = make_require_admin(get_current_user)
 
 router = APIRouter(prefix="/api/rag", tags=["rag-corpus"])
 
@@ -320,7 +333,7 @@ def get_all_embedding_adapters():
 # ─── Routes ───────────────────────────────────────────────────────────────────
 
 
-@router.post("/update-local", response_model=JobResponse)
+@router.post("/update-local", response_model=JobResponse, dependencies=[Depends(require_admin)])
 async def start_rag_update(request: UpdateRagRequest):
     """
     Start a background job to update the local RAG corpus.
@@ -394,7 +407,7 @@ async def list_jobs(limit: int = 10):
     return {"jobs": [job.to_dict() for job in jobs], "count": len(jobs)}
 
 
-@router.post("/jobs/{job_id}/cancel")
+@router.post("/jobs/{job_id}/cancel", dependencies=[Depends(require_admin)])
 async def cancel_job(job_id: str):
     """Cancel a running job."""
     job_manager = get_job_manager()
@@ -435,7 +448,7 @@ async def get_source_stats():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/rebuild")
+@router.post("/rebuild", dependencies=[Depends(require_admin)])
 async def rebuild_source(request: RebuildSourceRequest):
     """
     Rebuild (delete + re-index) a specific source.
@@ -482,7 +495,7 @@ async def rebuild_source(request: RebuildSourceRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/sources/{source}")
+@router.delete("/sources/{source}", dependencies=[Depends(require_admin)])
 async def clear_source(source: str):
     """Delete all vectors for a source from the appropriate collection."""
     valid_sources = get_valid_sources()
@@ -729,7 +742,7 @@ async def get_source_config(source_id: str):
     return config.to_dict()
 
 
-@router.post("/sources/config")
+@router.post("/sources/config", dependencies=[Depends(require_admin)])
 async def add_source_config(request: SourceConfigRequest):
     """
     Add a new source configuration.
@@ -777,7 +790,7 @@ async def add_source_config(request: SourceConfigRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.put("/sources/config/{source_id}")
+@router.put("/sources/config/{source_id}", dependencies=[Depends(require_admin)])
 async def update_source_config(source_id: str, request: SourceConfigRequest):
     """Update an existing source configuration."""
     config_mgr = get_config_manager_instance()
@@ -817,7 +830,7 @@ async def update_source_config(source_id: str, request: SourceConfigRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/sources/config/{source_id}")
+@router.delete("/sources/config/{source_id}", dependencies=[Depends(require_admin)])
 async def delete_source_config(source_id: str):
     """Delete a source configuration."""
     config_mgr = get_config_manager_instance()
@@ -834,7 +847,7 @@ async def delete_source_config(source_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/sources/config/{source_id}/toggle")
+@router.post("/sources/config/{source_id}/toggle", dependencies=[Depends(require_admin)])
 async def toggle_source(source_id: str, request: SourceToggleRequest):
     """Enable or disable a source."""
     config_mgr = get_config_manager_instance()
@@ -855,7 +868,7 @@ async def toggle_source(source_id: str, request: SourceToggleRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/sources/config/reset")
+@router.post("/sources/config/reset", dependencies=[Depends(require_admin)])
 async def reset_source_configs():
     """Reset all source configurations to defaults."""
     config_mgr = get_config_manager_instance()

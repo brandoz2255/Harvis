@@ -335,6 +335,17 @@ async def get_current_user(
             await conn.close()
 
 
+# ─── Authorization ──────────────────────────────────────────────────────────────
+# Server-side admin gate. The SvelteKit route guards on /admin and /workspace only
+# decide what the browser renders — they cannot stop a direct API call with a valid
+# token. Any admin-shaped or server-wide-config route must depend on this, not on
+# the client behaving. See owui_compat/authz.py for how admin identity is derived
+# (same single source the OWUI facade uses for the UI, so the two cannot disagree).
+from owui_compat.authz import make_require_admin  # noqa: E402
+
+require_admin = make_require_admin(get_current_user)
+
+
 # ─── Model Management -----------------------------------------------------------
 from model_manager import (
     unload_models,
@@ -5115,10 +5126,15 @@ async def owui_audio_config(current_user: UserResponse = Depends(get_current_use
 
 @app.post("/api/v1/audio/config/update", tags=["audio"])
 async def owui_audio_config_update(
-    request: Request, current_user: UserResponse = Depends(get_current_user)
+    request: Request, current_user: UserResponse = Depends(require_admin)
 ):
     """Accept admin audio-config edits. v1: echo back (engines are fixed to the
-    Harvis Whisper/TTS stack); persisting per-field config is a later pass."""
+    Harvis Whisper/TTS stack); persisting per-field config is a later pass.
+
+    Admin-gated server-side. This is server-wide configuration and was previously
+    reachable by ANY signed-in user — harmless only because the handler is a
+    no-op echo. Gating it now means the day it starts persisting, it is already
+    safe rather than needing to be remembered."""
     try:
         body = await request.json()
     except Exception:
