@@ -2303,15 +2303,18 @@ async def health_services():
     _openclaw_ws = os.getenv("OPENCLAW_URL", "ws://openclaw:18789")
     _openclaw_http = _openclaw_ws.replace("ws://", "http://").replace("wss://", "https://")
 
+    _tts_base = os.getenv("TTS_SERVICE_URL", "http://tts-service:8001").rstrip("/")
+
     await asyncio.gather(
         _check("ollama", f"{_ollama_base}/api/tags"),
         _check("openclaw", f"{_openclaw_http}/health"),
         _check("browser-runner", "http://browser-runner:8765/health", timeout=8.0),
+        _check("tts-service", f"{_tts_base}/health"),
     )
 
     # Database check — use the existing connection pool (not HTTP)
     try:
-        pool = app.state.pool if hasattr(app.state, "pool") else None
+        pool = getattr(app.state, "pg_pool", None)
         if pool:
             async with pool.acquire() as conn:
                 await conn.fetchval("SELECT 1")
@@ -2652,7 +2655,9 @@ async def get_current_user_info(current_user: UserResponse = Depends(get_current
 
 
 @app.get("/api/auth/stats", tags=["auth"])
-async def get_authentication_stats():
+async def get_authentication_stats(
+    current_user: UserResponse = Depends(get_current_user),
+):
     """Get authentication performance statistics"""
     return get_auth_stats()
 
