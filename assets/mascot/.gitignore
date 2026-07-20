@@ -1,0 +1,5 @@
+# Generated + intermediate mascot assets. The MASTER still and the prompts are
+# tracked (they reproduce everything else); the derived clips are not.
+source/*.mp4
+transparent/
+frames/

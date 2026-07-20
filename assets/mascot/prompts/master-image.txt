@@ -1,0 +1,19 @@
+# Harvis mascot — MASTER IMAGE prompt
+#
+# Tool:   Higgsfield → nano_banana_pro
+# Aspect: 1:1
+# Count:  4 (pick ONE master)
+# CHECK THE GENERATION COST BEFORE RUNNING.
+#
+# This prompt is only ever used ONCE, to make the master still. Every animation
+# afterwards uses the chosen image as `start_image` — that is what preserves
+# character consistency. Do NOT re-describe the mascot per animation.
+#
+# Chroma green (#04FA03) is used instead of off-white because Harvis has several
+# themes and green keys out cleanly against a multi-coloured character.
+
+Minimalist 2D 8-bit pixel-art mascot for an AI workspace named Harvis. A small calm and capable digital robot-creature based loosely on the existing Harvis logo identity. Compact rounded body, expressive square digital eyes, two small articulated arms, subtle antenna or signal element, and short stable legs. The character should feel intelligent, observant, helpful, and quietly powerful—not childish, hyperactive, aggressive, or neon-heavy.
+
+Use large clean pixels, a strong recognizable silhouette, two primary body colors plus dark eyes, hard pixel grid, crisp squares, no gradients, no shadows, no texture, no outlines outside the pixel-art design, and no text.
+
+Character centered and fully visible. Flat solid bright-green chroma-key background using approximately #04FA03. Nothing else in the frame.

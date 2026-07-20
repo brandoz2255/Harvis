@@ -150,7 +150,11 @@ vendor/sglang-H/
 # OpenClaw secrets — apply manually via kubectl, never commit
 # ==========================================
 k8s-manifests/overlays/prod/openclaw-secret.yaml
-mascot/
+# (removed a bare `mascot/` pattern here 2026-07-19 — added 2026-03 alongside an
+#  unrelated change, it matched ANY mascot/ directory tree-wide and silently blocked
+#  assets/mascot/ and the mascot component dir. Same class as the bare `build/` bug.
+#  It protected nothing: no other mascot/ dir exists, and tracked mascot files live
+#  under mascots/ or common/.)
 
 # graphify code map — local, regenerable; do NOT commit (per notes-vault setup)
 graphify-out/

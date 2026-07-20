@@ -1,0 +1,62 @@
+# Harvis mascot — ANIMATION prompts
+#
+# Tool:     Higgsfield → kling3_0 (image-to-video)
+# Mode:     std FIRST (cheap). Only regenerate the WINNER in `pro`.
+# Aspect:   1:1
+# Duration: 4s
+# start_image AND end_image: assets/mascot/source/harvis-master.png
+#
+# CHECK THE GENERATION COST BEFORE EACH RUN.
+#
+# Using the master still as BOTH start and end image is what makes loops seamless
+# and stops the model redesigning the character mid-clip.
+#
+# Proof-of-concept set is the first three only. Do not generate the full pack
+# until idle has been approved and the pipeline is proven end to end in Harvis.
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. idle-floating  →  harvis-idle.webm        [LOOPS]
+# ─────────────────────────────────────────────────────────────────────────────
+
+Minimalist 2D 8-bit pixel-art animation. The exact Harvis mascot from the reference remains centered and performs a very subtle idle animation: gentle floating movement, one small blink, and slight antenna movement. The character returns precisely to its starting pose at the end for a seamless loop.
+
+12fps stepped animation. Hard pixel grid, no motion blur. Camera static. No camera movement, no zoom, no rotation, no background changes, no new objects, and no character redesign. Preserve the exact colors, proportions, face, silhouette, and pixel-art style of the reference.
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. working  →  harvis-working.webm           [LOOPS]
+# ─────────────────────────────────────────────────────────────────────────────
+
+Minimalist 2D 8-bit pixel-art animation. The exact Harvis mascot from the reference appears focused and actively working. Its eyes display a subtle scanning pattern while its hands make small deliberate interface or typing motions. A tiny signal pulse may move through its antenna. Keep the movement contained and readable at a small interface size. The character returns precisely to its original pose at the end.
+
+12fps stepped animation. Hard pixel grid, no motion blur. Camera static. No camera movement, no zoom, no background changes, no extra objects, and no character redesign. Preserve the exact colors, proportions, face, silhouette, and pixel-art style of the reference.
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. success-wave  →  harvis-success.webm      [ONE-SHOT — must NOT loop]
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Deliberately one-shot. A mascot that waves continuously over a finished run
+# implies live activity — that exact bug was already found and fixed once in the
+# current SVG mascots. The player enforces this too (see HarvisAnimatedMascot).
+
+Minimalist 2D 8-bit pixel-art animation. The exact Harvis mascot from the reference gives one brief confident wave, displays a small happy eye expression, and returns to a calm resting pose.
+
+12fps stepped animation. Hard pixel grid, no motion blur. Camera static. No camera movement, no zoom, no background changes, no extra objects, and no character redesign. Preserve the exact colors, proportions, face, silhouette, and pixel-art style of the reference.
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# FULL PACK — only after the proof of concept is working inside Harvis
+# ═════════════════════════════════════════════════════════════════════════════
+#
+#   state           file                      loops?    animation
+#   ------------------------------------------------------------------------
+#   idle            harvis-idle.webm          yes       gentle float + blink
+#   thinking        harvis-thinking.webm      yes       eyes scan / processing pulse
+#   working         harvis-working.webm       yes       hands or interface motion
+#   needs_approval  harvis-approval.webm      yes       looks at user, raises one hand
+#   success         harvis-success.webm       NO        one brief confident wave
+#   error           harvis-error.webm         NO        small glitch → stable concerned pose
+#   cancelled       harvis-cancelled.webm     NO        activity stops, settles
+#   sleeping        harvis-sleeping.webm      yes       eyes close, slow idle
