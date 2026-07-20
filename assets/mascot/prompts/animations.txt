@@ -1,10 +1,59 @@
 # Harvis mascot — ANIMATION prompts
 #
 # Tool:     Higgsfield → kling3_0 (image-to-video)
-# Mode:     std FIRST (cheap). Only regenerate the WINNER in `pro`.
+# Mode:     std FIRST (cheap). Only regenerate the WINNER in `pro`. std is the default.
 # Aspect:   1:1
-# Duration: 4s
-# start_image AND end_image: assets/mascot/source/harvis-master.png
+# Duration: 4s  (model allows 3-15, defaults to 5)
+# start_image AND end_image: the SAME master media_id
+#           current master media_id: 8aeca547-e2fb-46e5-9715-3b2aca85ddf1
+#
+# ─── COST, measured 2026-07-19 ───────────────────────────────────────────────
+#   sound="on"  (the DEFAULT) ... 8 credits per 4s clip
+#   sound="off" ................. 6 credits per 4s clip
+#   ALWAYS pass sound="off". A silent mascot loop has no use for audio, and across
+#   the 8-clip pack that is 48 credits instead of 64 — the difference between
+#   affording a retry and not.
+#   Stills for comparison: 2 credits per batch of 4. One clip = ~16 stills.
+#
+# ─── GOTCHA: the preset hijack ───────────────────────────────────────────────
+#   The API may answer with a `preset_recommendation` instead of generating — it
+#   matched this prompt to a cinematic preset ("IN THE DARK"), which would destroy
+#   pixel art. Retry with `declined_preset_id: <that preset id>` to force a literal
+#   generation. Do not accept a cinematic preset for a mascot loop.
+#
+# ─── RESOLUTION NOTE ─────────────────────────────────────────────────────────
+#   Master is 1254x1254 but kling3_0 renders at 720x720 — the clips are a DOWNSCALE
+#   of the master. Fine for a 96px mascot; do not expect master-resolution output.
+#
+# ─── HOW TO MAKE SOMETHING ACTUALLY SPIN ─────────────────────────────────────
+#   THE PROBLEM: passing the master as BOTH start_image and end_image forces the
+#   last frame back to the opening pose, which actively SUPPRESSES rotation. The
+#   first idle attempt produced a nearly-static drill for exactly this reason —
+#   measured drill motion 2.52 vs head motion 6.48, i.e. the drill moved LESS than
+#   the head that was only supposed to bob.
+#
+#   THE FIX: keep both anchors (they're what makes the loop seamless) but ask for
+#   "exactly ONE full 360 degree rotation over the clip so the final frame matches
+#   the first". Rotation and loop-closure stop fighting each other.
+#   Result: drill 3.03 vs head 0.92 — the ratio flipped from 0.39 to 3.30.
+#   Loop seam (first vs last frame mean diff) stayed at 2.57. Clean.
+#
+#   ALSO: name ONE element as "THE MAIN ACTION" and explicitly say the others stay
+#   still ("the head does NOT rotate"). Without that the model spreads motion
+#   evenly and nothing reads as deliberate.
+#
+#   HARD SHAPES BEAT SOFT ONES. The smoke-vortex master keyed fine but read as
+#   vague churn when rotating. The blade/fan master gives the eye discrete shapes
+#   to track, keys without de-spill trouble, and survives downscaling to 96px.
+#   Add "keep the blades as distinct hard-edged chunky shapes — no blur, no
+#   smearing, no dissolving into a disc", or fast rotation becomes a grey disc.
+#
+# ─── STATE DIFFERENTIATION, CHEAPLY ──────────────────────────────────────────
+#   idle vs working does NOT need different art — same blades, different SPEED:
+#     idle    = blades turning slowly + amber strip breathing gently
+#     working = same blades noticeably faster + amber brighter
+#   A visibly fast spin reads as WORKING. If idle spins hard, every screen where
+#   Harvis is just sitting there will look busy. Keep idle genuinely calm.
 #
 # CHECK THE GENERATION COST BEFORE EACH RUN.
 #
@@ -60,3 +109,59 @@ Minimalist 2D 8-bit pixel-art animation. The exact Harvis mascot from the refere
 #   error           harvis-error.webm         NO        small glitch → stable concerned pose
 #   cancelled       harvis-cancelled.webm     NO        activity stops, settles
 #   sleeping        harvis-sleeping.webm      yes       eyes close, slow idle
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# STARTUP (one-shot) — harvis-startup.webm
+# ═════════════════════════════════════════════════════════════════════════════
+#
+#   start_image: harvis-powered-off-master.png  (fans FULLY retracted, see below)
+#   end_image:   the blade master (2b9fea6a-...) — the SAME image the idle clip
+#                was generated from, so startup lands exactly where idle begins.
+#                This is tighter than uploading an extracted frame: the two clips
+#                share one anchor instead of an approximation of one.
+#
+# ─── THE POWERED-OFF BASE: fans are INTERNALLY STORED, not folded ────────────
+#   Repeated correction from the user. When powered off there must be NO vanes,
+#   blades, fan, rotor, turbine, hub, drill, smoke, tail, feet, legs — NOTHING
+#   below or outside the body. The underside is CLOSED and nearly flat, with only
+#   a subtle dark rectangular/beveled HATCH SEAM showing where the assembly is
+#   stored inside. Harvis rests directly on that closed surface and reads as a
+#   plain flat TV: a clean rectangle, hat on top, straight bottom edge.
+#   "Folded underneath" is WRONG and was rejected twice. Say RETRACTED INSIDE.
+#
+# ─── REQUIRED SEQUENCE ───────────────────────────────────────────────────────
+#   1. closed clean underside, everything unlit
+#   2. bow tie + side H flicker on, then off
+#   3. flicker again, brighter
+#   4. screen outline lights cream; eyes + moustache appear; amber strip on;
+#      hat straightens
+#   5. a concealed hatch in the bottom OPENS
+#   6. 4-6 short angular polygonal vanes EMERGE FROM INSIDE the body
+#   7. they unfold and spread radially around a hidden hub
+#   8. ONLY THEN do they begin rotating
+#   9. small hop, rise into hover, ending in the exact end-frame pose
+#
+# ─── THE SPIN STILL IS NOT RIGHT (open issue) ────────────────────────────────
+#   User feedback: "it's like it's only spinning the very bottom part and not the
+#   top part of the fans."
+#
+#   ⚠ MY VERIFICATION WAS TOO WEAK TO CATCH THIS. Frame-differencing measures how
+#   many pixels changed; it CANNOT distinguish a cluster rotating rigidly from a
+#   shape morphing in place. It scored the fan region 1.26 upper/lower and I
+#   wrongly reported "motion is spread". Trust the eye over that metric.
+#
+#   Language to try next: every blade travels around the hub TOGETHER, INCLUDING
+#   where each blade meets the body — each blade ends the clip where its
+#   NEIGHBOUR began. Rigid-body rotation, attachment points move too. The current
+#   phrasing let the model anchor the tops and wave the tips.
+#
+#   IF IT FAILS AGAIN: stop paying for it. A radial fan at constant speed is
+#   deterministic mechanical motion — generate the blade layer procedurally
+#   (free, perfectly loopable, crisp pixels, exact speed control) and composite
+#   it under the AI-generated head. Three attempts at 6 credits each is the
+#   signal to switch approaches.
+#
+# ─── MODEL SUBSTITUTIONS OBSERVED (record what RAN, not what was asked) ──────
+#   requested nano_banana_pro -> ran nano_banana_2
+#   requested nano_banana_2   -> ran nano_banana_flash

@@ -1,8 +1,20 @@
 # Harvis mascot — MASTER IMAGE prompt
 #
-# Tool:   Higgsfield → nano_banana_pro
+# ⚠ THE CHOSEN MASTER DID NOT COME FROM THIS PROMPT.
+#   source/harvis-master.png was supplied by the user from elsewhere: a vertical
+#   charcoal cube with a top hat, cream moustache + bow tie, an amber "H" on the
+#   left face, an amber status light, and a dark SMOKE-VORTEX base instead of legs.
+#   1254x1254, background rgb(9,223,16), character 26% of frame, clear of all edges.
+#   The prompt below is kept as the record of the exploration that preceded it, not
+#   as a recipe that reproduces the master. To make variants, use the master itself
+#   as a reference image rather than re-running this text.
+#
+# Tool:   Higgsfield → requested `nano_banana_pro`
+#         ⚠ the service actually RAN `nano_banana_2` and reported that back. That
+#           id is not in the searchable catalog. Record what ran, not what was asked.
 # Aspect: 1:1
 # Count:  4 (pick ONE master)
+# Cost:   2 credits per batch of 4 at 1k. Stills are cheap — explore freely.
 # CHECK THE GENERATION COST BEFORE RUNNING.
 #
 # This prompt is only ever used ONCE, to make the master still. Every animation

@@ -167,6 +167,34 @@ def key_green(rgb: np.ndarray) -> np.ndarray:
     return (alpha * 255).astype(np.uint8)
 
 
+def despill(rgb: np.ndarray, alpha: np.ndarray) -> np.ndarray:
+    """Neutralise green *cast* on pixels we are KEEPING.
+
+    Chroma green bounces onto the subject, so retained pixels near the edge — and
+    any dark, soft-edged element like the mascot's smoke tail — come back tinted.
+    Widening the key is the wrong answer for those: the smoke is legitimately dark
+    grey, so a wider key deletes the character instead of the spill.
+
+    The standard fix is to clamp green to what the other two channels support. A
+    genuinely green pixel loses its excess; a neutral or warm pixel is untouched,
+    so the cream moustache and amber H are unaffected.
+    """
+    out = rgb.copy()
+    keep = alpha > 0
+    if not keep.any():
+        return out
+    r = out[..., 0].astype(np.int16)
+    g = out[..., 1].astype(np.int16)
+    b = out[..., 2].astype(np.int16)
+    # ceiling = the greener of the two neighbours, plus a small allowance so
+    # legitimately green-ish art isn't flattened.
+    ceiling = np.maximum(r, b) + 8
+    spilled = keep & (g > ceiling)
+    g_fixed = np.where(spilled, ceiling, g)
+    out[..., 1] = np.clip(g_fixed, 0, 255).astype(np.uint8)
+    return out
+
+
 def audit_frame(rgba: np.ndarray) -> int:
     """Count pixels that are still visibly green AND still visible. 0 = clean."""
     r = rgba[..., 0].astype(np.int16)
@@ -202,6 +230,7 @@ def convert(mp4: Path) -> bool:
         img = Image.open(fp).convert("RGB")
         rgb = np.array(img)
         alpha = key_green(rgb)
+        rgb = despill(rgb, alpha)   # neutralise green bounce on what we keep
         rgba = np.dstack([rgb, alpha])
         # zero the colour of fully-transparent pixels so no green survives in the
         # RGB planes to bleed back during scaling/encoding

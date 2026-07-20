@@ -1,5 +1,6 @@
 <script lang="ts" context="module">
 	export type MascotState =
+		| 'startup'
 		| 'idle'
 		| 'thinking'
 		| 'working'
@@ -13,11 +14,46 @@
 	// live activity — that exact bug already shipped once with the SVG mascots and
 	// had to be fixed, so it is enforced here in the player rather than left to
 	// each call site to remember.
-	const ONE_SHOT: MascotState[] = ['success', 'error', 'cancelled'];
+	//
+	// `startup` is a one-shot too: Harvis boots from powered-off, unfolds its vanes
+	// and rises into EXACTLY the idle clip's first frame, so it hands over without
+	// a visible jump. Looping it would make him reboot forever.
+	const ONE_SHOT: MascotState[] = ['startup', 'success', 'error', 'cancelled'];
 
 	// Clips worth having in cache before they're needed. Deliberately small: idle
 	// is near-permanent and working is the most common transition out of it.
+	// idle is prefetched hardest because `startup` hands straight over to it — a
+	// cache miss at that exact moment would show a gap right after the boot.
 	const PRELOAD: MascotState[] = ['idle', 'working'];
+
+	// ── Startup gating ────────────────────────────────────────────────────────
+	// The boot sequence is a moment, not a transition. Replaying it on every
+	// navigation would turn a nice touch into an irritation, so it fires ONCE per
+	// browser session and every later mount goes straight to idle.
+	// sessionStorage (not localStorage) is deliberate: a new tab or a fresh visit
+	// tomorrow should get the introduction again; clicking around today should not.
+	const BOOTED_KEY = 'harvis:mascot:booted';
+
+	/** True only the first time this is called in a session. Safe during SSR. */
+	export function shouldPlayStartup(): boolean {
+		if (typeof window === 'undefined') return false;
+		try {
+			if (sessionStorage.getItem(BOOTED_KEY)) return false;
+			sessionStorage.setItem(BOOTED_KEY, '1');
+			return true;
+		} catch {
+			return false; // private mode / storage blocked → just show idle
+		}
+	}
+
+	/** Let an explicit wake (e.g. returning from a sleeping state) replay the boot. */
+	export function resetStartup(): void {
+		try {
+			sessionStorage.removeItem(BOOTED_KEY);
+		} catch {
+			/* nothing to clear */
+		}
+	}
 </script>
 
 <script lang="ts">
@@ -32,6 +68,7 @@
 	export let basePath = '/mascot';
 
 	const FILES: Record<MascotState, string> = {
+		startup: 'harvis-startup.webm',
 		idle: 'harvis-idle.webm',
 		thinking: 'harvis-thinking.webm',
 		working: 'harvis-working.webm',
