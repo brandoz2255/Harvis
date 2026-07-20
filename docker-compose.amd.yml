@@ -14,8 +14,10 @@
 #   - /dev/kfd and /dev/dri present on the host; user in `video` + `render` groups.
 #   - Some cards need HSA_OVERRIDE_GFX_VERSION (e.g. 10.3.0 / 11.0.0) — set it in .env.
 #
-# NOTE: `devices: !reset []` (Compose ≥ 2.24) is required to clear the base's
-# nvidia reservation — a plain `devices: []` is silently ignored by the merge.
+# NOTE: `devices: !reset []` is required to clear the base's nvidia reservation —
+# a plain `devices: []` is silently ignored by the merge. Empirical floor:
+# Compose 2.19 honours the tag, 2.18.1 silently ignores it — install.sh verifies
+# the rendered merge behaviorally instead of trusting versions.
 services:
   ollama:
     image: ollama/ollama:rocm

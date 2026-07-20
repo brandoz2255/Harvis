@@ -8,7 +8,9 @@
 #   ollama / llmfit / backend  → runtime: runc (drop the nvidia runtime)
 #   ollama / llmfit / tts-service → `devices: !reset []` clears the base's
 #   `driver: nvidia` reservation. NOTE: a plain `devices: []` does NOT work —
-#   compose keeps the base list; the `!reset` YAML tag (Compose ≥ 2.24) is required.
+#   compose keeps the base list; the `!reset` YAML tag is required. Empirical
+#   floor: Compose 2.19 honours it, 2.18.1 silently ignores it — install.sh
+#   verifies the rendered merge behaviorally instead of trusting versions.
 #
 # Honest expectations on CPU:
 #   - Ollama inference runs but is MUCH slower; prefer small models.
