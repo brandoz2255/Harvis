@@ -26,8 +26,14 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def build_config() -> dict:
+def build_config(onboarding: bool = False) -> dict:
     """Build the static-ish config dict OWUI reads at boot.
+
+    ``onboarding`` is OWUI's stock setup-state signal: true ONLY while no
+    user exists yet — the auth page then shows the "Create Admin Account"
+    flow instead of sign-in. The caller (router.owui_get_config) queries the
+    users table live so the flag flips as soon as the admin is created,
+    without a backend restart.
 
     v1 deliberately disables image-gen, web-search, community sharing,
     autocomplete, channels, notes, etc. so OWUI never invokes routes the facade
@@ -38,6 +44,7 @@ def build_config() -> dict:
         "status": True,
         "name": HARVIS_OWUI_NAME,
         "version": HARVIS_OWUI_VERSION,
+        "onboarding": onboarding,
         "default_locale": "en-US",
         "images": False,
         "default_models": os.getenv("HARVIS_OWUI_DEFAULT_MODEL", ""),

@@ -89,8 +89,21 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
 
     # ── boot ──────────────────────────────────────────────────────────────
     @router.get("/api/config")
-    async def owui_get_config():
-        return owui_config.build_config()
+    async def owui_get_config(request: Request):
+        # onboarding = no user exists yet (live query, so the flag flips the
+        # moment the admin is created — no restart). On DB failure default
+        # False: never show the claim-instance flow unverified.
+        onboarding = False
+        pool = getattr(request.app.state, "pg_pool", None)
+        if pool is not None:
+            try:
+                async with pool.acquire() as conn:
+                    onboarding = (
+                        await conn.fetchval("SELECT COUNT(*) FROM users")
+                    ) == 0
+            except Exception:
+                onboarding = False
+        return owui_config.build_config(onboarding=onboarding)
 
     @router.get("/api/version")
     async def owui_version():

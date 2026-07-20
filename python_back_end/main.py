@@ -2362,6 +2362,22 @@ async def health_services():
     }
 
 
+@app.get("/api/setup/status", tags=["health"])
+async def setup_status(request: Request):
+    """Unauthenticated setup-state probe: does this instance still need its
+    first (admin) signup? 503 when the DB can't be reached — never a guessed
+    answer."""
+    pool = getattr(request.app.state, "pg_pool", None)
+    if pool is None:
+        raise HTTPException(status_code=503, detail="database unavailable")
+    try:
+        async with pool.acquire() as conn:
+            user_count = await conn.fetchval("SELECT COUNT(*) FROM users")
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"database unavailable: {str(exc)[:200]}")
+    return {"needs_setup": user_count == 0}
+
+
 # ─── Chat History Endpoints ───────────────────────────────────────────────────────
 @app.post(
     "/api/chat-history/sessions", response_model=ChatSession, tags=["chat-history"]
