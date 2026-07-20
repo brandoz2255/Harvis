@@ -259,6 +259,9 @@ services:
       # Default OFF: once the admin exists, signup stays closed until the
       # operator explicitly enables it.
       HARVIS_OWUI_ENABLE_SIGNUP: "${HARVIS_OWUI_ENABLE_SIGNUP:-false}"
+      # Set true behind HTTPS so the auth cookie gets the Secure flag.
+      # Leave false for localhost / plain HTTP LAN installs.
+      HARVIS_COOKIE_SECURE: "${HARVIS_COOKIE_SECURE:-false}"
       # Adaptive Workspace CAD engine (Stage 2). OFF by default — a gated capability.
       # Set HARVIS_ADAPTIVE_CAD_ENABLED=true and bring up the cad-engine sidecar to activate.
       HARVIS_ADAPTIVE_CAD_ENABLED: "${HARVIS_ADAPTIVE_CAD_ENABLED:-}"
@@ -327,6 +330,7 @@ services:
       - /tmp:/tmp
       - /var/run/docker.sock:/var/run/docker.sock
       - ./python_back_end/main.py:/app/main.py:ro
+      - ./python_back_end/setup_flow.py:/app/setup_flow.py:ro
       - ./python_back_end/workspace:/app/workspace:ro
       - ./python_back_end/image:/app/image:ro
       - ./python_back_end/tools:/app/tools:ro
