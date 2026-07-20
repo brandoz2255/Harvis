@@ -559,6 +559,16 @@ async def lifespan(app: FastAPI):
         # Ensure OpenClaw web tool audit + prefs columns exist (idempotent)
         try:
             async with app.state.pg_pool.acquire() as conn:
+                # Core schema (users/chat_sessions/chat_messages/artifacts/…).
+                # Fully idempotent; heals volumes that predate the initdb
+                # mounts of all_schemas_safe.sql.
+                _core_schema_path = os.path.join(
+                    os.path.dirname(__file__), "all_schemas_safe.sql"
+                )
+                with open(_core_schema_path, "r") as _csf:
+                    await conn.execute(_csf.read())
+                logger.info("✅ Core schema ensured (all_schemas_safe.sql)")
+
                 await conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS openclaw_tool_audit (

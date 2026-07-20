@@ -580,6 +580,12 @@ services:
       POSTGRES_INITDB_ARGS: "-E UTF8 --locale=C"
     volumes:
       - pgsql_data:/var/lib/postgresql/data
+      # Initdb runs mounted files in sorted order. 000_extensions must sort
+      # first (extensions before any schema), and 000_schemas (users/
+      # chat_sessions/chat_messages) must sort before 001_add_document_jobs,
+      # whose FKs reference those tables — without it a fresh volume aborts.
+      - ./python_back_end/migrations/000_extensions.sql:/docker-entrypoint-initdb.d/000_extensions.sql:ro
+      - ./python_back_end/all_schemas_safe.sql:/docker-entrypoint-initdb.d/000_schemas.sql:ro
       - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
       - ./python_back_end/artifacts_schema.sql:/docker-entrypoint-initdb.d/artifacts_schema.sql:ro
       - ./python_back_end/artifacts_build_jobs_schema.sql:/docker-entrypoint-initdb.d/artifacts_build_jobs_schema.sql:ro
