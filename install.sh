@@ -305,6 +305,44 @@ print_setup_code() {
   fi
 }
 
+# Modest default for stranger boxes (incl. 8 GB GPUs). Larger models can be pulled later.
+DEFAULT_OLLAMA_MODEL="${HARVIS_DEFAULT_OLLAMA_MODEL:-llama3.2:3b}"
+# Honest ballpark only — exact size depends on quant/tag and Ollama's registry.
+DEFAULT_OLLAMA_MODEL_SIZE_NOTE="~2 GB download (approx; exact size is not computed here)"
+
+offer_model_pull() {
+  # Skip if Ollama already has at least one model — don't nag a working box.
+  local tags count
+  tags="$(curl -s -m 8 http://localhost:11434/api/tags 2>/dev/null || true)"
+  if [ -n "$tags" ]; then
+    count="$(printf '%s' "$tags" | grep -o '"name"' | wc -l | tr -d ' ')"
+    if [ "${count:-0}" -gt 0 ]; then
+      echo "  Ollama already has ${count} model(s) — skipping pull offer."
+      return 0
+    fi
+  fi
+  echo ""
+  echo "No Ollama models detected. Chat will fail until you pull one."
+  echo "  Suggested default: ${DEFAULT_OLLAMA_MODEL}  (${DEFAULT_OLLAMA_MODEL_SIZE_NOTE})"
+  echo "  Override with HARVIS_DEFAULT_OLLAMA_MODEL=… before running install.sh."
+  local pull
+  if [ "$ASSUME_YES" -eq 1 ]; then
+    # Non-interactive: do NOT auto-download multi-GB blobs without an explicit opt-in.
+    echo "  (--yes: not pulling automatically. Run:  docker exec harvis-ollama ollama pull ${DEFAULT_OLLAMA_MODEL})"
+    return 0
+  fi
+  read -rp "Pull ${DEFAULT_OLLAMA_MODEL} now? [y/N]: " pull || true
+  if [[ ! "${pull:-N}" =~ ^[Yy]$ ]]; then
+    echo "  Skipped. Later:  docker exec harvis-ollama ollama pull ${DEFAULT_OLLAMA_MODEL}"
+    return 0
+  fi
+  if ! docker exec harvis-ollama ollama pull "$DEFAULT_OLLAMA_MODEL"; then
+    echo "  ✗ Pull failed — check \`docker logs harvis-ollama\` and try again manually."
+    return 0
+  fi
+  echo "  ✓ Model ready: ${DEFAULT_OLLAMA_MODEL}"
+}
+
 poll_health() {
   echo ""
   echo "Waiting for the stack to come up (polling ${HEALTH_URL}) ..."
@@ -339,6 +377,10 @@ poll_health() {
       *)     echo "  Could not confirm setup state (${SETUP_URL} unreachable) — if this is a"
              echo "  fresh install, the first signup will ask for the setup code from .env." ;;
     esac
+    echo ""
+    echo "  Auth cookie: HARVIS_COOKIE_SECURE defaults to false (localhost/LAN HTTP)."
+    echo "  Behind HTTPS, set HARVIS_COOKIE_SECURE=true in .env and recreate the backend."
+    offer_model_pull
     return 0
   fi
   echo ""
