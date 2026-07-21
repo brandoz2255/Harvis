@@ -222,38 +222,43 @@ def create_setup_router(
         body: PreferencesBody,
         _user=Depends(require_admin),
     ):
-        """Persist wizard choices that survive without editing .env by hand.
+        """Apply wizard preferences.
 
-        ``cookie_secure`` is honored by the auth cookie setters when the env var
-        is unset. ``enable_signup`` is stored for display; live enforcement still
-        uses HARVIS_OWUI_ENABLE_SIGNUP (documented in the wizard copy).
+        ``cookie_secure`` takes effect for the RUNNING backend process only — it
+        is not durable, because the container's HARVIS_COOKIE_SECURE env (set by
+        compose) is authoritative and is restored on restart. Set that var in
+        .env for a permanent value (install.sh documents this). ``enable_signup``
+        is stored for display; live enforcement always reads
+        HARVIS_OWUI_ENABLE_SIGNUP, per the wizard copy.
         """
-        pool = getattr(request.app.state, "pg_pool", None)
-        if pool is None:
-            raise HTTPException(status_code=503, detail="database unavailable")
-        updates: dict[str, str] = {}
+        updated: list[str] = []
         if body.cookie_secure is not None:
-            updates["cookie_secure"] = "true" if body.cookie_secure else "false"
-            # Live for this process so cookie setters see it without restart.
-            os.environ["HARVIS_COOKIE_SECURE"] = updates["cookie_secure"]
+            # Process-level only. We deliberately do NOT persist this to the DB:
+            # nothing reads it back (the cookie setters read the env var), so a
+            # stored row would be a durable-looking value that silently does
+            # nothing after a restart.
+            os.environ["HARVIS_COOKIE_SECURE"] = "true" if body.cookie_secure else "false"
+            updated.append("cookie_secure")
         if body.enable_signup is not None:
-            updates["enable_signup_preference"] = (
-                "true" if body.enable_signup else "false"
-            )
-        if not updates:
-            return {"ok": True, "updated": []}
-        async with pool.acquire() as conn:
-            for key, value in updates.items():
+            pool = getattr(request.app.state, "pg_pool", None)
+            if pool is None:
+                raise HTTPException(status_code=503, detail="database unavailable")
+            async with pool.acquire() as conn:
                 await conn.execute(
                     """
                     INSERT INTO instance_settings (key, value)
-                    VALUES ($1, $2)
+                    VALUES ('enable_signup_preference', $1)
                     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
                     """,
-                    key,
-                    value,
+                    "true" if body.enable_signup else "false",
                 )
-        return {"ok": True, "updated": list(updates.keys())}
+            updated.append("enable_signup")
+        return {
+            "ok": True,
+            "updated": updated,
+            "cookie_secure_durable": False,
+            "note": "cookie_secure applies to this process; set HARVIS_COOKIE_SECURE in .env for a durable value",
+        }
 
     @router.post("/api/setup/complete")
     async def setup_complete(
@@ -275,32 +280,3 @@ def create_setup_router(
         return {"ok": True, "setup_complete": True}
 
     return router
-
-
-def cookie_secure_enabled(pool=None) -> bool:
-    """Env wins; else instance_settings.cookie_secure; else False."""
-    env = os.getenv("HARVIS_COOKIE_SECURE", "").strip().lower()
-    if env in {"1", "true", "yes", "on"}:
-        return True
-    if env in {"0", "false", "no", "off"}:
-        return False
-    # Unset env — optional DB preference from the setup wizard.
-    return False  # sync callers can't await; use cookie_secure_enabled_async
-
-
-async def cookie_secure_enabled_async(pool) -> bool:
-    env = os.getenv("HARVIS_COOKIE_SECURE", "").strip().lower()
-    if env in {"1", "true", "yes", "on"}:
-        return True
-    if env in {"0", "false", "no", "off"}:
-        return False
-    if pool is None:
-        return False
-    try:
-        async with pool.acquire() as conn:
-            val = await conn.fetchval(
-                "SELECT value FROM instance_settings WHERE key = 'cookie_secure'"
-            )
-        return (val or "").strip().lower() in {"1", "true", "yes", "on"}
-    except Exception:
-        return False

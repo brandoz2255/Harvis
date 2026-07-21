@@ -299,6 +299,10 @@ async def _inject_media(request, owui_body: dict, user_id: int | None = None) ->
     urls = _extract_urls(_content_to_text(messages[idx].get("content")))
     if urls:
         for url in urls:
+            # A URL in the user's message is a request to read it. When we can't,
+            # say so in-band — a silent drop lets the model answer confidently
+            # about content it never received (i.e. hallucinate), which reads to
+            # the user as success. An honest marker lets the model caveat instead.
             try:
                 from tools.openclaw_proxy import _validate_url
 
@@ -306,12 +310,14 @@ async def _inject_media(request, owui_body: dict, user_id: int | None = None) ->
                     _validate_url(url)  # SSRF: reject private/localhost/non-http(s)
                 except Exception:
                     logger.info("owui_compat: media ingest skipped blocked URL %s", url)
+                    blocks.append(f"### Could not read {url}\n(blocked: address not permitted for fetching)")
                     continue
                 from research.extract.router import extract_url
 
                 doc = await asyncio.to_thread(extract_url, url)
                 text = (getattr(doc, "text", "") or "").strip()
                 if not (getattr(doc, "success", False) and text):
+                    blocks.append(f"### Could not read {url}\n(the page could not be fetched or had no readable text)")
                     continue
                 if len(text) > _MAX_MEDIA_CHARS:
                     text = text[:_MAX_MEDIA_CHARS] + "\n…[truncated]"
@@ -320,6 +326,7 @@ async def _inject_media(request, owui_body: dict, user_id: int | None = None) ->
                 blocks.append(f"{header}\n{text}")
             except Exception:
                 logger.warning("owui_compat: media ingest skipped one URL", exc_info=True)
+                blocks.append(f"### Could not read {url}\n(fetch failed)")
 
     if not blocks:
         return
