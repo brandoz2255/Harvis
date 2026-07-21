@@ -15,6 +15,7 @@ helpers are defined.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass
 from datetime import timedelta
@@ -82,8 +83,16 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
         return pool
 
     def _login_cookie(resp: JSONResponse, token: str) -> JSONResponse:
+        # HARVIS_COOKIE_SECURE=true behind HTTPS; leave false on localhost/LAN HTTP.
+        # Must stay in sync with main.py's /api/auth/login cookie flags.
+        secure = os.getenv("HARVIS_COOKIE_SECURE", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
         resp.set_cookie(
-            "access_token", token, httponly=True, samesite="lax", secure=False
+            "access_token", token, httponly=True, samesite="lax", secure=secure
         )
         return resp
 

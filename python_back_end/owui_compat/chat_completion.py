@@ -16,10 +16,12 @@ the body to model_proxy. No RAG/embeddings in v1 — raw content injection.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
 import os
+import re
 
 from .translate import owui_body_to_proxy
 
@@ -147,6 +149,10 @@ async def _inject_files(request, owui_body: dict, user_id: int | None = None) ->
                 if not row or not os.path.exists(row["path"]):
                     continue
                 ctype = (row["content_type"] or "").lower()
+                # Audio/video are ingested by _inject_media (Whisper transcript) —
+                # never decode their raw bytes as a "text file" (that injects garbage).
+                if ctype.startswith(("audio/", "video/")):
+                    continue
                 with open(row["path"], "rb") as fh:
                     raw = fh.read()
                 if ctype.startswith("image/"):
@@ -191,6 +197,143 @@ async def _inject_files(request, owui_body: dict, user_id: int | None = None) ->
         "owui_compat: injected %d text + %d image attachment(s) into the prompt",
         len(text_blocks), len(image_parts),
     )
+
+
+# ── Media / link ingestion (Phase 1) ────────────────────────────────────────────
+# Paste a link (article / PDF / YouTube) or drop an mp3/mp4, and the chat reads it:
+# audio/video → existing Whisper transcript; http(s) links → the existing research
+# extractor. Both injected as a context block on the last user message. Reuses
+# what already exists — no new deps. Gated by HARVIS_CHAT_MEDIA_INGEST (default on).
+_MEDIA_INGEST_ENABLED = os.getenv("HARVIS_CHAT_MEDIA_INGEST", "1").strip().lower() not in (
+    "0", "false", "no", "off",
+)
+_MAX_MEDIA_URLS = 3
+_MAX_MEDIA_FILES = 3
+_MAX_MEDIA_CHARS = 24_000
+_URL_RE = re.compile(r"""https?://[^\s<>"')\]}]+""", re.IGNORECASE)
+# Process-lifetime transcript cache so a re-sent attachment isn't re-transcribed
+# every turn (Whisper is expensive on the 8GB box). Bounded; keyed by file id.
+_transcript_cache: dict[str, str] = {}
+
+
+def _extract_urls(text: str) -> list[str]:
+    """Deduped http(s) URLs from the user's message, trailing punctuation stripped."""
+    seen: list[str] = []
+    for m in _URL_RE.findall(text or ""):
+        u = m.rstrip(".,;:!?)]}\"'")
+        if u and u not in seen:
+            seen.append(u)
+        if len(seen) >= _MAX_MEDIA_URLS:
+            break
+    return seen
+
+
+def _whisper_text(res) -> str:
+    """transcribe_with_whisper_optimized returns a dict ({'text': ...}) or a str."""
+    if isinstance(res, dict):
+        return str(res.get("text") or "").strip()
+    return str(res or "").strip()
+
+
+async def _inject_media(request, owui_body: dict, user_id: int | None = None) -> None:
+    """Ingest media the user shared into the last user message as context:
+    audio/video attachments → Whisper transcript; http(s) links in the message →
+    readable text (article/PDF/YouTube) via the research extractor. Every URL passes
+    the SSRF guard first. Runs BEFORE _inject_files so the URL scan sees the original
+    message. Never raises — a failed item is skipped (logged), not a 500."""
+    if not _MEDIA_INGEST_ENABLED:
+        return
+    messages = owui_body.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return
+    idx = _last_user_index(messages)
+    if idx < 0:
+        return
+
+    blocks: list[str] = []
+
+    # 1) Audio/video attachments → Whisper transcript (ffmpeg decodes mp4/mov/webm).
+    files = owui_body.get("files")
+    if isinstance(files, list) and files:
+        pool = getattr(request.app.state, "pg_pool", None)
+        done = 0
+        for f in files:
+            if done >= _MAX_MEDIA_FILES:
+                break
+            if not isinstance(f, dict):
+                continue
+            fid = f.get("id") or (f.get("file") or {}).get("id")
+            if not fid or pool is None:
+                continue
+            try:
+                async with pool.acquire() as conn:
+                    row = await conn.fetchrow(
+                        "SELECT filename, path, content_type FROM owui_files WHERE id=$1", fid
+                    )
+                if not row:
+                    continue
+                ctype = (row["content_type"] or "").lower()
+                if not ctype.startswith(("audio/", "video/")):
+                    continue
+                if not row["path"] or not os.path.exists(row["path"]):
+                    continue
+                transcript = _transcript_cache.get(str(fid))
+                if transcript is None:
+                    from model_manager import transcribe_with_whisper_optimized
+
+                    res = await asyncio.to_thread(transcribe_with_whisper_optimized, row["path"])
+                    transcript = _whisper_text(res)
+                    if len(transcript) > _MAX_MEDIA_CHARS:
+                        transcript = transcript[:_MAX_MEDIA_CHARS] + "\n…[truncated]"
+                    _transcript_cache[str(fid)] = transcript
+                    if len(_transcript_cache) > 256:
+                        _transcript_cache.pop(next(iter(_transcript_cache)))
+                if transcript:
+                    kind = "video" if ctype.startswith("video/") else "audio"
+                    blocks.append(f"### Transcript of attached {kind} — {row['filename']}\n{transcript}")
+                    done += 1
+            except Exception:
+                logger.warning("owui_compat: media transcription skipped one file", exc_info=True)
+
+    # 2) http(s) links in the message → readable text (article / PDF / YouTube).
+    urls = _extract_urls(_content_to_text(messages[idx].get("content")))
+    if urls:
+        for url in urls:
+            try:
+                from tools.openclaw_proxy import _validate_url
+
+                try:
+                    _validate_url(url)  # SSRF: reject private/localhost/non-http(s)
+                except Exception:
+                    logger.info("owui_compat: media ingest skipped blocked URL %s", url)
+                    continue
+                from research.extract.router import extract_url
+
+                doc = await asyncio.to_thread(extract_url, url)
+                text = (getattr(doc, "text", "") or "").strip()
+                if not (getattr(doc, "success", False) and text):
+                    continue
+                if len(text) > _MAX_MEDIA_CHARS:
+                    text = text[:_MAX_MEDIA_CHARS] + "\n…[truncated]"
+                title = (getattr(doc, "title", "") or "").strip()
+                header = f"### Content from {url}" + (f" — {title}" if title else "")
+                blocks.append(f"{header}\n{text}")
+            except Exception:
+                logger.warning("owui_compat: media ingest skipped one URL", exc_info=True)
+
+    if not blocks:
+        return
+    msg = messages[idx]
+    content = _as_content_list(msg.get("content"))
+    content.append(
+        {
+            "type": "text",
+            "text": "The user shared the media/link(s) below. Their transcribed/extracted "
+            "content is provided as context — use it to answer.\n\n" + "\n\n".join(blocks),
+        }
+    )
+    msg["content"] = content
+    logger.info("owui_compat: injected %d media/link context block(s)", len(blocks))
 
 
 async def _inject_knowledge(request, owui_body: dict, user_id: int | None = None) -> None:
@@ -403,6 +546,7 @@ async def run_chat_completion(request, owui_body: dict, user_id: int | None = No
     # workspace package (avoids any chance of a circular import at load).
     from workspace.model_proxy import execute_chat_completion
 
+    await _inject_media(request, owui_body, user_id=user_id)  # links/audio/video → context
     await _inject_files(request, owui_body, user_id=user_id)
     await _inject_knowledge(request, owui_body, user_id=user_id)
     # NOTE: skills are NOT auto-injected into every chat — that bled a globally-

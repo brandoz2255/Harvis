@@ -346,6 +346,9 @@ from owui_compat.authz import make_require_admin  # noqa: E402
 
 require_admin = make_require_admin(get_current_user)
 
+from setup_flow import create_setup_router  # noqa: E402
+# Router include is deferred until after ``app = FastAPI(...)`` below.
+
 
 # ─── Model Management -----------------------------------------------------------
 from model_manager import (
@@ -1530,6 +1533,15 @@ try:
 except Exception as e:
     logger.warning(f"Could not load deep_research router: {e}")
 
+# First-run setup wizard probes (status/verify/test-model/preferences/complete)
+app.include_router(
+    create_setup_router(
+        get_current_user=get_current_user,
+        require_admin=require_admin,
+    )
+)
+logger.info("Setup flow router registered at /api/setup/*")
+
 # ─── Device & models -----------------------------------------------------------
 device = 0 if torch.cuda.is_available() else -1
 logger.info("Using device: %s", "cuda" if device == 0 else "cpu")
@@ -2362,20 +2374,7 @@ async def health_services():
     }
 
 
-@app.get("/api/setup/status", tags=["health"])
-async def setup_status(request: Request):
-    """Unauthenticated setup-state probe: does this instance still need its
-    first (admin) signup? 503 when the DB can't be reached — never a guessed
-    answer."""
-    pool = getattr(request.app.state, "pg_pool", None)
-    if pool is None:
-        raise HTTPException(status_code=503, detail="database unavailable")
-    try:
-        async with pool.acquire() as conn:
-            user_count = await conn.fetchval("SELECT COUNT(*) FROM users")
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"database unavailable: {str(exc)[:200]}")
-    return {"needs_setup": user_count == 0}
+
 
 
 # ─── Chat History Endpoints ───────────────────────────────────────────────────────
@@ -2733,7 +2732,9 @@ async def _login_with_connection(request: AuthRequest, conn):
             value=access_token,
             httponly=True,
             samesite="lax",
-            secure=False,  # Set to True in production with HTTPS
+            # HARVIS_COOKIE_SECURE=true behind HTTPS; leave false on localhost/LAN HTTP.
+            secure=os.getenv("HARVIS_COOKIE_SECURE", "").strip().lower()
+            in {"1", "true", "yes", "on"},
         )
         return response
 

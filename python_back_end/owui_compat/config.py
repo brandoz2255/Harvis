@@ -72,6 +72,10 @@ def build_config(onboarding: bool = False) -> dict:
             "enable_autocomplete_generation": False,
             "enable_message_rating": False,
             "enable_direct_connections": False,
+            # Memories / Personalization tab — not wired in the Harvis facade yet.
+            "enable_memories": False,
+            # OWUI user API-key minting (/auths/api_key) is not implemented here; hide the Account UI.
+            "enable_api_keys": False,
             "enable_channels": False,
             "enable_notes": False,
             # Projects = OWUI Folders with custom instructions + knowledge (facade-served).
