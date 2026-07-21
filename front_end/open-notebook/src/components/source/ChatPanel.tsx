@@ -195,20 +195,21 @@ export function ChatPanel({
       <CardContent className="flex-1 flex flex-col min-h-0 p-0">
         <ScrollArea className="flex-1 min-h-0 px-4" ref={scrollAreaRef}>
           <div className="space-y-4 py-4">
-            {messages.length === 0 ? (
-              (() => {
-                const count = sourceCount ?? notebook?.source_count ?? 0
-                // Notebook chat overview card: emoji + AI-generated name + date + source
-                // count + a 3-5 sentence synopsis (notebook.description). Shows once the
-                // notebook has at least one source; otherwise the plain prompt below.
-                if (contextType === 'notebook' && notebook && count > 0) {
-                  let dateLabel = ''
-                  try {
-                    if (notebook.created) {
-                      dateLabel = format(new Date(notebook.created), 'MMM d, yyyy', { locale: getDateLocale(language) })
-                    }
-                  } catch { /* ignore unparseable dates */ }
-                  return (
+            {/* Notebook overview PINNED to the top of the chat: emoji on top, then the
+                name, source count/date, and description — the beginning of the chat, kept
+                above the messages instead of vanishing once you start chatting. */}
+            {(() => {
+              const count = sourceCount ?? notebook?.source_count ?? 0
+              const showOverview = contextType === 'notebook' && !!notebook && count > 0
+              let dateLabel = ''
+              if (notebook?.created) {
+                try {
+                  dateLabel = format(new Date(notebook.created), 'MMM d, yyyy', { locale: getDateLocale(language) })
+                } catch { /* ignore unparseable dates */ }
+              }
+              return (
+                <>
+                  {showOverview && notebook && (
                     <div className="max-w-2xl py-2">
                       {notebook.emoji ? (
                         <div className="text-5xl mb-3 leading-none">{notebook.emoji}</div>
@@ -231,7 +232,7 @@ export function ChatPanel({
                           Generating an overview of your sources…
                         </p>
                       )}
-                      {suggestedQuestions.length > 0 && (
+                      {messages.length === 0 && suggestedQuestions.length > 0 && (
                         <div className="flex flex-wrap gap-2 mt-5">
                           {suggestedQuestions.map((q) => (
                             <button
@@ -246,21 +247,22 @@ export function ChatPanel({
                           ))}
                         </div>
                       )}
+                      {messages.length > 0 && <div className="mt-6 border-b border-border" />}
                     </div>
-                  )
-                }
-                return (
-                  <div className="text-center text-muted-foreground py-8">
-                    <Bot className="h-12 w-12 mx-auto mb-4 opacity-50" />
-                    <p className="text-sm">
-                      {t('chat.startConversation').replace('{type}', contextType === 'source' ? t('navigation.sources') : t('common.notebook'))}
-                    </p>
-                    <p className="text-xs mt-2">{t('chat.askQuestions')}</p>
-                  </div>
-                )
-              })()
-            ) : (
-              messages.map((message) => (
+                  )}
+                  {messages.length === 0 && !showOverview && (
+                    <div className="text-center text-muted-foreground py-8">
+                      <Bot className="h-12 w-12 mx-auto mb-4 opacity-50" />
+                      <p className="text-sm">
+                        {t('chat.startConversation').replace('{type}', contextType === 'source' ? t('navigation.sources') : t('common.notebook'))}
+                      </p>
+                      <p className="text-xs mt-2">{t('chat.askQuestions')}</p>
+                    </div>
+                  )}
+                </>
+              )
+            })()}
+            {messages.map((message) => (
                 <div
                   key={message.id}
                   className={`flex gap-3 ${
@@ -307,8 +309,7 @@ export function ChatPanel({
                     </div>
                   )}
                 </div>
-              ))
-            )}
+              ))}
             {isStreaming && (
               <div className="flex gap-3 justify-start">
                 <div className="flex-shrink-0">
