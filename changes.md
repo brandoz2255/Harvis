@@ -1,5 +1,80 @@
 # Recent Changes and Fixes Documentation
 
+## Date: 2026-07-20 — Settings 1a complete · Build 1c honesty · progressive stream polish
+
+### Problem
+Roadmap leftovers: Settings still shipped OWUI About/shields + JWT copy + dead Connections/Personalization
+wiring; Build still showed "coming soon" affordances; ThoughtStream ignored `token` events so Build
+felt dump-at-end vs Cursor-style progressive text.
+
+### Solution
+- Settings: Harvis About (no shields.io); JWT row removed; API keys/memories flags default off;
+  Connections + Personalization unhooked from SettingsModal.
+- Build: hide Preview tab / mic / SSH-soon; drop unwired Connect-GitHub CTAs; BrowserPanel quick-links
+  use `window.location.origin`.
+- Stream: ThoughtStream accumulates `token` + 20s Connecting stall→Retry; `runStream` immediate flush
+  for token/tool/agent_message.
+
+### Files
+`Settings/About.svelte`, `Settings/Account.svelte`, `SettingsModal.svelte`, `owui_compat/config.py`,
+`WorkspaceMainPanel.svelte`, `BrowserPanel.svelte`, `vibecode/+page.svelte`, `ThoughtStream.svelte`,
+`runStream.ts`, `RunView.svelte`, `docs/plans/2026-07-18-plan-of-action.md`
+
+### Status
+Uncommitted. Recreate backend for config flags; rebuild OWUI static for UI. Phase 5 eyeball then push
+to a **separate remote branch**.
+
+---
+## Date: 2026-07-20 — Setup wizard steps 7–10 (`/api/setup/*` + `/setup`)
+
+### Problem
+Installer honesty (1–6) and Phase 7 leftovers shipped, but first-run still had no verify API
+or guided `/setup` wizard — layout bounced unauthenticated users to `/auth` and yanked `/setup`.
+
+### Solution
+- Backend `setup_flow.py`: status / verify / test-model / preferences / complete (admin after claim).
+- OWUI `/setup` wizard: Admin → Model → Exposure → Verify → Done.
+- `PUBLIC_ROUTES` + layout bounce sites honor `/setup`; onboarding prefers `/setup` over `/auth`.
+- Auth page redirects to `/setup` when `config.onboarding` is true.
+
+### Files
+`python_back_end/setup_flow.py`, `python_back_end/main.py`,
+`front_end/owui/src/lib/constants/publicRoutes.ts`,
+`front_end/owui/src/lib/apis/setup/index.ts`,
+`front_end/owui/src/lib/components/common/SetupStepper.svelte`,
+`front_end/owui/src/routes/setup/+page.svelte`,
+`front_end/owui/src/routes/+layout.svelte`,
+`front_end/owui/src/routes/auth/+page.svelte`
+
+### Status
+Uncommitted on `harvis1.1`. Backend recreated with `setup_flow.py` mount; include_router
+must sit **after** `app = FastAPI(...)`. OWUI `vite build` refreshed `front_end/owui/build`
+so `/setup` is on `:9000`. Full clean-run E2E (`down -v` + install.sh) still optional.
+
+---
+## Date: 2026-07-20 — Phase 7 leftovers: .env.example, model pull, cookie Secure, setup-code UI
+
+### Problem
+Installer hardening (steps 1–6) shipped, but Phase 7 still lacked root `.env.example`, a skippable
+model pull, a secure-cookie env toggle, and a browser path to send `X-Setup-Code` on Create Admin.
+
+### Solution
+- Added root `.env.example` (blank placeholders, grouped).
+- `install.sh`: after healthy poll, offer skippable `llama3.2:3b` pull; honest cookie note;
+  `--yes` does not auto-download.
+- `HARVIS_COOKIE_SECURE` wired in `main.py` + `owui_compat/router.py` + compose passthrough.
+- OWUI auth: setup-code field on onboarding signup; `userSignUp` sends `X-Setup-Code`.
+- Handoff DB correction updated with empirical abort + fix (`ca7a8070`).
+
+### Files
+`.env.example`, `install.sh`, `docker-compose.yaml`, `python_back_end/main.py`,
+`python_back_end/owui_compat/router.py`, `front_end/owui/src/lib/apis/auths/index.ts`,
+`front_end/owui/src/routes/auth/+page.svelte`, `docs/handoffs/2026-07-21-installer-hardening.md`
+
+### Status
+Uncommitted on `harvis1.1`. Not pushed. OWUI static rebuild needed for auth UI to appear on :9000.
+
+---
 ## Date: 2026-03-30 — experimental/plugin-merge: Browser Automation, Web Research, Discord Bot, Model Routing
 
 ### Summary

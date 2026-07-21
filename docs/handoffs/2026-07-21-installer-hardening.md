@@ -25,17 +25,37 @@ separate remote branch) stays last.
 | Idempotent | re-runnable, preserves existing `.env` values, `--backend X --yes` for CI |
 | Network | creates `ollama-n8n-network` if absent |
 
-`docker-compose.amd.yml` and `docker-compose.cpu.yml` both exist. **Database init is already
-handled** — six schema files mount into `docker-entrypoint-initdb.d` in `docker-compose.yaml:583-588`,
-so Postgres self-initialises on first boot. That is *not* a gap; I checked before listing it as one.
+`docker-compose.amd.yml` and `docker-compose.cpu.yml` both exist.
+
+> ### ⚠️ CORRECTION (2026-07-20) — the claim below was WRONG, then settled empirically
+>
+> This document originally asserted: *"Database init is already handled — six schema files mount into
+> `docker-entrypoint-initdb.d`, so Postgres self-initialises on first boot. That is not a gap; I checked
+> before listing it as one."*
+>
+> **That was inference from seeing the mounts, not a test, and it was stated as fact.** A later recon
+> found that two of those mounted files FK-reference a `users` table which **nothing in the mount set
+> created** (`001_add_document_jobs.sql:9-11`, `artifacts_schema.sql:9`), and that `init-db.sh`'s
+> pgvector extension sorted **last** alphabetically.
+>
+> **Empirical result (throwaway container, 2026-07-20):** a fresh volume **did abort** —
+> `Exited (3)` with `relation "users" does not exist` while applying `001_add_document_jobs.sql`.
+>
+> **Fix shipped** (`ca7a8070`): mount `000_extensions.sql` + `all_schemas_safe.sql` as
+> `000_schemas.sql` (sorts before `001_…`), and apply `all_schemas_safe.sql` idempotently from the
+> backend startup-ensure block so existing volumes self-heal too. Verified: throwaway comes up with
+> `users` / `chat_sessions` / `chat_messages` present.
+>
+> The lesson worth keeping: *"I checked"* meant "I looked at the mounts", which is not the same as
+> running it.
 
 So this is a **hardening pass on working code**, not a rewrite.
 
 ---
 
-## The five gaps (verified today, most severe first)
+## The five gaps (verified 2026-07-20; status updated after hardening)
 
-### 1. 🔴 `COMPOSE_FILE` silently disables `docker-compose.override.yml` — and yours is load-bearing
+### 1. 🔴 ~~`COMPOSE_FILE` silently disables `docker-compose.override.yml`~~ — ✅ fixed in `install.sh`
 
 Compose auto-loads `docker-compose.override.yml` **only when `COMPOSE_FILE` is unset**. The moment
 `install.sh` writes `COMPOSE_FILE=docker-compose.yaml`, the override stops applying.
@@ -58,19 +78,12 @@ Running `./install.sh` on this dev box **turns all of that off**, with no messag
 would go quiet and Ollama would silently lose its 8 GB tuning — and the symptom (slow/OOM inference,
 dead OpenClaw) looks nothing like the cause.
 
-**Fix:** append `:docker-compose.override.yml` to `COMPOSE_FILE` when the file exists. It's already
-last in precedence, so behaviour matches today's default for everyone else, and clean installs are
-unaffected because they don't have the file.
-
-```bash
-[ -f docker-compose.override.yml ] && COMPOSE_FILE="${COMPOSE_FILE}:docker-compose.override.yml"
-```
-
-Then say so in the output — "including your local override" — so it's visible either way.
+**Fix (shipped):** append `:docker-compose.override.yml` to `COMPOSE_FILE` when the file exists, and
+print "including your local override".
 
 ---
 
-### 2. 🔴 `FERNET_KEY` is never generated → GitHub OAuth silently dead
+### 2. 🔴 ~~`FERNET_KEY` is never generated~~ — ✅ fixed in `install.sh`
 
 `docker-compose.yaml` defaults it to **empty** (`${FERNET_KEY:-}`). The backend's response
 (`vibecoding/auth_github.py:51`):
@@ -84,16 +97,14 @@ A log line nobody reads. GitHub connect then fails in a way that looks like a br
 This directly undercuts the **locked** "Web Harvis = GitHub-first" decision — the primary repo path
 is off by default on every fresh install.
 
-**`python_back_end/generate_fernet_key.py` already exists.** Generate it alongside `JWT_SECRET`,
-same preserve-if-present pattern. Fernet needs a **32-byte url-safe base64** key, not hex — so
-`openssl rand -base64 32 | tr '+/' '-_'`, or shell out to the existing script.
+**Fix (shipped):** generate url-safe base64 Fernet key alongside JWT (preserve-if-present).
 
 Worth a follow-up (not tomorrow): that warning should surface in the UI's GitHub panel, not just
 logs. Same honesty principle as the Recon #2 work — a disabled integration should say it's disabled.
 
 ---
 
-### 3. 🟠 No root `.env.example`
+### 3. 🟠 ~~No root `.env.example`~~ — ✅ added at repo root
 
 `.env.example` exists for `front_end/owui/` and `python_back_end/`, but **not at the repo root** —
 which is the one Compose actually reads. A fresh clone gets no template, so the ~99 optional vars
@@ -101,27 +112,25 @@ are invisible unless you read `docker-compose.yaml`.
 
 `.env` itself is correctly gitignored (`.gitignore:14`).
 
-**Fix:** commit a root `.env.example` — commented, secrets blank, grouped by concern (core /
-engines / integrations / Discord / OpenClaw). It doubles as the config documentation that doesn't
-exist yet. **Blank placeholders only — never a real value.**
+**Fix (shipped):** root `.env.example` — commented, secrets blank, grouped by concern.
 
 ---
 
-### 4. 🟠 No model pull → first chat fails on a clean box
+### 4. 🟠 ~~No model pull~~ — ✅ skippable offer in `install.sh`
 
 `install.sh` never pulls an Ollama model, and nothing else does either. A fresh install brings up a
 healthy-looking stack whose first message fails, because Ollama has no models.
 
-**Fix:** after a successful `up`, offer to pull one small default. Sizing matters —
-[[project_hardware_gpu]] notes this box is 8 GB, and a stranger's may be smaller. Pick a modest
-default, name the download size before starting, and make it skippable.
+**Fix (shipped):** after a healthy stack, if Ollama has zero models, offer to pull
+`llama3.2:3b` (~2 GB approx; override via `HARVIS_DEFAULT_OLLAMA_MODEL`). Skippable; `--yes` does
+**not** auto-download (prints the manual command instead).
 
 Note the k8s DNS caveat if relevant: `K8S_DNS_WORKAROUND.md` documents `registry.ollama.ai` being
 blocked on the campus network. Docker installs are unaffected, but the failure is confusing if hit.
 
 ---
 
-### 5. 🟡 No post-up verification — the installer's own honesty gap
+### 5. 🟡 ~~No post-up verification~~ — ✅ fixed (`poll_health`)
 
 It prints `✓ Harvis is starting → http://localhost:9000` and exits. That `✓` is a **claim, not an
 observation** — it prints identically whether the stack came up or crashed on boot.
@@ -129,8 +138,8 @@ observation** — it prints identically whether the stack came up or crashed on 
 That's precisely the failure mode the whole Recon #2 pass was about, sitting in the first thing a new
 user runs.
 
-**Fix:** poll `http://localhost:9000` for ~60s. Report what actually happened; on failure print the
-`docker compose ps` line and the log command. Never claim success you didn't observe.
+**Fix (shipped):** poll `/api/health/services` for ~180s; print per-service table; exit 1 on failure;
+print setup code only when `needs_setup` is true.
 
 ---
 

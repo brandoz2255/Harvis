@@ -131,32 +131,36 @@ surfaces. Re-scope AFTER phases 1-8 land; fold into the new Build/preview toolba
 
 | Phase | Status | Where it stands |
 |---|---|---|
-| **1a** Settings functionality | 🟢 **~85%** | Penalty bug, theme-divergence, `defaultModelId` trap, 9 dead routes all fixed. **Left:** dead-weight removal — Personalization + Connections still imported at `SettingsModal.svelte:17,20` though permanently flag-hidden; About tab still upstream OWUI + shields.io (breaks offline); raw JWT copy row. |
+| **1a** Settings functionality | 🟢 **DONE (2026-07-20)** | Dead-weight Connections/Personalization removed from Settings modal; About rebranded (no shields.io); JWT copy row removed; `enable_api_keys`/`enable_memories` default false in facade config. |
 | **1b** Notebook | 🟢 **CLOSED** | Decided: keep the current lane as-is. Podcast + NotebookLM features later, as their own work. Native package off the list; the orphaned 652-line page **stays** as its base. Accepted: `/onb` can't join the 3-theme system. |
-| **1c** Build cockpit | 🟡 **partial** | Honest error states + poll hardening shipped. **Left:** dead affordances (permanent "No preview available yet." tab, mic placeholder, "SSH soon", unreachable Connect-GitHub CTA, hardcoded-localhost quick-links); SSE connecting-forever timeout UNVERIFIED. |
+| **1c** Build cockpit | 🟢 **~95% (2026-07-20)** | Dead affordances hidden (Preview tab, mic, SSH soon, unwired Connect-GitHub CTAs); BrowserPanel quick-links use this origin; ThoughtStream token streaming + 20s stall retry; runStream immediate flush for tokens/tools. |
 | **2** Settings UI redesign | 🟢 **DONE** | 12 tabs on `SettingsSection`/`SettingRow`. Independently audited: compiles, every control survived, no save handler lost a key. |
 | **3** New mascot | 🟢 **DONE (2026-07-20)** | Charcoal cube terminal w/ hat, moustache, bow tie, amber H, deployable hover vanes. `harvis-startup.webm` (one-shot) → `harvis-idle.webm` (loop), handoff 97.2% IoU. Reusable green-screen pipeline + player. Committed `3c7917da`. **This UNBLOCKS Phase 8.** |
-| **4** Loading + workspace polish | 🟢 **~85%** | Splash fixed for all 4 themes; skeletons on 6 surfaces; cockpit **fully tokenized** (zero raw hex — verified); global `prefers-reduced-motion` rule added. **Left:** micro-type lift (50× `text-[10px]`, 77× `text-[11px]`); raw hex moved to 8 other files. |
-| **5** Deploy test | 🟡 **partial — NEEDED BEFORE PUSH** | Built + deployed + specific fixes runtime-verified many times. **Left: the hands-on 3-theme pass over Chat/Settings/Notebook/Build with the console open.** This is yours; skeletons and per-theme splash are transient and can't be checked from code. |
-| **6** Push | 🔴 **LAST — after everything below** | Decided: goes to a **separate remote branch**, not `origin/harvis1.1`. Currently 25 commits ahead + ~130 changed files. |
-| **7** install.sh UX | 🟡 **thin — NEEDED** | Exists, 107 lines, multi-backend picker works. **Left:** real `--help`, preflight (docker/compose/GPU/ports/DNS), `.env` scaffolding with **generated** secrets, idempotent re-runs, post-install smoke check, clean-clone test. **Most config-sensitive task on the list.** |
-| **8** Main website | ⚪ **not started — NOW UNBLOCKED** | Static, no backend. Was waiting on the mascot; that landed 2026-07-20. |
+| **4** Loading + workspace polish | 🟡 **~90%** | Splash/skeletons/cockpit tokens/reduced-motion done. **2026-07-20:** progressive Build stream (token + tool flush). **Left:** micro-type lift (50×10px / 77×11px); raw hex in 8 non-cockpit files. |
+| **5** Deploy test | 🟡 **NEXT — hands-on before push** | Built + deployed + specific fixes runtime-verified many times. **Left: the hands-on 3-theme pass over Chat/Settings/Notebook/Build with the console open.** This is yours; skeletons and per-theme splash are transient and can't be checked from code. |
+| **6** Push | 🔴 **AFTER Phase 5** | Decided: goes to a **separate remote branch**, not `origin/harvis1.1`. Currently 36+ commits ahead + dirty tree (installer wizard + this polish). |
+
+
+> **Setup-flow build (2026-07-20):** Phase-7 groundwork landed as 7 commits (a1d44602..9a278715). Backend honesty foundation done + **verified live** — health endpoint now reports real DB/TTS status (was permanently 'degraded'); server-side signup enforcement works on BOTH routes (403, 0 leak) which **closes T2**; setup-code first-signup gate, fresh-volume DB bootstrap, `/api/setup/*` probe router, and `install.sh --check-only` behavioral compose gate all built. ⚠️ **The adversarial pass (pen-test/honesty/regression) died on a session limit and has NOT run** — first-signup-race, nginx-429, and fresh-volume-abort repro are agent-claimed, not independently verified. UI steps 8–10 (the `/setup` wizard) not started.
+
+| **7** install.sh UX | 🟢 **DONE in code (uncommitted leftovers)** | Preflight, secrets, health poll, setup code, `.env.example`, skippable model pull, `/setup` wizard. **Left:** commit remaining files; clean-clone E2E; honest amd note if untested. |
+| **8** Main website | ⚪ **not started — UNBLOCKED** | Static, no backend. Was waiting on the mascot; that landed 2026-07-20. |
 | **9** Adaptive Space | ⚪ **not started — LATER** | Base `b0963d3a`; next was gated sandbox run + preview. Re-scope when reached. |
 
-## Running order — confirmed by the user 2026-07-19
+## Running order — confirmed by the user 2026-07-19 · updated 2026-07-20
 
 **NOW:**
 
-1. **Finish the in-flight 5-task security/cleanup order** (below) — task 1 committed.
-2. **Phase 7 — install.sh hardening.** The open-source onboarding path.
+1. ~~Finish the in-flight 5-task security/cleanup order~~ — T1+T2 done; **T3–T5 still open**.
+2. ~~Phase 7 — install.sh hardening~~ — code complete; **commit + clean-clone verify**.
 3. **Phase 5 — the deploy test.** Full 3-theme hands-on pass. *Your* step; it gates the push.
-4. **Phase 6 — push.** To a separate remote branch, after 2 and 3 pass.
+4. **Phase 6 — push.** To a separate remote branch, after 3 passes.
 
 **LATER, explicitly deferred:**
 
-- **Phase 3** — new mascot design
-- **Phase 8** — main website (needs the mascot first)
+- **Phase 8** — main website (mascot unblocked it)
 - **Phase 9** — Adaptive Space
+- Phase 4 remainder (micro-type / raw-hex outside cockpit)
 
 ## The in-flight 5-task order (security + cleanup)
 
@@ -165,7 +169,7 @@ Not part of the original 9 phases — it came out of the `/workspace` + `/admin`
 | # | Task | Status |
 |---|---|---|
 | T1 | Server-side `require_admin` on every admin/config mutation | ✅ **committed `3c8616b2`** — uncovered that the whole `/api/rag` router was unauthenticated. Verified live: anon 401, non-admin 403. Suite 57 passed / 3 skipped. |
-| T2 | Harden fresh-install signup/admin (no silent first-signup admin) | ⏳ **in progress** — also serves Phase 7 |
+| T2 | Harden fresh-install signup/admin (no silent first-signup admin) | ✅ **committed `783cbada`** + `/setup` wizard (uncommitted) |
 | T3 | Hide Share actions everywhere (not building sharing) | ⬜ |
 | T4 | Implement Clone (existing create/retrieve fns, no schema redesign) | ⬜ |
 | T5 | Remove `/workspace` + `/admin` from nav via reversible flags | ⬜ — user: *"im sure the workspace is also fine as well"* |
