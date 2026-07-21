@@ -369,13 +369,23 @@ poll_health() {
   if [ "$overall" = "healthy" ]; then
     echo ""
     echo "✓ Harvis is up → http://localhost:9000"
-    local needs
-    needs="$(curl -s -m 8 "$SETUP_URL" 2>/dev/null | sed -n 's/^{"needs_setup":\(true\|false\)}$/\1/p')"
+    # The endpoint returns {"needs_setup":..,"setup_complete":..} — extract the
+    # one field we need without anchoring to the whole body (a second key was
+    # added later, and an anchored match silently yields empty → a false
+    # "unreachable" claim right after a 200).
+    local setup_body needs
+    setup_body="$(curl -s -m 8 "$SETUP_URL" 2>/dev/null)"
+    needs="$(printf '%s' "$setup_body" | grep -o '"needs_setup" *: *\(true\|false\)' | grep -o 'true\|false' | head -1)"
     case "$needs" in
       true)  print_setup_code ;;
       false) echo "  Instance already has an admin — no setup code needed." ;;
-      *)     echo "  Could not confirm setup state (${SETUP_URL} unreachable) — if this is a"
-             echo "  fresh install, the first signup will ask for the setup code from .env." ;;
+      *)     if [ -z "$setup_body" ]; then
+               echo "  Could not reach ${SETUP_URL} — if this is a fresh install, the first"
+               echo "  signup will ask for the setup code from .env (HARVIS_SETUP_CODE)."
+             else
+               echo "  ${SETUP_URL} answered but its state was unrecognised — if this is a"
+               echo "  fresh install, the first signup will ask for the setup code from .env."
+             fi ;;
     esac
     echo ""
     echo "  Auth cookie: HARVIS_COOKIE_SECURE defaults to false (localhost/LAN HTTP)."
