@@ -29,6 +29,8 @@
 
 	// Editor + Preview tabs only surface when a file is selected / preview is available.
 	$: hasFile = !!selectedFile;
+	// Preview tab stays hidden until a real preview URL exists (honesty: no permanent "soon" pane).
+	const BUILD_FILE_PREVIEW = false;
 	$: tabs = [
 		...(showChat ? [{ id: 'chat', label: $i18n.t('Chat') }] : []),
 		{ id: 'diff', label: $i18n.t('Diff') },
@@ -36,12 +38,13 @@
 		...(hasFile
 			? [
 					{ id: 'editor', label: $i18n.t('Editor') },
-					{ id: 'preview', label: $i18n.t('Preview') }
+					...(BUILD_FILE_PREVIEW ? [{ id: 'preview', label: $i18n.t('Preview') }] : [])
 				]
 			: [])
 	];
 	// In dock mode never sit on the (now-absent) Chat tab.
 	$: if (!showChat && tab === 'chat') tab = 'diff';
+	$: if (!BUILD_FILE_PREVIEW && tab === 'preview') tab = hasFile ? 'editor' : 'diff';
 
 	const selectTab = (id: 'chat' | 'diff' | 'logs' | 'editor' | 'preview') => {
 		tab = id;
@@ -69,13 +72,13 @@
 <div class="flex flex-col min-h-0 h-full">
 	<!-- Tab bar -->
 	<div
-		class="flex items-center gap-0 px-2 py-1 border-b border-white/8 shrink-0 bg-[#0c111d]"
+		class="flex items-center gap-0 px-2 py-1 border-b border-gray-200 dark:border-white/10 shrink-0 bg-gray-50 dark:bg-gray-900"
 	>
 		{#each tabs as t (t.id)}
 			<button
 				class="relative px-3 py-1.5 text-[11px] font-medium transition border-b border-transparent {tab === t.id
-					? 'text-gray-100 bg-white/4 border-white/14'
-					: 'text-gray-500 hover:text-gray-300'}"
+					? 'text-gray-800 dark:text-gray-100 bg-black/[0.03] dark:bg-white/[0.05] border-gray-200 dark:border-white/10'
+					: 'text-gray-500 hover:text-gray-600 dark:hover:text-gray-300'}"
 				on:click={() => selectTab(t.id)}
 			>
 				{t.label}
@@ -89,13 +92,13 @@
 	</div>
 
 	<!-- Content area -->
-	<div class="flex-1 min-h-0 overflow-auto bg-[#0a0f1a]">
+	<div class="flex-1 min-h-0 overflow-auto bg-gray-50 dark:bg-gray-900">
 		{#if tab === 'chat'}
 			{#if hasConversation}
 				<slot />
 			{:else if hasRepo}
 				<div class="h-full flex flex-col items-center justify-center text-center px-6 py-10">
-					<div class="text-base font-medium text-gray-100">
+					<div class="text-base font-medium text-gray-800 dark:text-gray-100">
 						{$i18n.t('Ready to build in')}
 						{projectName || $i18n.t('this project')}
 					</div>
@@ -119,23 +122,13 @@
 							d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.129.166 2.27.293 3.423.379.35.026.67.21.865.501L12 21l2.755-4.133a1.14 1.14 0 0 1 .865-.501 48.172 48.172 0 0 0 3.423-.379c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0 0 12 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018Z"
 						/>
 					</svg>
-					<div class="text-base font-medium text-gray-100">
+					<div class="text-base font-medium text-gray-800 dark:text-gray-100">
 						{$i18n.t('Start a coding session')}
 					</div>
 					<div class="mt-1.5 max-w-md text-xs text-gray-500">
 						{$i18n.t(
 							'Choose a repo, describe a task, and Harvis will plan, edit, test, and prepare a diff for review.'
 						)}
-					</div>
-					<div class="mt-3 flex items-center gap-2">
-						<button
-							class="text-xs px-3 py-1.5 border border-sky-400/20 bg-sky-500/80 text-white hover:bg-sky-500 transition"
-							on:click={() => dispatch('connectGithub')}>{$i18n.t('Connect GitHub')}</button
-						>
-						<button
-							class="text-xs px-3 py-1.5 border border-white/8 text-gray-300 hover:bg-white/4 transition"
-							on:click={() => dispatch('setupCli')}>{$i18n.t('Set up CLI')}</button
-						>
 					</div>
 				</div>
 			{/if}
@@ -148,18 +141,18 @@
 				</div>
 			{:else if fileError}
 				<div class="h-full flex flex-col items-center justify-center text-center px-6 py-10">
-					<div class="text-base font-medium text-gray-100">{$i18n.t('File unavailable')}</div>
+					<div class="text-base font-medium text-gray-800 dark:text-gray-100">{$i18n.t('File unavailable')}</div>
 					<div class="mt-1.5 max-w-md text-xs text-gray-500">{$i18n.t('This file may have moved, been deleted, or be outside the active workspace boundary.')}</div>
-					<button class="mt-3 text-xs px-3 py-1.5 border border-white/8 text-gray-300 hover:bg-white/4 transition" on:click={() => dispatch('refresh')}>{$i18n.t('Refresh files')}</button>
+					<button class="mt-3 text-xs px-3 py-1.5 border border-gray-200 dark:border-white/10 text-gray-600 dark:text-gray-300 hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition" on:click={() => dispatch('refresh')}>{$i18n.t('Refresh files')}</button>
 				</div>
 			{:else if !hasChanges}
 				<div class="h-full flex flex-col items-center justify-center text-center px-6 py-10">
-					<div class="text-base font-medium text-gray-100">{$i18n.t('No changes yet')}</div>
+					<div class="text-base font-medium text-gray-800 dark:text-gray-100">{$i18n.t('No changes yet')}</div>
 					<div class="mt-1.5 max-w-md text-xs text-gray-500">{$i18n.t('When Harvis edits files, they will appear here for review.')}</div>
 				</div>
 			{:else}
 				<div class="h-full flex flex-col items-center justify-center text-center px-6 py-10">
-					<div class="text-base font-medium text-gray-100">{$i18n.t('No file selected')}</div>
+					<div class="text-base font-medium text-gray-800 dark:text-gray-100">{$i18n.t('No file selected')}</div>
 					<div class="mt-1.5 max-w-md text-xs text-gray-500">{$i18n.t('Choose a file from the explorer to preview it here.')}</div>
 				</div>
 			{/if}
@@ -169,11 +162,11 @@
 			{#if selectedFile}
 				<div class="flex flex-col min-h-0 h-full">
 					<div
-						class="shrink-0 flex items-center gap-2 px-3 py-1.5 border-b border-white/8 bg-[#0c111d]"
+						class="shrink-0 flex items-center gap-2 px-3 py-1.5 border-b border-gray-200 dark:border-white/10 bg-gray-50 dark:bg-gray-900"
 					>
 						<span class="font-mono text-[11px] text-gray-400 truncate block min-w-0">{selectedFile}</span>
 						<span
-							class="ml-auto shrink-0 text-[10px] uppercase tracking-wide text-gray-600 border border-white/8 rounded px-1.5 py-0.5"
+							class="ml-auto shrink-0 text-[10px] uppercase tracking-wide text-gray-600 border border-gray-200 dark:border-white/10 rounded px-1.5 py-0.5"
 							>{$i18n.t('Read-only')}</span
 						>
 					</div>
@@ -183,7 +176,7 @@
 						</div>
 					{:else if fileBinary}
 						<div class="flex-1 flex flex-col items-center justify-center text-center px-6 py-10">
-							<div class="text-sm text-gray-300">{$i18n.t('Binary file')}</div>
+							<div class="text-sm text-gray-600 dark:text-gray-300">{$i18n.t('Binary file')}</div>
 							<div class="mt-1 text-xs text-gray-500">
 								{$i18n.t('This file cannot be displayed as text.')}
 							</div>
@@ -191,7 +184,7 @@
 					{:else if fileContent !== null}
 						{#if fileTruncated}
 							<div
-								class="shrink-0 px-3 py-1 text-[10px] text-amber-500/90 border-b border-white/8 bg-[#0c111d]"
+								class="shrink-0 px-3 py-1 text-[10px] text-amber-500/90 border-b border-gray-200 dark:border-white/10 bg-gray-50 dark:bg-gray-900"
 							>
 								{$i18n.t('Truncated at 512KB — showing the beginning of the file.')}
 							</div>
@@ -203,19 +196,29 @@
 										class="shrink-0 w-10 pr-2 text-right text-gray-600 select-none tabular-nums"
 										>{i + 1}</span
 									>
-									<span class="whitespace-pre text-gray-300 flex-1">{line || ' '}</span>
+									<span class="whitespace-pre text-gray-600 dark:text-gray-300 flex-1">{line || ' '}</span>
 								</div>
 							{/each}
 						</div>
 					{:else}
 						<!-- No fetched content (legacy host / fetch failed) → fall back to diff hunks. -->
 						<div class="flex-1 min-h-0 overflow-auto px-3 py-2 font-mono">
+							{#if fileError}
+								<!-- honest: the content fetch FAILED (diff hunks below may still help) -->
+								<div class="flex items-center gap-2 px-1 py-1.5 text-[11px] font-sans text-red-500 dark:text-red-400">
+									<span>{$i18n.t("Couldn't load this file's content.")}</span>
+									<button
+										class="underline hover:no-underline"
+										on:click={() => dispatch('refresh')}>{$i18n.t('Retry')}</button
+									>
+								</div>
+							{/if}
 							{#each diffLines as line, i (i)}
 								<div class="whitespace-pre text-[11px] leading-[1.45] {lineClass(line)}">
 									{line || ' '}
 								</div>
 							{/each}
-							{#if !diffLines.length}
+							{#if !diffLines.length && !fileError}
 								<div class="px-1 py-2 text-xs text-gray-500">
 									{$i18n.t('File content unavailable.')}
 								</div>
@@ -225,7 +228,7 @@
 				</div>
 			{:else}
 				<div class="h-full flex flex-col items-center justify-center text-center px-6 py-10">
-					<div class="text-base font-medium text-gray-100">
+					<div class="text-base font-medium text-gray-800 dark:text-gray-100">
 						{$i18n.t('No file selected')}
 					</div>
 					<div class="mt-1.5 max-w-md text-xs text-gray-500">

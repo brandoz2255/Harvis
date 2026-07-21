@@ -4,6 +4,7 @@
 	// The panels live in ./customize/* so the Settings modal ("Customize" group)
 	// and this full page mount ONE implementation each — no duplicated logic.
 	import { getContext, onMount } from 'svelte';
+	import { toast } from 'svelte-sonner';
 	import { models } from '$lib/stores';
 	// P4/P5 (marathon): model routing matrix + agent presets.
 	import ModelRoutingMatrix from './customize/ModelRoutingMatrix.svelte';
@@ -25,27 +26,62 @@
 	let poolModels: string[] = [];
 	let poolModelToAdd = '';
 	let poolLoaded = false;
+	let poolLoadError = '';
+	// Last server-confirmed pool state (successful load or save). A failed save
+	// rolls the UI back to this, so the screen never shows a pool the server
+	// doesn't actually have.
+	let poolSavedActive = false;
+	let poolSavedModels: string[] = [];
 	const loadPool = async () => {
+		// Honest load: never mark the pool "loaded" on a failed GET — presenting an
+		// empty pool as truth would let the next save overwrite the real server state.
+		poolLoadError = '';
 		const r = await fetch('/api/owui/orchestration/pool', {
 			headers: { authorization: `Bearer ${token}` }
 		})
-			.then((x) => (x.ok ? x.json() : null))
-			.catch(() => null);
+			.then(async (x) => {
+				if (!x.ok) throw new Error(`HTTP ${x.status}`);
+				return x.json();
+			})
+			.catch((e) => {
+				poolLoadError = `${e?.message ?? e ?? 'Request failed'}`;
+				return null;
+			});
 		if (r) {
 			poolActive = !!r.active;
 			poolModels = Array.isArray(r.models) ? r.models : [];
+			poolSavedActive = poolActive;
+			poolSavedModels = [...poolModels];
+			poolLoaded = true;
 		}
-		poolLoaded = true;
 	};
 	const savePool = async () => {
-		if (!poolLoaded) return;
-		await fetch('/api/owui/orchestration/pool', {
+		if (!poolLoaded) return; // never write over server state we haven't seen
+		// Snapshot the payload so a slow response commits what was actually sent.
+		const active = poolActive;
+		const modelsSent = [...poolModels];
+		const res = await fetch('/api/owui/orchestration/pool', {
 			method: 'PUT',
 			headers: { 'Content-Type': 'application/json', authorization: `Bearer ${token}` },
-			body: JSON.stringify({ active: poolActive, models: poolModels })
-		}).catch(() => {});
+			body: JSON.stringify({ active, models: modelsSent })
+		}).catch(() => null);
+		if (!res || !res.ok) {
+			// Roll the optimistic change back to the last server-confirmed state —
+			// the toggle/chips must not keep showing state the server rejected.
+			poolActive = poolSavedActive;
+			poolModels = [...poolSavedModels];
+			toast.error(
+				$i18n.t(
+					"Couldn't save the orchestration pool — your change was not stored and has been reverted."
+				)
+			);
+			return;
+		}
+		poolSavedActive = active;
+		poolSavedModels = modelsSent;
 	};
 	const addPoolModel = () => {
+		if (!poolLoaded) return;
 		const m = poolModelToAdd.trim();
 		if (m && !poolModels.includes(m)) {
 			poolModels = [...poolModels, m];
@@ -54,10 +90,12 @@
 		}
 	};
 	const removePoolModel = (m: string) => {
+		if (!poolLoaded) return;
 		poolModels = poolModels.filter((x) => x !== m);
 		savePool();
 	};
 	const togglePoolActive = () => {
+		if (!poolLoaded) return;
 		poolActive = !poolActive;
 		savePool();
 	};
@@ -124,10 +162,13 @@
 			</div>
 			<button
 				on:click={togglePoolActive}
-				class="inline-flex items-center gap-1.5 text-xs font-medium {poolActive
+				disabled={!poolLoaded}
+				class="inline-flex items-center gap-1.5 text-xs font-medium disabled:opacity-40 disabled:cursor-not-allowed {poolActive
 					? 'text-green-600 dark:text-green-400'
 					: 'text-gray-400'}"
-				title={$i18n.t('Use this pool for multi-agent runs')}
+				title={poolLoaded
+					? $i18n.t('Use this pool for multi-agent runs')
+					: $i18n.t('Pool not loaded yet — changes are disabled so your saved pool stays untouched')}
 			>
 				<span
 					class="relative inline-block w-9 h-5 rounded-full transition {poolActive
@@ -149,44 +190,60 @@
 			)}
 		</p>
 
-		<div class="flex gap-2 mb-3">
-			<select
-				bind:value={poolModelToAdd}
-				class="flex-1 rounded-lg border border-gray-200 dark:border-gray-800 bg-transparent dark:bg-gray-950 px-3 py-1.5 text-sm outline-none focus:border-blue-500"
+		{#if poolLoadError}
+			<!-- Load failed: don't render an empty pool as truth — a save from here
+			     would overwrite the real server-side pool. Same pattern as SkillsManager. -->
+			<div
+				class="rounded-xl border border-gray-100 dark:border-gray-850 bg-white dark:bg-gray-950 px-3 py-4 text-center text-sm text-gray-500"
 			>
-				<option value="">{$i18n.t('Choose a model to add…')}</option>
-				{#each ($models || []).filter((m) => m?.id && !poolModels.includes(m.id)) as m}
-					<option value={m.id}>{m.name || m.id}</option>
-				{/each}
-			</select>
-			<button
-				on:click={addPoolModel}
-				disabled={!poolModelToAdd}
-				class="rounded-lg bg-blue-600 text-white px-4 py-1.5 text-sm font-medium hover:bg-blue-700 disabled:opacity-40"
-				>{$i18n.t('Add')}</button
-			>
-		</div>
-
-		{#if poolModels.length}
-			<div class="flex flex-wrap gap-1.5">
-				{#each poolModels as m (m)}
-					<span
-						class="inline-flex items-center gap-1.5 rounded-full border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-950 pl-3 pr-1.5 py-1 text-xs text-gray-700 dark:text-gray-200"
-					>
-						<code class="font-mono">{m}</code>
-						<button
-							on:click={() => removePoolModel(m)}
-							title={$i18n.t('Remove')}
-							class="text-gray-400 hover:text-red-500 transition"
-							><svg class="size-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18" /></svg></button
-						>
-					</span>
-				{/each}
+				{$i18n.t('Could not load the orchestration pool')} — {poolLoadError}.
+				{$i18n.t('Your saved pool is untouched; changes are disabled until it loads.')}
+				<button class="ml-2 text-blue-600 dark:text-blue-400 hover:underline" on:click={loadPool}>
+					{$i18n.t('Retry')}
+				</button>
 			</div>
+		{:else if !poolLoaded}
+			<div class="text-xs text-gray-500 py-1" role="status">{$i18n.t('Loading pool…')}</div>
 		{:else}
-			<div class="text-xs text-gray-500 py-1">
-				{$i18n.t('No models in the pool. Add a few to fan multi-agent work across them.')}
+			<div class="flex gap-2 mb-3">
+				<select
+					bind:value={poolModelToAdd}
+					class="flex-1 rounded-lg border border-gray-200 dark:border-gray-800 bg-transparent dark:bg-gray-950 px-3 py-1.5 text-sm outline-none focus:border-blue-500"
+				>
+					<option value="">{$i18n.t('Choose a model to add…')}</option>
+					{#each ($models || []).filter((m) => m?.id && !poolModels.includes(m.id)) as m}
+						<option value={m.id}>{m.name || m.id}</option>
+					{/each}
+				</select>
+				<button
+					on:click={addPoolModel}
+					disabled={!poolModelToAdd}
+					class="rounded-lg bg-blue-600 text-white px-4 py-1.5 text-sm font-medium hover:bg-blue-700 disabled:opacity-40"
+					>{$i18n.t('Add')}</button
+				>
 			</div>
+
+			{#if poolModels.length}
+				<div class="flex flex-wrap gap-1.5">
+					{#each poolModels as m (m)}
+						<span
+							class="inline-flex items-center gap-1.5 rounded-full border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-950 pl-3 pr-1.5 py-1 text-xs text-gray-700 dark:text-gray-200"
+						>
+							<code class="font-mono">{m}</code>
+							<button
+								on:click={() => removePoolModel(m)}
+								title={$i18n.t('Remove')}
+								class="text-gray-400 hover:text-red-500 transition"
+								><svg class="size-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18" /></svg></button
+							>
+						</span>
+					{/each}
+				</div>
+			{:else}
+				<div class="text-xs text-gray-500 py-1">
+					{$i18n.t('No models in the pool. Add a few to fan multi-agent work across them.')}
+				</div>
+			{/if}
 		{/if}
 	</section>
 

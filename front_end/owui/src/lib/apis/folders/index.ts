@@ -24,7 +24,7 @@ export const createNewFolder = async (token: string, folderForm: FolderForm) => 
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -54,7 +54,7 @@ export const getFolders = async (token: string = '') => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -85,7 +85,7 @@ export const getFolderById = async (token: string, id: string) => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -117,7 +117,7 @@ export const updateFolderById = async (token: string, id: string, folderForm: Fo
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -155,7 +155,7 @@ export const updateFolderIsExpandedById = async (
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -189,7 +189,7 @@ export const updateFolderParentIdById = async (token: string, id: string, parent
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -228,7 +228,7 @@ export const updateFolderItemsById = async (token: string, id: string, items: Fo
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -262,7 +262,7 @@ export const deleteFolderById = async (token: string, id: string, deleteContents
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});

@@ -31,6 +31,8 @@
 	let selectedId = '';
 
 	let loading = false;
+	// Distinct from "loaded but empty": a failed load must say so, not render a blank panel.
+	let loadError = '';
 
 	let valvesSpec = null;
 	let valves = {};
@@ -123,19 +125,33 @@
 
 	const init = async () => {
 		loading = true;
+		loadError = '';
 
-		if ($functions === null) {
-			functions.set(await getFunctions(localStorage.token));
+		// try/finally: a throw here used to strand `loading = true`, and `{#if show && !loading}`
+		// then rendered a permanently blank panel — no content, no error, no way out.
+		try {
+			if ($functions === null) {
+				functions.set(await getFunctions(localStorage.token));
+			}
+			if ($tools === null) {
+				tools.set(await getTools(localStorage.token));
+			}
+		} catch (e) {
+			loadError = `${e}`;
+		} finally {
+			loading = false;
 		}
-		if ($tools === null) {
-			tools.set(await getTools(localStorage.token));
-		}
-
-		loading = false;
 	};
 </script>
 
-{#if show && !loading}
+{#if show && loadError}
+	<div class="rounded-xl border border-gray-100 dark:border-gray-850 px-3 py-6 text-center text-sm text-gray-500">
+		{$i18n.t('Could not load valves')} — {loadError}
+		<button class="ml-2 text-blue-600 dark:text-blue-400 hover:underline" on:click={init}
+			>{$i18n.t('Retry')}</button
+		>
+	</div>
+{:else if show && !loading}
 	<form
 		class="flex flex-col h-full justify-between space-y-3 text-sm"
 		on:submit|preventDefault={() => {

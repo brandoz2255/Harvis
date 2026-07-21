@@ -26,7 +26,7 @@ export const getModelAnalytics = async (
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -66,7 +66,7 @@ export const getUserAnalytics = async (
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -112,7 +112,7 @@ export const getMessages = async (
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -150,7 +150,7 @@ export const getSummary = async (
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -190,7 +190,7 @@ export const getDailyStats = async (
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -228,7 +228,7 @@ export const getTokenUsage = async (
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -272,7 +272,7 @@ export const getModelChats = async (
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -306,7 +306,7 @@ export const getModelOverview = async (token: string = '', modelId: string, days
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});

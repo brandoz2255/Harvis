@@ -50,33 +50,27 @@
 					localStorage.theme = 'system';
 				}
 
-				if (localStorage.theme === 'system') {
-					document.documentElement.classList.add(prefersDarkTheme ? 'dark' : 'light');
-					metaThemeColorTag.setAttribute('content', prefersDarkTheme ? '#12151D' : '#ffffff');
-				} else if (localStorage.theme === 'oled-dark') {
-					document.documentElement.style.setProperty('--color-gray-800', '#101010');
-					document.documentElement.style.setProperty('--color-gray-850', '#050505');
-					document.documentElement.style.setProperty('--color-gray-900', '#000000');
-					document.documentElement.style.setProperty('--color-gray-950', '#000000');
-					document.documentElement.classList.add('dark');
-					metaThemeColorTag.setAttribute('content', '#000000');
-				} else if (localStorage.theme === 'harvis-dark') {
-					document.documentElement.style.setProperty('--color-gray-800', '#1a1f2e');
-					document.documentElement.style.setProperty('--color-gray-850', '#141823');
-					document.documentElement.style.setProperty('--color-gray-900', '#0e111a');
-					document.documentElement.style.setProperty('--color-gray-950', '#090b12');
-					document.documentElement.classList.add('dark');
-					metaThemeColorTag.setAttribute('content', '#0e111a');
-				} else if (localStorage.theme === 'light') {
-					document.documentElement.classList.add('light');
-					metaThemeColorTag.setAttribute('content', '#ffffff');
-				} else if (localStorage.theme === 'her') {
-					document.documentElement.classList.add('her');
-					metaThemeColorTag.setAttribute('content', '#983724');
-				} else {
-					document.documentElement.classList.add('dark');
-					metaThemeColorTag.setAttribute('content', '#12151D');
-				}
+				// FOUC-critical mirror of src/lib/themes.ts — keep in sync. Data-driven so a
+				// light theme (airy/warm) paints its surfaces on the FIRST frame, not after hydration.
+				const t = localStorage.theme;
+				const BASE = { system: null, dark: 'dark', 'harvis-dark': 'dark', 'oled-dark': 'dark', light: 'light', airy: 'light', warm: 'light', her: 'her' };
+				const VARS = {
+					'harvis-dark': { '--color-gray-800': '#1a1f2e', '--color-gray-850': '#141823', '--color-gray-900': '#0e111a', '--color-gray-950': '#090b12' },
+					'oled-dark': { '--color-gray-800': '#101010', '--color-gray-850': '#050505', '--color-gray-900': '#000000', '--color-gray-950': '#000000' },
+					'airy': { '--color-gray-50': '#f4f6f8', '--color-gray-100': '#eef1f5', '--color-gray-200': '#e3e8ee', '--color-blue-400': '#8b8ef7', '--color-blue-500': '#6d70f0', '--color-blue-600': '#5457e6', '--color-blue-700': '#4143c9' },
+					'warm': { '--color-gray-50': '#f5f1e8', '--color-gray-100': '#efe9dc', '--color-gray-200': '#e6ddcc', '--color-gray-700': '#3a352c', '--color-gray-800': '#2b2a26', '--color-gray-900': '#211f1b', '--color-blue-400': '#e89f86', '--color-blue-500': '#df8365', '--color-blue-600': '#d0684a', '--color-blue-700': '#b5543a' }
+				};
+				const FONT = { warm: "'InstrumentSerif', Georgia, 'Times New Roman', serif" };
+				const META = { dark: '#00030b', 'harvis-dark': '#0e111a', 'oled-dark': '#000000', light: '#ffffff', airy: '#f4f6f8', warm: '#f5f1e8', her: '#983724' };
+
+				const base = t === 'system' || BASE[t] == null ? (prefersDarkTheme ? 'dark' : 'light') : BASE[t];
+				document.documentElement.classList.add(base);
+				if (t === 'her') document.documentElement.classList.add('her');
+				document.documentElement.classList.add('theme-' + (BASE[t] !== undefined ? t : 'dark'));
+				document.documentElement.dataset.theme = t;
+				if (VARS[t]) for (const k in VARS[t]) document.documentElement.style.setProperty(k, VARS[t][k]);
+				if (FONT[t]) document.documentElement.style.setProperty('--theme-font-body', FONT[t]);
+				metaThemeColorTag.setAttribute('content', t === 'system' ? (prefersDarkTheme ? '#00030b' : '#ffffff') : (META[t] || (base === 'dark' ? '#00030b' : '#ffffff')));
 
 				const preloadHref = document.documentElement.classList.contains('dark')
 					? '/static/harvis-logo.svg'
@@ -93,7 +87,7 @@
 						if (e.matches) {
 							document.documentElement.classList.add('dark');
 							document.documentElement.classList.remove('light');
-							metaThemeColorTag.setAttribute('content', '#12151D');
+							metaThemeColorTag.setAttribute('content', '#00030b');
 						} else {
 							document.documentElement.classList.add('light');
 							document.documentElement.classList.remove('dark');
@@ -202,20 +196,40 @@
 			overscroll-behavior-y: none;
 		}
 
+		/* Splash background must match the resolved theme on FIRST paint. The inline
+		   loader above adds base classes (`dark`/`light`/`her`) plus `theme-<name>`
+		   (e.g. `theme-harvis-dark`, `theme-airy`) — these selectors mirror that
+		   classing and the loader's META color map exactly. Hex is deliberate here:
+		   this runs pre-hydration, before any token CSS exists. Keep in sync with
+		   the META map in the loader script and src/lib/themes.ts. */
 		#splash-screen {
 			background: #fff;
 		}
 
 		html.dark #splash-screen {
-			background: #000;
+			background: #00030b;
 		}
 
 		html.her #splash-screen {
 			background: #983724;
 		}
 
-		html.harvis-dark #splash-screen {
+		/* Theme-specific overrides — same specificity as the base rules, so they
+		   must stay AFTER them (later rule wins). */
+		html.theme-harvis-dark #splash-screen {
 			background: #0e111a;
+		}
+
+		html.theme-oled-dark #splash-screen {
+			background: #000000;
+		}
+
+		html.theme-airy #splash-screen {
+			background: #f4f6f8;
+		}
+
+		html.theme-warm #splash-screen {
+			background: #f5f1e8;
 		}
 
 		#logo-her {

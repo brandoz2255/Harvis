@@ -14,6 +14,9 @@
 	import { goto } from '$app/navigation';
 
 	export let onSubmit: Function;
+	// Optional back override — the Settings modal mounts this editor in-panel and
+	// must not navigate away; the workspace route keeps the default goto.
+	export let onBack: Function | null = null;
 	export let edit = false;
 	export let skill = null;
 	export let clone = false;
@@ -139,7 +142,8 @@
 									class="w-full text-left text-sm py-1.5 px-1 rounded-lg dark:text-gray-300 dark:hover:text-white hover:bg-black/5 dark:hover:bg-gray-850"
 									aria-label={$i18n.t('Back')}
 									on:click={() => {
-										goto('/workspace/skills');
+										if (onBack) onBack();
+										else goto('/workspace/skills');
 									}}
 									type="button"
 								>

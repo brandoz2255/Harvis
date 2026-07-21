@@ -10,6 +10,9 @@
 	export let size = 60;
 	export let className = '';
 	export let interactive = false;
+	// Ambient look-around/wave cycle while idle. Turn OFF where "idle" means *finished*
+	// rather than *waiting* — a mascot waving over a completed run implies live activity.
+	export let idleCycle = true;
 
 	let currentState: string = state;
 	let bobOffset = 0;
@@ -30,12 +33,32 @@
 
 	const CYCLE = ['idle', 'lookLeft', 'idle', 'lookRight', 'idle', 'wave'];
 
+	// Accessibility + battery: honour prefers-reduced-motion (WCAG 2.3.3). When the user
+	// asks for less motion we hold a static pose — no rAF, no idle look/wave cycle — and
+	// we re-evaluate live so toggling the OS setting takes effect without a reload.
+	let reduceMotion = false;
+	let motionQuery: MediaQueryList | null = null;
+	const onMotionChange = (e: MediaQueryListEvent | MediaQueryList) => {
+		reduceMotion = e.matches;
+		if (reduceMotion) {
+			stopLoop();
+			bobOffset = 0;
+			antennaWiggle = 0;
+			clawOpenLeft = 0;
+			clawOpenRight = 0;
+			burst = false;
+		} else {
+			startLoop();
+		}
+		syncState(state, isAngry, idleCycle);
+	};
+
 	$: eyeOffset = currentState === 'lookLeft' ? -4 : currentState === 'lookRight' ? 4 : 0;
 	$: isSmiling = currentState === 'idle' || currentState === 'wave' || currentState === 'working';
 
-	$: syncState(state, isAngry);
+	$: syncState(state, isAngry, idleCycle);
 
-	const syncState = (s: string, angry: boolean) => {
+	const syncState = (s: string, angry: boolean, cycle = true) => {
 		if (cycleTimer) {
 			clearInterval(cycleTimer);
 			cycleTimer = null;
@@ -49,6 +72,9 @@
 			return;
 		}
 		currentState = 'idle';
+		// Static idle pose — no auto look/wave cycle — when the caller opted out, or the
+		// user asked for reduced motion.
+		if (!cycle || reduceMotion) return;
 		let i = 0;
 		cycleTimer = setInterval(() => {
 			i = (i + 1) % CYCLE.length;
@@ -64,32 +90,48 @@
 		}
 	};
 
-	onMount(() => {
-		let frame = 0;
-		const loop = () => {
-			frame++;
-			bobOffset = Math.sin(frame * 0.05) * 2;
-			antennaWiggle = Math.sin(frame * 0.08) * 3;
-			if (state === 'working') {
-				clawOpenLeft = Math.sin(frame * 0.2) * 12;
-				clawOpenRight = Math.sin(frame * 0.2 + Math.PI) * 12;
-			} else if (burst) {
-				burstFrame++;
-				if (burstFrame < 60) {
-					clawOpenLeft = Math.sin(burstFrame * 0.4) * 15;
-					clawOpenRight = Math.sin(burstFrame * 0.4 + Math.PI) * 15;
-				} else {
-					burst = false;
-					clawOpenLeft = 0;
-					clawOpenRight = 0;
-				}
-			} else if (clawOpenLeft !== 0 || clawOpenRight !== 0) {
+	let frame = 0;
+	const loop = () => {
+		frame++;
+		bobOffset = Math.sin(frame * 0.05) * 2;
+		antennaWiggle = Math.sin(frame * 0.08) * 3;
+		if (state === 'working') {
+			clawOpenLeft = Math.sin(frame * 0.2) * 12;
+			clawOpenRight = Math.sin(frame * 0.2 + Math.PI) * 12;
+		} else if (burst) {
+			burstFrame++;
+			if (burstFrame < 60) {
+				clawOpenLeft = Math.sin(burstFrame * 0.4) * 15;
+				clawOpenRight = Math.sin(burstFrame * 0.4 + Math.PI) * 15;
+			} else {
+				burst = false;
 				clawOpenLeft = 0;
 				clawOpenRight = 0;
 			}
-			rafId = requestAnimationFrame(loop);
-		};
+		} else if (clawOpenLeft !== 0 || clawOpenRight !== 0) {
+			clawOpenLeft = 0;
+			clawOpenRight = 0;
+		}
 		rafId = requestAnimationFrame(loop);
+	};
+
+	const startLoop = () => {
+		if (rafId !== null || reduceMotion) return;
+		rafId = requestAnimationFrame(loop);
+	};
+	const stopLoop = () => {
+		if (rafId !== null) cancelAnimationFrame(rafId);
+		rafId = null;
+	};
+	// A background tab should not burn frames (or battery) animating something nobody sees.
+	const onVisibility = () => (document.hidden ? stopLoop() : startLoop());
+
+	onMount(() => {
+		motionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+		onMotionChange(motionQuery);
+		motionQuery.addEventListener('change', onMotionChange);
+		document.addEventListener('visibilitychange', onVisibility);
+		startLoop();
 	});
 
 	onDestroy(() => {
@@ -124,7 +166,9 @@
 		}, 2000);
 	};
 
-	const ACCENT = '#9DC2FF';
+	// Theme accent — --color-blue-* re-hues per theme (Midnight cyan-blue,
+	// Airy indigo, Warm coral). ANGRY stays hardcoded red: semantic state color.
+	const ACCENT = 'var(--color-blue-400)';
 	const ANGRY = '#E53E3E';
 	$: accent = isAngry ? ANGRY : ACCENT;
 </script>
@@ -152,20 +196,20 @@
 			</feMerge>
 		</filter>
 		<linearGradient id="clawHeadGradient" x1="0%" y1="0%" x2="0%" y2="100%">
-			<stop offset="0%" stop-color="#7FA8F5" />
-			<stop offset="100%" stop-color="#4F7CF0" />
+			<stop offset="0%" stop-color="var(--color-blue-400)" />
+			<stop offset="100%" stop-color="var(--color-blue-600)" />
 		</linearGradient>
 		<linearGradient id="clawScreenGradient" x1="0%" y1="0%" x2="0%" y2="100%">
-			<stop offset="0%" stop-color="#1A2C5D" />
-			<stop offset="100%" stop-color="#0D152A" />
+			<stop offset="0%" stop-color="var(--color-gray-800)" />
+			<stop offset="100%" stop-color="var(--color-gray-950)" />
 		</linearGradient>
 		<linearGradient id="clawGradient" x1="0%" y1="0%" x2="0%" y2="100%">
-			<stop offset="0%" stop-color="#6F9FE8" />
-			<stop offset="100%" stop-color="#2F5FD8" />
+			<stop offset="0%" stop-color="var(--color-blue-400)" />
+			<stop offset="100%" stop-color="var(--color-blue-600)" />
 		</linearGradient>
 		<linearGradient id="clawBodyGradient" x1="0%" y1="0%" x2="0%" y2="100%">
-			<stop offset="0%" stop-color="#4F7CF0" />
-			<stop offset="100%" stop-color="#2B54C4" />
+			<stop offset="0%" stop-color="var(--color-blue-500)" />
+			<stop offset="100%" stop-color="var(--color-blue-700)" />
 		</linearGradient>
 		<linearGradient id="clawAngryGradient" x1="0%" y1="0%" x2="0%" y2="100%">
 			<stop offset="0%" stop-color="#FC8181" />
@@ -205,10 +249,10 @@
 			<ellipse cx="46" cy="22" rx="2" ry="1" fill="#FED7D7" />
 		{:else if isStartled}
 			<circle cx="34" cy="20" r="5" fill={ACCENT} filter="url(#clawGlow)" />
-			<circle cx="34" cy="20" r="2.5" fill="#EAF1FF" />
+			<circle cx="34" cy="20" r="2.5" fill="var(--color-gray-50)" />
 			<circle cx="34" cy="19" r="1" fill="#ffffff" />
 			<circle cx="46" cy="20" r="5" fill={ACCENT} filter="url(#clawGlow)" />
-			<circle cx="46" cy="20" r="2.5" fill="#EAF1FF" />
+			<circle cx="46" cy="20" r="2.5" fill="var(--color-gray-50)" />
 			<circle cx="46" cy="19" r="1" fill="#ffffff" />
 		{:else if isSmiling}
 			<path
@@ -229,9 +273,9 @@
 			/>
 		{:else}
 			<ellipse cx="34" cy="20" rx="3" ry="4" fill={ACCENT} filter="url(#clawGlow)" />
-			<ellipse cx="34" cy="20" rx="1.5" ry="2" fill="#EAF1FF" />
+			<ellipse cx="34" cy="20" rx="1.5" ry="2" fill="var(--color-gray-50)" />
 			<ellipse cx="46" cy="20" rx="3" ry="4" fill={ACCENT} filter="url(#clawGlow)" />
-			<ellipse cx="46" cy="20" rx="1.5" ry="2" fill="#EAF1FF" />
+			<ellipse cx="46" cy="20" rx="1.5" ry="2" fill="var(--color-gray-50)" />
 		{/if}
 	</g>
 
@@ -253,7 +297,7 @@
 	<rect x="24" y="38" width="10" height="24" rx="3" fill="url(#clawBodyGradient)" />
 	<rect x="46" y="38" width="10" height="24" rx="3" fill="url(#clawBodyGradient)" />
 	<rect x="24" y="46" width="32" height="10" rx="2" fill="url(#clawBodyGradient)" />
-	<text x="40" y="55" text-anchor="middle" font-size="10" font-weight="bold" fill="#D6E4FF">H</text>
+	<text x="40" y="55" text-anchor="middle" font-size="10" font-weight="bold" fill="var(--color-gray-50)">H</text>
 
 	<!-- left claw arm -->
 	<g style="transform-origin: 16px 45px">
@@ -262,14 +306,14 @@
 			<path
 				d={`M3 ${44 - clawOpenLeft * 0.3} Q8 ${40 - clawOpenLeft * 0.3} 10 ${46 - clawOpenLeft * 0.2}`}
 				fill="url(#clawGradient)"
-				stroke="#1E3F9E"
+				stroke="var(--color-blue-700)"
 				stroke-width="1"
 			/>
 			<ellipse cx="3" cy={44 - clawOpenLeft * 0.3} rx="4" ry="5" fill="url(#clawGradient)" />
 			<path
 				d={`M3 ${52 + clawOpenLeft * 0.3} Q8 ${56 + clawOpenLeft * 0.3} 10 ${50 + clawOpenLeft * 0.2}`}
 				fill="url(#clawGradient)"
-				stroke="#1E3F9E"
+				stroke="var(--color-blue-700)"
 				stroke-width="1"
 			/>
 			<ellipse cx="3" cy={52 + clawOpenLeft * 0.3} rx="4" ry="5" fill="url(#clawGradient)" />
@@ -283,14 +327,14 @@
 			<path
 				d={`M77 ${44 - clawOpenRight * 0.3} Q72 ${40 - clawOpenRight * 0.3} 70 ${46 - clawOpenRight * 0.2}`}
 				fill="url(#clawGradient)"
-				stroke="#1E3F9E"
+				stroke="var(--color-blue-700)"
 				stroke-width="1"
 			/>
 			<ellipse cx="77" cy={44 - clawOpenRight * 0.3} rx="4" ry="5" fill="url(#clawGradient)" />
 			<path
 				d={`M77 ${52 + clawOpenRight * 0.3} Q72 ${56 + clawOpenRight * 0.3} 70 ${50 + clawOpenRight * 0.2}`}
 				fill="url(#clawGradient)"
-				stroke="#1E3F9E"
+				stroke="var(--color-blue-700)"
 				stroke-width="1"
 			/>
 			<ellipse cx="77" cy={52 + clawOpenRight * 0.3} rx="4" ry="5" fill="url(#clawGradient)" />

@@ -5,16 +5,18 @@
 	const dispatch = createEventDispatcher();
 
 	import { config, models, settings, theme, user } from '$lib/stores';
+	import { THEMES, applyThemeById } from '$lib/themes';
 
 	const i18n = getContext('i18n');
 
 	import AdvancedParams from './Advanced/AdvancedParams.svelte';
 	import Textarea from '$lib/components/common/Textarea.svelte';
+	import SettingsSection from './SettingsSection.svelte';
+	import SettingRow from './SettingRow.svelte';
 	export let saveSettings: Function;
 	export let getModels: Function;
 
 	// General
-	let themes = ['dark', 'light', 'oled-dark', 'harvis-dark'];
 	let selectedTheme = 'system';
 
 	let languages: Awaited<ReturnType<typeof getLanguages>> = [];
@@ -81,8 +83,8 @@
 				reasoning_effort: params.reasoning_effort !== null ? params.reasoning_effort : undefined,
 				logit_bias: params.logit_bias !== null ? params.logit_bias : undefined,
 				frequency_penalty: params.frequency_penalty !== null ? params.frequency_penalty : undefined,
-				presence_penalty: params.frequency_penalty !== null ? params.frequency_penalty : undefined,
-				repeat_penalty: params.frequency_penalty !== null ? params.frequency_penalty : undefined,
+				presence_penalty: params.presence_penalty !== null ? params.presence_penalty : undefined,
+				repeat_penalty: params.repeat_penalty !== null ? params.repeat_penalty : undefined,
 				repeat_last_n: params.repeat_last_n !== null ? params.repeat_last_n : undefined,
 				mirostat: params.mirostat !== null ? params.mirostat : undefined,
 				mirostat_eta: params.mirostat_eta !== null ? params.mirostat_eta : undefined,
@@ -123,82 +125,9 @@
 		params.stop = $settings?.params?.stop ? ($settings?.params?.stop ?? []).join(',') : null;
 	});
 
-	const applyTheme = (_theme: string) => {
-		let themeToApply =
-			_theme === 'oled-dark' || _theme === 'harvis-dark'
-				? 'dark'
-				: _theme === 'her'
-					? 'light'
-					: _theme;
-
-		if (_theme === 'system') {
-			themeToApply = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-		}
-
-		if (themeToApply === 'dark' && !_theme.includes('oled')) {
-			document.documentElement.style.setProperty('--color-gray-800', '#333');
-			document.documentElement.style.setProperty('--color-gray-850', '#262626');
-			document.documentElement.style.setProperty('--color-gray-900', '#171717');
-			document.documentElement.style.setProperty('--color-gray-950', '#0d0d0d');
-		}
-
-		themes
-			.filter((e) => e !== themeToApply)
-			.forEach((e) => {
-				e.split(' ').forEach((e) => {
-					document.documentElement.classList.remove(e);
-				});
-			});
-
-		themeToApply.split(' ').forEach((e) => {
-			document.documentElement.classList.add(e);
-		});
-
-		const metaThemeColor = document.querySelector('meta[name="theme-color"]');
-		if (metaThemeColor) {
-			if (_theme.includes('system')) {
-				const systemTheme = window.matchMedia('(prefers-color-scheme: dark)').matches
-					? 'dark'
-					: 'light';
-				console.log('Setting system meta theme color: ' + systemTheme);
-				metaThemeColor.setAttribute('content', systemTheme === 'light' ? '#ffffff' : '#171717');
-			} else {
-				console.log('Setting meta theme color: ' + _theme);
-				metaThemeColor.setAttribute(
-					'content',
-					_theme === 'dark'
-						? '#171717'
-						: _theme === 'oled-dark'
-							? '#000000'
-							: _theme === 'her'
-								? '#983724'
-								: '#ffffff'
-				);
-			}
-		}
-
-		if (typeof window !== 'undefined' && window.applyTheme) {
-			window.applyTheme();
-		}
-
-		if (_theme.includes('oled')) {
-			document.documentElement.style.setProperty('--color-gray-800', '#101010');
-			document.documentElement.style.setProperty('--color-gray-850', '#050505');
-			document.documentElement.style.setProperty('--color-gray-900', '#000000');
-			document.documentElement.style.setProperty('--color-gray-950', '#000000');
-			document.documentElement.classList.add('dark');
-		}
-
-		if (_theme === 'harvis-dark') {
-			document.documentElement.style.setProperty('--color-gray-800', '#1a1f2e');
-			document.documentElement.style.setProperty('--color-gray-850', '#141823');
-			document.documentElement.style.setProperty('--color-gray-900', '#0e111a');
-			document.documentElement.style.setProperty('--color-gray-950', '#090b12');
-			document.documentElement.classList.add('dark');
-		}
-
-		console.log(_theme);
-	};
+	// Theme application is centralised in $lib/themes (applyThemeById) — the registry-driven
+	// token-map switcher shared with the desktop theme:update handler and the app.html loader.
+	const applyTheme = (_theme: string) => applyThemeById(_theme);
 
 	const themeChangeHandler = (_theme: string) => {
 		theme.set(_theme);
@@ -209,54 +138,46 @@
 
 <div class="flex flex-col h-full justify-between text-sm" id="tab-general">
 	<div class="  overflow-y-scroll max-h-[28rem] md:max-h-full">
-		<div class="">
-			<div class=" mb-1 text-sm font-medium">{$i18n.t('WebUI Settings')}</div>
-
-			<div class="flex w-full justify-between">
-				<div class=" self-center text-xs font-medium">{$i18n.t('Theme')}</div>
-				<div class="flex items-center relative">
-					<select
-						class="w-fit pr-8 rounded-sm py-2 px-2 text-xs bg-transparent text-right {$settings.highContrastMode
-							? ''
-							: 'outline-hidden'}"
-						bind:value={selectedTheme}
-						placeholder={$i18n.t('Select a theme')}
-						on:change={() => themeChangeHandler(selectedTheme)}
-					>
-						<option value="system">⚙️ {$i18n.t('System')}</option>
-						<option value="dark">🌑 {$i18n.t('Dark')}</option>
-						<option value="oled-dark">🌃 {$i18n.t('OLED Dark')}</option>
-						<option value="harvis-dark">🤖 {$i18n.t('Harvis Dark')}</option>
-						<option value="light">☀️ {$i18n.t('Light')}</option>
-						{#if $config?.features?.enable_easter_eggs}
-							<option value="her">🌷 Her</option>
+		<SettingsSection title={$i18n.t('WebUI Settings')}>
+			<SettingRow title={$i18n.t('Theme')} description={$i18n.t('How Harvis looks.')}>
+				<select
+					class="w-44 sm:w-56 cursor-pointer rounded-[10px] bg-gray-100 dark:bg-gray-850 px-3 py-2 pr-8 text-sm text-gray-800 dark:text-gray-100 {$settings.highContrastMode
+						? ''
+						: 'outline-hidden'}"
+					bind:value={selectedTheme}
+					placeholder={$i18n.t('Select a theme')}
+					on:change={() => themeChangeHandler(selectedTheme)}
+				>
+					{#each THEMES as t (t.id)}
+						{#if !t.eggOnly || $config?.features?.enable_easter_eggs}
+							<option value={t.id}>{t.icon} {$i18n.t(t.label)}</option>
 						{/if}
-					</select>
-				</div>
-			</div>
+					{/each}
+				</select>
+			</SettingRow>
 
-			<div class=" flex w-full justify-between">
-				<div class=" self-center text-xs font-medium">{$i18n.t('Language')}</div>
-				<div class="flex items-center relative">
-					<select
-						class="w-fit pr-8 rounded-sm py-2 px-2 text-xs bg-transparent text-right {$settings.highContrastMode
-							? ''
-							: 'outline-hidden'}"
-						bind:value={lang}
-						placeholder={$i18n.t('Select a language')}
-						on:change={(e) => {
-							changeLanguage(lang);
-						}}
-					>
-						{#each languages as language}
-							<option value={language['code']}>{language['title']}</option>
-						{/each}
-					</select>
-				</div>
-			</div>
+			<SettingRow
+				title={$i18n.t('Language')}
+				description={$i18n.t('The display language of the interface.')}
+			>
+				<select
+					class="w-44 sm:w-56 cursor-pointer rounded-[10px] bg-gray-100 dark:bg-gray-850 px-3 py-2 pr-8 text-sm text-gray-800 dark:text-gray-100 {$settings.highContrastMode
+						? ''
+						: 'outline-hidden'}"
+					bind:value={lang}
+					placeholder={$i18n.t('Select a language')}
+					on:change={(e) => {
+						changeLanguage(lang);
+					}}
+				>
+					{#each languages as language}
+						<option value={language['code']}>{language['title']}</option>
+					{/each}
+				</select>
+			</SettingRow>
 			{#if $i18n.language === 'en-US' && !($config?.license_metadata ?? false)}
 				<div
-					class="mb-2 text-xs {($settings?.highContrastMode ?? false)
+					class="py-2 text-xs {($settings?.highContrastMode ?? false)
 						? 'text-gray-800 dark:text-gray-100'
 						: 'text-gray-400 dark:text-gray-500'}"
 				>
@@ -273,52 +194,47 @@
 				</div>
 			{/if}
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div class=" self-center text-xs font-medium">{$i18n.t('Notifications')}</div>
-
-					<button
-						class="p-1 px-3 text-xs flex rounded-sm transition"
-						on:click={() => {
-							toggleNotification();
-						}}
-						type="button"
-						role="switch"
-						aria-checked={notificationEnabled}
-					>
-						{#if notificationEnabled === true}
-							<span class="ml-2 self-center">{$i18n.t('On')}</span>
-						{:else}
-							<span class="ml-2 self-center">{$i18n.t('Off')}</span>
-						{/if}
-					</button>
-				</div>
-			</div>
-		</div>
+			<SettingRow
+				title={$i18n.t('Notifications')}
+				description={$i18n.t('Asks your browser for permission to show notifications.')}
+			>
+				<button
+					class="px-3 py-1.5 text-sm font-medium rounded-[10px] bg-gray-100 hover:bg-gray-200 dark:bg-gray-850 dark:hover:bg-gray-800 text-gray-800 dark:text-gray-100 flex transition"
+					on:click={() => {
+						toggleNotification();
+					}}
+					type="button"
+					role="switch"
+					aria-checked={notificationEnabled}
+				>
+					{#if notificationEnabled === true}
+						<span class="self-center">{$i18n.t('On')}</span>
+					{:else}
+						<span class="self-center">{$i18n.t('Off')}</span>
+					{/if}
+				</button>
+			</SettingRow>
+		</SettingsSection>
 
 		{#if $user?.role === 'admin' || (($user?.permissions.chat?.controls ?? true) && ($user?.permissions.chat?.system_prompt ?? true))}
-			<hr class="border-gray-100/30 dark:border-gray-850/30 my-3" />
-
-			<div>
-				<div class=" my-2.5 text-sm font-medium">{$i18n.t('System Prompt')}</div>
+			<SettingsSection title={$i18n.t('System Prompt')}>
 				<Textarea
 					bind:value={system}
-					className={'w-full text-sm outline-hidden resize-vertical' +
+					className={'w-full text-sm outline-hidden resize-vertical mt-2' +
 						($settings.highContrastMode
 							? ' p-2.5 border-2 border-gray-300 dark:border-gray-700 rounded-lg bg-transparent text-gray-900 dark:text-gray-100 focus:ring-1 focus:ring-blue-500 focus:border-blue-500 overflow-y-hidden'
 							: '  dark:text-gray-300 ')}
 					rows="4"
 					placeholder={$i18n.t('Enter system prompt here')}
 				/>
-			</div>
+			</SettingsSection>
 		{/if}
 
 		{#if $user?.role === 'admin' || (($user?.permissions.chat?.controls ?? true) && ($user?.permissions.chat?.params ?? true))}
 			<div class="mt-2 space-y-3 pr-1.5">
-				<div class="flex justify-between items-center text-sm">
-					<div class="  font-medium">{$i18n.t('Advanced Parameters')}</div>
+				<SettingRow title={$i18n.t('Advanced Parameters')} border={false}>
 					<button
-						class=" text-xs font-medium {($settings?.highContrastMode ?? false)
+						class=" text-sm font-medium {($settings?.highContrastMode ?? false)
 							? 'text-gray-800 dark:text-gray-100'
 							: 'text-gray-400 dark:text-gray-500'}"
 						type="button"
@@ -327,7 +243,7 @@
 							showAdvanced = !showAdvanced;
 						}}>{showAdvanced ? $i18n.t('Hide') : $i18n.t('Show')}</button
 					>
-				</div>
+				</SettingRow>
 
 				{#if showAdvanced}
 					<AdvancedParams admin={$user?.role === 'admin'} bind:params />

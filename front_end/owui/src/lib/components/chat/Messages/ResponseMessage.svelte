@@ -664,9 +664,20 @@
 		<div class="flex-auto w-0 relative">
 			<Name>
 				<Tooltip content={model?.name ?? message.model} placement="top-start">
-					<span id="response-message-model-name" class="line-clamp-1 text-black dark:text-white">
-						{model?.name ?? message.model}
-					</span>
+					{#if selectedModels.length > 1}
+						<!-- Compare mode: the whole point is telling the columns apart, so the real
+						     model name wins over the HARVIS wordmark. -->
+						<span id="response-message-model-name" class="line-clamp-1 text-gray-800 dark:text-gray-100">
+							{model?.name ?? message.model}
+						</span>
+					{:else}
+						<span
+							id="response-message-model-name"
+							class="harvis-wordmark response-harvis-wordmark line-clamp-1 text-gray-800 dark:text-gray-100"
+						>
+							HARVIS
+						</span>
+					{/if}
 				</Tooltip>
 
 				{#if message.timestamp}
@@ -1526,6 +1537,13 @@
 {/key}
 
 <style>
+	/* Message-header-scale variant of the global .harvis-wordmark (app.css) — the sidebar
+	   logotype size (0.8125rem) is too large next to the timestamp, so size it down here
+	   without touching the global class. Scoped selector outranks the unlayered global. */
+	:global(span.response-harvis-wordmark) {
+		font-size: 0.7rem;
+	}
+
 	.buttons::-webkit-scrollbar {
 		display: none; /* for Chrome, Safari and Opera */
 	}

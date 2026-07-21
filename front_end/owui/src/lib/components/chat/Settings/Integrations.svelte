@@ -85,8 +85,10 @@
 			<div>
 				<div class="pr-1.5">
 					<div class="">
-						<div class="flex justify-between items-center mb-0.5">
-							<div class="font-medium">{$i18n.t('Manage Tool Servers')}</div>
+						<div class="flex justify-between items-center pt-1 pb-2">
+							<div class="text-lg font-semibold text-gray-900 dark:text-gray-100">
+								{$i18n.t('Manage Tool Servers')}
+							</div>
 
 							<Tooltip content={$i18n.t('Add Connection')}>
 								<button
@@ -115,9 +117,9 @@
 						</div>
 					</div>
 
-					<div class="my-1.5">
+					<div class="my-2">
 						<div
-							class={`text-xs ${($settings?.highContrastMode ?? false) ? 'text-gray-800 dark:text-gray-100' : 'text-gray-500'}`}
+							class={`text-sm ${($settings?.highContrastMode ?? false) ? 'text-gray-800 dark:text-gray-100' : 'text-gray-500'}`}
 						>
 							{$i18n.t('Connect to your own OpenAPI compatible external tool servers.')}
 							<br />

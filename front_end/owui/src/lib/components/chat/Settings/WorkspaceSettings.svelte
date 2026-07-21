@@ -102,20 +102,20 @@
 
 <div class="flex flex-col h-full justify-between text-sm">
 	<div class="overflow-y-scroll max-h-[28rem] md:max-h-full pr-1">
-		<div class="mb-3 text-sm font-medium">{$i18n.t('Workspace / OpenClaw')}</div>
+		<div class="pb-1 text-lg font-semibold text-gray-900 dark:text-gray-100">{$i18n.t('Workspace / OpenClaw')}</div>
 
 		{#if loading}
 			<div class="text-gray-500">{$i18n.t('Loading…')}</div>
 		{:else}
-			<div class="mb-1 text-xs text-gray-500">
+			<div class="mb-1 text-sm text-gray-500 dark:text-gray-400">
 				{$i18n.t('The model the Harvis agent (OpenClaw) uses for workspace runs.')}
 			</div>
 
 			<div class="mt-3 mb-3">
-				<div class="mb-1 text-xs font-medium text-gray-500">{$i18n.t('Provider')}</div>
+				<div class="mb-1 text-sm font-medium text-gray-700 dark:text-gray-300">{$i18n.t('Provider')}</div>
 				<select
 					bind:value={providerType}
-					class="w-full rounded-lg py-2 px-3 text-sm bg-gray-50 dark:bg-gray-850 outline-none"
+					class="w-full rounded-[10px] py-2 px-3 text-sm bg-gray-100 dark:bg-gray-850 text-gray-800 dark:text-gray-100 outline-none"
 				>
 					<option value="ollama">Ollama (local)</option>
 					<option value="openai">OpenAI-compatible</option>
@@ -123,30 +123,30 @@
 			</div>
 
 			<div class="mb-3">
-				<div class="mb-1 text-xs font-medium text-gray-500">{$i18n.t('Provider URL')}</div>
+				<div class="mb-1 text-sm font-medium text-gray-700 dark:text-gray-300">{$i18n.t('Provider URL')}</div>
 				<input
 					bind:value={providerUrl}
-					class="w-full rounded-lg py-2 px-3 text-sm bg-gray-50 dark:bg-gray-850 outline-none"
+					class="w-full rounded-[10px] py-2 px-3 text-sm bg-gray-100 dark:bg-gray-850 text-gray-800 dark:text-gray-100 outline-none"
 					placeholder="http://ollama:11434"
 				/>
 			</div>
 
 			<div class="mb-3">
-				<div class="mb-1 text-xs font-medium text-gray-500">{$i18n.t('Model')}</div>
+				<div class="mb-1 text-sm font-medium text-gray-700 dark:text-gray-300">{$i18n.t('Model')}</div>
 				<input
 					bind:value={modelId}
-					class="w-full rounded-lg py-2 px-3 text-sm bg-gray-50 dark:bg-gray-850 outline-none"
+					class="w-full rounded-[10px] py-2 px-3 text-sm bg-gray-100 dark:bg-gray-850 text-gray-800 dark:text-gray-100 outline-none"
 					placeholder="qwen2.5-coder:32b"
 				/>
 			</div>
 
 			<div class="mb-1">
-				<div class="mb-1 text-xs font-medium text-gray-500">{$i18n.t('API key')}</div>
+				<div class="mb-1 text-sm font-medium text-gray-700 dark:text-gray-300">{$i18n.t('API key')}</div>
 				<input
 					type="password"
 					bind:value={apiKey}
 					autocomplete="off"
-					class="w-full rounded-lg py-2 px-3 text-sm bg-gray-50 dark:bg-gray-850 outline-none"
+					class="w-full rounded-[10px] py-2 px-3 text-sm bg-gray-100 dark:bg-gray-850 text-gray-800 dark:text-gray-100 outline-none"
 					placeholder={hasStoredConfig
 						? $i18n.t('Leave blank to keep current')
 						: $i18n.t('Only needed for cloud providers')}
@@ -158,8 +158,8 @@
 
 			{#if hasUsage}
 				<hr class="border-gray-100 dark:border-gray-850 my-4" />
-				<div class="mb-1.5 text-xs font-medium text-gray-500">{$i18n.t('Usage')}</div>
-				<div class="text-xs text-gray-600 dark:text-gray-300 space-y-0.5">
+				<div class="mb-1.5 text-[15px] font-semibold text-gray-900 dark:text-gray-100">{$i18n.t('Usage')}</div>
+				<div class="text-sm text-gray-600 dark:text-gray-300 space-y-0.5">
 					{#if usage.total_tokens != null}<div>{$i18n.t('Total tokens')}: {usage.total_tokens}</div>{/if}
 					{#if usage.tokens_in != null}<div>{$i18n.t('Tokens in')}: {usage.tokens_in}</div>{/if}
 					{#if usage.tokens_out != null}<div>{$i18n.t('Tokens out')}: {usage.tokens_out}</div>{/if}

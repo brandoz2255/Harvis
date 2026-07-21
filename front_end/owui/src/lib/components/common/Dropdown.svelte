@@ -130,6 +130,12 @@
 
 	function handleKeydown(event) {
 		if (event.key === 'Escape' && show) {
+			// Capture phase runs before Modal.svelte's bubble-phase window Escape
+			// handler; stopPropagation() here halts the event before that bubble
+			// visit — so Escape closes ONLY this dropdown, not a surrounding Modal.
+			// When no dropdown is open this handler is a no-op and Modal's Escape
+			// behaves exactly as before. (Same pattern as SkillsBrowse.svelte.)
+			event.stopPropagation();
 			show = false;
 			onOpenChange(false);
 		}
@@ -156,7 +162,7 @@
 </script>
 
 <svelte:window
-	on:keydown={handleKeydown}
+	on:keydown|capture={handleKeydown}
 	on:scroll|capture={positionContent}
 	on:resize={positionContent}
 />

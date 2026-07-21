@@ -23,6 +23,7 @@
 	import Search from '../icons/Search.svelte';
 	import Plus from '../icons/Plus.svelte';
 	import Spinner from '../common/Spinner.svelte';
+	import Skeleton from '../common/Skeleton.svelte';
 	import Tooltip from '../common/Tooltip.svelte';
 	import XMark from '../icons/XMark.svelte';
 	import ViewSelector from './common/ViewSelector.svelte';
@@ -44,6 +45,7 @@
 
 	let allItemsLoaded = false;
 	let itemsLoading = false;
+	let loadError = ''; // list fetch failure — error branch with Retry, so the skeleton can't loop forever
 
 	$: if (query !== undefined) {
 		clearTimeout(searchDebounceTimer);
@@ -71,7 +73,10 @@
 	const loadMoreItems = async () => {
 		if (allItemsLoaded) return;
 		page += 1;
-		await getItemsPage();
+		const res = await getItemsPage();
+		if (!res) {
+			page -= 1; // failed page — retry it next time instead of silently skipping it
+		}
 	};
 
 	const init = async () => {
@@ -83,13 +88,19 @@
 
 	const getItemsPage = async () => {
 		itemsLoading = true;
-		const res = await searchKnowledgeBases(localStorage.token, query, viewOption, page).catch(
-			() => {
-				return [];
-			}
-		);
+		loadError = '';
 
-		if (res) {
+		// Robust to both helper behaviors: a thrown error (has detail) and a
+		// silent null return (network-level failure with no detail).
+		let res = null;
+		try {
+			res = await searchKnowledgeBases(localStorage.token, query, viewOption, page);
+		} catch (e) {
+			console.error(e);
+			loadError = `${e}`;
+		}
+
+		if (res && Array.isArray(res.items)) {
 			console.log(res);
 			total = res.total;
 			const pageItems = res.items;
@@ -107,10 +118,12 @@
 			} else {
 				items = pageItems;
 			}
+		} else if (!loadError) {
+			loadError = $i18n.t('Server connection failed');
 		}
 
 		itemsLoading = false;
-		return res;
+		return loadError ? null : res;
 	};
 
 	const deleteHandler = async (item) => {
@@ -244,7 +257,6 @@
 
 		{#if items !== null && total !== null}
 			{#if (items ?? []).length !== 0}
-				<!-- The Aleph dreams itself into being, and the void learns its own name -->
 				<div class=" my-2 px-3 grid grid-cols-1 lg:grid-cols-2 gap-2">
 					{#each items as item}
 						<button
@@ -332,18 +344,32 @@
 				</div>
 
 				{#if !allItemsLoaded}
-					<Loader
-						on:visible={(e) => {
-							if (!itemsLoading) {
-								loadMoreItems();
-							}
-						}}
-					>
-						<div class="w-full flex justify-center py-4 text-xs animate-pulse items-center gap-2">
-							<Spinner className=" size-4" />
-							<div class=" ">{$i18n.t('Loading...')}</div>
+					{#if loadError}
+						<!-- Load-more failure: an idle "Loading..." spinner here would be a lie,
+						     and the Loader would auto-retry against a broken server on scroll. -->
+						<div class="w-full flex justify-center py-4 text-xs items-center gap-2 text-gray-500">
+							{$i18n.t('Could not load more')}
+							<button
+								class="text-blue-600 dark:text-blue-400 hover:underline"
+								on:click={() => {
+									loadMoreItems();
+								}}>{$i18n.t('Retry')}</button
+							>
 						</div>
-					</Loader>
+					{:else}
+						<Loader
+							on:visible={(e) => {
+								if (!itemsLoading) {
+									loadMoreItems();
+								}
+							}}
+						>
+							<div class="w-full flex justify-center py-4 text-xs animate-pulse items-center gap-2">
+								<Spinner className=" size-4" />
+								<div class=" ">{$i18n.t('Loading...')}</div>
+							</div>
+						</Loader>
+					{/if}
 				{/if}
 			{:else}
 				<div class=" w-full h-full flex flex-col justify-center items-center my-16 mb-24">
@@ -356,9 +382,40 @@
 					</div>
 				</div>
 			{/if}
+		{:else if loadError}
+			<!-- Honest list-fetch failure: without this, `items` stays null and the
+			     skeleton below would shimmer forever. -->
+			<div class="px-3 my-2">
+				<div
+					class="rounded-xl border border-gray-100 dark:border-gray-850 px-3 py-6 text-center text-sm text-gray-500"
+				>
+					{$i18n.t('Could not load knowledge')} — {loadError}
+					<button
+						class="ml-2 text-blue-600 dark:text-blue-400 hover:underline"
+						on:click={() => {
+							init();
+						}}>{$i18n.t('Retry')}</button
+					>
+				</div>
+			</div>
 		{:else}
-			<div class="w-full h-full flex justify-center items-center py-10">
-				<Spinner className="size-4" />
+			<!-- Skeleton mirrors the knowledge card grid: 2-col rounded-2xl cards with a
+			     Collection badge row, name line, and updated/by meta line. -->
+			<div class="my-2 px-3 grid grid-cols-1 lg:grid-cols-2 gap-2" aria-busy="true">
+				<div aria-hidden="true" class="contents">
+					{#each Array.from({ length: 4 }) as _, i}
+						<div class="w-full px-3 py-2.5 rounded-2xl">
+							<div class="flex items-center h-8 -my-1">
+								<Skeleton width="4.5rem" height="1.125rem" rounded="rounded-full" delay={i * 90} />
+							</div>
+							<div class="flex items-center justify-between px-1.5 mt-1">
+								<Skeleton width={['38%', '52%', '30%', '44%'][i]} height="0.875rem" delay={i * 90} />
+								<Skeleton width="7rem" height="0.625rem" delay={i * 90} />
+							</div>
+						</div>
+					{/each}
+				</div>
+				<span class="sr-only" role="status">{$i18n.t('Loading knowledge…')}</span>
 			</div>
 		{/if}
 	</div>
@@ -367,7 +424,27 @@
 		ⓘ {$i18n.t("Use '#' in the prompt input to load and include your knowledge.")}
 	</div>
 {:else}
-	<div class="w-full h-full flex justify-center items-center">
-		<Spinner className="size-5" />
+	<!-- Cold-load skeleton for the whole page: title bar, then the same card grid. -->
+	<div class="px-1 mt-1.5" aria-busy="true">
+		<div aria-hidden="true">
+			<div class="flex items-center justify-between mb-3 px-0.5">
+				<Skeleton width="8rem" height="1.25rem" />
+				<Skeleton width="6.5rem" height="1.75rem" rounded="rounded-xl" />
+			</div>
+			<div class="grid grid-cols-1 lg:grid-cols-2 gap-2 px-2">
+				{#each Array.from({ length: 6 }) as _, i}
+					<div class="w-full px-3 py-2.5 rounded-2xl">
+						<div class="flex items-center h-8 -my-1">
+							<Skeleton width="4.5rem" height="1.125rem" rounded="rounded-full" delay={i * 90} />
+						</div>
+						<div class="flex items-center justify-between px-1.5 mt-1">
+							<Skeleton width={['38%', '52%', '30%', '44%', '48%', '34%'][i]} height="0.875rem" delay={i * 90} />
+							<Skeleton width="7rem" height="0.625rem" delay={i * 90} />
+						</div>
+					</div>
+				{/each}
+			</div>
+		</div>
+		<span class="sr-only" role="status">{$i18n.t('Loading knowledge…')}</span>
 	</div>
 {/if}

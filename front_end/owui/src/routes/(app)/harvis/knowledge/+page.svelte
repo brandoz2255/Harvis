@@ -210,21 +210,42 @@
 	const pollKb = (id: string) => {
 		if (pollers[id]) return;
 		let n = 0;
+		let misses = 0;
 		pollers[id] = setInterval(async () => {
 			n += 1;
 			const s: any = await getKbStatus(token, id);
 			if (s) {
+				misses = 0;
 				kbs = kbs.map((k) =>
 					k.id === id
 						? { ...k, status: s.status, meta: { ...(k.meta ?? {}), ...(s.meta ?? {}), error: s.error } }
 						: k
 				);
-				if (s.status === 'ready' || s.status === 'error' || n > 100) {
-					clearInterval(pollers[id]);
-					delete pollers[id];
+			} else {
+				misses += 1;
+			}
+			// Bail-out must run even when the status endpoint fails (s === null),
+			// otherwise the interval spins forever and the card lies "Ingesting…".
+			// 3 consecutive misses (~9s) means the endpoint is down, not slow — bail
+			// fast instead of claiming progress for the full cap; one good read resets.
+			const done = s?.status === 'ready' || s?.status === 'error';
+			if (done || n > 100 || misses >= 3) {
+				clearInterval(pollers[id]);
+				delete pollers[id];
+				if (!done) {
+					kbs = kbs.map((k) =>
+						k.id === id && k.status !== 'ready' && k.status !== 'error'
+							? { ...k, status: 'unknown' }
+							: k
+					);
 				}
 			}
 		}, 3000);
+	};
+
+	const retryKbStatus = (id: string) => {
+		kbs = kbs.map((k) => (k.id === id && k.status === 'unknown' ? { ...k, status: 'indexing' } : k));
+		pollKb(id);
 	};
 
 	const addRepo = async () => {
@@ -682,6 +703,14 @@
 									{:else if k.status === 'error'}
 										<span class="text-[11px] text-red-500 shrink-0">● {$i18n.t('Failed')}</span>
 										{#if k.meta?.error}<span class="text-[11px] text-gray-400 truncate">{k.meta.error}</span>{/if}
+									{:else if k.status === 'unknown'}
+										<span class="text-[11px] text-gray-500 dark:text-gray-400 shrink-0">● {$i18n.t('Status unknown')}</span>
+										<button
+											on:click={() => retryKbStatus(k.id)}
+											class="text-[11px] text-blue-600 dark:text-blue-400 hover:underline shrink-0"
+										>
+											{$i18n.t('Retry')}
+										</button>
 									{:else}
 										<span class="inline-flex items-center gap-1 text-[11px] text-amber-500 shrink-0">
 											<svg class="size-3 animate-spin" viewBox="0 0 24 24" fill="none"

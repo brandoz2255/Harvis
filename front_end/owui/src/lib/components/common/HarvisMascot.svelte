@@ -27,6 +27,25 @@
 
 	const CYCLE = ['idle', 'lookLeft', 'idle', 'lookRight', 'idle', 'wave'];
 
+	// Accessibility + battery: honour prefers-reduced-motion (WCAG 2.3.3). When the user
+	// asks for less motion we hold a static pose — no rAF, no idle look/wave cycle — and
+	// we re-evaluate live so toggling the OS setting takes effect without a reload.
+	let reduceMotion = false;
+	let motionQuery: MediaQueryList | null = null;
+	const onMotionChange = (e: MediaQueryListEvent | MediaQueryList) => {
+		reduceMotion = e.matches;
+		if (reduceMotion) {
+			stopLoop();
+			bobOffset = 0;
+			antennaWiggle = 0;
+			armRotation = 0;
+			waving = false;
+		} else {
+			startLoop();
+		}
+		syncState(state, isAngry);
+	};
+
 	$: eyeOffset = currentState === 'lookLeft' ? -4 : currentState === 'lookRight' ? 4 : 0;
 	$: isSmiling = currentState === 'idle' || currentState === 'wave';
 
@@ -46,6 +65,8 @@
 			return;
 		}
 		currentState = 'idle';
+		// Reduced motion: stay in the static idle pose — no auto look/wave cycle.
+		if (reduceMotion) return;
 		let i = 0;
 		cycleTimer = setInterval(() => {
 			i = (i + 1) % CYCLE.length;
@@ -64,28 +85,46 @@
 		}
 	};
 
-	onMount(() => {
-		let frame = 0;
-		const loop = () => {
-			frame++;
-			bobOffset = Math.sin(frame * 0.05) * 2;
-			antennaWiggle = Math.sin(frame * 0.08) * 3;
-			if (waving) {
-				waveFrame++;
-				if (waveFrame < 40) {
-					armRotation = Math.sin(waveFrame * 0.3) * 30;
-				} else {
-					armRotation = 0;
-					waving = false;
-				}
+	let frame = 0;
+	const loop = () => {
+		frame++;
+		bobOffset = Math.sin(frame * 0.05) * 2;
+		antennaWiggle = Math.sin(frame * 0.08) * 3;
+		if (waving) {
+			waveFrame++;
+			if (waveFrame < 40) {
+				armRotation = Math.sin(waveFrame * 0.3) * 30;
+			} else {
+				armRotation = 0;
+				waving = false;
 			}
-			rafId = requestAnimationFrame(loop);
-		};
+		}
 		rafId = requestAnimationFrame(loop);
+	};
+
+	const startLoop = () => {
+		if (rafId !== null || reduceMotion) return;
+		rafId = requestAnimationFrame(loop);
+	};
+	const stopLoop = () => {
+		if (rafId !== null) cancelAnimationFrame(rafId);
+		rafId = null;
+	};
+	// A background tab should not burn frames (or battery) animating something nobody sees.
+	const onVisibility = () => (document.hidden ? stopLoop() : startLoop());
+
+	onMount(() => {
+		motionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+		onMotionChange(motionQuery);
+		motionQuery.addEventListener('change', onMotionChange);
+		document.addEventListener('visibilitychange', onVisibility);
+		startLoop();
 	});
 
 	onDestroy(() => {
-		if (rafId !== null) cancelAnimationFrame(rafId);
+		stopLoop();
+		motionQuery?.removeEventListener('change', onMotionChange);
+		if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility);
 		if (cycleTimer) clearInterval(cycleTimer);
 		if (clickTimer) clearTimeout(clickTimer);
 		if (angryTimer) clearTimeout(angryTimer);
@@ -116,7 +155,9 @@
 		}, 2000);
 	};
 
-	const ACCENT = '#6FA0FF';
+	// Theme accent — --color-blue-* re-hues per theme (Midnight cyan-blue,
+	// Airy indigo, Warm coral). ANGRY stays hardcoded red: semantic state color.
+	const ACCENT = 'var(--color-blue-400)';
 	const ANGRY = '#E53E3E';
 	$: accent = isAngry ? ANGRY : ACCENT;
 </script>
@@ -144,12 +185,12 @@
 			</feMerge>
 		</filter>
 		<linearGradient id="harvisBodyGradient" x1="0%" y1="0%" x2="0%" y2="100%">
-			<stop offset="0%" stop-color="#5B8DEF" />
-			<stop offset="100%" stop-color="#2F5FD8" />
+			<stop offset="0%" stop-color="var(--color-blue-500)" />
+			<stop offset="100%" stop-color="var(--color-blue-700)" />
 		</linearGradient>
 		<linearGradient id="harvisScreenGradient" x1="0%" y1="0%" x2="0%" y2="100%">
-			<stop offset="0%" stop-color="#1A2C5D" />
-			<stop offset="100%" stop-color="#0D152A" />
+			<stop offset="0%" stop-color="var(--color-gray-800)" />
+			<stop offset="100%" stop-color="var(--color-gray-950)" />
 		</linearGradient>
 		<linearGradient id="harvisAngryGradient" x1="0%" y1="0%" x2="0%" y2="100%">
 			<stop offset="0%" stop-color="#FC8181" />
@@ -189,10 +230,10 @@
 			<ellipse cx="36" cy="22" rx="2" ry="1" fill="#FED7D7" />
 		{:else if isStartled}
 			<circle cx="24" cy="20" r="5" fill={ACCENT} filter="url(#harvisGlow)" />
-			<circle cx="24" cy="20" r="2.5" fill="#EAF1FF" />
+			<circle cx="24" cy="20" r="2.5" fill="var(--color-gray-50)" />
 			<circle cx="24" cy="19" r="1" fill="#ffffff" />
 			<circle cx="36" cy="20" r="5" fill={ACCENT} filter="url(#harvisGlow)" />
-			<circle cx="36" cy="20" r="2.5" fill="#EAF1FF" />
+			<circle cx="36" cy="20" r="2.5" fill="var(--color-gray-50)" />
 			<circle cx="36" cy="19" r="1" fill="#ffffff" />
 		{:else if isSmiling}
 			<path
@@ -213,9 +254,9 @@
 			/>
 		{:else}
 			<ellipse cx="24" cy="20" rx="3" ry="4" fill={ACCENT} filter="url(#harvisGlow)" />
-			<ellipse cx="24" cy="20" rx="1.5" ry="2" fill="#EAF1FF" />
+			<ellipse cx="24" cy="20" rx="1.5" ry="2" fill="var(--color-gray-50)" />
 			<ellipse cx="36" cy="20" rx="3" ry="4" fill={ACCENT} filter="url(#harvisGlow)" />
-			<ellipse cx="36" cy="20" rx="1.5" ry="2" fill="#EAF1FF" />
+			<ellipse cx="36" cy="20" rx="1.5" ry="2" fill="var(--color-gray-50)" />
 		{/if}
 	</g>
 

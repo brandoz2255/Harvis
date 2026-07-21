@@ -65,7 +65,7 @@ export const createNewPrompt = async (token: string, prompt: PromptItem) => {
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -96,7 +96,7 @@ export const getPrompts = async (token: string = '') => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -124,7 +124,7 @@ export const getPromptTags = async (token: string = '') => {
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -214,7 +214,7 @@ export const getPromptList = async (token: string = '') => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -247,7 +247,7 @@ export const getPromptByCommand = async (token: string, command: string) => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 
 			console.error(err);
 			return null;
@@ -279,7 +279,7 @@ export const getPromptById = async (token: string, promptId: string) => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 
 			console.error(err);
 			return null;
@@ -312,7 +312,7 @@ export const updatePromptById = async (token: string, prompt: PromptItem) => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 
 			console.error(err);
 			return null;
@@ -348,7 +348,7 @@ export const updatePromptMetadata = async (
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -384,7 +384,7 @@ export const setProductionPromptVersion = async (
 		})
 		.catch((err) => {
 			console.log(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -411,7 +411,7 @@ export const togglePromptById = async (token: string, promptId: string) => {
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -442,7 +442,7 @@ export const deletePromptById = async (token: string, promptId: string) => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 
 			console.error(err);
 			return null;
@@ -476,7 +476,7 @@ export const updatePromptAccessGrants = async (
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -512,7 +512,7 @@ export const getPromptHistory = async (
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -544,7 +544,7 @@ export const deletePromptHistoryVersion = async (
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return false;
 		});
@@ -576,7 +576,7 @@ export const getPromptHistoryEntry = async (
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -615,7 +615,7 @@ export const restorePromptFromHistory = async (
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -651,7 +651,7 @@ export const getPromptDiff = async (
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});

@@ -498,13 +498,16 @@ export interface GitHubRepoItem {
 	html_url?: string;
 }
 
-export const getGithubStatus = async (): Promise<GitHubStatus> => {
+// Returns null when the status could NOT be determined — a failed check is not the same
+// claim as "not connected", and telling a user their account is disconnected when we simply
+// couldn't reach the server is a false (and security-flavoured) assurance.
+export const getGithubStatus = async (): Promise<GitHubStatus | null> => {
 	try {
 		const r = await fetch(`/api/vibecode/github/status`, { headers: headers(), credentials: 'include' });
-		if (!r.ok) return { connected: false };
+		if (!r.ok) return null;
 		return await r.json();
 	} catch (_) {
-		return { connected: false };
+		return null;
 	}
 };
 
@@ -526,14 +529,19 @@ export const getGithubStartUrl = async (): Promise<{ ok: boolean; redirect?: str
 	}
 };
 
-export const disconnectGithub = async (): Promise<void> => {
+export const disconnectGithub = async (): Promise<boolean> => {
+	// Honest result: callers must not flip their UI to "disconnected" unless this
+	// returns true — the credential may still be live server-side otherwise.
 	try {
-		await fetch(`/api/vibecode/github/disconnect`, {
+		const r = await fetch(`/api/vibecode/github/disconnect`, {
 			method: 'POST',
 			headers: headers(),
 			credentials: 'include'
 		});
-	} catch (_) {}
+		return r.ok;
+	} catch (_) {
+		return false;
+	}
 };
 
 export const listUserGithubRepos = async (): Promise<GitHubRepoItem[]> => {
@@ -740,18 +748,20 @@ export interface VibecodeFileEntry {
 export const getVibecodeSessionFiles = async (
 	sessionId: string,
 	subpath?: string
-): Promise<{ entries: VibecodeFileEntry[] }> => {
+): Promise<{ entries: VibecodeFileEntry[] } | null> => {
+	// null = the fetch FAILED (vs a genuinely empty listing) so callers can keep their
+	// last-known tree and surface an honest error instead of rendering "no files".
 	try {
 		const qs = subpath ? `?subpath=${encodeURIComponent(subpath)}` : '';
 		const r = await fetch(`${BASE}/vibecode/session/${sessionId}/files${qs}`, {
 			headers: headers(),
 			credentials: 'include'
 		});
-		if (!r.ok) return { entries: [] };
+		if (!r.ok) return null;
 		const j = await r.json();
 		return { entries: Array.isArray(j?.entries) ? j.entries : [] };
 	} catch (_) {
-		return { entries: [] };
+		return null;
 	}
 };
 

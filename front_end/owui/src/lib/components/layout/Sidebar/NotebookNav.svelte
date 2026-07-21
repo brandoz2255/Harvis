@@ -6,18 +6,28 @@
 	// (?onb=/notebooks/{id}). Colors are Harvis theme tokens.
 	import { getContext, onMount, onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { listNotebooks, type Notebook } from '$lib/apis/notebooks';
+	import { listNotebooksDetailed, type Notebook } from '$lib/apis/notebooks';
 
 	export let activeOnb: string = '';
 
 	const i18n: any = getContext('i18n');
 
 	let notebooks: Notebook[] = [];
+	// Honest failure state for Recents: '' = ok; otherwise a short reason so an
+	// expired session / down backend doesn't masquerade as "No notebooks yet."
+	let recentsError = '';
 	let timer: any = null;
 	const load = async () => {
-		try {
-			notebooks = await listNotebooks();
-		} catch (_) {}
+		const res = await listNotebooksDetailed();
+		if (res.ok) {
+			notebooks = res.notebooks;
+			recentsError = '';
+		} else {
+			recentsError =
+				res.status === 401 || res.status === 403
+					? $i18n.t('Signed out — sign in to see recents.')
+					: `${$i18n.t("Couldn't load recents")} (${res.error ?? 'error'}).`;
+		}
 	};
 	const schedule = () => {
 		timer = setTimeout(async () => {
@@ -62,7 +72,7 @@
 	<button
 		type="button"
 		on:click={() => open('/notebooks')}
-		class="group flex items-center space-x-3 rounded-2xl px-2.5 py-2 text-gray-800 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-900 transition outline-none"
+		class="group flex items-center gap-3 rounded-xl px-2.5 py-2 text-blue-600 dark:text-blue-400 font-medium hover:bg-blue-500/10 transition outline-none"
 		aria-label={$i18n.t('New notebook')}
 	>
 		<div class="self-center">
@@ -90,11 +100,11 @@
 			type="button"
 			on:click={() => open(item.href)}
 			aria-current={isActive(item.href) ? 'page' : undefined}
-			class="w-full flex items-center gap-3 rounded-2xl px-2.5 py-2 text-sm transition outline-none {isActive(
+			class="w-full flex items-center gap-3 rounded-xl px-2.5 py-2 text-sm transition outline-none {isActive(
 				item.href
 			)
-				? 'bg-gray-100 dark:bg-gray-900 text-gray-900 dark:text-gray-50 font-medium'
-				: 'text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-900'}"
+				? 'bg-blue-500/10 text-blue-600 dark:text-blue-400 font-medium'
+				: 'text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-850'}"
 		>
 			<svg
 				xmlns="http://www.w3.org/2000/svg"
@@ -116,7 +126,7 @@
 	<button
 		type="button"
 		on:click={() => goto('/harvis/agent-studio/customize')}
-		class="w-full flex items-center gap-3 rounded-2xl px-2.5 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-900 transition outline-none"
+		class="w-full flex items-center gap-3 rounded-xl px-2.5 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-850 transition outline-none"
 	>
 		<svg
 			xmlns="http://www.w3.org/2000/svg"
@@ -135,11 +145,22 @@
 
 	<!-- Recent notebooks -->
 	<div
-		class="px-2.5 pt-3 pb-0.5 text-[0.625rem] font-semibold uppercase tracking-wider text-gray-400 dark:text-gray-500"
+		class="px-2.5 pt-3 pb-1 text-[0.625rem] font-medium uppercase tracking-wide text-gray-400 dark:text-gray-500"
 	>
 		{$i18n.t('Recents')}
 	</div>
-	{#if !notebooks.length}
+	{#if recentsError}
+		<div class="px-2.5 py-1 text-xs text-gray-500 dark:text-gray-400">
+			<span>{recentsError}</span>
+			<button
+				type="button"
+				on:click={load}
+				class="ml-1 text-blue-600 dark:text-blue-400 hover:underline"
+			>
+				{$i18n.t('Retry')}
+			</button>
+		</div>
+	{:else if !notebooks.length}
 		<div class="px-2.5 py-1 text-xs text-gray-400">{$i18n.t('No notebooks yet.')}</div>
 	{:else}
 		{#each notebooks as nb (nb.id)}
@@ -147,14 +168,14 @@
 				type="button"
 				on:click={() => openNotebook(nb.id)}
 				aria-current={isNotebookActive(nb.id) ? 'page' : undefined}
-				class="w-full flex items-center gap-2 rounded-2xl px-2.5 py-1.5 text-sm transition outline-none {isNotebookActive(
+				class="w-full flex items-center gap-3 rounded-xl px-2.5 py-1.5 text-sm transition outline-none {isNotebookActive(
 					nb.id
 				)
-					? 'bg-gray-100 dark:bg-gray-900 text-gray-900 dark:text-gray-50 font-medium'
-					: 'text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-900'}"
+					? 'bg-gray-100 dark:bg-gray-850 text-gray-900 dark:text-gray-50 font-medium'
+					: 'text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-850'}"
 			>
 				<span class="shrink-0 w-4 text-center">{nb.emoji || '📓'}</span>
-				<span class="flex-1 truncate text-left translate-y-[0.5px]"
+				<span class="flex-1 overflow-hidden whitespace-nowrap name-fade text-left translate-y-[0.5px]"
 					>{nb.title || $i18n.t('Untitled')}</span
 				>
 			</button>

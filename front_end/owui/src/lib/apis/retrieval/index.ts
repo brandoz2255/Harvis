@@ -16,7 +16,7 @@ export const getRAGConfig = async (token: string) => {
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -79,7 +79,7 @@ export const updateRAGConfig = async (token: string, payload: RAGConfigForm) => 
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -106,7 +106,7 @@ export const getQuerySettings = async (token: string) => {
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -142,7 +142,7 @@ export const updateQuerySettings = async (token: string, settings: QuerySettings
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -169,7 +169,7 @@ export const getEmbeddingConfig = async (token: string) => {
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -218,7 +218,7 @@ export const updateEmbeddingConfig = async (token: string, payload: EmbeddingMod
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -245,7 +245,7 @@ export const getRerankingConfig = async (token: string) => {
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -279,7 +279,7 @@ export const updateRerankingConfig = async (token: string, payload: RerankingMod
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -315,7 +315,7 @@ export const processYoutubeVideo = async (token: string, url: string) => {
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -358,7 +358,7 @@ export const processWeb = async (
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -394,7 +394,7 @@ export const processWebSearch = async (
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -431,7 +431,7 @@ export const queryDoc = async (
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -468,7 +468,7 @@ export const queryCollection = async (
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -494,7 +494,7 @@ export const resetUploadDir = async (token: string) => {
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -520,7 +520,7 @@ export const resetVectorDB = async (token: string) => {
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 

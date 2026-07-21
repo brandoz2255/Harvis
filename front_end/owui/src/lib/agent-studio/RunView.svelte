@@ -177,6 +177,20 @@
 	};
 	$: if (wsId !== activeId) start(wsId);
 
+	// The shared store lands on phase 'error' in TWO cases: a real backend `error` event
+	// (the run failed — the turn surfaces that), or the reconnect breaker giving up on a
+	// severed stream. Only the latter is a DISCONNECT: say so honestly + offer a retry.
+	$: streamBroken = phase === 'error' && !events.some((e) => e.type === 'error');
+	const retryStream = () => {
+		const id = activeId;
+		if (!id) return;
+		// Re-subscribe: if this view held the last ref, the errored entry is torn down and
+		// a fresh connection opens. (Other live subscribers keep the shared entry alive —
+		// their own retry does the same.)
+		activeId = '';
+		start(id);
+	};
+
 	onDestroy(() => {
 		_unsubStore?.();
 		_sub?.unsubscribe();
@@ -186,15 +200,29 @@
 	const goStudio = () => goto('/harvis/agent-studio');
 	const openFull = () => (onOpenFull ? onOpenFull() : goto(`/harvis/agent-studio/run/${wsId}`));
 
+	// Unified cockpit status palette: running=blue(pulse) · done=emerald · failed=red ·
+	// cancelled=gray (inert — amber is reserved for "needs YOU", i.e. awaiting approval).
+	// Takes two inputs (phase + status) so it can't just call the shared statusDot directly.
 	const statusDot = (s: string, p: string) => {
-		if (p === 'done' || s === 'done') return 'bg-blue-500';
+		if (p === 'done' || s === 'done') return 'bg-emerald-500';
 		if (p === 'error' || s === 'error') return 'bg-red-500';
-		if (p === 'cancelled' || s === 'cancelled') return 'bg-amber-500';
+		if (p === 'cancelled' || s === 'cancelled') return 'bg-gray-400 dark:bg-gray-600';
 		return 'bg-blue-500 animate-pulse';
 	};
 </script>
 
 <div class="w-full h-full flex flex-col">
+	{#if streamBroken}
+		<!-- honest degraded state: the live stream dropped and reconnects gave up -->
+		<div
+			class="shrink-0 flex items-center gap-2 px-3 py-1.5 text-[11px] text-red-500 dark:text-red-400 bg-red-500/5 border-b border-red-500/15"
+		>
+			<span class="truncate">{$i18n.t('Live stream disconnected — events may be incomplete.')}</span>
+			<button class="ml-auto shrink-0 underline hover:no-underline" on:click={retryStream}
+				>{$i18n.t('Retry')}</button
+			>
+		</div>
+	{/if}
 	{#if mode === 'full'}
 		{#if !embedded}
 			<!-- full-page header (breadcrumb) -->
@@ -204,6 +232,7 @@
 			<HarvisClawMascot
 				size={44}
 				state={running ? 'working' : phase === 'error' ? 'angry' : 'idle'}
+				idleCycle={running}
 				className="shrink-0 -my-1"
 			/>
 			<div class="min-w-0 flex-1 flex flex-col leading-tight">
@@ -245,7 +274,7 @@
 			<div
 				class="lg:w-80 max-h-56 lg:max-h-none lg:h-full overflow-y-auto border-b lg:border-b-0 lg:border-r border-gray-100 dark:border-gray-850 px-3 py-3 shrink-0 space-y-3"
 			>
-				<ThoughtStream {events} {running} />
+				<ThoughtStream {events} {running} onRetry={retryStream} />
 				<RunArtifacts {wsId} done={!running} mode="changes" bare />
 			</div>
 			<!-- Main: a LARGE preview pane (default) with the agent graph + table as tabs. -->
@@ -333,7 +362,7 @@
 			<RunArtifacts {wsId} done={!running} />
 		</div>
 		<div class="flex-1 min-h-0 overflow-y-auto px-3 py-2">
-			<ThoughtStream {events} {running} />
+			<ThoughtStream {events} {running} onRetry={retryStream} />
 		</div>
 	{:else}
 		<!-- compact dock: a stacked, half-screen version (stream capped over canvas) -->
@@ -367,7 +396,7 @@
 		<PaneGroup direction="vertical" class="flex-1 min-h-0">
 			<Pane defaultSize={38} minSize={10} class="min-h-0">
 				<div class="h-full overflow-y-auto px-3 py-2">
-					<ThoughtStream {events} {running} />
+					<ThoughtStream {events} {running} onRetry={retryStream} />
 				</div>
 			</Pane>
 			<PaneResizer

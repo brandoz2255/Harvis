@@ -16,7 +16,7 @@ export const getAudioConfig = async (token: string) => {
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -53,7 +53,7 @@ export const updateAudioConfig = async (token: string, payload: OpenAIConfigForm
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -85,7 +85,7 @@ export const transcribeAudio = async (token: string, file: File, language?: stri
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -122,7 +122,7 @@ export const synthesizeOpenAISpeech = async (
 			return res;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 
 			return null;
@@ -154,7 +154,7 @@ export const getModels = async (token: string = ''): Promise<AvailableModelsResp
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 
 			return null;
@@ -182,7 +182,7 @@ export const getVoices = async (token: string = '') => {
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 
 			return null;

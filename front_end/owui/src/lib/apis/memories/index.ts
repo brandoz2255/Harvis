@@ -16,7 +16,7 @@ export const getMemories = async (token: string) => {
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -47,7 +47,7 @@ export const addNewMemory = async (token: string, content: string) => {
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -78,7 +78,7 @@ export const updateMemoryById = async (token: string, id: string, content: strin
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -109,7 +109,7 @@ export const queryMemory = async (token: string, content: string) => {
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -140,7 +140,7 @@ export const deleteMemoryById = async (token: string, id: string) => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 
 			console.error(err);
 			return null;
@@ -172,7 +172,7 @@ export const deleteMemoriesByUserId = async (token: string) => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 
 			console.error(err);
 			return null;

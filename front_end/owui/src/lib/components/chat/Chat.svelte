@@ -1204,10 +1204,14 @@
 	// statusHistory rendering (StatusHistory.svelte) and hands off to WorkspaceRunCard the
 	// moment its marker arrives. No backend changes; no raw debug text — clean wording only.
 	//////////////////////////
-	const _taskHeartbeats: Record<string, { startedAt: number; stage: number; timer: any; model: string }> = {};
+	const _taskHeartbeats: Record<
+		string,
+		{ startedAt: number; stage: number; timer: any; model: string; taskish: boolean }
+	> = {};
 
-	// Task-ish intent — build/create/code/search/research/CTF/file-generation. A plain Q&A
-	// won't advance past "Understanding the request…" (which is true for any message).
+	// Task-ish intent — build/create/code/search/research/CTF/file-generation. Task-ish messages
+	// step through workspace/engine stages; plain Q&A steps through its own gentle progression
+	// (below) so a slow model never sits pinned on "Understanding the request…".
 	const _TASKISH_RE =
 		/\b(build|create|make|generate|implement|refactor|scaffold|develop|search|research|look\s*up|browse|analy[sz]e|scrape|crawl|crack|decode|decrypt|cipher|hash|website|dashboard|landing\s*page|spreadsheet|diagram|pdf|docx|html?|app|page|component|script)\b|\.(?:html?|py|js|ts|css|md|csv|json)\b/i;
 
@@ -1235,6 +1239,19 @@
 		][Math.min(Math.max(stage, 0), 5)];
 	const _HEARTBEAT_AT = [0, 1500, 3500, 7000, 13000, 22000];
 
+	// Plain-chat progression — honest, non-specific reassurance while the model works toward its
+	// first token (esp. slow/thinking local models). No workspace/engine wording (there's none).
+	const _QA_STAGES = [
+		'Understanding the request…',
+		'Thinking it through…',
+		'Working through it…',
+		'Still working…',
+		'Still working — local models can take a moment…'
+	];
+	const _qaStage = (stage: number, _m: string): string =>
+		_QA_STAGES[Math.min(Math.max(stage, 0), _QA_STAGES.length - 1)];
+	const _QA_AT = [0, 2000, 5000, 9000, 16000];
+
 	const _setHeartbeat = (messageId: string, text: string) => {
 		const m = history.messages[messageId];
 		if (!m || m.done || m.error) return;
@@ -1255,25 +1272,35 @@
 
 	const _startHeartbeat = (messageId: string, userText: string, model: string) => {
 		if (!messageId || !history.messages[messageId]) return;
-		_taskHeartbeats[messageId] = { startedAt: Date.now(), stage: 0, timer: null, model: model || '' };
-		_setHeartbeat(messageId, _heartbeatStage(0, model || ''));
-		if (!_TASKISH_RE.test(userText || '')) return; // plain Q&A: hold on stage 0, resolves on first token
+		const taskish = _TASKISH_RE.test(userText || '');
+		// Task-ish → workspace/engine stages (hand off to WorkspaceRunCard on the marker).
+		// Plain Q&A → gentle generic stages, cleared the instant real content streams.
+		const stageOf = taskish ? _heartbeatStage : _qaStage;
+		const at = taskish ? _HEARTBEAT_AT : _QA_AT;
+		_taskHeartbeats[messageId] = { startedAt: Date.now(), stage: 0, timer: null, model: model || '', taskish };
+		_setHeartbeat(messageId, stageOf(0, model || ''));
 		const tick = () => {
 			const hb = _taskHeartbeats[messageId];
 			if (!hb) return;
-			// Self-terminate the instant the message is finished/errored or has the workspace
-			// marker — a catch-all for any completion path we didn't hook explicitly.
+			// Self-terminate on completion/error, on the workspace marker (task-ish), or — for plain
+			// Q&A — the instant real answer text begins streaming (so the spinner never sits over it).
 			const msg = history.messages[messageId];
-			if (!msg || msg.done || msg.error || (msg.content || '').includes('<details type="workspace_run"')) {
+			if (
+				!msg ||
+				msg.done ||
+				msg.error ||
+				(msg.content || '').includes('<details type="workspace_run"') ||
+				(!hb.taskish && (msg.content || '').trim() !== '')
+			) {
 				_clearHeartbeat(messageId);
 				return;
 			}
 			const el = Date.now() - hb.startedAt;
 			let next = hb.stage;
-			while (next + 1 < _HEARTBEAT_AT.length && el >= _HEARTBEAT_AT[next + 1]) next++;
+			while (next + 1 < at.length && el >= at[next + 1]) next++;
 			if (next !== hb.stage) {
 				hb.stage = next;
-				_setHeartbeat(messageId, _heartbeatStage(next, hb.model));
+				_setHeartbeat(messageId, stageOf(next, hb.model));
 			}
 			hb.timer = setTimeout(tick, 700);
 		};
@@ -2122,6 +2149,12 @@
 
 		// Hand off the task heartbeat to the WorkspaceRunCard the moment its marker arrives.
 		_heartbeatMaybeHandoff(message);
+		// Plain-chat: the pre-content heartbeat's job ends the instant the answer starts streaming,
+		// so the progressive spinner never lingers above the response.
+		{
+			const hb = _taskHeartbeats[message.id];
+			if (hb && !hb.taskish && (message.content || '').trim() !== '') _clearHeartbeat(message.id);
+		}
 
 		if (done) {
 			message.done = true;

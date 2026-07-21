@@ -25,6 +25,10 @@
 	let templates: any[] = [];
 	let conns: any[] = [];
 	let loaded = false;
+	// failed fetch ≠ empty result — a dead backend must not render as an empty
+	// catalog or "0 connected" (null from the loaders below = request failed)
+	let templatesError = false;
+	let connsError = false;
 
 	let query = '';
 	let view: 'partners' | 'community' = 'partners';
@@ -45,12 +49,14 @@
 		const r = await fetch('/api/owui/mcp/templates', { headers: authHeaders() })
 			.then((x) => (x.ok ? x.json() : null))
 			.catch(() => null);
+		templatesError = r === null;
 		templates = r?.templates ?? [];
 	};
 	const loadConns = async () => {
 		const r = await fetch('/api/owui/mcp/connections', { headers: authHeaders() })
-			.then((x) => (x.ok ? x.json() : { items: [] }))
-			.catch(() => ({ items: [] }));
+			.then((x) => (x.ok ? x.json() : null))
+			.catch(() => null);
+		connsError = r === null;
 		conns = r?.items ?? [];
 	};
 
@@ -320,6 +326,16 @@
 		{/if}
 	</div>
 
+	<!-- failed connections fetch: the connected/count state below would be a lie -->
+	{#if connsError}
+		<div class="rounded-xl border border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-950/40 px-3 py-2.5 mb-4">
+			<div class="flex flex-wrap items-center gap-2">
+				<span class="text-xs font-medium text-red-600 dark:text-red-400 flex-1 min-w-[12rem]">{$i18n.t('Could not load your connections — the connected states shown may be wrong.')}</span>
+				<button type="button" on:click={loadConns} class="min-h-[32px] px-3 rounded-lg text-xs font-medium border border-red-300 dark:border-red-800 text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-900/40 transition">{$i18n.t('Retry')}</button>
+			</div>
+		</div>
+	{/if}
+
 	<!-- honesty banner: attached ≠ live in OpenClaw -->
 	{#if attachedEnabled > 0}
 		<div class="rounded-xl border border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/40 px-3 py-2.5 mb-4">
@@ -387,7 +403,14 @@
 					{/if}
 				</button>
 			{:else}
-				<div class="col-span-full text-sm text-gray-500 py-8 text-center">{loaded ? $i18n.t('No connectors match your search.') : $i18n.t('Loading catalog…')}</div>
+				<div class="col-span-full text-sm text-gray-500 py-8 text-center">
+					{#if templatesError}
+						{$i18n.t('Could not load the connector catalog.')}
+						<button type="button" class="ml-1 text-blue-600 dark:text-blue-400 hover:underline" on:click={() => { loadTemplates(); loadConns(); }}>{$i18n.t('Retry')}</button>
+					{:else}
+						{loaded ? $i18n.t('No connectors match your search.') : $i18n.t('Loading catalog…')}
+					{/if}
+				</div>
 			{/each}
 		</div>
 	{:else}

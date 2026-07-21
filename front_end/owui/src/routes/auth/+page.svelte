@@ -39,6 +39,7 @@
 	let email = '';
 	let password = '';
 	let confirmPassword = '';
+	let setupCode = '';
 
 	let ldapUsername = '';
 
@@ -85,12 +86,21 @@
 			}
 		}
 
-		const sessionUser = await userSignUp(name, email, password, generateInitialsImage(name)).catch(
-			(error) => {
-				toast.error(`${error}`);
-				return null;
-			}
-		);
+		if (($config?.onboarding ?? false) && !setupCode.trim()) {
+			toast.error($i18n.t('Setup code is required to create the administrator account.'));
+			return;
+		}
+
+		const sessionUser = await userSignUp(
+			name,
+			email,
+			password,
+			generateInitialsImage(name),
+			($config?.onboarding ?? false) ? setupCode.trim() : undefined
+		).catch((error) => {
+			toast.error(`${error}`);
+			return null;
+		});
 
 		await setSessionUser(sessionUser);
 	};
@@ -190,6 +200,11 @@
 			await signInHandler();
 		} else {
 			onboarding = $config?.onboarding ?? false;
+			// Prefer the dedicated /setup wizard over the stock OnBoarding modal.
+			if (onboarding) {
+				await goto('/setup');
+				return;
+			}
 		}
 	});
 </script>
@@ -347,6 +362,30 @@
 												aria-required="true"
 											/>
 										</div>
+
+										{#if mode === 'signup' && ($config?.onboarding ?? false)}
+											<div class="mb-2">
+												<label for="setup-code" class="text-sm font-medium text-left mb-1 block"
+													>{$i18n.t('Setup Code')}</label
+												>
+												<SensitiveInput
+													bind:value={setupCode}
+													type="password"
+													id="setup-code"
+													class="my-0.5 w-full text-sm outline-hidden bg-transparent placeholder:text-gray-300 dark:placeholder:text-gray-600"
+													placeholder={$i18n.t('From ./install.sh or .env (HARVIS_SETUP_CODE)')}
+													autocomplete="one-time-code"
+													name="setup-code"
+													required
+													aria-required="true"
+												/>
+												<div class="mt-1 text-xs text-gray-600 dark:text-gray-500">
+													{$i18n.t(
+														'Printed once by the installer. Also in .env as HARVIS_SETUP_CODE.'
+													)}
+												</div>
+											</div>
+										{/if}
 
 										{#if mode === 'signup' && $config?.features?.enable_signup_password_confirmation}
 											<div class="mt-2">

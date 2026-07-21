@@ -1,6 +1,9 @@
 <script lang="ts">
 	import { getContext } from 'svelte';
 	import RunWorkspace from '$lib/agent-studio/RunWorkspace.svelte';
+	// Shared status palette — the single source of truth (cancelled=gray, NOT amber:
+	// amber is reserved for "needs YOU", i.e. awaiting approval).
+	import { statusDot as dot } from '$lib/agent-studio/runFormat';
 
 	const i18n: any = getContext('i18n');
 
@@ -12,16 +15,6 @@
 	export let onToggle: (id: string) => void = () => {};
 	export let onStop: ((id: string) => void) | null = null;
 
-	const dot = (s?: string): string =>
-		s === 'done'
-			? 'bg-blue-500'
-			: s === 'error'
-				? 'bg-red-500'
-				: s === 'cancelled'
-					? 'bg-amber-500'
-					: s === 'running'
-						? 'bg-blue-500 animate-pulse'
-						: 'bg-gray-300 dark:bg-gray-600';
 	const fmtDur = (ms?: number): string =>
 		!ms
 			? ''

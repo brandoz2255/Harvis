@@ -18,6 +18,10 @@ export interface Surface {
 	label: string;
 	component: any;
 	modes: ('full' | 'dock')[];
+	// Marks a surface as not-yet-finished. One flag drives every entry point: the
+	// full-page route shows a banner, and nav entries show a "WIP" chip so you know
+	// before you click. Flip to false (or delete the line) when the surface is ready.
+	underConstruction?: boolean;
 }
 
 export const surfaces: Surface[] = [
@@ -30,7 +34,13 @@ export const surfaces: Surface[] = [
 	{ key: 'brain', label: 'Brain', component: Brain, modes: ['full', 'dock'] },
 	// Renamed Neural Map (2026-06-11); key stays 'global-map' — the dock bridge
 	// values and the existing route depend on it. '/neural-map' is an alias below.
-	{ key: 'global-map', label: 'Neural Map', component: GlobalMap, modes: ['full', 'dock'] },
+	{
+		key: 'global-map',
+		label: 'Neural Map',
+		component: GlobalMap,
+		modes: ['full', 'dock'],
+		underConstruction: true
+	},
 	{ key: 'model-comparison', label: 'Model Comparison', component: ModelComparison, modes: ['full'] },
 	{ key: 'activity', label: 'Artifacts', component: GlobalArtifacts, modes: ['full', 'dock'] },
 	{ key: 'cookbook', label: 'Models', component: Cookbook, modes: ['full', 'dock'] },

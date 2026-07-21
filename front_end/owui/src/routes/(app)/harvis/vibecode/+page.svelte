@@ -151,18 +151,23 @@
 	let selectedFile = '';
 	let showPrDrawer = false;
 	let sessionHasGithub = false;
+	let diffError = false; // last diff fetch failed → surface it (don't clobber the last-known diff)
 	const loadDiff = async () => {
 		if (!sessionId) {
 			sessionDiff = '';
+			diffError = false;
 			return;
 		}
-		try {
-			const r: any = await getVibecodeSessionDiff(sessionId);
-			sessionDiff = r?.diff ?? '';
-			sessionHasGithub = !!r?.has_github;
-		} catch {
-			sessionDiff = '';
+		// The API is fail-soft: null = fetch failed. Keep the last-known diff on failure
+		// (wiping it would silently hide real changes) and show an inline error + Retry.
+		const r: any = await getVibecodeSessionDiff(sessionId);
+		if (r === null) {
+			diffError = true;
+			return;
 		}
+		diffError = false;
+		sessionDiff = r?.diff ?? '';
+		sessionHasGithub = !!r?.has_github;
 	};
 	function parseDiffFiles(diff: string): { path: string; status: 'M' | 'A' | 'D'; lines: string[] }[] {
 		if (!diff) return [];
@@ -188,9 +193,11 @@
 	// the rail's Files sub-tab; the Changes sub-tab keeps its diff-parsed list. ──
 	let sessionFileEntries: VibecodeFileEntry[] = [];
 	let sessionFilesLoading = false;
+	let sessionFilesError = false; // listing fetch failed (≠ genuinely empty tree)
 	const loadSessionFiles = async () => {
 		if (!sessionId) {
 			sessionFileEntries = [];
+			sessionFilesError = false;
 			return;
 		}
 		const reqId = sessionId;
@@ -198,6 +205,12 @@
 		try {
 			const r = await getVibecodeSessionFiles(reqId);
 			if (reqId !== sessionId) return; // switched sessions mid-fetch → drop
+			if (r === null) {
+				// fetch failed — keep the last-known listing, surface an error + Retry
+				sessionFilesError = true;
+				return;
+			}
+			sessionFilesError = false;
 			sessionFileEntries = r.entries;
 		} finally {
 			if (reqId === sessionId) sessionFilesLoading = false;
@@ -213,10 +226,12 @@
 	let fileLoading = false;
 	let fileBinary = false;
 	let fileTruncated = false;
+	let fileError = false; // content fetch failed (API returns null) → honest state, not a blank editor
 	const loadFileContent = async (path: string) => {
 		fileContent = null;
 		fileBinary = false;
 		fileTruncated = false;
+		fileError = false;
 		if (!sessionId || !path) return;
 		fileLoading = true;
 		const req = path;
@@ -227,6 +242,8 @@
 			fileContent = r.binary ? '' : (r.content ?? '');
 			fileBinary = !!r.binary;
 			fileTruncated = !!r.truncated;
+		} else {
+			fileError = true;
 		}
 	};
 
@@ -242,23 +259,8 @@
 	const clearBg = () => {
 		bgHidden = new Set([...bgHidden, ...finishedTasks.map((t) => t.id)]);
 	};
-	const bgDot = (s?: string) =>
-		s === 'running'
-			? 'bg-blue-500 animate-pulse'
-			: s === 'error'
-				? 'bg-red-500'
-				: s === 'cancelled'
-					? 'bg-amber-500'
-					: 'bg-emerald-500';
-	const bgStatusLabel = (s?: string) =>
-		s === 'running'
-			? $i18n.t('Running')
-			: s === 'error'
-				? $i18n.t('Failed')
-				: s === 'cancelled'
-					? $i18n.t('Cancelled')
-					: $i18n.t('Completed');
-
+	// (bgDot/bgStatusLabel removed — dead since the shared runFormat helpers landed, and
+	//  they carried a stale cancelled=amber mapping. Use statusDot/statusLabel instead.)
 	// (BW2 3-region dock helpers removed — superseded by the BW3 dock + ⋯ panel menu)
 
 	// Left-rail tab + main-panel tab + file/artifact selection wiring.
@@ -595,7 +597,10 @@
 		toast.info(
 			$i18n.t('Local CLI sessions are coming soon — connect a GitHub or local repo for now.')
 		);
-	const refreshFiles = () => loadDiff();
+	const refreshFiles = () => {
+		loadDiff();
+		if (selectedFile) loadFileContent(selectedFile); // re-try the selected file's content too
+	};
 
 	// ── Token / context / COST usage — real per-turn usage, summed across the session, with a
 	//    real-time tick while a turn streams. Engine-FLEXIBLE: each model's context window + price
@@ -782,19 +787,26 @@
 	// connection-per-host cap and could stall the run when a 3rd/4th view was opened. The cost
 	// meter now reflects the persisted per-turn totals; `liveCompletionTokens` stays 0.)
 
+	let sessionLoadError = false; // last session fetch failed (API returns null on any failure)
 	const loadSession = async () => {
 		if (!sessionId) {
 			session = null;
 			turns = [];
+			sessionLoadError = false;
 			return;
 		}
 		const reqId = sessionId;
 		const data = await getVibecodeSession(reqId);
 		if (reqId !== sessionId) return; // navigated to another session mid-fetch — drop the stale response
 		if (data) {
+			sessionLoadError = false;
 			session = data.session;
 			turns = data.turns ?? [];
 			maybeAutoname();
+		} else {
+			// Fetch failed: keep whatever we already have (a transient poll failure must not
+			// blank a visible session) and surface the failure honestly in the thread/strip.
+			sessionLoadError = true;
 		}
 	};
 
@@ -814,10 +826,14 @@
 		if (!sessionId) return;
 		pollTimer = setTimeout(
 			async () => {
-				await loadSession();
-				await pollPending();
-				await maybeWriteBack();
-				schedule();
+				try {
+					await loadSession();
+					await pollPending();
+					await maybeWriteBack();
+				} finally {
+					// One failed poll must never silently kill the loop — always re-arm.
+					schedule();
+				}
 			},
 			anyRunning ? 2000 : 30000
 		);
@@ -1684,7 +1700,18 @@
 						     the right dock; aligns with the composer island below). `autoFollow` keeps
 						     the view pinned to the bottom as content streams in. -->
 						<div class="px-5 py-4 space-y-3 max-w-4xl mx-auto w-full" use:autoFollow>
-					{#if !turns.length}
+					{#if sessionLoadError && !session}
+						<!-- Initial session load FAILED — say so instead of a fake "no turns" empty state. -->
+						<div class="text-xs text-center pt-8 space-y-2">
+							<div class="text-red-500 dark:text-red-400">
+								{$i18n.t("Couldn't load this session — check your connection.")}
+							</div>
+							<button
+								class="text-[11px] px-2.5 py-1 rounded-lg border border-gray-200 dark:border-white/10 text-gray-600 dark:text-gray-300 hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition"
+								on:click={() => loadSession()}>{$i18n.t('Retry')}</button
+							>
+						</div>
+					{:else if !turns.length}
 						<div class="text-xs text-gray-500 text-center pt-8">
 							{$i18n.t('No turns yet — send a message to start coding.')}
 						</div>
@@ -1692,7 +1719,7 @@
 					{#each turns as t (t.id)}
 						<div class="flex justify-end">
 							<div
-								class="max-w-[68%] rounded-2xl rounded-br-md border border-white/8 bg-white/[0.03] px-3.5 py-2 text-gray-100"
+								class="max-w-[68%] rounded-2xl rounded-br-md border border-gray-200 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.05] px-3.5 py-2 text-gray-800 dark:text-gray-100"
 							>
 								{#if t.attachments && t.attachments.length}
 									<!-- The user's attachments stay in the chat: images inline, other files as chips. -->
@@ -1706,7 +1733,7 @@
 												/>
 											{:else}
 												<span
-													class="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-lg border border-white/8 bg-white/6 text-gray-300"
+													class="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-lg border border-gray-200 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.05] text-gray-600 dark:text-gray-300"
 													>📎 {att.name || $i18n.t('file')}</span
 												>
 											{/if}
@@ -1720,7 +1747,7 @@
 							<!-- live run while Harvis works: a lean Cursor-style step lineup (Editing
 							     hello.txt / Running: npm test …) that stays in the chat, not a blank
 							     canvas. Fixed height so the feed renders + scrolls; full run one click away. -->
-							<div class="h-80 rounded-xl border border-white/8 overflow-hidden bg-[#0b101b]">
+							<div class="h-80 rounded-xl border border-gray-200 dark:border-white/10 overflow-hidden bg-gray-50 dark:bg-gray-900">
 								{#key t.id}<RunView wsId={t.id} mode="stream" title={t.task_brief} onOpenFull={() => headerOpenRunId(t.id)} />{/key}
 							</div>
 						{:else}
@@ -1728,7 +1755,7 @@
 							     chat). Only the user's message above is bubbled. Full run is one click away. -->
 							<div class="flex flex-col items-start gap-1.5 w-full">
 								<div
-									class="w-full text-sm text-gray-100 markdown-prose markdown-prose-sm"
+									class="w-full text-sm text-gray-800 dark:text-gray-100 markdown-prose markdown-prose-sm"
 								>
 									{#if t.analysis_md}
 										<!-- Build Result Narrator: the full written analysis IS the assistant message. -->
@@ -1759,7 +1786,7 @@
 								{/if}
 								{#if expandedRuns[t.id]}
 									<div
-										class="w-full rounded-xl border border-white/8 overflow-hidden bg-[#0b101b]"
+										class="w-full rounded-xl border border-gray-200 dark:border-white/10 overflow-hidden bg-gray-50 dark:bg-gray-900"
 									>
 										{#key t.id}<RunView wsId={t.id} mode="dock" title={t.task_brief} onOpenFull={() => headerOpenRunId(t.id)} />{/key}
 									</div>
@@ -1779,7 +1806,8 @@
 						<!-- composer under the conversation — a centered floating island (not a
 						     full-width bar), buffered from the sidebar + dock to match the thread. -->
 		<div class="shrink-0 px-5 pb-4 pt-2">
-				<div class="w-full max-w-4xl mx-auto rounded-2xl border border-white/10 bg-[#0c111d] p-2.5 shadow-lg shadow-black/30">
+				<!-- A. chat card — raised, a step BRIGHTER than the page bg -->
+				<div class="w-full max-w-4xl mx-auto rounded-2xl border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-850 p-2.5 shadow-lg shadow-black/20">
 					<!-- attached image chips -->
 					{#if attachedImages.length}
 						<div class="flex flex-wrap gap-2 mb-2">
@@ -1792,7 +1820,7 @@
 											class="h-14 w-14 object-cover rounded-lg border border-gray-200 dark:border-gray-800"
 										/>
 									{:else}
-										<div class="h-14 max-w-[11rem] px-3 flex items-center gap-2 rounded-lg border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-850">
+										<div class="h-14 max-w-[11rem] px-3 flex items-center gap-2 rounded-lg border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-800">
 											<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" class="size-4 shrink-0 text-gray-400"><path d="M14 3v5h5M14 3l5 5v11a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z" stroke-linejoin="round" /></svg>
 											<span class="text-[11px] text-gray-600 dark:text-gray-300 truncate">{im.name}</span>
 										</div>
@@ -1811,7 +1839,7 @@
 						<!-- Execution-target chip → dropdown (Local = live; SSH = coming-soon seam) -->
 						<div class="relative">
 							<button
-								class="inline-flex items-center gap-1 text-[11px] px-2 py-1 rounded-lg bg-gray-100 dark:bg-gray-850 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-800"
+								class="inline-flex items-center gap-1 text-[11px] px-2 py-1 rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700"
 								on:click={() => (showExecMenu = !showExecMenu)}
 							>
 								<svg
@@ -1856,19 +1884,6 @@
 										</span>
 										<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="size-3.5 shrink-0 text-blue-500"><path d="M20 6 9 17l-5-5" stroke-linecap="round" stroke-linejoin="round" /></svg>
 									</button>
-									<div class="border-t border-gray-100 dark:border-gray-800 my-1"></div>
-									<div class="px-3 pt-1 pb-0.5 text-[10px] uppercase tracking-wide text-gray-400">
-										{$i18n.t('SSH')}
-									</div>
-									<button
-										class="w-full flex items-center gap-2 px-3 py-1.5 text-gray-400 cursor-not-allowed"
-										disabled
-										title={$i18n.t('Code on another machine over SSH — a later phase, gated behind the permission ladder')}
-									>
-										<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="size-3.5"><path d="M12 5v14M5 12h14" stroke-linecap="round" /></svg>
-										{$i18n.t('Add SSH host…')}
-										<span class="ml-auto text-[10px]">{$i18n.t('soon')}</span>
-									</button>
 								</div>
 							{/if}
 						</div>
@@ -1876,9 +1891,9 @@
 						<!-- repo chip -->
 						<div class="relative">
 							<button
-								class="inline-flex items-center gap-1.5 text-[11px] px-2 py-1 rounded-lg bg-gray-100 dark:bg-gray-850 text-gray-600 dark:text-gray-300 {sessionId
+								class="inline-flex items-center gap-1.5 text-[11px] px-2 py-1 rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 {sessionId
 									? 'cursor-default'
-									: 'hover:bg-gray-200 dark:hover:bg-gray-800'}"
+									: 'hover:bg-gray-200 dark:hover:bg-gray-700'}"
 								on:click={() => {
 									if (!sessionId) showRepoMenu = !showRepoMenu;
 								}}
@@ -1998,11 +2013,11 @@
 						<div class="flex items-start gap-2 mb-2 px-3 py-2 rounded-lg bg-violet-500/8 border border-violet-500/25">
 							<svg class="size-4 shrink-0 mt-0.5 text-violet-300" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="5" r="2" /><circle cx="5" cy="19" r="2" /><circle cx="19" cy="19" r="2" /><path d="M12 7v3m0 0-5 7m5-7 5 7" stroke-linecap="round" stroke-linejoin="round" /></svg>
 							<div class="min-w-0 flex-1">
-								<div class="text-xs font-medium text-gray-100">{$i18n.t('Split across ~{{n}} agents?', { n: orchestratePrompt.agents })}</div>
+								<div class="text-xs font-medium text-gray-800 dark:text-gray-100">{$i18n.t('Split across ~{{n}} agents?', { n: orchestratePrompt.agents })}</div>
 								{#if orchestratePrompt.reason}<div class="text-[11px] text-gray-400 mt-0.5 leading-snug">{orchestratePrompt.reason}</div>{/if}
 							</div>
 							<div class="shrink-0 flex items-center gap-1.5">
-								<button type="button" class="text-[11px] px-2.5 py-1 rounded-md text-gray-400 hover:text-gray-200 transition" on:click={() => answerSplit(false)}>{$i18n.t('Keep single')}</button>
+								<button type="button" class="text-[11px] px-2.5 py-1 rounded-md text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 transition" on:click={() => answerSplit(false)}>{$i18n.t('Keep single')}</button>
 								<button type="button" class="text-[11px] px-2.5 py-1 rounded-md border border-violet-500/30 bg-violet-500/15 text-violet-200 hover:bg-violet-500/25 transition" on:click={() => answerSplit(true)}>{$i18n.t('Split')}</button>
 							</div>
 						</div>
@@ -2012,7 +2027,7 @@
 					<div class="relative">
 						<textarea
 							bind:this={promptEl}
-							class="w-full text-sm bg-transparent py-2 pl-2 pr-10 outline-none resize-none disabled:opacity-50 leading-relaxed text-gray-100 placeholder:text-gray-500"
+							class="w-full text-sm bg-transparent py-2 pl-2 pr-10 outline-none resize-none disabled:opacity-50 leading-relaxed text-gray-800 dark:text-gray-100 placeholder:text-gray-500"
 							style="max-height: 160px"
 							rows="1"
 							placeholder={sessionId ? $i18n.t('Send a follow-up…') : $i18n.t('Describe a task or ask a question')}
@@ -2028,7 +2043,7 @@
 						></textarea>
 						<button
 							class="absolute right-2 bottom-1.5 size-7 rounded-lg flex items-center justify-center transition {composerDisabled || !prompt.trim()
-								? 'bg-white/6 text-gray-500 cursor-not-allowed'
+								? 'bg-black/[0.03] dark:bg-white/[0.05] text-gray-500 cursor-not-allowed'
 								: 'bg-blue-600 hover:bg-blue-500 text-white shadow-sm'}"
 							disabled={composerDisabled || !prompt.trim()}
 							on:click={submit}
@@ -2042,9 +2057,14 @@
 							{/if}
 						</button>
 					</div>
+				</div>
 
+				<!-- B. control strip — BELOW the chat card, blended into the page bg:
+				     no card, no border, no shadow. relative+z keeps the upward menus
+				     stacking above the chat card. -->
+				<div class="relative z-10 w-full max-w-4xl mx-auto bg-transparent px-1.5 pt-2">
 					<!-- toolbar -->
-					<div class="flex items-center gap-1.5 mt-2">
+					<div class="flex items-center gap-1.5">
 						<!-- Engine pill removed — the Build engine now follows the model dropdown
 						     (see the selectedEngine reactive); the model IS the single control. -->
 						{#if hermesNeedsModel}
@@ -2066,7 +2086,7 @@
 								type="button"
 								class="inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-full border transition hover:opacity-90 {runMode ===
 								'plan'
-									? 'border-white/8 bg-white/4 text-gray-300'
+									? 'border-gray-200 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.05] text-gray-600 dark:text-gray-300'
 									: runMode === 'full-auto'
 										? 'border-amber-500/20 bg-amber-500/10 text-amber-300'
 										: 'border-sky-500/20 bg-sky-500/10 text-sky-300'}"
@@ -2149,7 +2169,7 @@
 								? 'border-violet-500/30 bg-violet-500/12 text-violet-300'
 								: agentsMode === 'auto'
 									? 'border-amber-500/30 bg-amber-500/12 text-amber-300'
-									: 'border-white/8 bg-white/4 text-gray-400 hover:text-gray-200'}"
+									: 'border-gray-200 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.05] text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'}"
 							title={agentsMode === 'auto'
 								? $i18n.t('Agents · Auto — Harvis proposes splitting multi-part tasks; you confirm')
 								: agentsMode === 'on'
@@ -2177,8 +2197,9 @@
 						<!-- attach menu: the + opens a multi-choice popup (Add image / Attach files) -->
 						<div class="relative">
 							<button
-								class="text-gray-500 hover:text-gray-200 p-1.5"
+								class="text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 p-1.5"
 								title={$i18n.t('Add attachment')}
+								aria-label={$i18n.t('Add attachment')}
 								on:click={() => (showAttachMenu = !showAttachMenu)}
 							>
 								<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="size-4"><path d="M12 5v14M5 12h14" stroke-linecap="round" /></svg>
@@ -2232,31 +2253,12 @@
 							on:change={onFolderPick}
 						/>
 
-						<!-- mic (placeholder) -->
-						<button
-							class="text-gray-600 p-1.5 cursor-default"
-							title={$i18n.t('Voice (coming soon)')}
-						>
-							<svg
-								xmlns="http://www.w3.org/2000/svg"
-								viewBox="0 0 24 24"
-								fill="none"
-								stroke="currentColor"
-								stroke-width="1.8"
-								class="size-4"
-								><rect x="9" y="2" width="6" height="12" rx="3" /><path
-									d="M5 10a7 7 0 0 0 14 0M12 19v3"
-									stroke-linecap="round"
-								/></svg
-							>
-						</button>
-
 						<div class="flex-1"></div>
 
 						<!-- model selector → pick from available models -->
 						<div class="relative">
 							<button
-								class="inline-flex items-center gap-1 text-[11px] px-2 py-1 rounded-lg border border-white/8 bg-white/4 text-gray-300 hover:bg-white/8 transition max-w-[10rem]"
+								class="inline-flex items-center gap-1 text-[11px] px-2 py-1 rounded-lg border border-gray-200 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.05] text-gray-500 dark:text-gray-400 hover:bg-black/[0.06] dark:hover:bg-white/10 hover:text-gray-700 dark:hover:text-gray-200 transition max-w-[10rem]"
 								on:click={toggleModelMenu}
 								title={$i18n.t('Model')}
 							>
@@ -2285,7 +2287,7 @@
 						<!-- usage gauge → click for the full context/token breakdown -->
 						<div class="relative hidden sm:block">
 							<button
-								class="flex items-center gap-2 text-[10px] text-gray-500 px-1.5 py-1 hover:bg-white/4 transition"
+								class="flex items-center gap-2 text-[10px] text-gray-500 px-1.5 py-1 hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition"
 								on:click={() => (showUsageStats = !showUsageStats)}
 								title={$i18n.t('Context & token usage')}
 							>
@@ -2323,8 +2325,15 @@
 						</div>
 						
 						{#if anyRunning}<span class="text-[11px] text-gray-500">{$i18n.t('Working…')}</span>{/if}
+						{#if sessionLoadError && session}
+							<!-- background refresh failing; the poll loop keeps retrying on its own -->
+							<span class="text-[11px] text-amber-500"
+								>{$i18n.t('Connection lost — retrying…')}</span
+							>
+						{/if}
 					</div>
 					{#if sendError}<div class="text-[11px] text-red-500 mt-1">{sendError}</div>{/if}
+					{#if permError}<div class="text-[11px] text-red-500 mt-1">{permError}</div>{/if}
 					</div>
 				</div>
 					</div>
@@ -2333,19 +2342,19 @@
 					<PaneResizer class="w-1.5 shrink-0 bg-gray-100 dark:bg-gray-850 hover:bg-blue-400 dark:hover:bg-blue-500 transition" />
 					<!-- RIGHT PANE: the workspace 2×2 dock, OR the Workflow Inspector when a run is
 					     open — the inspector pushes the chat narrower instead of taking over the page. -->
-					<Pane bind:pane={rightPane} defaultSize={overlayRunId ? inspectorSize : dockSize} minSize={22} maxSize={72} class="min-h-0 bg-[#070b13]">
+					<Pane bind:pane={rightPane} defaultSize={overlayRunId ? inspectorSize : dockSize} minSize={22} maxSize={72} class="min-h-0 bg-gray-100 dark:bg-gray-950">
 						{#if (topHasAny || bottomHasAny) || overlayRunId}
 						<!-- When a run is open the inspector sits BESIDE the workspace dock (not over it),
 						     so the panels stay usable; the dock shrinks to a side strip. -->
 						<div class="flex h-full min-h-0">
 						{#if topHasAny || bottomHasAny}
-						<div class="h-full min-h-0 min-w-0 overflow-hidden order-last {overlayRunId ? 'border-l border-white/8' : ''}" style={overlayRunId ? 'flex: 0 0 38%' : 'flex: 1 1 100%'}>
+						<div class="h-full min-h-0 min-w-0 overflow-hidden order-last {overlayRunId ? 'border-l border-gray-200 dark:border-white/10' : ''}" style={overlayRunId ? 'flex: 0 0 38%' : 'flex: 1 1 100%'}>
 							<!-- Tabbed dock (Claude-Code-Desktop style): a tab strip over ONE full-height
 							     panel. The ⋯ menu still decides which tabs exist; the strip switches. -->
 							<div class="h-full p-1">
-							<div class="flex flex-col min-h-0 h-full bg-[#0c111d] rounded-xl border border-white/8 shadow-lg shadow-black/30 overflow-hidden text-gray-200">
+							<div class="flex flex-col min-h-0 h-full bg-gray-50 dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-white/10 shadow-lg shadow-black/30 overflow-hidden text-gray-700 dark:text-gray-200">
 								<!-- tab strip -->
-								<div class="shrink-0 flex items-center gap-0 px-2 border-b border-white/8 bg-white/[0.015]">
+								<div class="shrink-0 flex items-center gap-0 px-2 border-b border-gray-200 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.05]">
 									{#each dockTabs as t (t.key)}
 										<button
 											type="button"
@@ -2355,8 +2364,8 @@
 											on:drop|preventDefault={() => onTabDrop(t.key)}
 											class="relative px-3 py-2 text-[11px] font-medium transition cursor-grab active:cursor-grabbing {dockTab ===
 											t.key
-												? 'text-gray-100'
-												: 'text-gray-500 hover:text-gray-300'}"
+												? 'text-gray-800 dark:text-gray-100'
+												: 'text-gray-500 hover:text-gray-600 dark:hover:text-gray-300'}"
 											on:click={() => setDockTab(t.key)}
 										>
 											<span class="inline-flex items-center gap-1.5">
@@ -2372,7 +2381,7 @@
 									{/each}
 									<button
 										type="button"
-										class="ml-auto shrink-0 text-gray-500 hover:text-gray-200 transition p-1.5"
+										class="ml-auto shrink-0 text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 transition p-1.5"
 										aria-label={$i18n.t('Hide this panel')}
 										title={$i18n.t('Hide this panel')}
 										on:click={() => togglePanel(dockTab)}
@@ -2392,7 +2401,7 @@
 											{/if}
 											{#if finishedTasks.length}
 												<div class="flex items-center justify-between px-1 pt-1">
-													<button class="flex items-center gap-1 text-[10px] uppercase tracking-wider text-gray-500 hover:text-gray-300 transition" on:click={() => (showFinished = !showFinished)}>
+													<button class="flex items-center gap-1 text-[10px] uppercase tracking-wider text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 transition" on:click={() => (showFinished = !showFinished)}>
 														<svg class="size-3 transition-transform {showFinished ? 'rotate-90' : ''}" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.21 14.77a.75.75 0 0 1 .02-1.06L11.168 10 7.23 6.29a.75.75 0 1 1 1.04-1.08l4.5 4.25a.75.75 0 0 1 0 1.08l-4.5 4.25a.75.75 0 0 1-1.06-.02Z" clip-rule="evenodd" /></svg>
 														<span>{$i18n.t('Finished')} {finishedTasks.length}</span>
 													</button>
@@ -2418,8 +2427,27 @@
 										{/if}
 									</div>
 								{:else if dockTab === 'tr'}
-									<div class="flex-1 min-h-0">
-										<WorkspaceFileRail bind:tab={fileTab} {changedFiles} {artifacts} {selectedFile} sessionFiles={sessionFilePaths} {sessionFilesLoading} on:select={(e) => onFileSelect(e.detail.path)} on:selectArtifact={(e) => onArtifactSelect(e.detail.id)} />
+									<div class="flex-1 min-h-0 flex flex-col">
+										{#if diffError || sessionFilesError}
+											<!-- honest degraded state: the diff / file-listing fetch failed -->
+											<div class="shrink-0 flex items-center gap-2 px-3 py-1.5 text-[11px] text-red-500 dark:text-red-400 bg-red-500/5 border-b border-red-500/15">
+												<span class="truncate"
+													>{diffError
+														? $i18n.t("Couldn't load the changes.")
+														: $i18n.t("Couldn't load the file list.")}</span
+												>
+												<button
+													class="ml-auto shrink-0 underline hover:no-underline"
+													on:click={() => {
+														if (diffError) loadDiff();
+														if (sessionFilesError) loadSessionFiles();
+													}}>{$i18n.t('Retry')}</button
+												>
+											</div>
+										{/if}
+										<div class="flex-1 min-h-0">
+											<WorkspaceFileRail bind:tab={fileTab} {changedFiles} {artifacts} {selectedFile} sessionFiles={sessionFilePaths} {sessionFilesLoading} on:select={(e) => onFileSelect(e.detail.path)} on:selectArtifact={(e) => onArtifactSelect(e.detail.id)} />
+										</div>
 									</div>
 								{:else if dockTab === 'sh'}
 									<div class="flex-1 min-h-0">
@@ -2431,7 +2459,7 @@
 									</div>
 								{:else}
 									<div class="flex-1 min-h-0">
-										<WorkspaceMainPanel showChat={false} bind:tab={mainTab} {selectedFile} diffLines={selectedFileObj ? selectedFileObj.lines : []} {fileContent} {fileLoading} {fileBinary} {fileTruncated} hasRepo={!!sessionId} hasChanges={changedFiles.length > 0} on:refresh={refreshFiles}>
+										<WorkspaceMainPanel showChat={false} bind:tab={mainTab} {selectedFile} diffLines={selectedFileObj ? selectedFileObj.lines : []} {fileContent} {fileLoading} {fileBinary} {fileTruncated} {fileError} hasRepo={!!sessionId} hasChanges={changedFiles.length > 0} on:refresh={refreshFiles}>
 											<div slot="logs" class="h-full overflow-auto">
 												{#if logsRunId || latestTurnId}
 													{#key logsRunId || latestTurnId}<RunView wsId={logsRunId || latestTurnId} mode="dock" onOpenFull={() => headerOpenRunId(logsRunId || latestTurnId)} />{/key}
@@ -2642,7 +2670,7 @@
 	     the main sidebar, not a right drawer). ?panel=routines. -->
 	{#if showRoutines}
 		<div
-			class="fixed top-0 right-0 bottom-0 left-0 z-50 flex flex-col bg-white dark:bg-[#080c16] {$showSidebar
+			class="fixed top-0 right-0 bottom-0 left-0 z-50 flex flex-col bg-white dark:bg-gray-950 {$showSidebar
 				? 'md:left-[var(--sidebar-width)]'
 				: ''}"
 		>

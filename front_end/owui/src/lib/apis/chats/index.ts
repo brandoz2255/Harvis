@@ -82,7 +82,7 @@ export const unarchiveAllChats = async (token: string) => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 
 			console.error(err);
 			return null;
@@ -671,7 +671,7 @@ export const getChatById = async (token: string, id: string) => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 
 			console.error(err);
 			return null;
@@ -1137,7 +1137,7 @@ export const deleteChatById = async (token: string, id: string) => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 
 			console.error(err);
 			return null;
@@ -1204,7 +1204,7 @@ export const addTagById = async (token: string, id: string, tagName: string) => 
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -1301,7 +1301,7 @@ export const deleteAllChats = async (token: string) => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 
 			console.error(err);
 			return null;
@@ -1333,7 +1333,7 @@ export const archiveAllChats = async (token: string) => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 
 			console.error(err);
 			return null;

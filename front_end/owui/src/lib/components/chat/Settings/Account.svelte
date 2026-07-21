@@ -19,6 +19,15 @@
 
 	const i18n = getContext('i18n');
 
+	// HONESTY GATES: the Harvis owui_compat facade does not implement
+	// POST /api/v1/auths/update/profile or GET|POST /api/v1/auths/api_key
+	// (see python_back_end/owui_compat/router.py — only signin/signup/signout,
+	// GET /auths/ and the update/timezone stub exist). Rather than letting
+	// Save / Create-API-key fail on 404 every time, those controls are
+	// disabled with a note until the routes land.
+	const PROFILE_UPDATE_AVAILABLE = false;
+	const API_KEYS_AVAILABLE = false;
+
 	export let saveHandler: Function;
 	export let saveSettings: Function;
 
@@ -34,8 +43,6 @@
 
 	let webhookUrl = '';
 	let showAPIKeys = false;
-
-	let JWTTokenCopied = false;
 
 	let APIKey = '';
 	let APIKeyCopied = false;
@@ -81,6 +88,10 @@
 	};
 
 	const createAPIKeyHandler = async () => {
+		if (!API_KEYS_AVAILABLE) {
+			toast.error($i18n.t('API keys are not available in this deployment yet.'));
+			return;
+		}
 		APIKey = await createAPIKey(localStorage.token);
 		if (APIKey) {
 			toast.success($i18n.t('API Key created.'));
@@ -111,7 +122,7 @@
 		// Only fetch API key if the feature is enabled and user has permission
 		if (
 			user &&
-			($config?.features?.enable_api_keys ?? true) &&
+			($config?.features?.enable_api_keys ?? false) &&
 			(user?.role === 'admin' || (user?.permissions?.features?.api_keys ?? false))
 		) {
 			APIKey = await getAPIKey(localStorage.token).catch((error) => {
@@ -128,9 +139,9 @@
 	<div class=" overflow-y-scroll max-h-[28rem] md:max-h-full">
 		<div class="space-y-1">
 			<div>
-				<div class="text-base font-medium">{$i18n.t('Your Account')}</div>
+				<div class="text-lg font-semibold text-gray-900 dark:text-gray-100">{$i18n.t('Your Account')}</div>
 
-				<div class="text-xs text-gray-500 mt-0.5">
+				<div class="text-sm text-gray-500 dark:text-gray-400 mt-0.5">
 					{$i18n.t('Manage your account information.')}
 				</div>
 			</div>
@@ -143,7 +154,7 @@
 				<div class="flex flex-1 flex-col">
 					<div class=" flex-1">
 						<div class="flex flex-col w-full">
-							<div class=" mb-1 text-xs font-medium">{$i18n.t('Name')}</div>
+							<div class=" mb-1 text-sm font-medium text-gray-700 dark:text-gray-300">{$i18n.t('Name')}</div>
 
 							<div class="flex-1">
 								<input
@@ -158,7 +169,7 @@
 						</div>
 
 						<div class="flex flex-col w-full mt-2">
-							<div class=" mb-1 text-xs font-medium">{$i18n.t('Bio')}</div>
+							<div class=" mb-1 text-sm font-medium text-gray-700 dark:text-gray-300">{$i18n.t('Bio')}</div>
 
 							<div class="flex-1">
 								<Textarea
@@ -172,7 +183,7 @@
 						</div>
 
 						<div class="flex flex-col w-full mt-2">
-							<div class=" mb-1 text-xs font-medium">{$i18n.t('Gender')}</div>
+							<div class=" mb-1 text-sm font-medium text-gray-700 dark:text-gray-300">{$i18n.t('Gender')}</div>
 
 							<div class="flex-1">
 								<select
@@ -210,7 +221,7 @@
 						</div>
 
 						<div class="flex flex-col w-full mt-2">
-							<div class=" mb-1 text-xs font-medium">{$i18n.t('Birth Date')}</div>
+							<div class=" mb-1 text-sm font-medium text-gray-700 dark:text-gray-300">{$i18n.t('Birth Date')}</div>
 
 							<div class="flex-1">
 								<input
@@ -230,7 +241,7 @@
 		{#if $config?.features?.enable_user_webhooks}
 			<div class="mt-2">
 				<div class="flex flex-col w-full">
-					<div class=" mb-1 text-xs font-medium">{$i18n.t('Notification Webhook')}</div>
+					<div class=" mb-1 text-sm font-medium text-gray-700 dark:text-gray-300">{$i18n.t('Notification Webhook')}</div>
 
 					<div class="flex-1">
 						<input
@@ -254,11 +265,11 @@
 			</div>
 		{/if}
 
-		{#if ($config?.features?.enable_api_keys ?? true) && ($user?.role === 'admin' || ($user?.permissions?.features?.api_keys ?? false))}
-			<div class="flex justify-between items-center text-sm mt-2">
-				<div class="  font-medium">{$i18n.t('API keys')}</div>
+		{#if ($config?.features?.enable_api_keys ?? false) && ($user?.role === 'admin' || ($user?.permissions?.features?.api_keys ?? false))}
+			<div class="flex justify-between items-center mt-4 py-2">
+				<div class="text-lg font-semibold text-gray-900 dark:text-gray-100">{$i18n.t('API keys')}</div>
 				<button
-					class=" text-xs font-medium text-gray-500"
+					class=" text-sm font-medium text-gray-500"
 					type="button"
 					on:click={() => {
 						showAPIKeys = !showAPIKeys;
@@ -268,64 +279,7 @@
 
 			{#if showAPIKeys}
 				<div class="flex flex-col">
-					{#if $user?.role === 'admin'}
-						<div class="justify-between w-full mt-2">
-							<div class="flex justify-between w-full">
-								<div class="self-center text-xs font-medium mb-1">{$i18n.t('JWT Token')}</div>
-							</div>
-
-							<div class="flex">
-								<SensitiveInput value={localStorage.token} readOnly={true} />
-
-								<button
-									class="ml-1.5 px-1.5 py-1 dark:hover:bg-gray-850 transition rounded-lg"
-									aria-label={$i18n.t('Copy Token')}
-									on:click={() => {
-										copyToClipboard(localStorage.token);
-										JWTTokenCopied = true;
-										setTimeout(() => {
-											JWTTokenCopied = false;
-										}, 2000);
-									}}
-								>
-									{#if JWTTokenCopied}
-										<svg
-											xmlns="http://www.w3.org/2000/svg"
-											viewBox="0 0 20 20"
-											fill="currentColor"
-											class="w-4 h-4"
-										>
-											<path
-												fill-rule="evenodd"
-												d="M16.704 4.153a.75.75 0 01.143 1.052l-8 10.5a.75.75 0 01-1.127.075l-4.5-4.5a.75.75 0 011.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 011.05-.143z"
-												clip-rule="evenodd"
-											/>
-										</svg>
-									{:else}
-										<svg
-											xmlns="http://www.w3.org/2000/svg"
-											viewBox="0 0 16 16"
-											fill="currentColor"
-											class="w-4 h-4"
-										>
-											<path
-												fill-rule="evenodd"
-												d="M11.986 3H12a2 2 0 0 1 2 2v6a2 2 0 0 1-1.5 1.937V7A2.5 2.5 0 0 0 10 4.5H4.063A2 2 0 0 1 6 3h.014A2.25 2.25 0 0 1 8.25 1h1.5a2.25 2.25 0 0 1 2.236 2ZM10.5 4v-.75a.75.75 0 0 0-.75-.75h-1.5a.75.75 0 0 0-.75.75V4h3Z"
-												clip-rule="evenodd"
-											/>
-											<path
-												fill-rule="evenodd"
-												d="M3 6a1 1 0 0 0-1 1v7a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1V7a1 1 0 0 0-1-1H3Zm1.75 2.5a.75.75 0 0 0 0 1.5h3.5a.75.75 0 0 0 0-1.5h-3.5ZM4 11.75a.75.75 0 0 1 .75-.75h3.5a.75.75 0 0 1 0 1.5h-3.5a.75.75 0 0 1-.75-.75Z"
-												clip-rule="evenodd"
-											/>
-										</svg>
-									{/if}
-								</button>
-							</div>
-						</div>
-					{/if}
-
-					{#if ($config?.features?.enable_api_keys ?? true) && ($user?.role === 'admin' || ($user?.permissions?.features?.api_keys ?? false))}
+					{#if ($config?.features?.enable_api_keys ?? false) && ($user?.role === 'admin' || ($user?.permissions?.features?.api_keys ?? false))}
 						<div class="justify-between w-full mt-2">
 							{#if $user?.role === 'admin'}
 								<div class="flex justify-between w-full">
@@ -381,10 +335,17 @@
 										{/if}
 									</button>
 
-									<Tooltip content={$i18n.t('Create new key')}>
+									<Tooltip
+										content={API_KEYS_AVAILABLE
+											? $i18n.t('Create new key')
+											: $i18n.t('Not available in this deployment')}
+									>
 										<button
-											class=" px-1.5 py-1 dark:hover:bg-gray-850transition rounded-lg"
+											class=" px-1.5 py-1 rounded-lg {API_KEYS_AVAILABLE
+												? 'dark:hover:bg-gray-850 transition'
+												: 'opacity-50 cursor-not-allowed'}"
 											aria-label={$i18n.t('Create new key')}
+											disabled={!API_KEYS_AVAILABLE}
 											on:click={() => {
 												createAPIKeyHandler();
 											}}
@@ -406,16 +367,23 @@
 										</button>
 									</Tooltip>
 								{:else}
-									<button
-										class="flex gap-1.5 items-center font-medium px-3.5 py-1.5 rounded-lg bg-gray-100/70 hover:bg-gray-100 dark:bg-gray-850 dark:hover:bg-gray-850 transition"
-										on:click={() => {
-											createAPIKeyHandler();
-										}}
+									<Tooltip
+										content={API_KEYS_AVAILABLE ? '' : $i18n.t('Not available in this deployment')}
 									>
-										<Plus strokeWidth="2" className=" size-3.5" />
+										<button
+											class="flex gap-1.5 items-center font-medium px-3.5 py-1.5 rounded-lg bg-gray-100/70 dark:bg-gray-850 {API_KEYS_AVAILABLE
+												? 'hover:bg-gray-100 dark:hover:bg-gray-850 transition'
+												: 'opacity-50 cursor-not-allowed'}"
+											disabled={!API_KEYS_AVAILABLE}
+											on:click={() => {
+												createAPIKeyHandler();
+											}}
+										>
+											<Plus strokeWidth="2" className=" size-3.5" />
 
-										{$i18n.t('Create new secret key')}</button
-									>
+											{$i18n.t('Create new secret key')}</button
+										>
+									</Tooltip>
 								{/if}
 							</div>
 						</div>
@@ -425,10 +393,21 @@
 		{/if}
 	</div>
 
-	<div class="flex justify-end pt-3 text-sm font-medium">
+	<div class="flex justify-end items-center gap-3 pt-3 text-sm font-medium">
+		{#if !PROFILE_UPDATE_AVAILABLE}
+			<div class="text-xs text-gray-400 dark:text-gray-500">
+				{$i18n.t('Profile editing is not available in this deployment yet.')}
+			</div>
+		{/if}
 		<button
-			class="px-3.5 py-1.5 text-sm font-medium bg-black hover:bg-gray-900 text-white dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-full"
+			class="px-3.5 py-1.5 text-sm font-medium bg-black text-white dark:bg-white dark:text-black transition rounded-full {PROFILE_UPDATE_AVAILABLE
+				? 'hover:bg-gray-900 dark:hover:bg-gray-100'
+				: 'opacity-50 cursor-not-allowed'}"
+			disabled={!PROFILE_UPDATE_AVAILABLE}
 			on:click={async () => {
+				if (!PROFILE_UPDATE_AVAILABLE) {
+					return;
+				}
 				const res = await submitHandler();
 
 				if (res) {

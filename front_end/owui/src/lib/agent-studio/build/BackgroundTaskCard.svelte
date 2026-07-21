@@ -151,10 +151,10 @@
 	const toggle = () => (expanded = !expanded);
 </script>
 
-<div class="rounded-xl border border-white/8 bg-[#121a2e] overflow-hidden">
+<div class="rounded-xl border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-850 overflow-hidden">
 	<!-- Compact head (always) -->
 	<div
-		class="w-full text-left px-3 py-2.5 hover:bg-white/4 transition cursor-pointer"
+		class="w-full text-left px-3 py-2.5 hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition cursor-pointer"
 		role="button"
 		tabindex="0"
 		on:click={toggle}
@@ -162,7 +162,7 @@
 	>
 		<div class="flex items-center gap-2">
 			<span class="size-2 rounded-full shrink-0 {statusDot(status)}"></span>
-			<span class="flex-1 truncate text-xs font-medium text-gray-100"
+			<span class="flex-1 truncate text-xs font-medium text-gray-800 dark:text-gray-100"
 				>{humanizeRunTitle(run)}</span
 			>
 			{#if elapsed}<span class="text-[11px] text-gray-500 tabular-nums shrink-0">{elapsed}</span>{/if}
@@ -201,7 +201,7 @@
 
 	<!-- Expanded body (technical metrics one click away) -->
 	{#if expanded}
-		<div class="border-t border-white/8 px-3 py-2.5 space-y-2 bg-[#0d1320]">
+		<div class="border-t border-gray-200 dark:border-white/10 px-3 py-2.5 space-y-2 bg-gray-50 dark:bg-gray-900">
 			{#if prompt}
 				<p class="text-[11px] leading-snug text-gray-400 whitespace-pre-wrap">
 					{prompt}
@@ -211,7 +211,7 @@
 				<!-- Persisted background-job surface: command · timeout · pass/fail -->
 				<div class="flex items-center gap-1.5 min-w-0">
 					<code
-						class="flex-1 truncate font-mono text-[11px] text-gray-300 bg-white/4 rounded px-1.5 py-1"
+						class="flex-1 truncate font-mono text-[11px] text-gray-600 dark:text-gray-300 bg-black/[0.03] dark:bg-white/[0.05] rounded px-1.5 py-1"
 						title={jobCommand}>{jobCommand}</code
 					>
 					{#if timeoutSecs != null}
@@ -231,7 +231,7 @@
 			{#if tailLines.length}
 				<div>
 					<button
-						class="text-[11px] text-gray-500 hover:text-gray-200 transition"
+						class="text-[11px] text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 transition"
 						on:click={() => (showTail = !showTail)}
 						>{showTail ? $i18n.t('Hide log tail') : $i18n.t('Show log tail')} ({tailLines.length})</button
 					>
@@ -252,28 +252,28 @@
 			/>
 			<div class="flex items-center gap-1.5 pt-0.5">
 				<button
-					class="text-[11px] px-2 py-1 text-blue-400 hover:bg-white/4 transition"
+					class="text-[11px] px-2 py-1 text-blue-400 hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition"
 					on:click={() => dispatch('openRun', { id: run.id })}>{$i18n.t('Open run')}</button
 				>
 				<button
-					class="text-[11px] px-2 py-1 text-gray-300 hover:bg-white/4 transition"
+					class="text-[11px] px-2 py-1 text-gray-600 dark:text-gray-300 hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition"
 					on:click={() => dispatch('viewLogs', { id: run.id })}>{$i18n.t('View logs')}</button
 				>
 				{#if !isRunning && canRetry(status) && jobCommand}
 					<button
-						class="text-[11px] px-2 py-1 text-gray-300 hover:bg-white/4 transition disabled:opacity-50"
+						class="text-[11px] px-2 py-1 text-gray-600 dark:text-gray-300 hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition disabled:opacity-50"
 						disabled={retrying}
 						on:click={retry}>{retrying ? $i18n.t('Retrying…') : $i18n.t('Retry')}</button
 					>
 				{/if}
 				{#if isRunning}
 					<button
-						class="text-[11px] px-2 py-1 text-red-400 hover:bg-white/4 transition"
+						class="text-[11px] px-2 py-1 text-red-400 hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition"
 						on:click={() => dispatch('stop', { id: run.id })}>{$i18n.t('Stop')}</button
 					>
 				{/if}
 				<button
-					class="ml-auto text-[11px] px-2 py-1 text-gray-500 hover:text-gray-200 transition"
+					class="ml-auto text-[11px] px-2 py-1 text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 transition"
 					on:click={toggle}>{$i18n.t('Hide details')}</button
 				>
 			</div>

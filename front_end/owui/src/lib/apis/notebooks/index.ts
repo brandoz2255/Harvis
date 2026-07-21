@@ -24,15 +24,27 @@ export interface NotebookSource {
 	[key: string]: unknown;
 }
 
-export const listNotebooks = async (): Promise<Notebook[]> => {
+// Detailed variant: callers that need to distinguish "no notebooks" from "the
+// request failed" (auth expired, backend down) use this. `listNotebooks` below
+// keeps its swallow-to-[] signature for existing callers.
+export const listNotebooksDetailed = async (): Promise<{
+	ok: boolean;
+	status: number;
+	notebooks: Notebook[];
+	error?: string;
+}> => {
 	try {
 		const r = await fetch(BASE, { headers: authHeaders(), credentials: 'include' });
-		if (!r.ok) return [];
+		if (!r.ok) return { ok: false, status: r.status, notebooks: [], error: `HTTP ${r.status}` };
 		const data = await r.json();
-		return data?.notebooks ?? [];
-	} catch (_) {
-		return [];
+		return { ok: true, status: r.status, notebooks: data?.notebooks ?? [] };
+	} catch (e: any) {
+		return { ok: false, status: 0, notebooks: [], error: String(e?.message ?? e) };
 	}
+};
+
+export const listNotebooks = async (): Promise<Notebook[]> => {
+	return (await listNotebooksDetailed()).notebooks;
 };
 
 export const createNotebook = async (

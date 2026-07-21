@@ -1,12 +1,15 @@
 <script lang="ts">
 	import { getContext, onDestroy, createEventDispatcher } from 'svelte';
-	import { createWorkspaceStream } from '$lib/apis/streaming/workspace-stream';
+	import { subscribeRun } from '$lib/apis/streaming/runStream';
 
 	const i18n: any = getContext('i18n');
 	const dispatch = createEventDispatcher();
 
 	// The run whose plan to stream. Empty = idle. The backend's orchestrator emits a
 	// structured `plan` event (steps) + agent_start/agent_end — we map those to status.
+	// Consumes the SHARED per-run stream store (subscribeRun) so this panel rides the same
+	// single SSE connection as RunView / the Workflow Inspector instead of opening a second
+	// one; steps are re-folded from the full event array on each batched flush.
 	export let wsId = '';
 
 	type Step = {
@@ -20,62 +23,69 @@
 	// Tell the host whether a plan exists (so the dock can auto-show the Plan panel).
 	$: dispatch('steps', { count: steps.length });
 	let uniform = false;
-	let controller: AbortController | null = null;
 	let activeId = '';
+	let _sub: ReturnType<typeof subscribeRun> | null = null;
+	let _unsubStore: (() => void) | null = null;
 
-	const markByLabel = (label: string, status: Step['status']) => {
-		const s = steps.find((x) => x.label === label && x.status !== 'done' && x.status !== 'error');
-		if (s) {
-			s.status = status;
-			steps = [...steps];
-		}
-	};
-
-	const consume = async (id: string) => {
-		controller = new AbortController();
-		try {
-			for await (const evt of createWorkspaceStream(id, localStorage.token, controller.signal)) {
-				const e = evt as any;
-				if (evt.type === 'stream_end') break;
-				if (evt.type === 'plan' && Array.isArray(e.steps)) {
-					steps = e.steps.map((s: any) => ({ ...s, status: 'queued' }));
-					uniform = !!e.uniform;
-				} else if (evt.type === 'agent_start' && e.agent_label) {
-					markByLabel(e.agent_label, 'running');
-				} else if (evt.type === 'agent_end' && e.agent_label) {
-					markByLabel(e.agent_label, e.success === false ? 'error' : 'done');
-				} else if (['done', 'cancelled', 'error'].includes(evt.type)) {
-					steps = steps.map((s) =>
-						s.status === 'running' || s.status === 'queued'
-							? { ...s, status: evt.type === 'error' ? 'error' : 'done' }
-							: s
-					);
-					break;
-				}
+	// Fold the run's full event history into step states. Deterministic full re-fold (the
+	// shared store replays history on reconnect), reproducing exactly what the old
+	// incremental consumer rendered: `plan` seeds queued steps, agent_start/agent_end
+	// advance the FIRST matching not-yet-finished label, a terminal event settles the rest.
+	const fold = (events: any[]) => {
+		let next: Step[] = [];
+		let uni = false;
+		const mark = (label: string, status: Step['status']) => {
+			const s = next.find((x) => x.label === label && x.status !== 'done' && x.status !== 'error');
+			if (s) s.status = status;
+		};
+		for (const evt of events) {
+			const e = evt as any;
+			if (evt.type === 'plan' && Array.isArray(e.steps)) {
+				next = e.steps.map((s: any) => ({ ...s, status: 'queued' as const }));
+				uni = !!e.uniform;
+			} else if (evt.type === 'agent_start' && e.agent_label) {
+				mark(e.agent_label, 'running');
+			} else if (evt.type === 'agent_end' && e.agent_label) {
+				mark(e.agent_label, e.success === false ? 'error' : 'done');
+			} else if (['done', 'cancelled', 'error'].includes(evt.type)) {
+				next = next.map((s) =>
+					s.status === 'running' || s.status === 'queued'
+						? { ...s, status: evt.type === 'error' ? 'error' : 'done' }
+						: s
+				);
 			}
-		} catch (e: any) {
-			if (e?.name === 'AbortError') return;
 		}
+		steps = next;
+		uniform = uni;
 	};
 
+	const stop = () => {
+		_unsubStore?.();
+		_unsubStore = null;
+		_sub?.unsubscribe();
+		_sub = null;
+	};
 	const start = (id: string) => {
-		controller?.abort();
+		stop();
 		steps = [];
 		uniform = false;
 		activeId = id;
-		if (id) consume(id);
+		if (!id) return;
+		_sub = subscribeRun(id);
+		_unsubStore = _sub.store.subscribe((s) => fold(s.events));
 	};
 	$: if (wsId !== activeId) start(wsId);
-	onDestroy(() => controller?.abort());
+	onDestroy(stop);
 
+	// Matches the unified cockpit palette in runFormat.ts (done = emerald, not blue).
 	const dot = (s: Step['status']) =>
 		s === 'done'
-			? 'bg-blue-500'
+			? 'bg-emerald-500'
 			: s === 'error'
 				? 'bg-red-500'
 				: s === 'running'
 					? 'bg-blue-500 animate-pulse'
-					: 'bg-gray-300 dark:bg-gray-600';
+					: 'bg-gray-400 dark:bg-gray-600';
 </script>
 
 <div class="text-xs">

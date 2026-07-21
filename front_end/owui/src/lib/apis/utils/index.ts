@@ -175,7 +175,7 @@ export const downloadDatabase = async (token: string) => {
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 

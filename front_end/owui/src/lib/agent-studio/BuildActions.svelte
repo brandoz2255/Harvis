@@ -63,7 +63,7 @@
 	};
 
 	const BTN =
-		'inline-flex items-center gap-1 text-[11px] px-2 py-1 rounded-md border border-white/8 text-gray-400 hover:text-gray-100 hover:bg-white/5 transition';
+		'inline-flex items-center gap-1 text-[11px] px-2 py-1 rounded-md border border-gray-200 dark:border-white/10 text-gray-400 hover:text-gray-800 dark:hover:text-gray-100 hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition';
 </script>
 
 <div class="flex items-center gap-1.5 flex-wrap">

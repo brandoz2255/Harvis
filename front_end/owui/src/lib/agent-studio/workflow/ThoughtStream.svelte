@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { getContext, afterUpdate } from 'svelte';
+	import { getContext, afterUpdate, onDestroy } from 'svelte';
 	import { stepLabel } from './humanizeTool';
 	import type { WorkspaceEvent } from '$lib/apis/streaming/workspace-stream';
 	import Markdown from '$lib/components/chat/Messages/Markdown.svelte';
@@ -8,6 +8,29 @@
 
 	export let events: WorkspaceEvent[] = [];
 	export let running = false;
+	/** Optional: reconnect when Connecting… stalls with no events. */
+	export let onRetry: (() => void) | undefined = undefined;
+
+	const STALL_MS = 20_000;
+	let stalled = false;
+	let stallTimer: ReturnType<typeof setTimeout> | null = null;
+
+	$: {
+		if (stallTimer) {
+			clearTimeout(stallTimer);
+			stallTimer = null;
+		}
+		stalled = false;
+		if (running && events.length === 0 && onRetry) {
+			stallTimer = setTimeout(() => {
+				stalled = true;
+			}, STALL_MS);
+		}
+	}
+
+	onDestroy(() => {
+		if (stallTimer) clearTimeout(stallTimer);
+	});
 
 	type Line = {
 		kind: string;
@@ -18,16 +41,16 @@
 		label?: string;
 		prUrl?: string;
 		verdict?: 'approved' | 'changes' | 'comment';
+		streaming?: boolean;
 	};
 
 	const _VERDICT_RE = /\n*VERDICT\s*[:\-]\s*(APPROVED|CHANGES[_ ]REQUESTED|COMMENT)\s*\.?\s*$/i;
 
-	// Fold events into readable lines; pair each tool_call with its next tool_result.
 	$: lines = foldLines(events);
 
 	function foldLines(evts: WorkspaceEvent[]): Line[] {
 		const out: Line[] = [];
-		let lastTool = -1; // index in `out` of the tool line awaiting its result
+		let lastTool = -1;
 		for (const e of evts) {
 			switch (e.type) {
 				case 'agent_start':
@@ -37,13 +60,21 @@
 					});
 					lastTool = -1;
 					break;
+				case 'token': {
+					const c = e.content ?? (e as any).delta ?? '';
+					if (!c) break;
+					const last = out[out.length - 1];
+					if (last && last.kind === 'think') {
+						last.text += String(c);
+					} else {
+						out.push({ kind: 'think', text: String(c), streaming: true });
+					}
+					break;
+				}
 				case 'log':
 					if (e.message) out.push({ kind: 'log', text: String(e.message) });
 					break;
 				case 'agent_message': {
-					// Review-loop negotiation post (coder ↔ reviewer, incl. Discord #harvis-code
-					// runs) — render as a labeled chat bubble (markdown-formatted) so the back-and-
-					// forth reads as a dialogue inline, not just in the full-run inspector overlay.
 					const raw = String(e.content ?? '');
 					if (raw.trim()) {
 						const vm = raw.match(_VERDICT_RE);
@@ -57,8 +88,6 @@
 									: 'changes';
 						out.push({
 							kind: 'agent_msg',
-							// Pull the trailing "VERDICT: …" line out of the body — it's shown as a
-							// badge in the header instead, so the markdown reads cleanly.
 							text: verdict ? raw.replace(_VERDICT_RE, '').trim() : raw,
 							role:
 								e.role === 'reviewer'
@@ -112,10 +141,25 @@
 
 <div bind:this={scroller} class="h-full overflow-y-auto text-xs space-y-1.5 pr-1">
 	{#if lines.length === 0}
-		<div class="text-gray-400 py-2">{$i18n.t('Connecting…')}</div>
+		<div class="text-gray-400 py-2 flex items-center gap-2 flex-wrap">
+			<span>{stalled ? $i18n.t('Still connecting…') : $i18n.t('Connecting…')}</span>
+			{#if stalled && onRetry}
+				<button
+					type="button"
+					class="underline text-blue-500 hover:no-underline"
+					on:click={() => onRetry?.()}>{$i18n.t('Retry')}</button
+				>
+			{/if}
+		</div>
 	{/if}
 	{#each lines as l, i}
-		{#if l.kind === 'tool'}
+		{#if l.kind === 'think'}
+			<div
+				class="rounded-lg border border-gray-200/80 dark:border-white/10 bg-black/[0.02] dark:bg-white/[0.03] px-2.5 py-1.5 text-gray-600 dark:text-gray-300 whitespace-pre-wrap break-words leading-relaxed"
+			>
+				{l.text}{#if running && l.streaming}<span class="opacity-40">▍</span>{/if}
+			</div>
+		{:else if l.kind === 'tool'}
 			<div class="flex items-center gap-1.5">
 				{#if l.status === 'running'}
 					<span class="text-blue-500 animate-pulse shrink-0">●</span>

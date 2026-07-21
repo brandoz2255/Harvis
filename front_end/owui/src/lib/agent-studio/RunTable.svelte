@@ -1,6 +1,9 @@
 <script lang="ts">
 	import { getContext, onDestroy, createEventDispatcher } from 'svelte';
 	import { getRunTree, type RunNode } from '$lib/apis/agent-runs';
+	// Shared status palette — the single source of truth (cancelled=gray, NOT amber:
+	// amber is reserved for "needs YOU", i.e. awaiting approval).
+	import { statusDot as dot } from './runFormat';
 
 	const i18n: any = getContext('i18n');
 	const dispatch = createEventDispatcher();
@@ -46,16 +49,6 @@
 	};
 	const tokensOf = (n: RunNode | null): number =>
 		n ? Number(n.prompt_tokens || 0) + Number(n.completion_tokens || 0) : 0;
-	const dot = (status: string): string =>
-		status === 'done'
-			? 'bg-blue-500'
-			: status === 'error'
-				? 'bg-red-500'
-				: status === 'cancelled'
-					? 'bg-amber-500'
-					: status === 'running'
-						? 'bg-blue-500 animate-pulse'
-						: 'bg-gray-300 dark:bg-gray-600';
 	const labelOf = (n: RunNode): string => n.role || (n.task ? n.task.slice(0, 32) : 'agent');
 
 	$: totalTokens = children.reduce((a, c) => a + tokensOf(c), 0) + tokensOf(run);

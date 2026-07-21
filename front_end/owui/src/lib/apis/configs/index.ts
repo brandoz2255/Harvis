@@ -20,7 +20,7 @@ export const importConfig = async (token: string, config) => {
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -47,7 +47,7 @@ export const exportConfig = async (token: string) => {
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -74,7 +74,7 @@ export const getConnectionsConfig = async (token: string) => {
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -104,7 +104,7 @@ export const setConnectionsConfig = async (token: string, config: object) => {
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -131,7 +131,7 @@ export const getToolServerConnections = async (token: string) => {
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -161,7 +161,7 @@ export const setToolServerConnections = async (token: string, connections: objec
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -188,7 +188,7 @@ export const getTerminalServerConnections = async (token: string) => {
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -218,7 +218,7 @@ export const setTerminalServerConnections = async (token: string, connections: o
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -298,7 +298,7 @@ export const putOrchestratorPolicy = async (
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -332,7 +332,7 @@ export const verifyTerminalServerConnection = async (token: string, connection: 
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -362,7 +362,7 @@ export const verifyToolServerConnection = async (token: string, connection: obje
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -405,7 +405,7 @@ export const registerOAuthClient = async (
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -437,7 +437,7 @@ export const getCodeExecutionConfig = async (token: string) => {
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -467,7 +467,7 @@ export const setCodeExecutionConfig = async (token: string, config: object) => {
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -494,7 +494,7 @@ export const getModelsDefaults = async (token: string) => {
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -521,7 +521,7 @@ export const getModelsConfig = async (token: string) => {
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -551,7 +551,7 @@ export const setModelsConfig = async (token: string, config: object) => {
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -581,7 +581,7 @@ export const setDefaultPromptSuggestions = async (token: string, promptSuggestio
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -608,7 +608,7 @@ export const getBanners = async (token: string): Promise<Banner[]> => {
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -638,7 +638,7 @@ export const setBanners = async (token: string, banners: Banner[]) => {
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 

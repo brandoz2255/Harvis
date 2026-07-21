@@ -19,7 +19,7 @@ export const createNewFunction = async (token: string, func: object) => {
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -65,7 +65,7 @@ export const getFunctions = async (token: string = '') => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -96,7 +96,7 @@ export const getFunctionList = async (token: string = '') => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -130,7 +130,7 @@ export const loadFunctionByUrl = async (token: string = '', url: string) => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -161,7 +161,7 @@ export const exportFunctions = async (token: string = '') => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -192,7 +192,7 @@ export const getFunctionById = async (token: string, id: string) => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 
 			console.error(err);
 			return null;
@@ -227,7 +227,7 @@ export const updateFunctionById = async (token: string, id: string, func: object
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 
 			console.error(err);
 			return null;
@@ -259,7 +259,7 @@ export const deleteFunctionById = async (token: string, id: string) => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 
 			console.error(err);
 			return null;
@@ -291,7 +291,7 @@ export const toggleFunctionById = async (token: string, id: string) => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 
 			console.error(err);
 			return null;
@@ -323,7 +323,7 @@ export const toggleGlobalById = async (token: string, id: string) => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 
 			console.error(err);
 			return null;
@@ -355,7 +355,7 @@ export const getFunctionValvesById = async (token: string, id: string) => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 
 			console.error(err);
 			return null;
@@ -387,7 +387,7 @@ export const getFunctionValvesSpecById = async (token: string, id: string) => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 
 			console.error(err);
 			return null;
@@ -422,7 +422,7 @@ export const updateFunctionValvesById = async (token: string, id: string, valves
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 
 			console.error(err);
 			return null;
@@ -454,7 +454,7 @@ export const getUserValvesById = async (token: string, id: string) => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 
 			console.error(err);
 			return null;
@@ -486,7 +486,7 @@ export const getUserValvesSpecById = async (token: string, id: string) => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 
 			console.error(err);
 			return null;
@@ -521,7 +521,7 @@ export const updateUserValvesById = async (token: string, id: string, valves: ob
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 
 			console.error(err);
 			return null;

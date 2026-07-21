@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { getContext } from 'svelte';
+	import { toast } from 'svelte-sonner';
 	import {
 		getGithubStatus,
 		getGithubStartUrl,
@@ -17,6 +18,7 @@
 	export let onPick: (owner: string, name: string, branch?: string) => void = () => {};
 
 	let status: GitHubStatus = { connected: false };
+	let statusUnknown = false; // the status check failed — don't claim "not connected"
 	let repos: GitHubRepoItem[] = [];
 	let loadingRepos = false;
 	let search = '';
@@ -34,9 +36,15 @@
 	let chosenBranch = '';
 	let loadingBranches = false;
 
+	// null = couldn't check. Keep the last known status rather than silently downgrading
+	// the user to "not connected" because a request failed.
 	const refreshStatus = async () => {
-		status = await getGithubStatus();
-		if (status.connected) loadRepos();
+		const s = await getGithubStatus();
+		statusUnknown = !s;
+		if (s) {
+			status = s;
+			if (s.connected) loadRepos();
+		}
 	};
 	const loadRepos = async () => {
 		loadingRepos = true;
@@ -74,22 +82,34 @@
 		let tries = 0;
 		pollTimer = setInterval(async () => {
 			tries++;
+			// s === null means the check failed; keep polling (the attempt cap bounds it)
+			// rather than concluding "still not connected".
 			const s = await getGithubStatus();
-			if (s.connected || tries > 60) {
-				status = s;
+			if (s?.connected || tries > 60) {
+				if (s) {
+					status = s;
+					statusUnknown = false;
+				}
 				if (pollTimer) {
 					clearInterval(pollTimer);
 					pollTimer = null;
 				}
-				if (s.connected) loadRepos();
+				if (s?.connected) loadRepos();
 			}
 		}, 2000);
 	};
 
 	const disconnect = async () => {
-		await disconnectGithub();
-		repos = [];
-		status = { connected: false };
+		const ok = await disconnectGithub();
+		if (ok) {
+			repos = [];
+			status = { connected: false };
+		} else {
+			// Honest failure: the credential may still be live server-side — keep the
+			// connected state rather than claiming a disconnect that didn't happen.
+			toast.error($i18n.t("Couldn't disconnect GitHub — the connection is still active. Try again."));
+			refreshStatus();
+		}
 	};
 
 	const close = () => (show = false);
@@ -230,7 +250,17 @@
 					{:else}
 						<div class="rounded-lg border border-gray-100 dark:border-gray-800 p-3 text-center space-y-2">
 							<p class="text-xs text-gray-500 dark:text-gray-400">
-								{$i18n.t('Connect GitHub to browse + clone your private repos and open pull requests.')}
+								{#if statusUnknown}
+									<!-- Failed check ≠ not connected. Offer Retry before pushing them to re-connect. -->
+									{$i18n.t("Couldn't check your GitHub connection.")}
+									<button
+										type="button"
+										class="ml-1 text-blue-600 dark:text-blue-400 hover:underline"
+										on:click={refreshStatus}>{$i18n.t('Retry')}</button
+									>
+								{:else}
+									{$i18n.t('Connect GitHub to browse + clone your private repos and open pull requests.')}
+								{/if}
 							</p>
 							<button
 								class="px-3 py-1.5 text-xs rounded-lg bg-gray-900 dark:bg-gray-100 text-white dark:text-gray-900 hover:opacity-90"

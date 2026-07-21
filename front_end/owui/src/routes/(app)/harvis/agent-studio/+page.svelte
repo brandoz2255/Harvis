@@ -8,6 +8,7 @@
 	import { toast } from 'svelte-sonner';
 	import { WEBUI_NAME, chatId, researchEnabled } from '$lib/stores';
 	import IntentPills from '$lib/agent-studio/IntentPills.svelte';
+	import UnderConstruction from '$lib/components/common/UnderConstruction.svelte';
 
 	const i18n: any = getContext('i18n');
 
@@ -138,13 +139,26 @@
 					>
 				</div>
 			</div>
-			<h1 class="text-2xl font-semibold text-gray-800 dark:text-gray-100 mt-2">
+			<h1 class="text-2xl font-semibold text-gray-800 dark:text-gray-100 mt-2 flex items-center gap-2.5">
 				{$i18n.t('Agent Studio')}
+				<span
+					class="text-[10px] font-medium px-2 py-0.5 rounded-full border border-amber-300 dark:border-amber-800 text-amber-700 dark:text-amber-400 align-middle"
+					>{$i18n.t('WIP')}</span
+				>
 			</h1>
 			<p class="text-sm text-gray-500 mt-1">
 				{$i18n.t('Configure Harvis capabilities, tools, and behavior.')}
 			</p>
 		</header>
+
+		<!-- Honest marker: this hub is not finished. Deliberately non-blocking — the
+		     individual surfaces underneath (Customize, Models, Connectors) still work. -->
+		<UnderConstruction
+			title={$i18n.t('Agent Studio is under construction')}
+			note={$i18n.t(
+				'This hub is still being designed. Individual surfaces below may work, but the layout and what lives here will change.'
+			)}
+		/>
 
 		<!-- Quick start -->
 		<section>

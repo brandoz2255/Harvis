@@ -19,7 +19,7 @@ export const createNewGroup = async (token: string, group: object) => {
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -55,7 +55,7 @@ export const getGroups = async (token: string = '', share?: boolean) => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -86,7 +86,7 @@ export const getGroupById = async (token: string, id: string) => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 
 			console.error(err);
 			return null;
@@ -118,7 +118,7 @@ export const getGroupInfoById = async (token: string, id: string) => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 
 			console.error(err);
 			return null;
@@ -153,7 +153,7 @@ export const updateGroupById = async (token: string, id: string, group: object) 
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 
 			console.error(err);
 			return null;
@@ -185,7 +185,7 @@ export const deleteGroupById = async (token: string, id: string) => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 
 			console.error(err);
 			return null;
@@ -220,7 +220,7 @@ export const addUserToGroup = async (token: string, id: string, userIds: string[
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 
 			console.error(err);
 			return null;
@@ -255,7 +255,7 @@ export const removeUserFromGroup = async (token: string, id: string, userIds: st
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 
 			console.error(err);
 			return null;

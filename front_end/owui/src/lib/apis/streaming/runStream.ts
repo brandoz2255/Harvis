@@ -28,6 +28,16 @@ export interface RunStreamState {
 
 const FLUSH_MS = 140; // upper bound on UI update cadence (≈7 fps) — smooth but can't peg the thread
 const TERMINAL_PHASES: RunPhase[] = ['done', 'error', 'cancelled'];
+/** Flush immediately so tool steps + tokens paint like Cursor, not in 140ms clumps. */
+const IMMEDIATE_TYPES = new Set([
+	'token',
+	'tool_call',
+	'tool_result',
+	'done',
+	'error',
+	'cancelled',
+	'agent_message'
+]);
 
 interface Entry {
 	store: import('svelte/store').Writable<RunStreamState>;
@@ -58,7 +68,15 @@ function startConsume(id: string, entry: Entry): void {
 			return { events: [...s.events, ...batch], phase };
 		});
 	};
-	const schedule = () => {
+	const schedule = (evt: WorkspaceEvent) => {
+		if (IMMEDIATE_TYPES.has(evt.type)) {
+			if (flushTimer !== null) {
+				clearTimeout(flushTimer);
+				flushTimer = null;
+			}
+			flush();
+			return;
+		}
 		if (flushTimer === null) flushTimer = setTimeout(flush, FLUSH_MS);
 	};
 
@@ -85,7 +103,7 @@ function startConsume(id: string, entry: Entry): void {
 						flush(); // terminal event ends the run — surface it immediately
 						break;
 					}
-					schedule();
+					schedule(evt);
 				}
 			} catch (e: any) {
 				if (e?.name === 'AbortError') return;

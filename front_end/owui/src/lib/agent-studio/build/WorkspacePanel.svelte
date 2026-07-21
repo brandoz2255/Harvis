@@ -15,9 +15,9 @@
 </script>
 
 <div
-	class="flex flex-col min-h-0 h-full bg-[#0c111d] rounded-xl border border-white/8 shadow-lg shadow-black/30 overflow-hidden text-gray-200"
+	class="flex flex-col min-h-0 h-full bg-gray-50 dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-white/10 shadow-lg shadow-black/30 overflow-hidden text-gray-700 dark:text-gray-200"
 >
-	<div class="shrink-0 flex items-center gap-2 px-3 h-8 border-b border-white/8 bg-white/[0.015]">
+	<div class="shrink-0 flex items-center gap-2 px-3 h-8 border-b border-gray-200 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.05]">
 		{#if title}
 			<span class="text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-400 truncate"
 				>{title}</span
@@ -27,7 +27,7 @@
 			<slot name="actions" />
 			{#if dismissible}
 				<button
-					class="text-gray-500 hover:text-gray-200 transition"
+					class="text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 transition"
 					aria-label={$i18n.t('Hide panel')}
 					title={$i18n.t('Hide panel')}
 					on:click={() => dispatch('dismiss')}

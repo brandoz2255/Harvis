@@ -115,13 +115,43 @@
 		}
 	};
 
-	const setModels = async () => {
-		models.set(
-			await getModels(
+	// Global model list — keep it fresh (mirrors the Build page's refreshModels): the store
+	// was load-once, so a model pulled/connected after page load never appeared in the chat
+	// picker, Cookbook, or any other consumer until a full reload. Re-fetch on mount, on a
+	// calm 60s interval, and on window focus / tab-visible. Fail-soft: a transient error or
+	// empty response never blanks the existing list, and identical results don't churn store
+	// identity (which would re-render open pickers and reset a mid-selection state).
+	let _modelsRefreshTimer: ReturnType<typeof setInterval> | null = null;
+	let _modelsRefreshInFlight = false;
+	const refreshModels = async (force = false) => {
+		if (_modelsRefreshInFlight) return;
+		if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+		_modelsRefreshInFlight = true;
+		try {
+			const next = await getModels(
 				localStorage.token,
-				$config?.features?.enable_direct_connections ? ($settings?.directConnections ?? null) : null
-			)
-		);
+				$config?.features?.enable_direct_connections ? ($settings?.directConnections ?? null) : null,
+				false,
+				force
+			);
+			if (Array.isArray(next) && next.length) {
+				const sig = (arr: any[]) =>
+					(arr || []).map((m: any) => `${m?.id}:${m?.name || ''}:${m?.owned_by || ''}`).join('|');
+				if (sig(next) !== sig($models)) models.set(next);
+			}
+		} catch (e) {
+			console.debug('Model refresh failed; keeping previous list', e);
+		} finally {
+			_modelsRefreshInFlight = false;
+		}
+	};
+	const _onModelsFocus = () => refreshModels(true);
+	const _onModelsVisibility = () => {
+		if (document.visibilityState === 'visible') refreshModels(true);
+	};
+
+	const setModels = async () => {
+		await refreshModels(false);
 	};
 
 	const setToolServers = async () => {
@@ -201,6 +231,11 @@
 	let _discordPollTimer: ReturnType<typeof setInterval> | null = null;
 	onDestroy(() => {
 		if (_discordPollTimer) clearInterval(_discordPollTimer);
+		if (_modelsRefreshTimer) clearInterval(_modelsRefreshTimer);
+		if (typeof window !== 'undefined') {
+			window.removeEventListener('focus', _onModelsFocus);
+			document.removeEventListener('visibilitychange', _onModelsVisibility);
+		}
 	});
 
 	onMount(async () => {
@@ -224,6 +259,12 @@
 				]);
 			}).catch((e) => console.error('Failed to load user settings:', e))
 		]);
+
+		// Keep the global model list current app-wide (chat picker, Cookbook, model lists):
+		// calm 60s cadence, plus a forced (cache-busting) refresh on window focus / tab-visible.
+		_modelsRefreshTimer = setInterval(() => refreshModels(false), 60000);
+		window.addEventListener('focus', _onModelsFocus);
+		document.addEventListener('visibilitychange', _onModelsVisibility);
 
 		// ── "Harvis on Discord is running" indicator (app-wide poll) ──
 		// Surface a Discord-launched workspace run that is currently running for

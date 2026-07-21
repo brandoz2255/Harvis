@@ -44,7 +44,7 @@
 </script>
 
 <div
-	class="h-11 px-4 flex items-center justify-between border-b border-white/8 bg-[#080c16]"
+	class="h-11 px-4 flex items-center justify-between border-b border-gray-200 dark:border-white/10 bg-gray-100 dark:bg-gray-950"
 >
 	<!-- LEFT -->
 	<div class="flex items-center gap-3 min-w-0">
@@ -52,7 +52,7 @@
 			<span class="text-gray-500">{$i18n.t('Build')}</span>
 			{#if hasProject && projectName}
 				<span class="text-gray-700">/</span>
-				<span class="text-gray-100 font-medium truncate max-w-[16rem]">
+				<span class="text-gray-800 dark:text-gray-100 font-medium truncate max-w-[16rem]">
 					{projectName}
 				</span>
 			{/if}
@@ -84,22 +84,22 @@
 				<div class="hidden md:flex items-center gap-1 min-w-0 text-[10px] text-gray-400">
 					{#if repoLabel && repoLabel !== projectName}
 						<span
-							class="px-1.5 py-0.5 rounded border border-white/8 bg-white/4 truncate max-w-[12rem]"
+							class="px-1.5 py-0.5 rounded border border-gray-200 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.05] truncate max-w-[12rem]"
 							title={repoLabel}>{repoLabel}</span
 						>
 					{/if}
 					{#if workBranch}
 						<span
-							class="px-1.5 py-0.5 rounded border border-white/8 bg-white/4 truncate max-w-[16rem]"
+							class="px-1.5 py-0.5 rounded border border-gray-200 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.05] truncate max-w-[16rem]"
 							title={baseBranch ? `${baseBranch} → ${workBranch}` : workBranch}
 						>
 							{#if baseBranch}<span class="text-gray-500">{baseBranch}</span><span
 									class="text-gray-600 px-1">→</span
-								>{/if}<span class="text-gray-300">{workBranch}</span>
+								>{/if}<span class="text-gray-600 dark:text-gray-300">{workBranch}</span>
 						</span>
 					{/if}
 					{#if shortSha}
-						<span class="px-1.5 py-0.5 rounded border border-white/8 bg-white/4 font-mono text-gray-500"
+						<span class="px-1.5 py-0.5 rounded border border-gray-200 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.05] font-mono text-gray-500"
 							>{shortSha}</span
 						>
 					{/if}
@@ -120,16 +120,16 @@
 						<span
 							class="flex items-center gap-1 px-1.5 py-0.5 rounded border {lifecycle === 'blocked'
 								? 'border-amber-500/15 bg-amber-500/8 text-amber-400/90'
-								: 'border-white/8 bg-white/4 text-gray-400'}"
+								: 'border-gray-200 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.05] text-gray-400'}"
 						>
 							<span
 								class="w-1 h-1 rounded-full shrink-0 {lifecycle === 'running'
-									? 'bg-emerald-400 animate-pulse'
+									? 'bg-blue-500 animate-pulse'
 									: lifecycle === 'blocked'
 										? 'bg-amber-500'
 										: lifecycle === 'ready'
 											? 'bg-emerald-500'
-											: 'bg-gray-500'}"
+											: 'bg-gray-400 dark:bg-gray-600'}"
 							/>
 							{lifecycle}
 						</span>
@@ -155,7 +155,7 @@
 						})
 					: $i18n.t('A Discord #harvis-code session is running — open it here')}
 			>
-				<span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+				<span class="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse shrink-0" />
 				{$i18n.t('Discord session live')}
 			</button>
 		{/if}
@@ -182,9 +182,9 @@
 		<!-- ⋯ menu: choose which workspace-dock panels are open -->
 		<div class="relative">
 			<button
-				class="p-1.5 rounded-lg transition hover:bg-white/4 {panelsMenuOpen
-					? 'text-gray-200'
-					: 'text-gray-500 hover:text-gray-200'}"
+				class="p-1.5 rounded-lg transition hover:bg-black/[0.04] dark:hover:bg-white/[0.06] {panelsMenuOpen
+					? 'text-gray-700 dark:text-gray-200'
+					: 'text-gray-500 hover:text-gray-700 dark:hover:text-gray-200'}"
 				title={$i18n.t('Workspace panels')}
 				aria-label={$i18n.t('Workspace panels')}
 				on:click={() => (panelsMenuOpen = !panelsMenuOpen)}
@@ -202,14 +202,14 @@
 					on:click={() => (panelsMenuOpen = false)}
 				></button>
 				<div
-					class="absolute right-0 top-full mt-1 z-40 w-56 rounded-lg bg-[#0d1220] border border-white/10 shadow-xl py-1 text-xs"
+					class="absolute right-0 top-full mt-1 z-40 w-56 rounded-lg bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-white/10 shadow-xl py-1 text-xs"
 				>
 					<div class="px-3 pt-1.5 pb-1 text-[10px] uppercase tracking-wider text-gray-500">
 						{$i18n.t('Workspace panels')}
 					</div>
 					{#each panels as p (p.key)}
 						<button
-							class="w-full flex items-center gap-2 px-3 py-1.5 text-gray-200 hover:bg-white/5 transition"
+							class="w-full flex items-center gap-2 px-3 py-1.5 text-gray-700 dark:text-gray-200 hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition"
 							on:click={() => dispatch('togglePanel', { key: p.key })}
 						>
 							<span
@@ -228,9 +228,9 @@
 							<span class="flex-1 text-left">{p.label}</span>
 						</button>
 					{/each}
-					<div class="border-t border-white/8 my-1"></div>
+					<div class="border-t border-gray-200 dark:border-white/10 my-1"></div>
 					<button
-						class="w-full flex items-center gap-2 px-3 py-1.5 text-gray-300 hover:bg-white/5 transition"
+						class="w-full flex items-center gap-2 px-3 py-1.5 text-gray-600 dark:text-gray-300 hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition"
 						on:click={() => {
 							dispatch('toggleDock');
 							panelsMenuOpen = false;
@@ -252,7 +252,7 @@
 		</div>
 
 		<button
-			class="p-1.5 rounded-lg text-gray-500 hover:text-gray-200 hover:bg-white/4 transition"
+			class="p-1.5 rounded-lg text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition"
 			title={$i18n.t('Settings')}
 			aria-label={$i18n.t('Settings')}
 			on:click={() => dispatch('settings')}

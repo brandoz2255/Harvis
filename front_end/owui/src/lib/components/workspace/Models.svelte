@@ -39,7 +39,7 @@
 	import Plus from '../icons/Plus.svelte';
 	import ChevronRight from '../icons/ChevronRight.svelte';
 	import Switch from '../common/Switch.svelte';
-	import Spinner from '../common/Spinner.svelte';
+	import Skeleton from '../common/Skeleton.svelte';
 	import XMark from '../icons/XMark.svelte';
 	import EyeSlash from '../icons/EyeSlash.svelte';
 	import Eye from '../icons/Eye.svelte';
@@ -57,6 +57,8 @@
 	let tagsContainerElement: HTMLDivElement;
 
 	let loaded = false;
+	let loadError = ''; // groups (cold-load) failure — page-level error branch
+	let listError = ''; // model-list fetch failure — list-region error branch
 
 	let showModelDeleteConfirm = false;
 
@@ -81,8 +83,9 @@
 	}
 
 	const getModelList = async () => {
-		if (!loaded) return;
+		if (!loaded || loadError) return;
 
+		listError = '';
 		try {
 			const res = await getWorkspaceModels(
 				localStorage.token,
@@ -94,6 +97,7 @@
 				page
 			).catch((error) => {
 				toast.error(`${error}`);
+				listError = `${error}`;
 				return null;
 			});
 
@@ -109,6 +113,7 @@
 			}
 		} catch (err) {
 			console.error(err);
+			listError = listError || `${err}`;
 		}
 	};
 
@@ -276,15 +281,29 @@
 		toast.success($i18n.t('All models are now hidden'));
 	};
 
+	// getGroups throws on API failure (and a null body would TypeError on .map),
+	// which previously stranded the skeleton before `loaded = true`. Catch both so
+	// the skeleton always resolves to content or the error branch below.
+	const loadGroups = async () => {
+		loadError = '';
+		loaded = false;
+
+		const groups = await getGroups(localStorage.token).catch((error) => {
+			console.error(error);
+			loadError = `${error}`;
+			return null;
+		});
+		groupIds = (groups ?? []).map((group) => group.id);
+
+		await tick();
+		loaded = true;
+	};
+
 	onMount(async () => {
 		viewOption = localStorage.workspaceViewOption ?? '';
 		page = 1;
 
-		let groups = await getGroups(localStorage.token);
-		groupIds = groups.map((group) => group.id);
-
-		await tick();
-		loaded = true;
+		await loadGroups();
 
 		const onKeyDown = (event) => {
 			if (event.key === 'Shift') {
@@ -320,7 +339,22 @@
 	</title>
 </svelte:head>
 
-{#if loaded}
+{#if loadError}
+	<!-- Honest cold-load failure: the skeleton must never shimmer forever. -->
+	<div class="px-1 mt-1.5">
+		<div
+			class="rounded-xl border border-gray-100 dark:border-gray-850 px-3 py-6 text-center text-sm text-gray-500"
+		>
+			{$i18n.t('Could not load models')} — {loadError}
+			<button
+				class="ml-2 text-blue-600 dark:text-blue-400 hover:underline"
+				on:click={() => {
+					loadGroups();
+				}}>{$i18n.t('Retry')}</button
+			>
+		</div>
+	</div>
+{:else if loaded}
 	<ModelDeleteConfirmDialog
 		bind:show={showModelDeleteConfirm}
 		on:confirm={() => {
@@ -796,9 +830,40 @@
 					</div>
 				</div>
 			{/if}
+		{:else if listError}
+			<!-- Honest list-fetch failure: without this, `models` stays null and the
+			     skeleton below would shimmer forever. -->
+			<div class="px-3 my-2">
+				<div
+					class="rounded-xl border border-gray-100 dark:border-gray-850 px-3 py-6 text-center text-sm text-gray-500"
+				>
+					{$i18n.t('Could not load models')} — {listError}
+					<button
+						class="ml-2 text-blue-600 dark:text-blue-400 hover:underline"
+						on:click={() => {
+							getModelList();
+						}}>{$i18n.t('Retry')}</button
+					>
+				</div>
+			</div>
 		{:else}
-			<div class="w-full h-full flex justify-center items-center py-10">
-				<Spinner className="size-4" />
+			<!-- Skeleton mirrors the model card grid: 2-col p-2.5 cards with a size-12
+			     rounded-2xl avatar, name line, and description line. -->
+			<div class="px-3 my-2 gap-1 lg:gap-2 grid lg:grid-cols-2" aria-busy="true">
+				<div aria-hidden="true" class="contents">
+					{#each Array.from({ length: 6 }) as _, i}
+						<div class="flex w-full p-2.5 rounded-2xl">
+							<div class="flex gap-3.5 w-full">
+								<Skeleton width="3rem" height="3rem" rounded="rounded-2xl" className="shrink-0 self-center" delay={i * 90} />
+								<div class="flex-1 min-w-0 self-center">
+									<Skeleton width={['44%', '58%', '36%', '50%', '40%', '54%'][i]} height="0.875rem" delay={i * 90} />
+									<Skeleton width={['68%', '52%', '74%', '60%', '64%', '48%'][i]} height="0.625rem" className="mt-2" delay={i * 90} />
+								</div>
+							</div>
+						</div>
+					{/each}
+				</div>
+				<span class="sr-only" role="status">{$i18n.t('Loading models…')}</span>
 			</div>
 		{/if}
 	</div>
@@ -830,7 +895,27 @@
 		</div>
 	{/if}
 {:else}
-	<div class="w-full h-full flex justify-center items-center">
-		<Spinner className="size-5" />
+	<!-- Cold-load skeleton for the whole page: title bar, then the same card grid. -->
+	<div class="px-1 mt-1.5" aria-busy="true">
+		<div aria-hidden="true">
+			<div class="flex items-center justify-between mb-3 px-0.5">
+				<Skeleton width="7rem" height="1.25rem" />
+				<Skeleton width="7.5rem" height="1.75rem" rounded="rounded-xl" />
+			</div>
+			<div class="px-3 my-2 gap-1 lg:gap-2 grid lg:grid-cols-2">
+				{#each Array.from({ length: 6 }) as _, i}
+					<div class="flex w-full p-2.5 rounded-2xl">
+						<div class="flex gap-3.5 w-full">
+							<Skeleton width="3rem" height="3rem" rounded="rounded-2xl" className="shrink-0 self-center" delay={i * 90} />
+							<div class="flex-1 min-w-0 self-center">
+								<Skeleton width={['44%', '58%', '36%', '50%', '40%', '54%'][i]} height="0.875rem" delay={i * 90} />
+								<Skeleton width={['68%', '52%', '74%', '60%', '64%', '48%'][i]} height="0.625rem" className="mt-2" delay={i * 90} />
+							</div>
+						</div>
+					</div>
+				{/each}
+			</div>
+		</div>
+		<span class="sr-only" role="status">{$i18n.t('Loading models…')}</span>
 	</div>
 {/if}

@@ -8,6 +8,7 @@
 	import { toast } from 'svelte-sonner';
 	import { WEBUI_NAME, chatId } from '$lib/stores';
 	import { listVibecodeSessions, type VibecodeSession } from '$lib/apis/agent-runs';
+	import Skeleton from '$lib/components/common/Skeleton.svelte';
 
 	const i18n: any = getContext('i18n');
 	const backToChat = () => goto($chatId ? `/c/${$chatId}` : '/');
@@ -74,14 +75,16 @@
 		loadingR = false;
 	});
 
+	// Unified cockpit palette (see runFormat.ts): running=blue-pulse · done=emerald ·
+	// error=red · cancelled=gray (inert). amber = "needs YOU" only.
 	const runDot = (s?: string) =>
 		s === 'error'
 			? 'bg-red-500'
 			: s === 'running'
 				? 'bg-blue-500 animate-pulse'
 				: s === 'cancelled'
-					? 'bg-amber-500'
-					: 'bg-green-500';
+					? 'bg-gray-400 dark:bg-gray-600'
+					: 'bg-emerald-500';
 
 	const openProject = (id: string) => goto(`/harvis/vibecode?session=${id}`);
 
@@ -201,7 +204,18 @@
 					{$i18n.t('Recent Projects')}
 				</div>
 				{#if loadingP}
-					<div class="text-xs text-gray-500 py-2">{$i18n.t('Loading…')}</div>
+					<!-- Skeleton mirrors a project row: title line + repo sub-line, py-2 rows. -->
+					<div class="divide-y divide-gray-100 dark:divide-gray-850" aria-busy="true">
+						<div aria-hidden="true" class="divide-y divide-gray-100 dark:divide-gray-850">
+							{#each Array.from({ length: 3 }) as _, i}
+								<div class="py-2">
+									<Skeleton width={['62%', '44%', '54%'][i]} height="0.875rem" delay={i * 90} />
+									<Skeleton width={['48%', '34%', '40%'][i]} height="0.625rem" className="mt-1.5" delay={i * 90} />
+								</div>
+							{/each}
+						</div>
+						<span class="sr-only" role="status">{$i18n.t('Loading recent projects…')}</span>
+					</div>
 				{:else if projects.length === 0}
 					<div class="text-xs text-gray-500 py-2">
 						{$i18n.t('No projects yet.')}
@@ -242,7 +256,18 @@
 					{$i18n.t('Recent Runs')}
 				</div>
 				{#if loadingR}
-					<div class="text-xs text-gray-500 py-2">{$i18n.t('Loading…')}</div>
+					<!-- Skeleton mirrors a run row: status dot + single title line, py-2 rows. -->
+					<div class="divide-y divide-gray-100 dark:divide-gray-850" aria-busy="true">
+						<div aria-hidden="true" class="divide-y divide-gray-100 dark:divide-gray-850">
+							{#each Array.from({ length: 3 }) as _, i}
+								<div class="flex items-center gap-2 py-2">
+									<span class="size-1.5 rounded-full shrink-0 bg-gray-200 dark:bg-gray-800"></span>
+									<Skeleton width={['72%', '52%', '64%'][i]} height="0.875rem" delay={i * 90} />
+								</div>
+							{/each}
+						</div>
+						<span class="sr-only" role="status">{$i18n.t('Loading recent runs…')}</span>
+					</div>
 				{:else if runs.length === 0}
 					<div class="text-xs text-gray-500 py-2">{$i18n.t('No runs yet.')}</div>
 				{:else}

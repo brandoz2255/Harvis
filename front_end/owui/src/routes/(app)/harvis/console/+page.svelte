@@ -18,6 +18,11 @@
 	let runs: any[] = [];
 	let loading = true;
 	let refreshing = false;
+	// per-source failure flags — getJSON's null means the request failed, and a
+	// failed fetch must never render as "no providers / no jobs / no runs"
+	let providersError = false;
+	let jobsError = false;
+	let runsError = false;
 
 	const auth = () => ({ Authorization: `Bearer ${localStorage.token}` });
 	const getJSON = async (url: string) =>
@@ -32,6 +37,9 @@
 			getJSON('/api/harvis/jobs?limit=25'),
 			getJSON('/api/workspace/history?top_level=1')
 		]);
+		providersError = p === null;
+		jobsError = j === null;
+		runsError = h === null;
 		providers = Array.isArray(p?.providers) ? p.providers : [];
 		providerNote = p?.note ?? '';
 		jobs = Array.isArray(j?.jobs) ? j.jobs : [];
@@ -39,6 +47,9 @@
 		loading = false;
 		refreshing = false;
 	};
+
+	// backend fully unreachable — one honest error branch instead of three
+	$: allDown = providersError && jobsError && runsError;
 
 	const killJob = async (id: string) => {
 		const res = await fetch(`/api/harvis/jobs/${id}`, { method: 'DELETE', headers: auth() });
@@ -98,12 +109,22 @@
 
 	{#if loading}
 		<div class="text-sm text-gray-500 py-10 text-center">{$i18n.t('Loading…')}</div>
+	{:else if allDown}
+		<div class="text-sm text-gray-500 py-10 text-center">
+			{$i18n.t('Could not reach the backend — providers, jobs and runs are unavailable.')}
+			<button on:click={load} class="ml-2 text-blue-600 dark:text-blue-400 hover:underline"
+				>{$i18n.t('Retry')}</button
+			>
+		</div>
 	{:else}
 		<div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
 			<!-- Provider readiness -->
 			<section class="rounded-2xl border border-gray-100 dark:border-gray-850 bg-gray-50 dark:bg-gray-900 p-4">
 				<h2 class="text-sm font-semibold text-gray-700 dark:text-gray-200 mb-2.5">{$i18n.t('Provider readiness')}</h2>
 				<div class="space-y-1.5">
+					{#if providersError}
+						<div class="text-xs text-red-500 dark:text-red-400 py-1">{$i18n.t('Could not load providers.')} <button on:click={load} class="text-blue-600 dark:text-blue-400 hover:underline">{$i18n.t('Retry')}</button></div>
+					{:else}
 					{#each providers as p (p.id)}
 						<div class="rounded-xl border border-gray-100 dark:border-gray-850 bg-white dark:bg-gray-950 px-3 py-2">
 							<div class="flex items-center gap-2">
@@ -126,6 +147,7 @@
 					{:else}
 						<div class="text-xs text-gray-500 py-1">{$i18n.t('No providers reported.')}</div>
 					{/each}
+					{/if}
 				</div>
 				{#if providerNote}
 					<p class="text-[11px] text-gray-400 mt-2 leading-snug">{providerNote}</p>
@@ -136,6 +158,9 @@
 			<section class="rounded-2xl border border-gray-100 dark:border-gray-850 bg-gray-50 dark:bg-gray-900 p-4">
 				<h2 class="text-sm font-semibold text-gray-700 dark:text-gray-200 mb-2.5">{$i18n.t('Background jobs')}</h2>
 				<div class="space-y-1.5">
+					{#if jobsError}
+						<div class="text-xs text-red-500 dark:text-red-400 py-1">{$i18n.t('Could not load background jobs.')} <button on:click={load} class="text-blue-600 dark:text-blue-400 hover:underline">{$i18n.t('Retry')}</button></div>
+					{:else}
 					{#each jobs as j (j.id)}
 						<div class="rounded-xl border border-gray-100 dark:border-gray-850 bg-white dark:bg-gray-950 px-3 py-2">
 							<div class="flex items-center gap-2">
@@ -151,6 +176,7 @@
 					{:else}
 						<div class="text-xs text-gray-500 py-1">{$i18n.t('No background jobs.')}</div>
 					{/each}
+					{/if}
 				</div>
 			</section>
 
@@ -158,6 +184,9 @@
 			<section class="lg:col-span-2 rounded-2xl border border-gray-100 dark:border-gray-850 bg-gray-50 dark:bg-gray-900 p-4">
 				<h2 class="text-sm font-semibold text-gray-700 dark:text-gray-200 mb-2.5">{$i18n.t('Recent runs')}</h2>
 				<div class="space-y-1.5">
+					{#if runsError}
+						<div class="text-xs text-red-500 dark:text-red-400 py-1">{$i18n.t('Could not load recent runs.')} <button on:click={load} class="text-blue-600 dark:text-blue-400 hover:underline">{$i18n.t('Retry')}</button></div>
+					{:else}
 					{#each runs as r (r.id)}
 						<button
 							on:click={() => goto(`/harvis/agent-studio/run/${r.id}`)}
@@ -181,6 +210,7 @@
 					{:else}
 						<div class="text-xs text-gray-500 py-1">{$i18n.t('No recent runs.')}</div>
 					{/each}
+					{/if}
 				</div>
 			</section>
 		</div>

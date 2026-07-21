@@ -23,6 +23,8 @@
 
 	// ── Skills ──────────────────────────────────────────────────────────────
 	let skills: any[] = [];
+	let skillsLoaded = false;
+	let loadError = '';
 	let showSkillForm = false;
 	let sName = '';
 	let sDesc = '';
@@ -31,8 +33,18 @@
 	let editingSkillId: string | null = null;
 
 	const loadSkills = async () => {
-		const r = await getSkills(token).catch(() => []);
-		skills = Array.isArray(r) ? r : (r?.skills ?? r?.items ?? []);
+		loadError = '';
+		const r = await getSkills(token).catch((e) => {
+			// Keep whatever list is on screen — a failed refresh must not read as
+			// "all skills deleted". The error branch below covers the empty case.
+			loadError = `${e}`;
+			if (skills.length) toast.error(`${$i18n.t('Could not refresh skills')} — ${e}`);
+			return null;
+		});
+		if (r) {
+			skills = Array.isArray(r) ? r : (r?.skills ?? r?.items ?? []);
+			skillsLoaded = true;
+		}
 	};
 	const resetSkillForm = () => {
 		sName = sDesc = sContent = '';
@@ -64,12 +76,22 @@
 		}
 	};
 	const toggleSkill = async (id: string) => {
-		await toggleSkillById(token, id).catch(() => {});
-		await loadSkills();
+		// Only reflect a state change the server actually accepted.
+		try {
+			await toggleSkillById(token, id);
+			await loadSkills();
+		} catch (e) {
+			toast.error(`${e}`);
+		}
 	};
 	const removeSkill = async (id: string) => {
-		await deleteSkillById(token, id).catch(() => {});
-		skills = skills.filter((s) => s.id !== id);
+		// Don't drop the row unless the server confirmed the delete.
+		try {
+			await deleteSkillById(token, id);
+			skills = skills.filter((s) => s.id !== id);
+		} catch (e) {
+			toast.error(`${e}`);
+		}
 	};
 
 	// ── Skill governance (Exec Core C2) — audit → human verdict → OpenClaw sync ──
@@ -322,6 +344,13 @@
 				</div>
 			{/each}
 		</div>
+	{:else if loadError}
+		<div class="rounded-xl border border-gray-100 dark:border-gray-850 px-3 py-6 text-center text-sm text-gray-500">
+			{$i18n.t('Could not load skills')} — {loadError}
+			<button class="ml-2 text-blue-600 dark:text-blue-400 hover:underline" on:click={loadSkills}>{$i18n.t('Retry')}</button>
+		</div>
+	{:else if !showSkillForm && !skillsLoaded}
+		<div class="text-xs text-gray-500 py-1">{$i18n.t('Loading skills…')}</div>
 	{:else if !showSkillForm}
 		<div class="text-xs text-gray-500 py-1">{$i18n.t('No skills yet. Create one to get started.')}</div>
 	{/if}

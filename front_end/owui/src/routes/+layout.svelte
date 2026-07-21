@@ -28,6 +28,8 @@
 		isLastActiveTab,
 		isApp,
 		appInfo,
+		appData,
+		models,
 		toolServers,
 		playingNotificationSound,
 		channels,
@@ -52,6 +54,7 @@
 	import 'tippy.js/dist/tippy.css';
 
 	import { executeToolServer, getBackendConfig, getModels, getVersion } from '$lib/apis';
+	import { applyThemeById } from '$lib/themes';
 	import { getSessionUser, updateUserTimezone, userSignOut } from '$lib/apis/auths';
 	import { getAllTags, getChatList } from '$lib/apis/chats';
 	import { chatCompletion } from '$lib/apis/openai';
@@ -63,6 +66,7 @@
 	} from '$lib/utils/connections';
 
 	import { WEBUI_API_BASE_URL, WEBUI_BASE_URL, WEBUI_HOSTNAME } from '$lib/constants';
+	import { isPublicRoute } from '$lib/constants/publicRoutes';
 	import { bestMatchingLanguage, displayFileHandler, getUserTimezone } from '$lib/utils';
 	import { setTextScale } from '$lib/utils/text-scale';
 
@@ -736,6 +740,11 @@
 	};
 
 	const TOKEN_EXPIRY_BUFFER = 60; // seconds
+	const authBounceTarget = (encodedRedirectUrl) => {
+		// First-run: prefer the /setup wizard over stock /auth.
+		if ($config?.onboarding) return '/setup';
+		return `/auth?redirect=${encodedRedirectUrl}`;
+	};
 	const checkTokenExpiry = async () => {
 		const exp = $user?.expires_at; // token expiry time in unix timestamp
 		const now = Math.floor(Date.now() / 1000); // current time in unix timestamp
@@ -750,7 +759,12 @@
 			user.set(null);
 			localStorage.removeItem('token');
 
-			location.href = res?.redirect_url ?? '/auth';
+			// Don't yank /setup (or other public routes) mid-flow.
+			if (isPublicRoute($page.url.pathname)) {
+				return;
+			}
+
+			location.href = res?.redirect_url ?? ($config?.onboarding ? '/setup' : '/auth');
 		}
 	};
 
@@ -779,19 +793,7 @@
 			localStorage.setItem('theme', newTheme);
 			theme.set(newTheme);
 
-			// Apply theme classes (mirrors logic from chat/Settings/General.svelte)
-			const themes = ['dark', 'light', 'oled-dark'];
-			let themeToApply =
-				newTheme === 'oled-dark' ? 'dark' : newTheme === 'her' ? 'light' : newTheme;
-			if (newTheme === 'system') {
-				themeToApply = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-			}
-			themes
-				.filter((e) => e !== themeToApply)
-				.forEach((e) => {
-					e.split(' ').forEach((cls) => document.documentElement.classList.remove(cls));
-				});
-			themeToApply.split(' ').forEach((cls) => document.documentElement.classList.add(cls));
+			applyThemeById(newTheme); // registry-driven token-map switch ($lib/themes)
 			return;
 		}
 		if (event.type === 'models:refresh') {
@@ -969,7 +971,7 @@
 				$socket?.on('events', chatEventHandler);
 				$socket?.on('events:channel', channelEventHandler);
 
-				const userSettings = await getUserSettings(localStorage.token);
+				const userSettings = await getUserSettings(localStorage.token).catch(() => null);
 				if (userSettings) {
 					settings.set(userSettings.ui);
 				} else {
@@ -1059,15 +1061,21 @@
 								.catch(() => {});
 						}
 					} else {
-						// Redirect Invalid Session User to /auth Page
+						// Redirect Invalid Session User — /setup stays public during first-run.
 						localStorage.removeItem('token');
-						await goto(`/auth?redirect=${encodedUrl}`);
+						if (!isPublicRoute($page.url.pathname)) {
+							await goto(authBounceTarget(encodedUrl));
+						} else if ($config?.onboarding && $page.url.pathname === '/auth') {
+							await goto('/setup');
+						}
 					}
 				} else {
-					// Don't redirect if we're already on the auth page
-					// Needed because we pass in tokens from OAuth logins via URL fragments
-					if ($page.url.pathname !== '/auth') {
-						await goto(`/auth?redirect=${encodedUrl}`);
+					// Don't redirect if we're already on a public route
+					// (/auth needs to stay for OAuth URL fragments; /setup is first-run).
+					if (!isPublicRoute($page.url.pathname)) {
+						await goto(authBounceTarget(encodedUrl));
+					} else if ($config?.onboarding && $page.url.pathname === '/auth') {
+						await goto('/setup');
 					}
 				}
 			}

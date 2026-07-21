@@ -60,7 +60,10 @@
 				parseError = 'Canvas spec has no renderable blocks.';
 			}
 		} catch (e) {
+			// Malformed ```canvas JSON (common with small local models) — never surface a raw
+			// parse error in chat; log for debugging and let the template omit/degrade it.
 			parseError = `Invalid canvas JSON: ${e instanceof Error ? e.message : e}`;
+			console.warn('[CanvasRenderer]', parseError);
 		}
 	};
 
@@ -97,6 +100,10 @@
 	};
 </script>
 
+{#if parseError && mode === 'inline'}
+	<!-- An optional inline canvas panel that failed to parse is simply omitted — the
+	     model's prose answer stands on its own; no raw JSON error in the chat. -->
+{:else}
 <div
 	class="harvis-canvas w-full flex flex-col gap-2.5 text-gray-800 dark:text-gray-100 {mode ===
 	'panel'
@@ -120,10 +127,11 @@
 	{/if}
 
 	{#if parseError}
+		<!-- Reached only in panel mode (inline is omitted above): a subtle, non-alarming note. -->
 		<div
-			class="flex gap-2.5 border px-4 py-3 border-red-600/10 bg-red-600/10 rounded-2xl text-sm"
+			class="text-sm text-gray-500 dark:text-gray-400 border border-dashed border-gray-200 dark:border-gray-800 rounded-2xl px-4 py-3"
 		>
-			{parseError}
+			{$i18n.t("This panel couldn't be displayed.")}
 		</div>
 	{:else}
 		{#each groups as group}
@@ -245,6 +253,7 @@
 		{/each}
 	{/if}
 </div>
+{/if}
 
 <style>
 	.canvas-chart :global(svg) {

@@ -418,7 +418,7 @@
 				? 'bg-gray-100 dark:bg-gray-900 selected'
 				: selected
 					? 'bg-gray-100 dark:bg-gray-950 selected'
-					: 'group-hover:bg-gray-100 dark:group-hover:bg-gray-950'}  whitespace-nowrap text-ellipsis relative {generating
+					: 'group-hover:bg-gray-100 dark:group-hover:bg-gray-950'}  whitespace-nowrap relative {generating
 				? 'cursor-not-allowed'
 				: ''}"
 		>
@@ -454,7 +454,7 @@
 				? 'bg-gray-100 dark:bg-gray-900 selected'
 				: selected
 					? 'bg-gray-100 dark:bg-gray-950 selected'
-					: ' group-hover:bg-gray-100 dark:group-hover:bg-gray-950'}  whitespace-nowrap text-ellipsis"
+					: ' group-hover:bg-gray-100 dark:group-hover:bg-gray-950'}  whitespace-nowrap"
 			href="/c/{id}"
 			on:click={() => {
 				dispatch('select');
@@ -497,7 +497,7 @@
 			<div class="flex self-center flex-1 w-full min-w-0">
 				<div
 					dir="auto"
-					class="text-left self-center overflow-hidden w-full h-[20px] truncate text-[13px] font-normal {unread
+					class="text-left self-center overflow-hidden whitespace-nowrap name-fade w-full h-[20px] text-[13px] font-normal {unread
 						? 'text-gray-700 dark:text-gray-200'
 						: 'text-gray-500 dark:text-gray-400'}"
 				>

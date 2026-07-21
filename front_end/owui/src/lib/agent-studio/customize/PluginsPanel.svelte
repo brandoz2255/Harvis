@@ -135,10 +135,20 @@
 	// ── skills (real API) + starter workflow library ──────────────────────────
 	let skills: any[] = [];
 	let skillsLoaded = false;
+	let skillsLoadError = '';
 	const loadSkills = async () => {
-		const r = await getSkills(token).catch(() => []);
-		skills = Array.isArray(r) ? r : (r?.skills ?? r?.items ?? []);
-		skillsLoaded = true;
+		skillsLoadError = '';
+		const r = await getSkills(token).catch((e) => {
+			// Keep whatever list is on screen — a failed refresh must not read as
+			// "all skills deleted". The error branch below covers the empty case.
+			skillsLoadError = `${e}`;
+			if (skills.length) toast.error(`${$i18n.t('Could not refresh skills')} — ${e}`);
+			return null;
+		});
+		if (r) {
+			skills = Array.isArray(r) ? r : (r?.skills ?? r?.items ?? []);
+			skillsLoaded = true;
+		}
 	};
 	const verdictOf = (s: any): string | null => s?.meta?.audit?.verdict ?? null;
 
@@ -189,16 +199,26 @@
 	let busyId: string | null = null;
 	const toggleSkill = async (s: any) => {
 		busyId = s.id;
-		await toggleSkillById(token, s.id).catch(() => {});
+		// Only reflect a state change the server actually accepted.
+		try {
+			await toggleSkillById(token, s.id);
+			await loadSkills();
+			selected = skills.find((x) => x.id === s.id) ?? selected;
+		} catch (e) {
+			toast.error(`${e}`);
+		}
 		busyId = null;
-		await loadSkills();
-		selected = skills.find((x) => x.id === s.id) ?? selected;
 	};
 	const removeSkill = async (s: any) => {
 		if (!confirm($i18n.t('Remove this skill?'))) return;
-		await deleteSkillById(token, s.id).catch(() => {});
-		skills = skills.filter((x) => x.id !== s.id);
-		closeDetail();
+		// Don't drop the row unless the server confirmed the delete.
+		try {
+			await deleteSkillById(token, s.id);
+			skills = skills.filter((x) => x.id !== s.id);
+			closeDetail();
+		} catch (e) {
+			toast.error(`${e}`);
+		}
 	};
 	let auditingId: string | null = null;
 	const runAudit = async (s: any) => {
@@ -485,6 +505,11 @@
 							</button>
 						</div>
 					{/each}
+				</div>
+			{:else if skillsLoadError}
+				<div class="rounded-xl border border-gray-100 dark:border-gray-850 px-3 py-6 text-center text-sm text-gray-500">
+					{$i18n.t('Could not load skills')} — {skillsLoadError}
+					<button type="button" class="ml-2 text-blue-600 dark:text-blue-400 hover:underline" on:click={loadSkills}>{$i18n.t('Retry')}</button>
 				</div>
 			{:else}
 				<div class="text-sm text-gray-500 py-3">{skillsLoaded ? $i18n.t('No skills yet — add one from the library below or Create → New skill.') : $i18n.t('Loading skills…')}</div>

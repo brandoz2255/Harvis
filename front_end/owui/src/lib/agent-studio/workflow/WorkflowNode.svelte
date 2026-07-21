@@ -11,14 +11,16 @@
 	export let data: any;
 	$: d = data as any;
 
-	// Global Map run-node helpers.
+	// Global Map run-node helpers. Unified cockpit palette (see runFormat.ts):
+	// done=emerald · error=red · cancelled=gray (inert) · running=blue.
+	// amber is reserved for "needs YOU" and must not mean done or cancelled.
 	const runDot = (s?: string) =>
 		s === 'done'
-			? 'bg-blue-500'
+			? 'bg-emerald-500'
 			: s === 'error'
 				? 'bg-red-500'
 				: s === 'cancelled'
-					? 'bg-amber-500'
+					? 'bg-gray-400 dark:bg-gray-600'
 					: 'bg-blue-500';
 	const fmtDur = (ms?: number) =>
 		ms ? (ms < 60000 ? `${Math.round(ms / 1000)}s` : `${Math.round(ms / 60000)}m`) : '';

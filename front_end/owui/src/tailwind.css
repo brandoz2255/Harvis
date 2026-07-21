@@ -47,7 +47,32 @@
 }
 
 @layer base {
-	html,
+	/* Base body font is theme-swappable via --theme-font-body (set by a theme, e.g. Warm→serif;
+	   falls back to the Inter sans stack). `pre`/code keep the sans/mono stack regardless. */
+	html {
+		font-family: var(
+			--theme-font-body,
+			-apple-system,
+			BlinkMacSystemFont,
+			'Inter',
+			'Vazirmatn',
+			ui-sans-serif,
+			system-ui,
+			'Segoe UI',
+			Roboto,
+			Ubuntu,
+			Cantarell,
+			'Noto Sans',
+			sans-serif,
+			'Helvetica Neue',
+			Arial,
+			'Apple Color Emoji',
+			'Segoe UI Emoji',
+			'Segoe UI Symbol',
+			'Noto Color Emoji'
+		);
+	}
+
 	pre {
 		font-family:
 			-apple-system, BlinkMacSystemFont, 'Inter', 'Vazirmatn', ui-sans-serif, system-ui, 'Segoe UI',

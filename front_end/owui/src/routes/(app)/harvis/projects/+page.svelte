@@ -18,6 +18,7 @@
 	let projects: any[] = [];
 	let counts: Record<string, number> = {};
 	let loading = true;
+	let loadError = '';
 	let showCreate = false;
 
 	const rel = (iso?: string | number) => {
@@ -37,10 +38,20 @@
 
 	const load = async () => {
 		loading = true;
-		const f = await getFolders(token).catch(() => []);
-		projects = (f ?? [])
-			.filter((x: any) => !x.parent_id)
-			.sort((a: any, b: any) => (b.updated_at ?? 0) - (a.updated_at ?? 0));
+		loadError = '';
+		// getFolders may throw OR resolve null on failure — treat both as a failed
+		// load, never as "no projects yet"
+		const f = await getFolders(token).catch((e) => {
+			loadError = e ? `${e}` : $i18n.t('Server unreachable');
+			return null;
+		});
+		if (Array.isArray(f)) {
+			projects = f
+				.filter((x: any) => !x.parent_id)
+				.sort((a: any, b: any) => (b.updated_at ?? 0) - (a.updated_at ?? 0));
+		} else {
+			loadError = loadError || $i18n.t('Server unreachable');
+		}
 		loading = false;
 		for (const p of projects) {
 			getChatsByFolderId(token, p.id)
@@ -106,6 +117,17 @@
 			<div class="py-16 flex justify-center text-gray-400">
 				<svg class="size-6 animate-spin" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2.5" opacity="0.25" /><path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" /></svg>
 			</div>
+		{:else if loadError}
+			<div
+				class="rounded-2xl border border-gray-200 dark:border-gray-800 p-10 text-center"
+			>
+				<div class="text-sm text-gray-500">{$i18n.t('Could not load projects')} — {loadError}</div>
+				<button
+					on:click={load}
+					class="mt-3 text-sm text-blue-600 dark:text-blue-400 hover:underline"
+					>{$i18n.t('Retry')}</button
+				>
+			</div>
 		{:else if projects.length === 0}
 			<div
 				class="rounded-2xl border border-dashed border-gray-200 dark:border-gray-800 p-10 text-center"
@@ -135,7 +157,7 @@
 							<div class="text-xs text-gray-400 italic flex-1">{$i18n.t('No custom instructions yet.')}</div>
 						{/if}
 						<div class="flex items-center gap-2 text-[11px] text-gray-400">
-							<span>{counts[p.id] ?? 0} {$i18n.t('chats')}</span>
+							<span>{counts[p.id] ?? '—'} {$i18n.t('chats')}</span>
 							{#if p.updated_at}<span>· {rel(p.updated_at)}</span>{/if}
 						</div>
 					</button>

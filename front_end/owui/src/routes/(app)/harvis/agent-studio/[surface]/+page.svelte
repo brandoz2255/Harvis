@@ -4,6 +4,7 @@
 	import { goto } from '$app/navigation';
 	import { showSidebar, WEBUI_NAME } from '$lib/stores';
 	import { surfaceByKey } from '$lib/agent-studio/surfaces';
+	import UnderConstruction from '$lib/components/common/UnderConstruction.svelte';
 
 	const i18n: any = getContext('i18n');
 
@@ -34,13 +35,25 @@
 			on:click={back}>← {$i18n.t('Back')}</button
 		>
 		{#if surface}
-			<div class="text-sm font-semibold text-gray-800 dark:text-gray-100 mt-1">
+			<div class="text-sm font-semibold text-gray-800 dark:text-gray-100 mt-1 flex items-center gap-2">
 				{$i18n.t(surface.label)}
+				{#if surface.underConstruction}
+					<span
+						class="text-[10px] px-1.5 py-0.5 rounded-full border border-amber-300 dark:border-amber-800 text-amber-700 dark:text-amber-400"
+						>{$i18n.t('WIP')}</span
+					>
+				{/if}
 			</div>
 		{/if}
 	</div>
 
 	<div class="flex-1 min-h-0 overflow-y-auto">
+		{#if surface?.underConstruction}
+			<!-- Honest marker, deliberately non-blocking: the surface underneath still runs. -->
+			<div class="px-5 pt-4">
+				<UnderConstruction />
+			</div>
+		{/if}
 		{#if surface}
 			{#key surface.key}
 				<svelte:component this={surface.component} mode="full" />

@@ -95,13 +95,18 @@
 	let gh: { connected: boolean; login?: string; name?: string; avatar_url?: string } = { connected: false };
 	let ghBusy = false;
 	let ghMsg = '';
+	let ghUnknown = false; // status check failed — state on screen may be stale
 	let pollTimer: any = null;
 
+	// null = "couldn't check", which is NOT the same as "not connected". Keep the last known
+	// state on screen rather than claiming the account was disconnected.
 	const loadGithub = async () => {
-		try {
-			gh = await getGithubStatus();
-		} catch (_) {
-			gh = { connected: false };
+		const s = await getGithubStatus();
+		if (s) {
+			gh = s;
+			ghUnknown = false;
+		} else {
+			ghUnknown = true;
 		}
 	};
 
@@ -125,12 +130,15 @@
 		if (pollTimer) clearInterval(pollTimer);
 		pollTimer = setInterval(async () => {
 			tries += 1;
+			// s === null means the check failed; keep polling rather than treating it as
+			// "not connected yet" — the attempt cap still bounds the loop.
 			const s = await getGithubStatus();
-			if (s.connected || tries > 60) {
+			if (s?.connected || tries > 60) {
 				clearInterval(pollTimer);
 				pollTimer = null;
-				if (s.connected) {
+				if (s?.connected) {
 					gh = s;
+					ghUnknown = false;
 					toast.success($i18n.t('GitHub connected'));
 				}
 			}
@@ -139,18 +147,31 @@
 
 	const disconnectGh = async () => {
 		ghBusy = true;
-		try {
-			await disconnectGithub();
-		} catch (_) {}
+		const ok = await disconnectGithub();
 		ghBusy = false;
-		gh = { connected: false };
+		if (ok) {
+			gh = { connected: false };
+		} else {
+			// Honest failure: the credential may still be live server-side — keep the
+			// connected state rather than claiming a disconnect that didn't happen.
+			toast.error($i18n.t("Couldn't disconnect GitHub — the connection is still active. Try again."));
+			loadGithub();
+		}
 	};
 
 	// ── MCP ──
 	let mcpCount: number | null = null;
+	let mcpError = false;
 	const loadMcp = async () => {
-		const items = await getMcpConnections();
-		mcpCount = items.length;
+		mcpError = false;
+		// null (or a throw) = the fetch failed — show an error, never "0 servers connected"
+		const items = await getMcpConnections().catch(() => null);
+		if (Array.isArray(items)) {
+			mcpCount = items.length;
+		} else {
+			mcpCount = null;
+			mcpError = true;
+		}
 	};
 
 	// Hermes Agent management is its own component (3 connection modes — import / external / managed).
@@ -345,6 +366,17 @@
 				>
 					{$i18n.t('Disconnect')}
 				</button>
+			{:else if ghUnknown}
+				<!-- The status check failed. Saying "Not connected." here would be a false
+				     (and security-flavoured) assurance — the account may well still be linked. -->
+				<p class="text-xs text-gray-500 dark:text-gray-400">
+					{$i18n.t("Couldn't check your GitHub connection.")}
+					<button
+						type="button"
+						class="ml-1 text-blue-600 dark:text-blue-400 hover:underline"
+						on:click={loadGithub}>{$i18n.t('Retry')}</button
+					>
+				</p>
 			{:else}
 				<p class="text-xs text-gray-500 dark:text-gray-400">{$i18n.t('Not connected.')}</p>
 				<button
@@ -361,7 +393,12 @@
 	{:else if def.connect === 'mcp_link'}
 		<div class="rounded-lg border border-gray-100 dark:border-white/8 bg-gray-50 dark:bg-white/[0.02] p-3 flex items-center justify-between gap-3">
 			<span class="text-xs text-gray-600 dark:text-gray-300">
-				{#if mcpCount === null}{$i18n.t('Loading…')}{:else}{mcpCount}
+				{#if mcpError}<span class="text-red-500 dark:text-red-400"
+						>{$i18n.t('Could not load MCP servers.')}</span
+					>
+					<button type="button" class="text-blue-600 dark:text-blue-300 hover:underline" on:click={loadMcp}
+						>{$i18n.t('Retry')}</button
+					>{:else if mcpCount === null}{$i18n.t('Loading…')}{:else}{mcpCount}
 					{mcpCount === 1 ? $i18n.t('server connected') : $i18n.t('servers connected')}{/if}
 			</span>
 			<button

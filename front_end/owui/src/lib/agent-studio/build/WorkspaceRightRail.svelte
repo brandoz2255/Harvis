@@ -63,7 +63,7 @@
 					? 'bg-amber-500'
 					: s === 'running'
 						? 'bg-blue-500 animate-pulse'
-						: 'bg-gray-400';
+						: 'bg-gray-400 dark:bg-gray-600';
 
 	const statusWord = (s?: string): string =>
 		s === 'running'

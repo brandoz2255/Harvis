@@ -49,6 +49,7 @@
 	import Plus from '../icons/Plus.svelte';
 	import ChevronRight from '../icons/ChevronRight.svelte';
 	import Spinner from '../common/Spinner.svelte';
+	import Skeleton from '../common/Skeleton.svelte';
 	import Tooltip from '../common/Tooltip.svelte';
 	import NoteMenu from './Notes/NoteMenu.svelte';
 	import FilesOverlay from '../chat/MessageInput/FilesOverlay.svelte';
@@ -79,6 +80,7 @@
 
 	let itemsLoading = false;
 	let allItemsLoaded = false;
+	let loadError = ''; // list fetch failure — error branch with Retry, so the skeleton can't loop forever
 
 	const downloadHandler = async (type) => {
 		// Fetch the full note since the list response may not contain full content
@@ -172,7 +174,10 @@
 	const loadMoreItems = async () => {
 		if (allItemsLoaded) return;
 		page += 1;
-		await getItemsPage();
+		const res = await getItemsPage();
+		if (!res) {
+			page -= 1; // failed page — retry it next time instead of silently skipping it
+		}
 	};
 
 	const init = async () => {
@@ -195,23 +200,23 @@
 
 	const getItemsPage = async () => {
 		itemsLoading = true;
+		loadError = '';
 
 		if (viewOption === 'created') {
 			permission = null;
 		}
 
-		const res = await searchNotes(
-			localStorage.token,
-			query,
-			viewOption,
-			permission,
-			sortKey,
-			page
-		).catch(() => {
-			return [];
-		});
+		// Robust to both helper behaviors: a thrown error (has detail) and a
+		// silent null return (network-level failure with no detail).
+		let res = null;
+		try {
+			res = await searchNotes(localStorage.token, query, viewOption, permission, sortKey, page);
+		} catch (error) {
+			console.error(error);
+			loadError = `${error}`;
+		}
 
-		if (res) {
+		if (res && Array.isArray(res.items)) {
 			console.log(res);
 			total = res.total;
 			const pageItems = res.items;
@@ -229,10 +234,12 @@
 			} else {
 				items = pageItems;
 			}
+		} else if (!loadError) {
+			loadError = $i18n.t('Server connection failed');
 		}
 
 		itemsLoading = false;
-		return res;
+		return loadError ? null : res;
 	};
 
 	const groupNotes = (res) => {
@@ -671,20 +678,34 @@
 							{/each}
 
 							{#if !allItemsLoaded}
-								<Loader
-									on:visible={(e) => {
-										if (!itemsLoading) {
-											loadMoreItems();
-										}
-									}}
-								>
-									<div
-										class="w-full flex justify-center py-4 text-xs animate-pulse items-center gap-2"
-									>
-										<Spinner className=" size-4" />
-										<div class=" ">{$i18n.t('Loading...')}</div>
+								{#if loadError}
+									<!-- Load-more failure: an idle "Loading..." spinner here would be a lie,
+									     and the Loader would auto-retry against a broken server on scroll. -->
+									<div class="w-full flex justify-center py-4 text-xs items-center gap-2 text-gray-500">
+										{$i18n.t('Could not load more')}
+										<button
+											class="text-blue-600 dark:text-blue-400 hover:underline"
+											on:click={() => {
+												loadMoreItems();
+											}}>{$i18n.t('Retry')}</button
+										>
 									</div>
-								</Loader>
+								{:else}
+									<Loader
+										on:visible={(e) => {
+											if (!itemsLoading) {
+												loadMoreItems();
+											}
+										}}
+									>
+										<div
+											class="w-full flex justify-center py-4 text-xs animate-pulse items-center gap-2"
+										>
+											<Spinner className=" size-4" />
+											<div class=" ">{$i18n.t('Loading...')}</div>
+										</div>
+									</Loader>
+								{/if}
 							{/if}
 						</div>
 					</div>
@@ -701,15 +722,60 @@
 						</div>
 					</div>
 				{/if}
+			{:else if loadError}
+				<!-- Honest list-fetch failure: without this, `items` stays null and the
+				     skeleton below would shimmer forever. -->
+				<div class="py-2.5 px-2.5">
+					<div
+						class="rounded-xl border border-gray-100 dark:border-gray-850 px-3 py-6 text-center text-sm text-gray-500"
+					>
+						{$i18n.t('Could not load notes')} — {loadError}
+						<button
+							class="ml-2 text-blue-600 dark:text-blue-400 hover:underline"
+							on:click={() => {
+								init();
+							}}>{$i18n.t('Retry')}</button
+						>
+					</div>
+				</div>
 			{:else}
-				<div class="w-full h-full flex justify-center items-center py-10">
-					<Spinner className="size-4" />
+				<!-- Skeleton mirrors the grouped note list: time-range label, then
+				     rounded-2xl rows with a title line and date/author meta on the right. -->
+				<div class="h-full py-2.5 px-2.5" aria-busy="true">
+					<div aria-hidden="true">
+						<Skeleton width="4.5rem" height="0.625rem" className="mx-2.5 mb-2.5" />
+						<div class="gap-1.5 flex flex-col">
+							{#each Array.from({ length: 5 }) as _, i}
+								<div
+									class="flex items-center justify-between w-full px-3.5 py-2.5 border border-gray-50 dark:border-gray-850/30 rounded-2xl"
+								>
+									<Skeleton width={['38%', '52%', '30%', '46%', '40%'][i]} height="0.875rem" delay={i * 90} />
+									<Skeleton width="8rem" height="0.625rem" delay={i * 90} />
+								</div>
+							{/each}
+						</div>
+					</div>
+					<span class="sr-only" role="status">{$i18n.t('Loading notes…')}</span>
 				</div>
 			{/if}
 		</div>
 	{:else}
-		<div class="w-full h-full flex justify-center items-center">
-			<Spinner className="size-4" />
+		<!-- Cold-load skeleton: same note-row geometry as above, bound to `loaded`. -->
+		<div class="w-full py-2.5 px-2.5" aria-busy="true">
+			<div aria-hidden="true">
+				<Skeleton width="4.5rem" height="0.625rem" className="mx-2.5 mb-2.5" />
+				<div class="gap-1.5 flex flex-col">
+					{#each Array.from({ length: 5 }) as _, i}
+						<div
+							class="flex items-center justify-between w-full px-3.5 py-2.5 border border-gray-50 dark:border-gray-850/30 rounded-2xl"
+						>
+							<Skeleton width={['38%', '52%', '30%', '46%', '40%'][i]} height="0.875rem" delay={i * 90} />
+							<Skeleton width="8rem" height="0.625rem" delay={i * 90} />
+						</div>
+					{/each}
+				</div>
+			</div>
+			<span class="sr-only" role="status">{$i18n.t('Loading notes…')}</span>
 		</div>
 	{/if}
 </div>

@@ -50,13 +50,15 @@
 	$: shownRuns = statuses ? sourceRuns.filter((r) => statuses.includes(r.status ?? '')) : sourceRuns;
 	$: isLoading = runsOverride !== null ? false : loading;
 
+	// Unified cockpit palette (see runFormat.ts): done=emerald · error=red ·
+	// cancelled=gray (inert) · running=blue-pulse. amber = "needs YOU" only.
 	const dot = (s?: string) =>
 		s === 'done'
-			? 'bg-blue-500'
+			? 'bg-emerald-500'
 			: s === 'error'
 				? 'bg-red-500'
 				: s === 'cancelled'
-					? 'bg-amber-500'
+					? 'bg-gray-400 dark:bg-gray-600'
 					: 'bg-blue-500 animate-pulse';
 
 	const fmtDur = (ms?: number) =>

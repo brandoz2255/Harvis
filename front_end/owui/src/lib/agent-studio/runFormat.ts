@@ -1,21 +1,23 @@
 // Shared formatting helpers for workspace/agent RUN objects — one source of truth for
 // the Background-task cards, RunTable, and the vibecode page (dedupes the old `dot()` copies).
 
-// Status → Tailwind dot classes (Harvis status palette per the spec):
-//   running = blue (pulse) · done = green · waiting/approval = amber · failed = red ·
-//   cancelled = slate · idle/pending = gray.
+// Status → Tailwind dot classes (unified cockpit palette):
+//   running = blue-500 (pulse) · done/passed = emerald-500 · failed = red-500 ·
+//   waiting/approval = amber-500 (amber means "needs YOU") · cancelled = gray (inert;
+//   deliberately NOT amber so it can't be misread as awaiting-approval) ·
+//   idle/unknown = gray-400/gray-600.
 export const statusDot = (s?: string): string =>
 	s === 'done'
 		? 'bg-emerald-500'
 		: s === 'error'
 			? 'bg-red-500'
 			: s === 'cancelled'
-				? 'bg-slate-400'
+				? 'bg-gray-400 dark:bg-gray-600'
 				: s === 'running'
 					? 'bg-blue-500 animate-pulse'
 					: s === 'waiting' || s === 'pending_approval'
 						? 'bg-amber-500'
-						: 'bg-gray-400';
+						: 'bg-gray-400 dark:bg-gray-600';
 
 // Status → human label (English; $i18n.t passes these through unchanged).
 export const statusLabel = (s?: string): string =>

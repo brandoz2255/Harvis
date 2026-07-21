@@ -8,6 +8,7 @@
 	import Switch from '$lib/components/common/Switch.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
+	import SettingRow from './SettingRow.svelte';
 	const dispatch = createEventDispatcher();
 
 	const i18n = getContext('i18n');
@@ -177,14 +178,16 @@
 >
 	<div class=" space-y-3 overflow-y-scroll max-h-[28rem] md:max-h-full">
 		<div>
-			<div class=" mb-1 text-sm font-medium">{$i18n.t('STT Settings')}</div>
+			<div class="pb-1 text-lg font-semibold text-gray-900 dark:text-gray-100">{$i18n.t('STT Settings')}</div>
 
 			{#if $config.audio.stt.engine !== 'web'}
-				<div class=" py-0.5 flex w-full justify-between">
-					<div class=" self-center text-xs font-medium">{$i18n.t('Speech-to-Text Engine')}</div>
+				<SettingRow>
+					<svelte:fragment slot="title">
+						<div>{$i18n.t('Speech-to-Text Engine')}</div>
+					</svelte:fragment>
 					<div class="flex items-center relative">
 						<select
-							class="w-fit pr-8 rounded-sm px-2 p-1 text-xs bg-transparent outline-hidden text-right"
+							class="w-44 sm:w-56 cursor-pointer rounded-[10px] bg-gray-100 dark:bg-gray-850 px-3 py-2 pr-8 text-sm text-gray-800 dark:text-gray-100 outline-hidden"
 							bind:value={STTEngine}
 							aria-label={$i18n.t('Speech-to-Text Engine')}
 							placeholder={$i18n.t('Select an engine')}
@@ -193,10 +196,12 @@
 							<option value="web">{$i18n.t('Web API')}</option>
 						</select>
 					</div>
-				</div>
+				</SettingRow>
 
-				<div class=" py-0.5 flex w-full justify-between">
-					<div class=" self-center text-xs font-medium">{$i18n.t('Language')}</div>
+				<SettingRow>
+					<svelte:fragment slot="title">
+						<div>{$i18n.t('Language')}</div>
+					</svelte:fragment>
 
 					<div class="flex items-center relative text-xs px-3">
 						<Tooltip
@@ -210,20 +215,22 @@
 								bind:value={STTLanguage}
 								aria-label={$i18n.t('Speech-to-Text Language')}
 								placeholder={$i18n.t('e.g. en')}
-								class=" text-sm text-right bg-transparent dark:text-gray-300 outline-hidden"
+								class="w-24 rounded-[10px] bg-gray-100 dark:bg-gray-850 px-3 py-1.5 text-sm text-right text-gray-800 dark:text-gray-100 outline-hidden"
 							/>
 						</Tooltip>
 					</div>
-				</div>
+				</SettingRow>
 			{/if}
 
-			<div class=" py-0.5 flex w-full justify-between">
-				<div class=" self-center text-xs font-medium">
-					{$i18n.t('Instant Auto-Send After Voice Transcription')}
-				</div>
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div>
+						{$i18n.t('Instant Auto-Send After Voice Transcription')}
+					</div>
+				</svelte:fragment>
 
 				<button
-					class="p-1 px-3 text-xs flex rounded-sm transition"
+					class="px-3 py-1.5 text-sm font-medium rounded-[10px] bg-gray-100 hover:bg-gray-200 dark:bg-gray-850 dark:hover:bg-gray-800 text-gray-800 dark:text-gray-100 flex transition"
 					on:click={() => {
 						toggleSpeechAutoSend();
 					}}
@@ -232,22 +239,24 @@
 					aria-checked={speechAutoSend}
 				>
 					{#if speechAutoSend === true}
-						<span class="ml-2 self-center">{$i18n.t('On')}</span>
+						<span class="self-center">{$i18n.t('On')}</span>
 					{:else}
-						<span class="ml-2 self-center">{$i18n.t('Off')}</span>
+						<span class="self-center">{$i18n.t('Off')}</span>
 					{/if}
 				</button>
-			</div>
+			</SettingRow>
 		</div>
 
 		<div>
-			<div class=" mb-1 text-sm font-medium">{$i18n.t('TTS Settings')}</div>
+			<div class="pt-6 pb-1 text-lg font-semibold text-gray-900 dark:text-gray-100">{$i18n.t('TTS Settings')}</div>
 
-			<div class=" py-0.5 flex w-full justify-between">
-				<div class=" self-center text-xs font-medium">{$i18n.t('Text-to-Speech Engine')}</div>
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div>{$i18n.t('Text-to-Speech Engine')}</div>
+				</svelte:fragment>
 				<div class="flex items-center relative">
 					<select
-						class="w-fit pr-8 rounded-sm px-2 p-1 text-xs bg-transparent outline-hidden text-right"
+						class="w-44 sm:w-56 cursor-pointer rounded-[10px] bg-gray-100 dark:bg-gray-850 px-3 py-2 pr-8 text-sm text-gray-800 dark:text-gray-100 outline-hidden"
 						bind:value={TTSEngine}
 						aria-label={$i18n.t('Text-to-Speech Engine')}
 						placeholder={$i18n.t('Select an engine')}
@@ -256,14 +265,16 @@
 						<option value="browser-kokoro">{$i18n.t('Kokoro.js (Browser)')}</option>
 					</select>
 				</div>
-			</div>
+			</SettingRow>
 
 			{#if TTSEngine === 'browser-kokoro'}
-				<div class=" py-0.5 flex w-full justify-between">
-					<div class=" self-center text-xs font-medium">{$i18n.t('Kokoro.js Dtype')}</div>
+				<SettingRow>
+					<svelte:fragment slot="title">
+						<div>{$i18n.t('Kokoro.js Dtype')}</div>
+					</svelte:fragment>
 					<div class="flex items-center relative">
 						<select
-							class="w-fit pr-8 rounded-sm px-2 p-1 text-xs bg-transparent outline-hidden text-right"
+							class="w-44 sm:w-56 cursor-pointer rounded-[10px] bg-gray-100 dark:bg-gray-850 px-3 py-2 pr-8 text-sm text-gray-800 dark:text-gray-100 outline-hidden"
 							bind:value={TTSEngineConfig.dtype}
 							aria-label={$i18n.t('Kokoro.js Dtype')}
 							placeholder={$i18n.t('Select dtype')}
@@ -275,14 +286,16 @@
 							<option value="q4">q4</option>
 						</select>
 					</div>
-				</div>
+				</SettingRow>
 			{/if}
 
-			<div class=" py-0.5 flex w-full justify-between">
-				<div class=" self-center text-xs font-medium">{$i18n.t('Auto-playback response')}</div>
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div>{$i18n.t('Auto-playback response')}</div>
+				</svelte:fragment>
 
 				<button
-					class="p-1 px-3 text-xs flex rounded-sm transition"
+					class="px-3 py-1.5 text-sm font-medium rounded-[10px] bg-gray-100 hover:bg-gray-200 dark:bg-gray-850 dark:hover:bg-gray-800 text-gray-800 dark:text-gray-100 flex transition"
 					on:click={() => {
 						toggleResponseAutoPlayback();
 					}}
@@ -291,15 +304,17 @@
 					aria-checked={responseAutoPlayback}
 				>
 					{#if responseAutoPlayback === true}
-						<span class="ml-2 self-center">{$i18n.t('On')}</span>
+						<span class="self-center">{$i18n.t('On')}</span>
 					{:else}
-						<span class="ml-2 self-center">{$i18n.t('Off')}</span>
+						<span class="self-center">{$i18n.t('Off')}</span>
 					{/if}
 				</button>
-			</div>
+			</SettingRow>
 
-			<div class=" py-0.5 flex w-full justify-between">
-				<div class=" self-center text-xs font-medium">{$i18n.t('Speech Playback Speed')}</div>
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div>{$i18n.t('Speech Playback Speed')}</div>
+				</svelte:fragment>
 
 				<div class="flex items-center relative text-xs px-3">
 					<input
@@ -308,11 +323,11 @@
 						step="0.01"
 						bind:value={playbackRate}
 						aria-label={$i18n.t('Speech Playback Speed')}
-						class=" text-sm text-right bg-transparent dark:text-gray-300 outline-hidden"
+						class="w-24 rounded-[10px] bg-gray-100 dark:bg-gray-850 px-3 py-1.5 text-sm text-right text-gray-800 dark:text-gray-100 outline-hidden"
 					/>
 					x
 				</div>
-			</div>
+			</SettingRow>
 		</div>
 
 		<hr class=" border-gray-100/30 dark:border-gray-850/30" />
@@ -320,7 +335,7 @@
 		{#if TTSEngine === 'browser-kokoro'}
 			{#if TTSModel}
 				<div>
-					<div class=" mb-2.5 text-sm font-medium">{$i18n.t('Set Voice')}</div>
+					<div class=" mb-2 text-[15px] font-semibold text-gray-900 dark:text-gray-100">{$i18n.t('Set Voice')}</div>
 					<div class="flex w-full">
 						<div class="flex-1">
 							<input
@@ -359,7 +374,7 @@
 			{/if}
 		{:else if $config.audio.tts.engine === ''}
 			<div>
-				<div class=" mb-2.5 text-sm font-medium">{$i18n.t('Set Voice')}</div>
+				<div class=" mb-2 text-[15px] font-semibold text-gray-900 dark:text-gray-100">{$i18n.t('Set Voice')}</div>
 				<div class="flex w-full">
 					<div class="flex-1">
 						<select
@@ -378,8 +393,8 @@
 						</select>
 					</div>
 				</div>
-				<div class="flex items-center justify-between my-1.5">
-					<div class="text-xs">
+				<div class="flex items-center justify-between py-2.5">
+					<div class="text-sm text-gray-700 dark:text-gray-300">
 						{$i18n.t('Allow non-local voices')}
 					</div>
 
@@ -390,7 +405,7 @@
 			</div>
 		{:else if $config.audio.tts.engine !== ''}
 			<div>
-				<div class=" mb-2.5 text-sm font-medium">{$i18n.t('Set Voice')}</div>
+				<div class=" mb-2 text-[15px] font-semibold text-gray-900 dark:text-gray-100">{$i18n.t('Set Voice')}</div>
 				<div class="flex w-full">
 					<div class="flex-1">
 						<input

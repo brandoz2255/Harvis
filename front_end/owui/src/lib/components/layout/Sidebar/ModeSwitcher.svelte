@@ -35,8 +35,8 @@
 			title={m.label}
 			class="flex h-7 items-center justify-center rounded-full text-xs font-medium transition-all duration-200 outline-none {activeMode ===
 			m.id
-				? 'grow gap-1.5 px-3 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-50 shadow-sm'
-				: 'shrink-0 px-2 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-200/50 dark:hover:bg-gray-800/40'}"
+				? 'grow gap-1.5 px-3 bg-white dark:bg-gray-800 text-blue-600 dark:text-blue-400'
+				: 'shrink-0 px-2 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-200/50 dark:hover:bg-gray-850'}"
 			on:click={() => select(m)}
 		>
 			<svelte:component this={m.icon} className="size-4 shrink-0" strokeWidth="1.8" />

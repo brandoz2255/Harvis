@@ -27,6 +27,7 @@
 	let skills: any[] = [];
 	let conns: any[] = [];
 	let loaded = false;
+	let loadError = false;
 	let saving = false;
 
 	let showForm = false;
@@ -62,6 +63,10 @@
 				.then((x) => (x.ok ? x.json() : null))
 				.catch(() => null)
 		]);
+		// null = the request failed (backend down / non-2xx) — keep that distinct
+		// from a healthy backend reporting an empty list, so a dead backend never
+		// renders as "no sub-agents yet"
+		loadError = sa === null;
 		subagents = Array.isArray(sa?.items) ? sa.items : [];
 		skills = Array.isArray(sk) ? sk : Array.isArray(sk?.items) ? sk.items : [];
 		conns = Array.isArray(cn) ? cn : Array.isArray(cn?.items) ? cn.items : [];
@@ -269,7 +274,14 @@
 	</div>
 {/if}
 
-{#if subagents.length}
+{#if loadError}
+	<div class="rounded-xl border border-gray-100 dark:border-gray-850 px-3 py-6 text-center text-sm text-gray-500">
+		{$i18n.t('Could not load sub-agents.')}
+		<button class="ml-2 text-blue-600 dark:text-blue-400 hover:underline" on:click={load}
+			>{$i18n.t('Retry')}</button
+		>
+	</div>
+{:else if subagents.length}
 	<div class="space-y-1.5">
 		{#each subagents as a (a.id)}
 			<div class="group rounded-xl border {a.enabled ? 'border-gray-100 dark:border-gray-850' : 'border-dashed border-gray-200 dark:border-gray-800 opacity-70'} bg-white dark:bg-gray-950 px-3 py-2.5">

@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { getContext, onMount } from 'svelte';
+	import { getContext, onMount, onDestroy } from 'svelte';
 	import { toast } from 'svelte-sonner';
 	import {
 		getNodes,
@@ -15,7 +15,7 @@
 	import Cube from '$lib/components/icons/Cube.svelte';
 	import Bolt from '$lib/components/icons/Bolt.svelte';
 	import ArrowDownTray from '$lib/components/icons/ArrowDownTray.svelte';
-	import Spinner from '$lib/components/common/Spinner.svelte';
+	import Skeleton from '$lib/components/common/Skeleton.svelte';
 
 	const i18n: any = getContext('i18n');
 
@@ -34,7 +34,7 @@
 	const FETCH_LIMIT = 60;
 
 	// Two tabs: Recommend (fit-ranked download list) ⇄ Installed (what's pulled — swap to any).
-	const TABS = [
+	const TABS: { key: 'recommend' | 'installed'; label: string }[] = [
 		{ key: 'recommend', label: 'Recommend' },
 		{ key: 'installed', label: 'Installed models' }
 	];
@@ -138,13 +138,22 @@
 			activeModelId = '';
 		}
 	};
-	const loadInstalled = async () => {
+	// `silent` = background refresh: no spinner, no blanking, and a failed/empty
+	// response keeps the current list in place (fail-soft) so a periodic re-check
+	// never disturbs what the user is looking at.
+	const loadInstalled = async (silent = false) => {
 		const n = node();
-		installed = [];
-		installedErr = '';
 		readActiveModel();
-		if (!n || !n.alive) return;
-		loadingInstalled = true;
+		if (!n || !n.alive) {
+			installed = [];
+			installedErr = '';
+			return;
+		}
+		if (!silent) {
+			installed = [];
+			installedErr = '';
+			loadingInstalled = true;
+		}
 		try {
 			// Load installed models + this node's hardware together so the fit
 			// ranking (size vs gpu_vram_gb) uses the SELECTED node, not a stale one.
@@ -152,19 +161,23 @@
 				getInstalled(token(), activeNode),
 				getSystem(token(), activeNode).catch(() => null)
 			]);
-			installed = r?.models ?? [];
-			installedErr = r?.error ?? '';
+			const next = r?.models ?? [];
+			if (!silent || next.length) {
+				installed = next;
+				installedErr = r?.error ?? '';
+			}
 			if (sys) system = sys?.system ?? sys;
 		} catch (e: any) {
-			installedErr = e?.detail ?? `${e}`;
+			if (!silent) installedErr = e?.detail ?? `${e}`;
 		}
-		loadingInstalled = false;
+		if (!silent) loadingInstalled = false;
 	};
 	const selectTab = (t: 'recommend' | 'installed') => {
 		tab = t;
 		if (t === 'installed') {
-			if (!installed.length) loadInstalled();
-			else readActiveModel();
+			// Always re-check on tab entry (silently when a list is already showing)
+			// so models pulled since the last visit appear without a reload.
+			loadInstalled(installed.length > 0);
 		} else if (!models.length) {
 			loadNode();
 		}
@@ -324,7 +337,18 @@
 
 	$: aliveCount = nodes.filter((n) => n.alive).length;
 
-	onMount(loadNodes);
+	// Calm periodic re-check of the installed list (silent — no spinner/blanking) so
+	// models pulled while the panel sits open appear without a reload.
+	let _installedRefreshTimer: ReturnType<typeof setInterval> | null = null;
+	onMount(() => {
+		loadNodes();
+		_installedRefreshTimer = setInterval(() => {
+			if (tab === 'installed') loadInstalled(true);
+		}, 60000);
+	});
+	onDestroy(() => {
+		if (_installedRefreshTimer) clearInterval(_installedRefreshTimer);
+	});
 </script>
 
 <div class="w-full h-full flex flex-col {mode === 'full' ? 'max-w-5xl mx-auto px-4 py-4' : 'px-1 py-2'}">
@@ -355,8 +379,21 @@
 	</div>
 
 	{#if loadingNodes}
-		<div class="flex items-center gap-2 text-xs text-gray-400 px-1 py-3">
-			<Spinner className="size-4" /> {$i18n.t('Checking devices…')}
+		<!-- Skeleton mirrors the node-selector chip row + hardware chips below it. -->
+		<div aria-busy="true">
+			<div aria-hidden="true">
+				<div class="flex items-center gap-1.5 mb-2">
+					{#each Array.from({ length: 2 }) as _, i}
+						<Skeleton width={['5.5rem', '4.5rem'][i]} height="1.625rem" rounded="rounded-lg" delay={i * 90} />
+					{/each}
+				</div>
+				<div class="flex items-center gap-1 mb-2">
+					{#each Array.from({ length: 3 }) as _, i}
+						<Skeleton width={['7rem', '5rem', '4rem'][i]} height="1.125rem" rounded="rounded-full" delay={i * 90} />
+					{/each}
+				</div>
+			</div>
+			<span class="sr-only" role="status">{$i18n.t('Checking devices…')}</span>
 		</div>
 	{:else if topErr}
 		<div class="text-xs text-red-500 px-2 py-2">{topErr}</div>
@@ -427,7 +464,22 @@
 					{#if node()?.error}<div class="mt-0.5 text-gray-400 truncate" title={node()?.error}>{node()?.error}</div>{/if}
 				</div>
 			{:else if loading}
-				<div class="flex items-center gap-2 text-xs text-gray-400 px-1 py-3"><Spinner className="size-4" /> {$i18n.t('Scoring models…')}</div>
+				<!-- Skeleton mirrors the ranked table rows: FIT chip + model name + numeric columns. -->
+				<div class="px-1 pt-2" aria-busy="true">
+					<div aria-hidden="true">
+						{#each Array.from({ length: 8 }) as _, i}
+							<div class="flex items-center gap-2 py-1.5 border-b border-gray-50 dark:border-gray-850/50">
+								<Skeleton width="3rem" height="1rem" rounded="rounded" delay={i * 70} />
+								<Skeleton width={['34%', '26%', '38%', '22%', '30%', '28%', '36%', '24%'][i]} height="0.75rem" delay={i * 70} />
+								<div class="flex-1"></div>
+								{#each Array.from({ length: 4 }) as _, j}
+									<Skeleton width="2rem" height="0.625rem" delay={i * 70} className={j > 1 ? 'hidden sm:block' : ''} />
+								{/each}
+							</div>
+						{/each}
+					</div>
+					<span class="sr-only" role="status">{$i18n.t('Scoring models…')}</span>
+				</div>
 			{:else if err}
 				<div class="text-xs text-red-500 px-1 py-2">{err}</div>
 			{:else if models.length === 0}
@@ -543,7 +595,22 @@
 				{#if !node()?.alive}
 					<div class="text-[11px] text-gray-500 dark:text-gray-400 px-1 py-3">{$i18n.t('Device offline.')}</div>
 				{:else if loadingInstalled}
-					<div class="flex items-center gap-2 text-xs text-gray-400 px-1 py-3"><Spinner className="size-4" /> {$i18n.t('Loading installed models…')}</div>
+					<!-- Skeleton mirrors installed-model cards: fit chip + name/meta lines + Use button. -->
+					<div aria-busy="true">
+						<div aria-hidden="true" class="space-y-1.5">
+							{#each Array.from({ length: 4 }) as _, i}
+								<div class="flex items-center gap-2 rounded-lg border border-gray-100 dark:border-gray-850 px-2.5 py-1.5">
+									<Skeleton width="2.75rem" height="1.125rem" rounded="rounded" className="shrink-0" delay={i * 90} />
+									<div class="min-w-0 flex-1">
+										<Skeleton width={['48%', '36%', '56%', '42%'][i]} height="0.75rem" delay={i * 90} />
+										<Skeleton width={['34%', '26%', '38%', '30%'][i]} height="0.5rem" className="mt-1.5" delay={i * 90} />
+									</div>
+									<Skeleton width="2.25rem" height="1.5rem" rounded="rounded-lg" className="shrink-0" delay={i * 90} />
+								</div>
+							{/each}
+						</div>
+						<span class="sr-only" role="status">{$i18n.t('Loading installed models…')}</span>
+					</div>
 				{:else if installedErr}
 					<div class="text-xs text-red-500 px-1 py-2">{installedErr}</div>
 				{:else if installed.length === 0}

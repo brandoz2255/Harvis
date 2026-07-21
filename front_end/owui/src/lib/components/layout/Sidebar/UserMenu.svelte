@@ -14,8 +14,11 @@
 		showShortcuts,
 		user,
 		config,
-		settings
+		settings,
+		theme
 	} from '$lib/stores';
+
+	import { THEMES, applyThemeById } from '$lib/themes';
 
 	import { WEBUI_API_BASE_URL } from '$lib/constants';
 
@@ -27,6 +30,9 @@
 	import Keyboard from '$lib/components/icons/Keyboard.svelte';
 	import ShortcutsModal from '$lib/components/chat/ShortcutsModal.svelte';
 	import Settings from '$lib/components/icons/Settings.svelte';
+	import Swatch from '$lib/components/icons/Swatch.svelte';
+	import Check from '$lib/components/icons/Check.svelte';
+	import ChevronRight from '$lib/components/icons/ChevronRight.svelte';
 	import Code from '$lib/components/icons/Code.svelte';
 	import UserGroup from '$lib/components/icons/UserGroup.svelte';
 	import SignOut from '$lib/components/icons/SignOut.svelte';
@@ -56,6 +62,22 @@
 
 	let showUserStatusModal = false;
 	let shiftKey = false;
+
+	let showAppearance = false;
+	let appearanceButtonEl: HTMLButtonElement;
+
+	// Same filter as Settings → General: egg-only themes stay hidden unless easter eggs are on.
+	$: availableThemes = THEMES.filter((t) => !t.eggOnly || $config?.features?.enable_easter_eggs);
+
+	$: activeTheme = $theme ?? 'system';
+
+	// Canonical theme-change handler (mirrors Settings/General.svelte) — writing
+	// localStorage.theme keeps the notebook theme-sync working.
+	const themeChangeHandler = (id: string) => {
+		theme.set(id);
+		localStorage.setItem('theme', id);
+		applyThemeById(id);
+	};
 
 	const dispatch = createEventDispatcher();
 
@@ -91,6 +113,8 @@
 
 	const handleDropdownChange = (state) => {
 		dispatch('change', state);
+
+		showAppearance = false;
 
 		// Fetch usage info when dropdown opens, if user has permission
 		if (state && ($config?.features?.enable_public_active_users_count || role === 'admin')) {
@@ -252,6 +276,77 @@
 				</div>
 				<div class=" self-center truncate">{$i18n.t('Settings')}</div>
 			</button>
+
+			<!-- svelte-ignore a11y-no-static-element-interactions -->
+			<div
+				on:keydown={(e) => {
+					if (e.key === 'Escape' && showAppearance) {
+						e.stopPropagation();
+						showAppearance = false;
+						appearanceButtonEl?.focus();
+					}
+				}}
+			>
+				<button
+					bind:this={appearanceButtonEl}
+					class="flex rounded-xl py-1.5 px-3 w-full hover:bg-gray-50 dark:hover:bg-gray-800 transition cursor-pointer select-none"
+					type="button"
+					aria-haspopup="menu"
+					aria-expanded={showAppearance}
+					aria-controls="user-menu-appearance-list"
+					on:click={() => {
+						showAppearance = !showAppearance;
+					}}
+				>
+					<div class=" self-center mr-3">
+						<Swatch className="w-5 h-5" strokeWidth="1.5" />
+					</div>
+					<div class=" self-center truncate">{$i18n.t('Appearance')}</div>
+					<div class=" self-center ml-auto">
+						<ChevronRight
+							className="size-3.5 opacity-50 transition-transform {showAppearance
+								? 'rotate-90'
+								: ''}"
+							strokeWidth="2"
+						/>
+					</div>
+				</button>
+
+				{#if showAppearance}
+					<div
+						id="user-menu-appearance-list"
+						role="menu"
+						aria-label={$i18n.t('Appearance')}
+						class="pl-3"
+						transition:slide={{ duration: 150 }}
+					>
+						{#each availableThemes as t (t.id)}
+							<button
+								class="flex rounded-xl py-1.5 px-3 w-full transition cursor-pointer select-none {activeTheme ===
+								t.id
+									? 'bg-blue-500/10 text-blue-600 dark:text-blue-400 font-medium'
+									: 'hover:bg-gray-50 dark:hover:bg-gray-800'}"
+								type="button"
+								role="menuitemradio"
+								aria-checked={activeTheme === t.id}
+								on:click={() => {
+									themeChangeHandler(t.id);
+								}}
+							>
+								<div class=" self-center mr-3 text-base leading-none" aria-hidden="true">
+									{t.icon}
+								</div>
+								<div class=" self-center truncate">{$i18n.t(t.label)}</div>
+								{#if activeTheme === t.id}
+									<div class=" self-center ml-auto">
+										<Check className="size-4" strokeWidth="2" />
+									</div>
+								{/if}
+							</button>
+						{/each}
+					</div>
+				{/if}
+			</div>
 
 			{#if role === 'admin'}
 				<a

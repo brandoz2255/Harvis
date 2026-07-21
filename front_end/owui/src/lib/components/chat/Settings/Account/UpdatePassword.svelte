@@ -6,12 +6,23 @@
 
 	const i18n = getContext('i18n');
 
+	// HONESTY GATE: the Harvis owui_compat facade does not implement
+	// POST /api/v1/auths/update/password (see python_back_end/owui_compat/router.py —
+	// only signin/signup/signout and GET /auths/ exist), so every submit would 404.
+	// Same pattern as PROFILE_UPDATE_AVAILABLE / API_KEYS_AVAILABLE in Account.svelte;
+	// flip this const when the route lands to re-enable the form as-is.
+	const PASSWORD_CHANGE_AVAILABLE = false;
+
 	let show = false;
 	let currentPassword = '';
 	let newPassword = '';
 	let newPasswordConfirm = '';
 
 	const updatePasswordHandler = async () => {
+		if (!PASSWORD_CHANGE_AVAILABLE) {
+			toast.error($i18n.t('Password changes are not available in this deployment yet.'));
+			return;
+		}
 		if (newPassword === newPasswordConfirm) {
 			const res = await updateUserPassword(localStorage.token, currentPassword, newPassword).catch(
 				(error) => {
@@ -43,10 +54,10 @@
 		updatePasswordHandler();
 	}}
 >
-	<div class="flex justify-between items-center text-sm">
-		<div class="  font-medium">{$i18n.t('Change Password')}</div>
+	<div class="flex justify-between items-center py-2">
+		<div class="text-lg font-semibold text-gray-900 dark:text-gray-100">{$i18n.t('Change Password')}</div>
 		<button
-			class=" text-xs font-medium text-gray-500"
+			class=" text-sm font-medium text-gray-500"
 			type="button"
 			on:click={() => {
 				show = !show;
@@ -57,7 +68,7 @@
 	{#if show}
 		<div class=" py-2.5 space-y-1.5">
 			<div class="flex flex-col w-full">
-				<div class=" mb-1 text-xs text-gray-500">{$i18n.t('Current Password')}</div>
+				<div class=" mb-1 text-sm font-medium text-gray-700 dark:text-gray-300">{$i18n.t('Current Password')}</div>
 
 				<div class="flex-1">
 					<SensitiveInput
@@ -72,7 +83,7 @@
 			</div>
 
 			<div class="flex flex-col w-full">
-				<div class=" mb-1 text-xs text-gray-500">{$i18n.t('New Password')}</div>
+				<div class=" mb-1 text-sm font-medium text-gray-700 dark:text-gray-300">{$i18n.t('New Password')}</div>
 
 				<div class="flex-1">
 					<SensitiveInput
@@ -87,7 +98,7 @@
 			</div>
 
 			<div class="flex flex-col w-full">
-				<div class=" mb-1 text-xs text-gray-500">{$i18n.t('Confirm Password')}</div>
+				<div class=" mb-1 text-sm font-medium text-gray-700 dark:text-gray-300">{$i18n.t('Confirm Password')}</div>
 
 				<div class="flex-1">
 					<SensitiveInput
@@ -102,9 +113,17 @@
 			</div>
 		</div>
 
-		<div class="mt-3 flex justify-end">
+		<div class="mt-3 flex justify-end items-center gap-3">
+			{#if !PASSWORD_CHANGE_AVAILABLE}
+				<div class="text-xs text-gray-400 dark:text-gray-500">
+					{$i18n.t('Password changes are not available in this deployment yet.')}
+				</div>
+			{/if}
 			<button
-				class="px-3.5 py-1.5 text-sm font-medium bg-black hover:bg-gray-900 text-white dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-full"
+				class="px-3.5 py-1.5 text-sm font-medium bg-black text-white dark:bg-white dark:text-black transition rounded-full {PASSWORD_CHANGE_AVAILABLE
+					? 'hover:bg-gray-900 dark:hover:bg-gray-100'
+					: 'opacity-50 cursor-not-allowed'}"
+				disabled={!PASSWORD_CHANGE_AVAILABLE}
 			>
 				{$i18n.t('Update password')}
 			</button>

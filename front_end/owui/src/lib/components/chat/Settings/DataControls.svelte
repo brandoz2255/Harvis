@@ -28,8 +28,28 @@
 	import SharedChatsModal from '$lib/components/layout/SharedChatsModal.svelte';
 	import FilesModal from '$lib/components/layout/FilesModal.svelte';
 	import ConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
+	import Tooltip from '$lib/components/common/Tooltip.svelte';
+	import SettingRow from './SettingRow.svelte';
 
 	const i18n = getContext('i18n');
+
+	// HONESTY GATES: the Harvis owui_compat facade does not implement these
+	// routes yet (see python_back_end/owui_compat/router.py):
+	//   POST   /api/v1/chats/import       → Import Chats
+	//   GET    /api/v1/chats/all          → Export Chats (falls into /chats/{chat_id} → 404)
+	//   GET    /api/v1/chats/shared       → Shared Chats list
+	//   POST   /api/v1/chats/archive/all  → Archive All Chats
+	//   DELETE /api/v1/chats/             → Delete All Chats
+	//   GET    /api/v1/files/search       → Manage Files (FilesModal listing)
+	// Those controls would fail (some silently) on every click, so they are
+	// disabled with a note until the routes land. GET /api/v1/chats/archived
+	// exists, so Archived Chats stays enabled.
+	const CHAT_IMPORT_AVAILABLE = false;
+	const CHAT_EXPORT_AVAILABLE = false;
+	const SHARED_CHATS_AVAILABLE = false;
+	const ARCHIVE_ALL_AVAILABLE = false;
+	const DELETE_ALL_AVAILABLE = false;
+	const FILES_MODAL_AVAILABLE = false;
 
 	export let saveSettings: Function;
 
@@ -185,13 +205,20 @@
 		/>
 
 		<div>
-			<div class="mb-1 text-sm font-medium">{$i18n.t('Chats')}</div>
+			<div class="pb-1 text-lg font-semibold text-gray-900 dark:text-gray-100">{$i18n.t('Chats')}</div>
 
-			<div>
-				<div class="py-0.5 flex w-full justify-between">
-					<div class="self-center text-xs">{$i18n.t('Import Chats')}</div>
+			<SettingRow description={$i18n.t('Restore chats from a previously exported JSON file.')}>
+				<svelte:fragment slot="title">
+					<div>{$i18n.t('Import Chats')}</div>
+				</svelte:fragment>
+				<Tooltip
+					content={CHAT_IMPORT_AVAILABLE ? '' : $i18n.t('Not available in this deployment')}
+				>
 					<button
-						class="p-1 px-3 text-xs flex rounded-sm transition"
+						class="px-3 py-1.5 text-sm font-medium rounded-[10px] bg-gray-100 hover:bg-gray-200 dark:bg-gray-850 dark:hover:bg-gray-800 text-gray-800 dark:text-gray-100 flex transition {CHAT_IMPORT_AVAILABLE
+							? ''
+							: 'opacity-50 cursor-not-allowed'}"
+						disabled={!CHAT_IMPORT_AVAILABLE}
 						on:click={() => {
 							chatImportInputElement.click();
 						}}
@@ -199,15 +226,22 @@
 					>
 						<span class="self-center">{$i18n.t('Import')}</span>
 					</button>
-				</div>
-			</div>
+				</Tooltip>
+			</SettingRow>
 
 			{#if $user?.role === 'admin' || ($user.permissions?.chat?.export ?? true)}
-				<div>
-					<div class="py-0.5 flex w-full justify-between">
-						<div class="self-center text-xs">{$i18n.t('Export Chats')}</div>
+				<SettingRow description={$i18n.t('Download all of your chats as a JSON file.')}>
+					<svelte:fragment slot="title">
+						<div>{$i18n.t('Export Chats')}</div>
+					</svelte:fragment>
+					<Tooltip
+						content={CHAT_EXPORT_AVAILABLE ? '' : $i18n.t('Not available in this deployment')}
+					>
 						<button
-							class="p-1 px-3 text-xs flex rounded-sm transition"
+							class="px-3 py-1.5 text-sm font-medium rounded-[10px] bg-gray-100 hover:bg-gray-200 dark:bg-gray-850 dark:hover:bg-gray-800 text-gray-800 dark:text-gray-100 flex transition {CHAT_EXPORT_AVAILABLE
+								? ''
+								: 'opacity-50 cursor-not-allowed'}"
+							disabled={!CHAT_EXPORT_AVAILABLE}
 							on:click={() => {
 								exportChats();
 							}}
@@ -215,30 +249,37 @@
 						>
 							<span class="self-center">{$i18n.t('Export')}</span>
 						</button>
-					</div>
-				</div>
+					</Tooltip>
+				</SettingRow>
 			{/if}
 
-			<div>
-				<div class="py-0.5 flex w-full justify-between">
-					<div class="self-center text-xs">{$i18n.t('Archived Chats')}</div>
-					<button
-						class="p-1 px-3 text-xs flex rounded-sm transition"
-						on:click={() => {
-							showArchivedChatsModal = true;
-						}}
-						type="button"
-					>
-						<span class="self-center">{$i18n.t('Manage')}</span>
-					</button>
-				</div>
-			</div>
+			<SettingRow description={$i18n.t('View and manage the chats you have archived.')}>
+				<svelte:fragment slot="title">
+					<div>{$i18n.t('Archived Chats')}</div>
+				</svelte:fragment>
+				<button
+					class="px-3 py-1.5 text-sm font-medium rounded-[10px] bg-gray-100 hover:bg-gray-200 dark:bg-gray-850 dark:hover:bg-gray-800 text-gray-800 dark:text-gray-100 flex transition"
+					on:click={() => {
+						showArchivedChatsModal = true;
+					}}
+					type="button"
+				>
+					<span class="self-center">{$i18n.t('Manage')}</span>
+				</button>
+			</SettingRow>
 
-			<div>
-				<div class="py-0.5 flex w-full justify-between">
-					<div class="self-center text-xs">{$i18n.t('Shared Chats')}</div>
+			<SettingRow description={$i18n.t('Manage your shared chats.')}>
+				<svelte:fragment slot="title">
+					<div>{$i18n.t('Shared Chats')}</div>
+				</svelte:fragment>
+				<Tooltip
+					content={SHARED_CHATS_AVAILABLE ? '' : $i18n.t('Not available in this deployment')}
+				>
 					<button
-						class="p-1 px-3 text-xs flex rounded-sm transition"
+						class="px-3 py-1.5 text-sm font-medium rounded-[10px] bg-gray-100 hover:bg-gray-200 dark:bg-gray-850 dark:hover:bg-gray-800 text-gray-800 dark:text-gray-100 flex transition {SHARED_CHATS_AVAILABLE
+							? ''
+							: 'opacity-50 cursor-not-allowed'}"
+						disabled={!SHARED_CHATS_AVAILABLE}
 						on:click={() => {
 							showSharedChatsModal = true;
 						}}
@@ -246,14 +287,21 @@
 					>
 						<span class="self-center">{$i18n.t('Manage')}</span>
 					</button>
-				</div>
-			</div>
+				</Tooltip>
+			</SettingRow>
 
-			<div>
-				<div class="py-0.5 flex w-full justify-between">
-					<div class="self-center text-xs">{$i18n.t('Archive All Chats')}</div>
+			<SettingRow description={$i18n.t('Move every chat to the archive.')}>
+				<svelte:fragment slot="title">
+					<div>{$i18n.t('Archive All Chats')}</div>
+				</svelte:fragment>
+				<Tooltip
+					content={ARCHIVE_ALL_AVAILABLE ? '' : $i18n.t('Not available in this deployment')}
+				>
 					<button
-						class="p-1 px-3 text-xs flex rounded-sm transition"
+						class="px-3 py-1.5 text-sm font-medium rounded-[10px] bg-gray-100 hover:bg-gray-200 dark:bg-gray-850 dark:hover:bg-gray-800 text-gray-800 dark:text-gray-100 flex transition {ARCHIVE_ALL_AVAILABLE
+							? ''
+							: 'opacity-50 cursor-not-allowed'}"
+						disabled={!ARCHIVE_ALL_AVAILABLE}
 						on:click={() => {
 							showArchiveConfirmDialog = true;
 						}}
@@ -261,14 +309,21 @@
 					>
 						<span class="self-center">{$i18n.t('Archive All')}</span>
 					</button>
-				</div>
-			</div>
+				</Tooltip>
+			</SettingRow>
 
-			<div>
-				<div class="py-0.5 flex w-full justify-between">
-					<div class="self-center text-xs">{$i18n.t('Delete All Chats')}</div>
+			<SettingRow description={$i18n.t('Permanently delete every chat. This cannot be undone.')}>
+				<svelte:fragment slot="title">
+					<div>{$i18n.t('Delete All Chats')}</div>
+				</svelte:fragment>
+				<Tooltip
+					content={DELETE_ALL_AVAILABLE ? '' : $i18n.t('Not available in this deployment')}
+				>
 					<button
-						class="p-1 px-3 text-xs flex rounded-sm transition"
+						class="px-3 py-1.5 text-sm font-medium rounded-[10px] bg-gray-100 hover:bg-gray-200 dark:bg-gray-850 dark:hover:bg-gray-800 text-gray-800 dark:text-gray-100 flex transition {DELETE_ALL_AVAILABLE
+							? ''
+							: 'opacity-50 cursor-not-allowed'}"
+						disabled={!DELETE_ALL_AVAILABLE}
 						on:click={() => {
 							showDeleteConfirmDialog = true;
 						}}
@@ -276,18 +331,25 @@
 					>
 						<span class="self-center">{$i18n.t('Delete All')}</span>
 					</button>
-				</div>
-			</div>
+				</Tooltip>
+			</SettingRow>
 		</div>
 
 		<div>
-			<div class="mb-1 text-sm font-medium">{$i18n.t('Files')}</div>
+			<div class="pt-6 pb-1 text-lg font-semibold text-gray-900 dark:text-gray-100">{$i18n.t('Files')}</div>
 
-			<div>
-				<div class="py-0.5 flex w-full justify-between">
-					<div class="self-center text-xs">{$i18n.t('Manage Files')}</div>
+			<SettingRow description={$i18n.t('Browse and manage your uploaded files.')}>
+				<svelte:fragment slot="title">
+					<div>{$i18n.t('Manage Files')}</div>
+				</svelte:fragment>
+				<Tooltip
+					content={FILES_MODAL_AVAILABLE ? '' : $i18n.t('Not available in this deployment')}
+				>
 					<button
-						class="p-1 px-3 text-xs flex rounded-sm transition"
+						class="px-3 py-1.5 text-sm font-medium rounded-[10px] bg-gray-100 hover:bg-gray-200 dark:bg-gray-850 dark:hover:bg-gray-800 text-gray-800 dark:text-gray-100 flex transition {FILES_MODAL_AVAILABLE
+							? ''
+							: 'opacity-50 cursor-not-allowed'}"
+						disabled={!FILES_MODAL_AVAILABLE}
 						on:click={() => {
 							showFilesModal = true;
 						}}
@@ -295,8 +357,8 @@
 					>
 						<span class="self-center">{$i18n.t('Manage')}</span>
 					</button>
-				</div>
-			</div>
+				</Tooltip>
+			</SettingRow>
 		</div>
 	</div>
 </div>

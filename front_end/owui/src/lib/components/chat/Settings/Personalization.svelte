@@ -5,6 +5,7 @@
 	import { toast } from 'svelte-sonner';
 	import ManageModal from './Personalization/ManageModal.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
+	import SettingRow from './SettingRow.svelte';
 	const dispatch = createEventDispatcher();
 
 	const i18n = getContext('i18n');
@@ -31,14 +32,14 @@
 	}}
 >
 	<div class="py-1 overflow-y-scroll max-h-[28rem] md:max-h-full">
-		<div>
-			<div class="flex items-center justify-between mb-1">
+		<SettingRow>
+			<svelte:fragment slot="title">
 				<Tooltip
 					content={$i18n.t(
 						'This is an experimental feature, it may not function as expected and is subject to change at any time.'
 					)}
 				>
-					<div class="flex items-center gap-2 text-sm font-medium">
+					<div class="flex items-center gap-2">
 						{$i18n.t('Memory')}
 						<span
 							class="text-[0.65rem] font-medium uppercase px-1.5 py-0.5 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400"
@@ -46,39 +47,24 @@
 						>
 					</div>
 				</Tooltip>
-
-				<div class="">
-					<Switch
-						bind:state={enableMemory}
-						on:change={async () => {
-							saveSettings({ memory: enableMemory });
-						}}
-					/>
-				</div>
-			</div>
-		</div>
-
-		<div class="text-xs text-gray-600 dark:text-gray-400">
-			<div>
+			</svelte:fragment>
+			<svelte:fragment slot="description">
 				{$i18n.t(
 					"You can personalize your interactions with LLMs by adding memories through the 'Manage' button below, making them more helpful and tailored to you."
 				)}
-			</div>
+			</svelte:fragment>
+			<Switch
+				bind:state={enableMemory}
+				on:change={async () => {
+					saveSettings({ memory: enableMemory });
+				}}
+			/>
+		</SettingRow>
 
-			<!-- <div class="mt-3">
-				To understand what LLM remembers or teach it something new, just chat with it:
-
-				<div>- “Remember that I like concise responses.”</div>
-				<div>- “I just got a puppy!”</div>
-				<div>- “What do you remember about me?”</div>
-				<div>- “Where did we leave off on my last project?”</div>
-			</div> -->
-		</div>
-
-		<div class="mt-3 mb-1 ml-1">
+		<div class="mt-4 mb-1">
 			<button
 				type="button"
-				class=" px-3.5 py-1.5 font-medium hover:bg-black/5 dark:hover:bg-white/5 outline outline-1 outline-gray-300 dark:outline-gray-800 rounded-3xl"
+				class="px-3 py-1.5 text-sm font-medium rounded-[10px] bg-gray-100 hover:bg-gray-200 dark:bg-gray-850 dark:hover:bg-gray-800 text-gray-800 dark:text-gray-100 transition"
 				on:click={() => {
 					showManageModal = true;
 				}}

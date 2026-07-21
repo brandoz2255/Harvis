@@ -489,6 +489,7 @@
 		<HarvisClawMascot
 			size={40}
 			state={running ? 'working' : phase === 'error' ? 'angry' : 'idle'}
+			idleCycle={running}
 			className="shrink-0 -my-1.5"
 		/>
 		{#if running}

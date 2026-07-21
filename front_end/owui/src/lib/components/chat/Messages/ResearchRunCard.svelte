@@ -102,11 +102,14 @@
 		if (status === 'done' && !report) await loadReport();
 	};
 
+	// Unified cockpit palette (see runFormat.ts): done=emerald · error=red ·
+	// cancelled=gray (inert) · running=blue-pulse. amber = "needs YOU" only —
+	// a research that is merely running must not read as awaiting the user.
 	const statusDot = () => {
-		if (status === 'done') return 'bg-blue-500';
+		if (status === 'done') return 'bg-emerald-500';
 		if (status === 'error') return 'bg-red-500';
-		if (status === 'cancelled') return 'bg-amber-500';
-		return 'bg-amber-500 animate-pulse';
+		if (status === 'cancelled') return 'bg-gray-400 dark:bg-gray-600';
+		return 'bg-blue-500 animate-pulse';
 	};
 
 	// Short preview for the chat — the full report lives in the docked panel.

@@ -856,3 +856,36 @@ body {
 #note-content-container .ProseMirror {
 	padding-bottom: 2rem; /* space for the bottom toolbar */
 }
+
+/* Sidebar item names: fade out at the right edge instead of "…" ellipsis. */
+.name-fade {
+	-webkit-mask-image: linear-gradient(to right, #000 calc(100% - 22px), #0000);
+	mask-image: linear-gradient(to right, #000 calc(100% - 22px), #0000);
+}
+
+/* ─── Reduced motion (WCAG 2.3.3) ─────────────────────────────────────────────
+   One global rule instead of tagging ~86 `animate-*` uses across 62 files: it
+   covers everything that exists today AND anything added later, which a
+   per-class sweep cannot.
+
+   Why 0.01ms rather than `animation: none`: `none` would strand any element
+   whose animation *reveals* it (starting at opacity 0), leaving it invisible.
+   Collapsing the duration instead lets the animation run to its end state
+   instantly, so the final frame still applies — the standard accessible pattern.
+
+   Infinite loops (animate-pulse/spin/ping) are stopped by the iteration-count
+   clamp. A spinner that no longer spins still communicates "busy" by being
+   present, which is the accepted trade for motion-sensitive users.
+
+   Components with JS-driven animation (the mascots' rAF loops) read the same
+   media query directly in their own scripts — CSS can't reach those. */
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0.01ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.01ms !important;
+		scroll-behavior: auto !important;
+	}
+}

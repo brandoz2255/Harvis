@@ -48,19 +48,22 @@
 	const openExternal = () => {
 		if (url) window.open(url, '_blank', 'noopener');
 	};
-	const quick = [
-		{ label: 'localhost:3000', url: 'http://localhost:3000' },
-		{ label: 'localhost:5173', url: 'http://localhost:5173' },
-		{ label: 'localhost:8080', url: 'http://localhost:8080' },
-		{ label: 'Harvis', url: 'http://localhost:9000' }
+	// Prefer this origin over hardcoded localhost — LAN / reverse-proxy deployments differ.
+	$: origin =
+		typeof window !== 'undefined' ? window.location.origin : 'http://localhost:9000';
+	$: quick = [
+		{ label: '3000', url: 'http://127.0.0.1:3000' },
+		{ label: '5173', url: 'http://127.0.0.1:5173' },
+		{ label: '8080', url: 'http://127.0.0.1:8080' },
+		{ label: $i18n.t('This Harvis'), url: origin }
 	];
 </script>
 
-<div class="h-full flex flex-col min-h-0 bg-white dark:bg-[#0a0e18]">
+<div class="h-full flex flex-col min-h-0 bg-white dark:bg-gray-950">
 	<!-- URL bar -->
 	<div class="shrink-0 flex items-center gap-1 px-2 py-1.5 border-b border-gray-100 dark:border-white/8">
 		<button
-			class="p-1 rounded text-gray-400 hover:text-gray-200 disabled:opacity-30 disabled:hover:text-gray-400"
+			class="p-1 rounded text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 disabled:opacity-30 disabled:hover:text-gray-400"
 			disabled={!canBack}
 			on:click={back}
 			title={$i18n.t('Back')}
@@ -68,7 +71,7 @@
 			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="size-3.5"><path d="M15 18l-6-6 6-6" stroke-linecap="round" stroke-linejoin="round" /></svg>
 		</button>
 		<button
-			class="p-1 rounded text-gray-400 hover:text-gray-200 disabled:opacity-30 disabled:hover:text-gray-400"
+			class="p-1 rounded text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 disabled:opacity-30 disabled:hover:text-gray-400"
 			disabled={!canFwd}
 			on:click={fwd}
 			title={$i18n.t('Forward')}
@@ -76,7 +79,7 @@
 			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="size-3.5"><path d="M9 6l6 6-6 6" stroke-linecap="round" stroke-linejoin="round" /></svg>
 		</button>
 		<button
-			class="p-1 rounded text-gray-400 hover:text-gray-200 disabled:opacity-30"
+			class="p-1 rounded text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 disabled:opacity-30"
 			disabled={!url}
 			on:click={reload}
 			title={$i18n.t('Reload')}
@@ -94,7 +97,7 @@
 			on:click={() => go()}>{$i18n.t('Go')}</button
 		>
 		<button
-			class="shrink-0 p-1 rounded text-gray-400 hover:text-gray-200 disabled:opacity-30"
+			class="shrink-0 p-1 rounded text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 disabled:opacity-30"
 			disabled={!url}
 			on:click={openExternal}
 			title={$i18n.t('Open in a new tab')}

@@ -23,6 +23,7 @@
 
 	let webhooks = [];
 	let isLoading = false;
+	let loadError = '';
 	let isSaving = false;
 
 	let showDeleteConfirmDialog = false;
@@ -33,10 +34,17 @@
 
 	const loadWebhooks = async () => {
 		isLoading = true;
+		loadError = '';
 		try {
-			webhooks = await getChannelWebhooks(localStorage.token, channel.id);
-		} catch {
+			const res = await getChannelWebhooks(localStorage.token, channel.id);
+			if (!Array.isArray(res)) {
+				// helper can resolve null instead of throwing (backend down) — same failure
+				throw res === null ? $i18n.t('Server unreachable') : $i18n.t('Unexpected response');
+			}
+			webhooks = res;
+		} catch (error) {
 			webhooks = [];
+			loadError = error ? `${error}` : $i18n.t('Server unreachable');
 		}
 		isLoading = false;
 	};
@@ -103,7 +111,7 @@
 				<div class="flex w-full justify-between items-center mr-3">
 					<div class="self-center text-base flex gap-1.5 items-center">
 						<div>{$i18n.t('Webhooks')}</div>
-						<span class="text-sm text-gray-500">{webhooks.length}</span>
+						<span class="text-sm text-gray-500">{loadError ? '—' : webhooks.length}</span>
 					</div>
 
 					<button
@@ -133,6 +141,17 @@
 					{#if isLoading}
 						<div class="flex justify-center py-10">
 							<Spinner className="size-5" />
+						</div>
+					{:else if loadError}
+						<div class="text-gray-500 text-xs text-center py-8 px-10">
+							{$i18n.t('Could not load webhooks')} — {loadError}
+							<button
+								type="button"
+								class="text-blue-600 dark:text-blue-400 hover:underline ml-1"
+								on:click={loadWebhooks}
+							>
+								{$i18n.t('Retry')}
+							</button>
 						</div>
 					{:else if webhooks.length > 0}
 						<div class="w-full py-2">

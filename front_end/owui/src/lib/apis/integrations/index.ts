@@ -83,14 +83,15 @@ export const saveOpenclawConfig = async (body: {
 };
 
 // MCP server connections — count/state only (CRUD stays in Agent Studio → Customize).
-export const getMcpConnections = async (): Promise<any[]> => {
+// null = the request failed; callers must not render that as "0 servers connected".
+export const getMcpConnections = async (): Promise<any[] | null> => {
 	try {
 		const r = await fetch('/api/owui/mcp/connections', { headers: hdr(), credentials: 'include' });
-		if (!r.ok) return [];
+		if (!r.ok) return null;
 		const d = await r.json();
 		return d?.items ?? [];
 	} catch (_) {
-		return [];
+		return null;
 	}
 };
 

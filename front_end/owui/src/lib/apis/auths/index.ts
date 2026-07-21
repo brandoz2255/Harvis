@@ -16,7 +16,7 @@ export const getAdminDetails = async (token: string) => {
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -43,7 +43,7 @@ export const getAdminConfig = async (token: string) => {
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -71,7 +71,7 @@ export const updateAdminConfig = async (token: string, body: object) => {
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -99,7 +99,7 @@ export const getSessionUser = async (token: string) => {
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -131,7 +131,7 @@ export const ldapUserSignIn = async (user: string, password: string) => {
 		.catch((err) => {
 			console.error(err);
 
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -158,7 +158,7 @@ export const getLdapConfig = async (token: string = '') => {
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -188,7 +188,7 @@ export const updateLdapConfig = async (token: string = '', enable_ldap: boolean)
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -215,7 +215,7 @@ export const getLdapServer = async (token: string = '') => {
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -243,7 +243,7 @@ export const updateLdapServer = async (token: string = '', body: object) => {
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -275,7 +275,7 @@ export const userSignIn = async (email: string, password: string) => {
 		.catch((err) => {
 			console.error(err);
 
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -290,15 +290,23 @@ export const userSignUp = async (
 	name: string,
 	email: string,
 	password: string,
-	profile_image_url: string
+	profile_image_url: string,
+	setupCode?: string
 ) => {
 	let error = null;
 
+	const headers: Record<string, string> = {
+		'Content-Type': 'application/json'
+	};
+	// First-admin claim on a fresh instance requires X-Setup-Code matching
+	// HARVIS_SETUP_CODE (printed by ./install.sh / stored in .env).
+	if (setupCode) {
+		headers['X-Setup-Code'] = setupCode;
+	}
+
 	const res = await fetch(`${WEBUI_API_BASE_URL}/auths/signup`, {
 		method: 'POST',
-		headers: {
-			'Content-Type': 'application/json'
-		},
+		headers,
 		credentials: 'include',
 		body: JSON.stringify({
 			name: name,
@@ -313,7 +321,7 @@ export const userSignUp = async (
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -340,7 +348,7 @@ export const userSignOut = async () => {
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -382,7 +390,7 @@ export const addUser = async (
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -412,7 +420,7 @@ export const updateUserProfile = async (token: string, profile: object) => {
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			if (Array.isArray(error)) {
 				error = error.map((e: { msg?: string }) => e.msg).join('; ');
 			}
@@ -459,7 +467,7 @@ export const updateUserPassword = async (token: string, password: string, newPas
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -486,7 +494,7 @@ export const getSignUpEnabledStatus = async (token: string) => {
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -513,7 +521,7 @@ export const getDefaultUserRole = async (token: string) => {
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -543,7 +551,7 @@ export const updateDefaultUserRole = async (token: string, role: string) => {
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -570,7 +578,7 @@ export const toggleSignUpEnabledStatus = async (token: string) => {
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -597,7 +605,7 @@ export const getJWTExpiresDuration = async (token: string) => {
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -627,7 +635,7 @@ export const updateJWTExpiresDuration = async (token: string, duration: string) 
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -654,7 +662,7 @@ export const createAPIKey = async (token: string) => {
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 	if (error) {
@@ -679,7 +687,7 @@ export const getAPIKey = async (token: string) => {
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 	if (error) {
@@ -704,7 +712,7 @@ export const deleteAPIKey = async (token: string) => {
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 	if (error) {
@@ -732,7 +740,7 @@ export const deleteOAuthSession = async (token: string, provider: string) => {
 		})
 		.catch((err) => {
 			console.error(err);
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 

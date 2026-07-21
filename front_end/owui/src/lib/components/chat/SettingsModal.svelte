@@ -7,34 +7,33 @@
 	import { goto } from '$app/navigation';
 
 	import Modal from '../common/Modal.svelte';
+	import Tooltip from '../common/Tooltip.svelte';
 	import Account from './Settings/Account.svelte';
 	import About from './Settings/About.svelte';
 	import General from './Settings/General.svelte';
 	import Interface from './Settings/Interface.svelte';
 	import Audio from './Settings/Audio.svelte';
 	import DataControls from './Settings/DataControls.svelte';
-	import Personalization from './Settings/Personalization.svelte';
 	import Search from '../icons/Search.svelte';
 	import XMark from '../icons/XMark.svelte';
-	import Connections from './Settings/Connections.svelte';
 	import Integrations from './Settings/Integrations.svelte';
 	import WorkspaceSettings from './Settings/WorkspaceSettings.svelte';
 	import Sparkles from '../icons/Sparkles.svelte';
 	import DatabaseSettings from '../icons/DatabaseSettings.svelte';
 	import SettingsAlt from '../icons/SettingsAlt.svelte';
-	import Link from '../icons/Link.svelte';
 	import UserCircle from '../icons/UserCircle.svelte';
 	import SoundHigh from '../icons/SoundHigh.svelte';
 	import InfoCircle from '../icons/InfoCircle.svelte';
 	import WrenchAlt from '../icons/WrenchAlt.svelte';
-	import Face from '../icons/Face.svelte';
 	import AppNotification from '../icons/AppNotification.svelte';
 	import UserBadgeCheck from '../icons/UserBadgeCheck.svelte';
 	import Bolt from '../icons/Bolt.svelte';
 	import Cube from '../icons/Cube.svelte';
-	// Customize group panels — shared with /harvis/agent-studio/customize (one
-	// implementation, two mounts: the page sections and these modal tabs).
-	import SkillsPanel from '$lib/agent-studio/customize/SkillsPanel.svelte';
+	// Customize group panels. Connectors stays shared with
+	// /harvis/agent-studio/customize; Skills gets the desktop-native manager
+	// (list → Add dropdown → in-panel detail) — the agent-studio route keeps
+	// its own SkillsPanel (governance sync UI) untouched.
+	import SkillsManager from './Settings/Skills/SkillsManager.svelte';
 	import ConnectorsPanel from '$lib/agent-studio/customize/ConnectorsPanel.svelte';
 
 	const i18n = getContext('i18n');
@@ -243,19 +242,6 @@
 			]
 		},
 		{
-			id: 'connections',
-			title: 'Connections',
-			keywords: [
-				'addconnection',
-				'add connection',
-				'manageconnections',
-				'manage connections',
-				'manage direct connections',
-				'managedirectconnections',
-				'settings'
-			]
-		},
-		{
 			id: 'tools',
 			title: 'Integrations',
 			keywords: [
@@ -279,28 +265,6 @@
 			keywords: ['workspace', 'openclaw', 'agent', 'provider', 'model', 'byo', 'usage', 'claw']
 		},
 
-		{
-			id: 'personalization',
-			title: 'Personalization',
-			keywords: [
-				'account preferences',
-				'account settings',
-				'accountpreferences',
-				'accountsettings',
-				'custom settings',
-				'customsettings',
-				'experimental',
-				'memories',
-				'memory',
-				'personalization',
-				'personalize',
-				'personal settings',
-				'personalsettings',
-				'profile',
-				'user preferences',
-				'userpreferences'
-			]
-		},
 		{
 			id: 'audio',
 			title: 'Audio',
@@ -558,10 +522,6 @@
 
 	const getAvailableSettings = () => {
 		return allSettings.filter((tab) => {
-			if (tab.id === 'connections') {
-				return $config?.features?.enable_direct_connections;
-			}
-
 			if (tab.id === 'tools') {
 				return (
 					$user?.role === 'admin' ||
@@ -571,13 +531,6 @@
 
 			if (tab.id === 'interface') {
 				return $user?.role === 'admin' || ($user?.permissions?.settings?.interface ?? true);
-			}
-
-			if (tab.id === 'personalization') {
-				return (
-					$config?.features?.enable_memories &&
-					($user?.role === 'admin' || ($user?.permissions?.features?.memories ?? true))
-				);
 			}
 
 			return true;
@@ -626,6 +579,20 @@
 
 	let selectedTab = 'general';
 
+	// Shared nav-row chrome: rail rows on desktop, strip pills on mobile.
+	// Reactive assignment so class strings recompute when the active tab or
+	// high-contrast mode changes.
+	$: tabClass = (id: string) =>
+		`px-0.5 md:px-2.5 py-1 md:py-0 md:h-10 min-w-fit rounded-lg flex-1 md:flex-none flex items-center text-left transition ${
+			selectedTab === id
+				? ($settings?.highContrastMode ?? false)
+					? 'bg-gray-200 dark:bg-gray-800 text-gray-900 dark:text-gray-100'
+					: 'bg-gray-200/70 dark:bg-gray-800 text-gray-900 dark:text-gray-100'
+				: ($settings?.highContrastMode ?? false)
+					? 'hover:bg-gray-200 dark:hover:bg-gray-800'
+					: 'text-gray-500 dark:text-gray-400 hover:bg-gray-200/60 dark:hover:bg-gray-800/60 hover:text-gray-800 dark:hover:text-gray-100'
+		}`;
+
 	// Function to handle sideways scrolling
 	const scrollHandler = (event) => {
 		const settingsTabsContainer = document.getElementById('settings-tabs-container');
@@ -662,9 +629,14 @@
 	});
 </script>
 
-<Modal size="2xl" bind:show>
-	<div class="text-gray-700 dark:text-gray-100 mx-1">
-		<div class=" flex justify-between dark:text-gray-300 px-4 md:px-4.5 pt-4.5 pb-0.5 md:pb-2.5">
+<Modal
+	size="2xl"
+	className="bg-white dark:bg-gray-900 rounded-2xl overflow-hidden md:w-[min(1150px,96vw)] md:h-[min(88vh,900px)]"
+	bind:show
+>
+	<div class="relative h-full max-h-full text-gray-700 dark:text-gray-100">
+		<!-- Mobile top bar — on desktop the close button is pinned over the content pane instead. -->
+		<div class="flex md:hidden justify-between dark:text-gray-300 px-4 pt-4.5 pb-0.5">
 			<div class=" text-lg font-medium self-center">{$i18n.t('Settings')}</div>
 			<button
 				aria-label={$i18n.t('Close settings modal')}
@@ -677,26 +649,42 @@
 			</button>
 		</div>
 
-		<div class="flex flex-col md:flex-row w-full pt-1 pb-4">
+		<Tooltip
+			className="hidden md:flex absolute top-3.5 right-3.5 z-10"
+			content={$i18n.t('Close')}
+			placement="bottom"
+		>
+			<button
+				aria-label={$i18n.t('Close settings modal')}
+				class="flex size-8 items-center justify-center rounded-lg text-gray-400 hover:text-gray-700 dark:text-gray-500 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
+				on:click={() => {
+					show = false;
+				}}
+			>
+				<XMark className="size-4.5"></XMark>
+			</button>
+		</Tooltip>
+
+		<div class="flex flex-col md:flex-row w-full h-full max-h-full pt-1 md:pt-0 pb-4 md:pb-0">
 			<div
 				role="tablist"
 				id="settings-tabs-container"
-				class="tabs flex flex-row overflow-x-auto gap-2.5 mx-3 md:pr-4 md:gap-1 md:flex-col flex-1 md:flex-none md:w-50 md:min-h-[min(42rem,calc(100dvh-10rem))] md:max-h-[min(42rem,calc(100dvh-10rem))] dark:text-gray-200 text-sm text-left mb-1 md:mb-0 -translate-y-1"
+				class="tabs flex flex-row overflow-x-auto gap-2.5 mx-3 md:mx-0 md:gap-0.5 md:flex-col flex-1 md:flex-none md:w-[220px] md:shrink-0 md:h-full md:overflow-y-auto md:overflow-x-hidden md:px-3 md:pt-3.5 md:pb-3 md:bg-gray-100 md:dark:bg-gray-950 md:border-r md:border-gray-200 md:dark:border-gray-800 dark:text-gray-200 text-sm md:text-[15px] text-left mb-1 md:mb-0"
 			>
 				<div
-					class="hidden md:flex w-full rounded-full px-2.5 gap-2 bg-gray-100/80 dark:bg-gray-850/80 backdrop-blur-2xl my-1 mb-1.5"
+					class="hidden md:flex w-full h-10 shrink-0 items-center rounded-lg px-3 gap-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 mb-1"
 					id="settings-search"
 				>
-					<div class="self-center rounded-l-xl bg-transparent">
+					<div class="shrink-0 text-gray-400 dark:text-gray-500">
 						<Search
-							className="size-3.5"
+							className="size-4"
 							strokeWidth={($settings?.highContrastMode ?? false) ? '3' : '1.5'}
 						/>
 					</div>
 					<label class="sr-only" for="search-input-settings-modal">{$i18n.t('Search')}</label>
 					<input
-						class={`w-full py-1 text-sm bg-transparent dark:text-gray-300 outline-hidden
-								${($settings?.highContrastMode ?? false) ? 'placeholder-gray-800' : ''}`}
+						class={`w-full text-sm bg-transparent dark:text-gray-300 outline-hidden
+								${($settings?.highContrastMode ?? false) ? 'placeholder-gray-800' : 'placeholder-gray-400 dark:placeholder-gray-500'}`}
 						bind:value={search}
 						id="search-input-settings-modal"
 						on:input={searchDebounceHandler}
@@ -709,7 +697,7 @@
 					{#if groupTabs.length > 0}
 					<!-- Group header — desktop only (mobile keeps the flat horizontal strip). -->
 					<div
-						class="hidden md:block px-2.5 pt-2.5 pb-1 text-[10px] font-semibold uppercase tracking-wider text-gray-400 dark:text-gray-500 select-none"
+						class="hidden md:block px-2.5 pt-5 pb-1.5 text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-500 select-none"
 					>
 						{$i18n.t(group.label)}
 					</div>
@@ -719,22 +707,13 @@
 								role="tab"
 								aria-controls="tab-general"
 								aria-selected={selectedTab === 'general'}
-								class={`px-0.5 md:px-2.5 py-1 min-w-fit rounded-xl flex-1 md:flex-none flex text-left transition
-								${
-									selectedTab === 'general'
-										? ($settings?.highContrastMode ?? false)
-											? 'dark:bg-gray-800 bg-gray-200'
-											: ''
-										: ($settings?.highContrastMode ?? false)
-											? 'hover:bg-gray-200 dark:hover:bg-gray-800'
-											: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'
-								}`}
+								class={tabClass('general')}
 								on:click={() => {
 									selectedTab = 'general';
 								}}
 							>
 								<div class=" self-center mr-2">
-									<SettingsAlt strokeWidth="2" />
+									<SettingsAlt strokeWidth="1.75" className="size-[18px]" />
 								</div>
 								<div class=" self-center">{$i18n.t('General')}</div>
 							</button>
@@ -743,73 +722,29 @@
 								role="tab"
 								aria-controls="tab-interface"
 								aria-selected={selectedTab === 'interface'}
-								class={`px-0.5 md:px-2.5 py-1 min-w-fit rounded-xl flex-1 md:flex-none flex text-left transition
-								${
-									selectedTab === 'interface'
-										? ($settings?.highContrastMode ?? false)
-											? 'dark:bg-gray-800 bg-gray-200'
-											: ''
-										: ($settings?.highContrastMode ?? false)
-											? 'hover:bg-gray-200 dark:hover:bg-gray-800'
-											: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'
-								}`}
+								class={tabClass('interface')}
 								on:click={() => {
 									selectedTab = 'interface';
 								}}
 							>
 								<div class=" self-center mr-2">
-									<AppNotification strokeWidth="2" />
+									<AppNotification strokeWidth="1.75" className="size-[18px]" />
 								</div>
 								<div class=" self-center">{$i18n.t('Interface')}</div>
 							</button>
-						{:else if tabId === 'connections'}
-							{#if $user?.role === 'admin' || ($user?.role === 'user' && $config?.features?.enable_direct_connections)}
-								<button
-									role="tab"
-									aria-controls="tab-connections"
-									aria-selected={selectedTab === 'connections'}
-									class={`px-0.5 md:px-2.5 py-1 min-w-fit rounded-xl flex-1 md:flex-none flex text-left transition
-								${
-									selectedTab === 'connections'
-										? ($settings?.highContrastMode ?? false)
-											? 'dark:bg-gray-800 bg-gray-200'
-											: ''
-										: ($settings?.highContrastMode ?? false)
-											? 'hover:bg-gray-200 dark:hover:bg-gray-800'
-											: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'
-								}`}
-									on:click={() => {
-										selectedTab = 'connections';
-									}}
-								>
-									<div class=" self-center mr-2">
-										<Link strokeWidth="2" />
-									</div>
-									<div class=" self-center">{$i18n.t('Connections')}</div>
-								</button>
-							{/if}
 						{:else if tabId === 'tools'}
 							{#if $user?.role === 'admin' || ($user?.role === 'user' && $user?.permissions?.features?.direct_tool_servers)}
 								<button
 									role="tab"
 									aria-controls="tab-tools"
 									aria-selected={selectedTab === 'tools'}
-									class={`px-0.5 md:px-2.5 py-1 min-w-fit rounded-xl flex-1 md:flex-none flex text-left transition
-								${
-									selectedTab === 'tools'
-										? ($settings?.highContrastMode ?? false)
-											? 'dark:bg-gray-800 bg-gray-200'
-											: ''
-										: ($settings?.highContrastMode ?? false)
-											? 'hover:bg-gray-200 dark:hover:bg-gray-800'
-											: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'
-								}`}
+									class={tabClass('tools')}
 									on:click={() => {
 										selectedTab = 'tools';
 									}}
 								>
 									<div class=" self-center mr-2">
-										<WrenchAlt strokeWidth="2" />
+										<WrenchAlt strokeWidth="1.75" className="size-[18px]" />
 									</div>
 									<div class=" self-center">{$i18n.t('Integrations')}</div>
 								</button>
@@ -820,62 +755,29 @@
 									role="tab"
 									aria-controls="tab-workspace"
 									aria-selected={selectedTab === 'workspace'}
-									class="px-0.5 md:px-2.5 py-1 min-w-fit rounded-xl flex-1 md:flex-none flex text-left transition {selectedTab === 'workspace' ? '' : 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'}"
+									class={tabClass('workspace')}
 									on:click={() => {
 										selectedTab = 'workspace';
 									}}
 								>
 									<div class=" self-center mr-2">
-										<Sparkles strokeWidth="2" className="size-4" />
+										<Sparkles strokeWidth="1.75" className="size-[18px]" />
 									</div>
 									<div class=" self-center">{$i18n.t('Workspace')}</div>
 								</button>
 							{/if}
-						{:else if tabId === 'personalization'}
-							<button
-								role="tab"
-								aria-controls="tab-personalization"
-								aria-selected={selectedTab === 'personalization'}
-								class={`px-0.5 md:px-2.5 py-1 min-w-fit rounded-xl flex-1 md:flex-none flex text-left transition
-								${
-									selectedTab === 'personalization'
-										? ($settings?.highContrastMode ?? false)
-											? 'dark:bg-gray-800 bg-gray-200'
-											: ''
-										: ($settings?.highContrastMode ?? false)
-											? 'hover:bg-gray-200 dark:hover:bg-gray-800'
-											: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'
-								}`}
-								on:click={() => {
-									selectedTab = 'personalization';
-								}}
-							>
-								<div class=" self-center mr-2">
-									<Face strokeWidth="2" />
-								</div>
-								<div class=" self-center">{$i18n.t('Personalization')}</div>
-							</button>
 						{:else if tabId === 'audio'}
 							<button
 								role="tab"
 								aria-controls="tab-audio"
 								aria-selected={selectedTab === 'audio'}
-								class={`px-0.5 md:px-2.5 py-1 min-w-fit rounded-xl flex-1 md:flex-none flex text-left transition
-								${
-									selectedTab === 'audio'
-										? ($settings?.highContrastMode ?? false)
-											? 'dark:bg-gray-800 bg-gray-200'
-											: ''
-										: ($settings?.highContrastMode ?? false)
-											? 'hover:bg-gray-200 dark:hover:bg-gray-800'
-											: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'
-								}`}
+								class={tabClass('audio')}
 								on:click={() => {
 									selectedTab = 'audio';
 								}}
 							>
 								<div class=" self-center mr-2">
-									<SoundHigh strokeWidth="2" />
+									<SoundHigh strokeWidth="1.75" className="size-[18px]" />
 								</div>
 								<div class=" self-center">{$i18n.t('Audio')}</div>
 							</button>
@@ -884,22 +786,13 @@
 								role="tab"
 								aria-controls="tab-data-controls"
 								aria-selected={selectedTab === 'data_controls'}
-								class={`px-0.5 md:px-2.5 py-1 min-w-fit rounded-xl flex-1 md:flex-none flex text-left transition
-								${
-									selectedTab === 'data_controls'
-										? ($settings?.highContrastMode ?? false)
-											? 'dark:bg-gray-800 bg-gray-200'
-											: ''
-										: ($settings?.highContrastMode ?? false)
-											? 'hover:bg-gray-200 dark:hover:bg-gray-800'
-											: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'
-								}`}
+								class={tabClass('data_controls')}
 								on:click={() => {
 									selectedTab = 'data_controls';
 								}}
 							>
 								<div class=" self-center mr-2">
-									<DatabaseSettings strokeWidth="2" />
+									<DatabaseSettings strokeWidth="1.75" className="size-[18px]" />
 								</div>
 								<div class=" self-center">{$i18n.t('Data Controls')}</div>
 							</button>
@@ -908,22 +801,13 @@
 								role="tab"
 								aria-controls="tab-account"
 								aria-selected={selectedTab === 'account'}
-								class={`px-0.5 md:px-2.5 py-1 min-w-fit rounded-xl flex-1 md:flex-none flex text-left transition
-								${
-									selectedTab === 'account'
-										? ($settings?.highContrastMode ?? false)
-											? 'dark:bg-gray-800 bg-gray-200'
-											: ''
-										: ($settings?.highContrastMode ?? false)
-											? 'hover:bg-gray-200 dark:hover:bg-gray-800'
-											: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'
-								}`}
+								class={tabClass('account')}
 								on:click={() => {
 									selectedTab = 'account';
 								}}
 							>
 								<div class=" self-center mr-2">
-									<UserCircle strokeWidth="2" />
+									<UserCircle strokeWidth="1.75" className="size-[18px]" />
 								</div>
 								<div class=" self-center">{$i18n.t('Account')}</div>
 							</button>
@@ -932,22 +816,13 @@
 								role="tab"
 								aria-controls="tab-about"
 								aria-selected={selectedTab === 'about'}
-								class={`px-0.5 md:px-2.5 py-1 min-w-fit rounded-xl flex-1 md:flex-none flex text-left transition
-								${
-									selectedTab === 'about'
-										? ($settings?.highContrastMode ?? false)
-											? 'dark:bg-gray-800 bg-gray-200'
-											: ''
-										: ($settings?.highContrastMode ?? false)
-											? 'hover:bg-gray-200 dark:hover:bg-gray-800'
-											: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'
-								}`}
+								class={tabClass('about')}
 								on:click={() => {
 									selectedTab = 'about';
 								}}
 							>
 								<div class=" self-center mr-2">
-									<InfoCircle strokeWidth="2" />
+									<InfoCircle strokeWidth="1.75" className="size-[18px]" />
 								</div>
 								<div class=" self-center">{$i18n.t('About')}</div>
 							</button>
@@ -956,22 +831,13 @@
 								role="tab"
 								aria-controls="tab-skills"
 								aria-selected={selectedTab === 'skills'}
-								class={`px-0.5 md:px-2.5 py-1 min-w-fit rounded-xl flex-1 md:flex-none flex text-left transition
-								${
-									selectedTab === 'skills'
-										? ($settings?.highContrastMode ?? false)
-											? 'dark:bg-gray-800 bg-gray-200'
-											: ''
-										: ($settings?.highContrastMode ?? false)
-											? 'hover:bg-gray-200 dark:hover:bg-gray-800'
-											: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'
-								}`}
+								class={tabClass('skills')}
 								on:click={() => {
 									selectedTab = 'skills';
 								}}
 							>
 								<div class=" self-center mr-2">
-									<Bolt strokeWidth="2" className="size-4" />
+									<Bolt strokeWidth="1.75" className="size-[18px]" />
 								</div>
 								<div class=" self-center">{$i18n.t('Skills')}</div>
 							</button>
@@ -980,22 +846,13 @@
 								role="tab"
 								aria-controls="tab-connectors"
 								aria-selected={selectedTab === 'connectors'}
-								class={`px-0.5 md:px-2.5 py-1 min-w-fit rounded-xl flex-1 md:flex-none flex text-left transition
-								${
-									selectedTab === 'connectors'
-										? ($settings?.highContrastMode ?? false)
-											? 'dark:bg-gray-800 bg-gray-200'
-											: ''
-										: ($settings?.highContrastMode ?? false)
-											? 'hover:bg-gray-200 dark:hover:bg-gray-800'
-											: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'
-								}`}
+								class={tabClass('connectors')}
 								on:click={() => {
 									selectedTab = 'connectors';
 								}}
 							>
 								<div class=" self-center mr-2">
-									<Cube strokeWidth="2" className="size-4" />
+									<Cube strokeWidth="1.75" className="size-[18px]" />
 								</div>
 								<div class=" self-center">{$i18n.t('Connectors')}</div>
 							</button>
@@ -1012,9 +869,9 @@
 					<a
 						href="/admin/settings"
 						draggable="false"
-						class="px-0.5 md:px-2.5 py-1 min-w-fit rounded-xl flex-1 md:flex-none md:mt-auto flex select-none text-left transition {$settings?.highContrastMode
+						class="px-0.5 md:px-2.5 py-1 md:py-0 md:h-10 min-w-fit rounded-lg flex-1 md:flex-none md:mt-auto md:shrink-0 flex items-center select-none text-left transition {$settings?.highContrastMode
 							? 'hover:bg-gray-200 dark:hover:bg-gray-800'
-							: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'}"
+							: 'text-gray-500 dark:text-gray-400 hover:bg-gray-200/60 dark:hover:bg-gray-800/60 hover:text-gray-800 dark:hover:text-gray-100'}"
 						on:click={async (e) => {
 							e.preventDefault();
 							await goto('/admin/settings');
@@ -1022,14 +879,14 @@
 						}}
 					>
 						<div class=" self-center mr-2">
-							<UserBadgeCheck strokeWidth="2" />
+							<UserBadgeCheck strokeWidth="1.75" className="size-[18px]" />
 						</div>
 						<div class=" self-center">{$i18n.t('Admin Settings')}</div>
 					</a>
 				{/if}
 			</div>
 			<div
-				class="flex-1 px-3.5 md:pl-0 md:pr-4.5 md:min-h-[min(42rem,calc(100dvh-10rem))] max-h-[min(42rem,calc(100dvh-10rem))] overflow-y-auto"
+				class="settings-pane flex-1 min-w-0 md:h-full px-3.5 md:px-7 md:py-6 max-h-[min(42rem,calc(100dvh-10rem))] md:max-h-full overflow-y-auto"
 			>
 				{#if selectedTab === 'general'}
 					<General
@@ -1046,13 +903,6 @@
 							toast.success($i18n.t('Settings saved successfully!'));
 						}}
 					/>
-				{:else if selectedTab === 'connections'}
-					<Connections
-						saveSettings={async (updated) => {
-							await saveSettings(updated);
-							toast.success($i18n.t('Settings saved successfully!'));
-						}}
-					/>
 				{:else if selectedTab === 'tools'}
 					<Integrations
 						saveSettings={async (updated) => {
@@ -1062,13 +912,6 @@
 					/>
 				{:else if selectedTab === 'workspace'}
 					<WorkspaceSettings {saveSettings} />
-				{:else if selectedTab === 'personalization'}
-					<Personalization
-						{saveSettings}
-						on:save={() => {
-							toast.success($i18n.t('Settings saved successfully!'));
-						}}
-					/>
 				{:else if selectedTab === 'audio'}
 					<Audio
 						{saveSettings}
@@ -1086,7 +929,7 @@
 						}}
 					/>
 				{:else if selectedTab === 'skills'}
-					<SkillsPanel token={localStorage.token} />
+					<SkillsManager token={localStorage.token} />
 				{:else if selectedTab === 'connectors'}
 					<ConnectorsPanel token={localStorage.token} />
 				{:else if selectedTab === 'about'}
@@ -1117,5 +960,29 @@
 	input[type='number'] {
 		appearance: textfield;
 		-moz-appearance: textfield; /* Firefox */
+	}
+
+	/* Slim scrollbar for the content pane (desktop shell) — gray tokens so all
+	   themes remap it. */
+	.settings-pane {
+		scrollbar-width: thin;
+		scrollbar-color: var(--color-gray-300) transparent;
+	}
+
+	:global(.dark) .settings-pane {
+		scrollbar-color: var(--color-gray-700) transparent;
+	}
+
+	.settings-pane::-webkit-scrollbar {
+		width: 6px;
+	}
+
+	.settings-pane::-webkit-scrollbar-thumb {
+		border-radius: 9999px;
+		background-color: var(--color-gray-300);
+	}
+
+	:global(.dark) .settings-pane::-webkit-scrollbar-thumb {
+		background-color: var(--color-gray-700);
 	}
 </style>

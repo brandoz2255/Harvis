@@ -57,12 +57,14 @@
 	import ArchivedChatsModal from './ArchivedChatsModal.svelte';
 	import UserMenu from './Sidebar/UserMenu.svelte';
 	import ChatItem from './Sidebar/ChatItem.svelte';
+	import ChatItemSkeleton from './Sidebar/ChatItemSkeleton.svelte';
 	import Spinner from '../common/Spinner.svelte';
 	import Loader from '../common/Loader.svelte';
 	import Folder from '../common/Folder.svelte';
 	import FolderIcon from '../icons/Folder.svelte';
 	import Plus from '../icons/Plus.svelte';
 	import Tooltip from '../common/Tooltip.svelte';
+	import HarvisLogoMark from '../common/HarvisLogoMark.svelte';
 	import Folders from './Sidebar/Folders.svelte';
 	import { getChannels, createNewChannel } from '$lib/apis/channels';
 	import ChannelModal from './Sidebar/ChannelModal.svelte';
@@ -854,10 +856,8 @@
 						aria-label={$showSidebar ? $i18n.t('Close Sidebar') : $i18n.t('Open Sidebar')}
 					>
 						<div class=" self-center flex items-center justify-center size-9">
-							<img
-								src="{WEBUI_BASE_URL}/static/harvis-logo.svg"
-								class="sidebar-new-chat-icon size-6 object-contain group-hover:hidden"
-								alt=""
+							<HarvisLogoMark
+								className="sidebar-new-chat-icon size-6 object-contain group-hover:hidden"
 							/>
 
 							<Sidebar className="size-5 hidden group-hover:flex" />
@@ -1069,12 +1069,7 @@
 					draggable="false"
 					on:click={newChatHandler}
 				>
-					<img
-						crossorigin="anonymous"
-						src="{WEBUI_BASE_URL}/static/harvis-logo.svg"
-						class="sidebar-new-chat-icon size-6 object-contain"
-						alt=""
-					/>
+					<HarvisLogoMark className="sidebar-new-chat-icon size-6 object-contain" />
 				</a>
 
 				<a href="/" class="flex flex-1 px-0.5" on:click={newChatHandler}>
@@ -1133,7 +1128,7 @@
 					<div class="px-[0.4375rem] flex justify-center text-gray-800 dark:text-gray-200">
 						<a
 							id="sidebar-new-chat-button"
-							class="group grow flex items-center space-x-3 rounded-2xl px-2.5 py-2 hover:bg-gray-100 dark:hover:bg-gray-900 transition outline-none"
+							class="group grow flex items-center gap-3 rounded-xl px-2.5 py-2 text-blue-600 dark:text-blue-400 font-medium hover:bg-blue-500/10 transition outline-none"
 							href="/"
 							draggable="false"
 							on:click={newChatHandler}
@@ -1155,7 +1150,7 @@
 						<a
 							id="sidebar-projects-button"
 							href="/harvis/projects"
-							class="group grow flex items-center space-x-3 rounded-2xl px-2.5 py-2 hover:bg-gray-100 dark:hover:bg-gray-900 transition outline-none"
+							class="group grow flex items-center gap-3 rounded-xl px-2.5 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-850 transition outline-none"
 							draggable="false"
 							aria-label={$i18n.t('Projects')}
 						>
@@ -1169,7 +1164,7 @@
 						</a>
 						<button
 							id="sidebar-search-button"
-							class="shrink-0 rounded-2xl p-2 hover:bg-gray-100 dark:hover:bg-gray-900 transition outline-none"
+							class="shrink-0 rounded-xl p-2 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-850 transition outline-none"
 							on:click={() => {
 								showSearch.set(true);
 							}}
@@ -1181,12 +1176,13 @@
 					</div>
 
 						{#if modeSwitcherEnabled}
-							<!-- Chat-mode tools: Schedules + Artifacts + Customize -->
+							<!-- Chat-mode tools: Schedules + Artifacts (Customize lives in the footer bottom-nav cluster) -->
 							<!-- Schedules — the chat lens over the cron store (VibeCodeNav's
 							     Routines button is the coding lens of the same store). -->
+							<div class="px-[0.4375rem]">
 							<a
 								href="/harvis/agent-studio/schedules"
-								class="group mx-[0.4375rem] flex items-center space-x-3 rounded-2xl px-2.5 py-2 text-gray-800 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-900 transition outline-none"
+								class="group flex items-center gap-3 rounded-xl px-2.5 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-850 transition outline-none {($page.url.pathname ?? '').startsWith('/harvis/agent-studio/schedules') ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400 font-medium' : ''}"
 								draggable="false"
 								aria-label={$i18n.t('Schedules')}
 								title={$i18n.t(
@@ -1202,7 +1198,7 @@
 							</a>
 							<a
 								href="/harvis/agent-studio/activity"
-								class="group mx-[0.4375rem] flex items-center space-x-3 rounded-2xl px-2.5 py-2 text-gray-800 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-900 transition outline-none"
+								class="group flex items-center gap-3 rounded-xl px-2.5 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-850 transition outline-none {($page.url.pathname ?? '').startsWith('/harvis/agent-studio/activity') ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400 font-medium' : ''}"
 								draggable="false"
 								aria-label={$i18n.t('Artifacts')}
 							>
@@ -1213,25 +1209,12 @@
 									<div class=" self-center text-sm font-primary">{$i18n.t('Artifacts')}</div>
 								</div>
 							</a>
-							<button
-								type="button"
-								on:click={() => showSettings.set('skills')}
-								class="group w-full text-left mx-[0.4375rem] flex items-center space-x-3 rounded-2xl px-2.5 py-2 text-gray-800 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-900 transition outline-none"
-								aria-label={$i18n.t('Customize')}
-							>
-								<div class="self-center">
-									<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="size-4.5"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6" /></svg>
-								</div>
-								<div class="flex flex-1 self-center translate-y-[0.5px]">
-									<div class=" self-center text-sm font-primary">{$i18n.t('Customize')}</div>
-								</div>
-							</button>
+							</div>
 							<!-- Adaptive Space hidden for the deployment cut (2026-07-12) — the
 							     feature isn't ready; the /harvis/adaptive route shows a "coming
 							     soon" placeholder. Re-add this nav link + restore the route's
 							     <AdaptiveSpaceShell/> mount to bring it back. -->
-							<!-- More (bold) — tools, directly under Customize in chat mode. -->
-							<SidebarMore activePath={$page.url.pathname} bold />
+							<!-- More (bold) moved to the footer bottom-nav cluster. -->
 						{/if}
 					{/if}
 
@@ -1364,7 +1347,7 @@
 						<div class="mt-0.5 pb-1.5">
 							{#each $pinnedNotes as note (note.id)}
 								<a
-									class="w-full flex items-center gap-2.5 rounded-xl px-2.5 py-1.5 hover:bg-gray-100 dark:hover:bg-gray-900 transition group text-sm"
+									class="w-full flex items-center gap-3 rounded-xl px-2.5 py-1.5 hover:bg-gray-100 dark:hover:bg-gray-850 transition group text-sm"
 									href={`/notes/${note.id}`}
 									on:click={() => {
 										itemClickHandler();
@@ -1602,12 +1585,8 @@
 									</Loader>
 								{/if}
 							{:else}
-								<div
-									class="w-full flex justify-center py-1 text-xs animate-pulse items-center gap-2"
-								>
-									<Spinner className=" size-4" />
-									<div class=" ">{$i18n.t('Loading...')}</div>
-								</div>
+								<!-- Cold load: content-shaped skeleton mirroring ChatItem rows (not a bare spinner). -->
+								<ChatItemSkeleton rows={7} />
 							{/if}
 						</div>
 					</div>
@@ -1621,37 +1600,100 @@
 				></div>
 				<div class="flex flex-col font-primary">
 					{#if modeSwitcherEnabled}
-						<!-- Footer: stack status on top, then Integrations. -->
+						<!-- Footer: bottom-nav cluster (Cookbook · Providers · Customize · Settings · More). -->
 						<div class="px-[0.4375rem] pt-2 mt-1 border-t border-gray-100 dark:border-gray-850">
-							<div
-								class="flex items-center gap-2 px-2.5 py-1 text-xs text-gray-500 dark:text-gray-400"
-							>
-								<span class="size-2 rounded-full bg-green-500 shrink-0"></span>
-								<span>Local stack ready</span>
-							</div>
 							<a
-								id="sidebar-integrations-button"
-								href="/harvis/integrations"
-								class="group flex items-center gap-3 rounded-2xl px-2.5 py-2 text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-900 hover:text-gray-900 dark:hover:text-gray-100 transition outline-none {($page.url.pathname ?? '').startsWith('/harvis/integrations')
-									? 'bg-gray-100 dark:bg-gray-850 text-gray-900 dark:text-gray-100 font-medium'
+								href="/harvis/agent-studio/cookbook"
+								class="group flex items-center gap-3 rounded-xl px-2.5 py-2 text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-850 hover:text-gray-900 dark:hover:text-gray-100 transition outline-none {($page.url.pathname ?? '').startsWith('/harvis/agent-studio/cookbook')
+									? 'bg-blue-500/10 text-blue-600 dark:text-blue-400 font-medium'
 									: ''}"
 								draggable="false"
-								aria-label={$i18n.t('Integrations')}
+								aria-label={$i18n.t('Cookbook')}
 							>
 								<svg
 									xmlns="http://www.w3.org/2000/svg"
 									viewBox="0 0 24 24"
 									fill="none"
 									stroke="currentColor"
-									stroke-width="2"
+									stroke-width="1.8"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+									class="size-4.5 shrink-0"
+								>
+									<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20M4 19.5A2.5 2.5 0 0 0 6.5 22H20V2H6.5A2.5 2.5 0 0 0 4 4.5v15z" />
+								</svg>
+								<span class="flex-1 self-center translate-y-[0.5px]">{$i18n.t('Cookbook')}</span>
+							</a>
+							<a
+								id="sidebar-integrations-button"
+								href="/harvis/integrations"
+								class="group flex items-center gap-3 rounded-xl px-2.5 py-2 text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-850 hover:text-gray-900 dark:hover:text-gray-100 transition outline-none {($page.url.pathname ?? '').startsWith('/harvis/integrations')
+									? 'bg-blue-500/10 text-blue-600 dark:text-blue-400 font-medium'
+									: ''}"
+								draggable="false"
+								aria-label={$i18n.t('Providers')}
+							>
+								<svg
+									xmlns="http://www.w3.org/2000/svg"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="currentColor"
+									stroke-width="1.8"
 									stroke-linecap="round"
 									stroke-linejoin="round"
 									class="size-4.5 shrink-0"
 								>
 									<path d="m7 11 2-2-2-2M11 13h4M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z" />
 								</svg>
-								<span class="flex-1 self-center translate-y-[0.5px]">{$i18n.t('Integrations')}</span>
+								<span class="flex-1 self-center translate-y-[0.5px]">{$i18n.t('Providers')}</span>
 							</a>
+							<!-- Customize — opens the Settings modal's Customize group (Skills management
+							     lives there now); modal trigger, so no route-active state. -->
+							<button
+								type="button"
+								on:click={() => showSettings.set('skills')}
+								class="group w-full text-left flex items-center gap-3 rounded-xl px-2.5 py-2 text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-850 hover:text-gray-900 dark:hover:text-gray-100 transition outline-none"
+								aria-label={$i18n.t('Customize')}
+							>
+								<svg
+									xmlns="http://www.w3.org/2000/svg"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="currentColor"
+									stroke-width="1.8"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+									class="size-4.5 shrink-0"
+								>
+									<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6" />
+								</svg>
+								<span class="flex-1 self-center translate-y-[0.5px]">{$i18n.t('Customize')}</span>
+							</button>
+							<button
+								type="button"
+								on:click={() => showSettings.set(true)}
+								class="group w-full text-left flex items-center gap-3 rounded-xl px-2.5 py-2 text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-850 hover:text-gray-900 dark:hover:text-gray-100 transition outline-none"
+								aria-label={$i18n.t('Settings')}
+							>
+								<svg
+									xmlns="http://www.w3.org/2000/svg"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="currentColor"
+									stroke-width="1.8"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+									class="size-4.5 shrink-0"
+								>
+									<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+									<circle cx="12" cy="12" r="3" />
+								</svg>
+								<span class="flex-1 self-center translate-y-[0.5px]">{$i18n.t('Settings')}</span>
+							</button>
+							<!-- More (bold) — tools, last item of the bottom cluster. -->
+							<div class="-mx-[0.4375rem]">
+								<SidebarMore activePath={$page.url.pathname} bold />
+							</div>
 						</div>
 					{/if}
 					{#if $user !== undefined && $user !== null}

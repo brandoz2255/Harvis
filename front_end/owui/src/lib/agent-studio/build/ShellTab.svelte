@@ -30,7 +30,7 @@
 				? 'bg-blue-500 animate-pulse'
 				: status === 'error'
 					? 'bg-red-500'
-					: 'bg-gray-500';
+					: 'bg-gray-400 dark:bg-gray-600';
 
 	const disconnect = () => {
 		try {
@@ -137,7 +137,7 @@
 
 <div class="flex flex-col min-h-0 h-full">
 	<!-- header: provenance label + status + connect control -->
-	<div class="shrink-0 flex items-center gap-2 px-3 py-1.5 border-b border-white/8 text-[11px]">
+	<div class="shrink-0 flex items-center gap-2 px-3 py-1.5 border-b border-gray-200 dark:border-white/10 text-[11px]">
 		<span class="size-1.5 rounded-full shrink-0 {dot()}"></span>
 		<span class="text-gray-400 truncate">
 			{$i18n.t('Manual shell — runs inside this session’s container, not your machine.')}
@@ -145,7 +145,7 @@
 		<div class="ml-auto shrink-0 flex items-center gap-1.5">
 			{#if status === 'connected'}
 				<button
-					class="px-2 py-0.5 rounded-lg border border-white/8 text-gray-300 hover:bg-white/6 transition"
+					class="px-2 py-0.5 rounded-lg border border-gray-200 dark:border-white/10 text-gray-600 dark:text-gray-300 hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition"
 					on:click={disconnect}>{$i18n.t('Disconnect')}</button
 				>
 			{:else}
@@ -165,7 +165,7 @@
 			{$i18n.t('Start a coding session first — the shell attaches to the session’s container.')}
 		</div>
 	{:else}
-		<div class="flex-1 min-h-0 relative bg-[#0a0f1a]">
+		<div class="flex-1 min-h-0 relative bg-gray-50 dark:bg-gray-900">
 			<div bind:this={terminalEl} class="absolute inset-0 p-1.5"></div>
 			{#if status === 'idle'}
 				<div
@@ -181,7 +181,7 @@
 				</div>
 			{:else if status === 'closed'}
 				<div
-					class="absolute inset-x-0 bottom-0 px-3 py-1.5 text-[11px] text-gray-500 bg-white/[0.02] border-t border-white/8"
+					class="absolute inset-x-0 bottom-0 px-3 py-1.5 text-[11px] text-gray-500 bg-black/[0.03] dark:bg-white/[0.05] border-t border-gray-200 dark:border-white/10"
 				>
 					{$i18n.t('Session ended.')}
 				</div>

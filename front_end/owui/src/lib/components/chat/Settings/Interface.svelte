@@ -11,6 +11,7 @@
 	import Plus from '$lib/components/icons/Plus.svelte';
 	import Switch from '$lib/components/common/Switch.svelte';
 	import ManageFloatingActionButtonsModal from './Interface/ManageFloatingActionButtonsModal.svelte';
+	import SettingRow from './SettingRow.svelte';
 	import ManageImageCompressionModal from './Interface/ManageImageCompressionModal.svelte';
 
 	const dispatch = createEventDispatcher();
@@ -36,6 +37,7 @@
 
 	// Interface
 	let defaultModelId = '';
+	let initialDefaultModelId = '';
 	let showUsername = false;
 
 	let notificationSound = true;
@@ -180,10 +182,17 @@
 	};
 
 	const updateInterfaceHandler = async () => {
-		saveSettings({
-			models: [defaultModelId],
+		// This tab has no default-model control, so never write `models` here —
+		// doing so silently overwrote the user's chosen default model (with the
+		// server-config fallback) every time an unrelated interface setting was
+		// saved. Only include it if a control ever sets it to a changed value.
+		const payload: Record<string, unknown> = {
 			imageCompressionSize: imageCompressionSize
-		});
+		};
+		if (defaultModelId && defaultModelId !== initialDefaultModelId) {
+			payload.models = [defaultModelId];
+		}
+		saveSettings(payload);
 	};
 
 	const toggleWebSearch = async () => {
@@ -272,10 +281,13 @@
 		imageCompressionSize = $settings?.imageCompressionSize ?? { width: '', height: '' };
 		imageCompressionInChannels = $settings?.imageCompressionInChannels ?? true;
 
+		// Prefer the user's saved default model; only fall back to the server
+		// config default when the user has never picked one.
 		defaultModelId = $settings?.models?.at(0) ?? '';
-		if ($config?.default_models) {
+		if (!defaultModelId && $config?.default_models) {
 			defaultModelId = $config.default_models.split(',')[0];
 		}
+		initialDefaultModelId = defaultModelId;
 
 		backgroundImageUrl = $settings?.backgroundImageUrl ?? null;
 		webSearch = $settings?.webSearch ?? null;
@@ -339,17 +351,19 @@
 
 	<div class=" space-y-3 overflow-y-scroll max-h-[28rem] md:max-h-full">
 		<div>
-			<h1 class=" mb-2 text-sm font-medium">{$i18n.t('UI')}</h1>
+			<h1 class="pb-1 text-lg font-semibold text-gray-900 dark:text-gray-100">{$i18n.t('UI')}</h1>
 
 			<div>
-				<div class="py-0.5 flex w-full justify-between">
-					<label id="ui-scale-label" class=" self-center text-xs" for="ui-scale-slider">
-						{$i18n.t('UI Scale')}
-					</label>
+				<SettingRow>
+					<svelte:fragment slot="title">
+						<label id="ui-scale-label" for="ui-scale-slider">
+							{$i18n.t('UI Scale')}
+						</label>
+					</svelte:fragment>
 
 					<div class="flex items-center gap-2 p-1">
 						<button
-							class="text-xs"
+							class="px-3 py-1.5 text-sm font-medium rounded-[10px] bg-gray-100 hover:bg-gray-200 dark:bg-gray-850 dark:hover:bg-gray-800 text-gray-800 dark:text-gray-100 transition"
 							aria-live="polite"
 							type="button"
 							on:click={() => {
@@ -368,7 +382,7 @@
 							{/if}
 						</button>
 					</div>
-				</div>
+				</SettingRow>
 
 				{#if textScale !== null}
 					<div class=" flex items-center gap-2 px-1 pb-1">
@@ -421,1021 +435,1020 @@
 				{/if}
 			</div>
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div id="high-contrast-mode-label" class=" self-center text-xs">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="high-contrast-mode-label">
 						{$i18n.t('High Contrast Mode')} ({$i18n.t('Beta')})
 					</div>
+				</svelte:fragment>
 
-					<div class="flex items-center gap-2 p-1">
-						<Switch
-							ariaLabelledbyId="high-contrast-mode-label"
-							tooltip={true}
-							bind:state={highContrastMode}
-							on:change={() => {
-								saveSettings({ highContrastMode });
-							}}
-						/>
-					</div>
+				<div class="flex items-center gap-2 p-1">
+					<Switch
+						ariaLabelledbyId="high-contrast-mode-label"
+						tooltip={true}
+						bind:state={highContrastMode}
+						on:change={() => {
+							saveSettings({ highContrastMode });
+						}}
+					/>
 				</div>
-			</div>
+			</SettingRow>
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div id="use-chat-title-as-tab-title-label" class=" self-center text-xs">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="use-chat-title-as-tab-title-label">
 						{$i18n.t('Display chat title in tab')}
 					</div>
+				</svelte:fragment>
 
-					<div class="flex items-center gap-2 p-1">
-						<Switch
-							ariaLabelledbyId="use-chat-title-as-tab-title-label"
-							tooltip={true}
-							bind:state={showChatTitleInTab}
-							on:change={() => {
-								saveSettings({ showChatTitleInTab });
-							}}
-						/>
-					</div>
+				<div class="flex items-center gap-2 p-1">
+					<Switch
+						ariaLabelledbyId="use-chat-title-as-tab-title-label"
+						tooltip={true}
+						bind:state={showChatTitleInTab}
+						on:change={() => {
+							saveSettings({ showChatTitleInTab });
+						}}
+					/>
 				</div>
-			</div>
+			</SettingRow>
 
-			<div>
-				<div class="py-0.5 flex w-full justify-between">
-					<div id="notification-sound-label" class=" self-center text-xs">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="notification-sound-label">
 						{$i18n.t('Notification Sound')}
 					</div>
+				</svelte:fragment>
 
-					<div class="flex items-center gap-2 p-1">
-						<Switch
-							ariaLabelledbyId="notification-sound-label"
-							tooltip={true}
-							bind:state={notificationSound}
-							on:change={() => {
-								saveSettings({ notificationSound });
-							}}
-						/>
-					</div>
+				<div class="flex items-center gap-2 p-1">
+					<Switch
+						ariaLabelledbyId="notification-sound-label"
+						tooltip={true}
+						bind:state={notificationSound}
+						on:change={() => {
+							saveSettings({ notificationSound });
+						}}
+					/>
 				</div>
-			</div>
+			</SettingRow>
 
 			{#if notificationSound}
-				<div>
-					<div class=" py-0.5 flex w-full justify-between">
-						<div id="play-notification-sound-label" class=" self-center text-xs">
+				<SettingRow>
+					<svelte:fragment slot="title">
+						<div id="play-notification-sound-label">
 							{$i18n.t('Always Play Notification Sound')}
 						</div>
-
-						<div class="flex items-center gap-2 p-1">
-							<Switch
-								ariaLabelledbyId="play-notification-sound-label"
-								tooltip={true}
-								bind:state={notificationSoundAlways}
-								on:change={() => {
-									saveSettings({ notificationSoundAlways });
-								}}
-							/>
-						</div>
-					</div>
-				</div>
-			{/if}
-
-			<div>
-				<div id="allow-user-location-label" class=" py-0.5 flex w-full justify-between">
-					<div class=" self-center text-xs">{$i18n.t('Allow User Location')}</div>
+					</svelte:fragment>
 
 					<div class="flex items-center gap-2 p-1">
 						<Switch
-							ariaLabelledbyId="allow-user-location-label"
+							ariaLabelledbyId="play-notification-sound-label"
 							tooltip={true}
-							bind:state={userLocation}
+							bind:state={notificationSoundAlways}
 							on:change={() => {
-								toggleUserLocation();
+								saveSettings({ notificationSoundAlways });
 							}}
 						/>
 					</div>
-				</div>
-			</div>
+				</SettingRow>
+			{/if}
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div id="haptic-feedback-label" class=" self-center text-xs">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="allow-user-location-label">{$i18n.t('Allow User Location')}</div>
+				</svelte:fragment>
+				<div class="flex items-center gap-2 p-1">
+					<Switch
+						ariaLabelledbyId="allow-user-location-label"
+						tooltip={true}
+						bind:state={userLocation}
+						on:change={() => {
+							toggleUserLocation();
+						}}
+					/>
+				</div>
+			</SettingRow>
+
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="haptic-feedback-label">
 						{$i18n.t('Haptic Feedback')} ({$i18n.t('Android')})
 					</div>
+				</svelte:fragment>
 
-					<div class="flex items-center gap-2 p-1">
-						<Switch
-							ariaLabelledbyId="haptic-feedback-label"
-							tooltip={true}
-							bind:state={hapticFeedback}
-							on:change={() => {
-								saveSettings({ hapticFeedback });
-							}}
-						/>
-					</div>
+				<div class="flex items-center gap-2 p-1">
+					<Switch
+						ariaLabelledbyId="haptic-feedback-label"
+						tooltip={true}
+						bind:state={hapticFeedback}
+						on:change={() => {
+							saveSettings({ hapticFeedback });
+						}}
+					/>
 				</div>
-			</div>
+			</SettingRow>
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div id="copy-formatted-label" class=" self-center text-xs">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="copy-formatted-label">
 						{$i18n.t('Copy Formatted Text')}
 					</div>
+				</svelte:fragment>
 
-					<div class="flex items-center gap-2 p-1">
-						<Switch
-							ariaLabelledbyId="copy-formatted-label"
-							tooltip={true}
-							bind:state={copyFormatted}
-							on:change={() => {
-								saveSettings({ copyFormatted });
-							}}
-						/>
-					</div>
+				<div class="flex items-center gap-2 p-1">
+					<Switch
+						ariaLabelledbyId="copy-formatted-label"
+						tooltip={true}
+						bind:state={copyFormatted}
+						on:change={() => {
+							saveSettings({ copyFormatted });
+						}}
+					/>
 				</div>
-			</div>
+			</SettingRow>
 
 			{#if $user?.role === 'admin'}
-				<div>
-					<div class=" py-0.5 flex w-full justify-between">
-						<div id="toast-notifications-label" class=" self-center text-xs">
+				<SettingRow>
+					<svelte:fragment slot="title">
+						<div id="toast-notifications-label">
 							{$i18n.t('Toast notifications for new updates')}
 						</div>
+					</svelte:fragment>
 
-						<div class="flex items-center gap-2 p-1">
-							<Switch
-								ariaLabelledbyId="toast-notifications-label"
-								tooltip={true}
-								bind:state={showUpdateToast}
-								on:change={() => {
-									saveSettings({ showUpdateToast });
-								}}
-							/>
-						</div>
+					<div class="flex items-center gap-2 p-1">
+						<Switch
+							ariaLabelledbyId="toast-notifications-label"
+							tooltip={true}
+							bind:state={showUpdateToast}
+							on:change={() => {
+								saveSettings({ showUpdateToast });
+							}}
+						/>
 					</div>
-				</div>
+				</SettingRow>
 
-				<div>
-					<div class=" py-0.5 flex w-full justify-between">
-						<div id="whats-new-label" class=" self-center text-xs">
+				<SettingRow>
+					<svelte:fragment slot="title">
+						<div id="whats-new-label">
 							{$i18n.t(`Show "What's New" modal on login`)}
 						</div>
+					</svelte:fragment>
 
-						<div class="flex items-center gap-2 p-1">
-							<Switch
-								ariaLabelledbyId="whats-new-label"
-								tooltip={true}
-								bind:state={showChangelog}
-								on:change={() => {
-									saveSettings({ showChangelog });
-								}}
-							/>
-						</div>
+					<div class="flex items-center gap-2 p-1">
+						<Switch
+							ariaLabelledbyId="whats-new-label"
+							tooltip={true}
+							bind:state={showChangelog}
+							on:change={() => {
+								saveSettings({ showChangelog });
+							}}
+						/>
 					</div>
-				</div>
+				</SettingRow>
 			{/if}
 
-			<div class=" my-2 text-sm font-medium">{$i18n.t('Chat')}</div>
+			<div class="pt-8 pb-1 text-lg font-semibold text-gray-900 dark:text-gray-100">{$i18n.t('Chat')}</div>
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div id="enable-message-queue-label" class=" self-center text-xs">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="enable-message-queue-label">
 						{$i18n.t('Enable Message Queue')}
 					</div>
+				</svelte:fragment>
 
-					<div class="flex items-center gap-2 p-1">
-						<Switch
-							ariaLabelledbyId="enable-message-queue-label"
-							tooltip={true}
-							bind:state={enableMessageQueue}
-							on:change={() => {
-								saveSettings({ enableMessageQueue });
-							}}
-						/>
-					</div>
+				<div class="flex items-center gap-2 p-1">
+					<Switch
+						ariaLabelledbyId="enable-message-queue-label"
+						tooltip={true}
+						bind:state={enableMessageQueue}
+						on:change={() => {
+							saveSettings({ enableMessageQueue });
+						}}
+					/>
 				</div>
-			</div>
+			</SettingRow>
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div id="chat-direction-label" class=" self-center text-xs">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="chat-direction-label">
 						{$i18n.t('Chat direction')}
 					</div>
+				</svelte:fragment>
 
-					<button
-						aria-labelledby="chat-direction-label chat-direction-mode"
-						class="p-1 px-3 text-xs flex rounded-sm transition"
-						on:click={toggleChangeChatDirection}
-						type="button"
-					>
-						<span class="ml-2 self-center" id="chat-direction-mode">
-							{chatDirection === 'LTR'
-								? $i18n.t('LTR')
-								: chatDirection === 'RTL'
-									? $i18n.t('RTL')
-									: $i18n.t('Auto')}
-						</span>
-					</button>
-				</div>
-			</div>
+				<button
+					aria-labelledby="chat-direction-label chat-direction-mode"
+					class="px-3 py-1.5 text-sm font-medium rounded-[10px] bg-gray-100 hover:bg-gray-200 dark:bg-gray-850 dark:hover:bg-gray-800 text-gray-800 dark:text-gray-100 flex transition"
+					on:click={toggleChangeChatDirection}
+					type="button"
+				>
+					<span class="self-center" id="chat-direction-mode">
+						{chatDirection === 'LTR'
+							? $i18n.t('LTR')
+							: chatDirection === 'RTL'
+								? $i18n.t('RTL')
+								: $i18n.t('Auto')}
+					</span>
+				</button>
+			</SettingRow>
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div id="landing-page-mode-label" class=" self-center text-xs">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="landing-page-mode-label">
 						{$i18n.t('Landing Page Mode')}
 					</div>
+				</svelte:fragment>
 
-					<button
-						aria-labelledby="landing-page-mode-label notification-sound-state"
-						class="p-1 px-3 text-xs flex rounded-sm transition"
-						on:click={() => {
-							toggleLandingPageMode();
-						}}
-						type="button"
+				<button
+					aria-labelledby="landing-page-mode-label notification-sound-state"
+					class="px-3 py-1.5 text-sm font-medium rounded-[10px] bg-gray-100 hover:bg-gray-200 dark:bg-gray-850 dark:hover:bg-gray-800 text-gray-800 dark:text-gray-100 flex transition"
+					on:click={() => {
+						toggleLandingPageMode();
+					}}
+					type="button"
+				>
+					<span class="self-center" id="notification-sound-state"
+						>{landingPageMode === '' ? $i18n.t('Default') : $i18n.t('Chat')}</span
 					>
-						<span class="ml-2 self-center" id="notification-sound-state"
-							>{landingPageMode === '' ? $i18n.t('Default') : $i18n.t('Chat')}</span
-						>
-					</button>
-				</div>
-			</div>
+				</button>
+			</SettingRow>
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div id="chat-background-label" class=" self-center text-xs">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="chat-background-label">
 						{$i18n.t('Chat Background Image')}
 					</div>
+				</svelte:fragment>
 
-					<button
-						aria-labelledby="chat-background-label background-image-url-state"
-						class="p-1 px-3 text-xs flex rounded-sm transition"
-						on:click={() => {
-							if (backgroundImageUrl !== null) {
-								backgroundImageUrl = null;
-								saveSettings({ backgroundImageUrl });
-							} else {
-								filesInputElement.click();
-							}
-						}}
-						type="button"
+				<button
+					aria-labelledby="chat-background-label background-image-url-state"
+					class="px-3 py-1.5 text-sm font-medium rounded-[10px] bg-gray-100 hover:bg-gray-200 dark:bg-gray-850 dark:hover:bg-gray-800 text-gray-800 dark:text-gray-100 flex transition"
+					on:click={() => {
+						if (backgroundImageUrl !== null) {
+							backgroundImageUrl = null;
+							saveSettings({ backgroundImageUrl });
+						} else {
+							filesInputElement.click();
+						}
+					}}
+					type="button"
+				>
+					<span class="self-center" id="background-image-url-state"
+						>{backgroundImageUrl !== null ? $i18n.t('Reset') : $i18n.t('Upload')}</span
 					>
-						<span class="ml-2 self-center" id="background-image-url-state"
-							>{backgroundImageUrl !== null ? $i18n.t('Reset') : $i18n.t('Upload')}</span
-						>
-					</button>
-				</div>
-			</div>
+				</button>
+			</SettingRow>
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div id="chat-bubble-ui-label" class=" self-center text-xs">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="chat-bubble-ui-label">
 						{$i18n.t('Chat Bubble UI')}
 					</div>
+				</svelte:fragment>
 
-					<div class="flex items-center gap-2 p-1">
-						<Switch
-							tooltip={true}
-							ariaLabelledbyId="chat-bubble-ui-label"
-							bind:state={chatBubble}
-							on:change={() => {
-								saveSettings({ chatBubble });
-							}}
-						/>
-					</div>
+				<div class="flex items-center gap-2 p-1">
+					<Switch
+						tooltip={true}
+						ariaLabelledbyId="chat-bubble-ui-label"
+						bind:state={chatBubble}
+						on:change={() => {
+							saveSettings({ chatBubble });
+						}}
+					/>
 				</div>
-			</div>
+			</SettingRow>
 
 			{#if !$settings.chatBubble}
-				<div>
-					<div class=" py-0.5 flex w-full justify-between">
-						<div id="chat-bubble-username-label" class=" self-center text-xs">
+				<SettingRow>
+					<svelte:fragment slot="title">
+						<div id="chat-bubble-username-label">
 							{$i18n.t('Display the username instead of You in the Chat')}
 						</div>
+					</svelte:fragment>
 
-						<div class="flex items-center gap-2 p-1">
-							<Switch
-								ariaLabelledbyId="chat-bubble-username-label"
-								tooltip={true}
-								bind:state={showUsername}
-								on:change={() => {
-									saveSettings({ showUsername });
-								}}
-							/>
-						</div>
+					<div class="flex items-center gap-2 p-1">
+						<Switch
+							ariaLabelledbyId="chat-bubble-username-label"
+							tooltip={true}
+							bind:state={showUsername}
+							on:change={() => {
+								saveSettings({ showUsername });
+							}}
+						/>
 					</div>
-				</div>
+				</SettingRow>
 			{/if}
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div id="widescreen-mode-label" class=" self-center text-xs">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="widescreen-mode-label">
 						{$i18n.t('Widescreen Mode')}
 					</div>
+				</svelte:fragment>
 
-					<div class="flex items-center gap-2 p-1">
-						<Switch
-							ariaLabelledbyId="widescreen-mode-label"
-							tooltip={true}
-							bind:state={widescreenMode}
-							on:change={() => {
-								saveSettings({ widescreenMode });
-							}}
-						/>
-					</div>
+				<div class="flex items-center gap-2 p-1">
+					<Switch
+						ariaLabelledbyId="widescreen-mode-label"
+						tooltip={true}
+						bind:state={widescreenMode}
+						on:change={() => {
+							saveSettings({ widescreenMode });
+						}}
+					/>
 				</div>
-			</div>
+			</SettingRow>
 
 			{#if $user.role === 'admin' || $user?.permissions?.chat?.temporary}
-				<div>
-					<div class=" py-0.5 flex w-full justify-between">
-						<div id="temp-chat-default-label" class=" self-center text-xs">
+				<SettingRow>
+					<svelte:fragment slot="title">
+						<div id="temp-chat-default-label">
 							{$i18n.t('Temporary Chat by Default')}
 						</div>
+					</svelte:fragment>
 
-						<div class="flex items-center gap-2 p-1">
-							<Switch
-								ariaLabelledbyId="temp-chat-default-label"
-								tooltip={true}
-								bind:state={temporaryChatByDefault}
-								on:change={() => {
-									saveSettings({ temporaryChatByDefault });
-								}}
-							/>
-						</div>
+					<div class="flex items-center gap-2 p-1">
+						<Switch
+							ariaLabelledbyId="temp-chat-default-label"
+							tooltip={true}
+							bind:state={temporaryChatByDefault}
+							on:change={() => {
+								saveSettings({ temporaryChatByDefault });
+							}}
+						/>
 					</div>
-				</div>
+				</SettingRow>
 			{/if}
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div id="fade-streaming-label" class=" self-center text-xs">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="fade-streaming-label">
 						{$i18n.t('Fade Effect for Streaming Text')}
 					</div>
+				</svelte:fragment>
 
-					<div class="flex items-center gap-2 p-1">
-						<Switch
-							ariaLabelledbyId="fade-streaming-label"
-							tooltip={true}
-							bind:state={chatFadeStreamingText}
-							on:change={() => {
-								saveSettings({ chatFadeStreamingText });
-							}}
-						/>
-					</div>
+				<div class="flex items-center gap-2 p-1">
+					<Switch
+						ariaLabelledbyId="fade-streaming-label"
+						tooltip={true}
+						bind:state={chatFadeStreamingText}
+						on:change={() => {
+							saveSettings({ chatFadeStreamingText });
+						}}
+					/>
 				</div>
-			</div>
+			</SettingRow>
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div id="render-markdown-user-label" class=" self-center text-xs">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="render-markdown-user-label">
 						{$i18n.t('Render Markdown in User Messages')}
 					</div>
+				</svelte:fragment>
 
-					<div class="flex items-center gap-2 p-1">
-						<Switch
-							ariaLabelledbyId="render-markdown-user-label"
-							tooltip={true}
-							bind:state={renderMarkdownInUserMessages}
-							on:change={() => {
-								saveSettings({ renderMarkdownInUserMessages });
-							}}
-						/>
-					</div>
+				<div class="flex items-center gap-2 p-1">
+					<Switch
+						ariaLabelledbyId="render-markdown-user-label"
+						tooltip={true}
+						bind:state={renderMarkdownInUserMessages}
+						on:change={() => {
+							saveSettings({ renderMarkdownInUserMessages });
+						}}
+					/>
 				</div>
-			</div>
+			</SettingRow>
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div id="render-markdown-assistant-label" class=" self-center text-xs">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="render-markdown-assistant-label">
 						{$i18n.t('Render Markdown in Assistant Messages')}
 					</div>
+				</svelte:fragment>
 
-					<div class="flex items-center gap-2 p-1">
-						<Switch
-							ariaLabelledbyId="render-markdown-assistant-label"
-							tooltip={true}
-							bind:state={renderMarkdownInAssistantMessages}
-							on:change={() => {
-								saveSettings({ renderMarkdownInAssistantMessages });
-							}}
-						/>
-					</div>
+				<div class="flex items-center gap-2 p-1">
+					<Switch
+						ariaLabelledbyId="render-markdown-assistant-label"
+						tooltip={true}
+						bind:state={renderMarkdownInAssistantMessages}
+						on:change={() => {
+							saveSettings({ renderMarkdownInAssistantMessages });
+						}}
+					/>
 				</div>
-			</div>
+			</SettingRow>
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div id="auto-generation-label" class=" self-center text-xs">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="auto-generation-label">
 						{$i18n.t('Title Auto-Generation')}
 					</div>
+				</svelte:fragment>
 
-					<div class="flex items-center gap-2 p-1">
-						<Switch
-							ariaLabelledbyId="auto-generation-label"
-							tooltip={true}
-							bind:state={titleAutoGenerate}
-							on:change={() => {
-								toggleTitleAutoGenerate();
-							}}
-						/>
-					</div>
+				<div class="flex items-center gap-2 p-1">
+					<Switch
+						ariaLabelledbyId="auto-generation-label"
+						tooltip={true}
+						bind:state={titleAutoGenerate}
+						on:change={() => {
+							toggleTitleAutoGenerate();
+						}}
+					/>
 				</div>
-			</div>
+			</SettingRow>
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div class=" self-center text-xs" id="follow-up-auto-generation-label">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="follow-up-auto-generation-label">
 						{$i18n.t('Follow-Up Auto-Generation')}
 					</div>
+				</svelte:fragment>
 
-					<div class="flex items-center gap-2 p-1">
-						<Switch
-							ariaLabelledbyId="follow-up-auto-generation-label"
-							tooltip={true}
-							bind:state={autoFollowUps}
-							on:change={() => {
-								saveSettings({ autoFollowUps });
-							}}
-						/>
-					</div>
+				<div class="flex items-center gap-2 p-1">
+					<Switch
+						ariaLabelledbyId="follow-up-auto-generation-label"
+						tooltip={true}
+						bind:state={autoFollowUps}
+						on:change={() => {
+							saveSettings({ autoFollowUps });
+						}}
+					/>
 				</div>
-			</div>
+			</SettingRow>
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div id="chat-tags-label" class=" self-center text-xs">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="chat-tags-label">
 						{$i18n.t('Chat Tags Auto-Generation')}
 					</div>
+				</svelte:fragment>
 
-					<div class="flex items-center gap-2 p-1">
-						<Switch
-							ariaLabelledbyId="chat-tags-label"
-							tooltip={true}
-							bind:state={autoTags}
-							on:change={() => {
-								saveSettings({ autoTags });
-							}}
-						/>
-					</div>
+				<div class="flex items-center gap-2 p-1">
+					<Switch
+						ariaLabelledbyId="chat-tags-label"
+						tooltip={true}
+						bind:state={autoTags}
+						on:change={() => {
+							saveSettings({ autoTags });
+						}}
+					/>
 				</div>
-			</div>
+			</SettingRow>
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div id="auto-copy-label" class=" self-center text-xs">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="auto-copy-label">
 						{$i18n.t('Auto-Copy Response to Clipboard')}
 					</div>
+				</svelte:fragment>
 
-					<div class="flex items-center gap-2 p-1">
-						<Switch
-							ariaLabelledbyId="auto-copy-label"
-							tooltip={true}
-							bind:state={responseAutoCopy}
-							on:change={() => {
-								toggleResponseAutoCopy();
-							}}
-						/>
-					</div>
+				<div class="flex items-center gap-2 p-1">
+					<Switch
+						ariaLabelledbyId="auto-copy-label"
+						tooltip={true}
+						bind:state={responseAutoCopy}
+						on:change={() => {
+							toggleResponseAutoCopy();
+						}}
+					/>
 				</div>
-			</div>
+			</SettingRow>
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div id="insert-suggestion-prompt-label" class=" self-center text-xs">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="insert-suggestion-prompt-label">
 						{$i18n.t('Insert Suggestion Prompt to Input')}
 					</div>
+				</svelte:fragment>
 
-					<div class="flex items-center gap-2 p-1">
-						<Switch
-							ariaLabelledbyId="insert-suggestion-prompt-label"
-							tooltip={true}
-							bind:state={insertSuggestionPrompt}
-							on:change={() => {
-								saveSettings({ insertSuggestionPrompt });
-							}}
-						/>
-					</div>
+				<div class="flex items-center gap-2 p-1">
+					<Switch
+						ariaLabelledbyId="insert-suggestion-prompt-label"
+						tooltip={true}
+						bind:state={insertSuggestionPrompt}
+						on:change={() => {
+							saveSettings({ insertSuggestionPrompt });
+						}}
+					/>
 				</div>
-			</div>
+			</SettingRow>
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div id="keep-follow-up-prompts-label" class=" self-center text-xs">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="keep-follow-up-prompts-label">
 						{$i18n.t('Keep Follow-Up Prompts in Chat')}
 					</div>
+				</svelte:fragment>
 
-					<div class="flex items-center gap-2 p-1">
-						<Switch
-							ariaLabelledbyId="keep-follow-up-prompts-label"
-							tooltip={true}
-							bind:state={keepFollowUpPrompts}
-							on:change={() => {
-								saveSettings({ keepFollowUpPrompts });
-							}}
-						/>
-					</div>
+				<div class="flex items-center gap-2 p-1">
+					<Switch
+						ariaLabelledbyId="keep-follow-up-prompts-label"
+						tooltip={true}
+						bind:state={keepFollowUpPrompts}
+						on:change={() => {
+							saveSettings({ keepFollowUpPrompts });
+						}}
+					/>
 				</div>
-			</div>
+			</SettingRow>
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div id="insert-follow-up-prompt-label" class=" self-center text-xs">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="insert-follow-up-prompt-label">
 						{$i18n.t('Insert Follow-Up Prompt to Input')}
 					</div>
+				</svelte:fragment>
 
-					<div class="flex items-center gap-2 p-1">
-						<Switch
-							ariaLabelledbyId="insert-follow-up-prompt-label"
-							tooltip={true}
-							bind:state={insertFollowUpPrompt}
-							on:change={() => {
-								saveSettings({ insertFollowUpPrompt });
-							}}
-						/>
-					</div>
+				<div class="flex items-center gap-2 p-1">
+					<Switch
+						ariaLabelledbyId="insert-follow-up-prompt-label"
+						tooltip={true}
+						bind:state={insertFollowUpPrompt}
+						on:change={() => {
+							saveSettings({ insertFollowUpPrompt });
+						}}
+					/>
 				</div>
-			</div>
+			</SettingRow>
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div id="regenerate-menu-label" class=" self-center text-xs">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="regenerate-menu-label">
 						{$i18n.t('Regenerate Menu')}
 					</div>
+				</svelte:fragment>
 
-					<div class="flex items-center gap-2 p-1">
-						<Switch
-							ariaLabelledbyId="regenerate-menu-label"
-							tooltip={true}
-							bind:state={regenerateMenu}
-							on:change={() => {
-								saveSettings({ regenerateMenu });
-							}}
-						/>
-					</div>
+				<div class="flex items-center gap-2 p-1">
+					<Switch
+						ariaLabelledbyId="regenerate-menu-label"
+						tooltip={true}
+						bind:state={regenerateMenu}
+						on:change={() => {
+							saveSettings({ regenerateMenu });
+						}}
+					/>
 				</div>
-			</div>
+			</SettingRow>
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div id="always-collapse-label" class=" self-center text-xs">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="always-collapse-label">
 						{$i18n.t('Always Collapse Code Blocks')}
 					</div>
+				</svelte:fragment>
 
-					<div class="flex items-center gap-2 p-1">
-						<Switch
-							ariaLabelledbyId="always-collapse-label"
-							tooltip={true}
-							bind:state={collapseCodeBlocks}
-							on:change={() => {
-								saveSettings({ collapseCodeBlocks });
-							}}
-						/>
-					</div>
+				<div class="flex items-center gap-2 p-1">
+					<Switch
+						ariaLabelledbyId="always-collapse-label"
+						tooltip={true}
+						bind:state={collapseCodeBlocks}
+						on:change={() => {
+							saveSettings({ collapseCodeBlocks });
+						}}
+					/>
 				</div>
-			</div>
+			</SettingRow>
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div id="always-expand-label" class=" self-center text-xs">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="always-expand-label">
 						{$i18n.t('Always Expand Details')}
 					</div>
+				</svelte:fragment>
 
-					<div class="flex items-center gap-2 p-1">
-						<Switch
-							ariaLabelledbyId="always-expand-label"
-							tooltip={true}
-							bind:state={expandDetails}
-							on:change={() => {
-								saveSettings({ expandDetails });
-							}}
-						/>
-					</div>
+				<div class="flex items-center gap-2 p-1">
+					<Switch
+						ariaLabelledbyId="always-expand-label"
+						tooltip={true}
+						bind:state={expandDetails}
+						on:change={() => {
+							saveSettings({ expandDetails });
+						}}
+					/>
 				</div>
-			</div>
+			</SettingRow>
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div id="render-markdown-in-previews-label" class=" self-center text-xs">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="render-markdown-in-previews-label">
 						{$i18n.t('Render Markdown in Previews')}
 					</div>
+				</svelte:fragment>
 
-					<div class="flex items-center gap-2 p-1">
-						<Switch
-							ariaLabelledbyId="render-markdown-in-previews-label"
-							tooltip={true}
-							bind:state={renderMarkdownInPreviews}
-							on:change={() => {
-								saveSettings({ renderMarkdownInPreviews });
-							}}
-						/>
-					</div>
+				<div class="flex items-center gap-2 p-1">
+					<Switch
+						ariaLabelledbyId="render-markdown-in-previews-label"
+						tooltip={true}
+						bind:state={renderMarkdownInPreviews}
+						on:change={() => {
+							saveSettings({ renderMarkdownInPreviews });
+						}}
+					/>
 				</div>
-			</div>
+			</SettingRow>
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div id="keep-followup-prompts-label" class=" self-center text-xs">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="keep-followup-prompts-label">
 						{$i18n.t('Display Multi-model Responses in Tabs')}
 					</div>
+				</svelte:fragment>
 
-					<div class="flex items-center gap-2 p-1">
-						<Switch
-							ariaLabelledbyId="keep-followup-prompts-label"
-							tooltip={true}
-							bind:state={displayMultiModelResponsesInTabs}
-							on:change={() => {
-								saveSettings({ displayMultiModelResponsesInTabs });
-							}}
-						/>
-					</div>
+				<div class="flex items-center gap-2 p-1">
+					<Switch
+						ariaLabelledbyId="keep-followup-prompts-label"
+						tooltip={true}
+						bind:state={displayMultiModelResponsesInTabs}
+						on:change={() => {
+							saveSettings({ displayMultiModelResponsesInTabs });
+						}}
+					/>
 				</div>
-			</div>
+			</SettingRow>
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div id="scroll-on-branch-change-label" class=" self-center text-xs">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="scroll-on-branch-change-label">
 						{$i18n.t('Scroll On Branch Change')}
 					</div>
+				</svelte:fragment>
 
-					<div class="flex items-center gap-2 p-1">
-						<Switch
-							ariaLabelledbyId="scroll-on-branch-change-label"
-							tooltip={true}
-							bind:state={scrollOnBranchChange}
-							on:change={() => {
-								saveSettings({ scrollOnBranchChange });
-							}}
-						/>
-					</div>
+				<div class="flex items-center gap-2 p-1">
+					<Switch
+						ariaLabelledbyId="scroll-on-branch-change-label"
+						tooltip={true}
+						bind:state={scrollOnBranchChange}
+						on:change={() => {
+							saveSettings({ scrollOnBranchChange });
+						}}
+					/>
 				</div>
-			</div>
+			</SettingRow>
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div id="stylized-pdf-export-label" class=" self-center text-xs">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="stylized-pdf-export-label">
 						{$i18n.t('Stylized PDF Export')}
 					</div>
+				</svelte:fragment>
 
-					<div class="flex items-center gap-2 p-1">
-						<Switch
-							ariaLabelledbyId="stylized-pdf-export-label"
-							tooltip={true}
-							bind:state={stylizedPdfExport}
-							on:change={() => {
-								saveSettings({ stylizedPdfExport });
-							}}
-						/>
-					</div>
+				<div class="flex items-center gap-2 p-1">
+					<Switch
+						ariaLabelledbyId="stylized-pdf-export-label"
+						tooltip={true}
+						bind:state={stylizedPdfExport}
+						on:change={() => {
+							saveSettings({ stylizedPdfExport });
+						}}
+					/>
 				</div>
-			</div>
+			</SettingRow>
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<label id="floating-action-buttons-label" class=" self-center text-xs">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<label id="floating-action-buttons-label">
 						{$i18n.t('Floating Quick Actions')}
 					</label>
+				</svelte:fragment>
 
-					<div class="flex items-center gap-3 p-1">
-						{#if showFloatingActionButtons}
-							<button
-								class="text-xs text-gray-700 dark:text-gray-400 underline"
-								type="button"
-								aria-label={$i18n.t('Open Modal To Manage Floating Quick Actions')}
-								on:click={() => {
-									showManageFloatingActionButtonsModal = true;
-								}}
-							>
-								{$i18n.t('Manage')}
-							</button>
-						{/if}
-
-						<Switch
-							ariaLabelledbyId="floating-action-buttons-label"
-							tooltip={true}
-							bind:state={showFloatingActionButtons}
-							on:change={() => {
-								saveSettings({ showFloatingActionButtons });
+				<div class="flex items-center gap-3 p-1">
+					{#if showFloatingActionButtons}
+						<button
+							class="text-xs text-gray-700 dark:text-gray-400 underline"
+							type="button"
+							aria-label={$i18n.t('Open Modal To Manage Floating Quick Actions')}
+							on:click={() => {
+								showManageFloatingActionButtonsModal = true;
 							}}
-						/>
-					</div>
-				</div>
-			</div>
+						>
+							{$i18n.t('Manage')}
+						</button>
+					{/if}
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div id="web-search-in-chat-label" class=" self-center text-xs">
+					<Switch
+						ariaLabelledbyId="floating-action-buttons-label"
+						tooltip={true}
+						bind:state={showFloatingActionButtons}
+						on:change={() => {
+							saveSettings({ showFloatingActionButtons });
+						}}
+					/>
+				</div>
+			</SettingRow>
+
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="web-search-in-chat-label">
 						{$i18n.t('Web Search in Chat')}
 					</div>
+				</svelte:fragment>
 
-					<button
-						aria-labelledby="web-search-in-chat-label web-search-state"
-						class="p-1 px-3 text-xs flex rounded-sm transition"
-						on:click={() => {
-							toggleWebSearch();
-						}}
-						type="button"
+				<button
+					aria-labelledby="web-search-in-chat-label web-search-state"
+					class="px-3 py-1.5 text-sm font-medium rounded-[10px] bg-gray-100 hover:bg-gray-200 dark:bg-gray-850 dark:hover:bg-gray-800 text-gray-800 dark:text-gray-100 flex transition"
+					on:click={() => {
+						toggleWebSearch();
+					}}
+					type="button"
+				>
+					<span class="self-center" id="web-search-state"
+						>{webSearch === 'always' ? $i18n.t('Always') : $i18n.t('Default')}</span
 					>
-						<span class="ml-2 self-center" id="web-search-state"
-							>{webSearch === 'always' ? $i18n.t('Always') : $i18n.t('Default')}</span
-						>
-					</button>
-				</div>
-			</div>
+				</button>
+			</SettingRow>
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div id="show-all-claude-models-label" class=" self-center text-xs">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="show-all-claude-models-label">
 						{$i18n.t('Show all Claude models')}
 					</div>
+				</svelte:fragment>
 
-					<div class="flex items-center gap-2 p-1">
-						<Switch
-							ariaLabelledbyId="show-all-claude-models-label"
-							tooltip={true}
-							bind:state={showAllCloudModels}
-							on:change={() => {
-								saveSettings({ showAllCloudModels });
-							}}
-						/>
-					</div>
+				<div class="flex items-center gap-2 p-1">
+					<Switch
+						ariaLabelledbyId="show-all-claude-models-label"
+						tooltip={true}
+						bind:state={showAllCloudModels}
+						on:change={() => {
+							saveSettings({ showAllCloudModels });
+						}}
+					/>
 				</div>
-			</div>
+			</SettingRow>
 
-			<div class=" my-2 text-sm font-medium">{$i18n.t('Input')}</div>
+			<div class="pt-8 pb-1 text-lg font-semibold text-gray-900 dark:text-gray-100">{$i18n.t('Input')}</div>
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div id="enter-key-behavior-label ctrl-enter-to-send-state" class=" self-center text-xs">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="enter-key-behavior-label ctrl-enter-to-send-state">
 						{$i18n.t('Enter Key Behavior')}
 					</div>
+				</svelte:fragment>
 
-					<button
-						aria-labelledby="enter-key-behavior-label"
-						class="p-1 px-3 text-xs flex rounded transition"
-						on:click={() => {
-							togglectrlEnterToSend();
-						}}
-						type="button"
+				<button
+					aria-labelledby="enter-key-behavior-label"
+					class="px-3 py-1.5 text-sm font-medium rounded-[10px] bg-gray-100 hover:bg-gray-200 dark:bg-gray-850 dark:hover:bg-gray-800 text-gray-800 dark:text-gray-100 flex transition"
+					on:click={() => {
+						togglectrlEnterToSend();
+					}}
+					type="button"
+				>
+					<span class="self-center" id="ctrl-enter-to-send-state"
+						>{ctrlEnterToSend === true
+							? $i18n.t('Ctrl+Enter to Send')
+							: $i18n.t('Enter to Send')}</span
 					>
-						<span class="ml-2 self-center" id="ctrl-enter-to-send-state"
-							>{ctrlEnterToSend === true
-								? $i18n.t('Ctrl+Enter to Send')
-								: $i18n.t('Enter to Send')}</span
-						>
-					</button>
-				</div>
-			</div>
+				</button>
+			</SettingRow>
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div id="rich-input-label" class=" self-center text-xs">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="rich-input-label">
 						{$i18n.t('Rich Text Input for Chat')}
 					</div>
+				</svelte:fragment>
+
+				<div class="flex items-center gap-2 p-1">
+					<Switch
+						tooltip={true}
+						ariaLabelledbyId="rich-input-label"
+						bind:state={richTextInput}
+						on:change={() => {
+							saveSettings({ richTextInput });
+						}}
+					/>
+				</div>
+			</SettingRow>
+
+			{#if $config?.features?.enable_autocomplete_generation}
+				<SettingRow>
+					<svelte:fragment slot="title">
+						<div id="prompt-autocompletion-label">
+							{$i18n.t('Prompt Autocompletion')}
+						</div>
+					</svelte:fragment>
 
 					<div class="flex items-center gap-2 p-1">
 						<Switch
+							ariaLabelledbyId="prompt-autocompletion-label"
 							tooltip={true}
-							ariaLabelledbyId="rich-input-label"
-							bind:state={richTextInput}
+							bind:state={promptAutocomplete}
 							on:change={() => {
-								saveSettings({ richTextInput });
+								saveSettings({ promptAutocomplete });
 							}}
 						/>
 					</div>
-				</div>
-			</div>
-
-			{#if $config?.features?.enable_autocomplete_generation}
-				<div>
-					<div class=" py-0.5 flex w-full justify-between">
-						<div id="prompt-autocompletion-label" class=" self-center text-xs">
-							{$i18n.t('Prompt Autocompletion')}
-						</div>
-
-						<div class="flex items-center gap-2 p-1">
-							<Switch
-								ariaLabelledbyId="prompt-autocompletion-label"
-								tooltip={true}
-								bind:state={promptAutocomplete}
-								on:change={() => {
-									saveSettings({ promptAutocomplete });
-								}}
-							/>
-						</div>
-					</div>
-				</div>
+				</SettingRow>
 			{/if}
 
 			{#if richTextInput}
-				<div>
-					<div class=" py-0.5 flex w-full justify-between">
-						<div id="show-formatting-toolbar-label" class=" self-center text-xs">
+				<SettingRow>
+					<svelte:fragment slot="title">
+						<div id="show-formatting-toolbar-label">
 							{$i18n.t('Show Formatting Toolbar')}
 						</div>
+					</svelte:fragment>
 
-						<div class="flex items-center gap-2 p-1">
-							<Switch
-								ariaLabelledbyId="show-formatting-toolbar-label"
-								tooltip={true}
-								bind:state={showFormattingToolbar}
-								on:change={() => {
-									saveSettings({ showFormattingToolbar });
-								}}
-							/>
-						</div>
+					<div class="flex items-center gap-2 p-1">
+						<Switch
+							ariaLabelledbyId="show-formatting-toolbar-label"
+							tooltip={true}
+							bind:state={showFormattingToolbar}
+							on:change={() => {
+								saveSettings({ showFormattingToolbar });
+							}}
+						/>
 					</div>
-				</div>
+				</SettingRow>
 
-				<div>
-					<div class=" py-0.5 flex w-full justify-between">
-						<div id="insert-prompt-as-rich-text-label" class=" self-center text-xs">
+				<SettingRow>
+					<svelte:fragment slot="title">
+						<div id="insert-prompt-as-rich-text-label">
 							{$i18n.t('Insert Prompt as Rich Text')}
 						</div>
+					</svelte:fragment>
 
-						<div class="flex items-center gap-2 p-1">
-							<Switch
-								ariaLabelledbyId="insert-prompt-as-rich-text-label"
-								tooltip={true}
-								bind:state={insertPromptAsRichText}
-								on:change={() => {
-									saveSettings({ insertPromptAsRichText });
-								}}
-							/>
-						</div>
+					<div class="flex items-center gap-2 p-1">
+						<Switch
+							ariaLabelledbyId="insert-prompt-as-rich-text-label"
+							tooltip={true}
+							bind:state={insertPromptAsRichText}
+							on:change={() => {
+								saveSettings({ insertPromptAsRichText });
+							}}
+						/>
 					</div>
-				</div>
+				</SettingRow>
 			{/if}
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div id="paste-large-label" class=" self-center text-xs">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="paste-large-label">
 						{$i18n.t('Paste Large Text as File')}
 					</div>
+				</svelte:fragment>
 
-					<div class="flex items-center gap-2 p-1">
-						<Switch
-							tooltip={true}
-							ariaLabelledbyId="paste-large-label"
-							bind:state={largeTextAsFile}
-							on:change={() => {
-								saveSettings({ largeTextAsFile });
-							}}
-						/>
-					</div>
+				<div class="flex items-center gap-2 p-1">
+					<Switch
+						tooltip={true}
+						ariaLabelledbyId="paste-large-label"
+						bind:state={largeTextAsFile}
+						on:change={() => {
+							saveSettings({ largeTextAsFile });
+						}}
+					/>
 				</div>
-			</div>
+			</SettingRow>
 
-			<div class=" my-2 text-sm font-medium">{$i18n.t('Artifacts')}</div>
+			<div class="pt-8 pb-1 text-lg font-semibold text-gray-900 dark:text-gray-100">{$i18n.t('Artifacts')}</div>
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div id="detect-artifacts-label" class=" self-center text-xs">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="detect-artifacts-label">
 						{$i18n.t('Detect Artifacts Automatically')}
 					</div>
+				</svelte:fragment>
 
-					<div class="flex items-center gap-2 p-1">
-						<Switch
-							ariaLabelledbyId="detect-artifacts-label"
-							tooltip={true}
-							bind:state={detectArtifacts}
-							on:change={() => {
-								saveSettings({ detectArtifacts });
-							}}
-						/>
-					</div>
+				<div class="flex items-center gap-2 p-1">
+					<Switch
+						ariaLabelledbyId="detect-artifacts-label"
+						tooltip={true}
+						bind:state={detectArtifacts}
+						on:change={() => {
+							saveSettings({ detectArtifacts });
+						}}
+					/>
 				</div>
-			</div>
+			</SettingRow>
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div id="iframe-sandbox-allow-same-origin-label" class=" self-center text-xs">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="iframe-sandbox-allow-same-origin-label">
 						{$i18n.t('iframe Sandbox Allow Same Origin')}
 					</div>
+				</svelte:fragment>
 
-					<div class="flex items-center gap-2 p-1">
-						<Switch
-							ariaLabelledbyId="iframe-sandbox-allow-same-origin-label"
-							tooltip={true}
-							bind:state={iframeSandboxAllowSameOrigin}
-							on:change={() => {
-								saveSettings({ iframeSandboxAllowSameOrigin });
-							}}
-						/>
-					</div>
+				<div class="flex items-center gap-2 p-1">
+					<Switch
+						ariaLabelledbyId="iframe-sandbox-allow-same-origin-label"
+						tooltip={true}
+						bind:state={iframeSandboxAllowSameOrigin}
+						on:change={() => {
+							saveSettings({ iframeSandboxAllowSameOrigin });
+						}}
+					/>
 				</div>
-			</div>
+			</SettingRow>
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div id="iframe-sandbox-allow-forms-label" class=" self-center text-xs">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="iframe-sandbox-allow-forms-label">
 						{$i18n.t('iframe Sandbox Allow Forms')}
 					</div>
+				</svelte:fragment>
 
-					<div class="flex items-center gap-2 p-1">
-						<Switch
-							ariaLabelledbyId="iframe-sandbox-allow-forms-label"
-							tooltip={true}
-							bind:state={iframeSandboxAllowForms}
-							on:change={() => {
-								saveSettings({ iframeSandboxAllowForms });
-							}}
-						/>
-					</div>
+				<div class="flex items-center gap-2 p-1">
+					<Switch
+						ariaLabelledbyId="iframe-sandbox-allow-forms-label"
+						tooltip={true}
+						bind:state={iframeSandboxAllowForms}
+						on:change={() => {
+							saveSettings({ iframeSandboxAllowForms });
+						}}
+					/>
 				</div>
-			</div>
+			</SettingRow>
 
-			<div class=" my-2 text-sm font-medium">{$i18n.t('Voice')}</div>
+			<div class="pt-8 pb-1 text-lg font-semibold text-gray-900 dark:text-gray-100">{$i18n.t('Voice')}</div>
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div class=" self-center text-xs" id="allow-voice-interruption-in-call-label">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="allow-voice-interruption-in-call-label">
 						{$i18n.t('Allow Voice Interruption in Call')}
 					</div>
+				</svelte:fragment>
 
-					<div class="flex items-center gap-2 p-1">
-						<Switch
-							ariaLabelledbyId="allow-voice-interruption-in-call-label"
-							tooltip={true}
-							bind:state={voiceInterruption}
-							on:change={() => {
-								saveSettings({ voiceInterruption });
-							}}
-						/>
-					</div>
+				<div class="flex items-center gap-2 p-1">
+					<Switch
+						ariaLabelledbyId="allow-voice-interruption-in-call-label"
+						tooltip={true}
+						bind:state={voiceInterruption}
+						on:change={() => {
+							saveSettings({ voiceInterruption });
+						}}
+					/>
 				</div>
-			</div>
+			</SettingRow>
 
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div id="display-emoji-label" class=" self-center text-xs">
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="display-emoji-label">
 						{$i18n.t('Display Emoji in Call')}
 					</div>
+				</svelte:fragment>
+
+				<div class="flex items-center gap-2 p-1">
+					<Switch
+						ariaLabelledbyId="display-emoji-label"
+						tooltip={true}
+						bind:state={showEmojiInCall}
+						on:change={() => {
+							saveSettings({ showEmojiInCall });
+						}}
+					/>
+				</div>
+			</SettingRow>
+
+			<div class="pt-8 pb-1 text-lg font-semibold text-gray-900 dark:text-gray-100">{$i18n.t('File')}</div>
+
+			<SettingRow>
+				<svelte:fragment slot="title">
+					<div id="image-compression-label">
+						{$i18n.t('Image Compression')}
+					</div>
+				</svelte:fragment>
+
+				<div class="flex items-center gap-3 p-1">
+					{#if imageCompression}
+						<button
+							class="text-xs text-gray-700 dark:text-gray-400 underline"
+							type="button"
+							aria-label={$i18n.t('Open Modal To Manage Image Compression')}
+							on:click={() => {
+								showManageImageCompressionModal = true;
+							}}
+						>
+							{$i18n.t('Manage')}
+						</button>
+					{/if}
+
+					<Switch
+						ariaLabelledbyId="image-compression-label"
+						tooltip={true}
+						bind:state={imageCompression}
+						on:change={() => {
+							saveSettings({ imageCompression });
+						}}
+					/>
+				</div>
+			</SettingRow>
+
+			{#if imageCompression}
+				<SettingRow>
+					<svelte:fragment slot="title">
+						<div id="image-compression-in-channels-label">
+							{$i18n.t('Compress Images in Channels')}
+						</div>
+					</svelte:fragment>
 
 					<div class="flex items-center gap-2 p-1">
 						<Switch
-							ariaLabelledbyId="display-emoji-label"
+							ariaLabelledbyId="image-compression-in-channels-label"
 							tooltip={true}
-							bind:state={showEmojiInCall}
+							bind:state={imageCompressionInChannels}
 							on:change={() => {
-								saveSettings({ showEmojiInCall });
+								saveSettings({ imageCompressionInChannels });
 							}}
 						/>
 					</div>
-				</div>
-			</div>
-
-			<div class=" my-2 text-sm font-medium">{$i18n.t('File')}</div>
-
-			<div>
-				<div class=" py-0.5 flex w-full justify-between">
-					<div id="image-compression-label" class=" self-center text-xs">
-						{$i18n.t('Image Compression')}
-					</div>
-
-					<div class="flex items-center gap-3 p-1">
-						{#if imageCompression}
-							<button
-								class="text-xs text-gray-700 dark:text-gray-400 underline"
-								type="button"
-								aria-label={$i18n.t('Open Modal To Manage Image Compression')}
-								on:click={() => {
-									showManageImageCompressionModal = true;
-								}}
-							>
-								{$i18n.t('Manage')}
-							</button>
-						{/if}
-
-						<Switch
-							ariaLabelledbyId="image-compression-label"
-							tooltip={true}
-							bind:state={imageCompression}
-							on:change={() => {
-								saveSettings({ imageCompression });
-							}}
-						/>
-					</div>
-				</div>
-			</div>
-
-			{#if imageCompression}
-				<div>
-					<div class=" py-0.5 flex w-full justify-between">
-						<div id="image-compression-in-channels-label" class=" self-center text-xs">
-							{$i18n.t('Compress Images in Channels')}
-						</div>
-
-						<div class="flex items-center gap-2 p-1">
-							<Switch
-								ariaLabelledbyId="image-compression-in-channels-label"
-								tooltip={true}
-								bind:state={imageCompressionInChannels}
-								on:change={() => {
-									saveSettings({ imageCompressionInChannels });
-								}}
-							/>
-						</div>
-					</div>
-				</div>
+				</SettingRow>
 			{/if}
 		</div>
 	</div>

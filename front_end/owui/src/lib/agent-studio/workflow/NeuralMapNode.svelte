@@ -11,7 +11,8 @@
 			: data?.status === 'error'
 				? 'bg-red-500'
 				: data?.status === 'cancelled'
-					? 'bg-amber-500'
+					? // inert, NOT amber — amber is reserved for "needs YOU" (awaiting approval)
+						'bg-gray-400 dark:bg-gray-600'
 					: 'bg-blue-500';
 	$: running = kind === 'run' && data?.status === 'running';
 

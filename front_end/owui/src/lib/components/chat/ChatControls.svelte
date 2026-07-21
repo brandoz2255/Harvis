@@ -51,6 +51,7 @@
 	import PyodideFileNav from './PyodideFileNav.svelte';
 	import Overview from './Overview.svelte';
 	import GlobalMap from '$lib/agent-studio/GlobalMap.svelte';
+	import UnderConstruction from '$lib/components/common/UnderConstruction.svelte';
 	import Brain from '$lib/agent-studio/Brain.svelte';
 	import IncompletePanel from '$lib/agent-studio/IncompletePanel.svelte';
 	import Cookbook from '$lib/agent-studio/Cookbook.svelte';
@@ -431,6 +432,9 @@
 									onClose={() => showControls.set(false)}
 								/>
 							{:else if activeTab === 'global-map'}
+								<!-- Neural Map is flagged under construction in agent-studio/surfaces.ts;
+								     mark the docked view too so it doesn't read as finished. -->
+								<div class="px-3 pt-3"><UnderConstruction /></div>
 								<GlobalMap mode="dock" />
 							{:else if activeTab === 'brain'}
 								<Brain mode="dock" />
@@ -607,6 +611,7 @@
 										onClose={() => showControls.set(false)}
 									/>
 								{:else if activeTab === 'global-map'}
+									<div class="px-3 pt-3"><UnderConstruction /></div>
 									<GlobalMap mode="dock" />
 								{:else if activeTab === 'brain'}
 									<Brain mode="dock" />

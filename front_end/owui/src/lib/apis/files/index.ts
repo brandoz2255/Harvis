@@ -106,7 +106,7 @@ export const getFileProcessStatus = async (token: string, id: string) => {
 			authorization: `Bearer ${token}`
 		}
 	}).catch((err) => {
-		error = err.detail;
+		error = err.detail ?? err.message ?? 'Request failed';
 		console.error(err);
 		return null;
 	});
@@ -133,7 +133,7 @@ export const uploadDir = async (token: string) => {
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			return null;
 		});
 
@@ -163,7 +163,7 @@ export const getFiles = async (token: string = '') => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -201,7 +201,7 @@ export const searchFiles = async (
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return [];
 		});
@@ -232,7 +232,7 @@ export const getFileById = async (token: string, id: string) => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -266,7 +266,7 @@ export const updateFileDataContentById = async (token: string, id: string, conte
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -293,7 +293,7 @@ export const getFileContentById = async (id: string) => {
 			return await res.arrayBuffer();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 
 			return null;
@@ -325,7 +325,7 @@ export const deleteFileById = async (token: string, id: string) => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
@@ -356,7 +356,7 @@ export const deleteAllFiles = async (token: string) => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail ?? err.message ?? 'Request failed';
 			console.error(err);
 			return null;
 		});
