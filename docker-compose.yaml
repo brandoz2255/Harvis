@@ -470,6 +470,9 @@ services:
       dockerfile: Dockerfile
       target: build
     image: harvis-owui-builder:local
+    # Local build tag — tell Compose to build it, not pull it (a bare
+    # `docker compose up -d` without --build otherwise fails: pull access denied).
+    pull_policy: build
     container_name: harvis-owui-builder
     restart: "no"
     volumes:
@@ -721,6 +724,9 @@ services:
       context: .
       dockerfile: openclaw-browser/Dockerfile
     image: dulc3/openclaw-browser:latest
+    # Registry-style tag but we build it locally — force build so a bare
+    # `docker compose up -d` doesn't try to pull it.
+    pull_policy: build
     container_name: harvis-openclaw
     restart: unless-stopped
     user: "1000:1000"
@@ -959,6 +965,7 @@ services:
       context: ./plugins/messaging-gateway
       dockerfile: Dockerfile
     image: harvis-messaging-gateway:local
+    pull_policy: build
     container_name: harvis-messaging-gateway
     restart: unless-stopped
     environment:
@@ -1004,6 +1011,7 @@ services:
       context: ./opencode
       dockerfile: Dockerfile
     image: harvis-opencode:local
+    pull_policy: build
     container_name: harvis-opencode
     restart: unless-stopped
     user: "1001:1001"
@@ -1027,6 +1035,7 @@ services:
       context: ./codex
       dockerfile: Dockerfile
     image: harvis-codex:local
+    pull_policy: build
     container_name: harvis-codex
     restart: unless-stopped
     user: "1001:1001"
@@ -1046,6 +1055,7 @@ services:
       context: ./claude-code
       dockerfile: Dockerfile
     image: harvis-claude-code:local
+    pull_policy: build
     container_name: harvis-claude-code
     restart: unless-stopped
     user: "1001:1001"
@@ -1068,6 +1078,7 @@ services:
       context: ./hermes-agent
       dockerfile: Dockerfile
     image: harvis-hermes-agent:local
+    pull_policy: build
     container_name: harvis-hermes-agent
     restart: unless-stopped
     environment:
@@ -1096,6 +1107,7 @@ services:
       context: ./cad-engine
       dockerfile: Dockerfile
     image: harvis-cad:local
+    pull_policy: build
     container_name: harvis-cad
     restart: unless-stopped
     # Dedicated INTERNAL network shared only with the backend. The sidecar has no
