@@ -154,6 +154,11 @@ services:
       # Optional desktop-GPU Ollama for the model picker. Surfaces models that
       # only exist on the desktop (e.g. gemma4-26b on the 5080) in /api/models.
       DESKTOP_OLLAMA_URL: "${DESKTOP_OLLAMA_URL:-}"
+      # Deep-research synthesis model. MUST be forwarded here or a .env override
+      # never reaches the container (the code default would always win). Empty =
+      # fall back to the code default (llama3.1:8b); set in .env to an installed
+      # model. Per-request body.model overrides this.
+      DEEP_RESEARCH_MODEL: "${DEEP_RESEARCH_MODEL:-}"
       # Per-workspace ephemeral Docker terminal (Phase 2). Default ON — the
       # backend probes docker.sock + network at startup and gates the
       # /api/tools/terminal/<wsid>/exec endpoint on the result. Set
@@ -967,6 +972,10 @@ services:
     image: harvis-messaging-gateway:local
     pull_policy: build
     container_name: harvis-messaging-gateway
+    # Only start when a messaging platform is configured. Without this the
+    # gateway boots with no adapters, exits 0, and `restart: unless-stopped`
+    # loops it forever. Enable with `--profile messaging` / COMPOSE_PROFILES.
+    profiles: ["messaging"]
     restart: unless-stopped
     environment:
       MESSAGING_GATEWAY_TOKEN: "${MESSAGING_GATEWAY_TOKEN:-}"

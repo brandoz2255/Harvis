@@ -111,6 +111,10 @@ def _uid_from_request(request: Request) -> int:
 
 class GitHubStatusResponse(BaseModel):
     connected: bool
+    # False when GITHUB_CLIENT_ID is unset — lets the UI hide/disable "Connect
+    # GitHub" instead of letting the user click into an error. GitHub OAuth needs
+    # a per-deployment OAuth App, so it is legitimately absent by default.
+    configured: bool = True
     login: Optional[str] = None
     name: Optional[str] = None
     avatar_url: Optional[str] = None
@@ -130,7 +134,10 @@ async def github_oauth_start(request: Request, response: Response):
     flow (owui's "Connect GitHub" fetch) must set it just like the /login redirect does.
     """
     if not GITHUB_CLIENT_ID:
-        raise HTTPException(status_code=500, detail="GitHub OAuth not configured")
+        # 503 (not 500) + a parseable code: this is "not configured for this
+        # deployment", not a server crash. Frontend uses /status.configured to
+        # avoid reaching here at all.
+        raise HTTPException(status_code=503, detail="github_oauth_not_configured")
 
     # Generate CSRF state token
     state = _mk_state("/harvis/vibecode")  # land back on VibeCode after connecting
@@ -172,7 +179,7 @@ async def github_login(next: str = "/"):
     Redirects user to GitHub authorization page.
     """
     if not GITHUB_CLIENT_ID:
-        raise HTTPException(status_code=500, detail="GitHub OAuth not configured")
+        raise HTTPException(status_code=503, detail="github_oauth_not_configured")
 
     state = _mk_state(next)
 
@@ -364,6 +371,11 @@ async def github_status(request: Request):
     Auth via JWT cookie (OAuth flow) OR Authorization: Bearer (owui).
     """
     user_id = _uid_from_request(request)
+
+    # No OAuth App configured for this deployment → honestly report it so the UI
+    # can hide the Connect button rather than 500 when the user clicks it.
+    if not GITHUB_CLIENT_ID:
+        return GitHubStatusResponse(connected=False, configured=False)
 
     pool = getattr(request.app.state, 'pg_pool', None)
     if not pool:

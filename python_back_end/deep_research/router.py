@@ -51,7 +51,9 @@ _SESSION_ID_RE = re.compile(r"^[a-zA-Z0-9-]{1,128}$")
 
 # Default Ollama model for research synthesis. Override per-request (body.model)
 # or globally via DEEP_RESEARCH_MODEL. No keyword-based auto-routing.
-DEFAULT_RESEARCH_MODEL = os.getenv("DEEP_RESEARCH_MODEL", "llama3.1:8b")
+# `or` (not a getenv default) so compose forwarding the var as an EMPTY string
+# still falls back instead of trying to reach a model named "".
+DEFAULT_RESEARCH_MODEL = os.getenv("DEEP_RESEARCH_MODEL") or "llama3.1:8b"
 
 
 # ─── Auth (mirror notebooks/router.py — late import avoids circular import) ───

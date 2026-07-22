@@ -166,8 +166,9 @@ class DeepResearcher:
     """
     Iterative research engine following the IterResearch pattern.
 
-    Each round: LLM generates queries → SearXNG search → LLM extracts from
-    top pages → LLM synthesizes into evolving report → LLM decides continue/stop.
+    Each round: LLM generates queries → web search (DuckDuckGo via ddgs, see
+    research/web_search.py) → LLM extracts from top pages → LLM synthesizes into
+    an evolving report → LLM decides continue/stop.
     """
 
     def __init__(
