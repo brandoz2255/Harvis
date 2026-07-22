@@ -1,0 +1,49 @@
+# Build-context exclusions.
+#
+# Two services build with `context: .` (openclaw, tts-service), so without this
+# file the ENTIRE 24 GB repository is sent to the Docker daemon — twice. On
+# Docker Desktop (Windows/macOS) that transfer crosses a VM boundary and was
+# measured dominating an ~8m50s cold start.
+#
+# Everything below is verified NOT to be a build input. `assets/` is deliberately
+# NOT excluded: it holds mascot media that a build may legitimately copy.
+# If a build ever fails for a missing file, delete this file to revert entirely.
+
+# Model weights and generated image data — 17 GB, referenced by no Dockerfile.
+image-comfy/
+image-models/
+
+# Dependencies are installed inside the image; never ship the host's copies.
+**/node_modules/
+
+# Agent tooling and git worktrees — .claude/worktrees holds whole repo copies.
+.claude/
+.claude-flow/
+.swarm/
+
+# VCS metadata.
+.git/
+.gitignore
+.gitattributes
+
+# Python caches and virtualenvs.
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.venv/
+**/venv/
+
+# Frontend build outputs — regenerated inside the image.
+**/.svelte-kit/
+**/.next/
+front_end/owui/build/
+
+# Generated artifacts and local scratch.
+graphify-out/
+**/*.log
+deployment.log
+
+# Secrets must never enter a build context.
+.env
+.env.*
+!.env.example

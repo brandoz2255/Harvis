@@ -1,0 +1,15 @@
+# Shell scripts and container entrypoints MUST keep LF endings.
+# Git for Windows defaults to core.autocrlf=true, which rewrites them to CRLF on
+# checkout; bash then fails with confusing errors ($'\r': command not found, or a
+# syntax error on a script that is fine everywhere else). Harvis is meant to be
+# cloned by strangers, so this cannot be left to each user's git config.
+*.sh            text eol=lf
+Dockerfile      text eol=lf
+Dockerfile.*    text eol=lf
+*.bash          text eol=lf
+
+# Files read by Linux containers verbatim — keep LF so mounted copies parse.
+*.yaml          text eol=lf
+*.yml           text eol=lf
+*.sql           text eol=lf
+.env.example    text eol=lf
