@@ -1,0 +1,156 @@
+{
+  "gateway": {
+    "bind": "lan",
+    "port": 18789,
+    "auth": {
+      "mode": "token"
+    },
+    "controlUi": {
+      "enabled": false
+    }
+  },
+  "commands": {
+    "bash": true,
+    "bashForegroundMs": 30000
+  },
+  "browser": {
+    "enabled": false
+  },
+  "session": {
+    "scope": "per-sender",
+    "maintenance": {
+      "pruneAfter": "30d",
+      "maxEntries": 500
+    }
+  },
+  "models": {
+    "mode": "replace",
+    "providers": {
+      "harvis-proxy": {
+        "api": "openai-completions",
+        "baseUrl": "http://backend:8000/v1",
+        "apiKey": "${OPENCLAW_GATEWAY_TOKEN}",
+        "models": [
+          {
+            "id": "auto",
+            "name": "Auto (follows /model picked in Discord)"
+          },
+          {
+            "id": "batiai/qwen3.5-9b:latest",
+            "name": "batiai/qwen3.5-9b:latest"
+          },
+          {
+            "id": "llama3.1:8b",
+            "name": "llama3.1:8b"
+          },
+          {
+            "id": "gemma4:e4b",
+            "name": "gemma4:e4b"
+          },
+          {
+            "id": "granite4.1:8b",
+            "name": "granite4.1:8b"
+          },
+          {
+            "id": "finalend/hermes-3-llama-3.1:8b",
+            "name": "finalend/hermes-3-llama-3.1:8b"
+          },
+          {
+            "id": "qwen3:4b",
+            "name": "qwen3:4b"
+          },
+          {
+            "id": "hermes3:3b",
+            "name": "hermes3:3b"
+          },
+          {
+            "id": "qwen3:14b",
+            "name": "qwen3:14b"
+          },
+          {
+            "id": "hf.co/Mungert/Hermes-4-14B-GGUF:Q5_K_M",
+            "name": "hf.co/Mungert/Hermes-4-14B-GGUF:Q5_K_M"
+          },
+          {
+            "id": "fredrezones55/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive:latest",
+            "name": "fredrezones55/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive:latest"
+          },
+          {
+            "id": "hermes4:14b-q5",
+            "name": "hermes4:14b-q5"
+          },
+          {
+            "id": "batiai/qwen3.6-27b:iq3",
+            "name": "batiai/qwen3.6-27b:iq3"
+          },
+          {
+            "id": "batiai/qwen3.6-27b:iq3-24k",
+            "name": "batiai/qwen3.6-27b:iq3-24k"
+          },
+          {
+            "id": "batiai/qwen3.6-27b:iq3-16k",
+            "name": "batiai/qwen3.6-27b:iq3-16k"
+          },
+          {
+            "id": "qwen3.5:9b",
+            "name": "qwen3.5:9b"
+          },
+          {
+            "id": "gemma4:12b",
+            "name": "gemma4:12b"
+          }
+        ]
+      }
+    }
+  },
+  "tools": {
+    "elevated": {
+      "enabled": true
+    },
+    "exec": {
+      "host": "gateway",
+      "security": "full",
+      "ask": "off"
+    }
+  },
+  "agents": {
+    "defaults": {
+      "elevatedDefault": "full",
+      "verboseDefault": "full",
+      "timeoutSeconds": 600,
+      "model": {
+        "primary": "harvis-proxy/gemma4:12b"
+      },
+      "subagents": {
+        "model": "harvis-proxy/gemma4:12b",
+        "runTimeoutSeconds": 600,
+        "announceTimeoutMs": 30000,
+        "maxSpawnDepth": 3,
+        "maxChildrenPerAgent": 12,
+        "maxConcurrent": 8
+      },
+      "heartbeat": {
+        "every": "4h",
+        "target": "none"
+      }
+    },
+    "list": [
+      {
+        "id": "main",
+        "default": true,
+        "model": {
+          "primary": "harvis-proxy/gemma4:12b"
+        }
+      }
+    ]
+  },
+  "skills": {
+    "load": {
+      "extraDirs": [
+        "/skills",
+        "/skills-shared"
+      ]
+    }
+  },
+  "channels": {}
+}

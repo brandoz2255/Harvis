@@ -130,14 +130,26 @@ python_back_end/whisper_models/
 **/*.safetensors
 **/*.ckpt
 
-# openclaw directory (image is pre-built, not tracked)
+# openclaw directory (image is pre-built, not tracked). BUT the config, skills,
+# scripts, and plugin SOURCE that docker-compose bind-mounts MUST ship: a missing
+# mount source becomes an empty dir, openclaw reads a directory as its config file
+# (EISDIR) and crashloops, and backend depends_on: openclaw — so a fresh clone
+# starts NOTHING. Re-included 2026-07-22 after the first Windows install E2E.
 openclaw/
-# ...but track our local config and skills placeholder
+# Un-ignore each dir, then its whole subtree with /** (a nested `!parent/child/`
+# alone cannot re-open a subtree the broad `openclaw/` rule already pruned).
 !openclaw/config/
-!openclaw/config/openclaw.json
-!openclaw/config/exec-approvals.json
+!openclaw/config/**
 !openclaw/skills/
-!openclaw/skills/.gitkeep
+!openclaw/skills/**
+!openclaw/scripts/
+!openclaw/scripts/**
+!openclaw/plugins/
+!openclaw/plugins/**
+# ...then re-ignore what must NOT ship, AFTER the broad re-includes above:
+openclaw/**/node_modules/
+# bundled/exec-approvals.json carries a default token and is no longer mounted.
+openclaw/config/bundled/exec-approvals.json
 
 # OpenCode engine sidecar: the config dir (Dockerfile / opencode.json / entrypoint.sh)
 # IS tracked — only a nested vendored OpenCode source clone is ignored.

@@ -1,0 +1,19 @@
+{
+  "id": "harvis-web-search",
+  "name": "Harvis Web Search",
+  "description": "Web search via Harvis's DDG-backed proxy. Use when you need to verify a fact, look up current information, or are uncertain about an answer.",
+  "version": "0.1.0",
+  "configSchema": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+  },
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "tools": [
+      "web_search"
+    ]
+  }
+}
