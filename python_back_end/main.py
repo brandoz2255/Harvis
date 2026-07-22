@@ -573,6 +573,38 @@ async def lifespan(app: FastAPI):
                     await conn.execute(_csf.read())
                 logger.info("✅ Core schema ensured (all_schemas_safe.sql)")
 
+                # Migrations 011-015 create tables (cron_jobs, user_memory,
+                # mcp_servers, messaging_platforms, user_soul) that no initdb
+                # mount and no other startup block provisions — a fresh clone
+                # otherwise spams `relation "cron_jobs" does not exist` and
+                # cron/messaging features break. run_migrations.py exists but is
+                # never invoked. Apply just these five here: all are verified
+                # idempotent (CREATE ... IF NOT EXISTS), so this heals fresh AND
+                # pre-existing volumes. Per-file try/except so one bad file can't
+                # abort boot. The 001-009 migrations include un-guarded ALTERs
+                # and are deliberately NOT swept in.
+                _mig_dir = os.path.join(os.path.dirname(__file__), "migrations")
+                for _mig_name in (
+                    "011_messaging_platforms.sql",
+                    "012_user_memory.sql",
+                    "013_mcp_servers.sql",
+                    "014_cron_jobs.sql",
+                    "015_user_soul.sql",
+                ):
+                    _mig_path = os.path.join(_mig_dir, _mig_name)
+                    try:
+                        with open(_mig_path, "r") as _mf:
+                            await conn.execute(_mf.read())
+                    except FileNotFoundError:
+                        pass
+                    except Exception as _mig_err:  # noqa: BLE001
+                        logger.warning(
+                            "Migration %s did not apply cleanly (continuing): %s",
+                            _mig_name,
+                            _mig_err,
+                        )
+                logger.info("✅ Idempotent migrations 011-015 ensured")
+
                 # Instance-level key/value settings (admin_user_id, …).
                 await conn.execute(
                     """
