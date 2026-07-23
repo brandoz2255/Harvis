@@ -8,7 +8,7 @@
 	import { getContext, onMount, onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { toast } from 'svelte-sonner';
-	import { WEBUI_NAME, chatId, models } from '$lib/stores';
+	import { WEBUI_NAME, chatId, models, showSidebar } from '$lib/stores';
 	import { copyToClipboard } from '$lib/utils';
 
 	import {
@@ -221,7 +221,11 @@
 	<title>{$i18n.t('Integrations')} • {$WEBUI_NAME}</title>
 </svelte:head>
 
-<div class="w-full h-full overflow-y-auto">
+<div
+	class="w-full h-full overflow-y-auto {$showSidebar
+		? 'md:max-w-[calc(100%-var(--sidebar-width))]'
+		: ''}"
+>
 	<div class="max-w-5xl mx-auto px-5 py-6 space-y-5">
 		<!-- header -->
 		<header>

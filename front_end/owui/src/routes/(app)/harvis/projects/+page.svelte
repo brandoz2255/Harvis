@@ -6,7 +6,7 @@
 	import { goto } from '$app/navigation';
 	import { toast } from 'svelte-sonner';
 
-	import { WEBUI_NAME, chatId } from '$lib/stores';
+	import { WEBUI_NAME, chatId, showSidebar } from '$lib/stores';
 	import { getFolders, createNewFolder } from '$lib/apis/folders';
 	import { getChatsByFolderId } from '$lib/apis/chats';
 	import FolderModal from '$lib/components/layout/Sidebar/Folders/FolderModal.svelte';
@@ -88,7 +88,11 @@
 
 <FolderModal bind:show={showCreate} onSubmit={createProject} />
 
-<div class="w-full h-full overflow-y-auto">
+<div
+	class="w-full h-full overflow-y-auto {$showSidebar
+		? 'md:max-w-[calc(100%-var(--sidebar-width))]'
+		: ''}"
+>
 	<div class="max-w-5xl mx-auto px-5 py-6 space-y-6">
 		<!-- Header -->
 		<header class="flex items-end justify-between gap-3">

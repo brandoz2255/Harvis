@@ -1956,7 +1956,12 @@
 		const modelId =
 			selectedModels?.[0] && selectedModels[0] !== '' ? selectedModels[0] : ($models?.[0]?.id ?? '');
 		try {
-			const r = await startResearch(localStorage.token, { query: q });
+			const r = await startResearch(localStorage.token, {
+				query: q,
+				// Pass the chat-selected model so research uses it instead of the
+				// backend default (which 404s if that default model isn't pulled).
+				...(modelId ? { model: modelId } : {})
+			});
 			const esc = (s) =>
 				`${s}`
 					.replace(/&/g, '&amp;')
