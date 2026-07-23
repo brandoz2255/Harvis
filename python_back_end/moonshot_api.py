@@ -220,8 +220,11 @@ def get_moonshot_client(api_key: str) -> MoonshotClient:
     return MoonshotClient(api_key)
 
 
-# Moonshot model mapping
+# Moonshot model mapping. kimi-k3 = the 2.8T MoE flagship (1M ctx, released 2026-07-16);
+# kimi-k2.6 = the prior stable; kimi-k2.5 = multimodal. All OpenAI-compatible on this base URL.
 MOONSHOT_MODELS = {
+    "kimi-k3": "kimi-k3",
+    "kimi-k2.6": "kimi-k2.6",
     "kimi-k2.5": "kimi-k2.5",
     "kimi-k2": "kimi-k2",
     "kimi-k1.5": "kimi-k1.5",
@@ -239,14 +242,20 @@ def is_moonshot_model(model_name: str) -> bool:
 
 
 def get_moonshot_model_id(model_name: str) -> str:
-    """Get the actual Moonshot model ID from a model name."""
-    model_lower = model_name.lower()
+    """Resolve a facade or bare model name to the real Moonshot API model id.
+    Strips the ``moonshot/`` catalog prefix and recognizes the k3 / k2.6 / k2.5 / k2 / k1.5
+    families. Order matters — the more-specific version tags are checked before bare ``k2``."""
+    m = (model_name or "").lower().split("/", 1)[-1]  # strip the 'moonshot/' facade prefix
 
-    if "k2.5" in model_lower or "k2-5" in model_lower:
+    if "k3" in m:
+        return "kimi-k3"
+    elif "k2.6" in m or "k2-6" in m:
+        return "kimi-k2.6"
+    elif "k2.5" in m or "k2-5" in m:
         return "kimi-k2.5"
-    elif "k2" in model_lower:
+    elif "k2" in m:
         return "kimi-k2"
-    elif "k1.5" in model_lower or "k1-5" in model_lower:
+    elif "k1.5" in m or "k1-5" in m:
         return "kimi-k1.5"
     else:
         return "kimi-k2.5"  # safe fallback — kimi-latest doesn't exist on Moonshot API

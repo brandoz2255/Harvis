@@ -100,6 +100,10 @@ CLOUD_ENGINE_IDS = {"codex", "claude-code"}
 # Phase E4 (renamed): the experimental NATIVE Hermes engine (vibecode-turn SubAgentRunner
 # + SOUL persona, NOT a sidecar). Kept as an opt-in fallback alongside the real app engine.
 NATIVE_ENGINE_IDS = {"hermes-native"}
+# Kimi = the ORIGINAL Harvis workspace engine (Moonshot/Kimi K2.5). NOT a sidecar and NOT the
+# native SubAgentRunner — it's a cloud reasoning engine that streams via stream_kimi_workspace
+# (agent_id="kimi"). Gated on a Moonshot API key (per-user row OR MOONSHOT_API_KEY env).
+KIMI_ENGINE_IDS = {"kimi"}
 
 
 def _engine_enabled(engine: str) -> bool:
@@ -223,15 +227,15 @@ async def _probe_kimi(pool, user_id: int) -> dict:
     if has_key:
         return {
             "id": "kimi",
-            "label": "Kimi K2.5",
+            "label": "Kimi",
             "description": "Moonshot API",
             "status": "online",
-            "models": ["kimi-k2.5"],
+            "models": ["kimi-k3", "kimi-k2.6", "kimi-k2.5"],
             "reason": None,
         }
     return {
         "id": "kimi",
-        "label": "Kimi K2.5",
+        "label": "Kimi",
         "description": "Moonshot API",
         "status": "no_key",
         "models": [],
@@ -1172,14 +1176,14 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
         if api_key:
             if use_parallel:
                 event_stream = stream_parallel_workspace(
-                    task_brief, chat_history, api_key=api_key, provider="kimi",
+                    task_brief, chat_history, api_key=api_key, model=model_name, provider="kimi",
                 )
             else:
-                event_stream = stream_kimi_workspace(task_brief, chat_history, api_key)
+                event_stream = stream_kimi_workspace(task_brief, chat_history, api_key, model=model_name)
         else:
             logger.warning("No Kimi API key for user %s — falling back to local Ollama", ws["user_id"])
             fallback_event = OpenClawEvent("log", {
-                "message": "Kimi K2.5 API key not found. Falling back to local Ollama.",
+                "message": "Kimi (Moonshot) API key not found. Falling back to local Ollama.",
             })
             seq = await allocate_event_seq(pool, workspace_id)
             await _db_save_event(pool, workspace_id, seq, fallback_event)
@@ -3774,10 +3778,19 @@ async def create_vibecode_session(
     # Hermes model is installed. External engines run as sidecars (engine-adapter);
     # Hermes runs the NATIVE SubAgentRunner with a SOUL persona.
     _req_engine = (req.engine or "native")
-    if _req_engine != "native" and _req_engine not in (EXTERNAL_ENGINE_IDS | NATIVE_ENGINE_IDS):
+    if _req_engine != "native" and _req_engine not in (EXTERNAL_ENGINE_IDS | NATIVE_ENGINE_IDS | KIMI_ENGINE_IDS):
         raise HTTPException(status_code=400, detail=f"unknown engine '{_req_engine}'")
     engine_val = "native"
-    if _req_engine in EXTERNAL_ENGINE_IDS and _engine_enabled(_req_engine) and isolation_mode == "session":
+    if _req_engine in KIMI_ENGINE_IDS and isolation_mode == "session":
+        # Kimi = the original workspace engine. No sidecar/flag — just a Moonshot key, the same
+        # gate the chat lane uses. Reject with a clear message when the key is missing.
+        if not await _get_kimi_key(pool, uid):
+            raise HTTPException(
+                status_code=400,
+                detail="Kimi needs a Moonshot API key — add one in Settings (or set MOONSHOT_API_KEY) first",
+            )
+        engine_val = "kimi"
+    elif _req_engine in EXTERNAL_ENGINE_IDS and _engine_enabled(_req_engine) and isolation_mode == "session":
         if _req_engine in CLOUD_ENGINE_IDS:
             from owui_compat.engine_auth import user_has_verified_engine
             if not await user_has_verified_engine(pool, uid, _req_engine):
@@ -4170,6 +4183,10 @@ async def start_vibecode_turn(
             and _hermes_engine_enabled()
             and _is_session
         )
+        # Kimi = the original workspace engine. NOT a sidecar and NOT vibecode-turn — it routes
+        # to agent_id="kimi" (the existing stream_kimi_workspace lane). Gated only on a Moonshot
+        # key, resolved inside that lane; no flag, no clone-mode requirement beyond session.
+        _use_kimi = _engine in KIMI_ENGINE_IDS and _is_session
         # Cloud engines need the user's verified key, decrypted here at turn start and
         # held in-memory for this run only. If it was disconnected since session-create,
         # the adapter fails soft (emits a "connect your key" error) so the user sees why.
@@ -4185,7 +4202,7 @@ async def start_vibecode_turn(
             session_id=session_id,  # the turn run's session_id == the vibecode session id
             task_brief=agent_brief,
             chat_history=[],
-            agent_id="engine-adapter" if _use_engine else "vibecode-turn",
+            agent_id="kimi" if _use_kimi else ("engine-adapter" if _use_engine else "vibecode-turn"),
             user_id=uid,
             pool=pool,
             started_epoch=started_epoch,

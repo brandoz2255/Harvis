@@ -336,6 +336,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./python_back_end/main.py:/app/main.py:ro
       - ./python_back_end/setup_flow.py:/app/setup_flow.py:ro
+      - ./python_back_end/moonshot_api.py:/app/moonshot_api.py:ro
       - ./python_back_end/workspace:/app/workspace:ro
       - ./python_back_end/image:/app/image:ro
       - ./python_back_end/tools:/app/tools:ro

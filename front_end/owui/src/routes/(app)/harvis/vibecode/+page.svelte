@@ -619,13 +619,15 @@
 		opencode: ['ollama'],
 		'hermes-agent': ['ollama'],
 		'hermes-native': ['ollama'],
+		kimi: ['moonshot'],
 		native: ['ollama']
 	};
 	// The model the meter reads window+price from before the first turn lands (so a Claude session
 	// shows 200k + Claude pricing immediately).
 	const ENGINE_DEFAULT_MODEL: Record<string, string> = {
 		'claude-code': 'anthropic/claude-sonnet-4-6',
-		codex: 'openai/gpt-5'
+		codex: 'openai/gpt-5',
+		kimi: 'moonshot/kimi-k3'
 	};
 	const fmtTok = (n: number) =>
 		n >= 10000 ? Math.round(n / 1000) + 'k' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
@@ -637,6 +639,7 @@
 		if (o.startsWith('anthropic')) return 'claude-code';
 		if (o.startsWith('hermes')) return 'hermes-agent';
 		if (o === 'openai') return 'codex';
+		if (o.startsWith('moonshot') || o.startsWith('kimi')) return 'kimi';
 		return 'native';
 	};
 
@@ -740,7 +743,8 @@
 		{ label: 'Local', test: (o) => o.startsWith('ollama') || o === '' },
 		{ label: 'Claude', test: (o) => o.startsWith('anthropic') },
 		{ label: 'Hermes', test: (o) => o.startsWith('hermes') },
-		{ label: 'OpenAI', test: (o) => o === 'openai' }
+		{ label: 'OpenAI', test: (o) => o === 'openai' },
+		{ label: 'Kimi', test: (o) => o.startsWith('moonshot') || o.startsWith('kimi') }
 	];
 	$: modelGroups = (() => {
 		const used = new Set<string>();
@@ -926,7 +930,8 @@
 		codex: 'Codex',
 		'claude-code': 'Claude Code',
 		'hermes-agent': 'Hermes Agent',
-		'hermes-native': 'Hermes Native'
+		'hermes-native': 'Hermes Native',
+		kimi: 'Kimi'
 	};
 	// Display label for a session's engine ('native' / unset → "Native"); used by the
 	// Build-analysis card to label "Built with X".
@@ -950,9 +955,14 @@
 	// its flag is on), so we gate the selector purely on "≥1 ready engine + clone-mode" — no
 	// separate front-end flag check. This lets each Hermes engine show under its own flag
 	// without coupling to the external-engines flag, and vice-versa.
-	$: readyEngineIds = ['opencode', 'codex', 'claude-code', 'hermes-agent', 'hermes-native'].filter(
-		(e) => engineReadiness?.[e]?.ready
-	);
+	$: readyEngineIds = [
+		'opencode',
+		'codex',
+		'claude-code',
+		'hermes-agent',
+		'hermes-native',
+		'kimi'
+	].filter((e) => engineReadiness?.[e]?.ready);
 	$: showEngineSelector = readyEngineIds.length > 0 && isolationMode === 'session';
 	// Surface the Hermes-Native "enabled but no model" reason even when the selector is hidden.
 	$: hermesNeedsModel =
@@ -2072,7 +2082,12 @@
 								>{$i18n.t('Pull a Hermes model to enable the Hermes engine.')}</span
 							>
 						{/if}
-						{#if selectedEngine !== 'native'}
+						{#if selectedEngine === 'kimi'}
+							<span class="text-[11px] text-gray-500"
+								>{ENGINE_LABELS['kimi']}
+								{$i18n.t('reasons and responds in the thread (Moonshot) — no clone or diff.')}</span
+							>
+						{:else if selectedEngine !== 'native'}
 							<span class="text-[11px] text-gray-500"
 								>{ENGINE_LABELS[selectedEngine] || selectedEngine}
 								{$i18n.t('runs autonomously on a clone — review the diff.')}</span

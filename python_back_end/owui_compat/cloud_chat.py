@@ -186,6 +186,24 @@ _OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 # reasoning_effort is the OpenAI reasoning control (low|medium|high). "max" → "high" (no native ultra).
 _EFFORT_OPENAI = {"low": "low", "medium": "medium", "high": "high", "max": "high"}
 
+# Phase 3 — Moonshot / Kimi K2.5 (the ``kimi`` engine = the ORIGINAL Harvis workspace engine).
+# Same provider-prefix discipline (``moonshot/…``). Moonshot's API is OpenAI-compatible wire format,
+# so the chat proxy is a near-passthrough. The credential is a plain per-user "moonshot" API key
+# (NOT the verified engine_auth table codex/claude-code use) with an env fallback, so listing +
+# routing gate on ``_moonshot_key`` rather than ``get_verified_engine_auth``. ctx/price are public
+# estimates for the Build usage meter. Kimi only supports temperature=1.0 → no reasoning-effort.
+from moonshot_api import MOONSHOT_BASE_URL as _MOONSHOT_BASE_URL
+
+_MOONSHOT_MODELS = [
+    # kimi-k3 = the 2.8T-MoE flagship (~1M ctx, released 2026-07-16) → the default Kimi Build engine.
+    {"id": "moonshot/kimi-k3", "name": "Kimi K3", "supports_effort": False, "ctx": 1048576, "pin": 3.0, "pout": 15.0, "primary": True},
+    {"id": "moonshot/kimi-k2.6", "name": "Kimi K2.6", "supports_effort": False, "ctx": 256000, "pin": 0.95, "pout": 4.0, "primary": False},
+    {"id": "moonshot/kimi-k2.5", "name": "Kimi K2.5", "supports_effort": False, "ctx": 256000, "pin": 0.6, "pout": 3.0, "primary": False},
+]
+_MOONSHOT_BY_ID = {m["id"]: m for m in _MOONSHOT_MODELS}
+_ALL_MOONSHOT_IDS = {m["id"] for m in _MOONSHOT_MODELS}
+_MOONSHOT_URL = f"{_MOONSHOT_BASE_URL.rstrip('/')}/chat/completions"
+
 # Effort → extended-thinking budget (Anthropic api_key path). "auto"/"none"/absent → no thinking.
 _EFFORT_BUDGET = {"low": 4000, "medium": 8000, "high": 16000, "max": 32000}
 
@@ -199,7 +217,7 @@ def is_cloud_chat_model(model_id: Optional[str]) -> bool:
     bare ``claude-code`` Build-engine id. The Claude set is DYNAMIC (live /v1/models) → matched by
     prefix; the OpenAI set stays a fixed curated list → matched exactly."""
     mid = (model_id or "").strip()
-    return mid.startswith("anthropic/") or mid in _ALL_OPENAI_IDS
+    return mid.startswith("anthropic/") or mid in _ALL_OPENAI_IDS or mid in _ALL_MOONSHOT_IDS
 
 
 def _provider_of(model_id: str) -> Optional[str]:
@@ -208,18 +226,40 @@ def _provider_of(model_id: str) -> Optional[str]:
         return "anthropic"
     if mid in _ALL_OPENAI_IDS:
         return "openai"
+    if mid in _ALL_MOONSHOT_IDS:
+        return "moonshot"
     return None
 
 
-# Which verified-credential engine backs each provider's chat models.
-_PROVIDER_ENGINE = {"anthropic": "claude-code", "openai": "codex"}
+# Which verified-credential engine backs each provider's chat models. Moonshot maps to the
+# ``kimi`` Build engine (the original Harvis workspace engine); its key lives in the per-user
+# api-key store, not engine_auth, so proxy_cloud_chat special-cases it (see below).
+_PROVIDER_ENGINE = {"anthropic": "claude-code", "openai": "codex", "moonshot": "kimi"}
+
+
+async def _moonshot_key(pool, user_id: Optional[int]) -> str:
+    """Resolve the Moonshot/Kimi API key: per-user DB row first, then the MOONSHOT_API_KEY env.
+    Returns "" when neither is set. Never logged. Mirrors workspace_router._get_kimi_key so the
+    ``kimi`` engine is gated + routed off the SAME credential the chat-workspace lane already uses."""
+    if pool and user_id:
+        try:
+            from main import get_user_api_key
+
+            config = await get_user_api_key(pool, user_id, "moonshot")
+            if config and config.get("api_key"):
+                return config["api_key"]
+        except Exception:
+            logger.debug("cloud_chat: moonshot key lookup failed", exc_info=True)
+    return os.getenv("MOONSHOT_API_KEY", "")
 
 
 # ── Per-user model list (no decrypt) ────────────────────────────────────────────────────
 def _model_entry(m: dict, owned_by: str, mode: str) -> dict:
     """Build the OWUI picker dict (same shape as hermes_chat_model_entry)."""
     supports = bool(m.get("supports_effort"))
-    if owned_by == "openai":
+    if owned_by == "moonshot":
+        desc = "Kimi K2.5 via Moonshot — the original Harvis workspace engine. Reasons + writes in the thread."
+    elif owned_by == "openai":
         desc = "OpenAI GPT via your connected API key — reasoning effort supported."
     elif mode == "api_key":
         desc = "Anthropic Claude via your connected API key — full catalog + reasoning effort."
@@ -292,6 +332,14 @@ async def cloud_chat_model_entries(pool, user_id: Optional[int]) -> list[dict]:
             out += [_model_entry(m, "openai", "api_key") for m in _OPENAI_MODELS]
     except Exception:
         logger.debug("cloud_chat: openai model-list probe failed", exc_info=True)
+    # Phase 3: Moonshot/Kimi — gated on a per-user "moonshot" api key OR the MOONSHOT_API_KEY env
+    # (NOT the verified engine_auth table). Surfacing it here is what makes the model-driven Build
+    # engine picker resolve the ``kimi`` engine (owner=moonshot → engineForOwner).
+    try:
+        if await _moonshot_key(pool, user_id):
+            out += [_model_entry(m, "moonshot", "api_key") for m in _MOONSHOT_MODELS]
+    except Exception:
+        logger.debug("cloud_chat: moonshot model-list probe failed", exc_info=True)
     # Overlay per-user model profiles (custom display name + saved effort/budget). The frontend
     # reads meta.profile_* to show the current mode label + prefill the Edit popover.
     try:
@@ -339,6 +387,21 @@ async def proxy_cloud_chat(owui_body: dict, pool, user_id: Optional[int]):
                     budget_override = int(prof["thinking_budget"])
         except Exception:
             logger.debug("cloud_chat: profile effort lookup failed", exc_info=True)
+
+    # Moonshot/Kimi credential lives in the per-user api-key store (+ env), NOT engine_auth →
+    # resolve + route it before the verified-engine_auth path the other providers use.
+    if provider == "moonshot":
+        key = await _moonshot_key(pool, user_id)
+        if not key:
+            return _err_response(
+                owui_body, 402,
+                "Add a Moonshot API key in Settings (or set MOONSHOT_API_KEY) to use Kimi.",
+            )
+        try:
+            return await _proxy_moonshot_api(owui_body, model_id, key)
+        except Exception as exc:
+            logger.warning("cloud_chat: moonshot proxy failed (%s): %s", model_id, type(exc).__name__)
+            return _err_response(owui_body, 502, "Kimi is unavailable right now. Please try again.")
 
     engine = _PROVIDER_ENGINE[provider]
     auth = None
@@ -629,6 +692,67 @@ def _safe_openai_error(resp) -> str:
     except Exception:
         msg = f"HTTP {resp.status_code}"
     return f"GPT error: {_clip(msg)}"
+
+
+# ── Moonshot / Kimi path (OpenAI-compatible api_key) ────────────────────────────────────
+async def _proxy_moonshot_api(owui_body: dict, model_id: str, api_key: str):
+    """Moonshot's API is OpenAI-compatible → near-passthrough (mirrors _proxy_openai_api). Two Kimi
+    quirks: it requires temperature=1.0 and does NOT expose reasoning_effort, so we force the former
+    and never send the latter. The catalog id (``moonshot/kimi-k2.5``) → real id (``kimi-k2.5``)."""
+    messages = [
+        {"role": m.get("role"), "content": m.get("content")}
+        for m in (owui_body.get("messages") or [])
+        if m.get("role") and m.get("content") is not None
+    ]
+    body: dict = {
+        "model": _api_model(model_id),
+        "messages": messages,
+        "stream": bool(owui_body.get("stream")),
+        "temperature": 1.0,  # Kimi K2.5 only accepts temperature=1.0
+    }
+    if owui_body.get("max_tokens") is not None:
+        body["max_tokens"] = int(owui_body["max_tokens"])
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+    if not body["stream"]:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0)) as client:
+            r = await client.post(_MOONSHOT_URL, headers=headers, json=body)
+        if r.status_code >= 400:
+            return _err_response(owui_body, 502, _safe_moonshot_error(r))
+        return JSONResponse(status_code=200, content=r.json())
+
+    async def _gen():
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(None, connect=10.0)) as client:
+                async with client.stream("POST", _MOONSHOT_URL, headers=headers, json=body) as r:
+                    if r.status_code >= 400:
+                        detail = (await r.aread()).decode("utf-8", "replace")
+                        err = {"error": {"message": f"Kimi error: {_clip(detail)}"}}
+                        yield ("data: " + json.dumps(err) + "\n\n").encode()
+                        yield b"data: [DONE]\n\n"
+                        return
+                    # Moonshot already emits chat.completion.chunk SSE — forward verbatim.
+                    async for chunk in r.aiter_raw():
+                        if chunk:
+                            yield chunk
+        except Exception as exc:
+            logger.warning("cloud_chat: moonshot stream dropped: %s", type(exc).__name__)
+            yield ("data: " + json.dumps({"error": {"message": "Kimi chat stream dropped."}}) + "\n\n").encode()
+            yield b"data: [DONE]\n\n"
+
+    return StreamingResponse(
+        _gen(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+def _safe_moonshot_error(resp) -> str:
+    try:
+        body = resp.json()
+        msg = (((body or {}).get("error") or {}).get("message")) or json.dumps(body)
+    except Exception:
+        msg = f"HTTP {resp.status_code}"
+    return f"Kimi error: {_clip(msg)}"
 
 
 # ── Claude CLI path (subscription / oauth_token) ────────────────────────────────────────

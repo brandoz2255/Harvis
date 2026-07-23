@@ -238,6 +238,18 @@ def register_capabilities_routes(router: APIRouter, get_current_user: Callable) 
             if _svc.get("connected"):
                 _entry["connected"] = True
             engine_readiness[_eng] = _entry
+        # Kimi = the ORIGINAL Harvis workspace engine. Not a sidecar container — it's ready iff a
+        # Moonshot API key exists (per-user row OR MOONSHOT_API_KEY env), the same gate the chat
+        # lane + the model listing use. This is what lets the model-driven Build picker offer it.
+        try:
+            from owui_compat.cloud_chat import _moonshot_key
+            _kimi_ready = bool(await _moonshot_key(pool, uid))
+            engine_readiness["kimi"] = (
+                {"ready": True, "connected": True} if _kimi_ready
+                else {"ready": False, "reason": "missing_auth"}
+            )
+        except Exception:
+            engine_readiness["kimi"] = {"ready": False, "reason": "missing_auth"}
         # When the user has a VERIFIED external Hermes connected, Chat routes there but Build can't
         # (the external server has no access to the Build workspace clone) — mark it unavailable.
         try:

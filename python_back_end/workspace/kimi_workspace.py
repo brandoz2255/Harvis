@@ -16,7 +16,7 @@ from typing import AsyncGenerator
 
 import httpx
 
-from moonshot_api import MoonshotClient, MOONSHOT_BASE_URL
+from moonshot_api import MoonshotClient, MOONSHOT_BASE_URL, get_moonshot_model_id
 from .openclaw_client import OpenClawEvent
 
 logger = logging.getLogger(__name__)
@@ -87,16 +87,20 @@ async def stream_kimi_workspace(
     chat_history: list[dict],
     api_key: str,
     api_url: str = "",
+    model: str = "",
 ) -> AsyncGenerator[OpenClawEvent, None]:
     """
-    Run a workspace task using Kimi K2.5 directly (bypasses OpenClaw).
+    Run a workspace task using a Kimi model directly (bypasses OpenClaw).
     api_key must be the decrypted Moonshot key fetched from the user's DB row.
+    ``model`` is the facade/bare id the user picked (e.g. ``moonshot/kimi-k3``); it is
+    resolved to the real Moonshot id, defaulting to ``kimi-k2.5`` when unset.
 
     Yields OpenClawEvent objects in the same format as OpenClawClient.stream().
     """
+    real_model = get_moonshot_model_id(model) if model else "kimi-k2.5"
     if not api_key:
         yield OpenClawEvent("error", {
-            "message": "Kimi K2.5 API key not configured. Please add your Moonshot API key in Settings.",
+            "message": "Kimi API key not configured. Please add your Moonshot API key in Settings.",
             "fix_hint": "Add your Moonshot API key in Settings -> Workspace, or set MOONSHOT_API_KEY in your environment.",
         })
         return
@@ -110,7 +114,7 @@ async def stream_kimi_workspace(
 
     full_text_parts: list[str] = []
     try:
-        async for chunk in client.chat_completion_stream(model="kimi-k2.5", messages=messages):
+        async for chunk in client.chat_completion_stream(model=real_model, messages=messages):
             if chunk:
                 full_text_parts.append(chunk)
                 yield OpenClawEvent("token", {"content": chunk})
@@ -434,10 +438,10 @@ async def _plan_subtasks(
 
     try:
         if provider == "kimi" and api_key:
-            from moonshot_api import MoonshotClient, MOONSHOT_BASE_URL
             client = MoonshotClient(api_key=api_key, base_url=api_url or MOONSHOT_BASE_URL)
+            planner_model = get_moonshot_model_id(model) if model else "kimi-k2.5"
             parts: list[str] = []
-            async for chunk in client.chat_completion_stream(model="kimi-k2.5", messages=messages):
+            async for chunk in client.chat_completion_stream(model=planner_model, messages=messages):
                 if chunk:
                     parts.append(chunk)
             raw = "".join(parts).strip()
@@ -533,7 +537,7 @@ async def _run_subagent_stream(
     full_text_parts: list[str] = []
     try:
         if provider == "kimi":
-            stream = stream_kimi_workspace(task, chat_history, api_key=api_key, api_url=api_url)
+            stream = stream_kimi_workspace(task, chat_history, api_key=api_key, api_url=api_url, model=model)
         elif provider == "cloud-ollama":
             stream = stream_ollama_cloud_workspace(task, chat_history, model=model)
         else:
@@ -612,7 +616,7 @@ async def stream_parallel_workspace(
         })
         # Stream the single agent's output directly
         if provider == "kimi":
-            stream = stream_kimi_workspace(task_message, chat_history, api_key=api_key, api_url=api_url)
+            stream = stream_kimi_workspace(task_message, chat_history, api_key=api_key, api_url=api_url, model=model)
         elif provider == "cloud-ollama":
             stream = stream_ollama_cloud_workspace(task_message, chat_history, model=model)
         else:
