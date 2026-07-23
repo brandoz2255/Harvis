@@ -806,14 +806,26 @@ services:
     # prior `node openclaw.mjs ...` form only worked when openclaw.mjs was
     # in PWD, which required the dulc3/openclaw base image's filesystem
     # layout. Now we invoke the CLI directly.
+    # Wrap the gateway with a background auto-approver. On a FRESH openclaw-data
+    # volume the backend's device lands "pending" — openclaw v2026.5.22 does not
+    # honor skipPairingForOperatorSharedAuth despite the backend sending the
+    # correct token + operator.admin scopes — so Workspace + Build hang on
+    # "pairing required: device is not approved yet". This drains pending pairing
+    # requests every 5s so the backend's handshake succeeds unattended; it is an
+    # idempotent no-op once the device is paired ("No pending requests", exit 0).
+    # Safe here: openclaw has NO external port (internal network + 127.0.0.1 only),
+    # so only Harvis's own services / local Cursor can ever create a pending
+    # request. `$$` = a literal `$` (expanded container-side, not by Compose).
     command:
-      - openclaw
-      - gateway
-      - --bind
-      - lan
-      - --port
-      - "18789"
-      - --allow-unconfigured
+      - sh
+      - -c
+      - |
+        ( while true; do
+            openclaw devices approve --latest --url ws://127.0.0.1:18789 \
+              --token "$$OPENCLAW_GATEWAY_TOKEN" >/dev/null 2>&1 || true
+            sleep 5
+          done ) &
+        exec openclaw gateway --bind lan --port 18789 --allow-unconfigured
     depends_on:
       pgsql:
         condition: service_healthy
