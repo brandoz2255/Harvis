@@ -152,5 +152,17 @@
       ]
     }
   },
+  "plugins": {
+    "load": {
+      "paths": [
+        "/openclaw-plugins/harvis-web-search"
+      ]
+    },
+    "entries": {
+      "harvis-web-search": {
+        "enabled": true
+      }
+    }
+  },
   "channels": {}
 }
