@@ -18,6 +18,12 @@
 		<rect x="3" y="4.5" width="18" height="15" rx="2" />
 		<path d="M7 10l3 2.5-3 2.5M13 15h4" />
 	</svg>
+{:else if name === 'kimi'}
+	<!-- Moonshot / Kimi — crescent moon + spark -->
+	<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" class={className} aria-hidden="true">
+		<path d="M20 14.5A7.5 7.5 0 1 1 10.5 4a6 6 0 0 0 9.5 10.5z" />
+		<path d="M18.2 3l.5 1.6 1.6.5-1.6.5-.5 1.6-.5-1.6-1.6-.5 1.6-.5z" fill="currentColor" stroke="none" />
+	</svg>
 {:else if name === 'harvis'}
 	<!-- CLI prompt + spark -->
 	<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" class={className} aria-hidden="true">

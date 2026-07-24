@@ -60,7 +60,8 @@ export interface IntegrationDefinition {
 	provides?: IntegrationCapability[]; // typed capability contract (capability-first)
 	usedBy?: HarvisSurface[]; // Harvis surfaces that consume it
 	runtimeNote?: string; // honest runtime caveat (e.g. "wiring planned", "not runnable yet")
-	connect?: 'openclaw_byo' | 'github_oauth' | 'mcp_link' | 'engine_api_key' | 'hermes_agent'; // Phase B/E2/F: which in-modal connect flow
+	connect?: 'openclaw_byo' | 'github_oauth' | 'mcp_link' | 'engine_api_key' | 'hermes_agent' | 'user_api_key'; // Phase B/E2/F: which in-modal connect flow
+	providerKey?: string; // for connect:'user_api_key' — the /api/user/api-keys provider_name (e.g. 'moonshot')
 	permissions?: string[];
 	auth?: { required: boolean; modes: AuthMode[]; configured?: boolean; notes?: string };
 	engine?: { support: EngineSupport; adapterId?: string; notes?: string };
@@ -132,6 +133,33 @@ export const CATALOG: IntegrationDefinition[] = [
 			notes: 'Supports ChatGPT sign-in or an OpenAI API key. Harvis does not store OpenAI credentials in this release.'
 		},
 		engine: { support: 'planned' }
+	},
+	{
+		id: 'kimi-api',
+		name: 'Kimi (Moonshot)',
+		category: 'application',
+		description: 'Moonshot’s Kimi models as a cloud Build engine and chat provider.',
+		longDescription:
+			'Moonshot AI’s Kimi models (K3, K2.6, K2.5) run as a cloud Build engine and a selectable chat model. Kimi reasons and responds directly in the thread — it has no clone/diff runner. Connect your Moonshot API key; it’s stored encrypted per-user, never shown, and injected only at request time.',
+		brandKey: 'kimi',
+		status: 'available',
+		provider: 'Moonshot AI',
+		capabilities: ['reasoning', 'chat', 'long_context'],
+		provides: ['code_engine_candidate'],
+		usedBy: ['chat', 'code'],
+		connect: 'user_api_key',
+		providerKey: 'moonshot',
+		runtimeNote: 'Cloud engine — reasons and responds in the thread (Moonshot). No clone or diff. ~5× the cost of local models on K3.',
+		auth: {
+			required: true,
+			modes: ['api_key'],
+			notes: 'Your Moonshot API key (platform.moonshot.ai / .cn). Stored encrypted per-user, never shown; used only to call the Kimi API.'
+		},
+		engine: {
+			support: 'supported',
+			notes: 'Cloud reasoning engine — surfaced as moonshot/kimi-* models; picked in Build via the model selector.'
+		},
+		links: { homepage: 'https://www.moonshot.ai' }
 	},
 	{
 		id: 'openclaw',
@@ -375,6 +403,7 @@ export const BRAND_TONE: Record<string, { icon: string; tile: string }> = {
 	opencode: { icon: '', tile: LOGO_TILE },
 	openclaw: { icon: '', tile: LOGO_TILE },
 	hermes: { icon: '', tile: LOGO_TILE },
+	kimi: { icon: 'text-indigo-400', tile: 'bg-indigo-500/10 border-indigo-500/25' },
 	ssh: { icon: 'text-emerald-400', tile: 'bg-emerald-500/10 border-emerald-500/25' },
 	harvis: { icon: 'text-blue-400', tile: 'bg-blue-500/15 border-blue-500/30' },
 	pack: { icon: 'text-blue-400', tile: 'bg-blue-500/10 border-blue-500/25' }

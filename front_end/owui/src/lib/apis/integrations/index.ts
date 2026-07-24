@@ -162,3 +162,53 @@ export const disconnectEngine = async (engine: string): Promise<{ ok: boolean }>
 		return { ok: false };
 	}
 };
+
+// ── Per-user provider API keys (main.py /api/user/api-keys). Keyed by provider_name
+// (e.g. "moonshot" for Kimi). Distinct from engine-auth: these are cloud-chat/model
+// provider keys, Fernet-encrypted, write-only — the GET never returns the key value.
+// This is the store Kimi/Moonshot reads (workspace_router._get_kimi_key,
+// cloud_chat._moonshot_key), so saving here makes Kimi ready as a Build engine + chat model.
+export const hasUserApiKey = async (providerName: string): Promise<boolean> => {
+	try {
+		const r = await fetch('/api/user/api-keys', { headers: hdr(), credentials: 'include' });
+		if (!r.ok) return false;
+		const rows = await r.json();
+		return Array.isArray(rows) && rows.some((k: any) => k?.provider_name === providerName && k?.is_active);
+	} catch (_) {
+		return false;
+	}
+};
+
+export const saveUserApiKey = async (
+	providerName: string,
+	apiKey: string,
+	apiUrl?: string
+): Promise<{ ok: boolean; error?: string }> => {
+	try {
+		const r = await fetch('/api/user/api-keys', {
+			method: 'POST', headers: hdr(), credentials: 'include',
+			body: JSON.stringify({
+				provider_name: providerName,
+				api_key: apiKey,
+				api_url: apiUrl || null,
+				is_active: true
+			})
+		});
+		const d = await r.json().catch(() => ({}));
+		if (!r.ok) return { ok: false, error: d?.detail || `HTTP ${r.status}` };
+		return { ok: true };
+	} catch (e: any) {
+		return { ok: false, error: `${e?.message ?? e}` };
+	}
+};
+
+export const deleteUserApiKey = async (providerName: string): Promise<{ ok: boolean }> => {
+	try {
+		const r = await fetch(`/api/user/api-keys/${encodeURIComponent(providerName)}`, {
+			method: 'DELETE', headers: hdr(), credentials: 'include'
+		});
+		return { ok: r.ok };
+	} catch (_) {
+		return { ok: false };
+	}
+};

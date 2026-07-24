@@ -15,6 +15,9 @@
 		saveEngineKey,
 		verifyEngineKey,
 		disconnectEngine,
+		hasUserApiKey,
+		saveUserApiKey,
+		deleteUserApiKey,
 		type OpenclawConfig,
 		type EngineAuthStatus
 	} from '$lib/apis/integrations';
@@ -177,7 +180,21 @@
 	// Hermes Agent management is its own component (3 connection modes — import / external / managed).
 
 	// ── Cloud engine API key (Phase E2: codex / claude-code) ──
-	$: authEngine = def.id === 'codex-app' ? 'codex' : 'claude-code';
+	// Explicit id→engine map (was a `codex-app ? codex : claude-code` ternary, which
+	// silently wrote EVERY non-codex engine_api_key integration into the claude-code
+	// row). Only these two ids use engine-auth; anything else is a wiring bug — surface
+	// it instead of mis-routing a credential.
+	const ENGINE_AUTH_OF: Record<string, string> = {
+		'claude-code': 'claude-code',
+		'codex-app': 'codex'
+	};
+	$: authEngine = ENGINE_AUTH_OF[def.id] ?? '';
+	$: if (def.connect === 'engine_api_key' && !authEngine) {
+		console.error(
+			`ConnectionPanel: integration '${def.id}' uses connect:'engine_api_key' but has no engine-auth mapping. ` +
+				`Add it to ENGINE_AUTH_OF or use a different connect kind — refusing to guess a credential target.`
+		);
+	}
 	// E4B: only Claude Code offers a Claude-subscription (OAuth token) mode; Codex is API-key-only.
 	$: supportsOauth = authEngine === 'claude-code';
 	let ea: EngineAuthStatus | null = null;
@@ -243,11 +260,59 @@
 		await loadEngineAuth();
 	};
 
+	// ── Per-user provider API key (connect:'user_api_key' — e.g. Kimi/Moonshot) ──
+	// Targets main.py /api/user/api-keys keyed by def.providerKey. This is the store
+	// Kimi actually reads, so saving here makes it a ready Build engine + chat model.
+	let ukSaved = false;
+	let ukLoaded = false;
+	let ukKey = '';
+	let ukReplacing = false;
+	let ukBusy = false;
+	let ukMsg: { text: string; ok: boolean } | null = null;
+
+	const loadUserKey = async () => {
+		ukLoaded = false;
+		ukSaved = def.providerKey ? await hasUserApiKey(def.providerKey) : false;
+		ukLoaded = true;
+		ukReplacing = false;
+		ukKey = '';
+	};
+
+	const saveUserKey = async () => {
+		if (!def.providerKey) return;
+		if (!ukKey.trim()) {
+			ukMsg = { text: $i18n.t('Enter your API key'), ok: false };
+			return;
+		}
+		ukBusy = true;
+		ukMsg = null;
+		const r = await saveUserApiKey(def.providerKey, ukKey.trim());
+		ukBusy = false;
+		ukMsg = r.ok
+			? { text: $i18n.t('Saved — stored encrypted, never shown.'), ok: true }
+			: { text: r.error || $i18n.t('Save failed'), ok: false };
+		if (r.ok) {
+			await loadUserKey();
+			changed();
+		}
+	};
+
+	const disconnectUserKey = async () => {
+		if (!def.providerKey) return;
+		ukBusy = true;
+		await deleteUserApiKey(def.providerKey);
+		ukBusy = false;
+		ukMsg = null;
+		await loadUserKey();
+		changed();
+	};
+
 	onMount(() => {
 		if (def.connect === 'openclaw_byo') loadOpenclaw();
 		else if (def.connect === 'github_oauth') loadGithub();
 		else if (def.connect === 'mcp_link') loadMcp();
 		else if (def.connect === 'engine_api_key') loadEngineAuth();
+		else if (def.connect === 'user_api_key') loadUserKey();
 	});
 	onDestroy(() => {
 		if (pollTimer) clearInterval(pollTimer);
@@ -558,6 +623,79 @@
 						disabled={eaBusy}
 						class="text-xs px-2.5 py-1 rounded-lg border border-gray-200 dark:border-white/10 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-white/5 transition"
 						on:click={disconnectEngineKey}
+					>
+						{$i18n.t('Disconnect')}
+					</button>
+				{/if}
+			</div>
+		</div>
+	{:else if def.connect === 'user_api_key'}
+		<div class="rounded-lg border border-gray-100 dark:border-white/8 bg-gray-50 dark:bg-white/[0.02] p-3 space-y-3">
+			<div class="flex items-center justify-between gap-2 text-xs">
+				<span class="text-gray-500 dark:text-gray-400">
+					{$i18n.t('Status')}:
+					<span class="font-medium text-gray-700 dark:text-gray-200">
+						{!ukLoaded ? $i18n.t('Loading…') : ukSaved ? $i18n.t('Connected') : $i18n.t('Not connected')}
+					</span>
+				</span>
+				{#if ukSaved}<span class="text-[11px] text-green-600 dark:text-green-400">{$i18n.t('Key saved')}</span>{/if}
+			</div>
+
+			{#if def.auth?.notes}<p class="text-[11px] text-gray-500 dark:text-gray-400">{def.auth.notes}</p>{/if}
+
+			<div class="space-y-1">
+				<span class="text-[11px] text-gray-500 dark:text-gray-400">{$i18n.t('API key')}</span>
+				{#if ukSaved && !ukReplacing}
+					<div class="flex items-center gap-2 text-xs">
+						<span class="text-gray-500 dark:text-gray-400">🔑 {$i18n.t('API key saved')}</span>
+						<button type="button" class="text-blue-600 dark:text-blue-300 hover:underline" on:click={() => (ukReplacing = true)}>
+							{$i18n.t('Replace')}
+						</button>
+					</div>
+				{:else}
+					<input
+						bind:value={ukKey}
+						type="password"
+						autocomplete="off"
+						placeholder={$i18n.t('Write-only — never displayed')}
+						class="w-full text-xs font-mono rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-[#0a0e18] px-2.5 py-1.5 text-gray-700 dark:text-gray-200 outline-none focus:border-blue-500/40"
+					/>
+				{/if}
+			</div>
+
+			{#if ukMsg}
+				<p class="text-[11px] {ukMsg.ok ? 'text-green-600 dark:text-green-400' : 'text-red-500'}">{ukMsg.text}</p>
+			{/if}
+
+			<div class="flex flex-wrap items-center gap-2">
+				{#if !ukSaved || ukReplacing}
+					<button
+						type="button"
+						disabled={ukBusy}
+						class="text-xs px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-medium transition"
+						on:click={saveUserKey}
+					>
+						{ukBusy ? $i18n.t('Saving…') : $i18n.t('Save key')}
+					</button>
+					{#if ukReplacing}
+						<button
+							type="button"
+							disabled={ukBusy}
+							class="text-xs px-2.5 py-1 rounded-lg border border-gray-200 dark:border-white/10 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-white/5 transition"
+							on:click={() => {
+								ukReplacing = false;
+								ukKey = '';
+								ukMsg = null;
+							}}>{$i18n.t('Cancel')}</button
+						>
+					{/if}
+				{/if}
+				{#if ukSaved && !ukReplacing}
+					<button
+						type="button"
+						disabled={ukBusy}
+						class="text-xs px-2.5 py-1 rounded-lg border border-gray-200 dark:border-white/10 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-white/5 transition"
+						on:click={disconnectUserKey}
 					>
 						{$i18n.t('Disconnect')}
 					</button>
