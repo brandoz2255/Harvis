@@ -784,6 +784,16 @@ async def lifespan(app: FastAPI):
                 with open(_nb_schema_path, "r") as _nbf:
                     await conn.execute(_nbf.read())
                 logger.info("✅ Notebook schema ensured")
+
+                # Cookbook: ensure the cookbook_nodes table + merge any
+                # user-added inference nodes back into the live registry so a
+                # LAN GPU box added through the UI survives a restart.
+                try:
+                    from cookbook import config as _cookbook_config
+                    _n = await _cookbook_config.load_persisted_nodes(app.state.pg_pool)
+                    logger.info("✅ Cookbook nodes ensured (%d persisted)", _n)
+                except Exception as _cb_exc:  # noqa: BLE001
+                    logger.warning("⚠️ Cookbook node load failed: %s", _cb_exc)
         except Exception as e:
             logger.warning("⚠️ Failed to init OpenClaw audit/prefs schema: %s", e)
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -41,7 +42,25 @@ async def get_current_user_from_request(request: Request) -> Dict:
     return await get_current_user_optimized(credentials=credentials, request=request, pool=pool)
 
 
+async def require_admin_from_request(request: Request) -> Dict:
+    """Admin-only gate for node mutations. Auth first (401), then admin check (403)."""
+    from fastapi import HTTPException
+    from owui_compat.authz import is_admin
+
+    user = await get_current_user_from_request(request)
+    if not is_admin(user):
+        raise HTTPException(status_code=403, detail="Administrator privileges are required to manage cookbook nodes.")
+    return user
+
+
 # ─── Schemas ──────────────────────────────────────────────────────────────────
+class AddNodeRequest(BaseModel):
+    name: str
+    llmfit_url: str
+    ollama_url: Optional[str] = ""
+    role: Optional[str] = "subhost"
+
+
 class DownloadRequest(BaseModel):
     node: str
     repo: Optional[str] = None        # llmfit HF repo name, e.g. "org/Model-GGUF"
@@ -148,6 +167,73 @@ async def list_nodes(current_user: Dict = Depends(get_current_user_from_request)
             for n, h in zip(names, results)
         ]
     }
+
+
+import re
+
+_NODE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.-]{0,48}$")
+
+
+def _norm_url(u: str) -> str:
+    u = (u or "").strip().rstrip("/")
+    if u and not u.startswith(("http://", "https://")):
+        u = "http://" + u
+    return u
+
+
+@router.post("/nodes")
+async def add_node(req: AddNodeRequest, request: Request, current_user: Dict = Depends(require_admin_from_request)):
+    """Register another machine running `llmfit serve` as an inference node.
+
+    Admin-only. The llmfit URL is probed for reachability BEFORE the node is saved,
+    so a typo can't leave a permanently-offline entry in the picker. Persisted to
+    `cookbook_nodes` (survives restart) and merged into the live registry.
+    """
+    name = (req.name or "").strip()
+    if not _NODE_NAME_RE.match(name):
+        raise HTTPException(status_code=400, detail="Node name must be 1–49 chars: letters, digits, space, . _ -")
+    if config.is_baseline(name):
+        raise HTTPException(status_code=400, detail=f"'{name}' is a built-in node and can't be redefined.")
+
+    llmfit = _norm_url(req.llmfit_url)
+    ollama = _norm_url(req.ollama_url or "")
+    if not llmfit:
+        raise HTTPException(status_code=400, detail="llmfit_url is required (e.g. http://192.168.1.50:8787)")
+
+    # Reachability probe — refuse to save a node whose llmfit doesn't answer.
+    probe = await client.health(llmfit)
+    if not probe.get("alive"):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"llmfit at {llmfit} did not respond. Start `llmfit serve --host 0.0.0.0 --port 8787` "
+                f"on that machine and make sure the backend can reach it over the LAN."
+                + (f" ({probe['error']})" if probe.get("error") else "")
+            ),
+        )
+
+    pool = getattr(request.app.state, "pg_pool", None)
+    try:
+        await config.persist_node(pool, name, "subhost", llmfit, ollama)
+    except RuntimeError:
+        raise HTTPException(status_code=503, detail="Node storage unavailable (no database).")
+    config.register_node(name, "subhost", llmfit, ollama)
+    logger.info("cookbook: registered node %r (llmfit=%s ollama=%s)", name, llmfit, ollama)
+    return {"name": name, "role": "subhost", "llmfit_url": llmfit, "ollama_url": ollama, **probe}
+
+
+@router.delete("/nodes/{name}")
+async def remove_node(name: str, request: Request, current_user: Dict = Depends(require_admin_from_request)):
+    """Remove a user-added node. Admin-only. Built-in (env/default) nodes are protected."""
+    if config.is_baseline(name):
+        raise HTTPException(status_code=400, detail=f"'{name}' is a built-in node and can't be removed.")
+    if name not in config.NODES:
+        raise HTTPException(status_code=404, detail=f"Unknown node '{name}'.")
+    pool = getattr(request.app.state, "pg_pool", None)
+    await config.delete_persisted_node(pool, name)
+    config.unregister_node(name)
+    logger.info("cookbook: removed node %r", name)
+    return {"removed": name}
 
 
 @router.get("/system")

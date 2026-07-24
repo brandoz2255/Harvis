@@ -8,6 +8,8 @@
 		searchModels,
 		getInstalled,
 		downloadModel,
+		addNode,
+		removeNode,
 		type CookbookNode,
 		type CookbookModel,
 		type InstalledModel
@@ -123,6 +125,56 @@
 		activeNode = name;
 		if (tab === 'installed') loadInstalled();
 		else loadNode();
+	};
+
+	// ── Add-node modal: register another GPU machine (running `llmfit serve`) as an
+	// inference node. Admin-only on the backend, which probes reachability before saving.
+	let showAddNode = false;
+	let addForm = { name: '', llmfit_url: '', ollama_url: '' };
+	let addingNode = false;
+	let addErr = '';
+
+	const openAddNode = () => {
+		addForm = { name: '', llmfit_url: '', ollama_url: '' };
+		addErr = '';
+		showAddNode = true;
+	};
+
+	const submitAddNode = async () => {
+		addErr = '';
+		const name = addForm.name.trim();
+		const llmfit = addForm.llmfit_url.trim();
+		if (!name || !llmfit) {
+			addErr = $i18n.t('Give the device a name and its llmfit URL.');
+			return;
+		}
+		addingNode = true;
+		try {
+			const saved = await addNode(token(), {
+				name,
+				llmfit_url: llmfit,
+				ollama_url: addForm.ollama_url.trim()
+			});
+			showAddNode = false;
+			toast.success($i18n.t('Added device {{name}}', { name }));
+			await loadNodes();
+			pickNode(saved.name);
+		} catch (e: any) {
+			addErr = e?.detail ?? `${e}`;
+		}
+		addingNode = false;
+	};
+
+	const deleteNode = async (name: string) => {
+		if (!confirm($i18n.t('Remove device {{name}}? Its models stay on that machine.', { name }))) return;
+		try {
+			await removeNode(token(), name);
+			toast.success($i18n.t('Removed device {{name}}', { name }));
+			if (activeNode === name) activeNode = '';
+			await loadNodes();
+		} catch (e: any) {
+			toast.error(e?.detail ?? `${e}`);
+		}
 	};
 	const onFilters = () => loadNode();
 	const onSearchInput = () => {
@@ -403,17 +455,33 @@
 		<!-- node selector: one node, one table (clear which device you're viewing) -->
 		<div class="flex items-center gap-1.5 flex-wrap mb-2 shrink-0">
 			{#each nodes as n (n.name)}
-				<button
-					class="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs border transition {activeNode === n.name
+				<div
+					class="group flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs border transition {activeNode === n.name
 						? 'border-blue-500/50 bg-blue-500/10 text-blue-600 dark:text-blue-300'
 						: 'border-gray-200 dark:border-gray-800 text-gray-500 hover:bg-gray-50 dark:hover:bg-gray-800/50'}"
-					on:click={() => pickNode(n.name)}
 				>
-					<span class="size-2 rounded-full shrink-0 {n.alive ? 'bg-blue-500' : 'bg-gray-300 dark:bg-gray-700'}"></span>
-					{n.name}
-					{#if n.role === 'main'}<span class="text-[9px] uppercase text-blue-500/70">main</span>{/if}
-				</button>
+					<button class="flex items-center gap-1.5" on:click={() => pickNode(n.name)}>
+						<span class="size-2 rounded-full shrink-0 {n.alive ? 'bg-blue-500' : 'bg-gray-300 dark:bg-gray-700'}"></span>
+						{n.name}
+						{#if n.role === 'main'}<span class="text-[9px] uppercase text-blue-500/70">main</span>{/if}
+					</button>
+					{#if n.role !== 'main'}
+						<!-- remove a user-added device (built-in main is protected) -->
+						<button
+							class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-gray-400 hover:text-red-500 transition leading-none"
+							title={$i18n.t('Remove device')}
+							aria-label={$i18n.t('Remove device {{name}}', { name: n.name })}
+							on:click|stopPropagation={() => deleteNode(n.name)}>×</button
+						>
+					{/if}
+				</div>
 			{/each}
+			<!-- "+" — register another GPU machine as an inference node -->
+			<button
+				class="flex items-center gap-1 px-2 py-1 rounded-lg text-xs border border-dashed border-gray-300 dark:border-gray-700 text-gray-400 hover:text-blue-500 hover:border-blue-500/50 transition"
+				title={$i18n.t('Add another device running llmfit serve')}
+				on:click={openAddNode}>+ {$i18n.t('Add device')}</button
+			>
 		</div>
 
 		<!-- detected-hardware chips for the selected node (/api/cookbook/system) -->
@@ -643,3 +711,69 @@
 		{/if}
 	{/if}
 </div>
+
+<!-- Add-device modal: register another machine running `llmfit serve` as an inference node -->
+{#if showAddNode}
+	<div
+		class="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4"
+		on:click|self={() => (showAddNode = false)}
+		role="presentation"
+	>
+		<div class="w-full max-w-sm rounded-2xl bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 shadow-xl p-4">
+			<div class="flex items-center gap-2 mb-1">
+				<Cube className="size-4 text-blue-500" />
+				<div class="text-sm font-medium text-gray-800 dark:text-gray-100">{$i18n.t('Add inference device')}</div>
+			</div>
+			<p class="text-[11px] text-gray-500 dark:text-gray-400 leading-relaxed mb-3">
+				{$i18n.t('Point Harvis at another machine on your network running')}
+				<code class="text-blue-500">llmfit serve --host 0.0.0.0 --port 8787</code>.
+				{$i18n.t('Harvis checks it responds before saving.')}
+			</p>
+
+			<label class="block text-[11px] text-gray-500 dark:text-gray-400 mb-1" for="cb-node-name">{$i18n.t('Name')}</label>
+			<input
+				id="cb-node-name"
+				type="text"
+				bind:value={addForm.name}
+				placeholder={$i18n.t('e.g. rig, gaming-pc')}
+				class="w-full mb-2.5 text-xs bg-transparent border border-gray-200 dark:border-gray-800 rounded-lg px-2.5 py-1.5 outline-none focus:border-blue-500/50 transition"
+			/>
+
+			<label class="block text-[11px] text-gray-500 dark:text-gray-400 mb-1" for="cb-node-llmfit">{$i18n.t('llmfit URL')}</label>
+			<input
+				id="cb-node-llmfit"
+				type="text"
+				bind:value={addForm.llmfit_url}
+				placeholder="http://192.168.1.50:8787"
+				class="w-full mb-2.5 text-xs bg-transparent border border-gray-200 dark:border-gray-800 rounded-lg px-2.5 py-1.5 outline-none focus:border-blue-500/50 transition"
+			/>
+
+			<label class="block text-[11px] text-gray-500 dark:text-gray-400 mb-1" for="cb-node-ollama"
+				>{$i18n.t('Ollama URL')} <span class="text-gray-400">({$i18n.t('optional — for pulling models')})</span></label
+			>
+			<input
+				id="cb-node-ollama"
+				type="text"
+				bind:value={addForm.ollama_url}
+				placeholder="http://192.168.1.50:11434"
+				class="w-full mb-1 text-xs bg-transparent border border-gray-200 dark:border-gray-800 rounded-lg px-2.5 py-1.5 outline-none focus:border-blue-500/50 transition"
+			/>
+
+			{#if addErr}<div class="mt-2 text-[11px] text-red-500 leading-relaxed">{addErr}</div>{/if}
+
+			<div class="flex items-center justify-end gap-2 mt-4">
+				<button
+					class="text-xs px-3 py-1.5 rounded-lg text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
+					on:click={() => (showAddNode = false)}
+					disabled={addingNode}>{$i18n.t('Cancel')}</button
+				>
+				<button
+					class="text-xs px-3 py-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-500 transition disabled:opacity-50"
+					on:click={submitAddNode}
+					disabled={addingNode}
+					>{addingNode ? $i18n.t('Checking…') : $i18n.t('Add device')}</button
+				>
+			</div>
+		</div>
+	</div>
+{/if}

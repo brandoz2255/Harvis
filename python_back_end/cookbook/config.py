@@ -80,6 +80,100 @@ PROXY_TIMEOUT = float(os.getenv("COOKBOOK_PROXY_TIMEOUT", "30"))
 PULL_TIMEOUT = float(os.getenv("COOKBOOK_PULL_TIMEOUT", "3600"))  # model pulls are slow
 
 
+# ─── Runtime node registry (env defaults + DB-persisted subhosts) ──────────────
+#
+# The env/COOKBOOK_NODES map above is the *baseline* (always present, can't be
+# deleted via the API). Extra subhosts a user adds through the UI live in the
+# `cookbook_nodes` table and are merged into NODES at startup, so `NODES` stays a
+# plain dict every existing synchronous reader (node_or_400, list_nodes) already
+# uses — the DB is just where the additions survive a restart.
+
+COOKBOOK_NODES_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS cookbook_nodes (
+    name        TEXT PRIMARY KEY,
+    role        TEXT NOT NULL DEFAULT 'subhost',
+    llmfit_url  TEXT NOT NULL,
+    ollama_url  TEXT NOT NULL DEFAULT '',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+"""
+
+# Names that come from env/defaults and therefore cannot be persisted or removed.
+_BASELINE_NAMES = set(NODES.keys())
+
+
+def is_baseline(name: str) -> bool:
+    """A baseline node (from env/defaults) is protected: not editable/removable via API."""
+    return name in _BASELINE_NAMES
+
+
+def register_node(name: str, role: str, llmfit: str, ollama: str = "") -> Dict[str, str]:
+    """Add/replace a node in the in-memory registry (does NOT persist — callers persist)."""
+    cfg = {"role": role or "subhost", "llmfit": llmfit.rstrip("/"), "ollama": (ollama or "").rstrip("/")}
+    NODES[name] = cfg
+    return cfg
+
+
+def unregister_node(name: str) -> None:
+    """Drop a node from the in-memory registry (does NOT persist)."""
+    NODES.pop(name, None)
+
+
+async def load_persisted_nodes(pool) -> int:
+    """Ensure the table exists and merge DB-persisted subhosts into NODES.
+
+    Called once at startup. Baseline (env) nodes always win over a same-named DB
+    row so a mis-persisted duplicate can never shadow the compose `main-host`.
+    Returns how many DB nodes were loaded. Never raises — a cold DB just means the
+    env defaults stand.
+    """
+    if pool is None:
+        return 0
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(COOKBOOK_NODES_SCHEMA_SQL)
+            rows = await conn.fetch("SELECT name, role, llmfit_url, ollama_url FROM cookbook_nodes")
+    except Exception as e:  # noqa: BLE001 — startup must survive a cold/absent DB
+        logger.warning("cookbook: could not load persisted nodes (%s)", e)
+        return 0
+    loaded = 0
+    for r in rows:
+        if is_baseline(r["name"]):
+            continue  # never let a DB row shadow an env/default node
+        register_node(r["name"], r["role"], r["llmfit_url"], r["ollama_url"] or "")
+        loaded += 1
+    if loaded:
+        logger.info("cookbook: loaded %d persisted node(s)", loaded)
+    return loaded
+
+
+async def persist_node(pool, name: str, role: str, llmfit: str, ollama: str = "") -> None:
+    """UPSERT a node row. Raises if pool is None (persistence is required for adds)."""
+    if pool is None:
+        raise RuntimeError("no database pool — cannot persist cookbook node")
+    async with pool.acquire() as conn:
+        await conn.execute(COOKBOOK_NODES_SCHEMA_SQL)
+        await conn.execute(
+            """
+            INSERT INTO cookbook_nodes (name, role, llmfit_url, ollama_url)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (name) DO UPDATE
+              SET role = EXCLUDED.role,
+                  llmfit_url = EXCLUDED.llmfit_url,
+                  ollama_url = EXCLUDED.ollama_url
+            """,
+            name, role or "subhost", llmfit.rstrip("/"), (ollama or "").rstrip("/"),
+        )
+
+
+async def delete_persisted_node(pool, name: str) -> None:
+    """Remove a persisted node row (no-op if pool is None)."""
+    if pool is None:
+        return
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM cookbook_nodes WHERE name = $1", name)
+
+
 def node_or_400(name: str) -> Dict[str, str]:
     """Resolve a node name to its config, or raise HTTP 400."""
     from fastapi import HTTPException

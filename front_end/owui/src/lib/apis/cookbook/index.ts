@@ -48,6 +48,31 @@ export const getNodes = async (token: string): Promise<CookbookNode[]> => {
 	return res?.nodes ?? [];
 };
 
+// Register another machine running `llmfit serve` as an inference node (admin-only).
+// The backend probes the llmfit URL for reachability before saving, so a bad URL
+// throws here with a helpful `detail`. Returns the saved node (with liveness).
+export const addNode = async (
+	token: string,
+	body: { name: string; llmfit_url: string; ollama_url?: string }
+): Promise<CookbookNode> => {
+	const res = await fetch(`${WEBUI_BASE_URL}/api/cookbook/nodes`, {
+		method: 'POST',
+		headers: headers(token),
+		body: JSON.stringify(body)
+	});
+	if (!res.ok) throw await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+	return res.json();
+};
+
+// Remove a user-added node (admin-only). Built-in nodes (e.g. main-host) are protected.
+export const removeNode = async (token: string, name: string): Promise<void> => {
+	const res = await fetch(`${WEBUI_BASE_URL}/api/cookbook/nodes/${encodeURIComponent(name)}`, {
+		method: 'DELETE',
+		headers: headers(token)
+	});
+	if (!res.ok) throw await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+};
+
 export const getSystem = async (token: string, node: string): Promise<any> => {
 	return fetch(`${WEBUI_BASE_URL}/api/cookbook/system?node=${encodeURIComponent(node)}`, {
 		headers: headers(token)
