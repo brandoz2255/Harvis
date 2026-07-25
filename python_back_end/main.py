@@ -174,7 +174,10 @@ async def get_user_api_key(
     pool, user_id: int, provider_name: str
 ) -> Optional[Dict[str, Any]]:
     """Get a user's API key for a specific provider."""
-    logger.info(f"get_user_api_key: Looking for {provider_name} key for user {user_id}")
+    # DEBUG, not INFO/WARNING: this runs on every model-catalog poll for every
+    # provider, and "no key configured" is the normal state for any provider the
+    # user hasn't connected — not a warning. At INFO it drowned the boot log.
+    logger.debug("get_user_api_key: looking up %s key for user %s", provider_name, user_id)
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
@@ -187,12 +190,10 @@ async def get_user_api_key(
         )
         if row:
             encrypted_key = row["api_key_encrypted"]
-            logger.info(
-                f"get_user_api_key: Found encrypted key, length={len(encrypted_key) if encrypted_key else 0}"
-            )
             decrypted_key = decrypt_api_key(encrypted_key)
-            logger.info(
-                f"get_user_api_key: Decrypted key length={len(decrypted_key) if decrypted_key else 0}"
+            logger.debug(
+                "get_user_api_key: %s key resolved for user %s (decrypt %s)",
+                provider_name, user_id, "ok" if decrypted_key else "FAILED",
             )
             return {
                 "id": row["id"],
@@ -203,7 +204,7 @@ async def get_user_api_key(
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
             }
-        logger.warning(f"get_user_api_key: No key found for {provider_name}")
+        logger.debug("get_user_api_key: no %s key for user %s", provider_name, user_id)
         return None
 
 
@@ -573,18 +574,25 @@ async def lifespan(app: FastAPI):
                     await conn.execute(_csf.read())
                 logger.info("✅ Core schema ensured (all_schemas_safe.sql)")
 
-                # Migrations 011-015 create tables (cron_jobs, user_memory,
-                # mcp_servers, messaging_platforms, user_soul) that no initdb
-                # mount and no other startup block provisions — a fresh clone
+                # Migrations 010-015 create tables (user_openclaw_config, cron_jobs,
+                # user_memory, mcp_servers, messaging_platforms, user_soul) that no
+                # initdb mount and no other startup block provisions — a fresh clone
                 # otherwise spams `relation "cron_jobs" does not exist` and
                 # cron/messaging features break. run_migrations.py exists but is
-                # never invoked. Apply just these five here: all are verified
+                # never invoked. Apply just these six here: all are verified
                 # idempotent (CREATE ... IF NOT EXISTS), so this heals fresh AND
                 # pre-existing volumes. Per-file try/except so one bad file can't
                 # abort boot. The 001-009 migrations include un-guarded ALTERs
                 # and are deliberately NOT swept in.
+                #
+                # 010 was missing from this list even though it is idempotent, so
+                # user_openclaw_config never existed on a fresh volume and every BYO
+                # OpenClaw lookup failed — which is what surfaced as the pairing
+                # regression. It is a plain CREATE TABLE/INDEX IF NOT EXISTS plus a
+                # CREATE OR REPLACE FUNCTION and a DROP-then-CREATE trigger.
                 _mig_dir = os.path.join(os.path.dirname(__file__), "migrations")
                 for _mig_name in (
+                    "010_user_openclaw_config.sql",
                     "011_messaging_platforms.sql",
                     "012_user_memory.sql",
                     "013_mcp_servers.sql",
@@ -603,7 +611,7 @@ async def lifespan(app: FastAPI):
                             _mig_name,
                             _mig_err,
                         )
-                logger.info("✅ Idempotent migrations 011-015 ensured")
+                logger.info("✅ Idempotent migrations 010-015 ensured")
 
                 # Instance-level key/value settings (admin_user_id, …).
                 await conn.execute(
