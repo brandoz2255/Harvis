@@ -150,7 +150,14 @@ services:
       # Use a NON-thinking model: qwen3:4b emits a long <think> chain (~13s, ignores
       # think:false) → 15s timeout on the 8GB GPU → detection silently fails → no workspace
       # card. llama3.1:8b is non-thinking and with format:json answers in ~3s.
-      WORKSPACE_DETECTOR_OLLAMA_MODEL: "${WORKSPACE_DETECTOR_OLLAMA_MODEL:-llama3.1:8b}"
+      #
+      # EMPTY BY DEFAULT — deliberately. Pinning a name here is a hard override that
+      # BYPASSES the adaptive resolver (task_detector._resolve_detector_model), so a
+      # fresh clone that never pulled that exact tag gets silent detection failure and
+      # no Build card at all. Empty lets the resolver pick whatever Ollama actually has.
+      # Set it in .env on a box where you know the tag is pulled and want it pinned;
+      # the detector now verifies a pin against /api/tags and falls back if it's absent.
+      WORKSPACE_DETECTOR_OLLAMA_MODEL: "${WORKSPACE_DETECTOR_OLLAMA_MODEL:-}"
       # Optional desktop-GPU Ollama for the model picker. Surfaces models that
       # only exist on the desktop (e.g. gemma4-26b on the 5080) in /api/models.
       DESKTOP_OLLAMA_URL: "${DESKTOP_OLLAMA_URL:-}"
@@ -159,6 +166,14 @@ services:
       # fall back to the code default (llama3.1:8b); set in .env to an installed
       # model. Per-request body.model overrides this.
       DEEP_RESEARCH_MODEL: "${DEEP_RESEARCH_MODEL:-}"
+      # Operator-wide default local model, used by plugins.models.resolver whenever
+      # the user has no saved pick. Same forwarding rule as DEEP_RESEARCH_MODEL: it
+      # was read by the code but never declared here, so setting it in .env did
+      # nothing. Empty = resolver uses the first model Ollama actually reports.
+      HARVIS_DEFAULT_LOCAL_MODEL: "${HARVIS_DEFAULT_LOCAL_MODEL:-}"
+      # Safety net for OpenClaw's `model=auto` when the saved pick can't be served.
+      # Empty = the resolver names a real installed model instead of a fixed guess.
+      HARVIS_AUTO_MODEL_FALLBACK: "${HARVIS_AUTO_MODEL_FALLBACK:-}"
       # Per-workspace ephemeral Docker terminal (Phase 2). Default ON — the
       # backend probes docker.sock + network at startup and gates the
       # /api/tools/terminal/<wsid>/exec endpoint on the result. Set
@@ -892,6 +907,13 @@ services:
       - open_notebook_data:/app/data
     depends_on:
       - surrealdb
+    # Must share a network with surrealdb and ollama — both are pinned to
+    # ollama-n8n-network. With no `networks:` key Compose silently placed this
+    # service on the project default instead, so `ws://surrealdb:8000/rpc` never
+    # resolved: the startup migrations died with "[Errno -3] Temporary failure in
+    # name resolution" and supervisord restarted the api process forever.
+    networks:
+      - ollama-n8n-network
 
   # MCP bridge for Cursor / VS Code integration
   harvis-mcp:

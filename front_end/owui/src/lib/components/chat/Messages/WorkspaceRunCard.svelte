@@ -10,6 +10,7 @@
 	} from '$lib/apis/streaming/workspace-stream';
 	import Markdown from './Markdown.svelte';
 	import HarvisClawMascot from '$lib/components/common/HarvisClawMascot.svelte';
+	import BrandGlyph from '$lib/integrations/BrandGlyph.svelte';
 	import RunArtifacts from '$lib/agent-studio/RunArtifacts.svelte';
 	import RunProgressCard from '$lib/agent-studio/RunProgressCard.svelte';
 	import WorkflowInspector from '$lib/agent-studio/WorkflowInspector.svelte';
@@ -44,9 +45,29 @@
 
 	$: workspaceId = attributes?.workspaceid ?? '';
 	$: taskLabel = attributes?.tasklabel ?? 'Workspace task';
-	// Engine chip: the marker's engine hint (e.g. "OpenClaw") shows the instant the
-	// card pops; the stream-parsed `executor` refines it once the run connects.
+	// Engine chip: the marker's engine hint (e.g. "Kimi") shows the instant the card
+	// pops; the stream-parsed `executor` refines it once the run connects (and is the
+	// only thing that can report a mid-run fallback, e.g. Kimi → local with no key).
 	$: engineLabel = executor || (attributes?.engine ?? '');
+	// Brand mark for the engine actually running this task. Keyed off the label the
+	// backend resolved from the picked model, so the glyph tracks the real lane instead
+	// of being a fixed OpenClaw mark. Unknown engines fall back to the generic pack box.
+	const ENGINE_BRAND: Record<string, string> = {
+		openclaw: 'openclaw',
+		kimi: 'kimi',
+		claude: 'claude',
+		'claude code': 'claude',
+		'nvidia kimi': 'kimi',
+		'cloud ollama': 'ollama',
+		local: 'ollama',
+		'local model': 'ollama',
+		hermes: 'hermes',
+		'hermes agent': 'hermes',
+		orchestrator: 'harvis',
+		codex: 'openai',
+		'gpt-oss': 'openai'
+	};
+	$: engineBrand = ENGINE_BRAND[(engineLabel || '').trim().toLowerCase()] ?? 'pack';
 	// Launch-mode chip ("Auto" / "Agent" / "Orchestrate") — set by the bridge marker.
 	$: launchMode = attributes?.launchmode ?? '';
 	$: taskBrief = attributes?.taskbrief ?? '';
@@ -172,6 +193,13 @@
 
 	// Parse executor/model from system logs, surface narrative, skip the noise.
 	const noteLog = (msg: string) => {
+		// A lane can fall back mid-run (e.g. the Kimi lane with no Moonshot key drops to
+		// local Ollama). The marker chip still says "Kimi" at that point, so correct it —
+		// the chip must name what's ACTUALLY executing, not what was dispatched.
+		if (/falling back to local/i.test(msg)) {
+			executor = 'Local';
+			return;
+		}
 		if (/Connected to OpenClaw gateway/i.test(msg)) {
 			executor = 'OpenClaw'; // shown as the chip — verifies who's running it
 			return;
@@ -519,10 +547,13 @@
 			<div class="ml-auto flex items-center gap-1.5 min-w-0">
 				{#if engineLabel}
 					<span
-						class="shrink-0 max-w-[150px] truncate text-[10px] px-1.5 py-0.5 rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-300 font-medium"
+						class="shrink-0 flex items-center gap-1 max-w-[170px] text-[10px] px-1.5 py-0.5 rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-300 font-medium"
 						title={engineLabel + (execModel ? ' · ' + execModel : '')}
 					>
-						{engineLabel}{#if execModel} · {execModel}{/if}
+						<BrandGlyph name={engineBrand} className="size-3 shrink-0" />
+						<span class="truncate"
+							>{engineLabel}{#if execModel} · {execModel}{/if}</span
+						>
 					</span>
 				{/if}
 				{#if launchMode}

@@ -104,6 +104,42 @@ def _marker_content(
     )
 
 
+# Human label for each dispatch lane (agent_id) — what the run card's engine chip shows.
+# Keyed by the SAME agent_id that selects the event stream in workspace_router, so the chip
+# can never claim an engine that isn't the one running. Unknown ids fall back to the id
+# itself rather than silently reading "OpenClaw".
+_ENGINE_LABELS = {
+    "main": "OpenClaw",
+    "orchestrated": "Orchestrator",
+    "claude": "Claude",
+    "kimi": "Kimi",
+    "nvidia-kimi": "NVIDIA Kimi",
+    "cloud-ollama": "Cloud Ollama",
+    "gpt-oss": "GPT-OSS",
+    "local": "Local",
+}
+
+
+def _resolve_engine(mode: str, model_id: str) -> tuple[str, str]:
+    """``(agent_id, engine_label)`` for this turn.
+
+    ONE resolution drives both the dispatch lane and the card chip. They used to be two
+    independent ternaries, which is how a Moonshot/Kimi pick ended up dispatching to the
+    OpenClaw tool-loop *and* labelling itself "OpenClaw" — the model the user chose was
+    never consulted. Adding an engine now means adding one row here, not editing two
+    parallel conditionals that can drift apart.
+    """
+    if mode == "orchestrate":
+        agent_id = "orchestrated"
+    elif model_id.startswith("anthropic/"):
+        agent_id = "claude"  # cloud Claude drives its OWN tool-loop (claude -p)
+    elif model_id.startswith("moonshot/"):
+        agent_id = "kimi"  # → stream_kimi_workspace (the original Harvis workspace engine)
+    else:
+        agent_id = os.getenv("HARVIS_OWUI_WORKSPACE_AGENT", "main")
+    return agent_id, _ENGINE_LABELS.get(agent_id, agent_id)
+
+
 def _openai_sse_lines(workspace_id: str, content: str) -> list[str]:
     """A minimal OpenAI chat.completion.chunk sequence carrying ``content`` then
     ``[DONE]`` — exactly what OWUI's createOpenAITextStream parser expects."""
@@ -161,8 +197,11 @@ async def _sync_workspace_model(pool, model_name: str) -> None:
     m = (model_name or "").strip()
     if m.lower() in _MODEL_SENTINELS:
         return
-    if m.startswith(("anthropic/", "openai/")):
-        return  # cloud models don't run via OpenClaw→Ollama — the 'claude' lane handles them
+    if m.startswith(("anthropic/", "openai/", "moonshot/")):
+        return  # cloud models don't run via OpenClaw→Ollama — the 'claude'/'kimi' lanes handle
+                # them. moonshot/* especially: writing a cloud id into openclaw_llm_config makes
+                # model_proxy try to resolve it as an OLLAMA TAG, fail, and silently fall back to
+                # a local model — the same trap documented for hermes-agent below.
     if m == "hermes-agent":
         return  # Hermes Agent is a remote-proxied engine (its own OpenAI-compatible API server,
                 # local or BYO external), NOT an Ollama tag. Syncing it into the OpenClaw→Ollama
@@ -209,6 +248,10 @@ async def maybe_handle_workspace(
     _model_id = str(owui_body.get("model") or "")
     _is_anthropic = _model_id.startswith("anthropic/")
     _is_openai = _model_id.startswith("openai/")
+    # Moonshot/Kimi facade ids are provider-prefixed (``moonshot/kimi-k3`` …) exactly like the
+    # other cloud providers — see cloud_chat._MOONSHOT_MODELS. Prefix-matching (not an id list)
+    # keeps new K-versions routing correctly without touching this file.
+    _is_moonshot = _model_id.startswith("moonshot/")
 
     # FIX 5: OpenAI/GPT cloud models have no workspace tool lane. If the user FORCES
     # agent/orchestrate on one, launching the native/OpenClaw loop would run on a model
@@ -258,6 +301,11 @@ async def maybe_handle_workspace(
         # the artifact preview auto-opens. Forced agent/orchestrate (above) always runs it.
         if _is_openai:
             return None
+        # Kimi/Moonshot is a paid cloud engine like Claude — same rule, so simple generation
+        # doesn't burn Moonshot tokens on the slow tool lane when fast chat would do.
+        if _is_moonshot and not _needs_live_tools(suggestion, message):
+            logger.info("owui workspace_bridge: Kimi simple task → plain chat")
+            return None
         if _is_anthropic and not _needs_live_tools(suggestion, message):
             logger.info("owui workspace_bridge: cloud Claude simple task → plain chat")
             return None
@@ -303,22 +351,24 @@ async def maybe_handle_workspace(
             workspace_id,
         )
 
+    # Lane + chip label from one resolution (see _resolve_engine) — the picked model
+    # decides BOTH, so the card can't advertise an engine the run isn't using.
+    _agent_id, _engine_label = _resolve_engine(mode, _model_id)
+    logger.info(
+        "owui workspace_bridge: model=%r → agent_id=%r engine=%r (mode=%s)",
+        _model_id, _agent_id, _engine_label, mode,
+    )
+
     launch_kwargs = dict(
         workspace_id=workspace_id,
         session_id=session_id,
         task_brief=resolved_brief,
         chat_history=history,
-        # Route web-UI workspace tasks through OpenClaw's tool-loop by default. agent_id
-        # NOT in {local,kimi,nvidia-kimi,cloud-ollama,gpt-oss} → the `else` branch in
-        # workspace_router → client.stream (which actually has tools). Override per-deploy
-        # via HARVIS_OWUI_WORKSPACE_AGENT (e.g. "local" for the tool-less direct model).
-        # 'orchestrate' mode → the P5 multi-agent orchestrator; otherwise the default
-        # OpenClaw tool-loop agent (override via HARVIS_OWUI_WORKSPACE_AGENT).
-        agent_id=(
-            "orchestrated" if mode == "orchestrate"
-            else "claude" if _is_anthropic   # cloud Claude drives its OWN tool-loop (claude -p)
-            else os.getenv("HARVIS_OWUI_WORKSPACE_AGENT", "main")
-        ),
+        # Resolved above from the picked model. Default "main" → agent_id NOT in
+        # {local,kimi,nvidia-kimi,cloud-ollama,gpt-oss} → the `else` branch in
+        # workspace_router → client.stream (which actually has tools). Override the
+        # non-cloud default per-deploy via HARVIS_OWUI_WORKSPACE_AGENT (e.g. "local").
+        agent_id=_agent_id,
         user_id=user_id,
         model_name=model_name,
         live_web=True,
@@ -362,11 +412,6 @@ async def maybe_handle_workspace(
             workspace_id, suggestion.confidence, suggestion.task_type,
         )
 
-    _engine_label = (
-        "Orchestrator" if mode == "orchestrate"
-        else "Claude" if _is_anthropic
-        else "OpenClaw"
-    )
     lines = _openai_sse_lines(
         workspace_id,
         _marker_content(

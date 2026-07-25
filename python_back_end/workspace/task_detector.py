@@ -75,14 +75,42 @@ FAST_MODEL = (
 
 
 async def _resolve_detector_model() -> Optional[str]:
-    """FAST_MODEL when explicitly configured, otherwise the adaptive resolver."""
-    if FAST_MODEL:
-        return FAST_MODEL
+    """FAST_MODEL when explicitly configured AND actually installed, else the resolver.
+
+    The pin is verified against Ollama's real tag list rather than trusted blindly.
+    A pin naming a tag nobody pulled (the fresh-clone / new-machine case — the old
+    compose default was ``llama3.1:8b``, which most boxes don't have) used to make
+    every detection call 404 and return should_suggest=False, so the Build card simply
+    never appeared and nothing said why. Falling through to the resolver means a wrong
+    or stale pin degrades to "use whatever is installed" instead of "silently off",
+    and the operator can still change the pin at any time via .env — or change the
+    effective model at runtime by picking one in Build/Discord, which the resolver reads.
+    """
     try:
-        from plugins.models.resolver import resolve_default_local_model
+        from plugins.models.resolver import list_ollama_models, resolve_default_local_model
+    except Exception:
+        logger.exception("task_detector: resolver import failed")
+        return FAST_MODEL or None
+
+    if FAST_MODEL:
+        try:
+            installed = await list_ollama_models(ollama_url=OLLAMA_URL)
+        except Exception:
+            installed = []
+        # An empty list means Ollama was unreachable, not that the pin is bad —
+        # honor the pin rather than second-guessing it on a transient failure.
+        if not installed or FAST_MODEL in installed:
+            return FAST_MODEL
+        logger.warning(
+            "task_detector: pinned detector model %r is not installed in Ollama "
+            "(%d available) — falling back to the adaptive resolver",
+            FAST_MODEL, len(installed),
+        )
+
+    try:
         return await resolve_default_local_model(ollama_url=OLLAMA_URL)
     except Exception:
-        logger.exception("task_detector: resolver import/call failed")
+        logger.exception("task_detector: resolver call failed")
         return None
 
 

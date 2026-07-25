@@ -5520,6 +5520,12 @@ async def set_workspace_model_endpoint(
     wins). ON CONFLICT only touches model_id + updated_at, preserving provider_url /
     provider_type / engine on an existing row. Returns the new updated_at epoch so the
     caller can avoid re-adopting its own write on the next poll.
+
+    ``last_local_model_id`` mirrors what Discord's /set-model records: a LOCAL pick is
+    remembered there, a cloud pick leaves it untouched (COALESCE on NULL). That column
+    is what every local-only consumer falls back to while a cloud model is selected —
+    without it, picking Claude in Build left workspace detection and autonaming pointed
+    at a tag Ollama can't serve, and switching back to local had nothing to restore.
     """
     pool = getattr(request.app.state, "pg_pool", None)
     m = (req.model_id or "").strip()
@@ -5527,17 +5533,26 @@ async def set_workspace_model_endpoint(
         return {"ok": False, "updated_at": 0}
     ollama_url = os.getenv("OLLAMA_URL", "http://ollama:11434")
     try:
+        from owui_compat.cloud_chat import is_cloud_chat_model
+        _is_cloud = is_cloud_chat_model(m)
+    except Exception:
+        logger.warning("workspace-model: cloud detection unavailable, treating %r as local", m)
+        _is_cloud = False
+    _last_local = None if _is_cloud else m
+    try:
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                INSERT INTO openclaw_llm_config (user_id, provider_url, model_id, provider_type, is_active)
-                VALUES ($1, $2, $3, 'ollama', TRUE)
+                INSERT INTO openclaw_llm_config
+                    (user_id, provider_url, model_id, provider_type, is_active, last_local_model_id)
+                VALUES ($1, $2, $3, 'ollama', TRUE, $4)
                 ON CONFLICT (user_id) DO UPDATE SET
                     model_id = EXCLUDED.model_id,
+                    last_local_model_id = COALESCE($4, openclaw_llm_config.last_local_model_id),
                     updated_at = NOW()
                 RETURNING EXTRACT(EPOCH FROM updated_at) AS epoch
                 """,
-                current_user["id"], ollama_url, m,
+                current_user["id"], ollama_url, m, _last_local,
             )
         return {"ok": True, "model_id": m, "updated_at": float(row["epoch"] or 0) if row else 0}
     except Exception as exc:
