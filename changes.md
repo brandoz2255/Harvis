@@ -1,5 +1,145 @@
 # Recent Changes and Fixes Documentation
 
+## Date: 2026-07-24 — Kimi Code answered nothing: SSE parser required a space that Kimi doesn't send
+
+### Problem
+With a real Kimi Code key connected, "hello" in chat returned **an empty message**. HTTP 200, no
+error, no fallback notice — the UI simply rendered nothing, which reads as "the model said nothing"
+rather than "we failed to read the answer." Build/workspace was unaffected.
+
+### Root cause
+`_stream_anthropic()` in `owui_compat/cloud_chat.py` gated on `line.startswith("data: ")` and sliced
+`line[6:]`. The SSE spec makes the space after `data:` **optional**: Anthropic sends `data: {…}`,
+Kimi Code sends `data:{…}`. Every Kimi event therefore failed the prefix test and was skipped, so
+the stream completed cleanly with zero content deltas. Anthropic's own stream uses the space, which
+is why this never surfaced before Kimi Code shared the code path.
+
+Reproduced directly through `proxy_cloud_chat`: role chunk → `finish_reason: "stop"`, zero content
+deltas, reconstructed text `''`.
+
+### Solution
+Split on the colon and strip leading whitespace, so both wire styles parse:
+`startswith("data:")` + `json.loads(line[5:].lstrip())`. `event:` lines stay ignored on purpose —
+the payload's own `type` field is the authority.
+
+### Files
+`python_back_end/owui_compat/cloud_chat.py` (`_stream_anthropic`)
+
+### Verification (live, 6/6)
+- k3 stream returns 93 chars; visible answer after the thinking block is
+  `Hello! How can I help you today?`
+- k3 always emits a `thinking` block first (even for "hello"); it is wrapped in `<think>…</think>`
+  so the UI collapses it rather than showing it as the answer.
+- `kimi-for-coding` stream returns text · non-stream path returns text.
+- **Regression guard:** Anthropic streaming still works — the space-form `data: {…}` is unaffected.
+
+### Not a bug: "it creates a script in workspace"
+The workspace half of the report was correct behaviour, not a Kimi failure. Run `bca294a8` completed
+`status=done` with a full `final_summary` that opens *"in this environment I only have a **Read**
+tool available — I can't create files or run commands myself"*, matching the backend log line
+`auto launch bca294a8 — Tier-3 interactive withheld`. The Phase-D offer-time tool policy grants
+auto-launched runs Read only, so the model described the script instead of writing it. Engine-agnostic
+and pre-existing — whether auto-launch should grant write/exec is a product decision, not a fix.
+
+---
+## Date: 2026-07-24 — Two Kimi products, separated: Moonshot platform verification + Kimi Code membership engine
+
+### Problem
+Harvis treated "Kimi" as one thing. It is two, and conflating them produces a 401 with nothing
+pointing at the real cause:
+
+1. **Moonshot developer platform** (`api.moonshot.ai` / `api.moonshot.cn`) — a pay-as-you-go
+   API key. Two mutually exclusive regional platforms with separate key namespaces; a `.cn` key
+   401s against `.ai` and vice-versa. Harvis stored the key but never recorded WHICH platform it
+   belonged to, so every request was a coin flip. Worse, a rejected key was logged in plaintext.
+2. **Kimi Code** (`api.kimi.com/coding`) — a *subscription* coding product with its own console,
+   its own key namespace, and its own bill (membership allowance, not pay-as-you-go). Harvis had
+   no concept of it at all.
+
+Separately, the reason Kimi "doesn't behave like Claude" in Build was never the model: Claude Code
+supplies the agent loop (execute, read/write, feed tool results back, track permissions, collect
+diffs, handle cancellation). Kimi supplies reasoning *inside* that loop. Routing Kimi to a
+chat-completion lane can't reproduce agentic behaviour no matter which model answers.
+
+### Root cause
+`user_api_keys` had no `base_url` column in use for Moonshot, so `get_moonshot_client()` always
+built the same hardcoded endpoint. And the engine registry (`AUTH_ENGINES`) only knew
+`codex` / `claude-code`, so a subscription-backed coding product had nowhere to live — the only
+place to paste such a key was the Moonshot tile, which authenticates against the wrong service.
+
+### Solution
+
+**Part 1 — Moonshot platform verification (`.ai` vs `.cn` discovered, not guessed)**
+- `verify_moonshot_key()` probes both platforms at save time and returns the one that accepts the
+  key; the winning `base_url` is persisted alongside it.
+- The verified URL is threaded end-to-end: `get_moonshot_client(base_url=…)`, the workspace router's
+  credential fetcher (split into key-only and full-credential variants), `cloud_chat._moonshot_key()`
+  (now returns `(api_key, base_url)`), and `_proxy_moonshot_api()`.
+- Credential logging removed; a `_key_fingerprint()` helper replaces it.
+- Fixed a tuple-truthiness bug in two readiness gates: `("", "")` is truthy, so an empty credential
+  read as present. Both now test element `[0]`.
+
+**Part 2 — Kimi Code as a first-class engine (runs the REAL Claude Code CLI)**
+- `engine_auth.py`: `kimi-code` added to `AUTH_ENGINES` with its own verification branch against
+  `api.kimi.com/coding/v1/messages`. Status handling is deliberate — `200`/`429` → valid (rate
+  limits are applied *after* auth, so a user at their quota must not look like a user with a bad
+  key); `401`/`403` → invalid, with an error naming the Kimi Code Console; `5xx` → "unavailable,
+  not verified" (an outage is not evidence against a credential, and never replaces a stored one).
+  `OAUTH_ENGINES` deliberately unchanged — Kimi Code is API-key-only.
+- `engine_adapter.py`: `run_claude_chat_workspace(engine=…)` now serves both engines from the same
+  sidecar. For `kimi-code` it injects `ANTHROPIC_BASE_URL` + the membership key and pins **every**
+  model slot (`ANTHROPIC_MODEL`, opus/sonnet/haiku defaults, `CLAUDE_CODE_SUBAGENT_MODEL`) to the
+  chosen Kimi model — Claude Code resolves its own aliases internally, so leaving any slot unpinned
+  fails partway through a run with model-not-found rather than at the first token. Context budget
+  (262144) pinned per model. All user-facing "Claude" strings parameterised to a `label`.
+- Running the real CLI (not a proxy imitating it) is a **compliance requirement**, not a shortcut:
+  Kimi's terms require third-party coding tools to preserve their true client identity. Harvis only
+  injects documented env vars.
+- `workspace_router.py` + `workspace_bridge.py`: `kimi-code` dispatch lane and `agent_id` resolution.
+  The `kimi-code/` prefix is checked **before** `moonshot/` — collapsing them would silently spend
+  pay-as-you-go balance when the user picked their membership.
+- `cloud_chat.py`: Kimi Code speaks the Anthropic wire format, so `_proxy_claude_api` /
+  `_stream_anthropic` were made endpoint-agnostic and reused with the URL swapped. Prices listed as
+  0.0 — a per-token figure would invent a charge the user never incurs. The picker is gated on a
+  **verified** credential, so an unverified key cannot produce a run that silently falls back to a
+  local model while reporting success.
+- Frontend: `kimi-code` catalog tile ("Kimi Code (Membership)", `connect: 'engine_api_key'`),
+  `ENGINE_AUTH_OF` mapping, Kimi-specific help text, engine-readiness + section + group rows, Build
+  engine label / owner map / default model, and a distinct "Kimi Code (membership)" picker group.
+- **Bug caught while wiring**: `engineForOwner()` tested `o.startsWith('kimi')` before any exact
+  match, so a `kimi-code` model would have routed to the Moonshot lane — wrong credential, wrong
+  bill, no tool loop. `kimi-code` is now matched first.
+
+### Files
+Backend: `owui_compat/engine_auth.py`, `owui_compat/cloud_chat.py`, `owui_compat/workspace_bridge.py`,
+`owui_compat/capabilities.py`, `owui_compat/integration_logs.py`, `owui_compat/moonshot_api.py`,
+`workspace/workspace_router.py`, `workspace/orchestration/engine_adapter.py`, `main.py`
+Frontend: `integrations/catalog.ts`, `integrations/ConnectionPanel.svelte`, `integrations/status.ts`,
+`harvis/vibecode/+page.svelte`, `chat/Messages/WorkspaceRunCard.svelte`
+
+### Verification (all live, no stubs)
+- Kimi Code endpoint proven real, not assumed: `/coding/v1/messages` → `401` in the coding app's own
+  Anthropic-shaped envelope, while `/nonexistent-xyz/v1/messages` → raw nginx HTML 404 and
+  `/coding/v1/bogus` → `resource_not_found_error`. Three distinct response layers ⇒ `/coding/` is a
+  real, separate upstream. Sidecar reaches it in 516 ms (via `node -e fetch` — the image has no curl).
+- Moonshot verification: 6/6 scenarios + 4/4 HTTP save-time scenarios.
+- Kimi Code constants/routing/live-probe: 20/20. HTTP engine-auth E2E: 13/13.
+- Post-frontend: 5/5 readiness assertions + 10/10 store-isolation assertions — saving a `kimi-code`
+  key leaves the Moonshot store empty, leaves the `kimi` readiness row at `missing_auth`, and does
+  NOT put `kimi-code/*` in the picker; a live verify against real Kimi Code returns the
+  console-pointing error; disconnect removes the row.
+- Existing regression suite `tests/test_engine_auth_modes.py`: 7 passed.
+- owui built (1m 5s) and deployed; all six new string markers confirmed in the **served** bundles.
+
+### Status
+Shipped locally and deployed (backend restarted, owui rebuilt, nginx restarted). **Uncommitted** —
+awaiting the user's E2E with a real Kimi Code Console key. The spec's 10-point proof (session engine
+is `kimi-code`, execution in `harvis-claude-code`, file actually modified, tests actually executed,
+membership quota consumed, no fallback to Gemma/Ollama/Anthropic) needs that key.
+**Follow-up:** the bad Moonshot key is still in Docker logs in plaintext — rotate once a working one
+is in place.
+
+---
 ## Date: 2026-07-20 — Settings 1a complete · Build 1c honesty · progressive stream polish
 
 ### Problem
