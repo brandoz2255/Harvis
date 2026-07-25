@@ -53,7 +53,31 @@ _SESSION_ID_RE = re.compile(r"^[a-zA-Z0-9-]{1,128}$")
 # or globally via DEEP_RESEARCH_MODEL. No keyword-based auto-routing.
 # `or` (not a getenv default) so compose forwarding the var as an EMPTY string
 # still falls back instead of trying to reach a model named "".
-DEFAULT_RESEARCH_MODEL = os.getenv("DEEP_RESEARCH_MODEL") or "llama3.1:8b"
+DEFAULT_RESEARCH_MODEL = os.getenv("DEEP_RESEARCH_MODEL") or ""
+
+
+async def _resolve_research_model(request: Request, user_id) -> str:
+    """The env pin when set, otherwise whatever the box actually has installed.
+
+    There used to be a literal ``"llama3.1:8b"`` here, evaluated at import. On this
+    dev box that tag happens to be pulled, so it worked; on a fresh clone that never
+    pulled it, every research run failed in _probe_model — and until the handler fix
+    landed alongside this, it failed invisibly. Deferring to the shared resolver means
+    research follows the same "use an installed model" rule as workspace detection and
+    the auto lane, and picking a model in Build or Discord steers it too. Returning ""
+    is deliberate: _probe_model then reports that Ollama has no usable model, which is
+    the truth, rather than naming some tag the user never asked for.
+    """
+    if DEFAULT_RESEARCH_MODEL:
+        return DEFAULT_RESEARCH_MODEL
+    try:
+        from plugins.models.resolver import resolve_default_local_model
+        return await resolve_default_local_model(
+            pool=getattr(request.app.state, "pg_pool", None), user_id=user_id
+        ) or ""
+    except Exception:
+        logger.exception("deep_research: adaptive model resolution failed")
+        return ""
 
 
 # ─── Auth (mirror notebooks/router.py — late import avoids circular import) ───
@@ -119,10 +143,10 @@ class ResearchStartRequest(BaseModel):
 
 
 @router.post("/start")
-async def research_start(body: ResearchStartRequest, current_user: Dict = Depends(get_current_user_from_request)):
+async def research_start(body: ResearchStartRequest, request: Request, current_user: Dict = Depends(get_current_user_from_request)):
     owner = _owner(current_user)
     session_id = f"rp-{uuid.uuid4().hex[:12]}"
-    model = (body.model or DEFAULT_RESEARCH_MODEL).strip()
+    model = (body.model or await _resolve_research_model(request, current_user.get("id"))).strip()
     effective_max_rounds = body.max_rounds if body.max_rounds > 0 else 20
     _handler.start_research(
         session_id=session_id, query=body.query, llm_model=model,

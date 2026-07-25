@@ -111,6 +111,10 @@ class ResearchHandler:
                 else:
                     entry["result"] = f"Research timed out after {hard_timeout}s."
                     entry["status"] = "error"
+                    # Persist for the same reason as the generic failure below: a
+                    # timeout with no partial report is still a result the user needs
+                    # to find later, not a session that quietly ceases to exist.
+                    self._save_result(session_id, entry)
                 on_progress({"phase": "error", "message": f"Research timed out after {hard_timeout}s"})
             except asyncio.CancelledError:
                 entry["status"] = "cancelled"
@@ -119,6 +123,17 @@ class ResearchHandler:
                 logger.error("deep_research: background run failed: %s", e, exc_info=True)
                 entry["result"] = str(e)
                 entry["status"] = "error"
+                # Announce and persist, exactly like the done/timeout paths do.
+                # Neither happened here before, and the two omissions compounded into
+                # a run that failed invisibly: `progress` kept whatever phase it died
+                # in, so a /status poller saw "error" with no reason attached; and with
+                # nothing written to disk the session existed only in memory, so it
+                # never reached /library and a backend restart turned it into a plain
+                # 404 — indistinguishable from a run that was never started. The most
+                # common trigger is the most confusing one to debug blind: the model
+                # isn't pulled, and _probe_model's message says so precisely.
+                on_progress({"phase": "error", "message": str(e)})
+                self._save_result(session_id, entry)
 
         entry["task"] = asyncio.create_task(_run())
         return {"session_id": session_id, "status": "running", "query": query}
