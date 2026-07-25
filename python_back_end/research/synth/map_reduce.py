@@ -56,7 +56,10 @@ class MapReduceProcessor:
     def __init__(
         self,
         max_concurrent: int = 5,
-        timeout_seconds: int = 30,
+        # Per-chunk, and sized for a real local model. 30s was fine when the LLM
+        # client was a stub that slept 0.1s; a 12B model summarising a web page
+        # takes considerably longer than that.
+        timeout_seconds: int = 180,
         min_successful_maps: int = 1,
         enable_fallback: bool = True,
     ):
@@ -74,23 +77,34 @@ class MapReduceProcessor:
     ) -> MapResult:
         """Process a single chunk in MAP phase"""
         start_time = time.time()
-        chunk_id = chunk.chunk.chunk_id
-        source_url = chunk.chunk.url
+        # `chunk.chunk` is a DocChunk (url/title/text/start/end/meta). It has no
+        # `chunk_id` and no `content` — BM25 only ever uses chunk ids internally as
+        # dict keys and never attaches them. Reading those two names raised
+        # AttributeError for every chunk, so the MAP phase failed 100% of the time
+        # and the caller silently fell back to single-shot synthesis. Derive the id
+        # the same way BM25 does, and read the field DocChunk actually has.
+        doc = chunk.chunk
+        source_url = doc.url
+        chunk_id = getattr(doc, "chunk_id", None) or f"chunk_{hash(doc.url + str(doc.start))}"
+        chunk_text = getattr(doc, "text", None) or getattr(doc, "content", "") or ""
 
         try:
             # Generate MAP prompt
             prompt = get_map_prompt(
                 query=query,
-                chunk_content=chunk.chunk.content[:4000],  # Limit chunk size
+                chunk_content=chunk_text[:4000],  # Limit chunk size
                 source_url=source_url,
             )
 
-            # Call LLM for actual analysis
+            # Call LLM for actual analysis. The timeout is per chunk, not per
+            # phase: a single slow page must not discard the work of every other
+            # chunk (which is what the phase-wide timeout below used to do).
             logger.debug(
                 f"MAP phase calling LLM for chunk {chunk_id} from {source_url}"
             )
-            llm_response = await llm_client.generate(
-                prompt, model=model, temperature=0.7
+            llm_response = await asyncio.wait_for(
+                llm_client.generate(prompt, model=model, temperature=0.7),
+                timeout=self.timeout_seconds,
             )
 
             if not llm_response.success:
@@ -153,16 +167,28 @@ class MapReduceProcessor:
             async with semaphore:
                 return await self._process_single_chunk(query, chunk, llm_client, model)
 
-        # Process chunks with timeout
-        try:
-            map_results = await asyncio.wait_for(
-                asyncio.gather(*[bounded_process(chunk) for chunk in chunks]),
-                timeout=self.timeout_seconds,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(f"MAP phase timed out after {self.timeout_seconds}s")
-            # Return partial results if available
-            map_results = []
+        # Each chunk carries its own timeout (see _process_single_chunk), so a
+        # straggler degrades to one failed MapResult instead of wiping the phase.
+        # The previous phase-wide wait_for discarded *every* result on timeout —
+        # the "return partial results" comment notwithstanding, it returned [].
+        settled = await asyncio.gather(
+            *[bounded_process(chunk) for chunk in chunks], return_exceptions=True
+        )
+        map_results = []
+        for chunk, outcome in zip(chunks, settled):
+            if isinstance(outcome, BaseException):
+                logger.error(f"MAP phase raised for a chunk: {outcome}")
+                map_results.append(
+                    MapResult(
+                        chunk_id="unknown",
+                        source_url=getattr(getattr(chunk, "chunk", None), "url", ""),
+                        content="",
+                        success=False,
+                        error=str(outcome),
+                    )
+                )
+            else:
+                map_results.append(outcome)
 
         # Filter successful results
         successful_results = [r for r in map_results if r.success]

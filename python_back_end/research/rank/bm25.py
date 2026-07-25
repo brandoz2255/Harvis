@@ -89,9 +89,17 @@ class BM25Ranker:
         df = self._doc_frequencies.get(term, 0)
         if df == 0:
             return 0.0
-        
-        # Standard BM25 IDF formula
-        return math.log((self._total_docs - df + 0.5) / (df + 0.5))
+
+        # Non-negative BM25 IDF (the `log(1 + x)` variant).
+        #
+        # The textbook form, log((N - df + 0.5) / (df + 0.5)), goes NEGATIVE once a
+        # term appears in more than half the corpus. That is harmless on a web-scale
+        # index but fatal here: this ranker only ever sees the handful of pages a
+        # research run just fetched FOR that query, so every query term is in nearly
+        # every document. Each term then contributed a negative score, totals landed
+        # below `min_score`, and rank_chunks returned an empty list — which read
+        # downstream as "no relevant content" and silently skipped map/reduce.
+        return math.log(1.0 + (self._total_docs - df + 0.5) / (df + 0.5))
     
     def _compute_chunk_score(self, chunk_id: str, query_terms: Dict[str, int]) -> Tuple[float, Dict[str, int]]:
         """

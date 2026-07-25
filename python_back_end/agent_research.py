@@ -385,8 +385,12 @@ async def async_research_agent_streaming(
             # Use enhanced agent's query generation
             search_queries = [query]  # Start with the main query
             try:
-                # Try to generate additional queries via the advanced agent
-                additional_queries = await agent.advanced_agent._generate_queries(query)
+                # The pipeline agent's query expansion is `_planning_stage`; there is
+                # no `_generate_queries`, so this always raised AttributeError and
+                # research ran on the single verbatim query. `_planning_stage` returns
+                # the original query first, so skip it to avoid searching it twice.
+                planned = await agent.advanced_agent._planning_stage(query)
+                additional_queries = [q for q in (planned or []) if q != query]
                 if additional_queries:
                     search_queries.extend(additional_queries[:2])  # Add up to 2 more
             except Exception as e:
@@ -500,48 +504,99 @@ async def async_research_agent_streaming(
                     "[Streaming Research] 🚀 USING ENHANCED PIPELINE with BM25 ranking and map/reduce synthesis"
                 )
 
-                # Convert search results to format expected by pipeline
+                # Convert search results to format expected by pipeline.
+                # `_ranking_stage` takes a list of extraction dicts (url/title/content)
+                # and builds the DocChunks itself — handing it DocChunks made every
+                # ranking call die on `content["url"]` ("not subscriptable") and fall
+                # through to the unranked slice below, silently.
                 from research.core.types import DocChunk
+                from research.rank.bm25 import RankedChunk
 
-                # Create DocChunks from extracted content for ranking
-                chunks = []
-                for content_data in all_search_data.get("extracted_content", []):
-                    if isinstance(content_data, dict) and content_data.get("success"):
-                        chunk = DocChunk(
-                            url=content_data.get("url", ""),
-                            title=content_data.get("title", "Unknown"),
-                            text=content_data.get("content", "")[:8000],  # Limit size
-                            start=0,
-                            end=len(content_data.get("content", "")),
-                            meta={"source": content_data.get("url", "")},
-                        )
-                        chunks.append(chunk)
+                # extract_content_from_url returns the article body under "text"
+                # (see research/web_search.py:213). Reading "content" here yielded ""
+                # for every page while `success` was still True, so the pipeline was
+                # ranking and synthesising over empty documents — the answer was
+                # written from page TITLES alone. Read "text" first, keep "content"
+                # as a fallback for the pipeline's own extraction-stage shape.
+                def _body(c: dict) -> str:
+                    return (c.get("text") or c.get("content") or "").strip()
 
-                # If no extracted content, create chunks from search results
-                if not chunks:
-                    for result in all_search_data.get("search_results", [])[:10]:
-                        chunk = DocChunk(
-                            url=result.get("url", ""),
-                            title=result.get("title", "Unknown"),
-                            text=result.get("snippet", ""),
-                            start=0,
-                            end=len(result.get("snippet", "")),
-                            meta={"source": result.get("url", "")},
-                        )
-                        chunks.append(chunk)
+                extracted = [
+                    c
+                    for c in all_search_data.get("extracted_content", [])
+                    if isinstance(c, dict) and c.get("success") and _body(c)
+                ]
+
+                if extracted:
+                    rankable = [
+                        {
+                            "url": c.get("url", ""),
+                            "title": c.get("title") or "Unknown",
+                            "content": _body(c)[:8000],  # Limit size
+                        }
+                        for c in extracted
+                    ]
+                else:
+                    # No page extraction yielded text — rank the search snippets instead.
+                    logger.warning(
+                        "[Streaming Research] No page text extracted from %d result(s); "
+                        "ranking search snippets instead",
+                        len(all_search_data.get("search_results", [])),
+                    )
+                    rankable = [
+                        {
+                            "url": r.get("url", ""),
+                            "title": r.get("title") or "Unknown",
+                            "content": r.get("snippet", "") or "",
+                        }
+                        for r in all_search_data.get("search_results", [])[:10]
+                        if (r.get("snippet") or "").strip()
+                    ]
 
                 # Use pipeline's ranking stage
                 advanced_agent = agent.advanced_agent
                 yield {"type": "analysis", "detail": "Ranking content relevance..."}
 
+                # Keep the downstream contract: synthesis expects scored chunks that
+                # wrap a DocChunk, so unranked content has to be wrapped too rather
+                # than passed through as bare DocChunks.
+                def _unranked(items):
+                    return [
+                        RankedChunk(
+                            chunk=DocChunk(
+                                url=c["url"],
+                                title=c["title"],
+                                text=c["content"],
+                                start=0,
+                                end=len(c["content"]),
+                                meta={"source": c["url"]},
+                            ),
+                            score=0.0,
+                            term_matches={},
+                        )
+                        for c in items[:15]
+                    ]
+
                 try:
-                    ranked_chunks = await advanced_agent._ranking_stage(query, chunks)
+                    ranked_chunks = await advanced_agent._ranking_stage(query, rankable)
                     logger.info(
                         f"[Streaming Research] Ranked {len(ranked_chunks)} chunks"
                     )
                 except Exception as e:
                     logger.warning(f"Ranking failed, using all chunks: {e}")
-                    ranked_chunks = chunks[:15]  # Use top 15 without ranking
+                    ranked_chunks = _unranked(rankable)
+
+                if not ranked_chunks and rankable:
+                    # Ranking "succeeded" but kept nothing. Handing an empty list to
+                    # map/reduce makes it report failure with no cause, which then
+                    # reads as a synthesis bug. Content we fetched is better than no
+                    # content — degrade to unranked rather than to nothing.
+                    logger.warning(
+                        "[Streaming Research] Ranking returned 0 of %d chunks; "
+                        "falling back to unranked content",
+                        len(rankable),
+                    )
+                    ranked_chunks = _unranked(rankable)
 
                 # Use pipeline's synthesis stage with map/reduce
                 yield {
@@ -595,7 +650,13 @@ async def async_research_agent_streaming(
                         synthesis_model = get_moonshot_model_id(model)
                     else:
                         llm_client = OllamaClient()
-                        synthesis_model = get_model_for_task(TaskType.SYNTHESIS)
+                        # Honour the model the user picked. The task-policy default
+                        # is a small local model, so routing here unconditionally
+                        # meant a research run selected as gemma3:12b was actually
+                        # answered by qwen2.5:3b — quietly, and with the thin answer
+                        # that implies. Fall back to the policy only when nothing
+                        # was asked for.
+                        synthesis_model = model or get_model_for_task(TaskType.SYNTHESIS)
 
                     # Run map/reduce synthesis
                     map_results, reduce_result = await quick_map_reduce(
@@ -635,9 +696,11 @@ Question: {query}
 
 Research Findings:
 """
-                    for i, chunk in enumerate(ranked_chunks[:10], 1):
+                    for i, scored in enumerate(ranked_chunks[:10], 1):
+                        # RankedChunk / RerankedChunk both wrap the DocChunk in `.chunk`
+                        doc = getattr(scored, "chunk", scored)
                         synthesis_prompt += (
-                            f"\n{i}. {chunk.title}\n{chunk.text[:1000]}\n"
+                            f"\n{i}. {doc.title}\n{doc.text[:1000]}\n"
                         )
 
                     synthesis_prompt += f"\n\nProvide a comprehensive, well-structured answer to: {query}"

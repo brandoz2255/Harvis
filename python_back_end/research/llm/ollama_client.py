@@ -13,6 +13,8 @@ import asyncio
 import logging
 import os
 import time
+
+import httpx
 from typing import Optional, Dict, Any, List, Union, AsyncGenerator
 from dataclasses import dataclass
 from enum import Enum
@@ -66,7 +68,7 @@ class OllamaClient:
         default_model: str = "mistral",
         fallback_models: Optional[List[str]] = None,
         max_retries: int = 3,
-        request_timeout: int = 60,
+        request_timeout: int = 180,
         rate_limit_delay: float = 0.1
     ):
         self.base_url = base_url
@@ -124,21 +126,43 @@ class OllamaClient:
         
         models_to_try = [model] + [m for m in self.fallback_models if m != model]
         last_error = None
-        
+
+        options: Dict[str, Any] = {}
+        if "temperature" in kwargs:
+            options["temperature"] = kwargs["temperature"]
+        if kwargs.get("max_tokens"):
+            options["num_predict"] = kwargs["max_tokens"]
+
         for attempt_model in models_to_try:
             try:
                 start_time = time.time()
-                
-                # This would call your existing make_ollama_request function
-                # response = await make_ollama_request(prompt, attempt_model, **kwargs)
-                
-                # Placeholder for integration with your existing code
-                # For now, simulate a response
-                await asyncio.sleep(0.1)  # Simulate processing time
-                response = f"Response to '{prompt[:50]}...' using model {attempt_model}"
-                
+
+                # This used to be a placeholder that returned
+                #   f"Response to '{prompt[:50]}...' using model {attempt_model}"
+                # with success=True — a fabricated answer that never touched Ollama.
+                # Every consumer (map/reduce MAP and REDUCE phases especially) treated
+                # it as a real model response, so research "synthesis" was a template
+                # string echoing its own prompt. Call the actual API.
+                async with httpx.AsyncClient(timeout=self.request_timeout) as client:
+                    http_response = await client.post(
+                        f"{self.base_url}/api/generate",
+                        json={
+                            "model": attempt_model,
+                            "prompt": prompt,
+                            "stream": False,
+                            **({"options": options} if options else {}),
+                        },
+                    )
+                    http_response.raise_for_status()
+                    response = (http_response.json() or {}).get("response", "")
+
                 processing_time = time.time() - start_time
-                
+
+                if attempt_model != model:
+                    logger.warning(
+                        "Ollama request for %s fell back to %s", model, attempt_model
+                    )
+
                 # Validate response
                 if not self._validate_response(response):
                     raise GenerationError(f"Empty or invalid response from {attempt_model}")
