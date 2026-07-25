@@ -6,6 +6,8 @@ Engines (``engine=…``):
 - ``opencode``    — local Ollama, no auth (E1).
 - ``codex``       — OpenAI's Codex CLI, CLOUD GPT models, per-user OpenAI key (E2).
 - ``claude-code`` — Anthropic's Claude Code CLI, CLOUD Claude models, per-user key (E2).
+- ``kimi-code``   — the SAME Claude Code CLI + sidecar with ANTHROPIC_BASE_URL repointed at
+  the Kimi Code membership API, per-user verified membership key.
 
 Each runs in its own ``harvis-<engine>`` sidecar via ``docker exec`` against the session
 clone (shared ``/data/artifacts`` volume). Per-engine differences are isolated to a
@@ -38,16 +40,19 @@ _CONTAINERS = {
     "opencode": os.getenv("HARVIS_OPENCODE_CONTAINER", "harvis-opencode"),
     "codex": os.getenv("HARVIS_CODEX_CONTAINER", "harvis-codex"),
     "claude-code": os.getenv("HARVIS_CLAUDE_CODE_CONTAINER", "harvis-claude-code"),
+    # Kimi Code MEMBERSHIP runs the SAME sidecar and the SAME `claude` CLI as claude-code —
+    # only ANTHROPIC_BASE_URL and the credential differ (see _build_kimi_code_command).
+    "kimi-code": os.getenv("HARVIS_CLAUDE_CODE_CONTAINER", "harvis-claude-code"),
     # Phase E4B: the REAL NousResearch Hermes Agent app (full runtime: tools, memory,
     # skills, SOUL, providers). Local Ollama, no cloud key. Plain-text CLI output.
     "hermes-agent": os.getenv("HARVIS_HERMES_AGENT_CONTAINER", "harvis-hermes-agent"),
 }
-_CLOUD_ENGINES = {"codex", "claude-code"}
+_CLOUD_ENGINES = {"codex", "claude-code", "kimi-code"}
 # Engines whose stdout is PLAIN TEXT (not JSON) — the loop maps each line to a `log`
 # event and uses the output tail as the final summary; the git diff is the authority.
 _TEXT_ENGINES = {"hermes-agent"}
 _ENGINE_LABEL = {"opencode": "OpenCode", "codex": "Codex", "claude-code": "Claude Code",
-                 "hermes-agent": "Hermes Agent"}
+                 "hermes-agent": "Hermes Agent", "kimi-code": "Kimi Code"}
 # Cloud engines default to the CLI's own default model when these are empty.
 _CODEX_DEFAULT_MODEL = os.getenv("HARVIS_CODEX_DEFAULT_MODEL", "")
 _CLAUDE_DEFAULT_MODEL = os.getenv("HARVIS_CLAUDE_DEFAULT_MODEL", "")
@@ -119,6 +124,50 @@ def _build_claude_command(container, workspace_path, task_brief, model_name, api
     return cmd, (_CLAUDE_DEFAULT_MODEL or "claude/default")
 
 
+def _build_kimi_code_command(container, workspace_path, task_brief, model_name, api_key, user_id=0, auth_mode="api_key"):
+    """Kimi Code MEMBERSHIP against the session clone: the REAL Claude Code CLI, in the same
+    sidecar as claude-code, with its base URL repointed at Kimi Code and the membership key
+    injected. Running the genuine CLI rather than a proxy that imitates it is deliberate —
+    Kimi Code's terms require third-party coding tools to keep their true client identity.
+
+    Every model slot is pinned, not just ANTHROPIC_MODEL: Claude Code resolves its own
+    aliases internally (a Sonnet-tier model for the main loop, Haiku-tier for cheap side
+    calls, a separate subagent model for Task), and each of those would otherwise request an
+    ANTHROPIC model id Kimi Code does not serve — so the run fails PARTWAY THROUGH with a
+    model-not-found, long after the first token made it look healthy. Mirrors the chat lane's
+    env block in run_claude_chat_workspace; keep the two in agreement."""
+    from owui_compat.engine_auth import (
+        KIMI_CODE_BASE_URL, KIMI_CODE_CONTEXT_TOKENS, KIMI_CODE_DEFAULT_MODEL, KIMI_CODE_MODELS,
+    )
+    model = (model_name or "").split("/", 1)[-1].strip()  # strip the 'kimi-code/' catalog prefix
+    if model not in KIMI_CODE_MODELS:
+        model = KIMI_CODE_DEFAULT_MODEL
+    cred = [
+        "-e", f"ANTHROPIC_BASE_URL={KIMI_CODE_BASE_URL}",
+        "-e", f"ANTHROPIC_API_KEY={api_key or ''}",
+        "-e", f"ANTHROPIC_MODEL={model}",
+        "-e", f"ANTHROPIC_DEFAULT_OPUS_MODEL={model}",
+        "-e", f"ANTHROPIC_DEFAULT_SONNET_MODEL={model}",
+        "-e", f"ANTHROPIC_DEFAULT_HAIKU_MODEL={model}",
+        "-e", f"CLAUDE_CODE_SUBAGENT_MODEL={model}",
+        # Kimi Code is API-key only, so simple/bare mode (which reads auth STRICTLY from
+        # ANTHROPIC_API_KEY and ignores CLAUDE_CODE_OAUTH_TOKEN) is correct here — unlike
+        # claude-code's subscription mode, which must clear it.
+        "-e", "CLAUDE_CODE_SIMPLE=1",
+    ]
+    ctx = KIMI_CODE_CONTEXT_TOKENS.get(model)
+    if ctx:
+        cred += ["-e", f"CLAUDE_CODE_MAX_CONTEXT_TOKENS={ctx}",
+                 "-e", f"CLAUDE_CODE_AUTO_COMPACT_WINDOW={ctx}"]
+    cmd = ["docker", "exec", *cred,
+           "-u", "1001", "-w", workspace_path, container,
+           "claude", "-p", task_brief,
+           "--output-format", "stream-json", "--verbose",
+           "--add-dir", workspace_path, "--dangerously-skip-permissions",
+           "--model", model]
+    return cmd, f"kimi-code/{model}"
+
+
 def _build_hermes_command(container, workspace_path, task_brief, model_name, api_key, user_id=0, auth_mode="api_key"):
     # Phase E4B: the REAL Hermes Agent app, headless one-shot (`-z`) INSIDE the session
     # clone. HERMES_WRITE_SAFE_ROOT=<clone> confines write_file to the clone (Hermes itself
@@ -143,6 +192,7 @@ _BUILDERS = {
     "opencode": _build_opencode_command,
     "codex": _build_codex_command,
     "claude-code": _build_claude_command,
+    "kimi-code": _build_kimi_code_command,
     "hermes-agent": _build_hermes_command,
 }
 
@@ -236,6 +286,8 @@ _MAPPERS = {
     "opencode": _map_opencode_line,
     "codex": _map_codex_line,
     "claude-code": _map_claude_line,
+    # Same CLI, same `--output-format stream-json` shape → the same mapper.
+    "kimi-code": _map_claude_line,
     "hermes-agent": _map_hermes_line,
 }
 
@@ -246,7 +298,8 @@ def _extract_usage(engine: str, obj: dict):
     `usage`; others may not (then None → no capture, free/local engines just show 0). Cumulative
     cache-read/creation input tokens count toward the prompt (they bill as input)."""
     try:
-        if engine == "claude-code" and obj.get("type") == "result":
+        # kimi-code runs the same CLI, so its `result` line carries the same usage shape.
+        if engine in ("claude-code", "kimi-code") and obj.get("type") == "result":
             u = obj.get("usage") or {}
             p = (int(u.get("input_tokens") or 0) + int(u.get("cache_read_input_tokens") or 0)
                  + int(u.get("cache_creation_input_tokens") or 0))
@@ -371,7 +424,10 @@ async def run_external_engine_adapter(
         await _db_set_run_repo(pool, parent_workspace_id, repo_path)
 
     if engine not in _BUILDERS:
-        yield root_ev("error", {"message": f"Unknown engine '{engine}'.", "fix_hint": "Supported: opencode, codex, claude-code."})
+        yield root_ev("error", {
+            "message": f"Unknown engine '{engine}'.",
+            "fix_hint": "Supported: " + ", ".join(sorted(_BUILDERS)) + ".",
+        })
         return
     if not workspace_path or not _under_session_root(workspace_path):
         yield root_ev("error", {

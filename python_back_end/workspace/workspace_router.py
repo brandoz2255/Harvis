@@ -104,6 +104,15 @@ NATIVE_ENGINE_IDS = {"hermes-native"}
 # native SubAgentRunner — it's a cloud reasoning engine that streams via stream_kimi_workspace
 # (agent_id="kimi"). Gated on a Moonshot API key (per-user row OR MOONSHOT_API_KEY env).
 KIMI_ENGINE_IDS = {"kimi"}
+# Kimi Code = the MEMBERSHIP product (api.kimi.com/coding) — a DIFFERENT product from `kimi`
+# above (Moonshot pay-as-you-go). Its own set because it belongs to neither of the others:
+# NOT EXTERNAL_ENGINE_IDS, because that set is gated by _engine_enabled()'s external-engines
+# flag while capabilities.py reports kimi-code ready on a VERIFIED key alone — a gate that
+# disagrees with the readiness probe offers the user an engine the server then refuses.
+# NOT KIMI_ENGINE_IDS, because that routes to stream_kimi_workspace: wrong API, wrong bill.
+# It runs the real Claude Code CLI against the session clone through the engine-adapter,
+# with ANTHROPIC_BASE_URL repointed. See docs/kimi-integration.md.
+KIMI_CODE_ENGINE_IDS = {"kimi-code"}
 
 
 def _engine_enabled(engine: str) -> bool:
@@ -2642,11 +2651,19 @@ async def launch_workspace(
     task_brief = await _prepend_attachments(task_brief, req.attachments or [])
     pool = getattr(request.app.state, "pg_pool", None)
 
-    # Normalize agent_id — accept legacy 'qwen3' as alias for 'cloud-ollama'
+    # Normalize agent_id — accept legacy 'qwen3' as alias for 'cloud-ollama'.
+    # This allowlist must list EVERY agent_id _run_workspace_bg dispatches, or the run
+    # silently falls back to local Ollama and then dies with a model-not-found naming the
+    # engine's model — which reads as "that model doesn't exist" rather than "we ignored
+    # your engine". 'claude' and 'kimi-code' were missing for exactly that reason.
     agent_id = req.agent_id
     if agent_id == "qwen3":
         agent_id = "cloud-ollama"
-    if agent_id not in ("main", "kimi", "nvidia-kimi", "local", "cloud-ollama", "gpt-oss", "orchestrated"):
+    if agent_id not in ("main", "kimi", "kimi-code", "claude", "nvidia-kimi", "local",
+                        "cloud-ollama", "gpt-oss", "orchestrated"):
+        logger.warning(
+            "workspace launch: unknown agent_id %r — falling back to local Ollama", agent_id,
+        )
         agent_id = "local"
 
     # Attached-repo isolation may only target an ops-mounted allowlisted repo — same
@@ -3811,10 +3828,25 @@ async def create_vibecode_session(
     # Hermes model is installed. External engines run as sidecars (engine-adapter);
     # Hermes runs the NATIVE SubAgentRunner with a SOUL persona.
     _req_engine = (req.engine or "native")
-    if _req_engine != "native" and _req_engine not in (EXTERNAL_ENGINE_IDS | NATIVE_ENGINE_IDS | KIMI_ENGINE_IDS):
+    if _req_engine != "native" and _req_engine not in (
+        EXTERNAL_ENGINE_IDS | NATIVE_ENGINE_IDS | KIMI_ENGINE_IDS | KIMI_CODE_ENGINE_IDS
+    ):
         raise HTTPException(status_code=400, detail=f"unknown engine '{_req_engine}'")
     engine_val = "native"
-    if _req_engine in KIMI_ENGINE_IDS and isolation_mode == "session":
+    if _req_engine in KIMI_CODE_ENGINE_IDS and isolation_mode == "session":
+        # Kimi Code MEMBERSHIP. Tested BEFORE the `kimi` arm below on purpose: these are set
+        # memberships, not prefixes, so order is not load-bearing today — but every other
+        # Kimi-aware site in the codebase matches kimi-code first, and breaking that habit
+        # here is how a membership run ends up billed to the pay-as-you-go platform.
+        # Gate = a VERIFIED key, the same contract capabilities.py reports readiness on.
+        from owui_compat.engine_auth import user_has_verified_engine
+        if not await user_has_verified_engine(pool, uid, "kimi-code"):
+            raise HTTPException(
+                status_code=400,
+                detail="Kimi Code needs a connected, verified membership key — connect it in Integrations first",
+            )
+        engine_val = "kimi-code"
+    elif _req_engine in KIMI_ENGINE_IDS and isolation_mode == "session":
         # Kimi = the original workspace engine. No sidecar/flag — just a Moonshot key, the same
         # gate the chat lane uses. Reject with a clear message when the key is missing.
         if not await _get_kimi_key(pool, uid):
@@ -4220,12 +4252,18 @@ async def start_vibecode_turn(
         # to agent_id="kimi" (the existing stream_kimi_workspace lane). Gated only on a Moonshot
         # key, resolved inside that lane; no flag, no clone-mode requirement beyond session.
         _use_kimi = _engine in KIMI_ENGINE_IDS and _is_session
+        # Kimi Code MEMBERSHIP → the engine-adapter sidecar, like claude-code, so the CLI runs
+        # in the session's working CLONE. (The chat lane's kimi-code branch runs in a scratch
+        # dir with no repo — right for chat, useless for a Build turn.) Not folded into
+        # _use_engine because it is deliberately NOT in EXTERNAL_ENGINE_IDS: its gate is a
+        # verified key, not the external-engines flag. See KIMI_CODE_ENGINE_IDS above.
+        _use_kimi_code = _engine in KIMI_CODE_ENGINE_IDS and _is_session
         # Cloud engines need the user's verified key, decrypted here at turn start and
         # held in-memory for this run only. If it was disconnected since session-create,
         # the adapter fails soft (emits a "connect your key" error) so the user sees why.
         _engine_key = None
         _engine_auth_mode = "api_key"  # E4B: 'api_key' | 'oauth_token' (Claude subscription)
-        if _use_engine and _engine in CLOUD_ENGINE_IDS:
+        if _use_kimi_code or (_use_engine and _engine in CLOUD_ENGINE_IDS):
             from owui_compat.engine_auth import get_verified_engine_auth
             _auth = await get_verified_engine_auth(pool, uid, _engine)
             if _auth:
@@ -4235,7 +4273,10 @@ async def start_vibecode_turn(
             session_id=session_id,  # the turn run's session_id == the vibecode session id
             task_brief=agent_brief,
             chat_history=[],
-            agent_id="kimi" if _use_kimi else ("engine-adapter" if _use_engine else "vibecode-turn"),
+            agent_id=(
+                "kimi" if _use_kimi
+                else ("engine-adapter" if (_use_engine or _use_kimi_code) else "vibecode-turn")
+            ),
             user_id=uid,
             pool=pool,
             started_epoch=started_epoch,
@@ -4248,7 +4289,7 @@ async def start_vibecode_turn(
             base_sha=s.get("base_sha"),
             vibecode_isolation_mode=s.get("isolation_mode") or "session",
             vibecode_permission_mode=turn_permission,
-            engine=_engine if _use_engine else None,
+            engine=_engine if (_use_engine or _use_kimi_code) else None,
             engine_key=_engine_key,
             engine_auth_mode=_engine_auth_mode,
             vibecode_persona_engine="hermes-native" if _use_hermes else "",
