@@ -754,17 +754,25 @@
 		{ label: 'Claude', test: (o) => o.startsWith('anthropic') },
 		{ label: 'Hermes', test: (o) => o.startsWith('hermes') },
 		{ label: 'OpenAI', test: (o) => o === 'openai' },
-		// Ordered BEFORE 'Kimi': groups claim models first-match-wins, and the generic Kimi test
-		// below also matches 'kimi-code'. Two groups because they are two products on two bills —
-		// the membership models must be pickable as such, not blended into the Moonshot list.
+		// Ordered BEFORE 'Kimi': the generic Kimi test below also matches 'kimi-code', so the
+		// membership group has to claim those models first. Two groups because they are two
+		// products on two bills — the membership models must be pickable as such, not blended
+		// into the Moonshot list.
 		{ label: 'Kimi Code (membership)', test: (o) => o === 'kimi-code' },
-		{ label: 'Kimi', test: (o) => o.startsWith('moonshot') || o.startsWith('kimi') }
+		{ label: 'Kimi (Moonshot)', test: (o) => o.startsWith('moonshot') || o.startsWith('kimi') }
 	];
 	$: modelGroups = (() => {
+		// First match wins. Skipping already-claimed ids is what makes that true: without it
+		// every kimi-code model ALSO fell into the broader 'Kimi' group below and the picker
+		// listed each one twice — under a Moonshot header, for an account with no Moonshot key.
+		// The backend only ships a provider's models once its credential is connected, so a
+		// group with nothing left to claim is dropped rather than shown empty.
 		const used = new Set<string>();
 		const groups: { label: string; models: any[] }[] = [];
 		for (const g of OWNER_GROUPS) {
-			const ms = modelOptions.filter((m: any) => g.test((m.owned_by || 'ollama').toString().toLowerCase()));
+			const ms = modelOptions.filter(
+				(m: any) => !used.has(m.id) && g.test((m.owned_by || 'ollama').toString().toLowerCase())
+			);
 			ms.forEach((m: any) => used.add(m.id));
 			if (ms.length) groups.push({ label: g.label, models: ms });
 		}
