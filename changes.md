@@ -1,5 +1,90 @@
 # Recent Changes and Fixes Documentation
 
+## Date: 2026-07-25 — Build model dropdown: unclickable, then showing every Kimi model twice
+
+Two separate defects in the Build (`/harvis/vibecode`) model picker, found and fixed in one pass.
+
+### 1. The dropdown could not be clicked or scrolled
+
+**Symptom.** Opening the model dropdown showed the list, but clicking a model just closed the
+menu without selecting it, and the wheel did nothing — the list could not be scrolled to reach
+models below the fold. Reported from both the Windows box and the laptop.
+
+**Root cause — a stacking context, not a z-index race.** The composer control strip carries
+`relative z-10`, added 2026-07-20 (`897376337`) with the comment *"relative+z keeps the upward
+menus stacking above the chat card."* That fixed one layering problem and created a worse one: a
+positioned element with a `z-index` opens a **stacking context**, and every descendant is then
+capped at the ancestor's level. So the dropdown's own `z-40` was meaningless. The full-screen
+click-outside backdrop (`fixed inset-0 z-20`, added 2026-06-23 in `a4c07cb2e`) is a *sibling* of
+the strip, so it lives in the root stacking context and painted over the entire menu. Every
+pointer event inside the open dropdown hit the backdrop, whose handler closes the menu.
+
+The backdrop was harmless for the ~4 weeks between those two commits. Only the second one made
+it fatal.
+
+**Scope, corrected.** Only the four menus *inside* the strip were affected — mode, attach, model,
+usage. Repo and exec live outside it, under a container that creates no stacking context, and
+were never broken. Also noted while reading: `showEngineMenu` is declared and reset but never
+rendered anywhere — dead state.
+
+**Fix.** The strip goes to `z-30` while one of its own menus is open, clearing the backdrop, and
+returns to `z-10` otherwise so it doesn't float over page chrome the rest of the time.
+
+**A second bug this exposed.** Every menu toggle was an independent `!x`; nothing closed the
+siblings. The backdrop's batch-close had been hiding that. Once the strip floats above the
+backdrop, two menus could be open at once — so all six toggles now route through a single
+`openMenu()` helper and the one-at-a-time invariant is stated rather than emergent.
+
+**Files:** `front_end/owui/src/routes/(app)/harvis/vibecode/+page.svelte`
+**Commit:** `200e3982`
+
+### 2. Every Kimi Code model was listed twice, under a Moonshot header
+
+**Symptom.** "Kimi for Coding", "Kimi K3 (256K)", "Kimi K3" and "Kimi for Coding (High-speed)"
+each appeared twice — once under *Kimi Code (membership)*, once under a *Kimi* header. Moonshot
+is not connected on this account, so the second group advertised a product with no credential.
+
+**Root cause.** `OWNER_GROUPS` is documented as first-match-wins, but the loop building
+`modelGroups` filtered the **full** option list on every iteration and only applied the `used`
+set to the trailing "Other" group. The generic Kimi test (`o.startsWith('kimi')`) also matches
+`kimi-code`, so the membership models were claimed by their own group and then claimed again by
+the Moonshot one. The documented invariant was never implemented.
+
+The backend was already correct: `cloud_chat.py` ships Moonshot models only when a `moonshot`
+key resolves, and Kimi Code models only on a verified `kimi-code` engine_auth row. `/api/models`
+returned 36 models with no Moonshot entries at all. The duplication was entirely in the picker.
+
+**Fix.** Groups now skip already-claimed ids, which is what makes first-match-wins true. A group
+with nothing left to claim is dropped instead of rendered empty, so an inactive provider gets no
+header. The group was renamed "Kimi (Moonshot)" so the two Kimi products — two credentials, two
+bills — are distinguishable on sight when both are connected.
+
+**Files:** `front_end/owui/src/routes/(app)/harvis/vibecode/+page.svelte`
+**Commit:** `56259330`
+
+### Verification (live, against the deployed build)
+
+| Check | Result |
+|---|---|
+| Strip vs backdrop while a menu is open | `z-30` vs `z-20` — strip wins |
+| Strip after close | back to `z-10` |
+| Hit-test, every row in the visible menu area | each resolves to its own row element |
+| Wheel scroll | `scrollTop` 0 → 300 of 1244; hit-test after scroll still lands on a menu row |
+| Click a row | selection changed and the menu closed |
+| Picker row count | 36 rendered for the 36 models `/api/models` returns |
+| Duplicates | 0 |
+| Moonshot group with no Moonshot key | absent |
+
+Deployed via `npm run build` in `front_end/owui/` + `docker restart nginx-proxy`.
+
+### Lesson
+
+A `z-index` on a positioned element is not just a layer number — it opens a stacking context and
+silently caps everything inside it. The dropdown's `z-40` looked authoritative and meant nothing.
+When layering breaks, check the **ancestor chain** before adjusting the element's own z-index.
+
+---
+
 ## Date: 2026-07-25 — Kimi Code was selectable in Build but never dispatched
 
 ### Problem
