@@ -1,5 +1,113 @@
 # Recent Changes and Fixes Documentation
 
+## Date: 2026-07-25 — Kimi Code was selectable in Build but never dispatched
+
+### Problem
+
+Picking a Kimi Code model in Build produced a run that returned **HTTP 200 with a real
+`workspace_id`**, then failed with an Ollama 404 naming `kimi-code/kimi-for-coding`. That error
+reads as "that model doesn't exist" — a Kimi or credential problem — when the actual cause was
+that the backend had discarded the engine choice and asked local Ollama instead.
+
+### Root cause
+
+Two dispatch paths in `python_back_end/workspace/workspace_router.py`, both refusing `kimi-code`,
+in two different ways:
+
+1. **`/launch`** normalized any unrecognized `agent_id` to `"local"` **with nothing in the log**.
+   The fallback is a reasonable defense against a typo, but by staying silent it converted every
+   downstream error into evidence against the wrong component.
+2. **Vibecode session-create** rejected `kimi-code` outright as `unknown engine` — wrong, but at
+   least loudly wrong, which is where the diagnosis started.
+
+The frontend was already correct (`vibecode/+page.svelte` routes `kimi-code/*` models to the
+`kimi-code` engine, and matches it *before* the generic `kimi` test), and `capabilities.py`
+already reported the engine ready on a verified membership key. Only the router had the gap.
+
+### Solution
+
+- Added `KIMI_CODE_ENGINE_IDS` as its own set. It belongs to neither existing one:
+  **not** `EXTERNAL_ENGINE_IDS`, which is gated by `_engine_enabled()`'s external-engines flag
+  while `capabilities.py` reports readiness on a verified key alone — a gate that disagrees with
+  its own readiness probe offers an engine the server then refuses (the same three-places-must-agree
+  shape as the signup flag below). **Not** `KIMI_ENGINE_IDS`, which routes to
+  `stream_kimi_workspace` — wrong API, wrong bill; `kimi` is Moonshot pay-as-you-go and `kimi-code`
+  is the membership product.
+- Session-create accepts `kimi-code` behind a `user_has_verified_engine` check, so an unconnected
+  key now returns *"Kimi Code needs a connected, verified membership key — connect it in
+  Integrations first"* instead of a model-not-found.
+- `/launch` accepts `kimi-code` and `claude`, and **logs a warning** before falling back on an
+  unknown id.
+- Build dispatches through `run_external_engine_adapter`, **not** the chat lane. Both run the same
+  Claude Code CLI in the same container, but `run_claude_chat_workspace` uses a scratch workdir
+  (`/data/artifacts/claude-chat/<run_id>`) with no repo in it — routing Build there would have
+  produced a healthy-looking run that operated on nothing.
+- New command builder in `orchestration/engine_adapter.py` pins every model slot the CLI resolves
+  internally (opus/sonnet/haiku defaults + `CLAUDE_CODE_SUBAGENT_MODEL`), plus the context-window
+  vars for the 256K models. See `docs/kimi-integration.md` for why partial pinning fails *mid-run*.
+
+### Files modified
+
+- `python_back_end/workspace/workspace_router.py`
+- `python_back_end/workspace/orchestration/engine_adapter.py`
+
+### Result
+
+Verified live against the running stack:
+
+| Probe | Result |
+|---|---|
+| `engine=kimi-code` session create | `400 "Kimi Code needs a connected, verified membership key…"` (was `unknown engine`) |
+| `engine=bogus-engine` | still `400 unknown engine` — the real-typo path intact |
+| `/launch agent=kimi-code` | backend log shows `agent=kimi-code` (was `agent=local`) |
+| `/launch agent=totally-bogus` | `WARNING: unknown agent_id … falling back to local Ollama`, then `agent=local` |
+
+User-confirmed end to end on a live Build turn. Commit `6e513572`.
+
+---
+
+## Date: 2026-07-25 — A finished Build turn looked like nothing had happened
+
+### Problem
+
+When a Build turn completed, the live run panel unmounted and the turn collapsed to its summary
+plus a **View run details** button. A run with a real diff, file writes, and a full log presented
+as a single line of text until the user clicked — so a successful run read as an empty one.
+
+### Root cause
+
+Not a bug — a default. `expandedRuns[t.id]` started false for every turn and only `toggleRun`
+ever set it.
+
+### Solution
+
+`front_end/owui/src/routes/(app)/harvis/vibecode/+page.svelte` — the reactive block that already
+detects the running→finished transition (the one that starts the answer type-out) now also expands
+that turn. Three guards:
+
+- **Only turns watched running auto-open**, via the existing `_sawRunning` set. Without it,
+  reloading a long session would mount a `RunView`, and its fetches, for every turn at once —
+  the same reason that guard suppresses replay-typing on reload.
+- **Starting a new run folds the previously auto-opened dock**, so at most one is mounted. A panel
+  the user opened by hand is never folded: `toggleRun` removes the id from the auto set on touch.
+- **The dock waits for the type-out**, matching the actions row above it. Otherwise the row
+  appears *between* the answer and the dock when typing ends, shifting the panel mid-read.
+
+### Files modified
+
+- `front_end/owui/src/routes/(app)/harvis/vibecode/+page.svelte`
+
+### Result
+
+Built and deployed (nginx 200; the chunk carrying that UI rebuilt with a new hash,
+`40.CMOctlA8` → `40.9JeZlLTN`). User-confirmed on a live turn. Commit `e12ac63c`.
+
+**Known cosmetic residue, pre-existing:** when a turn has `analysis_md`, the narrator markdown
+renders immediately but the actions row stays hidden for the ~1–3.6s the type-out timer runs, even
+though nothing is visibly typing. Not addressed here.
+
+---
+
 ## Date: 2026-07-25 — Auth page had no working "Sign up" (three flags disagreed)
 
 ### Problem
