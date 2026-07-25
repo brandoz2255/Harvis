@@ -1,5 +1,121 @@
 # Recent Changes and Fixes Documentation
 
+## Date: 2026-07-24 — Research "enhanced pipeline" had never actually run
+
+### Problem
+
+Every research request reported `research_depth: "enhanced"` and logged
+`🚀 USING ENHANCED PIPELINE with BM25 ranking and map/reduce synthesis`. None of it ran. Answers
+came from a single direct-LLM call over page **titles**, and one layer below that, from a stub that
+never contacted a model at all.
+
+This only surfaced after the credential-honesty fix (commit `5335baaf`) made the streaming path
+report its failures instead of swallowing them.
+
+### Root cause — five defects, stacked
+
+Each was enough on its own to disable the pipeline; each was masked by the next fallback.
+
+1. **Query expansion never ran.** `agent_research.py` called `advanced_agent._generate_queries()`.
+   The pipeline agent's method is `_planning_stage`. `AttributeError` every time → research ran on
+   the single verbatim query.
+2. **Ranking never ran.** `_ranking_stage(query, extracted_content: List[Dict])` builds its own
+   `DocChunk`s from `content["url"]`. It was being handed already-built `DocChunk`s →
+   `TypeError: 'DocChunk' object is not subscriptable` → fell through to an unranked slice.
+3. **The chunks were empty anyway.** `extract_content_from_url()` returns the article body under
+   **`text`** (`research/web_search.py:213`); this caller read `content`. Every chunk got `""`
+   while `success` stayed `True`, so ranking, synthesis, and the fallback prompt all operated on
+   titles alone. Every other consumer of that dict reads `text` correctly — only this lane starved.
+4. **BM25 dropped everything even when fed real text.** `_compute_idf` used the textbook
+   `log((N - df + 0.5) / (df + 0.5))`, which goes **negative** once a term appears in more than half
+   the corpus. This ranker only ever sees the handful of pages fetched *for that query*, so every
+   query term is in nearly every document → all scores negative → below `min_score` → empty result.
+5. **MAP/REDUCE read fields that do not exist.** `map_reduce._process_single_chunk` read
+   `chunk.chunk.chunk_id` and `chunk.chunk.content`. `DocChunk` exposes `text` and has no
+   `chunk_id` (BM25 only uses ids internally as dict keys). `AttributeError` for every chunk → MAP
+   failed 100% of the time.
+
+And underneath all of it: **`research/llm/ollama_client.py` never called Ollama.**
+`_make_request_with_fallback` slept 0.1s and returned
+`f"Response to '{prompt[:50]}...' using model {attempt_model}"` with `success=True`. A live run
+confirmed the "synthesis" was literally
+`Response to 'You are a research synthesizer combining informati...' using model gemma3:12b`.
+
+### Solution
+
+- Call `_planning_stage` instead of the non-existent `_generate_queries`, skipping the echoed
+  original query.
+- Pass extraction dicts (not `DocChunk`s) to `_ranking_stage`; when ranking fails *or returns
+  nothing*, wrap content in `RankedChunk` so the downstream type contract still holds.
+- Read the article body from `text` (falling back to `content`), and log a result with no text
+  instead of silently ranking it as empty.
+- BM25 uses the non-negative `log(1 + x)` IDF variant.
+- MAP derives the chunk id the way BM25 does and reads `text`.
+- `OllamaClient` posts to `/api/generate` for real, logs when it falls back to another model, and
+  its timeout moved from per-phase to per-chunk at 180s — a straggler no longer discards the whole
+  MAP phase, and the budget is sized for real local inference rather than a 0.1s stub.
+- Local synthesis honours the selected model. A run picked as `gemma3:12b` was being answered by
+  `qwen2.5:3b` because the task-policy default was applied unconditionally.
+
+### Files modified
+
+- `python_back_end/agent_research.py`
+- `python_back_end/research/llm/ollama_client.py`
+- `python_back_end/research/rank/bm25.py`
+- `python_back_end/research/synth/map_reduce.py`
+
+### Result
+
+Verified live in `harvis-backend`, 28/28: real `PONG` back from Ollama; ranking keeps 6/7 docs on a
+homogeneous corpus while still dropping the off-topic one; MAP 9/9 successful; REDUCE succeeds; a
+live "who is the president of france" run returns 3694 chars naming Macron with
+`model_used: gemma3:12b` and no ranking or map/reduce fallback in the logs. Prior suites still
+green (12/12 credential honesty, 5/5 local-research regression — whose answer grew 1840 → 4250
+chars, direct evidence the pipeline now contributes).
+
+### Still open
+
+`research/pipeline/research_agent.py::_extraction_stage` is also a placeholder — it fabricates
+`"This is the extracted content for {title}."`. It is only reached through
+`ResearchAgent.research()`, not the streaming lane fixed here, but it is the same
+stub-reports-success shape.
+
+---
+
+## Date: 2026-07-24 — Kimi showed its chain-of-thought when nobody asked for it
+
+### Problem
+
+"hello" through the Kimi Code engine came back with the model's reasoning pasted in front of the
+greeting.
+
+### Root cause
+
+`_stream_anthropic()` wrapped every `thinking_delta` in `<think>…</think>` unconditionally. That is
+right for Claude, where a thinking block only exists because the request set `payload["thinking"]`
+via the effort control. Kimi Code's k3 emits a thinking block on **every** turn, and that lane
+deliberately never requests one (the parameter would be rejected on the endpoint). So reasoning
+nobody asked for was rendered as part of the answer.
+
+### Solution
+
+Reasoning is surfaced only when `"thinking" in payload`. Otherwise it is buffered and dropped —
+except when the model produced no text at all, in which case the buffered reasoning is shown, so a
+thinking-only turn still never renders as silence. The non-streaming
+`_anthropic_msg_to_openai()` follows the same rule via a `show_thinking` argument.
+
+### Files modified
+
+- `python_back_end/owui_compat/cloud_chat.py`
+
+### Result
+
+10/10 live against the streaming translator using Kimi's no-space SSE wire style: unrequested
+reasoning dropped while the answer survives; requested reasoning still shown before the answer;
+thinking-only turns non-empty on both the streaming and non-streaming paths.
+
+---
+
 ## Date: 2026-07-24 — Kimi Code answered nothing: SSE parser required a space that Kimi doesn't send
 
 ### Problem

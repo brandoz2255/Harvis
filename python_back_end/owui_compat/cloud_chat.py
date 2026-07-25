@@ -573,7 +573,12 @@ async def _proxy_claude_api(owui_body: dict, model_id: str, api_key: str, effort
                     r = await client.post(endpoint, headers=headers, json=payload2)
         if r.status_code >= 400:
             return _err_response(owui_body, 502, _safe_vendor_error(r))
-        return JSONResponse(status_code=200, content=_anthropic_msg_to_openai(r.json(), model_id))
+        return JSONResponse(
+            status_code=200,
+            content=_anthropic_msg_to_openai(
+                r.json(), model_id, show_thinking="thinking" in payload
+            ),
+        )
 
     async def _gen():
         async for chunk in _stream_anthropic(headers, payload, model_id, owui_body, endpoint):
@@ -612,7 +617,17 @@ async def _stream_anthropic(headers: dict, payload: dict, model_id: str, owui_bo
     def _chunk(delta: dict, finish=None) -> bytes:
         return ("data: " + json.dumps({**base, "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}) + "\n\n").encode()
 
+    # Surface reasoning only when this request actually asked for it. Anthropic
+    # emits thinking blocks only under `payload["thinking"]`, but Kimi Code's k3
+    # emits one on EVERY turn — including "hello" — and we never request thinking
+    # on that lane (see _kimi_code_payload: the parameter would be rejected). So
+    # an unasked-for chain-of-thought was being pasted in front of the answer.
+    # Buffer it instead: it is shown only if the model produced no text at all,
+    # which keeps a thinking-only response from rendering as silence.
+    show_thinking = "thinking" in payload
     think_open = False
+    saw_text = False
+    dropped_thinking: list[str] = []
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(None, connect=10.0)) as client:
             async with client.stream("POST", url or _ANTHROPIC_URL, headers=headers, json=payload) as r:
@@ -656,18 +671,28 @@ async def _stream_anthropic(headers: dict, payload: dict, model_id: str, owui_bo
                                 think_open = False
                             txt = d.get("text") or ""
                             if txt:
+                                saw_text = True
                                 yield _chunk({"content": txt})
                         elif d.get("type") == "thinking_delta":
+                            t = d.get("thinking") or ""
+                            if not show_thinking:
+                                if t:
+                                    dropped_thinking.append(t)
+                                continue
                             if not think_open:
                                 yield _chunk({"content": "<think>"})
                                 think_open = True
-                            t = d.get("thinking") or ""
                             if t:
                                 yield _chunk({"content": t})
                     elif etype == "message_stop":
                         break
                 if think_open:
                     yield _chunk({"content": "</think>\n\n"})
+                if not saw_text and dropped_thinking:
+                    # Thinking-only turn: better to show the reasoning than nothing.
+                    logger.info("cloud_chat: %s emitted only a thinking block; "
+                                "surfacing it as the answer", model_id)
+                    yield _chunk({"content": "<think>" + "".join(dropped_thinking) + "</think>\n\n"})
                 yield _chunk({}, "stop")
                 yield b"data: [DONE]\n\n"
     except Exception as exc:
@@ -676,8 +701,11 @@ async def _stream_anthropic(headers: dict, payload: dict, model_id: str, owui_bo
         yield b"data: [DONE]\n\n"
 
 
-def _anthropic_msg_to_openai(body: dict, model_id: str) -> dict:
-    """Non-stream Anthropic Messages response → OpenAI chat.completion shape."""
+def _anthropic_msg_to_openai(body: dict, model_id: str, show_thinking: bool = True) -> dict:
+    """Non-stream Anthropic Messages response → OpenAI chat.completion shape.
+
+    `show_thinking` mirrors the streaming path: reasoning is kept only when the
+    request asked for it, otherwise it is dropped unless it is all we got."""
     text_parts, think_parts = [], []
     for blk in body.get("content") or []:
         if not isinstance(blk, dict):
@@ -686,7 +714,9 @@ def _anthropic_msg_to_openai(body: dict, model_id: str) -> dict:
             text_parts.append(blk.get("text") or "")
         elif blk.get("type") == "thinking":
             think_parts.append(blk.get("thinking") or "")
-    content = ("<think>" + "".join(think_parts) + "</think>\n\n" if think_parts else "") + "".join(text_parts)
+    text = "".join(text_parts)
+    keep_thinking = think_parts and (show_thinking or not text)
+    content = ("<think>" + "".join(think_parts) + "</think>\n\n" if keep_thinking else "") + text
     usage = body.get("usage") or {}
     return {
         "id": body.get("id") or f"chatcmpl-{int(time.time())}",
