@@ -112,6 +112,8 @@
 	// one click away. Running turns always show the live run.
 	let expandedRuns: Record<string, boolean> = {};
 	const toggleRun = (id: string) => {
+		// Touching it by hand makes it the user's panel, not ours — see _autoExpanded.
+		_autoExpanded.delete(id);
 		expandedRuns = { ...expandedRuns, [id]: !expandedRuns[id] };
 	};
 
@@ -1591,14 +1593,35 @@
 		};
 		requestAnimationFrame(step);
 	};
+	// Turns whose details this code opened (as opposed to the user clicking "View run
+	// details"). Only these get folded again when the next run starts — a panel the user
+	// opened by hand stays open.
+	const _autoExpanded = new Set<string>();
 	$: {
+		// `next` stays null until something actually changes, so the assignment below — and
+		// with it this block's own re-run — only happens on a real transition.
+		let next: Record<string, boolean> | null = null;
 		for (const t of turns) {
-			if (t.status === 'running') _sawRunning.add(t.id);
-			else if (_sawRunning.has(t.id) && !_typedTurns.has(t.id)) {
+			if (t.status === 'running') {
+				_sawRunning.add(t.id);
+				if (_autoExpanded.size) {
+					next = next ?? { ...expandedRuns };
+					for (const id of _autoExpanded) if (id !== t.id) next[id] = false;
+					_autoExpanded.clear();
+				}
+			} else if (_sawRunning.has(t.id) && !_typedTurns.has(t.id)) {
 				_typedTurns.add(t.id);
 				if (t.status === 'done') typeOut(t.id, (t.final_summary || '').toString());
+				// Open the diff + logs without a click: a finished turn that shows only a one-line
+				// summary reads as if nothing happened. Guarded by _sawRunning, so turns already
+				// terminal at page load stay collapsed — otherwise reloading a long session would
+				// mount a RunView (and its fetches) for every turn at once.
+				next = next ?? { ...expandedRuns };
+				next[t.id] = true;
+				_autoExpanded.add(t.id);
 			}
 		}
+		if (next) expandedRuns = next;
 	}
 
 	onMount(async () => {
@@ -1808,7 +1831,9 @@
 										onCreatePr={() => (showPrDrawer = true)}
 									/>
 								{/if}
-								{#if expandedRuns[t.id]}
+								{#if expandedRuns[t.id] && typingText[t.id] === undefined}
+									<!-- Same typing guard as the actions row above: the dock and the row appear
+									     together, so nothing shifts underneath the answer while it types out. -->
 									<div
 										class="w-full rounded-xl border border-gray-200 dark:border-white/10 overflow-hidden bg-gray-50 dark:bg-gray-900"
 									>
