@@ -2030,17 +2030,23 @@ def generate_speech_llama(
         generated_text = output["choices"][0]["text"]
         logger.info(f"✅ Generated {len(generated_text)} tokens")
 
-        # NOTE: Full implementation would decode audio tokens to waveform
-        # For now, we return a placeholder that indicates successful generation
-        # The actual audio decoding requires additional vocoder integration
-
-        # Return placeholder - actual audio synthesis needs vocoder
-        import numpy as np
-
-        sample_rate = 24000  # Qwen3 TTS uses 24kHz
-        placeholder_audio = np.zeros(sample_rate, dtype=np.float32)  # 1 second silence
-
-        return sample_rate, placeholder_audio
+        # The model emits audio TOKENS; turning them into a waveform needs a
+        # vocoder that was never wired up. This used to return one second of
+        # np.zeros — silence that is indistinguishable from success to every
+        # caller, so voice playback "worked" and produced nothing audible, with
+        # no error anywhere to explain it.
+        #
+        # (None, None) is this function's documented failure contract, so
+        # returning it lets callers fall back to a working engine or tell the
+        # user, instead of shipping silence. Restore real audio here by decoding
+        # `generated_text`'s audio tokens through a vocoder.
+        logger.error(
+            "❌ llama.cpp TTS produced %d tokens but no vocoder is wired, so no "
+            "waveform can be produced — reporting failure rather than returning "
+            "silence. Use the chatterbox or piper engine for working speech.",
+            len(generated_text),
+        )
+        return None, None
 
     except Exception as e:
         logger.error(f"❌ llama.cpp TTS generation failed: {e}")

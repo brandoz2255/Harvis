@@ -10,6 +10,21 @@ from research.enhanced_research_agent import get_enhanced_research_agent
 
 logger = logging.getLogger(__name__)
 
+
+class ResearchCredentialError(RuntimeError):
+    """
+    The requested model needs a cloud credential the current user does not have.
+
+    This is deliberately its own type because the streaming research path nests
+    three `except Exception` fallbacks. A generic exception raised for a missing
+    key is caught by the first of them and quietly degraded to a local model,
+    while the result still reports the cloud model as `model_used` — so the user
+    is told Kimi answered when Ollama did. Every one of those handlers re-raises
+    this type instead: "you have not connected this provider" is an answerable
+    problem, not a synthesis failure to route around.
+    """
+
+
 # Initialize the research agent
 research_agent_instance = ResearchAgent(
     search_engine="duckduckgo",  # or "tavily" if API key is available
@@ -28,22 +43,43 @@ enhanced_research_agent_instance = get_enhanced_research_agent(
 )
 
 
-def set_research_agent_moonshot_key(api_key: str):
-    """Set the Moonshot API key for research agents"""
-    research_agent_instance.moonshot_api_key = api_key
-    enhanced_research_agent_instance.moonshot_api_key = api_key
-    logger.info("Moonshot API key set for research agents")
+def set_research_agent_moonshot_key(api_key: str, base_url: str = ""):
+    """
+    Set (or CLEAR) the Moonshot credential for research agents.
+
+    Both research agents are module-level singletons shared by every request, so
+    this must be called on every research request — with an empty key when the
+    current user has none. Previously the caller only invoked it when a key was
+    found, which left the *previous* user's key in the singleton: the next user
+    without a Moonshot key silently researched on someone else's account and
+    quota. Passing "" is therefore a meaningful call, not a no-op.
+
+    base_url carries the verified regional platform (.ai vs .cn). They have
+    separate key namespaces, so a key sent to the wrong one just 401s.
+    """
+    for agent in (research_agent_instance, enhanced_research_agent_instance):
+        agent.moonshot_api_key = api_key or ""
+        agent.moonshot_base_url = base_url or ""
+    logger.info(
+        "Moonshot credential %s for research agents%s",
+        "set" if api_key else "CLEARED",
+        f" (base_url={base_url})" if api_key and base_url else "",
+    )
 
 
-# Module-level NVIDIA API key (set before streaming research starts)
+# Module-level NVIDIA API key (set before streaming research starts).
+# Shared across requests — see the clearing note in the Moonshot setter above.
 _nvidia_api_key: str = ""
 
 
 def set_research_agent_nvidia_key(api_key: str):
-    """Set the NVIDIA NIM API key for research synthesis"""
+    """Set (or CLEAR) the NVIDIA NIM API key for research synthesis."""
     global _nvidia_api_key
-    _nvidia_api_key = api_key
-    logger.info("NVIDIA NIM API key set for research agents")
+    _nvidia_api_key = api_key or ""
+    logger.info(
+        "NVIDIA NIM credential %s for research agents",
+        "set" if api_key else "CLEARED",
+    )
 
 
 class _CloudLLMClient:
@@ -54,10 +90,14 @@ class _CloudLLMClient:
     passed to quick_map_reduce / MapReduceProcessor without changes.
     """
 
-    def __init__(self, provider: str, api_key: str, model_id: str):
+    def __init__(self, provider: str, api_key: str, model_id: str, base_url: str = ""):
         self.provider = provider   # "nvidia" | "moonshot"
         self.api_key = api_key
         self.model_id = model_id
+        # Moonshot's .ai and .cn platforms have separate key namespaces, so a key
+        # sent to the wrong one 401s. The region is discovered and stored at
+        # save time; this carries it through instead of assuming .ai.
+        self.base_url = (base_url or "").rstrip("/")
 
     async def generate(self, prompt: str, model: str = None, **kwargs):
         import time
@@ -80,7 +120,7 @@ class _CloudLLMClient:
                     "stream": False,
                 }
             else:  # moonshot
-                url = "https://api.moonshot.ai/v1/chat/completions"
+                url = f"{self.base_url or 'https://api.moonshot.ai/v1'}/chat/completions"
                 headers = {
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
@@ -509,6 +549,13 @@ async def async_research_agent_streaming(
                     "detail": "Synthesizing comprehensive answer...",
                 }
 
+                # Declared before the try so the fallback handler can tell whether a
+                # cloud client was ever built, and so `answered_by` reports the model
+                # that actually produced the text rather than the one that was asked for.
+                llm_client = None
+                synthesis_model = None
+                answered_by = model
+
                 try:
                     from research.synth.map_reduce import quick_map_reduce
                     from research.llm.model_policy import TaskType, get_model_for_task
@@ -518,7 +565,11 @@ async def async_research_agent_streaming(
                     # Select the right LLM client based on the requested model
                     if model == "nvidia-kimi":
                         if not _nvidia_api_key:
-                            raise Exception("NVIDIA API key not set for research synthesis")
+                            raise ResearchCredentialError(
+                                "NVIDIA NIM is not connected for this account. "
+                                "Add an NVIDIA API key in Settings → Integrations, "
+                                "or pick a local model for research."
+                            )
                         llm_client = _CloudLLMClient(
                             provider="nvidia",
                             api_key=_nvidia_api_key,
@@ -528,11 +579,18 @@ async def async_research_agent_streaming(
                     elif is_moonshot_model(model):
                         moonshot_key = getattr(enhanced_research_agent_instance, "moonshot_api_key", "")
                         if not moonshot_key:
-                            raise Exception("Moonshot API key not set for research synthesis")
+                            raise ResearchCredentialError(
+                                "Moonshot is not connected for this account. "
+                                "Add a Moonshot API key in Settings → Integrations, "
+                                "or pick a local model for research."
+                            )
                         llm_client = _CloudLLMClient(
                             provider="moonshot",
                             api_key=moonshot_key,
                             model_id=get_moonshot_model_id(model),
+                            base_url=getattr(
+                                enhanced_research_agent_instance, "moonshot_base_url", ""
+                            ),
                         )
                         synthesis_model = get_moonshot_model_id(model)
                     else:
@@ -550,6 +608,7 @@ async def async_research_agent_streaming(
 
                     if reduce_result and reduce_result.success:
                         analysis = reduce_result.synthesis
+                        answered_by = synthesis_model or model
                         logger.info(
                             f"[Streaming Research] ✅ Map/reduce synthesis successful - ANALYSIS GENERATED ({len(analysis)} chars)"
                         )
@@ -559,6 +618,12 @@ async def async_research_agent_streaming(
                     else:
                         raise Exception("Map/reduce synthesis failed")
 
+                except ResearchCredentialError:
+                    # Not a synthesis failure — the user has not connected this
+                    # provider. Degrading to a local model here is what produced
+                    # a "complete" research report attributed to a cloud model
+                    # the account cannot even reach. Let it surface.
+                    raise
                 except Exception as e:
                     logger.warning(
                         f"Map/reduce synthesis failed: {e}, using direct LLM"
@@ -577,12 +642,28 @@ Research Findings:
 
                     synthesis_prompt += f"\n\nProvide a comprehensive, well-structured answer to: {query}"
 
-                    # Use async version for non-blocking LLM call
-                    analysis = await research_agent_instance.async_query_llm(
-                        synthesis_prompt,
-                        model,
-                        "You are a research assistant. Synthesize information from multiple sources into a clear, comprehensive answer. Include specific details and cite sources where possible.",
-                    )
+                    if llm_client is not None and getattr(llm_client, "provider", None):
+                        # Cloud model: retry against the SAME provider. Handing
+                        # "nvidia-kimi" to async_query_llm posts it to Ollama, which
+                        # has no such model — and async_query_llm returns its failure
+                        # as a plain string, so the error text became the research
+                        # answer under a heading claiming Kimi wrote it.
+                        resp = await llm_client.generate(synthesis_prompt)
+                        if not getattr(resp, "success", False):
+                            raise RuntimeError(
+                                f"{llm_client.provider} synthesis failed: "
+                                f"{getattr(resp, 'error', 'unknown error')}"
+                            )
+                        analysis = resp.content
+                        answered_by = synthesis_model or model
+                    else:
+                        # Use async version for non-blocking LLM call
+                        analysis = await research_agent_instance.async_query_llm(
+                            synthesis_prompt,
+                            model,
+                            "You are a research assistant. Synthesize information from multiple sources into a clear, comprehensive answer. Include specific details and cite sources where possible.",
+                        )
+                        answered_by = model
 
                 # Format sources for output
                 quality_sources = all_search_data.get("search_results", [])
@@ -595,7 +676,9 @@ Research Findings:
                         "topic": query,
                         "analysis": analysis,
                         "research_depth": "enhanced",
-                        "model_used": model,
+                        # The model that actually produced the text, not the one that
+                        # was requested — those diverge whenever synthesis falls back.
+                        "model_used": answered_by,
                         "sources_found": len(all_search_data.get("search_results", [])),
                         "sources_used": len(quality_sources),
                         "sources": [
@@ -614,6 +697,8 @@ Research Findings:
                 )
                 yield result
                 return
+            except ResearchCredentialError:
+                raise  # see the note on the inner handler
             except Exception as e:
                 logger.warning(
                     f"[Streaming Research] Enhanced pipeline failed, falling back: {e}"
@@ -661,22 +746,27 @@ Research Findings:
             )
             yield result
 
+        except ResearchCredentialError:
+            raise  # see the note on the inner handler
         except Exception as e:
+            # This used to yield type="complete" with the failure text as the
+            # analysis body — a research report that reads as finished while
+            # containing no research. Synthesis failing IS the outcome, so report
+            # it as an error and let the caller decide what to show. The sources
+            # we did gather ride along so the work isn't thrown away.
             logger.error(f"[Streaming Research] Async fallback failed: {e}")
-            # Last resort: return what we have
             yield {
-                "type": "complete",
-                "result": {
-                    "topic": query,
-                    "analysis": f"Research completed but analysis generation failed: {str(e)}",
-                    "research_depth": "standard",
-                    "model_used": model,
-                    "sources_found": len(all_search_data.get("search_results", [])),
-                    "sources_used": 0,
-                    "sources": [],
-                    "timestamp": research_agent_instance._get_timestamp(),
-                },
+                "type": "error",
+                "error": f"Research gathered sources but could not synthesise an answer: {e}",
+                "sources_found": len(all_search_data.get("search_results", [])),
             }
+
+    except ResearchCredentialError as e:
+        # Actionable by the user, so it gets its own code rather than being
+        # flattened into a generic failure the UI can only render as "something
+        # went wrong".
+        logger.warning(f"[Streaming Research] Credential missing: {e}")
+        yield {"type": "error", "error": str(e), "code": "provider_not_connected"}
 
     except Exception as e:
         logger.error(f"[Streaming Research] Error: {e}")

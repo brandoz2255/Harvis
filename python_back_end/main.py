@@ -6590,27 +6590,36 @@ async def research_chat(
     Streams progress updates during web searches and LLM inference.
     """
 
-    # Check if using Moonshot model and set API key for research (before stream_research)
+    # Resolve the cloud credential for THIS user before streaming research.
+    #
+    # The research agents are module-level singletons shared by every request, so
+    # these setters must run unconditionally — including with an empty key. The
+    # previous version only called them when a key was found, which meant the
+    # singleton kept the LAST user's key: a second user with no Moonshot/NVIDIA
+    # credential silently researched on the first user's account and quota, and
+    # the missing-key branch downstream never fired because the global was still
+    # populated. Clearing is the whole point of the unconditional call.
     if is_moonshot_model(req.model):
+        from agent_research import set_research_agent_moonshot_key
+
         pool = getattr(request.app.state, "pg_pool", None)
-        if pool:
-            moonshot_config = await get_user_api_key(pool, current_user.id, "moonshot")
-            if moonshot_config and moonshot_config.get("api_key"):
-                from agent_research import set_research_agent_moonshot_key
+        moonshot_config = (
+            await get_user_api_key(pool, current_user.id, "moonshot") if pool else None
+        ) or {}
+        set_research_agent_moonshot_key(
+            moonshot_config.get("api_key") or "",
+            # api_url holds the platform verified at save time (.ai vs .cn).
+            moonshot_config.get("api_url") or "",
+        )
 
-                set_research_agent_moonshot_key(moonshot_config["api_key"])
-                logger.info(f"🌙 Moonshot API key set for research agent")
-
-    # Check if using NVIDIA NIM (Kimi K2.5) and set API key for research synthesis
     if req.model == "nvidia-kimi":
-        pool = getattr(request.app.state, "pg_pool", None)
-        if pool:
-            nvidia_config = await get_user_api_key(pool, current_user.id, "nvidia")
-            if nvidia_config and nvidia_config.get("api_key"):
-                from agent_research import set_research_agent_nvidia_key
+        from agent_research import set_research_agent_nvidia_key
 
-                set_research_agent_nvidia_key(nvidia_config["api_key"])
-                logger.info(f"🟢 NVIDIA API key set for research agent")
+        pool = getattr(request.app.state, "pg_pool", None)
+        nvidia_config = (
+            await get_user_api_key(pool, current_user.id, "nvidia") if pool else None
+        ) or {}
+        set_research_agent_nvidia_key(nvidia_config.get("api_key") or "")
 
     # ── Live Web: dispatch through OpenClaw with unrestricted web access ──
     live_web = getattr(req, "live_web", False)

@@ -352,6 +352,13 @@ services:
       - ./python_back_end/main.py:/app/main.py:ro
       - ./python_back_end/setup_flow.py:/app/setup_flow.py:ro
       - ./python_back_end/moonshot_api.py:/app/moonshot_api.py:ro
+      # main.py calls into these three, so leaving them baked into the image while
+      # main.py is mounted lets the two drift apart: a restart deploys the caller
+      # but not the callee, and the mismatch surfaces as a TypeError at request
+      # time rather than at boot. Mount whatever main.py imports directly.
+      - ./python_back_end/agent_research.py:/app/agent_research.py:ro
+      - ./python_back_end/model_manager.py:/app/model_manager.py:ro
+      - ./python_back_end/research:/app/research:ro
       - ./python_back_end/workspace:/app/workspace:ro
       - ./python_back_end/image:/app/image:ro
       - ./python_back_end/tools:/app/tools:ro

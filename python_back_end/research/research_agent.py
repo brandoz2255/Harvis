@@ -200,7 +200,15 @@ class ResearchAgent:
                 return "Error: Moonshot API key not configured"
 
             try:
-                client = MoonshotClient(self.moonshot_api_key)
+                # base_url carries the platform verified at save time. Moonshot's
+                # .ai and .cn have separate key namespaces, so defaulting to .ai
+                # makes a valid .cn key look revoked.
+                _base = getattr(self, "moonshot_base_url", "") or ""
+                client = (
+                    MoonshotClient(self.moonshot_api_key, _base)
+                    if _base
+                    else MoonshotClient(self.moonshot_api_key)
+                )
                 moonshot_model = get_moonshot_model_id(model)
 
                 messages = []
@@ -267,7 +275,15 @@ class ResearchAgent:
                 return "Error: Moonshot API key not configured"
 
             try:
-                client = MoonshotClient(self.moonshot_api_key)
+                # base_url carries the platform verified at save time. Moonshot's
+                # .ai and .cn have separate key namespaces, so defaulting to .ai
+                # makes a valid .cn key look revoked.
+                _base = getattr(self, "moonshot_base_url", "") or ""
+                client = (
+                    MoonshotClient(self.moonshot_api_key, _base)
+                    if _base
+                    else MoonshotClient(self.moonshot_api_key)
+                )
                 moonshot_model = get_moonshot_model_id(model)
 
                 messages = []
