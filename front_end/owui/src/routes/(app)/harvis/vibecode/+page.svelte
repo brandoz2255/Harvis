@@ -734,7 +734,7 @@
 	// Toggle the model dropdown; force a fresh, cache-busting model fetch on the opening edge
 	// so the list the user is about to pick from is genuinely current.
 	const toggleModelMenu = () => {
-		showModelMenu = !showModelMenu;
+		openMenu(showModelMenu ? '' : 'model');
 		if (showModelMenu) refreshModels(true);
 	};
 
@@ -1378,6 +1378,27 @@
 
 	// ── Attach menu: the composer + opens a multi-choice popup (Add image / Attach files) ──
 	let showAttachMenu = false;
+
+	// ── Toolbar menus: exactly one open at a time ──
+	// Each toggle used to be an independent `!x`, and the full-screen click-outside backdrop
+	// closed the rest, which hid that they don't coordinate. The stacking fix below lifts the
+	// composer strip ABOVE that backdrop while a menu is open, so the invariant has to be
+	// stated here instead of falling out of the click order.
+	type ToolbarMenu = '' | 'mode' | 'repo' | 'exec' | 'attach' | 'model' | 'usage';
+	const openMenu = (which: ToolbarMenu) => {
+		showModeMenu = which === 'mode';
+		showRepoMenu = which === 'repo';
+		showExecMenu = which === 'exec';
+		showAttachMenu = which === 'attach';
+		showModelMenu = which === 'model';
+		showUsageStats = which === 'usage';
+	};
+	// The four menus that live INSIDE the `relative z-10` composer strip. Their z-30/z-40 is
+	// capped by that stacking context, so the strip itself has to clear the z-20 backdrop —
+	// see the class binding on the control strip. The other two (repo, exec) sit outside it
+	// and already paint above the backdrop.
+	$: composerMenuOpen = showModeMenu || showAttachMenu || showModelMenu || showUsageStats;
+	$: anyToolbarMenuOpen = composerMenuOpen || showRepoMenu || showExecMenu || showEngineMenu;
 	let fileAttachInputEl: HTMLInputElement;
 	// Any-file attach (not just images) → same attachment pipeline; the backend inlines
 	// text-like files into the brief and lists the rest for the agent.
@@ -1889,7 +1910,7 @@
 						<div class="relative">
 							<button
 								class="inline-flex items-center gap-1 text-[11px] px-2 py-1 rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700"
-								on:click={() => (showExecMenu = !showExecMenu)}
+								on:click={() => openMenu(showExecMenu ? '' : 'exec')}
 							>
 								<svg
 									xmlns="http://www.w3.org/2000/svg"
@@ -1944,7 +1965,7 @@
 									? 'cursor-default'
 									: 'hover:bg-gray-200 dark:hover:bg-gray-700'}"
 								on:click={() => {
-									if (!sessionId) showRepoMenu = !showRepoMenu;
+									if (!sessionId) openMenu(showRepoMenu ? '' : 'repo');
 								}}
 							>
 								<svg
@@ -2110,8 +2131,15 @@
 
 				<!-- B. control strip — BELOW the chat card, blended into the page bg:
 				     no card, no border, no shadow. relative+z keeps the upward menus
-				     stacking above the chat card. -->
-				<div class="relative z-10 w-full max-w-4xl mx-auto bg-transparent px-1.5 pt-2">
+				     stacking above the chat card.
+				     That z-index also opens a stacking context, which CAPS every menu inside
+				     it at this level — so at z-10 the z-40 model dropdown still painted under
+				     the z-20 click-outside backdrop, and nothing in it could be clicked or
+				     scrolled. While one of its own menus is open the strip clears the
+				     backdrop; otherwise it stays at z-10 and doesn't float over page chrome. -->
+				<div
+					class="relative {composerMenuOpen ? 'z-30' : 'z-10'} w-full max-w-4xl mx-auto bg-transparent px-1.5 pt-2"
+				>
 					<!-- toolbar -->
 					<div class="flex items-center gap-1.5">
 						<!-- Engine pill removed — the Build engine now follows the model dropdown
@@ -2145,7 +2173,7 @@
 										? 'border-amber-500/20 bg-amber-500/10 text-amber-300'
 										: 'border-sky-500/20 bg-sky-500/10 text-sky-300'}"
 								title={$i18n.t('Run mode — how much the agent does on its own this turn')}
-								on:click={() => (showModeMenu = !showModeMenu)}
+								on:click={() => openMenu(showModeMenu ? '' : 'mode')}
 							>
 								<svg
 									xmlns="http://www.w3.org/2000/svg"
@@ -2254,7 +2282,7 @@
 								class="text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 p-1.5"
 								title={$i18n.t('Add attachment')}
 								aria-label={$i18n.t('Add attachment')}
-								on:click={() => (showAttachMenu = !showAttachMenu)}
+								on:click={() => openMenu(showAttachMenu ? '' : 'attach')}
 							>
 								<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="size-4"><path d="M12 5v14M5 12h14" stroke-linecap="round" /></svg>
 							</button>
@@ -2342,7 +2370,7 @@
 						<div class="relative hidden sm:block">
 							<button
 								class="flex items-center gap-2 text-[10px] text-gray-500 px-1.5 py-1 hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition"
-								on:click={() => (showUsageStats = !showUsageStats)}
+								on:click={() => openMenu(showUsageStats ? '' : 'usage')}
 								title={$i18n.t('Context & token usage')}
 							>
 								<div class="flex flex-col items-end leading-tight">
@@ -2562,7 +2590,7 @@
 	</div>
 
 	<!-- click-away backdrop for the composer menus -->
-	{#if showModeMenu || showRepoMenu || showExecMenu || showEngineMenu || showAttachMenu || showUsageStats || showModelMenu}
+	{#if anyToolbarMenuOpen}
 		<button
 			class="fixed inset-0 z-20 cursor-default"
 			tabindex="-1"
