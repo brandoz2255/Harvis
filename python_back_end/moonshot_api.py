@@ -2,6 +2,7 @@
 
 import os
 import json
+import hashlib
 import logging
 from typing import List, Dict, Any, Optional, AsyncGenerator
 from fastapi import HTTPException
@@ -9,8 +10,46 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-# Moonshot API configuration
-MOONSHOT_BASE_URL = "https://api.moonshot.ai/v1"
+# Moonshot API configuration.
+#
+# Moonshot runs TWO separate platforms with SEPARATE key namespaces:
+#   platform.moonshot.ai → https://api.moonshot.ai/v1   (global)
+#   platform.moonshot.cn → https://api.moonshot.cn/v1   (China)
+# A key issued on one returns 401 on the other, which is the single most common
+# cause of "invalid api key" here. Override with MOONSHOT_BASE_URL to match
+# whichever console the key was created in.
+MOONSHOT_BASE_URL = os.getenv("MOONSHOT_BASE_URL", "https://api.moonshot.ai/v1").rstrip("/")
+
+
+def _key_fingerprint(api_key: str) -> str:
+    """Non-reversible identifier for a key, safe to log.
+
+    Enough to tell two keys apart or spot an empty one; never enough to use.
+    """
+    if not api_key:
+        return "<missing>"
+    digest = hashlib.sha256(api_key.encode()).hexdigest()[:8]
+    return f"len={len(api_key)} sha256:{digest}"
+
+
+def _explain_error(status: int, body: str, base_url: str) -> str:
+    """Turn a Moonshot HTTP error into something the user can act on.
+
+    A 401 here is almost never "the key is malformed" — it's the key belonging to
+    the other Moonshot platform, so say that instead of echoing the raw body.
+    """
+    if status == 401:
+        other = ("https://api.moonshot.cn/v1" if "moonshot.ai" in base_url
+                 else "https://api.moonshot.ai/v1")
+        return (
+            f"Moonshot rejected the API key at {base_url}. Moonshot runs two separate "
+            f"platforms with separate keys — if this key was created on the other console, "
+            f"set MOONSHOT_BASE_URL={other} and restart the backend. Otherwise re-copy the "
+            f"key from the console that issued it."
+        )
+    if status == 429:
+        return "Moonshot rate limit or quota exceeded. Check the balance on your Moonshot account."
+    return f"Moonshot API error {status}: {body[:400]}"
 
 
 class MoonshotClient:
@@ -114,11 +153,13 @@ class MoonshotClient:
                 if response.status_code != 200:
                     error_text = response.text
                     logger.error(
-                        f"Moonshot API error: {response.status_code} - {error_text}"
+                        "Moonshot API error %s at %s (key %s): %s",
+                        response.status_code, self.base_url,
+                        _key_fingerprint(self.api_key), error_text,
                     )
                     raise HTTPException(
-                        status_code=500,
-                        detail=f"Moonshot API error: {response.status_code}",
+                        status_code=response.status_code if response.status_code in (401, 403, 429) else 502,
+                        detail=_explain_error(response.status_code, error_text, self.base_url),
                     )
 
                 data = response.json()
@@ -163,14 +204,13 @@ class MoonshotClient:
             payload["max_tokens"] = max_tokens
 
         try:
-            # Log the actual Authorization header (with full key for debugging)
-            logger.info(f"Moonshot API: Using API key length={len(self.api_key)}")
+            # NEVER log self.headers or the raw key — the Authorization header carries the
+            # secret verbatim and container logs are readable by anyone with docker access.
+            # A fingerprint is enough to tell "wrong key" from "no key" when debugging.
             logger.info(
-                f"Moonshot API: API key repr={repr(self.api_key[:20])}...{repr(self.api_key[-5:])}"
+                "Moonshot API: POST %s/chat/completions model=%s messages=%d key=%s",
+                self.base_url, model, len(filtered_messages), _key_fingerprint(self.api_key),
             )
-            logger.info(f"Moonshot API: Full headers={self.headers}")
-            logger.info(f"Moonshot API: Request URL={self.base_url}/chat/completions")
-            logger.info(f"Moonshot API: Request payload={payload}")
 
             async with httpx.AsyncClient(
                 timeout=httpx.Timeout(120.0, connect=30.0)
@@ -182,16 +222,15 @@ class MoonshotClient:
                     headers=self.headers,
                 ) as response:
                     if response.status_code != 200:
-                        error_text = await response.aread()
+                        error_text = (await response.aread()).decode(errors="replace")
                         logger.error(
-                            f"Moonshot API streaming error: {response.status_code}"
-                        )
-                        logger.error(
-                            f"Moonshot API error response: {error_text.decode()}"
+                            "Moonshot API error %s at %s (key %s): %s",
+                            response.status_code, self.base_url,
+                            _key_fingerprint(self.api_key), error_text,
                         )
                         raise HTTPException(
-                            status_code=500,
-                            detail=f"Moonshot API error: {response.status_code} - {error_text.decode()}",
+                            status_code=response.status_code if response.status_code in (401, 403, 429) else 502,
+                            detail=_explain_error(response.status_code, error_text, self.base_url),
                         )
 
                     async for line in response.aiter_lines():
