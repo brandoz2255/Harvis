@@ -53,10 +53,14 @@ def build_config(onboarding: bool = False) -> dict:
             "auth": True,
             "auth_trusted_header": False,
             "enable_ldap": False,
-            # Default False to match the server-side gate in main.py's
-            # _signup_with_connection — once an admin exists, signup stays
-            # closed unless the operator explicitly enables it.
-            "enable_signup": _env_bool("HARVIS_OWUI_ENABLE_SIGNUP", False),
+            # Must match main.py's _signup_enabled() default exactly. If this
+            # says True and the server gate says False, the auth page shows a
+            # "Sign up" link that 403s — the worst of both. Self-serve signup
+            # is on by default so a fresh deploy has a working front door; the
+            # instance still cannot be hijacked, because the FIRST signup
+            # additionally requires HARVIS_SETUP_CODE (main.py:2675). Operators
+            # who want a closed instance set HARVIS_OWUI_ENABLE_SIGNUP=false.
+            "enable_signup": _env_bool("HARVIS_OWUI_ENABLE_SIGNUP", True),
             "enable_login_form": True,
             # OPTION A: HTTP-SSE chat, no Socket.IO. Do not flip without also
             # implementing an OWUI-compatible Socket.IO server (owui_compat).

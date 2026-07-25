@@ -2659,9 +2659,16 @@ _FIRST_SIGNUP_LOCK_KEY = 0x48415256  # "HARV"
 
 
 def _signup_enabled() -> bool:
-    return os.getenv("HARVIS_OWUI_ENABLE_SIGNUP", "").strip().lower() in {
-        "1", "true", "yes", "on",
-    }
+    # Default ON, and it must stay in lockstep with owui_compat/config.py's
+    # "enable_signup" — that flag is what draws the "Don't have an account?
+    # Sign up" link, so a mismatch either hides a working signup or shows a
+    # link that 403s. Open signup is safe here because claiming the instance
+    # (the first signup, which becomes admin) additionally requires
+    # HARVIS_SETUP_CODE; every later signup creates an ordinary user.
+    raw = os.getenv("HARVIS_OWUI_ENABLE_SIGNUP", "").strip().lower()
+    if not raw:
+        return True
+    return raw in {"1", "true", "yes", "on"}
 
 
 async def _signup_with_connection(request: SignupRequest, conn, setup_code: str | None = None):

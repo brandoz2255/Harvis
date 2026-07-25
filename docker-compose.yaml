@@ -276,9 +276,11 @@ services:
       # installer — never hard-code it.
       HARVIS_SETUP_CODE: "${HARVIS_SETUP_CODE:-}"
       # Server-enforced (main.py signup gate) AND read by the frontend config.
-      # Default OFF: once the admin exists, signup stays closed until the
-      # operator explicitly enables it.
-      HARVIS_OWUI_ENABLE_SIGNUP: "${HARVIS_OWUI_ENABLE_SIGNUP:-false}"
+      # Default ON so a fresh deploy has a working "Don't have an account?
+      # Sign up" front door. The instance still can't be hijacked: the FIRST
+      # signup (the one that becomes admin) also needs HARVIS_SETUP_CODE.
+      # Set false for a closed, invite-only instance.
+      HARVIS_OWUI_ENABLE_SIGNUP: "${HARVIS_OWUI_ENABLE_SIGNUP:-true}"
       # Set true behind HTTPS so the auth cookie gets the Secure flag.
       # Leave false for localhost / plain HTTP LAN installs.
       HARVIS_COOKIE_SECURE: "${HARVIS_COOKIE_SECURE:-false}"
