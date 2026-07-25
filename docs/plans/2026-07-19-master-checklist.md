@@ -190,6 +190,31 @@ Ranked by user-visible impact within rough clusters.
 - [ ] **Tinker** — check private-beta availability; best fine-tune target named: tool-call formatting. **S** · same doc
 - [ ] **Inkling** — hosted evaluation only (cannot run on 8GB); test calibration inside the agent loop. **S–M** · same doc
 
+### Added 2026-07-25 (user-directed, documented not started)
+
+- [ ] **One account across Harvis and the public website.** When the marketing/product site gets
+  built, a user signs in once and the same account works in both places. Harvis already issues its
+  own JWTs (`main.py` `create_access_token`, HS256, `sub` = user id) and the OWUI facade sets the
+  `access_token` cookie, so the identity source exists — what does not exist is a shared session
+  boundary. **Decide before building:** whether the website authenticates against the Harvis backend
+  directly (simplest; couples the site's uptime to the app), or Harvis becomes an OIDC/OAuth
+  provider (cleaner, more work), or both sit behind one identity provider. Cookie scope, CSRF, and
+  CORS all change depending on that answer, and so does whether the token can be shared across
+  subdomains at all. **M–L** · depends on nothing shipped yet; do not build until the site's domain
+  and hosting are known.
+- [ ] **Voice layover needs more work.** The layover (voice speaking over the running UI) is
+  functional but not finished — see `docs/voice-processing.md` for what exists today and the
+  specific gaps. Not scoped yet; the next step is deciding what "done" looks like rather than
+  writing code. **M**
+- [ ] **In-depth background view of the models' workings.** Today the user sees an answer and, at
+  best, a collapsed `<think>` block. What is missing is a real window into what the model is doing:
+  which model actually answered (this lane has already lied once — see the
+  2026-07-24 research fixes), which tools it called and why, how long each step took, tokens in/out
+  and cost, what context it was given, and where a fallback silently changed the plan. Several
+  ingredients already exist and are unexposed — the execution-trace event types, `answered_by`,
+  the workspace run events, and the usage meter. **M–L** · this is presentation over data we
+  already collect, not new instrumentation.
+
 ---
 
 ## If you only do five things

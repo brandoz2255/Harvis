@@ -1,5 +1,90 @@
 # Recent Changes and Fixes Documentation
 
+## Date: 2026-07-25 — Auth page had no working "Sign up" (three flags disagreed)
+
+### Problem
+
+A new user had no way to create an account. The auth page showed sign-in only; there was no
+"Don't have an account? Sign up" affordance, so the only accounts that existed were ones created
+before the flag defaults were set.
+
+### Root cause
+
+Not a missing feature — a **disabled** one. Every piece of the signup path already existed and was
+correct:
+
+- `front_end/owui/src/routes/auth/+page.svelte:432` — the "Don't have an account? / Sign up" link
+  and the signin↔signup mode toggle, gated on `$config?.features.enable_signup`.
+- `front_end/owui/src/lib/apis/auths/index.ts:289` — `userSignUp(...)`, including the optional
+  `X-Setup-Code` header.
+- `python_back_end/owui_compat/router.py:141` — `POST /api/v1/auths/signup`, returning a full OWUI
+  session user plus the login cookie (not a bare token).
+- `python_back_end/main.py:2667` — `_signup_with_connection`: advisory lock, first-signup setup-code
+  check, duplicate → 409, bcrypt hash, first user claims admin.
+
+The only thing missing was `HARVIS_OWUI_ENABLE_SIGNUP`, which defaults in **three places that must
+agree**: `docker-compose.yaml` (deployment default), `owui_compat/config.py` (draws the UI link),
+and `main.py::_signup_enabled()` (the server gate). All three defaulted to `false`. A mismatch
+between them is worse than either state — it either hides a working signup or shows a link that
+403s.
+
+### Solution
+
+Flipped all three defaults to `true`, with a comment at each site naming the other two so they
+can't drift apart again.
+
+Open signup is safe here because **claiming the instance is still gated**: the first signup — the
+one that becomes admin — additionally requires `X-Setup-Code` matching `HARVIS_SETUP_CODE`,
+checked under a Postgres advisory lock (`_FIRST_SIGNUP_LOCK_KEY`). Every later signup creates an
+ordinary non-admin user. Operators wanting a closed instance set `HARVIS_OWUI_ENABLE_SIGNUP=false`.
+
+Note: an env-var change needs `docker compose up -d backend` (recreate), **not** `docker restart` —
+the bind-mounted code updates on restart, the environment does not.
+
+### Files modified
+
+- `docker-compose.yaml` (~:278)
+- `python_back_end/owui_compat/config.py` (~:56)
+- `python_back_end/main.py` (~:2661)
+
+No frontend edit and no owui rebuild were needed.
+
+### Result
+
+Verified live against `http://localhost:9000`, **11/11**: config reports `enable_signup=true` and
+`onboarding=false`; signup returns 200 with a session token and the full OWUI session shape; the
+new user's role is `user`, not admin; the token authenticates on `/api/v1/auths/` and
+`/api/models`; sign-in with the new credentials works; duplicate email → 409; wrong password → 401.
+The probe user was inspected and deleted; user count returned to 3.
+
+---
+
+## Date: 2026-07-25 — Documentation: Kimi integration + voice-overlay gaps
+
+Two docs written, no behavior change.
+
+- **`docs/kimi-integration.md`** (new) — how the Kimi requests actually work. Covers the two-product
+  split (Moonshot platform vs Kimi Code membership) and every gotcha that cost time: the
+  `.ai`/`.cn` key-namespace split and save-time both-platform probe; `temperature: 1.0` being the
+  only value Kimi accepts; running the *real* Claude Code CLI with `ANTHROPIC_BASE_URL` repointed
+  (a compliance requirement, not a shortcut); why **every** model slot must be pinned or the run
+  dies partway through; the SSE `data:`-space bug that made Kimi return 200-with-no-answer; the
+  unrequested-thinking gate; and the rule that `kimi-code` must be matched **before** `kimi`
+  everywhere, since one is a prefix of the other and mismatching bills the wrong account.
+- **`docs/voice-processing.md`** — added an accurate "voice overlay (call mode) — current state and
+  known gaps" section and flagged the pre-existing sections as historical (they describe
+  `front_end/script.js`, which no longer exists). Seven grounded gaps, the notable ones being: TTS
+  failure is swallowed into `console.error` so the overlay just never speaks; `/audio/config`
+  reports `HARVIS_TTS_ENGINE` defaulting to `qwen` while `/audio/speech` defaults it to `piper`;
+  `/audio/config/update` is a no-op echo that reports success; and VAD is a fixed RMS threshold
+  with no calibration and no UI.
+
+Also appended three user-directed, documented-not-started items to
+`docs/plans/2026-07-19-master-checklist.md` section F: one account across Harvis and the future
+public website, voice-layover work, and an in-depth background view of the models' workings.
+
+---
+
 ## Date: 2026-07-24 — Research "enhanced pipeline" had never actually run
 
 ### Problem

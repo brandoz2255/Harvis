@@ -2,6 +2,94 @@
 
 This document details the voice processing components of the AI Voice Assistant, including speech-to-text (STT) and text-to-speech (TTS) implementations.
 
+> **Note (2026-07-25):** the sections from "Microphone Recording Implementation" onward describe
+> `front_end/script.js`, which no longer exists. The live voice surface is the OWUI call overlay
+> documented in the next section. Treat the older material as historical.
+
+---
+
+## The voice overlay (call mode) — current state and known gaps
+
+**Status: works end to end, but not good enough to ship as a headline feature.** This section is the
+honest inventory of what is wired and what still needs work. It is written against the code, with
+file and line references, so the next person starts from facts rather than from this doc's
+aspirational older sections.
+
+### What exists today
+
+The overlay is `front_end/owui/src/lib/components/chat/MessageInput/CallOverlay.svelte` (~1,200
+lines), opened by the `showCallOverlay` store and rendered from
+`front_end/owui/src/lib/components/chat/ChatControls.svelte:325`. One call turn runs:
+
+1. **Capture** — `MediaRecorder` on the mic stream, with a Web Audio analyser tapping the same
+   stream for voice-activity detection.
+2. **Turn detection** — a frame counts as speech when its normalized RMS exceeds
+   `SPEECH_RMS_THRESHOLD`; the turn ends after `SILENCE_DURATION_MS` below it
+   (`CallOverlay.svelte:165-166`, defaults `0.01` and `1500`).
+3. **Transcribe** — the recorded blob goes to `POST /api/v1/audio/transcriptions`
+   (`main.py:5320`), which saves it to a temp file and runs Harvis's Whisper helper
+   (`transcribe_with_whisper_optimized`) in a threadpool.
+4. **Respond** — the transcript is submitted as an ordinary chat prompt, so a call turn is a normal
+   chat turn with `voice: true` attached (`Chat.svelte:2534`).
+5. **Speak** — the reply is split on punctuation and each sentence is synthesized by
+   `POST /api/v1/audio/speech` (`main.py:5350`), queued, and played
+   (`CallOverlay.svelte:536-548`, `monitorAndPlayAudio` at `:562`).
+
+TTS defaults to **Piper** (CPU, no VRAM, ~0.1s per sentence) and falls back to the neural `qwen`
+engine if Piper is missing (`main.py:5365-5382`). The synth call passes `auto_unload=False` so the
+model stays warm between sentences — without it the model reloaded on every sentence and playback
+crawled.
+
+### Known gaps
+
+**1. TTS failure is silent to the user.** `synthesizeOpenAISpeech(...)` swallows its error into a
+`console.error` and returns null (`CallOverlay.svelte:537-542`), and the enclosing `try` does the
+same at `:552`. The server returns a real `503 TTS unavailable` (`main.py:5402`). Put together: if
+TTS is down, the overlay listens, transcribes, thinks, and then simply never speaks — with nothing
+on screen saying why. This is the same silent-success shape found in the research pipeline
+(`docs/handoffs/2026-07-24-research-pipeline-never-ran.md`); it needs a visible failed-to-speak
+state and a fall back to showing the text.
+
+**2. The advertised TTS engine and the actual TTS engine disagree.** `/api/v1/audio/config` reports
+`MODEL: os.getenv("HARVIS_TTS_ENGINE", "qwen")` (`main.py:5287`) while `/api/v1/audio/speech`
+resolves the same variable with `os.getenv("HARVIS_TTS_ENGINE", "piper")` (`main.py:5365`). With
+the variable unset — the default deployment — the Settings UI reports `qwen` and the server
+actually speaks with Piper. One of the two defaults has to move.
+
+**3. `/api/v1/audio/config/update` does not persist anything.** It echoes the request body back
+(`main.py:5302-5317`). An admin editing audio settings gets a success response and no change. The
+docstring is honest about this, the API is not.
+
+**4. The engine and voice lists are wrong.** `/api/v1/audio/models` advertises `qwen` and
+`chatterbox` and omits `piper` — the actual default (`main.py:5406`). `/api/v1/audio/voices`
+returns exactly one voice, `alloy` (`main.py:5411`), so the overlay's `getVoiceId()` plumbing is
+decorative: Piper speaks with its one baked-in voice regardless of what is selected.
+
+**5. Voice-activity detection is a fixed threshold with no calibration.** `SPEECH_RMS_THRESHOLD`
+is a constant read once from settings; there is no ambient-noise measurement at call start and no
+adaptation while the call runs. A quiet room and a noisy room need different numbers, and the only
+way to change them is by hand-editing the settings JSON — there is no UI for either value. In a
+noisy room the turn never ends; with a soft speaker it ends mid-sentence. Auto-calibrating from
+the first second of ambient audio is the obvious fix.
+
+**6. Latency stacks per sentence.** Each sentence is its own HTTP round trip to `/audio/speech`,
+serialized behind the queue. Whisper transcription also runs in the backend's threadpool, competing
+with LLM inference on the same box — on the 8GB laptop the whole turn serializes. Streaming
+synthesis, or synthesizing the next sentence while the current one plays, would cut the gap between
+"done thinking" and "starts speaking."
+
+**7. No calibration, device-selection, or diagnostics UI.** There is no way from the interface to
+pick an input device, see the measured noise floor, confirm which TTS engine actually answered, or
+test the round trip. Every one of the gaps above is currently diagnosed from the browser console
+and the backend log.
+
+### Where to start
+
+Gaps 1 through 4 are small, self-contained honesty fixes on code that already exists — an
+afternoon each. Gap 5 (VAD calibration) is the one that most changes how the feature *feels*.
+Gap 6 is the largest and should not be attempted before the others are done, because its symptoms
+are currently masked by them.
+
 ## Speech-to-Text (STT)
 
 ### Whisper Model
