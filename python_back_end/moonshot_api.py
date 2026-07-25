@@ -52,6 +52,72 @@ def _explain_error(status: int, body: str, base_url: str) -> str:
     return f"Moonshot API error {status}: {body[:400]}"
 
 
+# The two Moonshot platforms, in probe order. A key is valid on exactly ONE of them,
+# so save-time verification tries both instead of making the user know which console
+# issued theirs. Order only decides which is tried first, never which is accepted.
+MOONSHOT_PLATFORMS = ("https://api.moonshot.ai/v1", "https://api.moonshot.cn/v1")
+
+
+async def verify_moonshot_key(
+    api_key: str, preferred_base_url: Optional[str] = None
+) -> tuple[bool, str, str]:
+    """Check a Moonshot key against the live API. Returns ``(ok, base_url, error)``.
+
+    ``base_url`` is the platform that actually accepted the key — the caller persists it
+    so every later request goes to the console that issued the key. This exists because a
+    key stored without checking only fails much later, at build time, as a bare 401 with
+    no indication that the *region* was the problem; the `.ai`/`.cn` split is the most
+    common cause and the least guessable. Uses ``GET /models``: real auth, zero tokens.
+
+    A key rejected by both platforms is genuinely bad. A key that reaches neither (both
+    requests error out) is reported as unverified rather than invalid — an outage is not
+    evidence against the credential, and refusing to store a good key during a network
+    blip would be worse than storing an unproven one.
+    """
+    candidates: list[str] = []
+    for url in ([preferred_base_url] if preferred_base_url else []) + list(MOONSHOT_PLATFORMS):
+        u = (url or "").strip().rstrip("/")
+        if u and u not in candidates:
+            candidates.append(u)
+
+    rejected: list[str] = []
+    unreachable: list[str] = []
+    async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=8.0)) as client:
+        for base in candidates:
+            try:
+                r = await client.get(
+                    f"{base}/models", headers={"Authorization": f"Bearer {api_key}"}
+                )
+            except Exception as exc:
+                logger.debug("verify_moonshot_key: %s unreachable (%s)", base, type(exc).__name__)
+                unreachable.append(base)
+                continue
+            if r.status_code == 200:
+                logger.info(
+                    "verify_moonshot_key: key accepted at %s (%s)", base, _key_fingerprint(api_key)
+                )
+                return True, base, ""
+            if r.status_code in (401, 403):
+                rejected.append(base)
+                continue
+            # Anything else (429 quota, 5xx) is about the account or the service, not the
+            # key's validity — surface it verbatim rather than calling the key invalid.
+            return False, "", _explain_error(r.status_code, r.text, base)
+
+    if rejected and not unreachable:
+        return False, "", (
+            "Moonshot rejected this key on both of its platforms "
+            f"({', '.join(rejected)}). Moonshot runs two consoles with separate key "
+            "namespaces — re-copy the key from the console that issued it "
+            "(platform.moonshot.ai or platform.moonshot.cn)."
+        )
+    return False, "", (
+        "Could not reach Moonshot to verify the key "
+        f"({', '.join(unreachable) or 'no endpoint responded'}). The key was not saved — "
+        "check outbound network access and try again."
+    )
+
+
 class MoonshotClient:
     """Client for interacting with Moonshot AI API (Kimi models)."""
 
@@ -254,9 +320,10 @@ class MoonshotClient:
             )
 
 
-def get_moonshot_client(api_key: str) -> MoonshotClient:
-    """Create a Moonshot client with the given API key."""
-    return MoonshotClient(api_key)
+def get_moonshot_client(api_key: str, base_url: Optional[str] = None) -> MoonshotClient:
+    """Create a Moonshot client. ``base_url`` should be the platform stored alongside the
+    user's key (``user_api_keys.api_url``); omitting it falls back to the env default."""
+    return MoonshotClient(api_key, base_url or MOONSHOT_BASE_URL)
 
 
 # Moonshot model mapping. kimi-k3 = the 2.8T MoE flagship (1M ctx, released 2026-07-16);

@@ -57,6 +57,8 @@
 		kimi: 'kimi',
 		claude: 'claude',
 		'claude code': 'claude',
+		// Kimi Code runs IN the Claude Code sidecar but the brand shown is whose model answered.
+		'kimi code': 'kimi',
 		'nvidia kimi': 'kimi',
 		'cloud ollama': 'ollama',
 		local: 'ollama',

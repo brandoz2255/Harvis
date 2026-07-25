@@ -162,6 +162,39 @@ export const CATALOG: IntegrationDefinition[] = [
 		links: { homepage: 'https://www.moonshot.ai' }
 	},
 	{
+		// SEPARATE PRODUCT from 'kimi-api' above, deliberately its own tile: that one is a
+		// Moonshot developer-platform key on a pay-as-you-go balance; this one is a Kimi Code
+		// membership key. Different console, different key namespace, different bill — pasting
+		// one into the other authenticates against the wrong service and 401s.
+		id: 'kimi-code',
+		name: 'Kimi Code (Membership)',
+		category: 'application',
+		description: 'Your Kimi Code subscription driving the Claude Code tool loop.',
+		longDescription:
+			'Kimi Code is Moonshot’s subscription coding product. It serves an Anthropic-compatible API, so Harvis runs it through the same Claude Code sidecar and the same agentic loop — reading files, editing code, running commands, and streaming the diff back — with Kimi supplying the reasoning. Usage draws on your membership allowance, not pay-as-you-go credits. Use the key from the Kimi Code Console (kimi.com/coding); a Moonshot developer-platform key will not work here.',
+		brandKey: 'kimi',
+		status: 'available',
+		provider: 'Moonshot AI',
+		capabilities: ['coding', 'tool_use', 'files', 'shell', 'long_context'],
+		provides: ['code_engine_candidate'],
+		usedBy: ['chat', 'code'],
+		permissions: ['Runs shell commands', 'Reads / writes repo files'],
+		connect: 'engine_api_key',
+		runtimeNote:
+			'Runs in the Claude Code sidecar with the endpoint pointed at Kimi Code — full tool loop, clone + diff, zero GPU. Billed to your Kimi membership.',
+		auth: {
+			required: true,
+			modes: ['api_key'],
+			notes:
+				'The API key created in the Kimi Code Console (kimi.com/coding). Uses your Kimi membership quota. Stored encrypted per-user, never shown; injected only at run time.'
+		},
+		engine: {
+			support: 'supported',
+			notes: 'External Build engine — surfaced as kimi-code/* models; picked in Build via the model selector.'
+		},
+		links: { docs: 'https://www.kimi.com/coding', homepage: 'https://www.kimi.com' }
+	},
+	{
 		id: 'openclaw',
 		name: 'OpenClaw',
 		category: 'application',

@@ -25,6 +25,7 @@ export const NORM_META: Record<NormStatus, { label: string; dot: string; text: s
 export const ENGINE_READINESS_KEY: Record<string, string> = {
 	'claude-code': 'claude-code',
 	'codex-app': 'codex',
+	'kimi-code': 'kimi-code',
 	opencode: 'opencode',
 	openclaw: 'openclaw',
 	'hermes-agent': 'hermes-agent'
@@ -103,6 +104,7 @@ const GROUP_OF: Record<string, GroupKey> = {
 	'claude-code': 'engines',
 	opencode: 'engines',
 	'codex-app': 'engines',
+	'kimi-code': 'engines',
 	'hermes-agent': 'engines',
 	ollama: 'models',
 	github: 'repos',
@@ -157,6 +159,9 @@ const SECTION_OF: Record<string, SectionKey> = {
 	'claude-code': 'agent_engines',
 	opencode: 'agent_engines',
 	'codex-app': 'agent_engines',
+	// Kimi Code EXECUTES (the Claude Code sidecar drives its tool loop), so it belongs with the
+	// engines — unlike the 'kimi-api' tile below, which is only a chat/model credential.
+	'kimi-code': 'agent_engines',
 	'hermes-agent': 'agent_engines',
 	'anthropic-api': 'cloud_apis',
 	'openai-api': 'cloud_apis',

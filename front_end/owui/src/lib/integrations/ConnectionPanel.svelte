@@ -179,14 +179,17 @@
 
 	// Hermes Agent management is its own component (3 connection modes — import / external / managed).
 
-	// ── Cloud engine API key (Phase E2: codex / claude-code) ──
+	// ── Cloud engine API key (Phase E2: codex / claude-code / kimi-code) ──
 	// Explicit id→engine map (was a `codex-app ? codex : claude-code` ternary, which
 	// silently wrote EVERY non-codex engine_api_key integration into the claude-code
-	// row). Only these two ids use engine-auth; anything else is a wiring bug — surface
+	// row). Only these ids use engine-auth; anything else is a wiring bug — surface
 	// it instead of mis-routing a credential.
 	const ENGINE_AUTH_OF: Record<string, string> = {
 		'claude-code': 'claude-code',
-		'codex-app': 'codex'
+		'codex-app': 'codex',
+		// Kimi Code MEMBERSHIP gets its OWN engine-auth row — NOT the same credential as the
+		// 'kimi-api' tile, which is a Moonshot pay-as-you-go key in the plain api-key store.
+		'kimi-code': 'kimi-code'
 	};
 	$: authEngine = ENGINE_AUTH_OF[def.id] ?? '';
 	$: if (def.connect === 'engine_api_key' && !authEngine) {
@@ -586,6 +589,8 @@
 			<p class="text-[11px] text-gray-400">
 				{#if def.id === 'codex-app'}
 					{$i18n.t('Your OpenAI API key — used only to run Codex in Build, stored encrypted, never shown. OpenCode needs no key (local).')}
+				{:else if def.id === 'kimi-code'}
+					{$i18n.t('Use the API key created in the Kimi Code Console (kimi.com/coding). Uses your Kimi membership quota — a Moonshot developer-platform key (platform.moonshot.ai) is a different product and will not work here. Stored encrypted, never shown.')}
 				{:else if authMode === 'oauth_token'}
 					{$i18n.t('Run `claude setup-token` in your terminal (needs Claude Pro/Max/Team/Enterprise), then paste the token here. No API credits required — stored encrypted, never shown.')}
 				{:else}

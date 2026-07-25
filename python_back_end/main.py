@@ -39,6 +39,7 @@ from moonshot_api import (
     is_moonshot_model,
     get_moonshot_model_id,
     MOONSHOT_BASE_URL,
+    _key_fingerprint,
 )
 from typing import List, Optional, Dict, Any, Union
 from vison_models.llm_connector import (
@@ -2879,11 +2880,26 @@ async def create_or_update_api_key(
     if not pool:
         raise HTTPException(status_code=500, detail="Database not available")
 
-    # Log what we received
-    received_key = api_key_data.api_key
-    logger.info(
-        f"API SAVE: Received key for provider={api_key_data.provider_name}, length={len(received_key) if received_key else 0}, preview={received_key[:8] if received_key else 'EMPTY'}...{received_key[-4:] if received_key and len(received_key) > 4 else 'NONE'}"
-    )
+    # Never log any part of a credential. This previously logged the first 8 and last 4
+    # characters at INFO on every save, which put a usable fragment of the key into the
+    # container log — where it persists long after the key is rotated.
+    received_key = api_key_data.api_key or ""
+    provider = (api_key_data.provider_name or "").strip()
+    api_url = api_key_data.api_url
+    logger.info("API SAVE: received key for provider=%s (%s)", provider, _key_fingerprint(received_key))
+
+    # Moonshot/Kimi: prove the key works BEFORE storing it, and record WHICH of Moonshot's
+    # two platforms accepted it. Storing unverified meant the first sign of a bad key was a
+    # 401 in the middle of a build, with nothing pointing at the real cause — usually a key
+    # from the other console. Verified-at-save is the same contract Codex and Claude Code
+    # already use (owui_compat/engine_auth.py::_verify_credential).
+    if provider in ("moonshot", "kimi") and received_key:
+        from moonshot_api import verify_moonshot_key
+
+        ok, working_url, err = await verify_moonshot_key(received_key, api_url)
+        if not ok:
+            raise HTTPException(status_code=400, detail=err)
+        api_url = working_url
 
     # Encrypt the API key
     encrypted_key = encrypt_api_key(api_key_data.api_key)
@@ -2911,7 +2927,7 @@ async def create_or_update_api_key(
                 current_user.id,
                 api_key_data.provider_name,
                 encrypted_key,
-                api_key_data.api_url,
+                api_url,
                 api_key_data.is_active,
             )
         else:
@@ -2925,7 +2941,7 @@ async def create_or_update_api_key(
                 current_user.id,
                 api_key_data.provider_name,
                 encrypted_key,
-                api_key_data.api_url,
+                api_url,
                 api_key_data.is_active,
             )
 

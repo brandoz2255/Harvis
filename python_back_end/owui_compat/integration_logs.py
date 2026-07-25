@@ -108,6 +108,9 @@ _AUTH_ENGINE_OF: dict[str, str] = {
     "codex-app": "codex",
     "anthropic-api": "claude-code",
     "openai-api": "codex",
+    # Kimi Code MEMBERSHIP — separate card from `kimi-api` (the Moonshot developer-platform key,
+    # which lives in the plain api-key store and so has no engine_auth row to log against).
+    "kimi-code": "kimi-code",
 }
 
 _KNOWN_IDS = (

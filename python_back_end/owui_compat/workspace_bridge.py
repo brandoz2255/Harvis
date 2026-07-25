@@ -113,6 +113,7 @@ _ENGINE_LABELS = {
     "orchestrated": "Orchestrator",
     "claude": "Claude",
     "kimi": "Kimi",
+    "kimi-code": "Kimi Code",
     "nvidia-kimi": "NVIDIA Kimi",
     "cloud-ollama": "Cloud Ollama",
     "gpt-oss": "GPT-OSS",
@@ -133,6 +134,12 @@ def _resolve_engine(mode: str, model_id: str) -> tuple[str, str]:
         agent_id = "orchestrated"
     elif model_id.startswith("anthropic/"):
         agent_id = "claude"  # cloud Claude drives its OWN tool-loop (claude -p)
+    elif model_id.startswith("kimi-code/"):
+        # Kimi Code SUBSCRIPTION → the Claude Code sidecar with ANTHROPIC_BASE_URL repointed.
+        # Deliberately checked BEFORE the moonshot/ prefix: this is a different product on a
+        # different credential and a different bill, and collapsing the two would silently
+        # spend pay-as-you-go balance when the user picked their membership allowance.
+        agent_id = "kimi-code"
     elif model_id.startswith("moonshot/"):
         agent_id = "kimi"  # → stream_kimi_workspace (the original Harvis workspace engine)
     else:

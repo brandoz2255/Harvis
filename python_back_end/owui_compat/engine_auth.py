@@ -32,7 +32,31 @@ logger = logging.getLogger(__name__)
 
 # Auth-bearing engines (NOT opencode — it's local, no key). Maps the auth-row engine id
 # to the vendor verify contract.
-AUTH_ENGINES = {"codex", "claude-code"}
+AUTH_ENGINES = {"codex", "claude-code", "kimi-code"}
+
+# Kimi Code = the SUBSCRIPTION coding product (platform: www.kimi.com/coding), which serves an
+# Anthropic-compatible Messages API so the real Claude Code CLI can drive it. This is a DIFFERENT
+# product from the Moonshot developer platform (api.moonshot.{ai,cn}) with a DIFFERENT key
+# namespace and DIFFERENT billing: a Kimi Code key draws on the user's membership allowance,
+# a Moonshot platform key draws on a pay-as-you-go balance. They are not interchangeable, which
+# is why they live in separate stores — Kimi Code here (verified, engine-backed), Moonshot in
+# `user_api_keys` (see moonshot_api.verify_moonshot_key). Storing one where the other belongs
+# authenticates against the wrong service and 401s with nothing pointing at the real cause.
+KIMI_CODE_BASE_URL = os.getenv("KIMI_CODE_BASE_URL", "https://api.kimi.com/coding")
+# Available to every membership tier — higher tiers add k3/k3-256k/kimi-for-coding-highspeed,
+# so defaulting here avoids a model-access rejection for users on the entry plan.
+KIMI_CODE_DEFAULT_MODEL = os.getenv("KIMI_CODE_DEFAULT_MODEL", "kimi-for-coding")
+
+# Model ids Kimi Code serves. Entitlement is per membership tier (k3/k3-256k need Moderato+,
+# highspeed needs Allegretto+), and the API is the only authority on what a given account may
+# use — so all four are offered and a tier rejection surfaces as a model-access error rather
+# than being guessed at here.
+KIMI_CODE_MODELS = ("kimi-for-coding", "k3-256k", "k3", "kimi-for-coding-highspeed")
+
+# Context budget the CLI should assume, per model. Claude Code otherwise sizes its context and
+# auto-compact threshold for Anthropic's windows, which would either waste Kimi's larger window
+# or overrun a smaller one.
+KIMI_CODE_CONTEXT_TOKENS = {"kimi-for-coding": 262144, "k3-256k": 262144}
 
 # Per-user auth modes. Phase E4B: Claude Code supports BOTH an Anthropic API key
 # (ANTHROPIC_API_KEY) AND a Claude subscription OAuth token (CLAUDE_CODE_OAUTH_TOKEN, from
@@ -175,6 +199,44 @@ async def _verify_credential(engine: str, secret: str, auth_mode: str) -> tuple[
                 if r.status_code == 200:
                     return True, ""
                 return False, f"Anthropic rejected the key (HTTP {r.status_code})."
+            elif engine == "kimi-code":
+                # Kimi Code's Anthropic-compatible Messages route. There is no free metadata
+                # endpoint to probe, so this is the smallest real request that can exist
+                # (max_tokens:1). Sent with BOTH header forms because the runtime path is the
+                # Claude Code CLI, which may use either depending on which env var carries the
+                # credential — the gateway accepts either, so matching it here keeps the check
+                # honest about what the real run will do.
+                r = await client.post(
+                    f"{KIMI_CODE_BASE_URL.rstrip('/')}/v1/messages",
+                    headers={
+                        "x-api-key": secret,
+                        "Authorization": f"Bearer {secret}",
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": KIMI_CODE_DEFAULT_MODEL,
+                        "max_tokens": 1,
+                        "messages": [{"role": "user", "content": "hi"}],
+                    },
+                )
+                if r.status_code == 200:
+                    return True, ""
+                if r.status_code == 429:
+                    # Rate/quota limits are applied AFTER authentication, so a 429 proves the
+                    # credential is real. Rejecting it would make a user at their limit look
+                    # like a user with a bad key — the opposite of the truth.
+                    return True, ""
+                if r.status_code in (401, 403):
+                    return False, (
+                        "Kimi Code rejected this key. Use the key from the Kimi Code Console "
+                        "(kimi.com/coding) — a Moonshot developer-platform key "
+                        "(platform.moonshot.ai/.cn) is a different product and will not work here."
+                    )
+                if r.status_code >= 500:
+                    # An outage is not evidence against the credential.
+                    return False, f"Kimi Code is unavailable right now (HTTP {r.status_code}) — key not verified."
+                return False, f"Kimi Code rejected the request (HTTP {r.status_code})."
     except Exception as exc:
         return False, f"Verification request failed: {type(exc).__name__}"
     return False, "Unknown engine."

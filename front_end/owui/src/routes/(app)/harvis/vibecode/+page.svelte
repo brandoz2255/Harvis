@@ -620,6 +620,7 @@
 		'hermes-agent': ['ollama'],
 		'hermes-native': ['ollama'],
 		kimi: ['moonshot'],
+		'kimi-code': ['kimi-code'],
 		native: ['ollama']
 	};
 	// The model the meter reads window+price from before the first turn lands (so a Claude session
@@ -627,7 +628,10 @@
 	const ENGINE_DEFAULT_MODEL: Record<string, string> = {
 		'claude-code': 'anthropic/claude-sonnet-4-6',
 		codex: 'openai/gpt-5',
-		kimi: 'moonshot/kimi-k3'
+		kimi: 'moonshot/kimi-k3',
+		// The one model every Kimi Code membership tier can use (k3/k3-256k/highspeed need higher
+		// tiers), so it can't show a window/price the user isn't entitled to.
+		'kimi-code': 'kimi-code/kimi-for-coding'
 	};
 	const fmtTok = (n: number) =>
 		n >= 10000 ? Math.round(n / 1000) + 'k' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
@@ -639,6 +643,10 @@
 		if (o.startsWith('anthropic')) return 'claude-code';
 		if (o.startsWith('hermes')) return 'hermes-agent';
 		if (o === 'openai') return 'codex';
+		// 'kimi-code' MUST be tested before the generic kimi/moonshot arm below — it also starts
+		// with "kimi", and falling through would run a MEMBERSHIP model on the pay-as-you-go
+		// Moonshot lane: wrong credential, wrong bill, and no tool loop.
+		if (o === 'kimi-code') return 'kimi-code';
 		if (o.startsWith('moonshot') || o.startsWith('kimi')) return 'kimi';
 		return 'native';
 	};
@@ -744,6 +752,10 @@
 		{ label: 'Claude', test: (o) => o.startsWith('anthropic') },
 		{ label: 'Hermes', test: (o) => o.startsWith('hermes') },
 		{ label: 'OpenAI', test: (o) => o === 'openai' },
+		// Ordered BEFORE 'Kimi': groups claim models first-match-wins, and the generic Kimi test
+		// below also matches 'kimi-code'. Two groups because they are two products on two bills —
+		// the membership models must be pickable as such, not blended into the Moonshot list.
+		{ label: 'Kimi Code (membership)', test: (o) => o === 'kimi-code' },
 		{ label: 'Kimi', test: (o) => o.startsWith('moonshot') || o.startsWith('kimi') }
 	];
 	$: modelGroups = (() => {
@@ -931,7 +943,8 @@
 		'claude-code': 'Claude Code',
 		'hermes-agent': 'Hermes Agent',
 		'hermes-native': 'Hermes Native',
-		kimi: 'Kimi'
+		kimi: 'Kimi',
+		'kimi-code': 'Kimi Code'
 	};
 	// Display label for a session's engine ('native' / unset → "Native"); used by the
 	// Build-analysis card to label "Built with X".
@@ -961,7 +974,8 @@
 		'claude-code',
 		'hermes-agent',
 		'hermes-native',
-		'kimi'
+		'kimi',
+		'kimi-code'
 	].filter((e) => engineReadiness?.[e]?.ready);
 	$: showEngineSelector = readyEngineIds.length > 0 && isolationMode === 'session';
 	// Surface the Hermes-Native "enabled but no model" reason even when the selector is hidden.

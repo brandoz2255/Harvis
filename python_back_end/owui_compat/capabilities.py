@@ -243,13 +243,30 @@ def register_capabilities_routes(router: APIRouter, get_current_user: Callable) 
         # lane + the model listing use. This is what lets the model-driven Build picker offer it.
         try:
             from owui_compat.cloud_chat import _moonshot_key
-            _kimi_ready = bool(await _moonshot_key(pool, uid))
+            # [0] = the key; _moonshot_key returns (key, base_url), and an empty
+            # ("", "") tuple is TRUTHY — testing the tuple would report Kimi ready
+            # for every user regardless of whether a key exists.
+            _kimi_ready = bool((await _moonshot_key(pool, uid))[0])
             engine_readiness["kimi"] = (
                 {"ready": True, "connected": True} if _kimi_ready
                 else {"ready": False, "reason": "missing_auth"}
             )
         except Exception:
             engine_readiness["kimi"] = {"ready": False, "reason": "missing_auth"}
+        # Kimi Code = the MEMBERSHIP engine (distinct product from `kimi` above). It uses a
+        # VERIFIED engine_auth row, the same contract as Claude Code — so "ready" here means the
+        # key was actually proven against api.kimi.com/coding at save time, not merely that some
+        # key exists. Keeping the two separate is what stops a Moonshot pay-as-you-go key from
+        # standing in for a subscription the user hasn't connected.
+        try:
+            from owui_compat.engine_auth import user_has_verified_engine
+            engine_readiness["kimi-code"] = (
+                {"ready": True, "connected": True}
+                if await user_has_verified_engine(pool, uid, "kimi-code")
+                else {"ready": False, "reason": "missing_auth"}
+            )
+        except Exception:
+            engine_readiness["kimi-code"] = {"ready": False, "reason": "missing_auth"}
         # When the user has a VERIFIED external Hermes connected, Chat routes there but Build can't
         # (the external server has no access to the Build workspace clone) — mark it unavailable.
         try:

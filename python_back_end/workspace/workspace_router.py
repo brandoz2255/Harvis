@@ -303,17 +303,29 @@ async def _probe_cloud_ollama() -> dict:
         "reason": f"Could not reach {_EXTERNAL_OLLAMA_URL}. Check EXTERNAL_OLLAMA_URL and network.",
     }
 
-async def _get_kimi_key(pool, user_id: int) -> str:
-    """Return decrypted Moonshot API key -- DB row first, then env var."""
+async def _get_kimi_credentials(pool, user_id: int) -> tuple[str, str]:
+    """Return ``(api_key, base_url)`` for Moonshot -- DB row first, then env var.
+
+    The base URL matters: a key issued on platform.moonshot.ai 401s on .cn and vice versa.
+    It is recorded per key at save time (verify_moonshot_key picks whichever platform
+    accepted it), so callers must carry it through instead of assuming the env default.
+    An empty base URL means "use the env default" and is normal for env-provided keys.
+    """
     if pool:
         try:
             from main import get_user_api_key
             config = await get_user_api_key(pool, user_id, "moonshot")
             if config and config.get("api_key"):
-                return config["api_key"]
+                return config["api_key"], (config.get("api_url") or "")
         except Exception as exc:
             logger.debug("Failed to fetch Kimi key from DB: %s", exc)
-    return _MOONSHOT_API_KEY
+    return _MOONSHOT_API_KEY, ""
+
+
+async def _get_kimi_key(pool, user_id: int) -> str:
+    """Key only — for gate checks that just need to know whether Kimi is usable."""
+    key, _ = await _get_kimi_credentials(pool, user_id)
+    return key
 
 
 # ─── In-memory workspace registry ─────────────────────────────────────────────
@@ -938,6 +950,8 @@ def _narrator_engine_label(ws: dict, agent_id: str) -> str:
         return "Hermes"
     if agent_id == "claude":
         return "Claude Code"
+    if agent_id == "kimi-code":
+        return "Kimi Code"
     if agent_id in ("vibecode-turn", "orchestrated"):
         return "Native"
     return "Harvis"
@@ -1118,7 +1132,7 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
     # builds produce artifacts (+ auto-pop) like vibecode/orchestrator already do.
     # Excludes the lanes that already collect via _db_save_artifact internally.
     _oc_writes: dict[str, str] = {}
-    _collect_writes = agent_id not in ("orchestrated", "vibecode-turn", "engine-adapter", "claude")
+    _collect_writes = agent_id not in ("orchestrated", "vibecode-turn", "engine-adapter", "claude", "kimi-code")
 
     async def _flush_oc_writes() -> None:
         nonlocal event_count
@@ -1172,14 +1186,17 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
             event_stream = stream_local_ollama_workspace(task_brief, chat_history, model=model_name)
 
     elif agent_id == "kimi":
-        api_key = await _get_kimi_key(pool, ws["user_id"])
+        api_key, kimi_url = await _get_kimi_credentials(pool, ws["user_id"])
         if api_key:
             if use_parallel:
                 event_stream = stream_parallel_workspace(
                     task_brief, chat_history, api_key=api_key, model=model_name, provider="kimi",
+                    api_url=kimi_url,
                 )
             else:
-                event_stream = stream_kimi_workspace(task_brief, chat_history, api_key, model=model_name)
+                event_stream = stream_kimi_workspace(
+                    task_brief, chat_history, api_key, model=model_name, api_url=kimi_url,
+                )
         else:
             logger.warning("No Kimi API key for user %s — falling back to local Ollama", ws["user_id"])
             fallback_event = OpenClawEvent("log", {
@@ -1207,6 +1224,22 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
             parent_workspace_id=workspace_id, user_id=ws["user_id"],
             session_id=ws.get("session_id", ""),
             launch_mode=ws.get("launch_mode", "user"),  # Phase D: auto → Claude sidecar read-only
+        )
+
+    elif agent_id == "kimi-code":
+        # Kimi Code MEMBERSHIP as a workspace engine. Identical lane to `claude` above — the
+        # same sidecar, the same `claude -p` agentic loop, the same tool set — with the CLI's
+        # ANTHROPIC_BASE_URL repointed at Kimi Code and the user's verified membership key
+        # injected. Kimi supplies the reasoning; Claude Code supplies the loop that reads
+        # files, runs commands, and feeds tool results back. Zero GPU.
+        from .orchestration.engine_adapter import run_claude_chat_workspace
+        event_stream = run_claude_chat_workspace(
+            task_brief, chat_history,
+            model_name=model_name, pool=pool,
+            parent_workspace_id=workspace_id, user_id=ws["user_id"],
+            session_id=ws.get("session_id", ""),
+            launch_mode=ws.get("launch_mode", "user"),
+            engine="kimi-code",
         )
 
     elif agent_id == "nvidia-kimi":
@@ -1488,7 +1521,7 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
                         # the OpenClaw CTF lane, so this never narrates hash/decode tasks).
                         _build_like = bool(
                             _bn_changed or _bn_diff or ws.get("vibecode_session_id")
-                            or (agent_id == "claude" and _bn_fc > 0)
+                            or (agent_id in ("claude", "kimi-code") and _bn_fc > 0)
                         )
                         if event.type == "done" and _build_like and structured is None:
                             final_analysis_md = await _compose_run_analysis(

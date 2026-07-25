@@ -555,12 +555,21 @@ async def run_claude_chat_workspace(
     user_id: int = 0,
     session_id: str = "",
     launch_mode: str = "user",
+    engine: str = "claude-code",
 ) -> AsyncGenerator[OpenClawEvent, None]:
-    """Run a CHAT workspace task through cloud Claude's OWN agentic loop — ``claude -p``
+    """Run a CHAT workspace task through a cloud model's OWN agentic loop — ``claude -p``
     with its built-in tools (web_search, exec, file ops). No repo clone: a scratch workdir
     under the shared artifact volume. This makes the workspace a universal tool runtime that
-    Claude drives (like Kimi via Moonshot), using the user's VERIFIED per-user credential
-    (subscription oauth OR api_key). Zero GPU — runs in the harvis-claude-code sidecar."""
+    the model drives, using the user's VERIFIED per-user credential. Zero GPU — runs in the
+    harvis-claude-code sidecar.
+
+    ``engine`` selects WHOSE model answers, not which loop runs:
+      * ``claude-code`` — Anthropic, via subscription OAuth token or API key.
+      * ``kimi-code``   — Kimi Code membership, via its Anthropic-compatible Messages API.
+        Same sidecar, same CLI, same tool loop; only ANTHROPIC_BASE_URL and the credential
+        differ. Running the REAL CLI (rather than a proxy that imitates it) is deliberate:
+        Kimi Code's terms require third-party coding tools to keep their true client identity,
+        so Harvis only injects the documented env vars and lets the CLI speak for itself."""
     from ..workspace_router import _db_create_run, _db_save_artifact
     from .isolation import _is_secret_artifact
     try:
@@ -568,7 +577,8 @@ async def run_claude_chat_workspace(
     except Exception:
         get_verified_engine_auth = None  # type: ignore
 
-    label = "Claude"
+    is_kimi = engine == "kimi-code"
+    label = "Kimi Code" if is_kimi else "Claude"
     run_id = parent_workspace_id
     container = _CONTAINERS.get("claude-code", "harvis-claude-code")
     sess = session_id or f"ws-{parent_workspace_id}"
@@ -584,13 +594,17 @@ async def run_claude_chat_workspace(
     auth = None
     if get_verified_engine_auth is not None:
         try:
-            auth = await get_verified_engine_auth(pool, user_id, "claude-code")
+            auth = await get_verified_engine_auth(pool, user_id, engine)
         except Exception:
             auth = None
     if not auth:
         yield root_ev("error", {
-            "message": "Claude isn't connected.",
-            "fix_hint": "Connect + verify your Claude subscription or API key in Integrations.",
+            "message": f"{label} isn't connected.",
+            "fix_hint": (
+                "Connect + verify your Kimi Code Console key in Integrations."
+                if is_kimi else
+                "Connect + verify your Claude subscription or API key in Integrations."
+            ),
         })
         return
     secret, auth_mode = auth
@@ -606,8 +620,33 @@ async def run_claude_chat_workspace(
     except Exception:
         pass
 
-    claude_model = (model_name or "").split("/", 1)[-1].strip()  # strip 'anthropic/' prefix
-    if auth_mode == "oauth_token":
+    claude_model = (model_name or "").split("/", 1)[-1].strip()  # strip 'anthropic/'|'kimi/' prefix
+    if is_kimi:
+        from owui_compat.engine_auth import (
+            KIMI_CODE_BASE_URL, KIMI_CODE_DEFAULT_MODEL, KIMI_CODE_CONTEXT_TOKENS, KIMI_CODE_MODELS,
+        )
+        if claude_model not in KIMI_CODE_MODELS:
+            claude_model = KIMI_CODE_DEFAULT_MODEL
+        # Point the real CLI at Kimi Code and pin EVERY model slot to the chosen Kimi model.
+        # Claude Code resolves its own aliases internally (sonnet for the main loop, haiku for
+        # cheap side calls, a subagent model for Task) — each of those would otherwise request
+        # an Anthropic model id that Kimi Code does not serve, so the run would fail partway
+        # through with a model-not-found rather than at the first token.
+        cred = [
+            "-e", f"ANTHROPIC_BASE_URL={KIMI_CODE_BASE_URL}",
+            "-e", f"ANTHROPIC_API_KEY={secret}",
+            "-e", f"ANTHROPIC_MODEL={claude_model}",
+            "-e", f"ANTHROPIC_DEFAULT_OPUS_MODEL={claude_model}",
+            "-e", f"ANTHROPIC_DEFAULT_SONNET_MODEL={claude_model}",
+            "-e", f"ANTHROPIC_DEFAULT_HAIKU_MODEL={claude_model}",
+            "-e", f"CLAUDE_CODE_SUBAGENT_MODEL={claude_model}",
+            "-e", "CLAUDE_CODE_SIMPLE=1",
+        ]
+        ctx = KIMI_CODE_CONTEXT_TOKENS.get(claude_model)
+        if ctx:
+            cred += ["-e", f"CLAUDE_CODE_MAX_CONTEXT_TOKENS={ctx}",
+                     "-e", f"CLAUDE_CODE_AUTO_COMPACT_WINDOW={ctx}"]
+    elif auth_mode == "oauth_token":
         cred = ["-e", f"CLAUDE_CODE_OAUTH_TOKEN={secret}", "-e", "CLAUDE_CODE_SIMPLE="]
     else:
         cred = ["-e", f"ANTHROPIC_API_KEY={secret}", "-e", "CLAUDE_CODE_SIMPLE=1"]
@@ -626,7 +665,7 @@ async def run_claude_chat_workspace(
         # Claude Code CLI version; the tool NAMES are stable.
         cmd += ["--disallowedTools", "Bash", "Edit", "Write", "MultiEdit", "NotebookEdit"]
 
-    yield root_ev("log", {"message": f"Connected to Claude ({claude_model or 'subscription'}) — workspace tools active…"})
+    yield root_ev("log", {"message": f"Connected to {label} ({claude_model or 'subscription'}) — workspace tools active…"})
 
     proc: asyncio.subprocess.Process | None = None
     final_text_parts: list[str] = []
@@ -651,7 +690,7 @@ async def run_claude_chat_workspace(
                 *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, limit=_STREAM_LIMIT,
             )
         except Exception as exc:
-            yield root_ev("error", {"message": f"Could not start Claude: {exc}",
+            yield root_ev("error", {"message": f"Could not start {label}: {exc}",
                                     "fix_hint": f"Is the {container} sidecar running?"})
             return
         stderr_task = asyncio.create_task(_drain(proc))
@@ -722,9 +761,9 @@ async def run_claude_chat_workspace(
         logger.warning("claude chat workspace: artifact capture failed: %s", exc)
 
     if timed_out:
-        yield root_ev("error", {"message": f"Claude timed out after {_TIMEOUT_S}s.",
+        yield root_ev("error", {"message": f"{label} timed out after {_TIMEOUT_S}s.",
                                 "fix_hint": "Try a narrower task."})
         return
     summary = " ".join(p for p in final_text_parts if p).strip()
-    summary = (summary[:2000] if summary else "") or (stderr_buf[-1][:300] if stderr_buf else "Claude finished.")
+    summary = (summary[:2000] if summary else "") or (stderr_buf[-1][:300] if stderr_buf else f"{label} finished.")
     yield root_ev("done", {"summary": summary})
