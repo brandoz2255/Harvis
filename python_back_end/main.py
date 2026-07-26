@@ -583,8 +583,10 @@ async def lifespan(app: FastAPI):
                 # never invoked. Apply just these six here: all are verified
                 # idempotent (CREATE ... IF NOT EXISTS), so this heals fresh AND
                 # pre-existing volumes. Per-file try/except so one bad file can't
-                # abort boot. The 001-009 migrations include un-guarded ALTERs
-                # and are deliberately NOT swept in.
+                # abort boot. Most of 001-009 include un-guarded ALTERs and are
+                # deliberately NOT swept in — the exception is the podcast trio
+                # (005-007), which IS idempotent and is applied further below,
+                # after the notebooks schema its FK depends on.
                 #
                 # 010 was missing from this list even though it is idempotent, so
                 # user_openclaw_config never existed on a fresh volume and every BYO
@@ -793,6 +795,36 @@ async def lifespan(app: FastAPI):
                 with open(_nb_schema_path, "r") as _nbf:
                     await conn.execute(_nbf.read())
                 logger.info("✅ Notebook schema ensured")
+
+                # Podcast tables (005-007). They belong to the notebooks feature and
+                # 005 has an FK to notebooks(id), so they must run AFTER the schema
+                # above — which is why they are not in the 010-015 sweep. Nothing
+                # else provisions them: no initdb mount, no other startup block, and
+                # run_migrations.py is never invoked. On a fresh volume that made
+                # every /onb-api podcast call fail with
+                # `relation "standalone_podcasts" does not exist`. All three are
+                # idempotent (CREATE TABLE/INDEX IF NOT EXISTS, ADD COLUMN IF NOT
+                # EXISTS), so this heals fresh AND pre-existing volumes.
+                for _pod_mig in (
+                    "005_create_notebook_podcasts.sql",
+                    "006_create_standalone_podcasts.sql",
+                    "007_alter_standalone_podcasts_add_speakers.sql",
+                ):
+                    _pod_path = _os.path.join(
+                        _os.path.dirname(__file__), "migrations", _pod_mig
+                    )
+                    try:
+                        with open(_pod_path, "r") as _pf:
+                            await conn.execute(_pf.read())
+                    except FileNotFoundError:
+                        logger.warning("Podcast migration %s not found", _pod_mig)
+                    except Exception as _pod_err:  # noqa: BLE001
+                        logger.warning(
+                            "Podcast migration %s did not apply cleanly (continuing): %s",
+                            _pod_mig,
+                            _pod_err,
+                        )
+                logger.info("✅ Podcast tables ensured (005-007)")
 
                 # Cookbook: ensure the cookbook_nodes table + merge any
                 # user-added inference nodes back into the live registry so a
