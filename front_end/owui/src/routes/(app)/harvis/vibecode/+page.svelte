@@ -2733,7 +2733,7 @@
 			>
 				<div class="shrink-0 flex items-center gap-2 px-4 py-3 border-b border-gray-100 dark:border-gray-850">
 					<div class="min-w-0">
-						<div class="text-sm font-semibold text-gray-800 dark:text-gray-100">{$i18n.t('Customize')}</div>
+						<div class="text-sm font-semibold text-gray-800 dark:text-gray-100">{$i18n.t('Tune')}</div>
 						<div class="text-[11px] text-gray-400">{$i18n.t('Models, presets, skills & MCP — without leaving Build')}</div>
 					</div>
 					<a

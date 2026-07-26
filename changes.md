@@ -1,5 +1,77 @@
 # Recent Changes and Fixes Documentation
 
+## Date: 2026-07-25 — Notebook chat 404 / "no sources", missing podcast tables, nav de-dup
+
+Batch of five issues relayed from the Windows/rig session
+(`ISSUES-NOTEBOOK-CHAT-NAV-2026-07-25.md`). All five are fixed; two of them turned out to be
+**one bug with the causality inverted**, and the report's named cause was not the cause.
+
+### Corrected diagnosis (items #1 + #2)
+
+The report blamed the notebook-chat 404 on the hardcoded `llama3.1:8b` at
+`onb_compat/router.py:55` and `podcasts.py:48`. That constant is real and worth removing, but the
+chat lane already had a 404-aware fallback chain, so it was never what produced the failure. The
+actual chain runs the other way:
+
+1. `notebooks/ingestion.py::_get_embedding` tried a **fixed list of five embedding models** and
+   returned `None` when the deploy had none of them pulled.
+2. `None` embedding → vector retrieval matches nothing → the RAG path finds no chunks.
+3. The code then falls through to `_chat_without_rag`, whose prompt literally says *"I couldn't
+   search them right now"* — that is the **"no sources"** answer in item #2.
+4. `_chat_without_rag` called `/api/generate` with **one hardcoded model and no fallback at all**.
+   On a machine without that model, this is the bare 404 in item #1.
+
+So #2 causes #1, and the embedding list — not the chat default — is the root. Same failure class
+as the `.gitignore` bug below: the dev box happens to have what's hardcoded, so the failure is
+invisible here and total on a fresh machine.
+
+### Fixes
+
+| File | Change |
+|---|---|
+| `python_back_end/notebooks/ingestion.py` | `_get_embedding` now appends everything Ollama actually reports installed (`/api/tags`, embedding-looking names first) after the preferred list; total failure logs *what* it tried and how to fix it instead of returning a silent `None`. |
+| `python_back_end/notebooks/rag_chat.py` | New `_models_to_try()` builds one shared chain: requested model → `FALLBACK_MODELS` → installed models (embedders dropped, reasoning models deferred — they emit into `thinking` and can return blank `response`). `_chat_without_rag` now uses it instead of a single un-guarded call. `_generate_response` returns the model that **actually** answered, so `model_used` stops naming a model that never ran. |
+| `python_back_end/onb_compat/router.py` | Module constant `DEFAULT_CHAT_MODEL` replaced by cached `await _default_chat_model()` — env override → first preferred model Ollama has → any installed generative model → honest error log. All 13 consumers updated. Also removed a duplicate later `OLLAMA_URL` definition that shadowed the first. |
+| `python_back_end/onb_compat/podcasts.py` | Dropped its own `DEFAULT_CHAT_MODEL`; `_build_episode_profiles` is async and resolves through the router (function-local import avoids a module cycle). |
+| `python_back_end/main.py` | Podcast migrations `005`–`007` now run at startup. |
+| `front_end/owui/.../Sidebar/NotebookNav.svelte` | Deleted the duplicate "Customize" button (item #4) — it routed out of Notebooks into `/harvis/agent-studio/customize`. |
+| `front_end/owui/.../Sidebar/VibeCodeNav.svelte`, `harvis/vibecode/+page.svelte`, `i18n/en-US/translation.json` | Build's "Customize" renamed to **"Tune"** (item #5) so it stops reading as the footer's Customize, which opens the Settings modal. Behaviour unchanged — still opens the in-Build drawer. |
+
+**Why the podcast migrations aren't in the 010–015 sweep** (item #3): `005` has
+`REFERENCES notebooks(id)`, and the `notebooks` table is created by `notebooks/schema.sql` at
+`main.py:~795` — *after* the 010–015 block at `~594`. So the trio is applied right after the
+notebook schema instead. Nothing else provisioned them: no initdb mount, no other startup block,
+and `run_migrations.py` is never invoked. All three are idempotent
+(`CREATE ... IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`), so this heals fresh **and** pre-existing
+volumes.
+
+### Verification
+
+- **Fresh volume, not this one.** Throwaway `pgvector/pgvector:pg15` → `000_extensions.sql` →
+  `all_schemas_safe.sql` → `notebooks/schema.sql` → `005`/`006`/`007`: all applied clean.
+  `notebook_podcasts`, `podcast_speaker_profiles`, `standalone_podcasts` present with their
+  `script` and `speaker_profiles` columns; re-running all three was a no-op. Container removed.
+- **Rig simulation** (fake `/api/tags` serving only `gemma4:e4b`): the onb default resolved to
+  `gemma4:e4b`; `_models_to_try('llama3.1:8b')` reached it at position 3 — confirming the chat lane
+  could always recover and the 404 came from the un-guarded non-RAG path; the embedder now sees it
+  as a candidate too.
+- **Live notebook chat** against notebook `323c45d0…` (117 chunks): real RAG answer with citations;
+  a deliberately non-existent model still answered (3 citations) and reported the model that really
+  ran; `_chat_without_rag` with a missing model answered instead of 404ing. Test messages deleted.
+- **Backend boot:** `✅ Idempotent migrations 010-015 ensured` / `✅ Notebook schema ensured` /
+  `✅ Podcast tables ensured (005-007)` / `Application startup complete.` — no errors since restart.
+- **Frontend:** two clean `npm run build` runs; NotebookNav chunks no longer reference
+  `/harvis/agent-studio/customize`; `/`, `/onb`, `/harvis/notebooks`, `/harvis/vibecode` all 200;
+  `/onb-api/settings` still 401.
+
+### Still open
+
+The repo has ~37 other hardcoded `llama3.1:8b` sites (orchestration, discord, cron, title
+generation). They are the same failure class but were **not** touched here — fixing them untested
+would be worse than leaving them visible. Flagged as a follow-up sweep.
+
+---
+
 ## Date: 2026-07-25 — `/onb` 502 on fresh clones: `.gitignore` was eating source code
 
 **Symptom.** On the Windows box, a fresh clone's `open-notebook-ui` container failed to build and
