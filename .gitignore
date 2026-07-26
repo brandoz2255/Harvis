@@ -90,9 +90,48 @@ kubeconfig.*
 certs/
 
 # API Keys and tokens
+# Deliberately broad — they must catch credential FILES wherever they land.
 **/*api-key*
 **/*token*
 **/credentials*
+# …but not at the cost of source code. A module with one of those words in its NAME is not a
+# secret; a secret INSIDE a file is, and that is what the pre-push secret scan is for. Without
+# these re-includes, `**/credentials*` silently swallowed
+# front_end/open-notebook/src/lib/api/credentials.ts — which broke `npm run build` for the
+# open-notebook UI in EVERY fresh clone and took /onb down with it. Nothing surfaced it, because
+# an ignored file never shows up in `git status`. Same failure as the bare `build/` rule.
+# Data formats a real credential file actually uses (.json/.yaml/.yml/.env) stay ignored.
+#
+# Directories FIRST, and they are not optional: git never descends into an excluded directory, so
+# a `!...*.tsx` re-include can never reach a file inside one. `**/*api-key*` matched the route dir
+# `src/app/(dashboard)/settings/api-keys/`, which is how the whole API Keys settings page vanished
+# from every fresh clone — silently, because the build still SUCCEEDS and just drops the route.
+# Un-ignoring the dir does not un-ignore its contents: a `credentials.json` inside one is still
+# caught by the file patterns above.
+!**/*api-key*/
+!**/*token*/
+!**/credentials*/
+!**/*api-key*.ts
+!**/*api-key*.tsx
+!**/*api-key*.js
+!**/*api-key*.jsx
+!**/*api-key*.py
+!**/*api-key*.svelte
+!**/*api-key*.md
+!**/*token*.ts
+!**/*token*.tsx
+!**/*token*.js
+!**/*token*.jsx
+!**/*token*.py
+!**/*token*.svelte
+!**/*token*.md
+!**/credentials*.ts
+!**/credentials*.tsx
+!**/credentials*.js
+!**/credentials*.jsx
+!**/credentials*.py
+!**/credentials*.svelte
+!**/credentials*.md
 *.pem
 *.key
 *.crt
