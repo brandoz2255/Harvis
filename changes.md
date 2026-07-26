@@ -1,5 +1,68 @@
 # Recent Changes and Fixes Documentation
 
+## Date: 2026-07-25 — `/onb` 502 on fresh clones: `.gitignore` was eating source code
+
+**Symptom.** On the Windows box, a fresh clone's `open-notebook-ui` container failed to build and
+`/onb` returned 502. A report from that session concluded `src/lib/api/credentials.ts` had "never
+been written" and proposed hand-authoring a replacement `credentialsApi` reverse-engineered from
+its importers.
+
+**That conclusion was wrong, and acting on it would have made things worse.** The module exists on
+this tree — 243 lines, 14 methods, complete. The reconstruction would have shipped 12, silently
+dropping `getEnvStatus`, `listByProvider`, and `migrateFromProviderConfig`, and drifted from the
+API the UI and the backend facade were both built against.
+
+### Root cause
+
+`.gitignore`'s secret-hygiene block matched source files by name:
+
+| Pattern | Swallowed | Consequence in a fresh clone |
+|---|---|---|
+| `**/credentials*` | `front_end/open-notebook/src/lib/api/credentials.ts` | `next build` dies on an unresolved `@/lib/api/credentials` import → image never builds → `/onb` 502 |
+| `**/*api-key*` | `src/app/(dashboard)/settings/api-keys/` (whole dir) | build **succeeds**, Next just drops the route — the API Keys settings page is silently absent |
+
+Neither ever appeared in `git status`, because an ignored path doesn't. "Never committed" looked
+exactly like "never written."
+
+The second one is the nastier failure. `**/*api-key*` matched the **directory**, and git does not
+descend into an excluded directory — so a `!**/*api-key*.tsx` re-include can never reach a file
+inside it. Directories have to be re-included on their own line, before the file patterns.
+
+### Fix
+
+Kept the broad patterns (they must catch credential files wherever they land) and re-included
+after them: directories first, then source extensions (`.ts .tsx .js .jsx .py .svelte .md`). A
+module with one of those words in its *name* is not a secret; a secret *inside* a file is, and
+catching that is the pre-push scan's job. Data formats a real credential file actually uses
+(`.json`, `.yaml`, `.env`) stay ignored — including inside a re-included directory.
+
+### Verification
+
+| Check | Method | Result |
+|---|---|---|
+| Both files now trackable | `git add --dry-run` | accepted |
+| Safety net intact | `git add --dry-run` on a `credentials.json` placed *inside* the re-included `api-keys/` dir | refused, "ignored by one of your .gitignore files" |
+| No other casualty | swept 897 untracked source files repo-wide, `git check-ignore -v` each, discarding negation matches | 0 still swallowed |
+| Fresh clone is complete | `git archive HEAD` → walk vs working tree | 227 / 227 files, 0 missing (was 226 / 227) |
+| Fresh clone builds | `docker build` on the archive export | exit 0 |
+| The route survives the build | `find` inside the produced image | `(dashboard)/settings/api-keys/page.js` present |
+| Live check on this box | `curl localhost:9000/onb`, `/onb/settings/api-keys` | HTTP 200, 200 |
+
+This box was never broken — its containers were built from a working tree that had both files on
+disk. That is precisely why the bug could only ever show up on a fresh clone.
+
+**Lesson.** `git check-ignore -v` is not an "is this ignored" test: it prints negation matches too
+and still exits 0. `git add --dry-run` is the authoritative check. And a build that *succeeds* is
+not proof a fresh clone is whole — compare the `git archive` export against the working tree.
+
+**Files modified.** `.gitignore`; added `front_end/open-notebook/src/lib/api/credentials.ts` and
+`front_end/open-notebook/src/app/(dashboard)/settings/api-keys/page.tsx` (both pre-existing on
+disk, both secret-scanned before committing). Commit `82908fc1`.
+
+Same failure class as the bare `build/` and `mascot/` rules already recorded here.
+
+---
+
 ## Date: 2026-07-25 — Build model dropdown: unclickable, then showing every Kimi model twice
 
 Two separate defects in the Build (`/harvis/vibecode`) model picker, found and fixed in one pass.
