@@ -43,9 +43,7 @@ from notebooks.manager import NotebookManager
 
 logger = logging.getLogger(__name__)
 
-# Reliable non-reasoning instruct model for outline/transcript generation.
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://ollama:11434")
-DEFAULT_CHAT_MODEL = "llama3.1:8b"
 
 # GPU TTS service that synthesizes per-speaker audio. Mirrors the native
 # notebooks router (`TTS_URL`). When unreachable, episodes finish as script_only.
@@ -150,9 +148,11 @@ def _build_speaker_profiles() -> List[Dict[str, Any]]:
     ]
 
 
-def _build_episode_profiles() -> List[Dict[str, Any]]:
+async def _build_episode_profiles() -> List[Dict[str, Any]]:
     """Built-in episode profiles, one per PODCAST_STYLES entry from script.py,
     mapped to the EpisodeProfile shape (src/lib/types/podcasts.ts)."""
+    from .router import _default_chat_model
+    chat_model = await _default_chat_model()
     try:
         from open_notebook.podcast.script import get_podcast_styles
         styles = get_podcast_styles()
@@ -171,8 +171,8 @@ def _build_episode_profiles() -> List[Dict[str, Any]]:
                 "description": description,
                 "speaker_config": _DEFAULT_SPEAKER_PROFILE_ID,
                 # Non-null model refs so needsModelSetup() => false.
-                "outline_llm": DEFAULT_CHAT_MODEL,
-                "transcript_llm": DEFAULT_CHAT_MODEL,
+                "outline_llm": chat_model,
+                "transcript_llm": chat_model,
                 "language": "en",
                 "default_briefing": (
                     f"Produce a {style_key} podcast episode. {description}"
@@ -492,7 +492,7 @@ async def _resolve_notebook_content(
 async def list_episode_profiles(
     current_user: Dict = Depends(get_current_user_from_request),
 ):
-    return _build_episode_profiles()
+    return await _build_episode_profiles()
 
 
 @router.get("/speaker-profiles")
@@ -602,7 +602,7 @@ async def generate_podcast(
 
     # episode_profile id is the style key (see _build_episode_profiles).
     style = episode_profile if episode_profile in {
-        p["id"] for p in _build_episode_profiles()
+        p["id"] for p in await _build_episode_profiles()
     } else "conversational"
 
     content = await _resolve_notebook_content(manager, notebook_id, direct_content)
@@ -674,7 +674,7 @@ async def list_episodes(
             user_id,
         )
 
-    episode_profiles = _build_episode_profiles()
+    episode_profiles = await _build_episode_profiles()
     speaker_profiles = _build_speaker_profiles()
     return [
         _episode_to_onb(row, episode_profiles, speaker_profiles) for row in rows

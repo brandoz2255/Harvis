@@ -517,18 +517,22 @@ class IngestionService:
             IngestionService._working_model = None
 
         # nomic-embed-text (the default) is the dedicated embedder; the rest are
-        # fallbacks. llama3.1:8b ships on this deploy and DOES support
-        # /api/embeddings (native 4096-dim = our target_dim) — the guaranteed
-        # safety net when no dedicated embedder is pulled. Note: chat-only models
-        # like qwen3:4b / gpt-oss return "does not support embeddings", so they're
-        # intentionally NOT in this list.
+        # preferred fallbacks. llama3.1:8b DOES support /api/embeddings (native
+        # 4096-dim = our target_dim). But a hardcoded list only works on a deploy
+        # that happens to have one of these pulled — on any other machine every
+        # candidate 404s, this returns None, retrieval silently finds nothing, and
+        # the chat answers "I couldn't search your sources". So after the preferred
+        # names we try whatever Ollama actually reports as installed.
         embedding_models = [
             EMBEDDING_MODEL,          # nomic-embed-text (dedicated, default)
             "qwen3-embedding:4b",
             "mxbai-embed-large",
-            "llama3.1:8b",            # installed fallback — supports embeddings
+            "llama3.1:8b",
             "mistral",
         ]
+        for model in self._installed_models():
+            if model not in embedding_models:
+                embedding_models.append(model)
 
         for model in embedding_models:
             result = self._try_embedding(OLLAMA_URL, model, text)
@@ -537,8 +541,29 @@ class IngestionService:
                 logger.info(f"Locked embedding model to: {model}")
                 return result
 
-        logger.error("All embedding models failed")
+        logger.error(
+            "All embedding models failed — tried %s. Retrieval will find nothing "
+            "and notebook chat will answer without sources. Pull an embedding model "
+            "(e.g. `ollama pull nomic-embed-text`) or set EMBEDDING_MODEL.",
+            ", ".join(embedding_models) or "<none installed>",
+        )
         return None
+
+    @staticmethod
+    def _installed_models() -> List[str]:
+        """
+        Models Ollama actually has, embedding-looking names first. Never raises —
+        an unreachable Ollama just means we fall back to the preferred list.
+        """
+        try:
+            response = requests.get(f"{OLLAMA_URL}/api/tags", timeout=10)
+            if response.status_code != 200:
+                return []
+            names = [m.get("name") for m in response.json().get("models", []) if m.get("name")]
+        except Exception:
+            logger.warning("Could not list Ollama models for embedding fallback", exc_info=True)
+            return []
+        return sorted(names, key=lambda n: "embed" not in n.lower())
 
     def _try_embedding(self, base_url: str, model: str, text: str) -> Optional[List[float]]:
         """Try to get an embedding from a specific model. Returns None on failure."""

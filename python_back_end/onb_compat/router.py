@@ -47,14 +47,65 @@ from notebooks.models import (
 from notebooks.ingestion import run_ingestion_task, IngestionService
 from notebooks.rag_chat import RAGChatService
 
-# Default chat model when a session/request specifies none. Must be a reliable
-# non-reasoning instruct model: gpt-oss intermittently emits all tokens into the
-# `thinking` channel and returns blank `response` content (empty chat bubble), so
-# it's NOT the default here. rag_chat's empty-content guard + fallbacks cover the
-# case where a user explicitly selects a reasoning model.
-DEFAULT_CHAT_MODEL = "llama3.1:8b"
-
 logger = logging.getLogger(__name__)
+
+OLLAMA_URL = (
+    os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_URL") or "http://ollama:11434"
+)
+
+# Chat model used when a session/request specifies none. These are a PREFERENCE
+# order, not a guarantee: reliable non-reasoning instruct models first, because
+# gpt-oss and friends intermittently emit every token into the `thinking` channel
+# and return blank `response` content (empty chat bubble). This used to be a single
+# hardcoded name, which meant a deploy without that exact model 404'd on every
+# notebook chat call — so we now fall through to whatever Ollama actually has.
+ONB_DEFAULT_CHAT_MODEL = os.getenv("ONB_DEFAULT_CHAT_MODEL", "").strip()
+_PREFERRED_CHAT_MODELS = ("llama3.1:8b", "granite4.1:8b", "gemma4:e4b", "qwen3:4b")
+_resolved_chat_model: Optional[str] = None
+
+
+async def _default_chat_model() -> str:
+    """
+    Best available local chat model: explicit env override, else the first
+    preferred model Ollama actually reports, else any installed generative model.
+    Cached after the first successful resolution.
+    """
+    global _resolved_chat_model
+
+    if ONB_DEFAULT_CHAT_MODEL:
+        return ONB_DEFAULT_CHAT_MODEL
+    if _resolved_chat_model:
+        return _resolved_chat_model
+
+    installed: List[str] = []
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(f"{OLLAMA_URL}/api/tags")
+        if resp.status_code == 200:
+            installed = [m.get("name") for m in resp.json().get("models", []) if m.get("name")]
+    except Exception:
+        logger.warning("onb_compat: could not list Ollama models", exc_info=True)
+
+    for name in _PREFERRED_CHAT_MODELS:
+        if name in installed:
+            _resolved_chat_model = name
+            return name
+
+    generative = [m for m in installed if "embed" not in m.lower()]
+    if generative:
+        _resolved_chat_model = generative[0]
+        logger.info(
+            "onb_compat: none of %s installed; defaulting to %s",
+            ", ".join(_PREFERRED_CHAT_MODELS), generative[0],
+        )
+        return generative[0]
+
+    logger.error(
+        "onb_compat: Ollama at %s reports no usable chat model — notebook chat "
+        "will fail until one is pulled (e.g. `ollama pull llama3.1:8b`).",
+        OLLAMA_URL,
+    )
+    return _PREFERRED_CHAT_MODELS[0]
 
 router = APIRouter(prefix="/onb-api", tags=["onb_compat"])
 
@@ -896,7 +947,7 @@ async def chat_execute(
     if not s:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    model = body.get("model_override") or s["model_override"] or DEFAULT_CHAT_MODEL
+    model = body.get("model_override") or s["model_override"] or await _default_chat_model()
     source_ids = _context_source_ids(body.get("context") or {})
 
     rag = RAGChatService(manager)
@@ -1164,7 +1215,7 @@ async def onb_execute_transformation(
 ):
     tid = (body or {}).get("transformation_id")
     input_text = (body or {}).get("input_text") or ""
-    model = (body or {}).get("model_id") or DEFAULT_CHAT_MODEL
+    model = (body or {}).get("model_id") or await _default_chat_model()
     t = await _resolve_transformation(tid, current_user["id"], manager)
     if not t:
         raise HTTPException(status_code=404, detail="Transformation not found")
@@ -1413,7 +1464,7 @@ async def onb_notebook_generate(
                 else "This notebook has no source content to generate from yet."
             ),
         )
-    model = (body or {}).get("model_id") or DEFAULT_CHAT_MODEL
+    model = (body or {}).get("model_id") or await _default_chat_model()
 
     if kind in _MARKDOWN_GENERATORS:
         gen = _MARKDOWN_GENERATORS[kind]
@@ -1596,7 +1647,7 @@ async def onb_suggest_questions(
     if not content or not content.strip():
         return {"questions": []}
 
-    model = (body or {}).get("model_id") or DEFAULT_CHAT_MODEL
+    model = (body or {}).get("model_id") or await _default_chat_model()
     prompt = (
         "You are looking at the source material of a research notebook. Suggest 5 "
         "specific, interesting questions a curious reader could ask about this material. "
@@ -1776,8 +1827,9 @@ async def onb_create_source_insight(
     content = srow["content_text"]
     if not content or not content.strip():
         raise HTTPException(status_code=400, detail="Source has no extracted content to transform")
+    insight_model = await _default_chat_model()
     try:
-        output = await _run_transformation_llm(t["prompt"], content, DEFAULT_CHAT_MODEL)
+        output = await _run_transformation_llm(t["prompt"], content, insight_model)
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"Model request failed: {e}")
     if not output.strip():
@@ -1788,7 +1840,7 @@ async def onb_create_source_insight(
             "(notebook_id, source_id, user_id, transformation_type, original_content, transformed_content, model_used) "
             "VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
             srow["notebook_id"], sid, current_user["id"], t["db_type"],
-            content[:2000], output, DEFAULT_CHAT_MODEL,
+            content[:2000], output, insight_model,
         )
     insight_id = str(r["id"])
     # Synchronous: the work is already done + persisted; command status is "completed".
@@ -1902,10 +1954,6 @@ async def onb_source_web_search(
 # real per-user JSONB store; the models list is the live Ollama tag list; credentials
 # (cloud API keys) are stubbed to minimal-real so the page loads instead of spinning.
 
-OLLAMA_URL = (
-    os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_URL") or "http://ollama:11434"
-)
-
 _SETTINGS_DEFAULTS: Dict[str, Any] = {
     "default_content_processing_engine_doc": "auto",
     "default_content_processing_engine_url": "auto",
@@ -1922,15 +1970,19 @@ _MODEL_DEFAULT_SLOTS = (
     "default_text_to_speech_model",
     "default_speech_to_text_model",
 )
-_MODEL_DEFAULTS_DEFAULTS: Dict[str, Any] = {
-    "default_chat_model": DEFAULT_CHAT_MODEL,
-    "default_transformation_model": DEFAULT_CHAT_MODEL,
-    "default_tools_model": DEFAULT_CHAT_MODEL,
-    "large_context_model": DEFAULT_CHAT_MODEL,
-    "default_embedding_model": "nomic-embed-text",
-    "default_text_to_speech_model": None,
-    "default_speech_to_text_model": None,
-}
+async def _model_defaults_defaults() -> Dict[str, Any]:
+    """Settings-panel defaults. Resolved per call so the chat slots reflect what
+    this deploy actually has installed rather than a name baked in at import."""
+    chat_model = await _default_chat_model()
+    return {
+        "default_chat_model": chat_model,
+        "default_transformation_model": chat_model,
+        "default_tools_model": chat_model,
+        "large_context_model": chat_model,
+        "default_embedding_model": "nomic-embed-text",
+        "default_text_to_speech_model": None,
+        "default_speech_to_text_model": None,
+    }
 
 
 def _jsonb(v):
@@ -1963,7 +2015,7 @@ async def _read_onb_settings(manager, user_id):
             user_id,
         )
     s = dict(_SETTINGS_DEFAULTS)
-    md = dict(_MODEL_DEFAULTS_DEFAULTS)
+    md = await _model_defaults_defaults()
     if r:
         s.update(_jsonb(r["settings"]))
         md.update(_jsonb(r["model_defaults"]))
@@ -2293,7 +2345,6 @@ async def onb_delete_credential(
 # Ollama URL for the LLM-planning / answering steps in /search/ask. Mirrors the
 # resolution used elsewhere in this module (router.py:1292) and rag_chat's default.
 _ASK_OLLAMA_URL = OLLAMA_URL
-_ASK_DEFAULT_MODEL = DEFAULT_CHAT_MODEL  # 'llama3.1:8b'
 
 
 def _sse(event: Dict[str, Any]) -> str:
@@ -2591,9 +2642,10 @@ async def onb_search_ask(
     body: {question, strategy_model, answer_model, final_answer_model}
     """
     question = (body.get("question") or "").strip()
-    strategy_model = (body.get("strategy_model") or _ASK_DEFAULT_MODEL).strip()
-    answer_model = (body.get("answer_model") or _ASK_DEFAULT_MODEL).strip()
-    final_model = (body.get("final_answer_model") or _ASK_DEFAULT_MODEL).strip()
+    ask_default = await _default_chat_model()
+    strategy_model = (body.get("strategy_model") or ask_default).strip()
+    answer_model = (body.get("answer_model") or ask_default).strip()
+    final_model = (body.get("final_answer_model") or ask_default).strip()
     uid = current_user["id"]
 
     if not question:

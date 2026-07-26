@@ -39,6 +39,10 @@ FALLBACK_MODELS = [
     "qwen3:4b",
 ]
 
+# Reasoning models put their tokens in a separate `thinking` channel and can leave
+# `response` blank, so they go last among discovered models rather than never.
+_REASONING_HINTS = ("gpt-oss", "deepseek-r1", "qwq", "-r1")
+
 # Performance settings
 MAX_CONTEXT_CHARS = 8000  # Limit context to prevent slow processing
 MAX_CHUNKS = 3  # Limit chunks to improve speed
@@ -97,7 +101,7 @@ class RAGChatService:
         system_prompt, context_text, citations = self._build_rag_prompt(chunks)
 
         # Generate response from LLM
-        answer, reasoning = await self._generate_response(
+        answer, reasoning, answered_by = await self._generate_response(
             request.message,
             system_prompt,
             context_text,
@@ -123,14 +127,14 @@ class RAGChatService:
             content=answer,
             reasoning=reasoning if request.include_reasoning else None,
             citations=final_citations,
-            model_used=request.model
+            model_used=answered_by
         )
 
         return NotebookChatResponse(
             answer=answer,
             reasoning=reasoning if request.include_reasoning else None,
             citations=final_citations,
-            model_used=request.model,
+            model_used=answered_by,
             message_id=message.id,
             raw_chunks=chunks if request.include_reasoning else None
         )
@@ -151,7 +155,7 @@ class RAGChatService:
         """
         query_embedding = await self.ingestion_service.get_query_embedding(message)
         if not query_embedding:
-            answer, _ = await self._generate_response(
+            answer, _, _ = await self._generate_response(
                 message,
                 "You are a helpful research assistant. Sources could not be searched right now.",
                 "", model,
@@ -173,7 +177,7 @@ class RAGChatService:
             ), []
 
         system_prompt, context_text, citations = self._build_rag_prompt(chunks)
-        answer, _ = await self._generate_response(message, system_prompt, context_text, model)
+        answer, _, _ = await self._generate_response(message, system_prompt, context_text, model)
         # Return the ORDERED context sources (citations[N-1] == "SOURCE N" in the
         # prompt) so the caller can map the model's [SOURCE N] markers to real
         # source ids for clickable inline citations.
@@ -240,14 +244,44 @@ Remember: You are a research assistant helping the user understand their uploade
 
         return system_prompt, context_text, citations
 
+    @staticmethod
+    def _models_to_try(model: str) -> List[str]:
+        """
+        Requested model first, then the preferred fallbacks, then anything Ollama
+        actually reports installed. The preferred names are only a preference — on a
+        deploy that has none of them pulled, a list of four hardcoded names means
+        every attempt 404s and the user gets "I couldn't connect to any AI models"
+        while a perfectly good model sits installed.
+        """
+        ordered = [model] if model else []
+        ordered += [m for m in FALLBACK_MODELS if m != model]
+
+        try:
+            response = requests.get(f"{OLLAMA_URL}/api/tags", timeout=10)
+            installed = (
+                [m.get("name") for m in response.json().get("models", []) if m.get("name")]
+                if response.status_code == 200 else []
+            )
+        except Exception:
+            logger.warning("Could not list Ollama models for chat fallback", exc_info=True)
+            installed = []
+
+        # Skip dedicated embedders — they cannot generate — and defer reasoning models.
+        usable = [m for m in installed if "embed" not in m.lower()]
+        usable.sort(key=lambda m: any(h in m.lower() for h in _REASONING_HINTS))
+        for name in usable:
+            if name not in ordered:
+                ordered.append(name)
+        return ordered
+
     async def _generate_response(
         self,
         query: str,
         system_prompt: str,
         context: str,
         model: str
-    ) -> Tuple[str, Optional[str]]:
-        """Generate response using Ollama with smart model fallback"""
+    ) -> Tuple[str, Optional[str], str]:
+        """Generate a response, returning (answer, reasoning, model that actually answered)."""
 
         full_prompt = f"""{system_prompt}
 
@@ -258,9 +292,8 @@ USER QUESTION: {query}
 
 Please provide a helpful answer based on the sources above. Remember to cite sources when using specific information."""
 
-        # Build list of models to try - requested model first, then fallbacks
-        models_to_try = [model] + [m for m in FALLBACK_MODELS if m != model]
-        
+        models_to_try = self._models_to_try(model)
+
         # Try local Ollama with multiple models
         for try_model in models_to_try:
             try:
@@ -307,7 +340,7 @@ Please provide a helpful answer based on the sources above. Remember to cite sou
                         continue
 
                     logger.info(f"Successfully generated response with model: {try_model}")
-                    return answer, reasoning
+                    return answer, reasoning, try_model
 
                 elif response.status_code == 404:
                     logger.debug(f"Model {try_model} not found locally, trying next...")
@@ -360,7 +393,7 @@ Please provide a helpful answer based on the sources above. Remember to cite sou
                         continue
 
                     logger.info(f"Successfully generated response with cloud model: {try_model}")
-                    return answer, reasoning
+                    return answer, reasoning, try_model
 
                 elif response.status_code == 404:
                     continue
@@ -369,8 +402,13 @@ Please provide a helpful answer based on the sources above. Remember to cite sou
                 logger.warning(f"Cloud error with {try_model}: {e}")
                 continue
 
-        logger.error("All LLM models failed")
-        return "I apologize, but I couldn't connect to any AI models. Please check that Ollama is running with a model loaded.", None
+        logger.error("All LLM models failed; tried %s", ", ".join(models_to_try))
+        return (
+            "I couldn't reach any language model. Check that Ollama is running "
+            "with at least one model pulled.",
+            None,
+            model,
+        )
 
     def _separate_thinking(self, text: str) -> Tuple[str, str]:
         """Separate thinking/reasoning from final answer"""
@@ -461,25 +499,42 @@ Please provide a helpful answer based on the sources above. Remember to cite sou
 but I couldn't search them right now. Please let the user know and offer to help with general questions.
 If they're asking about their sources, suggest they try again or check if their sources are fully processed."""
 
-        try:
-            response = requests.post(
-                f"{OLLAMA_URL}/api/generate",
-                json={
-                    "model": request.model,
-                    "prompt": f"{system_prompt}\n\nUser: {request.message}",
-                    "stream": False
-                },
-                timeout=60
-            )
+        answer = ""
+        used_model = request.model
+        # Same fallback chain as the RAG path — this used to call one hardcoded model
+        # with no fallback, so a deploy without it got a bare 404 here.
+        for try_model in self._models_to_try(request.model):
+            try:
+                response = await asyncio.to_thread(
+                    requests.post,
+                    f"{OLLAMA_URL}/api/generate",
+                    json={
+                        "model": try_model,
+                        "prompt": f"{system_prompt}\n\nUser: {request.message}",
+                        "stream": False
+                    },
+                    timeout=60
+                )
+            except Exception:
+                logger.warning(f"Non-RAG chat failed with {try_model}", exc_info=True)
+                continue
 
             if response.status_code == 200:
-                answer = response.json().get("response", "")
+                answer = (response.json().get("response") or "").strip()
+                if answer:
+                    used_model = try_model
+                    break
+            elif response.status_code == 404:
+                logger.debug(f"Model {try_model} not found locally, trying next...")
             else:
-                answer = "I apologize, but I'm having trouble accessing your sources right now. Please try again in a moment."
+                logger.warning(f"Non-RAG chat with {try_model} failed: {response.status_code}")
 
-        except Exception as e:
-            logger.error(f"Non-RAG chat failed: {e}")
-            answer = "I apologize, but I encountered an error. Please try again."
+        if not answer:
+            logger.error("Non-RAG chat: every model failed")
+            answer = (
+                "I couldn't search this notebook's sources, and no language model "
+                "answered. Check that Ollama is running with a model pulled."
+            )
 
         # Save to history
         await self.manager.add_chat_message(
@@ -494,13 +549,13 @@ If they're asking about their sources, suggest they try again or check if their 
             user_id=user_id,
             role=MessageRole.ASSISTANT,
             content=answer,
-            model_used=request.model
+            model_used=used_model
         )
 
         return NotebookChatResponse(
             answer=answer,
             citations=[],
-            model_used=request.model,
+            model_used=used_model,
             message_id=message.id
         )
 
