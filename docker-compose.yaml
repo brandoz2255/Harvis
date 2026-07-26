@@ -427,10 +427,13 @@ services:
         condition: service_completed_successfully
       ollama-model-check:
         condition: service_completed_successfully
-      openclaw:
-        condition: service_healthy
-      browser-runner:
-        condition: service_started
+      # NOTE: openclaw + browser-runner are deliberately NOT depends_on.
+      # The backend never contacts either at startup — both lifespan() and
+      # startup_event() touch Postgres only, and the openclaw/browser routers
+      # proxy lazily at request time (/api/services/health probes them per
+      # request). Keeping them here made two optional capabilities into hard
+      # boot blockers and prevented profile-gating them. Availability is
+      # reported by the health probe, not enforced by the boot order.
 
   # Tier 3 Browser Runner (Firefox sandbox) - internal only
   browser-runner:
@@ -536,8 +539,6 @@ services:
       # populating the static bundle before it starts serving.
       owui-builder:
         condition: service_completed_successfully
-      frontend:
-        condition: service_started
       backend:
         condition: service_started
     deploy:
