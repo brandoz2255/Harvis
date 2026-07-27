@@ -348,7 +348,11 @@ from owui_compat.authz import make_require_admin  # noqa: E402
 
 require_admin = make_require_admin(get_current_user)
 
-from setup_flow import create_setup_router  # noqa: E402
+from setup_flow import (  # noqa: E402
+    _SERVICE_PROFILE,
+    create_setup_router,
+    service_expected,
+)
 # Router include is deferred until after ``app = FastAPI(...)`` below.
 
 
@@ -2411,11 +2415,25 @@ async def health_services():
             if r.status_code < 400:
                 results[name] = {"status": "up", "code": r.status_code}
             else:
+                # It answered, so it IS installed — an error code is a real fault
+                # even for an optional service.
                 results[name] = {"status": "degraded", "code": r.status_code}
                 overall = "degraded"
         except Exception as exc:
-            results[name] = {"status": "down", "error": str(exc)[:200]}
-            overall = "degraded"
+            # Unreachable. Whether that is a FAULT depends on whether the operator
+            # asked for this capability: profile-gated services are absent from a
+            # correct default install, and calling that install degraded teaches
+            # people to ignore this page. We still probe first, so a service that
+            # is running despite a stale/absent HARVIS_ENABLED_PROFILES is
+            # reported up rather than written off as missing.
+            if not service_expected(name):
+                results[name] = {
+                    "status": "not_installed",
+                    "reason": f"compose profile '{_SERVICE_PROFILE[name]}' is not enabled",
+                }
+            else:
+                results[name] = {"status": "down", "error": str(exc)[:200]}
+                overall = "degraded"
 
     # Ollama — use the raw Ollama API, not the vLLM-style /v1 path
     _ollama_base = os.getenv("OLLAMA_URL", "http://ollama:11434").rstrip("/")

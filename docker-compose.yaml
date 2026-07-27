@@ -145,6 +145,11 @@ services:
       # error itself recommends this.) Harmless on the rig.
       PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
       OLLAMA_URL: "${OLLAMA_URL:-http://ollama:11434}"
+      # Which optional capability packs the operator turned on. A container cannot
+      # see `docker compose --profile`, so without this the health endpoints have
+      # no way to tell "engines were never installed" from "openclaw crashed", and
+      # a correct default install reports itself degraded.
+      HARVIS_ENABLED_PROFILES: "${COMPOSE_PROFILES:-}"
       # Workspace task-detector model. Without this the resolver auto-picks the
       # LARGEST installed model (e.g. gpt-oss:20b) which can't load in 15s on the
       # 8GB GPU → detection times out → chat builds never launch. Pin a SMALL/fast

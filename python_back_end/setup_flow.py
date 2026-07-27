@@ -22,8 +22,39 @@ _HTTP_TIMEOUT = httpx.Timeout(5.0)
 _MODEL_TIMEOUT = httpx.Timeout(120.0, connect=10.0)
 
 
-def _tick(ready: bool, reason: str, probe: str) -> dict[str, Any]:
-    return {"ready": bool(ready), "reason": reason or "", "probe": probe}
+def _tick(ready: bool, reason: str, probe: str, skipped: bool = False) -> dict[str, Any]:
+    return {
+        "ready": bool(ready),
+        "reason": reason or "",
+        "probe": probe,
+        "skipped": bool(skipped),
+    }
+
+
+# Optional capabilities live behind compose profiles, and profiles are opt-in — a
+# correct default install starts neither openclaw nor tts-service. The backend
+# cannot see `docker compose --profile`, so compose passes the enabled set in via
+# HARVIS_ENABLED_PROFILES. Without that we cannot tell "the operator turned this
+# off" from "it crashed", and the safe reading is the former: calling a correct
+# install degraded teaches people to ignore the health page.
+_SERVICE_PROFILE = {"openclaw": "engines", "tts": "voice", "tts-service": "voice"}
+
+
+def enabled_profiles() -> set[str]:
+    raw = os.getenv("HARVIS_ENABLED_PROFILES", "")
+    return {p.strip() for p in raw.replace(";", ",").split(",") if p.strip()}
+
+
+def service_expected(name: str) -> bool:
+    """False when `name` sits behind a compose profile that is not turned on."""
+    profile = _SERVICE_PROFILE.get(name)
+    if profile is None:
+        return True
+    return profile in enabled_profiles()
+
+
+def _not_installed_reason(name: str) -> str:
+    return f"not installed — compose profile '{_SERVICE_PROFILE[name]}' is not enabled"
 
 
 def _artifact_dir() -> Path:
@@ -71,6 +102,8 @@ async def _probe_openclaw() -> dict[str, Any]:
             return _tick(True, f"HTTP {r.status_code}", probe)
         return _tick(False, f"HTTP {r.status_code}", probe)
     except Exception as exc:
+        if not service_expected("openclaw"):
+            return _tick(False, _not_installed_reason("openclaw"), probe, skipped=True)
         return _tick(False, str(exc)[:200], probe)
 
 
@@ -84,6 +117,11 @@ async def _probe_tts() -> dict[str, Any]:
             return _tick(True, f"HTTP {r.status_code}", probe)
         return _tick(False, f"HTTP {r.status_code}", probe)
     except Exception as exc:
+        # Speech is NOT off when this is skipped: Whisper STT and piper/chatterbox
+        # TTS run inside the backend process. tts-service is the SpeechT5 sidecar
+        # for notebook podcasts, which is what the `voice` profile turns on.
+        if not service_expected("tts"):
+            return _tick(False, _not_installed_reason("tts"), probe, skipped=True)
         return _tick(False, str(exc)[:200], probe)
 
 
@@ -164,7 +202,9 @@ def create_setup_router(
             "tts": tts,
             "artifacts": artifacts,
         }
-        overall = all(t["ready"] for t in ticks.values())
+        # A skipped tick is neither ready nor a failure — it is a capability the
+        # operator did not install. Counting it either way would lie.
+        overall = all(t["ready"] for t in ticks.values() if not t.get("skipped"))
         return {"overall": overall, "ticks": ticks}
 
     @router.post("/api/setup/test-model")
