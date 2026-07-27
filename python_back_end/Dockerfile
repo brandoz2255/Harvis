@@ -76,10 +76,13 @@ RUN pip install --no-cache-dir "numpy>=1.26.0,<2.0.0"
 # NOTE: PyTorch (torch, torchvision, torchaudio) already installed in base image
 # No need to install PyTorch separately - saves ~8GB and eliminates CI/CD layer size issues
 
-# Install all other prebuilt wheels (numpy already installed, wheels removed from builder)
-COPY --from=builder /wheels /wheels
-RUN pip install --no-cache-dir --no-index --find-links=/wheels /wheels/* \
-  && rm -rf /wheels \
+# Install all other prebuilt wheels (numpy already installed, wheels removed from builder).
+# Bind-mounted from the builder rather than COPYed: a COPY lands the wheels in their own
+# ~455 MB layer, and the `rm -rf /wheels` that used to follow ran in a LATER layer, so it
+# never reclaimed a byte — layers are additive. The bind mount lets pip read them without
+# them ever becoming part of the image.
+RUN --mount=type=bind,from=builder,source=/wheels,target=/wheels \
+  pip install --no-cache-dir --no-index --find-links=/wheels /wheels/* \
   && pip cache purge
 
 # Docker CLI for vibecoding container management + git for clone-local repo isolation

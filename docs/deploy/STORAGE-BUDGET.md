@@ -60,18 +60,21 @@ everything else 1.88 GB  █████                                        
 | # | Change | Saved | Status |
 |---|---|---:|---|
 | 1 | Profile-gate the optional stack (24 → 11 default services) | **~35 GB** | landed `fa494b41` |
+| 2 | Bind-mount the builder wheels instead of `COPY` | **0.90 GB** | landed, rebuild-verified |
+
+**Item 2, measured:** `COPY --from=builder /wheels /wheels` created its own ~455 MB layer, and the
+`rm -rf /wheels` that followed ran in a *later* layer, so it never reclaimed a byte — layers are
+additive. A BuildKit bind mount lets pip read the wheels without them entering the image. Rebuilt
+to a throwaway tag and measured: **16.9 GB → 16.0 GB**, roughly double the 455 MB the layer history
+attributed to the `COPY` alone. Smoke-tested with all 16 runtime imports plus
+`torch 2.8.0+cu128` — clean.
 
 ### Available, measured
 
 | # | Change | Est. saving | Risk | Blocked by |
 |---|---|---:|---|---|
-| 2 | Bind-mount the builder wheels instead of `COPY` | **0.46 GB** | none — layer-only | verifying now |
 | 3 | Drop the CUDA/torch base from the backend image | **~12–14 GB** | medium | the torch decoupling below |
 | 4 | Stop shipping `owui-builder` as a persistent image | **~5.25 GB** | low–medium | needs a build-stage or prebuilt-artifact design |
-
-**Item 2** — `COPY --from=builder /wheels /wheels` created its own ~455 MB layer, and the
-`rm -rf /wheels` that followed ran in a *later* layer, so it never reclaimed a byte. Layers are
-additive. A BuildKit bind mount lets pip read the wheels without them entering the image.
 
 **Item 3 is the big one, and the evidence says it's more tractable than it looks.** `main.py` imports
 the entire 12.1 GB CUDA runtime and uses it for exactly nine lines:
