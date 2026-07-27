@@ -1038,9 +1038,13 @@ services:
     image: harvis-messaging-gateway:local
     pull_policy: build
     container_name: harvis-messaging-gateway
-    # Default service (the old `messaging` profile is gone): the gateway now
-    # stays up unconfigured — with no adapters enabled it idles instead of
-    # exiting, so the restart loop that motivated the profile no longer occurs.
+    # Opt-in. The crash loop that first motivated a profile here is fixed — with
+    # no adapters enabled the gateway idles rather than exiting — but idling
+    # still costs a 294 MB image, a running container and a bound host port on
+    # every default install, for Slack/Discord bridges nobody has configured.
+    # Enable with COMPOSE_PROFILES=messaging (the backend reads the same var as
+    # HARVIS_ENABLED_PROFILES, so its health endpoints stay in agreement).
+    profiles: ["messaging"]
     restart: unless-stopped
     environment:
       MESSAGING_GATEWAY_TOKEN: "${MESSAGING_GATEWAY_TOKEN:-}"
