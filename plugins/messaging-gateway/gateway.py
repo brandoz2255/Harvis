@@ -117,16 +117,7 @@ async def _run() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     cfg = load_config()
-    if not cfg.gateway_token:
-        logger.error("MESSAGING_GATEWAY_TOKEN is not set — refusing to start")
-        return
-
     logger.info("backend=%s platforms=%s", cfg.backend_url, cfg.enabled_platforms)
-
-    adapters = _build_adapters(cfg)
-    if not adapters:
-        logger.error("no adapters enabled; exiting")
-        return
 
     stop_event = asyncio.Event()
 
@@ -141,6 +132,28 @@ async def _run() -> None:
         except NotImplementedError:
             # Windows / restricted env — fallback handled in container exit.
             pass
+
+    adapters = _build_adapters(cfg)
+    if not adapters:
+        # Exiting here would loop forever under `restart: unless-stopped`,
+        # so idle until a shutdown signal instead.
+        logger.info(
+            "no messaging platforms configured — idling. To enable one, set "
+            "ENABLED_PLATFORMS plus its credentials (discord: DISCORD_BOT_TOKEN; "
+            "slack: SLACK_BOT_TOKEN + SLACK_APP_TOKEN; dev stub: STUB_ENABLED=true) "
+            "and MESSAGING_GATEWAY_TOKEN, then recreate the container."
+        )
+        await stop_event.wait()
+        return
+
+    if not cfg.gateway_token:
+        logger.error(
+            "platforms %s enabled but MESSAGING_GATEWAY_TOKEN is not set — "
+            "idling until configured",
+            cfg.enabled_platforms,
+        )
+        await stop_event.wait()
+        return
 
     async with HarvisBridge(cfg) as bridge:
         async def inbound_for(adapter, msg):
