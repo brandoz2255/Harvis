@@ -5,16 +5,100 @@ Vision is not managed here — it runs in Ollama (see vison_models/llm_connector
 
 IMPORTANT: TTS (ChatterboxTTS) is loaded LAZILY to avoid allocating VRAM/RAM
 when running in text_only mode. This prevents unnecessary memory usage.
+
+torch is optional here. It is required to load the models, not to import this
+module — see the guarded import below.
 """
 
 import os
-import torch
 import logging
 import time
 import gc
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# ─── Optional torch ──────────────────────────────────────────────────────────
+# The in-process TTS and Whisper models need torch; the GPU bookkeeping that
+# surrounds them does not need to *exist* for the rest of the backend to run.
+# On a core install with no voice pack, importing this module used to fail
+# outright and take every one of its non-model callers down with it.
+#
+# With torch installed nothing below changes: `torch` is the real module.
+# Without it, `torch.cuda.is_available()` answers False, so every guarded GPU
+# path skips, the telemetry reports zero, and only an actual model load fails —
+# with a message that says which package is missing.
+try:
+    import torch
+
+    TORCH_AVAILABLE = True
+except ImportError:
+
+    class _NullCuda:
+        """CUDA surface used by this module, answering "no GPU here"."""
+
+        @staticmethod
+        def is_available() -> bool:
+            return False
+
+        @staticmethod
+        def empty_cache() -> None:
+            pass
+
+        @staticmethod
+        def synchronize() -> None:
+            pass
+
+        @staticmethod
+        def reset_peak_memory_stats() -> None:
+            pass
+
+        @staticmethod
+        def memory_allocated() -> int:
+            return 0
+
+        @staticmethod
+        def memory_reserved() -> int:
+            return 0
+
+        @staticmethod
+        def device_count() -> int:
+            return 0
+
+        @staticmethod
+        def current_device():
+            raise RuntimeError(_NO_TORCH)
+
+        @staticmethod
+        def get_device_name(*_args):
+            raise RuntimeError(_NO_TORCH)
+
+        @staticmethod
+        def get_device_properties(*_args):
+            raise RuntimeError(_NO_TORCH)
+
+    class _NullTorch:
+        cuda = _NullCuda()
+
+        @staticmethod
+        def empty(*_args, **_kwargs):
+            raise RuntimeError(_NO_TORCH)
+
+        @staticmethod
+        def ones(*_args, **_kwargs):
+            raise RuntimeError(_NO_TORCH)
+
+    torch = _NullTorch()
+    TORCH_AVAILABLE = False
+    logger.info(
+        "torch is not installed — in-process TTS/Whisper are unavailable and GPU "
+        "telemetry reads zero. Install the voice pack to enable them."
+    )
+
+_NO_TORCH = (
+    "torch is not installed in this backend. In-process TTS and Whisper need the "
+    "voice pack; text chat and Ollama-served models do not."
+)
 
 # ─── Lazy TTS Import ─────────────────────────────────────────────────────────
 # ChatterboxTTS is NOT imported at module level to avoid allocating memory
@@ -318,6 +402,12 @@ def load_tts_model(force_cpu=None):
     """
     global tts_model, ChatterboxTTS
 
+    # Say which package is missing. Without this the caller gets ChatterboxTTS's
+    # own failure — "'NoneType' object has no attribute 'from_pretrained'" —
+    # which names nothing the user can act on.
+    if not TORCH_AVAILABLE:
+        raise RuntimeError(_NO_TORCH)
+
     # Check TTS_DEVICE environment variable if force_cpu not explicitly set
     if force_cpu is None:
         tts_device_env = os.environ.get("TTS_DEVICE", "cuda").lower()
@@ -595,6 +685,10 @@ def load_whisper_model():
     when not needed.
     """
     global whisper_model, whisper
+
+    if not TORCH_AVAILABLE:
+        raise RuntimeError(_NO_TORCH)
+
     if whisper_model is None:
         # Lazy import whisper only when needed
         whisper = _lazy_import_whisper()
@@ -1034,6 +1128,9 @@ def load_qwen_tts_model(force_cpu=None, use_1_7b=False):
                  NOTE: Default changed to False to always use 0.6B for VRAM compatibility
     """
     global qwen_tts_model
+
+    if not TORCH_AVAILABLE:
+        raise RuntimeError(_NO_TORCH)
 
     # Check TTS_DEVICE environment variable if force_cpu not explicitly set
     if force_cpu is None:
