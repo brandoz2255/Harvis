@@ -242,6 +242,103 @@ docker run --rm --network none --user 0:0 --tmpfs /data:rw --entrypoint python <
   -c "import sys; sys.path.insert(0,'/app'); import main; print(len(sys.modules))"
 ```
 
+## Why Odysseus is 3 GB and we are 27
+
+Measured 2026-07-26 against the Odysseus stack running on this same box
+(`/home/user/Projects/Odysseus/odysseus`). Same method — UNIQUE SIZE, fresh clone, zero
+models pulled. Our `ollama-model-check` is detect-only and pulls nothing, so this is a clean
+image-only comparison.
+
+| | services | images |
+|---|---|---:|
+| Harvis default | 11 | **27.4 GB** |
+| Harvis `--ollama-url` (BYO) | 9 | **17.7 GB** |
+| Odysseus | 4 | **3.03 GB** |
+
+The repo is noise on both sides: Harvis 80 MB checkout + 98 MB pack, Odysseus 34 MB + 23 MB.
+
+**Quote the BYO-adjusted ratio, not the raw one.** Odysseus ships no model server — its compose
+points at `host.docker.internal:11434`, which is the same BYO posture `--ollama-url` gives us.
+Counting the Ollama a local-inference user needs either way, Harvis is **2.15×** Odysseus, not 9×.
+
+### The gap is one thing, not a hundred
+
+Comparing like with like (both assuming an external Ollama), the delta is 14.66 GB:
+
+| | Harvis BYO | Odysseus | delta |
+|---|---:|---:|---:|
+| app image | 15.40 GB | 1.71 GB | **13.69 GB** |
+| everything else | 2.29 GB | 1.32 GB | 0.97 GB |
+
+The supporting cast is already within a gigabyte. And **12.10 GB of our backend is the
+`pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime` base — 83% of the entire gap.** No amount of
+service trimming, package pruning or repo hygiene touches it.
+
+### The mechanism: inference runtime vs training framework
+
+Odysseus's whole `site-packages` is **371 MB**, and the largest entry in it is **`onnxruntime`
+at 55 MB**. Checked by name inside the image, all of these are **absent**: `torch`,
+`transformers`, `sentence_transformers`, `whisper`, `faster_whisper`, `librosa`, `soundfile`,
+`torchaudio`, `torchvision`, `nvidia/*`, `triton`, `TTS`, `piper`.
+
+Ours is **8,486 MB**, and three entries are 76% of it:
+
+```
+nvidia/*   4,184 MB
+torch      1,692 MB
+triton       542 MB
+           ─────────
+           6,418 MB   = 76% of site-packages
+```
+
+ONNX Runtime executes a pre-compiled model graph and nothing else. PyTorch ships a tensor
+library, autograd, a compiler (`triton`) and the CUDA toolchain, because it exists to *train*.
+Harvis never trains anything — it pays the training-framework tax because the libraries it
+depends on are written against torch.
+
+### What actually keeps torch alive here — four consumers
+
+**`onnxruntime` (57 MB) and `piper` (25 MB) are already installed in our image.** The ONNX path
+is not foreign to Harvis; `piper` is a real, used ONNX TTS engine (6 importers, incl.
+`tts_engine_manager.py:12`). `onnxruntime` has **zero direct importers** in our code — it arrived
+as a transitive dependency.
+
+| Consumer | Call sites | Torch-free path |
+|---|---|---|
+| `openai-whisper` (STT) | `main.py:120`, `cody.py:19`, +2 | `faster-whisper` (CTranslate2) — keeps GPU, no torch |
+| `sentence_transformers` | `enhanced_vector_optimizer.py:8`, `research/rank/rerank.py:139` | fastembed / ONNX MiniLM — literally Odysseus's choice |
+| `chatterbox` / `qwen3_tts` | `tts_engine_manager.py:45`, `qwen3_tts.py:14`, +10 | `piper`, already present — quality/voice-clone regression |
+| `transformers` (vision) | `model_manager.py:463`, `chatbot.py:9`, `vison_models/qwen.py:1` | ONNX export or a sidecar — **the hard one** |
+
+Only two call sites use `sentence_transformers`. `faster_whisper` has zero — it is not installed.
+
+### The ceiling, and why it is ~10 GB rather than 3
+
+**Estimated, not measured — flagged deliberately.** GPU speech still needs cuDNN (1,005 MB) and
+cuBLAS (830 MB); CTranslate2 links them too. The *torch-only* CUDA libraries are roughly
+cusolver 387 + cusparselt 431 + nccl 410 + nvrtc 212 + cufft 268 + cusparse 371 + curand 133 ≈
+**2.2 GB**. The one-package-at-a-time removal tests recorded above were run against **torch**;
+CTranslate2's requirement set needs its own pass before anyone relies on this split.
+
+On that estimate: torch 1.7 + triton 0.5 + transformers 0.12 + torch-only CUDA 2.2 ≈ **4.6 GB
+off**, taking the backend from 15.4 GB to about **10.8 GB**, or ~10.2 with item 7's slim base.
+A real win — and still **6× Odysseus**.
+
+**All-or-nothing:** one surviving torch consumer keeps the entire 6.4 GB stack. Migrating three
+of the four buys nothing in image size.
+
+### The architectural floor
+
+Odysseus is small because of what it does not do. It is a router: no speech, no vision, no
+in-process inference beyond an ONNX embedding model, and no model server of its own. Harvis is a
+runtime — Whisper STT, TTS, vision and embeddings run in-process on the GPU, which *is* the
+optimization-plus-customization premise. Those two shapes have different floors.
+
+Exactly one change bridges them: move torch out of the backend into a GPU worker behind a
+profile, leaving the core as a router. That is the `harvis-core` / `harvis-gpu-worker` split,
+which was **deliberately closed** — speech stays first-class in core. That decision sets the
+floor. It is a legitimate decision; it just means the target is ~10 GB, not 3 GB.
+
 ## What blocks item 5 (the CPU-only floor, if it is ever wanted)
 
 Ten top-level `import torch` statements exist in the backend. Only the ones reachable from `main.py`'s
