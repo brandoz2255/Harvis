@@ -1,6 +1,7 @@
 """
 Model Management System for GPU Memory Optimization
-Handles loading/unloading of TTS, Whisper, and Qwen2VL models
+Handles loading/unloading of the in-process TTS and Whisper models.
+Vision is not managed here — it runs in Ollama (see vison_models/llm_connector).
 
 IMPORTANT: TTS (ChatterboxTTS) is loaded LAZILY to avoid allocating VRAM/RAM
 when running in text_only mode. This prevents unnecessary memory usage.
@@ -286,14 +287,8 @@ def auto_cleanup_if_needed(threshold_percent=75):
         unload_whisper_model()
         cleanup_actions.append("Whisper model unloaded")
 
-    # Also unload Qwen model if available
-    try:
-        from vison_models.llm_connector import unload_qwen_model
-
-        unload_qwen_model()
-        cleanup_actions.append("Qwen2VL model unloaded")
-    except Exception as e:
-        logger.warning(f"Could not unload Qwen model: {e}")
+    # Vision no longer runs in this process — Ollama owns that model's
+    # lifecycle, and unload_running_ollama_models() covers it where needed.
 
     # Force aggressive cleanup
     if torch.cuda.is_available():
@@ -1176,7 +1171,7 @@ def unload_running_ollama_models():
 
 
 def unload_all_models():
-    """Unload all models including Qwen2VL to free maximum GPU memory"""
+    """Unload every in-process model to free maximum GPU memory."""
     logger.info("🗑️ Unloading ALL models to free GPU memory for vision processing")
 
     log_gpu_memory("before full unload")
@@ -1185,15 +1180,7 @@ def unload_all_models():
     unload_models()
     unload_qwen_tts_model()
 
-    # Unload Qwen2VL
-    try:
-        from vison_models.llm_connector import unload_qwen_model
-
-        unload_qwen_model()
-    except Exception as e:
-        logger.warning(f"Could not unload Qwen2VL: {e}")
-
-    # Unload any running Ollama models
+    # Unload any running Ollama models (this is where vision now lives)
     unload_running_ollama_models()
 
     # Additional aggressive cleanup

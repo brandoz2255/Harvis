@@ -1,7 +1,7 @@
 import socketio
 from aiohttp import web
 from screen_analyzer import analyze_image_base64
-from vison_models.llm_connector import query_llm, unload_qwen_model, load_qwen_model, log_gpu_memory
+from vison_models.llm_connector import query_llm
 import logging
 
 logger = logging.getLogger(__name__)
@@ -48,22 +48,17 @@ async def candidate(sid, data):
 @sio.event
 async def screen_data(sid, data): # data is now an object { imageData, modelName }
     """
-    Process screen data with intelligent model management.
-    Automatically loads Qwen2VL when needed and manages memory efficiently.
+    Vision and text inference both run in Ollama, which owns model load/unload
+    via keep_alive — this process holds no model state of its own.
     """
     try:
         # Process screen data
         image_data = data.get("imageData")
-        model_name = data.get("modelName", "mistral") # Default to mistral if not provided
-        
-        logger.info(f"🖼️ Processing screen data for client {sid} with model {model_name}")
-        
-        # Log memory before processing
-        log_gpu_memory("before screen processing")
-        
-        # Ensure Qwen2VL is loaded for screen analysis
-        load_qwen_model()
-        
+        # None means "resolve whatever is installed" (see llm_connector).
+        model_name = data.get("modelName") or None
+
+        logger.info(f"🖼️ Processing screen data for client {sid} with model {model_name or 'auto'}")
+
         analysis_results = analyze_image_base64(image_data)
         if "error" in analysis_results:
             logger.error(f"Screen analysis error: {analysis_results['error']}")
@@ -73,10 +68,6 @@ async def screen_data(sid, data): # data is now an object { imageData, modelName
         caption = analysis_results.get("caption", "")
         ocr_text = analysis_results.get("ocr_text", "")
 
-        # Unload Qwen2VL immediately after screen analysis
-        logger.info("🔄 Unloading Qwen2VL after screen analysis")
-        unload_qwen_model()
-        
         # Generate LLM response
         llm_prompt = f"Analyze the following screen content. Caption: {caption}. OCR text: {ocr_text}. Provide a concise summary or relevant insights."
         llm_response = query_llm(llm_prompt, model_name=model_name)
@@ -85,9 +76,8 @@ async def screen_data(sid, data): # data is now an object { imageData, modelName
         await sio.emit("llm_response", {
             "caption": caption, 
             "llm_response": llm_response,
-            "model_used": model_name,
-            "processing_info": "Qwen2VL + " + model_name,
-            "memory_management": "✅ Qwen2VL unloaded after use"
+            "model_used": model_name or "auto",
+            "processing_info": f"vision + {model_name or 'auto'} (Ollama)",
         }, room=sid)
         
     except Exception as e:
@@ -97,17 +87,16 @@ async def screen_data(sid, data): # data is now an object { imageData, modelName
 @sio.event
 async def stopShare(sid):
     """
-    Handle screen share stopping and optionally unload models to free memory
+    Handle screen share stopping.
+
+    No model unload here any more: the vision model lives in Ollama, which is
+    shared with chat and every other lane. Evicting it on the last screen-share
+    disconnect would yank a model another request may be mid-way through, and
+    Ollama's own keep_alive already reclaims it when genuinely idle.
     """
     logger.info(f"🛑 Client {sid} stopped screen sharing")
     if sid in connections and connections[sid] is not None:
         connections[sid] = None
-    
-    # Optional: Unload Qwen2VL if no active connections
-    active_connections = sum(1 for conn in connections.values() if conn is not None)
-    if active_connections == 0:
-        logger.info("🗑️ No active screen shares, unloading Qwen2VL to free memory")
-        unload_qwen_model()
 
 # Start the server
 if __name__ == "__main__":

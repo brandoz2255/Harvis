@@ -43,10 +43,10 @@ from moonshot_api import (
 )
 from typing import List, Optional, Dict, Any, Union
 from vison_models.llm_connector import (
-    query_qwen,
+    query_vision,
     query_llm,
-    load_qwen_model,
-    unload_qwen_model,
+    list_vision_models,
+    VISION_ERROR_PREFIX,
 )
 
 # Import workspace (Harvis Workspaces / OpenClaw integration)
@@ -5746,7 +5746,7 @@ async def upload_file(
 @app.post("/api/analyze-screen", tags=["vision"])
 async def analyze_screen(req: ScreenAnalysisRequest):
     try:
-        # Unload ALL models to free maximum GPU memory for Qwen2VL
+        # Free VRAM for the vision model Ollama is about to load
         logger.info("🖼️ Starting screen analysis - clearing ALL GPU memory")
         unload_all_models()  # Unload everything for maximum memory
 
@@ -5756,21 +5756,17 @@ async def analyze_screen(req: ScreenAnalysisRequest):
         with open(temp_image_path, "wb") as f:
             f.write(image_data)
 
-        # Use Qwen to caption the image
-        qwen_prompt = "Describe this image in detail."
-        qwen_caption = query_qwen(temp_image_path, qwen_prompt)
+        # Caption the image with whatever vision model the user has installed
+        vision_prompt = "Describe this image in detail."
+        vision_caption = query_vision(temp_image_path, vision_prompt)
         os.remove(temp_image_path)  # Clean up temp file
 
-        if "[Qwen error]" in qwen_caption:
-            raise HTTPException(status_code=500, detail=qwen_caption)
-
-        # Unload Qwen2VL immediately after use to free memory
-        logger.info("🔄 Unloading Qwen2VL after screen analysis")
-        unload_qwen_model()
+        if VISION_ERROR_PREFIX in vision_caption:
+            raise HTTPException(status_code=500, detail=vision_caption)
 
         # Use LLM to get a response based on the caption
         llm_system_prompt = "You are an AI assistant that helps users understand what's on their screen. Provide a concise and helpful response based on the screen content."
-        llm_user_prompt = f"Here's what's on the user's screen: {qwen_caption}\nWhat should they do next?"
+        llm_user_prompt = f"Here's what's on the user's screen: {vision_caption}\nWhat should they do next?"
         llm_response = query_llm(llm_user_prompt, system_prompt=llm_system_prompt)
 
         # Reload TTS/Whisper models for future use
@@ -5778,7 +5774,7 @@ async def analyze_screen(req: ScreenAnalysisRequest):
         reload_models_if_needed()
 
         logger.info("✅ Screen analysis complete - all models restored")
-        return {"commentary": qwen_caption, "llm_response": llm_response}
+        return {"commentary": vision_caption, "llm_response": llm_response}
 
     except Exception as e:
         logger.error("Screen analysis failed: %s", e)
@@ -5847,7 +5843,7 @@ async def analyze_and_respond(req: AnalyzeAndRespondRequest):
 
         temp_image_path = None
         try:
-            # Unload ALL models to free maximum GPU memory for Qwen2VL
+            # Free VRAM for the vision model Ollama is about to load
             logger.info("🖼️ Starting enhanced screen analysis - clearing ALL GPU memory")
             unload_all_models()  # Unload everything for maximum memory
 
@@ -5870,14 +5866,14 @@ async def analyze_and_respond(req: AnalyzeAndRespondRequest):
             with open(temp_image_path, "wb") as f:
                 f.write(image_data)
 
-            # Use Qwen to analyze the image
-            qwen_prompt = "Analyze this screen in detail. Describe what you see, including any text, UI elements, applications, and content visible."
-            logger.info("🔍 Analyzing screen with Qwen2VL...")
+            # Analyse the image with whatever vision model the user has installed
+            vision_prompt = "Analyze this screen in detail. Describe what you see, including any text, UI elements, applications, and content visible."
+            logger.info("🔍 Analyzing screen with the installed vision model...")
 
             try:
-                qwen_analysis = query_qwen(temp_image_path, qwen_prompt)
+                vision_analysis = query_vision(temp_image_path, vision_prompt)
             except Exception as e:
-                logger.error(f"Qwen2VL analysis failed: {e}")
+                logger.error(f"Vision analysis failed: {e}")
                 raise HTTPException(
                     status_code=500, detail=f"Screen analysis failed: {str(e)}"
                 )
@@ -5892,14 +5888,10 @@ async def analyze_and_respond(req: AnalyzeAndRespondRequest):
                             f"Failed to remove temp file {temp_image_path}: {e}"
                         )
 
-            if "[Qwen error]" in qwen_analysis:
-                raise HTTPException(status_code=500, detail=qwen_analysis)
+            if VISION_ERROR_PREFIX in vision_analysis:
+                raise HTTPException(status_code=500, detail=vision_analysis)
 
-            # Unload Qwen2VL immediately after analysis to free memory for LLM
-            logger.info("🔄 Unloading Qwen2VL after analysis, preparing for LLM")
-            unload_qwen_model()
-
-            # Additional cleanup after Qwen unload
+            # Additional cleanup before the LLM step
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -5916,7 +5908,7 @@ async def analyze_and_respond(req: AnalyzeAndRespondRequest):
                 # Use Gemini for response
                 try:
                     llm_response = query_gemini(
-                        f"Screen analysis: {qwen_analysis}\n\nPlease provide helpful insights about this screen.",
+                        f"Screen analysis: {vision_analysis}\n\nPlease provide helpful insights about this screen.",
                         [],
                     )
                 except Exception as e:
@@ -5933,7 +5925,7 @@ async def analyze_and_respond(req: AnalyzeAndRespondRequest):
                         {"role": "system", "content": system_prompt},
                         {
                             "role": "user",
-                            "content": f"Screen analysis: {qwen_analysis}\n\nPlease provide helpful insights about this screen.",
+                            "content": f"Screen analysis: {vision_analysis}\n\nPlease provide helpful insights about this screen.",
                         },
                     ],
                     "stream": False,
@@ -5988,7 +5980,7 @@ async def analyze_and_respond(req: AnalyzeAndRespondRequest):
             logger.info("✅ Enhanced screen analysis complete - all models restored")
             return {
                 "response": llm_response,
-                "screen_analysis": qwen_analysis,
+                "screen_analysis": vision_analysis,
                 "model_used": req.model,
             }
 
@@ -6063,13 +6055,13 @@ async def vision_control(action: str = "status"):
 @app.post("/api/analyze-screen-with-tts", tags=["vision"])
 async def analyze_screen_with_tts(req: ScreenAnalysisWithTTSRequest):
     """
-    Complete screen analysis with Qwen2VL + LLM response + TTS audio output.
-    Implements intelligent model management: Qwen2VL -> LLM -> TTS pipeline.
+    Complete screen analysis with vision model + LLM response + TTS audio output.
+    Implements intelligent model management: vision -> LLM -> TTS pipeline.
     """
     try:
-        # Phase 1: Unload ALL models for maximum memory for Qwen2VL processing
+        # Phase 1: free VRAM for the vision model Ollama is about to load
         logger.info(
-            "🖼️ Phase 1: Starting screen analysis - clearing ALL GPU memory for Qwen2VL"
+            "🖼️ Phase 1: Starting screen analysis - clearing ALL GPU memory for vision"
         )
         unload_all_models()
 
@@ -6079,18 +6071,17 @@ async def analyze_screen_with_tts(req: ScreenAnalysisWithTTSRequest):
         with open(temp_image_path, "wb") as f:
             f.write(image_data)
 
-        # Use Qwen2VL to analyze the image
-        qwen_prompt = "Analyze this screen comprehensively. Describe what you see, including any text, UI elements, applications, and content. Focus on what the user might need help with."
-        logger.info("🔍 Analyzing screen with Qwen2VL...")
-        qwen_analysis = query_qwen(temp_image_path, qwen_prompt)
+        # Analyse the image with whatever vision model the user has installed
+        vision_prompt = "Analyze this screen comprehensively. Describe what you see, including any text, UI elements, applications, and content. Focus on what the user might need help with."
+        logger.info("🔍 Analyzing screen with the installed vision model...")
+        vision_analysis = query_vision(temp_image_path, vision_prompt)
         os.remove(temp_image_path)
 
-        if "[Qwen error]" in qwen_analysis:
-            raise HTTPException(status_code=500, detail=qwen_analysis)
+        if VISION_ERROR_PREFIX in vision_analysis:
+            raise HTTPException(status_code=500, detail=vision_analysis)
 
-        # Phase 2: Unload Qwen2VL to free memory for LLM processing
-        logger.info("🤖 Phase 2: Unloading Qwen2VL, generating LLM response")
-        unload_qwen_model()
+        # Phase 2: generate the LLM response
+        logger.info("🤖 Phase 2: Generating LLM response")
 
         # Generate LLM response
         system_prompt = (
@@ -6100,7 +6091,7 @@ async def analyze_screen_with_tts(req: ScreenAnalysisWithTTSRequest):
 
         if req.model == "gemini-1.5-flash":
             llm_response = query_gemini(
-                f"Screen analysis: {qwen_analysis}\n\nProvide helpful insights about this screen.",
+                f"Screen analysis: {vision_analysis}\n\nProvide helpful insights about this screen.",
                 [],
             )
         else:
@@ -6110,7 +6101,7 @@ async def analyze_screen_with_tts(req: ScreenAnalysisWithTTSRequest):
                     {"role": "system", "content": system_prompt},
                     {
                         "role": "user",
-                        "content": f"Screen analysis: {qwen_analysis}\n\nProvide helpful insights about this screen.",
+                        "content": f"Screen analysis: {vision_analysis}\n\nProvide helpful insights about this screen.",
                     },
                 ],
                 "stream": False,
@@ -6162,11 +6153,11 @@ async def analyze_screen_with_tts(req: ScreenAnalysisWithTTSRequest):
         logger.info("✅ Complete screen analysis with TTS finished")
         return {
             "response": llm_response,
-            "screen_analysis": qwen_analysis,
+            "screen_analysis": vision_analysis,
             "model_used": req.model,
             "audio_path": f"/api/audio/{filename}",
             "processing_stages": {
-                "qwen_analysis": "✅ Completed",
+                "vision_analysis": "✅ Completed",
                 "llm_response": "✅ Completed",
                 "tts_generation": "✅ Completed",
             },
@@ -7209,12 +7200,14 @@ class MemoryPressureResponse(BaseModel):
 class ModelStatusResponse(BaseModel):
     tts_loaded: bool
     whisper_loaded: bool
-    qwen_loaded: bool
+    # Vision runs in Ollama now, so nothing is "loaded" in this process — what
+    # matters to a caller is whether an image can be analysed at all.
+    vision_available: bool
     total_models_loaded: int
 
 
 class UnloadModelRequest(BaseModel):
-    model_type: str  # "tts", "whisper", "qwen", "all", "ollama"
+    model_type: str  # "tts", "whisper", "all", "ollama"
     model_name: Optional[str] = None  # For Ollama model unloading
 
 
@@ -7271,18 +7264,19 @@ async def trigger_auto_cleanup():
 async def get_model_status():
     """Get current status of all loaded models"""
     from model_manager import tts_model, whisper_model
-    from vison_models.llm_connector import qwen_model
 
     tts_loaded = tts_model is not None
     whisper_loaded = whisper_model is not None
-    qwen_loaded = qwen_model is not None
+    # Ollama owns the vision model's lifecycle, so report capability rather than
+    # a load flag this process no longer has any say in.
+    vision_available = bool(list_vision_models())
 
-    total_loaded = sum([tts_loaded, whisper_loaded, qwen_loaded])
+    total_loaded = sum([tts_loaded, whisper_loaded])
 
     return ModelStatusResponse(
         tts_loaded=tts_loaded,
         whisper_loaded=whisper_loaded,
-        qwen_loaded=qwen_loaded,
+        vision_available=vision_available,
         total_models_loaded=total_loaded,
     )
 
@@ -7295,10 +7289,10 @@ async def unload_model(request: UnloadModelRequest):
     unloaded_models = []
 
     if request.model_type == "all":
-        # Unload all models
+        # Unload all models. Vision is not listed: it runs in Ollama, whose own
+        # keep_alive owns that lifecycle (see model_type == "ollama" below).
         unload_models()
-        unload_qwen_model()
-        unloaded_models = ["TTS", "Whisper", "Qwen2VL"]
+        unloaded_models = ["TTS", "Whisper"]
 
         # vLLM and llama-server manage memory automatically — no explicit unload needed
         if request.model_name:
@@ -7314,10 +7308,6 @@ async def unload_model(request: UnloadModelRequest):
     elif request.model_type == "whisper":
         unload_whisper_model()
         unloaded_models.append("Whisper")
-
-    elif request.model_type == "qwen":
-        unload_qwen_model()
-        unloaded_models.append("Qwen2VL")
 
     elif request.model_type == "ollama":
         if not request.model_name:

@@ -199,9 +199,10 @@ class IngestionService:
     async def _extract_image(self, file_path: str) -> str:
         """Extract searchable text from an image: a vision caption + OCR.
 
-        Caption via Qwen2-VL (vison_models.query_qwen); OCR via the tesseract
-        binary. Both best-effort and independent — one failing still yields the
-        other. No hard dep on pytesseract / screen_analyzer (not importable here).
+        Caption via whatever vision model is installed in Ollama
+        (vison_models.query_vision); OCR via the tesseract binary. Both
+        best-effort and independent — one failing still yields the other. No
+        hard dep on pytesseract / screen_analyzer (not importable here).
         """
         if not file_path or not os.path.exists(file_path):
             logger.warning(f"Image source path missing: {file_path}")
@@ -210,17 +211,17 @@ class IngestionService:
 
         # 1) Vision caption (best-effort)
         try:
-            from vison_models.llm_connector import query_qwen
+            from vison_models.llm_connector import query_vision, VISION_ERROR_PREFIX
             caption = await asyncio.to_thread(
-                query_qwen, file_path,
+                query_vision, file_path,
                 "Describe this image in detail, including any visible text, "
                 "objects, people, charts, and setting.",
             )
             cap = (caption or "").strip()
-            # query_qwen returns an "[Qwen error] ..." string on failure (e.g. the
-            # local Qwen2-VL CUDA-kernel mismatch in this container) — never let
+            # query_vision returns a "[vision error] ..." string on failure (no
+            # vision-capable model installed, Ollama unreachable) — never let
             # that error text pollute the source content; fall back to OCR-only.
-            if cap and not cap.startswith("[Qwen error]"):
+            if cap and not cap.startswith(VISION_ERROR_PREFIX):
                 parts.append(f"Image description:\n{cap}")
             elif cap:
                 logger.warning(f"Image caption unavailable (vision model error) for {file_path}")

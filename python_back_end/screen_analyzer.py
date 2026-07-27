@@ -1,6 +1,6 @@
 import base64, io, pytesseract, tempfile, os
 from PIL import Image
-from vison_models.llm_connector import query_qwen
+from vison_models.llm_connector import query_vision
 
 pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'  # Update this path as needed
 
@@ -12,8 +12,8 @@ def analyze_image_base64(image_b64: str) -> dict:
             temp_image.write(base64.b64decode(image_data))
             temp_image_path = temp_image.name
 
-        # Get Qwen2VL caption
-        caption = query_qwen(temp_image_path, "Describe the image.")
+        # Caption via whatever vision model is installed
+        caption = query_vision(temp_image_path, "Describe the image.")
 
         # Clean up the temporary file
         os.unlink(temp_image_path)
