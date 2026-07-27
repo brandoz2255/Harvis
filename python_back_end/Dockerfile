@@ -33,7 +33,8 @@ RUN groupadd -g 999 docker || true && \
 ############################
 COPY requirements.txt .
 
-# Pre-reqs for pkuseg build
+# Build tooling for any requirement that has no prebuilt wheel for this
+# platform. Cython stays: several source dists in requirements.txt need it.
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel Cython
 
 # Build wheels for the rest (excluding torch/torchvision/torchaudio and numpy to prevent conflicts)
@@ -41,8 +42,12 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel Cython
 RUN grep -v "^torch" requirements.txt | grep -v "^numpy" > requirements_no_torch_numpy.txt \
   && pip wheel --no-cache-dir -r requirements_no_torch_numpy.txt -w /wheels
 
-# Also build a wheel for pkuseg if it comes from source
-RUN pip wheel --no-cache-dir pkuseg==0.0.25 --no-build-isolation -w /wheels
+# NOTE: pkuseg is deliberately NOT built here. It was a prerequisite of
+# chatterbox-tts, which has been commented out of requirements.txt since the
+# transformers>=0.27.0 conflict. Building it left 180 MB of Chinese word
+# segmentation data in the runtime image that nothing imports and no installed
+# package depends on. If chatterbox-tts ever comes back, restore:
+#   RUN pip wheel --no-cache-dir pkuseg==0.0.25 --no-build-isolation -w /wheels
 
 # Remove any numpy wheels that got built as dependencies (keep only one version)
 RUN rm -f /wheels/numpy-*.whl
@@ -85,14 +90,31 @@ RUN --mount=type=bind,from=builder,source=/wheels,target=/wheels \
   pip install --no-cache-dir --no-index --find-links=/wheels /wheels/* \
   && pip cache purge
 
-# Docker CLI for vibecoding container management + git for clone-local repo isolation
-# + openssh-client (ssh / ssh-keyscan / ssh-keygen) for the Phase 4 SSH target
-# registry — the governed probe/exec path shells out to the system ssh binary
-# (argv list, StrictHostKeyChecking=yes, pinned per-user known_hosts).
+# git for clone-local repo isolation + openssh-client (ssh / ssh-keyscan /
+# ssh-keygen) for the Phase 4 SSH target registry — the governed probe/exec
+# path shells out to the system ssh binary (argv list,
+# StrictHostKeyChecking=yes, pinned per-user known_hosts).
 # (kept in this late layer so the expensive pip-wheel layers above stay cached on rebuild)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-  docker.io git openssh-client \
+  git openssh-client \
   && rm -rf /var/lib/apt/lists/*
+
+# Docker CLI for vibecoding container management — the client binary ONLY.
+# `apt-get install docker.io` used to be on the line above, and it installs the
+# entire Docker package: dockerd (84 MB), containerd (48 MB), containerd-stress
+# (22 MB), runc x2, containerd-shim and docker-proxy — ~190 MB of daemon
+# binaries this container never executes. It only ever talks to the HOST
+# daemon through the bind-mounted /var/run/docker.sock, and that needs the
+# client and nothing else. Socket permission comes from compose
+# (`group_add: "984"`), not from any group the package used to create.
+# Ubuntu 22.04 has no CLI-only package, so this pulls the official static
+# release and keeps one file. Pinned to the host daemon's version.
+ARG DOCKER_CLI_VERSION=29.5.2
+RUN curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_CLI_VERSION}.tgz" \
+  | tar -xzC /tmp docker/docker \
+  && mv /tmp/docker/docker /usr/bin/docker \
+  && rm -rf /tmp/docker \
+  && docker --version
 
 # Reinstall Python docker package to override any system docker-py conflict
 RUN pip install --no-cache-dir --force-reinstall "docker>=7.0.0"
