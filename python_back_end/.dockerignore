@@ -99,3 +99,8 @@ data/
 datasets/
 checkpoints/
 weights/
+
+# Node deps. Nothing in this image runs node — the Dockerfile has no npm step and
+# no code imports the `ai`/`@ai-sdk/openai` packages — so `COPY . .` was baking
+# 2,250 unused files in. package.json stays tracked in case that changes.
+node_modules/

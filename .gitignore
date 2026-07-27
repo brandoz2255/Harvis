@@ -237,3 +237,10 @@ err.txt
 k8s-manifests/overlays/prod/openclaw-secrets.yaml
 # vendored ComfyUI runtime + SD models (13GB) — provider container build context, never repo content
 /image-comfy/
+# TTS/STT scratch output. NOTE: python_back_end/harvis_voice.mp3 is NOT scratch —
+# it is the voice-cloning reference audio qwen3_tts.py and vibecoding/commands.py
+# read at runtime, so it stays tracked. Only name the throwaways here.
+/temp_response.wav
+python_back_end/test_segment_*.wav
+# research BM25/fetch cache — runtime state, rebuilt on demand
+python_back_end/research_cache/
