@@ -82,6 +82,9 @@ services:
       context: ./python_back_end
       dockerfile: Dockerfile
     container_name: harvis-model-downloader
+    # Voice-only: downloads Whisper/Chatterbox/Qwen3-TTS weights. Rides the
+    # `voice` profile so a default install boots without a multi-GB pull.
+    profiles: ["voice"]
     user: root
     entrypoint: /bin/bash
     command:
@@ -417,16 +420,19 @@ services:
       # Allow backend container to reach host-installed openclaw gateway on :18790
       - "host.docker.internal:host-gateway"
     depends_on:
-      ollama:
-        condition: service_started
       pgsql:
         condition: service_healthy
-      model-downloader:
-        condition: service_completed_successfully
       artifact-init:
         condition: service_completed_successfully
-      ollama-model-check:
-        condition: service_completed_successfully
+      # NOTE: ollama + ollama-model-check + model-downloader were cut for the
+      # same reason as the block below. lifespan() and startup_event() touch
+      # Postgres only; /api/health/services probes Ollama per request and
+      # reports up|degraded|down instead of blocking boot. ollama-model-check
+      # is detect-only and exits 0 even when Ollama never answers. And
+      # model-downloader now rides the `voice` profile — keeping it here made
+      # every fresh install download the Whisper/Chatterbox/Qwen3-TTS voice
+      # weights before the app could start (and a default service may never
+      # depend on a profiled one, or Compose refuses to schedule it).
       # NOTE: openclaw + browser-runner are deliberately NOT depends_on.
       # The backend never contacts either at startup — both lifespan() and
       # startup_event() touch Postgres only, and the openclaw/browser routers
@@ -469,6 +475,7 @@ services:
         BUILD_TIMESTAMP: ${BUILD_TIMESTAMP:-default}
         GIT_COMMIT: ${GIT_COMMIT:-unknown}
     container_name: harvis-frontend
+    profiles: ["legacy"]
     restart: unless-stopped
     ports:
       - "3000:3000"
@@ -556,6 +563,7 @@ services:
     build:
       context: ./front_end/open-notebook
     container_name: harvis-open-notebook
+    profiles: ["notebooks"]
     restart: unless-stopped
     environment:
       INTERNAL_API_URL: "http://backend:8000"
@@ -579,6 +587,7 @@ services:
       context: ./python_back_end
       dockerfile: Dockerfile.document-worker
     container_name: harvis-document-worker
+    profiles: ["notebooks"]
     restart: unless-stopped
     environment:
       DATABASE_URL: "postgresql://pguser:pgpassword@pgsql:5432/database"
@@ -701,6 +710,7 @@ services:
   openclaw-db-init:
     image: postgres:15-alpine
     container_name: harvis-openclaw-db-init
+    profiles: ["engines"]
     restart: "no"
     command: >
       sh -c "
@@ -759,6 +769,7 @@ services:
     # `docker compose up -d` doesn't try to pull it.
     pull_policy: build
     container_name: harvis-openclaw
+    profiles: ["engines"]
     restart: unless-stopped
     user: "1000:1000"
     # Expose to localhost ONLY for Cursor extension — never 0.0.0.0
@@ -883,6 +894,7 @@ services:
   surrealdb:
     image: surrealdb/surrealdb:v2
     container_name: surrealdb
+    profiles: ["notebooks"]
     restart: unless-stopped
     command: start --log info --user root --pass root rocksdb:/mydata/mydatabase.db
     environment:
@@ -896,6 +908,7 @@ services:
   open-notebook:
     image: lfnovo/open_notebook:v1-latest
     container_name: open-notebook
+    profiles: ["notebooks"]
     restart: unless-stopped
     ports:
       - "8502:8502"
@@ -955,6 +968,7 @@ services:
       context: .
       dockerfile: docker/tts-service/Dockerfile
     container_name: tts-service
+    profiles: ["voice"]
     restart: unless-stopped
     ports:
       - "8001:8001"
@@ -1017,10 +1031,9 @@ services:
     image: harvis-messaging-gateway:local
     pull_policy: build
     container_name: harvis-messaging-gateway
-    # Only start when a messaging platform is configured. Without this the
-    # gateway boots with no adapters, exits 0, and `restart: unless-stopped`
-    # loops it forever. Enable with `--profile messaging` / COMPOSE_PROFILES.
-    profiles: ["messaging"]
+    # Default service (the old `messaging` profile is gone): the gateway now
+    # stays up unconfigured — with no adapters enabled it idles instead of
+    # exiting, so the restart loop that motivated the profile no longer occurs.
     restart: unless-stopped
     environment:
       MESSAGING_GATEWAY_TOKEN: "${MESSAGING_GATEWAY_TOKEN:-}"
@@ -1067,6 +1080,7 @@ services:
     image: harvis-opencode:local
     pull_policy: build
     container_name: harvis-opencode
+    profiles: ["engines"]
     restart: unless-stopped
     user: "1001:1001"
     environment:
@@ -1091,6 +1105,7 @@ services:
     image: harvis-codex:local
     pull_policy: build
     container_name: harvis-codex
+    profiles: ["engines"]
     restart: unless-stopped
     user: "1001:1001"
     environment:
@@ -1111,6 +1126,7 @@ services:
     image: harvis-claude-code:local
     pull_policy: build
     container_name: harvis-claude-code
+    profiles: ["engines"]
     restart: unless-stopped
     user: "1001:1001"
     environment:
@@ -1134,6 +1150,7 @@ services:
     image: harvis-hermes-agent:local
     pull_policy: build
     container_name: harvis-hermes-agent
+    profiles: ["engines"]
     restart: unless-stopped
     environment:
       HERMES_HOME: /opt/data
@@ -1163,6 +1180,7 @@ services:
     image: harvis-cad:local
     pull_policy: build
     container_name: harvis-cad
+    profiles: ["cad"]
     restart: unless-stopped
     # Dedicated INTERNAL network shared only with the backend. The sidecar has no
     # auth and no host port; keeping it off the shared ollama-n8n-network means the
