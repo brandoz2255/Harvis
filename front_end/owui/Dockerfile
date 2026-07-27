@@ -206,3 +206,15 @@ ENV WEBUI_BUILD_VERSION=${BUILD_HASH}
 ENV DOCKER=true
 
 CMD [ "bash", "start.sh"]
+
+######## Build artifact only ########
+# `owui-builder` in docker-compose.yaml exists solely to copy the compiled
+# SvelteKit output into ./front_end/owui/build via a bind mount. Targeting the
+# `build` stage directly tagged a 5.25 GB image (node_modules + source + output)
+# and kept it on disk forever to deliver ~263 MB of static files — it shared 0 B
+# with any other image, so it was 5.25 GB of pure additive cost on every install.
+# This stage carries the output and nothing else. busybox (not scratch) because
+# the compose command runs `sh -c ... cp -a`, and it is already pulled for
+# `artifact-init`, so its layers cost nothing extra.
+FROM busybox:latest AS artifact
+COPY --from=build /app/build /app/build

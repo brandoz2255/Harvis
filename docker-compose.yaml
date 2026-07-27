@@ -508,7 +508,9 @@ services:
     build:
       context: ./front_end/owui
       dockerfile: Dockerfile
-      target: build
+      # `artifact` = busybox + the compiled output only. Targeting `build`
+      # tagged the whole Node build stage (5.25 GB) to ship ~263 MB.
+      target: artifact
     image: harvis-owui-builder:local
     # Local build tag — tell Compose to build it, not pull it (a bare
     # `docker compose up -d` without --build otherwise fails: pull access denied).
