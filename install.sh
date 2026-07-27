@@ -8,6 +8,8 @@
 #   ./install.sh --backend cpu --yes    # non-interactive (nvidia|amd|cpu)
 #   ./install.sh --check-only           # preflight only: changes NOTHING
 #   ./install.sh --no-launch            # configure but don't start the stack
+#   ./install.sh --ollama-url URL       # use an Ollama you already run instead of
+#                                       # the bundled one (~9.7 GB smaller install)
 set -euo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -15,6 +17,12 @@ BACKEND=""
 ASSUME_YES=0
 CHECK_ONLY=0
 NO_LAUNCH=0
+# Bundled Ollama vs one you already run. This is a SEPARATE axis from BACKEND:
+# the backend container still wants the GPU for Whisper and TTS even when
+# inference lives elsewhere, so --ollama-url COMPOSES with nvidia/amd/cpu
+# rather than replacing that choice.
+OLLAMA_MODE="bundled"
+OLLAMA_ENDPOINT=""
 COMPOSE_FILE=""
 COMPOSE_ARGS=()
 HAS_OVERRIDE=0
@@ -33,8 +41,17 @@ parse_args() {
       --yes|-y) ASSUME_YES=1; shift ;;
       --check-only) CHECK_ONLY=1; shift ;;
       --no-launch) NO_LAUNCH=1; shift ;;
+      --ollama-url) OLLAMA_ENDPOINT="${2:-}"; OLLAMA_MODE="external"; shift 2 ;;
+      --ollama-url=*) OLLAMA_ENDPOINT="${1#*=}"; OLLAMA_MODE="external"; shift ;;
       -h|--help)
-        echo "Usage: ./install.sh [--backend nvidia|amd|cpu] [--yes] [--check-only] [--no-launch]"
+        echo "Usage: ./install.sh [--backend nvidia|amd|cpu] [--ollama-url URL]"
+        echo "                    [--yes] [--check-only] [--no-launch]"
+        echo ""
+        echo "  --ollama-url URL   Point Harvis at an Ollama you already run and skip"
+        echo "                     the bundled server (~9.7 GB smaller install)."
+        echo "                     From inside a container 'localhost' is the container,"
+        echo "                     not your machine — use host.docker.internal or a LAN IP:"
+        echo "                       ./install.sh --ollama-url http://host.docker.internal:11434"
         exit 0 ;;
       *) echo "Unknown arg: $1"; exit 1 ;;
     esac
@@ -43,6 +60,22 @@ parse_args() {
     ""|nvidia|amd|cpu) : ;;
     *) echo "✗ --backend must be nvidia|amd|cpu (got '$BACKEND')"; exit 1 ;;
   esac
+  if [ "$OLLAMA_MODE" = "external" ]; then
+    case "$OLLAMA_ENDPOINT" in
+      http://*|https://*) : ;;
+      "") echo "✗ --ollama-url needs a URL, e.g. http://host.docker.internal:11434"; exit 1 ;;
+      *)  echo "✗ --ollama-url must start with http:// or https:// (got '$OLLAMA_ENDPOINT')"; exit 1 ;;
+    esac
+    # localhost inside the backend container is the CONTAINER, not the host. This
+    # is the single most likely way a BYO install fails, and it fails at first
+    # chat rather than at install time — so refuse it here where it's obvious.
+    case "$OLLAMA_ENDPOINT" in
+      *://localhost*|*://127.0.0.1*)
+        echo "✗ '$OLLAMA_ENDPOINT' points at the container itself, not your machine."
+        echo "  Use http://host.docker.internal:11434, or this box's LAN IP."
+        exit 1 ;;
+    esac
+  fi
 }
 
 # ── Check table ─────────────────────────────────────────────────────────────
@@ -111,6 +144,44 @@ choose_backend() {
   esac
 }
 
+# ── Bundled Ollama vs one you already run ───────────────────────────────────
+# Orthogonal to BACKEND: this only decides where INFERENCE happens. Whisper STT
+# and TTS still run inside the backend container, so a BYO install on an NVIDIA
+# box still wants the nvidia backend.
+choose_ollama() {
+  # An explicit --ollama-url already settled it.
+  if [ "$OLLAMA_MODE" = "external" ]; then return 0; fi
+  if [ "$CHECK_ONLY" -eq 1 ] || [ "$ASSUME_YES" -eq 1 ]; then return 0; fi
+  echo ""
+  echo "Ollama — Harvis can run one for you, or use one you already have:"
+  echo "  1) bundled    Run Ollama in Docker as part of the stack (default)"
+  echo "  2) existing   Point Harvis at an Ollama you already run (~9.7 GB smaller)"
+  read -rp "Ollama [bundled]: " oc || true
+  case "${oc:-bundled}" in
+    1|bundled|"") return 0 ;;
+    2|existing)   : ;;
+    *) echo "✗ Unknown choice '$oc'"; exit 1 ;;
+  esac
+  echo ""
+  echo "  Enter the URL the BACKEND CONTAINER will use — not what your browser uses."
+  echo "  'localhost' inside a container means the container itself, so:"
+  echo "    Ollama on this machine   → http://host.docker.internal:11434"
+  echo "    Ollama on another box    → http://<its-lan-ip>:11434"
+  local url
+  read -rp "  Ollama URL [http://host.docker.internal:11434]: " url || true
+  url="${url:-http://host.docker.internal:11434}"
+  case "$url" in
+    *://localhost*|*://127.0.0.1*)
+      echo "✗ '$url' points at the container itself, not your machine."
+      echo "  Use http://host.docker.internal:11434, or this box's LAN IP."
+      exit 1 ;;
+    http://*|https://*) : ;;
+    *) echo "✗ URL must start with http:// or https:// (got '$url')"; exit 1 ;;
+  esac
+  OLLAMA_MODE="external"
+  OLLAMA_ENDPOINT="$url"
+}
+
 # ── Compose file selection ──────────────────────────────────────────────────
 select_compose_files() {
   case "$BACKEND" in
@@ -118,6 +189,12 @@ select_compose_files() {
     amd)    COMPOSE_FILE="docker-compose.yaml:docker-compose.amd.yml" ;;
     cpu)    COMPOSE_FILE="docker-compose.yaml:docker-compose.cpu.yml" ;;
   esac
+  # After the hardware overlay (it gates the bundled ollama off entirely, so it
+  # must outrank the overlay that tunes that same service) and before the local
+  # override below, which still wins over everything.
+  if [ "$OLLAMA_MODE" = "external" ]; then
+    COMPOSE_FILE="${COMPOSE_FILE}:docker-compose.byo-ollama.yml"
+  fi
   # Compose auto-loads docker-compose.override.yml ONLY when COMPOSE_FILE is unset.
   # The moment we set it above, a developer's gitignored override silently stops
   # applying — and the symptom (dead host services, untuned GPU) looks nothing like
@@ -172,6 +249,49 @@ check_compose_merge() {
         add_row FAIL "compose merge" "${nv} nvidia reservation(s) survived the ${BACKEND} merge — your Compose ignores \`!reset\` (fixed in ≥ 2.19); upgrade Compose"
       fi ;;
   esac
+  # BYO mode is only real if the bundled server actually dropped out of the merge.
+  # Ask compose for the service list rather than pattern-matching the JSON — the
+  # string "ollama" appears in env vars and image tags either way.
+  if [ "$OLLAMA_MODE" = "external" ]; then
+    local svcs
+    svcs="$("${envprefix[@]}" docker compose "${COMPOSE_ARGS[@]}" config --services 2>/dev/null || true)"
+    if printf '%s\n' "$svcs" | grep -qx 'ollama'; then
+      add_row FAIL "byo ollama" "bundled ollama service is still in the merge — is docker-compose.byo-ollama.yml present?"
+    else
+      add_row PASS "byo ollama" "bundled server gated off; backend will use ${OLLAMA_ENDPOINT}"
+    fi
+  fi
+}
+
+# ── BYO endpoint reachability (soft — you may start Ollama later) ───────────
+check_ollama_endpoint() {
+  [ "$OLLAMA_MODE" = "external" ] || return 0
+  # host.docker.internal resolves inside containers, not in this shell. Probing
+  # 127.0.0.1 instead tests the same listener for the common "Ollama on this
+  # machine" case — say so in the row rather than implying we tested the real name.
+  local probe="$OLLAMA_ENDPOINT" note=""
+  case "$OLLAMA_ENDPOINT" in
+    *host.docker.internal*)
+      probe="${OLLAMA_ENDPOINT/host.docker.internal/127.0.0.1}"
+      note=" (probed 127.0.0.1 from this shell; containers reach it as host.docker.internal)" ;;
+  esac
+  if ! command -v curl >/dev/null 2>&1; then
+    add_row SKIP "ollama endpoint" "curl not found — cannot probe ${OLLAMA_ENDPOINT}"
+    return 0
+  fi
+  local tags
+  tags="$(curl -s -m 6 "${probe%/}/api/tags" 2>/dev/null || true)"
+  if [ -z "$tags" ]; then
+    add_row WARN "ollama endpoint" "no answer from ${OLLAMA_ENDPOINT}${note} — start it before using chat"
+    return 0
+  fi
+  local count
+  count="$(printf '%s' "$tags" | grep -o '"name"' | wc -l | tr -d ' ')"
+  if [ "${count:-0}" -gt 0 ]; then
+    add_row PASS "ollama endpoint" "${OLLAMA_ENDPOINT} reachable, ${count} model(s)${note}"
+  else
+    add_row WARN "ollama endpoint" "${OLLAMA_ENDPOINT} reachable but has 0 models — chat will fail until you pull one${note}"
+  fi
 }
 
 # ── Host port preflight ─────────────────────────────────────────────────────
@@ -260,6 +380,25 @@ write_env() {
     fi
     printf 'COMPOSE_FILE=%s\n' "$COMPOSE_FILE" >> .env
   fi
+  # OLLAMA_URL — every Ollama call site in the stack reads it, defaulting to the
+  # bundled server. Same rewrite-only-on-change rule as COMPOSE_FILE.
+  if [ "$OLLAMA_MODE" = "external" ]; then
+    if ! grep -qxF "OLLAMA_URL=${OLLAMA_ENDPOINT}" .env; then
+      if grep -q '^OLLAMA_URL=' .env; then
+        tmp="$(mktemp)"; grep -v '^OLLAMA_URL=' .env > "$tmp"; mv "$tmp" .env
+      fi
+      printf 'OLLAMA_URL=%s\n' "$OLLAMA_ENDPOINT" >> .env
+    fi
+  else
+    # Switching back to bundled with a leftover BYO value would send every request
+    # to an endpoint that is no longer the intent — but the value may equally be
+    # something you set by hand, so say it rather than silently deleting it.
+    stale="$(grep '^OLLAMA_URL=' .env | head -1 | cut -d= -f2-)"
+    if [ -n "${stale:-}" ] && [ "$stale" != "http://ollama:11434" ]; then
+      echo "⚠ .env already sets OLLAMA_URL=${stale}, which overrides the bundled server"
+      echo "  this install just configured. Remove that line to use the bundled Ollama."
+    fi
+  fi
   ensure_env_secret JWT_SECRET "$(rand_hex 32)" "a JWT_SECRET"
   # FERNET_KEY — encrypts stored GitHub OAuth tokens. Compose defaults it to empty
   # and the backend only logs a warning, so without this GitHub sign-in fails in a
@@ -311,6 +450,15 @@ DEFAULT_OLLAMA_MODEL="${HARVIS_DEFAULT_OLLAMA_MODEL:-llama3.2:3b}"
 DEFAULT_OLLAMA_MODEL_SIZE_NOTE="~2 GB download (approx; exact size is not computed here)"
 
 offer_model_pull() {
+  # BYO: the server isn't ours to pull into, and `docker exec harvis-ollama`
+  # doesn't exist in this mode. The endpoint preflight already reported its model
+  # count, so point at the machine that owns it instead of guessing.
+  if [ "$OLLAMA_MODE" = "external" ]; then
+    echo ""
+    echo "  Models come from your own Ollama at ${OLLAMA_ENDPOINT}."
+    echo "  Pull one there, e.g.:  ollama pull ${DEFAULT_OLLAMA_MODEL}"
+    return 0
+  fi
   # Skip if Ollama already has at least one model — don't nag a working box.
   local tags count
   tags="$(curl -s -m 8 http://localhost:11434/api/tags 2>/dev/null || true)"
@@ -411,6 +559,10 @@ launch() {
     amd) echo "  Note: AMD accelerates Ollama (chat/agents); voice (TTS + Whisper STT) runs on CPU." ;;
     cpu) echo "  Note: everything runs on CPU — inference is slower and voice (TTS/STT) may lag." ;;
   esac
+  if [ "$OLLAMA_MODE" = "external" ]; then
+    echo "Ollama: your own at ${OLLAMA_ENDPOINT} (bundled server not started)"
+    echo "  The backend still uses this machine's ${BACKEND} backend for Whisper STT and TTS."
+  fi
   if [ "$NO_LAUNCH" -eq 1 ]; then
     echo ""
     echo "When ready, run:  docker compose up --build -d   (.env selects the ${BACKEND} backend)"
@@ -438,8 +590,10 @@ main() {
   fi
   detect_backend
   choose_backend
+  choose_ollama
   select_compose_files
   check_compose_merge
+  check_ollama_endpoint
   check_ports
   check_resources
   print_check_table

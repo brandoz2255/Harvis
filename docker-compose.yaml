@@ -144,7 +144,7 @@ services:
       # where Whisper + TTS + desktop fragment the small free pool. (The CUDA-OOM
       # error itself recommends this.) Harmless on the rig.
       PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
-      OLLAMA_URL: "http://ollama:11434"
+      OLLAMA_URL: "${OLLAMA_URL:-http://ollama:11434}"
       # Workspace task-detector model. Without this the resolver auto-picks the
       # LARGEST installed model (e.g. gpt-oss:20b) which can't load in 15s on the
       # 8GB GPU → detection times out → chat builds never launch. Pin a SMALL/fast
@@ -312,7 +312,7 @@ services:
       # the sidecar per Build run (local Ollama, no cloud key).
       HARVIS_OWUI_HERMES_AGENT_ENGINE: "${HARVIS_OWUI_HERMES_AGENT_ENGINE:-}"
       HARVIS_HERMES_AGENT_CONTAINER: "${HARVIS_HERMES_AGENT_CONTAINER:-harvis-hermes-agent}"
-      HARVIS_HERMES_OLLAMA_URL: "${HARVIS_HERMES_OLLAMA_URL:-http://ollama:11434/v1}"
+      HARVIS_HERMES_OLLAMA_URL: "${HARVIS_HERMES_OLLAMA_URL:-${OLLAMA_URL:-http://ollama:11434}/v1}"
       HARVIS_HERMES_AGENT_DEFAULT_MODEL: "${HARVIS_HERMES_AGENT_DEFAULT_MODEL:-qwen3:4b}"
       # Image generation v0 — gated txt2img → workspace artifact. Providers probed at the
       # ComfyUI/A1111 hostnames below; flag default OFF (honest 403 until a provider is up
@@ -484,7 +484,7 @@ services:
       NEXT_TELEMETRY_DISABLED: "1"
       JWT_SECRET: "${JWT_SECRET:?JWT_SECRET must be set in .env}"
       BACKEND_URL: "http://backend:8000"
-      OLLAMA_URL: "http://ollama:11434"
+      OLLAMA_URL: "${OLLAMA_URL:-http://ollama:11434}"
     depends_on:
       - backend
       - pgsql
@@ -593,7 +593,7 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: "postgresql://pguser:pgpassword@pgsql:5432/database"
-      OLLAMA_URL: "http://ollama:11434"
+      OLLAMA_URL: "${OLLAMA_URL:-http://ollama:11434}"
       BACKEND_URL: "http://backend:8000"
       ENVIRONMENT: "production"
       LOG_LEVEL: "INFO"
@@ -923,7 +923,7 @@ services:
       SURREAL_NAMESPACE: open_notebook
       SURREAL_DATABASE: open_notebook
       # Ollama Configuration (shared with your backend)
-      OLLAMA_API_BASE: http://ollama:11434
+      OLLAMA_API_BASE: "${OLLAMA_URL:-http://ollama:11434}"
       # API Configuration
       API_URL: http://localhost:8502
       INTERNAL_API_URL: http://localhost:5055
@@ -1163,7 +1163,7 @@ services:
       # network only (no host port); this is a local gateway bearer token, NOT a user/
       # cloud credential. Override in prod. The backend Chat connector uses the same value.
       API_SERVER_KEY: "${HARVIS_HERMES_API_SERVER_KEY:-harvis-hermes-local-dev}"
-      HARVIS_HERMES_OLLAMA_URL: "${HARVIS_HERMES_OLLAMA_URL:-http://ollama:11434/v1}"
+      HARVIS_HERMES_OLLAMA_URL: "${HARVIS_HERMES_OLLAMA_URL:-${OLLAMA_URL:-http://ollama:11434}/v1}"
       HARVIS_HERMES_AGENT_DEFAULT_MODEL: "${HARVIS_HERMES_AGENT_DEFAULT_MODEL:-qwen3:4b}"
     volumes:
       - artifact_data:/data/artifacts       # session clones (Build) — shared with the backend
