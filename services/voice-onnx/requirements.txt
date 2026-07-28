@@ -1,0 +1,13 @@
+# voice-onnx — the default Harvis speech service.
+#
+# HARD CONSTRAINT: nothing here may pull in torch, CUDA, or any GPU runtime.
+# sherpa-onnx bundles its own ONNX Runtime and covers all three jobs (ASR, VAD,
+# Kokoro TTS) in one dependency. The Dockerfile asserts the constraint at build
+# time, so adding a torch-dependent package here fails the build rather than
+# quietly shipping a multi-gigabyte "light" image.
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+numpy==2.2.1
+soundfile==0.13.0
+sherpa-onnx==1.13.4
