@@ -205,6 +205,20 @@ services:
       SSH_AUTH_SOCK: "${SSH_AUTH_SOCK:-}"
       # Automations: the cron tick loop fires scheduled agent runs when true.
       HARVIS_CRON_ENABLED: "${HARVIS_CRON_ENABLED:-true}"
+      # Speech-to-text provider (python_back_end/transcription.py). Declared here
+      # or a .env setting never reaches the container — the same forwarding trap
+      # DEEP_RESEARCH_MODEL hit. Values:
+      #   local    in-process Whisper (default; needs torch inside this image)
+      #   sidecar  any OpenAI-compatible /audio/transcriptions endpoint. Start the
+      #            bundled one with `--profile voice` and set
+      #            HARVIS_STT_URL=http://stt:8000/v1
+      #   browser  the client transcribes; the server refuses audio uploads (503)
+      #   disabled no speech input at all
+      HARVIS_STT_PROVIDER: "${HARVIS_STT_PROVIDER:-local}"
+      HARVIS_STT_URL: "${HARVIS_STT_URL:-}"
+      HARVIS_STT_MODEL: "${HARVIS_STT_MODEL:-}"
+      HARVIS_STT_API_KEY: "${HARVIS_STT_API_KEY:-}"
+      HARVIS_STT_LANGUAGE: "${HARVIS_STT_LANGUAGE:-}"
       BACKEND_URL: "http://backend:8000"
       HF_HOME: "/models-cache/huggingface"
       TRANSFORMERS_CACHE: "/models-cache/huggingface"
@@ -1033,6 +1047,46 @@ services:
       - ollama-n8n-network
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # STT Sidecar — speech-to-text off the backend process
+  # ───────────────────────────────────────────────────────────────────────────
+  # Somewhere to point HARVIS_STT_PROVIDER=sidecar. Speaches (the maintained
+  # successor to faster-whisper-server) serves the same OpenAI-compatible
+  # /v1/audio/transcriptions contract python_back_end/transcription.py speaks, so
+  # the backend needs no in-process Whisper — and therefore no torch — to accept
+  # a microphone recording.
+  #
+  # Opt-in via the `voice` profile, and no `ports:` — reachable from the backend
+  # over the compose network, not from the host. To use it:
+  #     COMPOSE_PROFILES=voice
+  #     HARVIS_STT_PROVIDER=sidecar
+  #     HARVIS_STT_URL=http://stt:8000/v1
+  # The default tag is the CPU build; on a GPU box set
+  # HARVIS_STT_IMAGE=ghcr.io/speaches-ai/speaches:latest-cuda and add the nvidia
+  # runtime + device reservation the way tts-service does above.
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  stt:
+    image: "${HARVIS_STT_IMAGE:-ghcr.io/speaches-ai/speaches:latest-cpu}"
+    container_name: harvis-stt
+    profiles: ["voice"]
+    restart: unless-stopped
+    environment:
+      # Same cache volume the backend uses, so a model downloaded by either is
+      # downloaded once.
+      HF_HOME: "/models-cache/huggingface"
+      WHISPER__TTL: "${HARVIS_STT_TTL:-300}"
+    volumes:
+      - ml-models-cache:/models-cache
+    networks:
+      - ollama-n8n-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3

@@ -104,3 +104,11 @@ weights/
 # no code imports the `ai`/`@ai-sdk/openai` packages — so `COPY . .` was baking
 # 2,250 unused files in. package.json stays tracked in case that changes.
 node_modules/
+
+# The voice-pack TTS service's source. It belongs to the `tts-service` container
+# (docker/tts-service/Dockerfile, build context = repo root, `COPY
+# python_back_end/tts_system /app/tts_system`) and nothing in the backend imports
+# it — but `COPY . .` baked it into this image anyway, engines that `import torch`
+# at module scope included. Excluding it here cannot affect the tts-service build:
+# that context is the repo root, which this file does not govern.
+tts_system/
