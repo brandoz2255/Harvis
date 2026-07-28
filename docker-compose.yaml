@@ -1108,6 +1108,12 @@ services:
       VOICE_ASR_LANGUAGE: "${VOICE_ASR_LANGUAGE:-en}"
       VOICE_NUM_THREADS: "${VOICE_NUM_THREADS:-2}"
       VOICE_API_KEY: "${VOICE_API_KEY:-}"
+      # Mirror of the Kokoro model the BROWSER loads (nginx serves it at
+      # /kokoro/), so in-tab speech survives losing internet. Syncs in the
+      # background on startup; ~120 MB for the default q8 build. Add fp32 if
+      # your users have WebGPU and you want that offline too (+325 MB).
+      VOICE_BROWSER_ASSETS: "${VOICE_BROWSER_ASSETS:-1}"
+      VOICE_BROWSER_DTYPES: "${VOICE_BROWSER_DTYPES:-q8}"
     volumes:
       # Pre-created and owned by uid 1001 in the image, so a fresh volume
       # inherits that ownership instead of coming up root-owned.

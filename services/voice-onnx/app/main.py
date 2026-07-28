@@ -17,10 +17,11 @@ import time
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
-from . import engines, models
+from . import browser_assets, engines, models
 
 logging.basicConfig(
     level=os.getenv("VOICE_LOG_LEVEL", "INFO"),
@@ -51,6 +52,37 @@ def require_key(authorization: str = Header(default="")) -> None:
 @app.exception_handler(engines.VoiceError)
 async def _voice_error(_request, exc: engines.VoiceError):
     return JSONResponse(status_code=400, content={"error": {"message": str(exc)}})
+
+
+# --------------------------------------------------------------------------- #
+# browser assets
+# --------------------------------------------------------------------------- #
+
+# Mirrored Kokoro weights + voice embeddings for the in-browser path, served
+# straight off the model volume. Mounted unauthenticated on purpose: these are
+# public model files, and the browser's own fetch (inside a Web Worker) cannot
+# carry the service key. The mount is created even when syncing is disabled so
+# the path 404s honestly instead of not existing.
+browser_assets.ROOT.mkdir(parents=True, exist_ok=True)
+app.mount("/browser", StaticFiles(directory=str(browser_assets.ROOT)), name="browser")
+
+
+@app.on_event("startup")
+def _sync_browser_assets() -> None:
+    browser_assets.sync_in_background()
+
+
+@app.get("/v1/browser/manifest", tags=["audio"])
+def browser_manifest() -> dict:
+    """What the in-browser path can load locally. `complete: false` means the
+    client should keep its remote fallback."""
+    return browser_assets.manifest()
+
+
+@app.post("/v1/browser/sync", tags=["audio"])
+async def browser_sync(force: bool = False, _: None = Depends(require_key)) -> dict:
+    """Re-run the mirror now (first install, or after adding a dtype)."""
+    return await run_in_threadpool(browser_assets.sync, force)
 
 
 # --------------------------------------------------------------------------- #
