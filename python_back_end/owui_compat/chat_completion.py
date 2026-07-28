@@ -229,7 +229,7 @@ def _extract_urls(text: str) -> list[str]:
 
 
 def _whisper_text(res) -> str:
-    """transcribe_with_whisper_optimized returns a dict ({'text': ...}) or a str."""
+    """transcription.transcribe returns a dict ({'text': ...}); tolerate a str."""
     if isinstance(res, dict):
         return str(res.get("text") or "").strip()
     return str(res or "").strip()
@@ -279,9 +279,9 @@ async def _inject_media(request, owui_body: dict, user_id: int | None = None) ->
                     continue
                 transcript = _transcript_cache.get(str(fid))
                 if transcript is None:
-                    from model_manager import transcribe_with_whisper_optimized
+                    from transcription import transcribe as transcribe_audio
 
-                    res = await asyncio.to_thread(transcribe_with_whisper_optimized, row["path"])
+                    res = await asyncio.to_thread(transcribe_audio, row["path"])
                     transcript = _whisper_text(res)
                     if len(transcript) > _MAX_MEDIA_CHARS:
                         transcript = transcript[:_MAX_MEDIA_CHARS] + "\n…[truncated]"

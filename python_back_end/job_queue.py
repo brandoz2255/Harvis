@@ -498,7 +498,7 @@ async def process_whisper_job(job: Job):
     """
     Process Whisper transcription job
     """
-    from model_manager import transcribe_with_whisper_optimized
+    from transcription import TranscriptionUnavailable, transcribe
 
     data = job.data
     audio_path = data.get("audio_path")
@@ -510,7 +510,10 @@ async def process_whisper_job(job: Job):
         if not audio_path or not os.path.exists(audio_path):
             raise Exception(f"Audio file not found: {audio_path}")
 
-        text = transcribe_with_whisper_optimized(audio_path)
+        # transcribe() returns {"text", "segments", "language"}. This used to
+        # assign the whole dict to "text", so the job result nested a dict where
+        # clients expected a string and the length log counted dict keys.
+        text = (transcribe(audio_path) or {}).get("text", "")
 
         result = {
             "status": "completed",
@@ -524,6 +527,11 @@ async def process_whisper_job(job: Job):
         logger.info(f"✅ Whisper job {job.id} completed. Text length: {len(text)}")
         await job.done(result)
 
+    except TranscriptionUnavailable as e:
+        # Not a failure of this job — this server does not transcribe with the
+        # configured provider. Say so plainly so the client stops retrying.
+        logger.warning(f"🎤 Whisper job {job.id} unavailable: {e}")
+        await job.fail(str(e))
     except Exception as e:
         logger.error(f"❌ Whisper job {job.id} failed: {e}")
         await job.fail(str(e))

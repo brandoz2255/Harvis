@@ -16,7 +16,8 @@ from typing import List, Dict, Any, Optional
 import logging
 
 from .core import get_vibe_agent, execute_vibe_coding_with_model_management
-from model_manager import transcribe_with_whisper_optimized, generate_speech_optimized, reload_models_if_needed
+from model_manager import generate_speech_optimized, reload_models_if_needed
+from transcription import TranscriptionUnavailable, transcribe as transcribe_audio
 
 logger = logging.getLogger(__name__)
 
@@ -162,15 +163,19 @@ async def voice_transcribe(file: UploadFile = File(...), model: str = DEFAULT_MO
         with open(tmp_path, "wb") as f:
             f.write(contents)
         
-        # Use VRAM-optimized transcription
-        result = transcribe_with_whisper_optimized(tmp_path)
-        transcription = result.get("text", "").strip()
-        
+        # Whichever provider HARVIS_STT_PROVIDER selects; `local` is the
+        # VRAM-optimized in-process Whisper this used to call directly.
+        result = transcribe_audio(tmp_path)
+        transcription = (result or {}).get("text", "").strip()
+
         # Clean up temp file
         os.remove(tmp_path)
-        
+
         logger.info(f"🎤 Voice transcribed for vibe coding: {transcription}")
         return {"transcription": transcription, "model_used": "whisper-base"}
+    except TranscriptionUnavailable as e:
+        logger.warning("🎤 Voice transcription unavailable: %s", e)
+        raise HTTPException(503, str(e)) from e
     except Exception as e:
         logger.error("Voice transcription failed: %s", e)
         raise HTTPException(500, str(e)) from e

@@ -117,7 +117,6 @@ artifact_build_manager = None
 
 from pydantic import BaseModel
 import torch, soundfile as sf
-import whisper  # Import Whisper
 
 # ─── Authentication Setup ──────────────────────────────────────────────────────
 SECRET_KEY = os.getenv("JWT_SECRET", "key")
@@ -366,7 +365,6 @@ from model_manager import (
     get_whisper_model,
     generate_speech,
     wait_for_vram,
-    transcribe_with_whisper_optimized,
     generate_speech_optimized,
     generate_speech_unified,
     unload_tts_model,
@@ -379,6 +377,12 @@ from model_manager import (
     get_active_tts_engine,
     get_available_tts_engines,
 )
+
+# Speech-to-text goes through the provider client, not model_manager directly, so
+# HARVIS_STT_PROVIDER can point these routes at a sidecar or at the browser
+# without touching them. Default is `local`, i.e. the in-process Whisper this
+# used to call.
+from transcription import TranscriptionUnavailable, transcribe as transcribe_audio
 
 
 # TTS Helper Function with graceful error handling
@@ -2029,7 +2033,7 @@ async def run_stt_with_heartbeats(audio_path: str):
     loop = asyncio.get_event_loop()
 
     def stt_task():
-        return transcribe_with_whisper_optimized(audio_path)
+        return transcribe_audio(audio_path)
 
     future = loop.run_in_executor(executor, stt_task)
 
@@ -5384,9 +5388,14 @@ async def owui_audio_transcriptions(
         with open(tmp_path, "wb") as f:
             f.write(contents)
         logger.info("🎤 OWUI STT: %s (%d bytes) → %s", file.filename, len(contents), tmp_path)
-        result = await run_in_threadpool(transcribe_with_whisper_optimized, tmp_path)
+        result = await run_in_threadpool(transcribe_audio, tmp_path)
         text = (result or {}).get("text", "") if isinstance(result, dict) else str(result or "")
         return {"text": text.strip()}
+    except TranscriptionUnavailable as e:
+        # The server was never going to transcribe this — a provider setting, not
+        # a fault. 503 with the message, so the client can say something useful.
+        logger.warning("🎤 OWUI STT unavailable: %s", e)
+        raise HTTPException(503, str(e))
     except Exception as e:
         logger.error("❌ OWUI STT failed: %s", e)
         raise HTTPException(500, f"Transcription failed: {e}")
@@ -6233,6 +6242,14 @@ async def mic_chat(
 
             text = transcription_result.get("text", "").strip()
             logger.info(f"🎤 Transcription complete: {text[:100]}...")
+        except TranscriptionUnavailable as e:
+            # A provider setting, not a fault — 503 so the UI can tell the user
+            # to use browser speech input instead of showing a server error.
+            logger.warning(f"🎤 MIC-CHAT transcription unavailable: {e}")
+            return JSONResponse(
+                status_code=503,
+                content={"status": "error", "error": str(e)},
+            )
         except Exception as e:
             logger.error(f"Transcription failed: {e}")
             return JSONResponse(
