@@ -1077,12 +1077,23 @@ services:
     profiles: ["voice"]
     restart: unless-stopped
     environment:
-      # Same cache volume the backend uses, so a model downloaded by either is
-      # downloaded once.
-      HF_HOME: "/models-cache/huggingface"
       WHISPER__TTL: "${HARVIS_STT_TTL:-300}"
     volumes:
-      - ml-models-cache:/models-cache
+      # Its OWN cache, mounted at the image's default HF cache path.
+      #
+      # Two things force this. (1) It can't share ml-models-cache: this image
+      # runs as uid 1000 (ubuntu) while the rest of the stack runs as 1001
+      # (appuser), so the shared volume is read-only to it — it comes up healthy
+      # and then fails on the first transcription, when it tries to download a
+      # model. (2) The mount point must already exist in the image, because
+      # Docker copies ownership into a fresh named volume only from a directory
+      # that's there; mounting at an invented path like /models-cache gets a
+      # root-owned volume and the same permission failure.
+      #
+      # Nothing is lost by splitting: the backend's Whisper models are
+      # openai-whisper .pt files under ~/.cache/whisper, a different format from
+      # the CTranslate2/HF snapshots this service fetches.
+      - stt-cache:/home/ubuntu/.cache/huggingface
     networks:
       - ollama-n8n-network
     healthcheck:
@@ -1292,6 +1303,7 @@ volumes:
   ollama-models:
   pgsql_data:
   ml-models-cache:
+  stt-cache:            # `voice` profile: the STT sidecar's HF cache (uid 1000, not 1001)
   embedding-data:
   artifact_data:
   surrealdb_data:
