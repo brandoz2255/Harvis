@@ -390,7 +390,16 @@ from model_manager import (
 # HARVIS_STT_PROVIDER can point these routes at a sidecar or at the browser
 # without touching them. Default is `local`, i.e. the in-process Whisper this
 # used to call.
-from transcription import TranscriptionUnavailable, transcribe as transcribe_audio
+from transcription import (
+    TranscriptionUnavailable,
+    status as transcription_status,
+    transcribe as transcribe_audio,
+)
+# Aliased `tts_synthesize`, not `synthesize_speech`: main.py already defines a
+# route handler by that name further down, and a module-level def silently wins
+# over an import at call time.
+from synthesis import SynthesisUnavailable, synthesize as tts_synthesize
+import synthesis
 
 
 # TTS Helper Function with graceful error handling
@@ -5340,24 +5349,30 @@ async def owui_audio_config(current_user: UserResponse = Depends(get_current_use
     """OWUI reads this to decide STT/TTS routing. Server-side engines (empty
     OPENAI_API_BASE_URL = same-origin) so the UI calls our endpoints, not the
     browser Web Speech API."""
+    tts_status = synthesis.status()
+    stt_status = transcription_status()
     return {
         "tts": {
             "OPENAI_API_BASE_URL": "",
             "OPENAI_API_KEY": "",
             "API_KEY": "",
             "ENGINE": "",
-            "MODEL": os.getenv("HARVIS_TTS_ENGINE", "qwen"),
-            "VOICE": "alloy",
+            "MODEL": tts_status.get("model") or tts_status.get("engine") or "",
+            "VOICE": tts_status.get("voice", synthesis.DEFAULT_VOICE),
             "SPLIT_ON": "punctuation",
         },
         "stt": {
             "OPENAI_API_BASE_URL": "",
             "OPENAI_API_KEY": "",
             "ENGINE": "",
-            "MODEL": "whisper-1",
+            "MODEL": stt_status.get("model") or "whisper-1",
             "WHISPER_MODEL": os.getenv("WHISPER_MODEL", "base"),
             "SUPPORTED_CONTENT_TYPES": ["audio/*"],
         },
+        # Harvis-specific: which side of the wire does the work. The client reads
+        # these to keep browser Kokoro as the playback path when the server isn't
+        # synthesizing, instead of calling an endpoint that will 503.
+        "harvis": {"tts": tts_status, "stt": stt_status},
     }
 
 
@@ -5418,8 +5433,12 @@ async def owui_audio_transcriptions(
 async def owui_audio_speech(
     request: Request, current_user: UserResponse = Depends(get_current_user)
 ):
-    """OWUI TTS: {input, voice, model?} → Harvis TTS → audio/wav bytes (the OpenAI
-    /audio/speech contract — raw audio in the response body)."""
+    """OWUI TTS: {input, voice, model?, speed?} → audio bytes (the OpenAI
+    /audio/speech contract — raw audio in the response body).
+
+    Which engine actually speaks is `synthesis.py`'s call: in-process Piper/Qwen
+    on a voice-pack build, the ONNX voice sidecar when HARVIS_TTS_PROVIDER=
+    sidecar, or an honest refusal when the browser owns playback."""
     try:
         body = await request.json()
     except Exception:
@@ -5427,57 +5446,60 @@ async def owui_audio_speech(
     text = (body.get("input") or "").strip()
     if not text:
         raise HTTPException(400, "Missing 'input' text")
-    # Default to Piper (fast CPU, no VRAM). Override per-request with model=… or
-    # globally with HARVIS_TTS_ENGINE=qwen for the neural voice on a big GPU.
-    engine = body.get("model") or os.getenv("HARVIS_TTS_ENGINE", "piper")
 
-    # Piper: real-time CPU TTS (~0.1s/sentence, ZERO VRAM). The default for voice
-    # on VRAM-constrained boxes — neural qwen TTS needs ~3-5GB GPU which the 8GB
-    # laptop can't spare (it OOM-falls-back to CPU at 15-40s/sentence). Set
-    # HARVIS_TTS_ENGINE=piper (or pass model="piper"). Falls through to qwen if
-    # piper is unavailable so it degrades gracefully.
-    if engine == "piper":
-        from owui_compat.piper_tts import piper_synthesize_wav, piper_available
-        if piper_available():
-            audio_bytes = await run_in_threadpool(piper_synthesize_wav, text)
-            if audio_bytes:
-                return Response(content=audio_bytes, media_type="audio/wav")
-            logger.warning("Piper returned no audio; falling back to %s",
-                           os.getenv("HARVIS_TTS_FALLBACK", "qwen"))
-        else:
-            logger.warning("Piper unavailable; falling back to qwen TTS")
-        engine = os.getenv("HARVIS_TTS_FALLBACK", "qwen")
+    speed = body.get("speed")
+    try:
+        speed = float(speed) if speed is not None else None
+    except (TypeError, ValueError):
+        speed = None
 
-    def _synth():
-        # auto_unload=False keeps the TTS model WARM between sentences. A voice
-        # reply is split into many sentences, each its own /speech call; with the
-        # default auto_unload=True the model reloads on CPU every sentence (this
-        # box's RTX 5070 sm_120 isn't CUDA-compatible with the installed torch),
-        # making playback crawl and the overlay's audio queue spin. Warm = load
-        # once, fast thereafter.
-        sr, wav = safe_generate_speech_optimized(
-            text=text, tts_engine=engine, auto_unload=False
+    try:
+        audio_bytes, mime = await run_in_threadpool(
+            tts_synthesize,
+            text,
+            body.get("voice"),
+            speed,
+            body.get("response_format"),
+            body.get("model"),
         )
-        if sr is None or wav is None:
-            return None
-        buf = io.BytesIO()
-        sf.write(buf, wav, sr, format="WAV")
-        return buf.getvalue()
-
-    audio_bytes = await run_in_threadpool(_synth)
-    if not audio_bytes:
-        raise HTTPException(503, "TTS unavailable")
-    return Response(content=audio_bytes, media_type="audio/wav")
+    except SynthesisUnavailable as e:
+        # The server was never going to speak this — a provider setting, not a
+        # fault. 503 with the message so the client can fall back to its own
+        # Kokoro rather than showing an error.
+        logger.warning("🔊 TTS unavailable: %s", e)
+        raise HTTPException(503, str(e))
+    except Exception as e:
+        logger.error("❌ TTS failed: %s", e)
+        raise HTTPException(500, f"Speech synthesis failed: {e}")
+    return Response(content=audio_bytes, media_type=mime)
 
 
 @app.get("/api/v1/audio/models", tags=["audio"])
 async def owui_audio_models(current_user: UserResponse = Depends(get_current_user)):
-    return {"models": [{"id": "qwen", "name": "Qwen TTS"}, {"id": "chatterbox", "name": "Chatterbox"}]}
+    """TTS engines this server can actually reach, not a fixed list."""
+    info = synthesis.status()
+    if info["provider"] == synthesis.SIDECAR:
+        model = info.get("model") or "voice-onnx"
+        return {"models": [{"id": model, "name": "ONNX voice service"}]}
+    if info["provider"] == synthesis.LOCAL:
+        models = [{"id": "piper", "name": "Piper (CPU)"}]
+        fallback = info.get("fallback")
+        if fallback and fallback != "piper":
+            models.append({"id": fallback, "name": f"{fallback.title()} TTS"})
+        return {"models": models}
+    return {"models": []}
 
 
 @app.get("/api/v1/audio/voices", tags=["audio"])
 async def owui_audio_voices(current_user: UserResponse = Depends(get_current_user)):
-    return {"voices": [{"id": "alloy", "name": "Alloy"}]}
+    """Voices the configured provider offers. A voice list the server can't
+    honour is worse than an empty one — the picker would offer names that
+    silently fall back to something else."""
+    try:
+        return {"voices": await run_in_threadpool(synthesis.voices)}
+    except SynthesisUnavailable as e:
+        logger.warning("🔊 voice list unavailable: %s", e)
+        return {"voices": [], "detail": str(e)}
 
 
 # ════════════════════════════════════════════════════════════════════════════
