@@ -13,6 +13,9 @@
 image-comfy/
 image-models/
 
+# Database dumps — 50 MB of real chat/session data, referenced by no Dockerfile.
+embedding/
+
 # Dependencies are installed inside the image; never ship the host's copies.
 **/node_modules/
 
