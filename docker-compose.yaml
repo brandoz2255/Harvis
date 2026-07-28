@@ -129,10 +129,19 @@ services:
 
   # Python FastAPI Backend
   backend:
-    runtime: nvidia
+    # Dockerfile.core, not Dockerfile: python:3.12-slim instead of the 12.1 GB
+    # pytorch/cuda base — 2.42 GB instead of 15.4 GB. The API never needed torch.
+    # model_manager.py guards `import torch` behind a null-object shim and main.py
+    # imports torch *from* it, so every torch.cuda.* call still resolves. The heavy
+    # engines are separate services now (voice-onnx by default, tts-service under
+    # --profile advanced-voice).
+    #
+    # `runtime: nvidia` went with it. It failed every fresh install on a host
+    # without the NVIDIA container runtime, for a container that no longer holds
+    # a line of CUDA code.
     build:
       context: ./python_back_end
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.core
     container_name: harvis-backend
     restart: unless-stopped
     group_add:
@@ -1014,9 +1023,13 @@ services:
 
   # MCP bridge for Cursor / VS Code integration
   harvis-mcp:
+    # Same context and same args as `backend`, so this resolves to the SAME image
+    # on disk under a second name — not a second 2.42 GB copy. Leaving this one on
+    # the torch Dockerfile is what made a CPU install (17.8 GB) end up LARGER than
+    # a GPU install (15.4 GB shared).
     build:
       context: ./python_back_end
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.core
     container_name: harvis-mcp
     restart: unless-stopped
     entrypoint: ["uvicorn", "mcp.server.app:app", "--host", "0.0.0.0", "--port", "8010"]
