@@ -1,0 +1,102 @@
+# Harvis backend — CORE.
+#
+# Everything the backend needs to serve chat, RAG, research, documents,
+# workspaces and the API surface. Deliberately free of the torch stack: with
+# these packages alone `import main` succeeds and every GPU path degrades to a
+# no-op (model_manager's null-torch shim) rather than an ImportError.
+#
+# In-process speech (Whisper STT, neural/Piper TTS) lives in
+# requirements-voice.txt. A core-only deploy does speech in the browser or
+# through the `stt` sidecar (HARVIS_STT_PROVIDER=sidecar).
+#
+# Nothing here may pull torch. If a `pip install -r requirements-core.txt` ever
+# lands torch in site-packages, a new dependency dragged it in — find it rather
+# than accepting it.
+
+# Core dependencies - numpy must be first for other packages
+numpy #==1.26.0
+setuptools
+wheel
+Cython
+sympy==1.13.1
+
+# Core FastAPI and web dependencies
+fastapi
+uvicorn[standard]
+websockets
+python-multipart
+asyncpg
+passlib[bcrypt]==1.7.4
+python-jose[cryptography]==3.3.0
+bcrypt==4.0.1
+cryptography>=41.0.0
+requests
+pydantic
+Pillow
+
+# Audio I/O only — reading/writing wav/ogg. libsndfile bindings, no ML.
+# main.py imports this at module scope.
+soundfile
+tavily-python
+
+# Job queue for background processing (TTS, Whisper, etc.)
+# Using arq for Python async job queue (similar to pg-boss but for Python)
+arq>=0.26.0
+redis>=5.0.0
+
+langchain
+langchain-community
+langchain-openai
+langchain-postgres
+langchain-text-splitters
+ddgs
+beautifulsoup4
+markdown
+brotli
+newspaper3k
+pytest
+pytest-asyncio
+pytest-mock
+pytest-cov
+httpx
+discord.py>=2.3.0
+responses
+lxml_html_clean
+python-dotenv
+google-generativeai
+psycopg2-binary
+psycopg[binary]>=3.1.0
+psycopg-pool>=3.1.0
+pgvector>=0.2.0
+docker>=7.0.0
+defusedxml>=0.7.0
+
+# Advanced research system dependencies
+requests-cache>=1.0.0
+trafilatura>=1.6.0
+rank-bm25>=0.2.2
+
+youtube-transcript-api>=0.6.0
+yt-dlp>=2024.0.0
+pypdf>=3.0.0
+python-magic>=0.4.27
+python-docx
+
+# Open Notebook integration dependencies
+langgraph>=0.2.0
+jinja2>=3.1.0
+pydub>=0.25.1
+
+# Optional: Multi-provider AI support
+openai>=1.0.0
+anthropic>=0.18.0
+
+# Document generation for artifacts
+openpyxl>=3.1.0
+python-pptx>=0.6.21
+weasyprint>=60.0
+reportlab>=4.0.0
+
+# PDF/DOCX to image conversion for vision models
+PyMuPDF>=1.23.0
+croniter

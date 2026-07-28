@@ -31,15 +31,19 @@ RUN groupadd -g 999 docker || true && \
 ############################
 # Python deps (as root, then switch to appuser)
 ############################
-COPY requirements.txt .
+COPY requirements.txt requirements-core.txt requirements-voice.txt ./
 
 # Build tooling for any requirement that has no prebuilt wheel for this
 # platform. Cython stays: several source dists in requirements.txt need it.
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel Cython
 
 # Build wheels for the rest (excluding torch/torchvision/torchaudio and numpy to prevent conflicts)
-# PyTorch is already installed in base image, so skip it
-RUN grep -v "^torch" requirements.txt | grep -v "^numpy" > requirements_no_torch_numpy.txt \
+# PyTorch is already installed in base image, so skip it.
+# The two halves are concatenated rather than read through requirements.txt's
+# `-r` lines: the greps below have to see the real package names to strip them,
+# and an `-r` include would hide torch from them.
+RUN cat requirements-core.txt requirements-voice.txt \
+  | grep -v "^torch" | grep -v "^numpy" > requirements_no_torch_numpy.txt \
   && pip wheel --no-cache-dir -r requirements_no_torch_numpy.txt -w /wheels
 
 # NOTE: pkuseg is deliberately NOT built here. It was a prerequisite of

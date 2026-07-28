@@ -1,0 +1,43 @@
+# Harvis backend — VOICE PACK (in-process speech + the torch stack it needs).
+#
+# Everything here is optional. Install it when the backend itself should run
+# Whisper and the TTS engines; leave it out and the backend still boots, chats,
+# does RAG and research, and speech happens in the browser or in the `stt`
+# sidecar (`docker compose --profile voice`, HARVIS_STT_PROVIDER=sidecar).
+#
+# Each entry is here because it pulls or needs torch:
+#   torch/torchaudio    the stack itself
+#   openai-whisper      in-process STT (HARVIS_STT_PROVIDER=local)
+#   qwen-tts            neural TTS engine (HARVIS_TTS_ENGINE=qwen)
+#   piper-tts           CPU TTS engine + its onnxruntime
+#   llama-cpp-python    GGUF TTS models
+#   accelerate          device placement for the above
+#   sentence-transformers
+#                       only consumer is enhanced_vector_optimizer, which is
+#                       itself only imported by the unreachable n8n chain. Kept
+#                       out of core because nothing reachable needs it; delete
+#                       this line the day that chain goes.
+
+# torch 2.8.0 + CUDA 12.8 = sm_120 (RTX 50-series/Blackwell) support. Provided by
+# the GPU base image (these pins are stripped before wheel-building); kept in sync.
+torch==2.8.0
+torchaudio==2.8.0
+accelerate #==0.34.0
+
+# STT
+openai-whisper
+
+# TTS engines
+# Piper — real-time CPU TTS (ONNX, no VRAM). Default voice engine; the neural
+# qwen TTS needs ~3-5GB GPU the 8GB laptop can't spare. Voice model (~60MB) lives
+# in the persisted /models-cache/piper/ volume (download in the Dockerfile or once
+# at runtime). HARVIS_TTS_ENGINE=qwen switches back to neural on a big-GPU box.
+piper-tts
+onnxruntime
+# chatterbox-tts  # REMOVED: conflicts with transformers>=0.27.0 required by qwen3
+qwen-tts
+
+# TTS - llama.cpp for GGUF models (lightweight ~1GB)
+llama-cpp-python
+
+sentence-transformers
