@@ -209,9 +209,10 @@ services:
       # or a .env setting never reaches the container — the same forwarding trap
       # DEEP_RESEARCH_MODEL hit. Values:
       #   local    in-process Whisper (default; needs torch inside this image)
-      #   sidecar  any OpenAI-compatible /audio/transcriptions endpoint. Start the
-      #            bundled one with `--profile voice` and set
-      #            HARVIS_STT_URL=http://stt:8000/v1
+      #   sidecar  any OpenAI-compatible /audio/transcriptions endpoint. Start
+      #            one with `--profile voice` and point at it:
+      #            HARVIS_STT_URL=http://voice-onnx:8000/v1   (default, ONNX)
+      #            HARVIS_STT_URL=http://stt:8000/v1          (speaches fallback)
       #   browser  the client transcribes; the server refuses audio uploads (503)
       #   disabled no speech input at all
       HARVIS_STT_PROVIDER: "${HARVIS_STT_PROVIDER:-local}"
@@ -1053,8 +1054,70 @@ services:
       start_period: 60s
 
   # ═══════════════════════════════════════════════════════════════════════════
-  # STT Sidecar — speech-to-text off the backend process
+  # voice-onnx — the DEFAULT speech service for a voice-first install
   # ───────────────────────────────────────────────────────────────────────────
+  # Local speech recognition, voice activity detection and Kokoro synthesis, all
+  # on ONNX Runtime through sherpa-onnx. No PyTorch, no CUDA — the image asserts
+  # that at build time. This is what makes a voice-capable Harvis fit on a
+  # laptop: ~1 GB of image against the 15.4 GB GPU backend.
+  #
+  # Built here rather than pulled: the alternative was an unvetted community
+  # image, and this one is small enough to own.
+  #
+  #     COMPOSE_PROFILES=voice
+  #     HARVIS_STT_PROVIDER=sidecar
+  #     HARVIS_STT_URL=http://voice-onnx:8000/v1
+  #
+  # Models are NOT in the image. On first use it downloads whisper-tiny.en,
+  # silero VAD and Kokoro v1.0 (~630 MB total) into the voice-models volume,
+  # where they survive rebuilds. Set VOICE_ASR_MODEL / VOICE_TTS_MODEL to pick
+  # different bundles; `docker compose run --rm voice-onnx download-models`
+  # fetches them ahead of the first request.
+  #
+  # No `ports:` — reachable from the backend over the compose network only.
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  voice-onnx:
+    build:
+      context: ./services/voice-onnx
+      dockerfile: Dockerfile
+    image: harvis-voice-onnx:local
+    pull_policy: build
+    container_name: harvis-voice-onnx
+    profiles: ["voice"]
+    restart: unless-stopped
+    environment:
+      VOICE_ASR_MODEL: "${VOICE_ASR_MODEL:-whisper-tiny.en}"
+      VOICE_TTS_MODEL: "${VOICE_TTS_MODEL:-kokoro-v1.0}"
+      VOICE_TTS_VOICE: "${VOICE_TTS_VOICE:-af_heart}"
+      VOICE_ASR_LANGUAGE: "${VOICE_ASR_LANGUAGE:-en}"
+      VOICE_NUM_THREADS: "${VOICE_NUM_THREADS:-2}"
+      VOICE_API_KEY: "${VOICE_API_KEY:-}"
+    volumes:
+      # Pre-created and owned by uid 1001 in the image, so a fresh volume
+      # inherits that ownership instead of coming up root-owned.
+      - voice-models:/models
+    networks:
+      - ollama-n8n-network
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # STT Sidecar — speech-to-text off the backend process (FALLBACK)
+  # ───────────────────────────────────────────────────────────────────────────
+  # Kept alongside voice-onnx while the ONNX path is being proven: it is the
+  # reference the benchmark measures against, and the way back if ONNX falls
+  # short. Once ONNX passes the acceptance tests this moves to its own profile
+  # so the `voice` preset stops pulling a second, larger STT image.
+  #
   # Somewhere to point HARVIS_STT_PROVIDER=sidecar. Speaches (the maintained
   # successor to faster-whisper-server) serves the same OpenAI-compatible
   # /v1/audio/transcriptions contract python_back_end/transcription.py speaks, so
@@ -1304,6 +1367,7 @@ volumes:
   pgsql_data:
   ml-models-cache:
   stt-cache:            # `voice` profile: the STT sidecar's HF cache (uid 1000, not 1001)
+  voice-models:         # `voice` profile: voice-onnx's ASR/VAD/Kokoro bundles (uid 1001)
   embedding-data:
   artifact_data:
   surrealdb_data:
