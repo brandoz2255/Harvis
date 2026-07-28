@@ -1,0 +1,124 @@
+# Harvis backend — CORE image (no torch, no CUDA).
+#
+# Same application, same entrypoint, same port as the default `Dockerfile`. The
+# only difference is what is inside: this one installs requirements-core.txt on
+# a plain Debian/Python base instead of installing requirements.txt on the
+# 6-GB-plus pytorch/CUDA base.
+#
+# What it can't do: run Whisper or the TTS engines *in this process*. Speech
+# happens in the browser (Kokoro/WebSpeech) or in the `stt` sidecar
+# (`docker compose --profile voice`, HARVIS_STT_PROVIDER=sidecar). Everything
+# else — chat, RAG, research, documents, workspaces, the whole API surface —
+# is unchanged: main.py imports the null-torch shim from model_manager, so the
+# GPU bookkeeping degrades to a no-op instead of an ImportError.
+#
+# Build:
+#   docker build -t harvis-backend:core -f python_back_end/Dockerfile.core python_back_end
+# Run (CPU stack):
+#   docker compose -f docker-compose.yaml -f docker-compose.cpu.yml up -d backend
+
+# ---------- Builder: compile any source wheels ----------
+FROM python:3.12-slim AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  build-essential curl \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY requirements-core.txt ./
+
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel Cython
+
+# Only the core half. If a `pip wheel` here ever drags torch in, a new
+# dependency added it — find it rather than accepting it (the assertion in the
+# runtime stage below is what catches that).
+RUN pip wheel --no-cache-dir -r requirements-core.txt -w /wheels
+
+# ---------- Runtime ----------
+FROM python:3.12-slim
+
+# ffmpeg           media ingest (pydub, yt-dlp, audio conversion)
+# tesseract-ocr    OCR in the document pipeline
+# libmagic1        python-magic
+# libsndfile1      soundfile (main.py imports it at module scope)
+# libpango/harfbuzz weasyprint's text shaping — PDF artifacts fail without it
+# libglib/libgomp  transitive loaders for the above
+# curl             the compose healthcheck
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  ffmpeg tesseract-ocr tesseract-ocr-eng \
+  libmagic1 libsndfile1 \
+  libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz0b libglib2.0-0 libgomp1 \
+  fonts-dejavu-core curl \
+  && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+
+# Bind-mounted rather than COPYed so the wheels never become an image layer
+# (the same reasoning as the GPU Dockerfile: layers are additive, so a later
+# `rm -rf /wheels` would reclaim nothing).
+RUN --mount=type=bind,from=builder,source=/wheels,target=/wheels \
+  pip install --no-cache-dir --no-index --find-links=/wheels /wheels/* \
+  && pip cache purge
+
+# The contract of this image, asserted at build time rather than trusted: if a
+# dependency ever pulls the torch stack back in, the build fails here instead
+# of quietly shipping a 6 GB "core" image.
+RUN python -c "\
+import importlib.util, sys; \
+bad = [m for m in ('torch', 'nvidia', 'triton') if importlib.util.find_spec(m)]; \
+sys.exit('CORE IMAGE CONTRACT VIOLATED — found: %s' % bad) if bad else print('core image is torch-free')"
+
+# git for clone-local repo isolation + openssh-client for the SSH target
+# registry (the governed probe/exec path shells out to the system ssh binary).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  git openssh-client \
+  && rm -rf /var/lib/apt/lists/*
+
+# Docker CLI for vibecoding container management — the client binary ONLY. It
+# talks to the HOST daemon over the bind-mounted socket, so none of the daemon
+# package's ~190 MB of binaries are needed. Pinned to the host daemon's version.
+ARG DOCKER_CLI_VERSION=29.5.2
+RUN curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_CLI_VERSION}.tgz" \
+  | tar -xzC /tmp docker/docker \
+  && mv /tmp/docker/docker /usr/bin/docker \
+  && rm -rf /tmp/docker \
+  && docker --version
+
+RUN useradd -m -u 1001 -s /bin/bash appuser \
+  && groupadd -g 999 dockerhost || true \
+  && usermod -aG 999 appuser || true
+
+WORKDIR /app
+COPY . .
+
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
+RUN mkdir -p /home/appuser/.cache/huggingface \
+  && chown -R appuser:appuser /home/appuser/.cache /app
+
+# Phase 4 SSH state dir (per-user known_hosts + temp keys, 0700). Pre-created
+# owned by appuser(1001) so a fresh `ssh_state` named volume mounted here
+# inherits that ownership.
+RUN mkdir -p /data/ssh_state \
+  && chown -R appuser:appuser /data/ssh_state \
+  && chmod 700 /data/ssh_state
+
+# Same treatment for the artifact store. main.py constructs ArtifactStorage() at
+# module scope (main.py:113 → artifacts/storage.py:39 os.makedirs), so if
+# /data/artifacts is root-owned the process dies on import — which is exactly
+# what a FRESH `artifact_data` volume gives you, since Docker only copies
+# ownership from the image when the mount point already exists there.
+RUN mkdir -p /data/artifacts \
+  && chown -R appuser:appuser /data/artifacts
+
+USER appuser
+
+ENV PYTHONPATH=/app \
+  HOME=/home/appuser \
+  HARVIS_STT_PROVIDER=browser
+
+EXPOSE 8000
+
+ENTRYPOINT ["/app/entrypoint.sh"]
+CMD ["app"]

@@ -33,10 +33,23 @@ services:
         reservations:
           devices: !reset []
 
-  # Only blocker was the compose-level nvidia runtime; the image itself is
-  # CPU-bootable (all torch device picks are cuda-guarded, model loads are lazy).
+  # On a CPU box the pytorch/CUDA base image buys nothing — it just costs ~6 GB
+  # of GPU runtime that can never run. Dockerfile.core is the same application
+  # on python:3.12-slim with requirements-core.txt only; it asserts at build
+  # time that no torch/CUDA package made it in.
+  #
+  # The trade: no in-process Whisper or TTS. Speech goes to the browser by
+  # default, or to the `stt` sidecar (`--profile voice`,
+  # HARVIS_STT_PROVIDER=sidecar). The mic route answers 503 with an explanation
+  # rather than failing, so nothing else in the stack changes.
   backend:
     runtime: runc
+    build:
+      dockerfile: Dockerfile.core
+    environment:
+      # `local` (the base default) means in-process Whisper, which this image
+      # deliberately does not carry.
+      HARVIS_STT_PROVIDER: "${HARVIS_STT_PROVIDER:-browser}"
 
   tts-service:
     environment:
