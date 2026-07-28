@@ -101,9 +101,16 @@ export const synthesizeOpenAISpeech = async (
 	token: string = '',
 	speaker: string = 'alloy',
 	text: string = '',
-	model?: string
+	model?: string,
+	speed?: number
 ) => {
 	let error = null;
+
+	// Speed is rendered by the engine rather than applied as playbackRate on the
+	// audio element: resampling finished audio changes pitch, synthesizing at the
+	// requested rate doesn't. Clamped to the range the server accepts so a stray
+	// 0 in the settings box comes back as speech, not a 422.
+	const rate = speed === undefined ? undefined : Math.min(4, Math.max(0.25, speed));
 
 	const res = await fetch(`${AUDIO_API_BASE_URL}/speech`, {
 		method: 'POST',
@@ -114,7 +121,8 @@ export const synthesizeOpenAISpeech = async (
 		body: JSON.stringify({
 			input: text,
 			voice: speaker,
-			...(model && { model })
+			...(model && { model }),
+			...(rate !== undefined && { speed: rate })
 		})
 	})
 		.then(async (res) => {

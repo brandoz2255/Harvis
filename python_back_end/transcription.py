@@ -91,7 +91,18 @@ def status() -> Dict[str, Any]:
     return info
 
 
-def _transcribe_local(audio_path: str, auto_unload: bool = True) -> Dict[str, Any]:
+def _language(override: Optional[str] = None) -> str:
+    """Per-request language wins over the server default; blank means detect.
+
+    The UI's "preferred STT language" is a per-user setting, so it has to be
+    able to override HARVIS_STT_LANGUAGE rather than only fill in for it.
+    """
+    return (override or os.getenv("HARVIS_STT_LANGUAGE") or "").strip()
+
+
+def _transcribe_local(
+    audio_path: str, auto_unload: bool = True, language: Optional[str] = None
+) -> Dict[str, Any]:
     # Imported here rather than at module scope so a build without torch can
     # still import this module and serve the sidecar/browser providers. The
     # failure is named and only reachable when `local` is actually selected.
@@ -114,7 +125,22 @@ def _transcribe_local(audio_path: str, auto_unload: bool = True) -> Dict[str, An
             "HARVIS_STT_URL, use browser speech recognition, or install the voice pack."
         )
 
-    result = transcribe_with_whisper_optimized(audio_path, auto_unload=auto_unload)
+    lang = _language(language)
+    kwargs: Dict[str, Any] = {"auto_unload": auto_unload}
+    if lang:
+        # Asked rather than assumed: the in-process helper's signature has grown
+        # before, and passing a keyword it doesn't take would turn a language
+        # preference into a TypeError on every local transcription.
+        import inspect
+
+        if "language" in inspect.signature(transcribe_with_whisper_optimized).parameters:
+            kwargs["language"] = lang
+        else:
+            logger.info(
+                "STT language %r ignored: in-process Whisper here auto-detects", lang
+            )
+
+    result = transcribe_with_whisper_optimized(audio_path, **kwargs)
     # The system-whisper fallback path returns a bare {"text": ...}; normalise
     # so callers can always read segments/language without a .get() dance.
     return {
@@ -124,7 +150,9 @@ def _transcribe_local(audio_path: str, auto_unload: bool = True) -> Dict[str, An
     }
 
 
-def _transcribe_sidecar(audio_path: str, timeout: int = 300) -> Dict[str, Any]:
+def _transcribe_sidecar(
+    audio_path: str, timeout: int = 300, language: Optional[str] = None
+) -> Dict[str, Any]:
     base = _sidecar_base()
     if not base:
         raise TranscriptionUnavailable(
@@ -133,13 +161,13 @@ def _transcribe_sidecar(audio_path: str, timeout: int = 300) -> Dict[str, Any]:
         )
 
     model = os.getenv("HARVIS_STT_MODEL") or DEFAULT_SIDECAR_MODEL
-    language = (os.getenv("HARVIS_STT_LANGUAGE") or "").strip()
+    lang = _language(language)
     api_key = (os.getenv("HARVIS_STT_API_KEY") or "").strip()
 
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     data = {"model": model, "response_format": "verbose_json"}
-    if language:
-        data["language"] = language
+    if lang:
+        data["language"] = lang
 
     url = f"{base}/audio/transcriptions"
     logger.info("🎤 Transcribing via STT sidecar %s (model=%s)", url, model)
@@ -183,8 +211,13 @@ def _transcribe_sidecar(audio_path: str, timeout: int = 300) -> Dict[str, Any]:
     }
 
 
-def transcribe(audio_path: str, auto_unload: bool = True) -> Dict[str, Any]:
+def transcribe(
+    audio_path: str, auto_unload: bool = True, language: Optional[str] = None
+) -> Dict[str, Any]:
     """Transcribe a file with whichever provider is configured.
+
+    `language` is an ISO-639-1 code from the caller (the user's own preference);
+    blank or None falls back to HARVIS_STT_LANGUAGE, and then to auto-detect.
 
     Raises TranscriptionUnavailable when the server is not the one doing the
     transcribing (browser/disabled) or the provider is misconfigured. Real
@@ -202,5 +235,5 @@ def transcribe(audio_path: str, auto_unload: bool = True) -> Dict[str, Any]:
             "(HARVIS_STT_PROVIDER=browser); send the transcript, not the audio."
         )
     if provider == SIDECAR:
-        return _transcribe_sidecar(audio_path)
-    return _transcribe_local(audio_path, auto_unload=auto_unload)
+        return _transcribe_sidecar(audio_path, language=language)
+    return _transcribe_local(audio_path, auto_unload=auto_unload, language=language)

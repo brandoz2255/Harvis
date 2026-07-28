@@ -225,7 +225,13 @@ def _pick(root: Path, pattern: str) -> Path:
 
 
 def get_recognizer(model: str | None = None, language: str | None = None) -> Recognizer:
-    bundle = models.pick_asr(model)
+    # A model name we don't have is the caller's mistake, not ours: a bare
+    # KeyError here escaped as a 500, which reads as "the voice service is
+    # broken" instead of "that model id isn't one of these four".
+    try:
+        bundle = models.pick_asr(model)
+    except KeyError as e:
+        raise VoiceError(str(e.args[0] if e.args else e)) from e
     lang = (language or os.getenv("VOICE_ASR_LANGUAGE", "en") or "en").lower()
     if bundle.languages and lang not in bundle.languages:
         raise VoiceError(
@@ -305,7 +311,10 @@ class Synthesizer:
 
 
 def get_synthesizer(model: str | None = None) -> Synthesizer:
-    bundle = models.pick_tts(model)
+    try:
+        bundle = models.pick_tts(model)  # 400, not 500 — see get_recognizer
+    except KeyError as e:
+        raise VoiceError(str(e.args[0] if e.args else e)) from e
     if bundle.name in _tts_cache:
         return _tts_cache[bundle.name]
     with _load_lock:

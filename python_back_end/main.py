@@ -5401,7 +5401,11 @@ async def owui_audio_transcriptions(
     current_user: UserResponse = Depends(get_current_user),
 ):
     """OWUI STT: multipart audio → Harvis Whisper → {text}. Mirrors /api/mic-chat's
-    save-then-transcribe, minus the LLM/TTS legs (OWUI just wants the transcript)."""
+    save-then-transcribe, minus the LLM/TTS legs (OWUI just wants the transcript).
+
+    `language` is the caller's own preference (Settings → Audio) and overrides the
+    server default. It used to be accepted and silently dropped, which made the
+    setting look effective while every request still auto-detected."""
     contents = await file.read()
     _, ext = os.path.splitext(file.filename or "")
     if not ext:
@@ -5411,7 +5415,9 @@ async def owui_audio_transcriptions(
         with open(tmp_path, "wb") as f:
             f.write(contents)
         logger.info("🎤 OWUI STT: %s (%d bytes) → %s", file.filename, len(contents), tmp_path)
-        result = await run_in_threadpool(transcribe_audio, tmp_path)
+        result = await run_in_threadpool(
+            transcribe_audio, tmp_path, True, (language or "").strip() or None
+        )
         text = (result or {}).get("text", "") if isinstance(result, dict) else str(result or "")
         return {"text": text.strip()}
     except TranscriptionUnavailable as e:

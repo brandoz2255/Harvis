@@ -242,15 +242,30 @@ def is_present(bundle: Bundle) -> bool:
     return bundle.path.exists()
 
 
+# This service speaks the OpenAI audio API, and OpenAI clients send OpenAI model
+# ids — `whisper-1` is what every stock client (including Harvis's own sidecar
+# provider, whose default it is) puts in the form. Treating those as "whichever
+# model this service is configured for" is what makes the API actually
+# compatible; rejecting them made a default install 500 on its first upload.
+_GENERIC = {"", "default", "auto"}
+_ASR_ALIASES = _GENERIC | {"whisper-1", "whisper"}
+_TTS_ALIASES = _GENERIC | {"tts-1", "tts-1-hd", "kokoro"}
+
+
+def _resolve(name: str | None, aliases: set[str], env: str, fallback: str) -> str:
+    key = (name or "").strip()
+    return os.getenv(env, fallback) if key.lower() in aliases else key
+
+
 def pick_asr(name: str | None = None) -> Bundle:
-    key = name or os.getenv("VOICE_ASR_MODEL", "whisper-tiny.en")
+    key = _resolve(name, _ASR_ALIASES, "VOICE_ASR_MODEL", "whisper-tiny.en")
     if key not in ASR_BUNDLES:
         raise KeyError(f"unknown ASR model {key!r}; have {sorted(ASR_BUNDLES)}")
     return ASR_BUNDLES[key]
 
 
 def pick_tts(name: str | None = None) -> Bundle:
-    key = name or os.getenv("VOICE_TTS_MODEL", "kokoro-v1.0")
+    key = _resolve(name, _TTS_ALIASES, "VOICE_TTS_MODEL", "kokoro-v1.0")
     if key not in TTS_BUNDLES:
         raise KeyError(f"unknown TTS model {key!r}; have {sorted(TTS_BUNDLES)}")
     return TTS_BUNDLES[key]

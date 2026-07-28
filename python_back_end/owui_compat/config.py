@@ -26,6 +26,48 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _audio_config() -> dict:
+    """Voice state as it actually is, not as it was hardcoded.
+
+    A NON-EMPTY ``tts.engine`` is what makes the client's TTS path (the "sound"
+    button, the CallOverlay) synthesize at all — its branch is gated on
+    ``config.audio.tts.engine !== ''`` — so it stays "openai" even when the
+    server refuses to speak, because browser Kokoro lives on the same branch.
+    What must not stay hardcoded is ``voice``: it is the default the client
+    sends when the user hasn't picked one, and "alloy" is an OpenAI name no
+    local engine has. ``harvis`` carries the provider truth so the settings UI
+    can say which side of the wire speaks, without a second round-trip.
+
+    Imported lazily and defensively: /api/config is boot-critical for the whole
+    frontend, and a voice module that fails to import must not take the app down
+    with it.
+    """
+    tts: dict = {}
+    stt: dict = {}
+    try:
+        import synthesis
+
+        tts = synthesis.status()
+    except Exception:  # noqa: BLE001 - see docstring
+        pass
+    try:
+        import transcription
+
+        stt = transcription.status()
+    except Exception:  # noqa: BLE001
+        pass
+
+    return {
+        "tts": {
+            "engine": "openai",
+            "voice": tts.get("voice") or os.getenv("HARVIS_TTS_VOICE") or "af_heart",
+            "split_on": "punctuation",
+        },
+        "stt": {"engine": "openai"},
+        "harvis": {"tts": tts, "stt": stt},
+    }
+
+
 def build_config(onboarding: bool = False) -> dict:
     """Build the static-ish config dict OWUI reads at boot.
 
@@ -110,19 +152,7 @@ def build_config(onboarding: bool = False) -> dict:
             "enable_onedrive_integration": False,
         },
         "oauth": {"providers": {}},
-        # Voice (S4): a NON-EMPTY tts.engine is what makes the CallOverlay (the
-        # "sound" button) actually synthesize + play audio — its TTS branch is
-        # gated on `config.audio.tts.engine !== ''`. "openai" = the OpenAI-shaped
-        # server contract, which the facade serves at /api/v1/audio/speech (→
-        # Harvis TTS). STT in the overlay calls /api/v1/audio/transcriptions
-        # directly (not engine-gated). `voice` feeds getVoiceId().
-        "audio": {
-            "tts": {
-                "engine": "openai",
-                "voice": "alloy",
-                "split_on": "punctuation",
-            },
-            "stt": {"engine": "openai"},
-        },
+        # Voice (S4/V5): live provider state — see _audio_config().
+        "audio": _audio_config(),
         "ui": {},
     }

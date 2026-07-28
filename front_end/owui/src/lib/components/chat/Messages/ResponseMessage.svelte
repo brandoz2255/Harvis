@@ -265,8 +265,14 @@
 				}
 			}, 100);
 		} else {
+			// One user-facing speed, applied where it sounds best: the server
+			// renders at that rate (no pitch shift), the browser path resamples
+			// playback. Applying both would compound them.
+			const speed = $settings.audio?.tts?.playbackRate ?? 1;
+			const serverSpeaks = $settings.audio?.tts?.engine !== 'browser-kokoro';
+
 			$audioQueue.setId(`${message.id}`);
-			$audioQueue.setPlaybackRate($settings.audio?.tts?.playbackRate ?? 1);
+			$audioQueue.setPlaybackRate(serverSpeaks ? 1 : speed);
 			$audioQueue.onStopped = () => {
 				speaking = false;
 				speakingIdx = undefined;
@@ -322,14 +328,18 @@
 				for (const [, sentence] of messageContentParts.entries()) {
 					if (signal.aborted) return;
 
-					const res = await synthesizeOpenAISpeech(localStorage.token, voiceId, sentence).catch(
-						(error) => {
-							console.error(error);
-							toast.error(`${error}`);
-							speaking = false;
-							loadingSpeech = false;
-						}
-					);
+					const res = await synthesizeOpenAISpeech(
+						localStorage.token,
+						voiceId,
+						sentence,
+						undefined,
+						speed
+					).catch((error) => {
+						console.error(error);
+						toast.error(`${error}`);
+						speaking = false;
+						loadingSpeech = false;
+					});
 
 					if (signal.aborted) return;
 

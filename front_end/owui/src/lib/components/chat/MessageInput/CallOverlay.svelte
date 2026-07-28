@@ -464,7 +464,12 @@
 					// SHARED #audioElement muted if play()/unmute was interrupted —
 					// silently killing both the overlay voice AND message Read-Aloud.
 					audioElement.muted = false;
-					audioElement.playbackRate = $settings.audio?.tts?.playbackRate ?? 1;
+					// Server-rendered audio already came back at the requested speed
+					// (see fetchAudio) — resampling it again would compound the two.
+					audioElement.playbackRate =
+						$settings.audio?.tts?.engine === 'browser-kokoro'
+							? ($settings.audio?.tts?.playbackRate ?? 1)
+							: 1;
 
 					audioElement.play().catch((error) => {
 						console.error(error);
@@ -534,12 +539,16 @@
 						audioCache.set(content, new Audio(url));
 					}
 				} else if ($config.audio.tts.engine !== '') {
-					const res = await synthesizeOpenAISpeech(localStorage.token, getVoiceId(), content).catch(
-						(error) => {
-							console.error(error);
-							return null;
-						}
-					);
+					const res = await synthesizeOpenAISpeech(
+						localStorage.token,
+						getVoiceId(),
+						content,
+						undefined,
+						$settings.audio?.tts?.playbackRate ?? 1
+					).catch((error) => {
+						console.error(error);
+						return null;
+					});
 
 					if (res) {
 						const blob = await res.blob();

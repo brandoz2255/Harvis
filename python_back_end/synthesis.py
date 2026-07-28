@@ -117,8 +117,21 @@ def status() -> Dict[str, Any]:
 # local
 # --------------------------------------------------------------------------- #
 
-def _synthesize_local(text: str, engine: Optional[str] = None) -> Tuple[bytes, str]:
-    engine = engine or os.getenv("HARVIS_TTS_ENGINE", "piper")
+def _synthesize_local(
+    text: str, engine: Optional[str] = None, speed: Optional[float] = None
+) -> Tuple[bytes, str]:
+    """Speak `text` in-process.
+
+    `speed` is the per-user setting. Piper renders it (so the voice speeds up
+    without shifting pitch); the neural fallback has no such knob, and says so
+    in the log rather than accepting the value and ignoring it.
+    """
+    # This endpoint speaks the OpenAI contract, where the field is a *model* id,
+    # so stock clients send "tts-1". Treating those as "whichever engine this
+    # server runs" is what makes it compatible — taking them literally sent
+    # every such request down the neural fallback with a nonsense engine name.
+    if (engine or "").strip().lower() in {"", "default", "auto", "tts-1", "tts-1-hd"}:
+        engine = os.getenv("HARVIS_TTS_ENGINE", "piper")
 
     # Piper: real-time CPU TTS, zero VRAM. The default on VRAM-constrained
     # boxes — the neural engine needs 3-5 GB of GPU and OOM-falls-back to CPU at
@@ -130,7 +143,7 @@ def _synthesize_local(text: str, engine: Optional[str] = None) -> Tuple[bytes, s
             logger.warning("Piper unavailable (%s); falling back", e)
         else:
             if piper_available():
-                audio = piper_synthesize_wav(text)
+                audio = piper_synthesize_wav(text, speed=speed)
                 if audio:
                     return audio, _MIME["wav"]
                 logger.warning("Piper returned no audio; falling back")
@@ -152,6 +165,12 @@ def _synthesize_local(text: str, engine: Optional[str] = None) -> Tuple[bytes, s
             "HARVIS_TTS_PROVIDER=sidecar with HARVIS_TTS_URL, or install the "
             "voice pack."
         ) from e
+
+    if speed is not None and abs(float(speed) - 1.0) > 1e-6:
+        logger.info(
+            "TTS speed %.2f ignored: in-process engine %r renders at 1.0x only",
+            float(speed), engine,
+        )
 
     # auto_unload=False keeps the model warm: a spoken reply is split into many
     # sentences, each its own call, and reloading per sentence makes playback
@@ -289,7 +308,7 @@ def synthesize(
         )
     if provider == SIDECAR:
         return _synthesize_sidecar(text, voice=voice, speed=speed, fmt=fmt)
-    return _synthesize_local(text, engine=engine)
+    return _synthesize_local(text, engine=engine, speed=speed)
 
 
 def voices() -> List[Dict[str, Any]]:
