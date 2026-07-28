@@ -17,6 +17,8 @@
  * with no route to it.
  */
 
+import { env } from '@huggingface/transformers';
+
 let installed = false;
 let fellBack = false;
 
@@ -46,6 +48,14 @@ const toMirrorUrl = (url: string): string | null => {
 export const installKokoroMirror = (timeoutMs = 20000) => {
 	if (installed) return;
 	installed = true;
+
+	// ONNX Runtime's WASM runtime is a second download, separate from the model,
+	// and transformers.js pulls it from cdn.jsdelivr.net unless pointed elsewhere.
+	// It arrives as an ES module import, so the fetch shim below cannot catch it —
+	// this assignment is the only lever. Harvis ships the same files at /wasm/.
+	if (env.backends?.onnx?.wasm) {
+		env.backends.onnx.wasm.wasmPaths = '/wasm/';
+	}
 
 	const originalFetch = globalThis.fetch.bind(globalThis);
 

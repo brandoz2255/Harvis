@@ -1,17 +1,13 @@
-import { env } from '@huggingface/transformers';
 import { KokoroTTS } from 'kokoro-js';
 
 import { installKokoroMirror } from '$lib/utils/kokoro-mirror';
-
-// TODO: Below doesn't work as expected, need to investigate further
-env.backends.onnx.wasm.wasmPaths = '/wasm/';
 
 let tts;
 let isInitialized = false; // Flag to track initialization status
 const DEFAULT_MODEL_ID = 'onnx-community/Kokoro-82M-v1.0-ONNX'; // Default model
 
-// Serve the weights from Harvis's own origin. Shared with the Audio settings
-// panel, which loads the same model on the main thread.
+// Serve the weights and the ONNX Runtime WASM from Harvis's own origin. Shared
+// with the Audio settings panel, which loads the same model on the main thread.
 installKokoroMirror();
 
 self.onmessage = async (event) => {

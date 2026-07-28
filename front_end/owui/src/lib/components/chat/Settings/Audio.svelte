@@ -31,7 +31,7 @@
 	let TTSModel = null;
 	let TTSModelProgress = null;
 	let TTSModelLoading = false;
-	let TTSModelError = null;
+	let TTSModelError: string | null = null;
 	// Whether any weight came from huggingface.co instead of Harvis's own mirror.
 	// Worth saying out loud: it means this browser reached the public internet.
 	let TTSModelFellBack = false;
