@@ -4,6 +4,7 @@
 
 	import { user, settings, config } from '$lib/stores';
 	import { getVoices as _getVoices, getAudioConfig } from '$lib/apis/audio';
+	import { installKokoroMirror, didFallBackToHuggingFace } from '$lib/utils/kokoro-mirror';
 
 	import Switch from '$lib/components/common/Switch.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';
@@ -30,6 +31,10 @@
 	let TTSModel = null;
 	let TTSModelProgress = null;
 	let TTSModelLoading = false;
+	let TTSModelError = null;
+	// Whether any weight came from huggingface.co instead of Harvis's own mirror.
+	// Worth saying out loud: it means this browser reached the public internet.
+	let TTSModelFellBack = false;
 
 	let voices = [];
 	let voice = '';
@@ -43,6 +48,12 @@
 	// turning it on is one edit once that service ships.
 	const ADVANCED_VOICE_ENABLED = false;
 	let voiceMode = 'natural';
+
+	// Harvis mirrors one Kokoro weight locally — the quantized one, which is what
+	// dtype `q8` resolves to (onnx/model_quantized.onnx). Every other dtype names
+	// a file that only exists on huggingface.co, so choosing one is choosing to
+	// download ~300 MB from the public internet.
+	const MIRRORED_DTYPE = 'q8';
 
 	// Which side of the wire actually does the work, straight from the server's
 	// providers rather than assumed from the OWUI engine strings.
@@ -153,6 +164,13 @@
 
 	const onTTSEngineChange = async () => {
 		if (TTSEngine === 'browser-kokoro') {
+			// Picking the engine with no dtype set used to fall straight through
+			// loadKokoro's guard and leave a spinner up that was loading nothing.
+			// q8 is the weight Harvis mirrors locally, so it is the one that works
+			// with no internet — see MIRRORED_DTYPE.
+			if (!TTSEngineConfig?.dtype) {
+				TTSEngineConfig = { ...TTSEngineConfig, dtype: MIRRORED_DTYPE };
+			}
 			await loadKokoro();
 		}
 	};
@@ -174,19 +192,39 @@
 			if (TTSEngineConfig?.dtype) {
 				TTSModel = null;
 				TTSModelProgress = null;
+				TTSModelError = null;
 				TTSModelLoading = true;
+				TTSModelFellBack = false;
 
 				const model_id = 'onnx-community/Kokoro-82M-v1.0-ONNX';
 
-				const { KokoroTTS } = await import('kokoro-js');
-				TTSModel = await KokoroTTS.from_pretrained(model_id, {
-					dtype: TTSEngineConfig.dtype, // Options: "fp32", "fp16", "q8", "q4", "q4f16"
-					device: !!navigator?.gpu ? 'webgpu' : 'wasm', // Detect WebGPU
-					progress_callback: (e) => {
-						TTSModelProgress = e;
-						console.log(e);
-					}
-				});
+				// The shim used to live only inside the TTS worker, so this path —
+				// the one the settings picker uses — fetched the weights straight
+				// from huggingface.co even though Harvis mirrors them locally.
+				installKokoroMirror();
+
+				try {
+					const { KokoroTTS } = await import('kokoro-js');
+					TTSModel = await KokoroTTS.from_pretrained(model_id, {
+						dtype: TTSEngineConfig.dtype, // Options: "fp32", "fp16", "q8", "q4", "q4f16"
+						device: !!navigator?.gpu ? 'webgpu' : 'wasm', // Detect WebGPU
+						progress_callback: (e) => {
+							TTSModelProgress = e;
+						}
+					});
+					TTSModelFellBack = didFallBackToHuggingFace();
+				} catch (error) {
+					// A failed load used to leave the spinner up indefinitely,
+					// because the template read "no model yet" as "still working".
+					TTSModel = null;
+					TTSModelError = `${error}`;
+					toast.error(
+						$i18n.t('Could not load Kokoro.js: {{error}}', { error: TTSModelError })
+					);
+					return;
+				} finally {
+					TTSModelLoading = false;
+				}
 
 				await getVoices();
 
@@ -385,13 +423,21 @@
 							placeholder={$i18n.t('Select dtype')}
 						>
 							<option value="" disabled selected>{$i18n.t('Select dtype')}</option>
-							<option value="fp32">fp32</option>
-							<option value="fp16">fp16</option>
-							<option value="q8">q8</option>
-							<option value="q4">q4</option>
+							<option value="q8">q8 {$i18n.t('(included, works offline)')}</option>
+							<option value="fp32">fp32 {$i18n.t('(downloads ~300MB)')}</option>
+							<option value="fp16">fp16 {$i18n.t('(downloads ~160MB)')}</option>
+							<option value="q4">q4 {$i18n.t('(downloads ~90MB)')}</option>
 						</select>
 					</div>
 				</SettingRow>
+
+				{#if TTSEngineConfig?.dtype && TTSEngineConfig.dtype !== MIRRORED_DTYPE}
+					<div class="text-xs text-amber-600 dark:text-amber-500 -mt-1 mb-1">
+						{$i18n.t(
+							'Only q8 is included with Harvis. Other precisions are downloaded from huggingface.co, so this needs internet access.'
+						)}
+					</div>
+				{/if}
 			{/if}
 
 			<SettingRow>
@@ -459,8 +505,16 @@
 							</datalist>
 						</div>
 					</div>
+
+					{#if TTSModelFellBack}
+						<div class="mt-2 text-xs text-amber-600 dark:text-amber-500">
+							{$i18n.t(
+								'Loaded from huggingface.co — this browser reached the public internet because the local copy was unavailable. Start the voice service to keep it offline.'
+							)}
+						</div>
+					{/if}
 				</div>
-			{:else}
+			{:else if TTSModelLoading}
 				<div>
 					<div class=" mb-2.5 text-sm font-medium flex gap-2 items-center">
 						<Spinner className="size-4" />
@@ -476,6 +530,28 @@
 					<div class="text-xs text-gray-500">
 						{$i18n.t('Please do not close the settings page while loading the model.')}
 					</div>
+				</div>
+			{:else}
+				<!-- Not loading and no model: the load failed, or never started because
+				     no dtype is picked. Both used to render as an endless spinner. -->
+				<div>
+					<div class="mb-1 text-sm font-medium text-red-600 dark:text-red-400">
+						{TTSModelError
+							? $i18n.t('Kokoro.js could not be loaded.')
+							: $i18n.t('Select a dtype above to load Kokoro.js.')}
+					</div>
+
+					{#if TTSModelError}
+						<div class="text-xs text-gray-500 mb-2">{TTSModelError}</div>
+
+						<button
+							class="text-xs px-3 py-1.5 rounded-lg bg-gray-100 dark:bg-gray-850 hover:bg-gray-200 dark:hover:bg-gray-800 transition"
+							type="button"
+							on:click={loadKokoro}
+						>
+							{$i18n.t('Retry')}
+						</button>
+					{/if}
 				</div>
 			{/if}
 		{:else if !serverSpeaks}
