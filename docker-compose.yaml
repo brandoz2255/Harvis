@@ -392,6 +392,18 @@ services:
       - ./python_back_end/remote:/app/remote:ro
       - ./python_back_end/cookbook:/app/cookbook:ro
       - ./python_back_end/deep_research:/app/deep_research:ro
+      # The last seven direct imports of main.py that were still coming from the
+      # image. The rule three comments up was written but never finished, and the
+      # drift it warns about was real: commit 3c8616b2 (2026-07-19) added the
+      # server-side require_admin gate to rag_corpus, the image was built
+      # 2026-07-17, so the gate was committed but never running here.
+      - ./python_back_end/artifacts:/app/artifacts:ro
+      - ./python_back_end/auth_optimized.py:/app/auth_optimized.py:ro
+      - ./python_back_end/chat_history_module:/app/chat_history_module:ro
+      - ./python_back_end/file_processing.py:/app/file_processing.py:ro
+      - ./python_back_end/gemini_api.py:/app/gemini_api.py:ro
+      - ./python_back_end/job_queue.py:/app/job_queue.py:ro
+      - ./python_back_end/rag_corpus:/app/rag_corpus:ro
       - artifact_data:/data/artifacts
       - openclaw-projects:/data/openclaw-projects
       # Phase 4 SSH state — per-user pinned known_hosts (0700) + ephemeral 0600
