@@ -151,6 +151,14 @@ RUN mkdir -p /data/ssh_state \
   && chown -R appuser:appuser /data/ssh_state \
   && chmod 700 /data/ssh_state
 
+# Same treatment for the artifact store. main.py constructs ArtifactStorage() at
+# module scope (main.py:113 → artifacts/storage.py:39 os.makedirs), so a fresh
+# root-owned /data/artifacts kills the process on import. This box's volume is
+# already appuser-owned from an earlier run, which is why the gap has stayed
+# invisible here; a genuinely fresh install hits it.
+RUN mkdir -p /data/artifacts \
+  && chown -R appuser:appuser /data/artifacts
+
 # Switch to non-root user
 USER appuser
 
