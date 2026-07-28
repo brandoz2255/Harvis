@@ -5,13 +5,22 @@ import psycopg2.extras
 from pgvector.psycopg2 import register_vector
 import numpy as np
 from typing import Dict, Any, List, Optional, Tuple
-from sentence_transformers import SentenceTransformer
 from dataclasses import dataclass
 import hashlib
 import re
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# sentence-transformers is a torch package: importing it at module scope made this
+# file — and anything that imports it — unloadable in a build without torch. It is
+# only ever touched when someone constructs EnhancedVectorOptimizer, so the import
+# moved into the constructor and the failure is named there instead.
+SENTENCE_TRANSFORMERS_MISSING = (
+    "EnhancedVectorOptimizer needs sentence-transformers (a torch package), which "
+    "is not installed in this build. Install the voice/ML pack, or use the "
+    "embedding service the rest of the RAG stack uses."
+)
 
 @dataclass
 class VectorSearchConfig:
@@ -30,6 +39,11 @@ class EnhancedVectorOptimizer:
                  embedding_model: str = "all-MiniLM-L6-v2",
                  table_name: str = "n8n_automations"):
         
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError as e:
+            raise RuntimeError(SENTENCE_TRANSFORMERS_MISSING) from e
+
         self.conn = psycopg2.connect(db_conn_string)
         register_vector(self.conn)
         self.embedder = SentenceTransformer(embedding_model)
