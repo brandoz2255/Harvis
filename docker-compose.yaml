@@ -368,6 +368,7 @@ services:
       # time rather than at boot. Mount whatever main.py imports directly.
       - ./python_back_end/agent_research.py:/app/agent_research.py:ro
       - ./python_back_end/model_manager.py:/app/model_manager.py:ro
+      - ./python_back_end/transcription.py:/app/transcription.py:ro
       # main.py imports vison_models.llm_connector, so by the rule above this
       # belongs here. It was the one direct import left unmounted, and the gap
       # is not theoretical: renaming query_qwen -> query_vision deployed the new
