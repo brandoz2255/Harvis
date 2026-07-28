@@ -116,7 +116,15 @@ artifact_storage = ArtifactStorage()
 artifact_build_manager = None
 
 from pydantic import BaseModel
-import torch, soundfile as sf
+import soundfile as sf
+
+# The entrypoint importing torch at module scope is what made a torch-free
+# backend impossible: nothing else mattered while `import main` needed it.
+# model_manager already resolves this to the real torch when it is installed and
+# to a null object that answers `cuda.is_available() == False` when it is not, so
+# every `torch.cuda.*` call below keeps working either way — the GPU bookkeeping
+# just becomes a no-op instead of an ImportError.
+from model_manager import torch
 
 # ─── Authentication Setup ──────────────────────────────────────────────────────
 SECRET_KEY = os.getenv("JWT_SECRET", "key")
