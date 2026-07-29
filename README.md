@@ -35,36 +35,43 @@ Copy the example env files, then create a top-level `.env` for the values `docke
 ```
 See `docker-compose.yaml` for the full list of variables.
 
-## 3.  **Choose your backend & run — `./install.sh`:**
-Run the installer and pick your inference backend. It writes the right compose selection
-(`COMPOSE_FILE`) and a generated `JWT_SECRET` into `.env`, ensures the docker network exists, and
-can launch the whole stack:
+## 3.  **Run — `./install.sh`:**
+There is nothing to choose. Harvis ships the workspace — UI, API, routing, auth, ONNX speech,
+embeddings — and needs **no GPU of its own**, so the old nvidia/amd/cpu question is gone. The
+installer looks for a model server you already run, generates the secrets `.env` needs, creates the
+docker network, and launches the stack:
 
 ```bash
-    ./install.sh                        # interactive — detects your GPU and asks
-    # or non-interactive:
-    ./install.sh --backend cpu --yes    # nvidia | amd | cpu
+    ./install.sh          # detects a local model server, then installs
+    ./install.sh --yes    # same, non-interactive
 ```
 
-| Backend | Requires | Accelerates | Notes |
-|---|---|---|---|
-| **nvidia** (default) | NVIDIA GPU + nvidia-container-toolkit | everything | fastest |
-| **amd** | ROCm-supported AMD GPU · `/dev/kfd`+`/dev/dri` · user in `video`+`render` groups | **Ollama only** | voice (TTS/STT) runs on CPU; some cards need `HSA_OVERRIDE_GFX_VERSION` in `.env` |
-| **cpu** | nothing | — | runs anywhere, slower; voice on CPU |
+It probes this machine for an OpenAI-compatible server and uses the first one it finds:
 
-**Apple Silicon (M-series):** Docker on macOS can't reach the Mac GPU — pick **cpu**. For Metal
-acceleration, run **Ollama natively** on the Mac and set `OLLAMA_URL=http://host.docker.internal:11434`.
+| Port | Server |
+|---|---|
+| 11434 | Ollama |
+| 1234 | LM Studio |
+| 8080 | llama.cpp |
+| 8000 | vLLM |
+
+Point it somewhere else with `./install.sh --llm-url http://host.docker.internal:11434` — note that
+`localhost` inside a container means *the container*, so use `host.docker.internal` or a LAN IP for a
+server on your own machine. Found or not, the stack starts either way: with no server running, Harvis
+comes up and reports that no model provider is connected, and you can attach one from Settings later.
+
+**Apple Silicon (M-series):** Docker on macOS can't reach the Mac GPU, so run **Ollama natively** for
+Metal acceleration — the installer will find it on 11434 like any other host server.
 
 <details><summary>Manual / advanced (skip the installer)</summary>
 
 ```bash
-    docker network create ollama-n8n-network                                        # once (external network)
-    docker compose up --build -d                                                     # NVIDIA (default)
-    docker compose -f docker-compose.yaml -f docker-compose.cpu.yml up --build -d    # CPU
-    docker compose -f docker-compose.yaml -f docker-compose.amd.yml up --build -d    # AMD / ROCm
+    docker network create ollama-n8n-network    # once (external network)
+    docker compose up --build -d
 ```
-`JWT_SECRET` must be set in `.env` for any of these. Only the main `docker-compose.yaml` is
-multi-backend — the secondary `docker-compose.prebuilt.yml` / `-with-services.yaml` stacks are NVIDIA-only.
+`JWT_SECRET` must be set in `.env` for this to start. Set `HARVIS_LLM_BASE_URL` to your model
+server; every service resolves against it, falling back to `OLLAMA_URL` and then to
+`http://host.docker.internal:11434`.
 </details>
 
 ## 4.  **Access the application:**

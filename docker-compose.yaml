@@ -7,59 +7,25 @@ version: "3.9"
 name: harvis
 
 services:
-  # Ollama LLM Service
-  ollama:
-    image: ollama/ollama:latest
-    runtime: nvidia
-    container_name: harvis-ollama
-    restart: unless-stopped
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama-models:/root/.ollama
-    environment:
-      # OpenClaw's system prompt + tool schemas + config files total ~13K
-      # tokens.  Hash/decode skill hints pushed the full prompt to ~20K,
-      # which silently truncated at the old 16384 limit — cutting the
-      # hash_hint that makes the model use cracker.py.  24576 fits the
-      # 20K prompt + ~4.5K generation headroom and adds only ~640 MiB of
-      # q8_0 KV cache (safe on 8GB GPU with OLLAMA_KV_CACHE_TYPE=q8_0).
-      # The /v1/chat/completions OAI-compat endpoint does NOT forward
-      # per-request options.num_ctx, so this env var is the actual lever.
-      OLLAMA_CONTEXT_LENGTH: "24576"
-      # Keep models loaded indefinitely between turns. Prefix-cache hits
-      # on the stable ~13k brief prefix drop second-turn prefill to near
-      # zero. -1 = never unload (until the container restarts). With
-      # OLLAMA_MAX_LOADED_MODELS=1 this means a single hot model.
-      OLLAMA_KEEP_ALIVE: "-1"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-        limits:
-          memory: 30G
-    networks:
-      - ollama-n8n-network
-      - openclaw-internal
-    healthcheck:
-      test: ["CMD", "ollama", "list"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 15s
-
   # Cookbook hardware scanner for the MAIN HOST. llmfit scans this box's
   # GPU/CPU/RAM and serves a fit-ranked model DB that the backend's
-  # /api/cookbook/* proxies. GPU-passthrough (same pattern as ollama) so it
-  # detects the real card instead of CPU-only. Subhosts (e.g. the rig) run
-  # their own `llmfit serve`; this container is the "main-host" cookbook node
-  # (reached by the backend as http://llmfit:8787 on the shared network).
+  # /api/cookbook/* proxies. GPU-passthrough so it detects the real card
+  # instead of CPU-only. Subhosts (e.g. the rig) run their own `llmfit serve`;
+  # this container is the "main-host" cookbook node (reached by the backend as
+  # http://llmfit:8787 on the shared network).
+  #
+  # Profiled, not default: `runtime: nvidia` makes this the one service that
+  # cannot start on a host without the NVIDIA container runtime, and after the
+  # bundled Ollama left it was the last such service in the default set. Its
+  # whole job — "which model fits my GPU" — belongs to the local-model-management
+  # workflow that went with it. /api/cookbook/* reports the node offline rather
+  # than failing when it isn't running.
+  #
+  #     docker compose --profile cookbook up -d
   llmfit:
     image: ghcr.io/alexsjones/llmfit:latest
     runtime: nvidia
+    profiles: ["cookbook"]
     container_name: harvis-llmfit
     restart: unless-stopped
     command: ["serve", "--host", "0.0.0.0", "--port", "8787"]
@@ -156,7 +122,7 @@ services:
       # where Whisper + TTS + desktop fragment the small free pool. (The CUDA-OOM
       # error itself recommends this.) Harmless on the rig.
       PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
-      OLLAMA_URL: "${OLLAMA_URL:-http://ollama:11434}"
+      OLLAMA_URL: "${HARVIS_LLM_BASE_URL:-${OLLAMA_URL:-http://host.docker.internal:11434}}"
       # Which optional capability packs the operator turned on. A container cannot
       # see `docker compose --profile`, so without this the health endpoints have
       # no way to tell "engines were never installed" from "openclaw crashed", and
@@ -373,7 +339,7 @@ services:
       # the sidecar per Build run (local Ollama, no cloud key).
       HARVIS_OWUI_HERMES_AGENT_ENGINE: "${HARVIS_OWUI_HERMES_AGENT_ENGINE:-}"
       HARVIS_HERMES_AGENT_CONTAINER: "${HARVIS_HERMES_AGENT_CONTAINER:-harvis-hermes-agent}"
-      HARVIS_HERMES_OLLAMA_URL: "${HARVIS_HERMES_OLLAMA_URL:-${OLLAMA_URL:-http://ollama:11434}/v1}"
+      HARVIS_HERMES_OLLAMA_URL: "${HARVIS_HERMES_OLLAMA_URL:-${HARVIS_LLM_BASE_URL:-${OLLAMA_URL:-http://host.docker.internal:11434}}/v1}"
       HARVIS_HERMES_AGENT_DEFAULT_MODEL: "${HARVIS_HERMES_AGENT_DEFAULT_MODEL:-qwen3:4b}"
       # Image generation v0 — gated txt2img → workspace artifact. Providers probed at the
       # ComfyUI/A1111 hostnames below; flag default OFF (honest 403 until a provider is up
@@ -547,6 +513,11 @@ services:
   #   Smart rebuild (recommended): ./scripts/rebuild-frontend.sh
   #   Full rebuild (no cache):     ./scripts/rebuild-frontend.sh --no-cache
   frontend:
+    # Reaches an LLM server running on the HOST (the default is the operator's
+    # own Ollama/LM Studio/llama.cpp/vLLM on 127.0.0.1). Linux needs this
+    # mapping explicitly; without it host.docker.internal does not resolve.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     build:
       context: ./front_end/newjfrontend
       dockerfile: Dockerfile
@@ -565,7 +536,7 @@ services:
       NEXT_TELEMETRY_DISABLED: "1"
       JWT_SECRET: "${JWT_SECRET:?JWT_SECRET must be set in .env}"
       BACKEND_URL: "http://backend:8000"
-      OLLAMA_URL: "${OLLAMA_URL:-http://ollama:11434}"
+      OLLAMA_URL: "${HARVIS_LLM_BASE_URL:-${OLLAMA_URL:-http://host.docker.internal:11434}}"
     depends_on:
       - backend
       - pgsql
@@ -666,6 +637,11 @@ services:
   # Handles PDF, DOCX, XLSX, PPTX generation in background
   # Uses lightweight image (~200MB) - no GPU/ML dependencies needed
   document-worker:
+    # Reaches an LLM server running on the HOST (the default is the operator's
+    # own Ollama/LM Studio/llama.cpp/vLLM on 127.0.0.1). Linux needs this
+    # mapping explicitly; without it host.docker.internal does not resolve.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     build:
       context: ./python_back_end
       dockerfile: Dockerfile.document-worker
@@ -674,7 +650,7 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: "postgresql://pguser:pgpassword@pgsql:5432/database"
-      OLLAMA_URL: "${OLLAMA_URL:-http://ollama:11434}"
+      OLLAMA_URL: "${HARVIS_LLM_BASE_URL:-${OLLAMA_URL:-http://host.docker.internal:11434}}"
       BACKEND_URL: "http://backend:8000"
       ENVIRONMENT: "production"
       LOG_LEVEL: "INFO"
@@ -745,45 +721,6 @@ services:
       timeout: 5s
       retries: 5
 
-  # ═══════════════════════════════════════════════════════════════════════════
-  # Ollama Model Check — detection only. Never pulls. Users pull their own models.
-  # ═══════════════════════════════════════════════════════════════════════════
-  ollama-model-check:
-    image: curlimages/curl:latest
-    container_name: harvis-ollama-model-check
-    restart: "no"
-    entrypoint: sh
-    command: >
-      -c "
-        echo '=== Ollama Model Check (detect-only, no pulls) ===' &&
-        echo 'Waiting up to 30s for Ollama...' &&
-        i=0; until curl -sf http://ollama:11434/api/tags >/dev/null 2>&1 || [ $$i -ge 10 ]; do
-          i=$$((i+1)); echo '  Ollama not ready, retry '$$i'/10...'; sleep 3;
-        done &&
-        if ! curl -sf http://ollama:11434/api/tags >/dev/null 2>&1; then
-          echo 'WARN: Ollama did not respond — skipping model check.'; exit 0;
-        fi &&
-        TAGS=$$(curl -sf http://ollama:11434/api/tags) &&
-        COUNT=$$(echo \"$$TAGS\" | grep -o '\"name\"' | wc -l | tr -d ' ') &&
-        if [ \"$$COUNT\" -gt 0 ]; then
-          echo \"Found $$COUNT model(s) installed in Ollama:\";
-          echo \"$$TAGS\" | tr ',' '\\n' | grep '\"name\"' | sed 's/.*\"name\":\"\\([^\"]*\\)\".*/  - \\1/';
-        else
-          echo '────────────────────────────────────────────────────────';
-          echo 'NOTICE: No models installed in Ollama.';
-          echo 'Harvis will start, but model-backed features will fail until you pull one.';
-          echo 'To install a recommended model, run:';
-          echo '  docker exec harvis-ollama ollama pull qwen2.5:7b';
-          echo 'Or any model of your choice — Harvis auto-detects installed models.';
-          echo '────────────────────────────────────────────────────────';
-        fi &&
-        echo '=== Model check complete ==='
-      "
-    depends_on:
-      ollama:
-        condition: service_healthy
-    networks:
-      - ollama-n8n-network
 
   # ═══════════════════════════════════════════════════════════════════════════
   # OpenClaw Agent Gateway
@@ -951,10 +888,10 @@ services:
         condition: service_healthy
       openclaw-db-init:
         condition: service_completed_successfully
-      ollama:
-        condition: service_healthy
-      ollama-model-check:
-        condition: service_completed_successfully
+      # The bundled ollama + ollama-model-check are gone: the model server is the
+      # operator's now (HARVIS_LLM_BASE_URL), so there is nothing local to wait on.
+      # OpenClaw resolves its model endpoint per request and reports a provider
+      # that isn't answering, rather than refusing to boot without one.
     healthcheck:
       test: ["CMD-SHELL", "node -e \"const n=require('net');const c=n.createConnection(18789,'127.0.0.1');c.on('connect',()=>{c.end();process.exit(0)});c.on('error',()=>process.exit(1))\""]
       interval: 30s
@@ -989,6 +926,11 @@ services:
       - ollama-n8n-network
 
   open-notebook:
+    # Reaches an LLM server running on the HOST (the default is the operator's
+    # own Ollama/LM Studio/llama.cpp/vLLM on 127.0.0.1). Linux needs this
+    # mapping explicitly; without it host.docker.internal does not resolve.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     image: lfnovo/open_notebook:v1-latest
     container_name: open-notebook
     profiles: ["notebooks"]
@@ -1004,7 +946,7 @@ services:
       SURREAL_NAMESPACE: open_notebook
       SURREAL_DATABASE: open_notebook
       # Ollama Configuration (shared with your backend)
-      OLLAMA_API_BASE: "${OLLAMA_URL:-http://ollama:11434}"
+      OLLAMA_API_BASE: "${HARVIS_LLM_BASE_URL:-${OLLAMA_URL:-http://host.docker.internal:11434}}"
       # API Configuration
       API_URL: http://localhost:8502
       INTERNAL_API_URL: http://localhost:5055
@@ -1291,6 +1233,11 @@ services:
   # credentials. Idle by default (invoked per-turn); gated on the backend by
   # HARVIS_OWUI_EXTERNAL_ENGINES. No host ports. uid 1001 = artifact_data owner.
   opencode:
+    # Reaches an LLM server running on the HOST (the default is the operator's
+    # own Ollama/LM Studio/llama.cpp/vLLM on 127.0.0.1). Linux needs this
+    # mapping explicitly; without it host.docker.internal does not resolve.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     build:
       context: ./opencode
       dockerfile: Dockerfile
@@ -1301,13 +1248,10 @@ services:
     restart: unless-stopped
     user: "1001:1001"
     environment:
-      OLLAMA_URL: "${OLLAMA_URL:-http://ollama:11434}"
+      OLLAMA_URL: "${HARVIS_LLM_BASE_URL:-${OLLAMA_URL:-http://host.docker.internal:11434}}"
       HOME: /home/opencode
     volumes:
       - artifact_data:/data/artifacts
-    depends_on:
-      ollama:
-        condition: service_started
     networks:
       - ollama-n8n-network
 
@@ -1361,6 +1305,11 @@ services:
   # `docker exec -u 1001 hermes -z` against a session clone (files land 1001-owned so the
   # backend can diff them). Local Ollama only — NO provider/API key baked.
   hermes-agent:
+    # Reaches an LLM server running on the HOST (the default is the operator's
+    # own Ollama/LM Studio/llama.cpp/vLLM on 127.0.0.1). Linux needs this
+    # mapping explicitly; without it host.docker.internal does not resolve.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     build:
       context: ./hermes-agent
       dockerfile: Dockerfile
@@ -1378,7 +1327,7 @@ services:
       # network only (no host port); this is a local gateway bearer token, NOT a user/
       # cloud credential. Override in prod. The backend Chat connector uses the same value.
       API_SERVER_KEY: "${HARVIS_HERMES_API_SERVER_KEY:-harvis-hermes-local-dev}"
-      HARVIS_HERMES_OLLAMA_URL: "${HARVIS_HERMES_OLLAMA_URL:-${OLLAMA_URL:-http://ollama:11434}/v1}"
+      HARVIS_HERMES_OLLAMA_URL: "${HARVIS_HERMES_OLLAMA_URL:-${HARVIS_LLM_BASE_URL:-${OLLAMA_URL:-http://host.docker.internal:11434}}/v1}"
       HARVIS_HERMES_AGENT_DEFAULT_MODEL: "${HARVIS_HERMES_AGENT_DEFAULT_MODEL:-qwen3:4b}"
     volumes:
       - artifact_data:/data/artifacts       # session clones (Build) — shared with the backend
@@ -1422,7 +1371,6 @@ networks:
     driver: bridge
 
 volumes:
-  ollama-models:
   pgsql_data:
   ml-models-cache:
   stt-cache:            # `voice` profile: the STT sidecar's HF cache (uid 1000, not 1001)

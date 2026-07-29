@@ -1,28 +1,29 @@
 #!/usr/bin/env bash
-# Harvis installer — pick your inference backend (NVIDIA / AMD / CPU), preflight
-# the host, write the compose selection + generated secrets into .env, create the
-# docker network, and optionally bring the stack up. Re-run any time to switch
-# backends — existing secrets are never regenerated.
+# Harvis installer — preflight the host, find a model server, write generated
+# secrets into .env, create the docker network, and bring the stack up.
 #
-#   ./install.sh                        # interactive
-#   ./install.sh --backend cpu --yes    # non-interactive (nvidia|amd|cpu)
+# There is no backend question any more. Harvis ships the workspace (UI, API,
+# routing, auth, ONNX speech, embeddings) and you plug in the intelligence: the
+# stack itself needs no GPU, so nvidia/amd/cpu stopped being a thing to choose.
+# Whatever OpenAI-compatible server you already run is what it talks to, and if
+# none is running it still comes up and says so.
+#
+#   ./install.sh                        # detect a local model server, install
+#   ./install.sh --yes                  # non-interactive
 #   ./install.sh --check-only           # preflight only: changes NOTHING
 #   ./install.sh --no-launch            # configure but don't start the stack
-#   ./install.sh --ollama-url URL       # use an Ollama you already run instead of
-#                                       # the bundled one (~9.7 GB smaller install)
+#   ./install.sh --llm-url URL          # skip detection, use this server
 set -euo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-BACKEND=""
 ASSUME_YES=0
 CHECK_ONLY=0
 NO_LAUNCH=0
-# Bundled Ollama vs one you already run. This is a SEPARATE axis from BACKEND:
-# the backend container still wants the GPU for Whisper and TTS even when
-# inference lives elsewhere, so --ollama-url COMPOSES with nvidia/amd/cpu
-# rather than replacing that choice.
-OLLAMA_MODE="bundled"
-OLLAMA_ENDPOINT=""
+# Where inference happens. "auto" probes the host for a running server; "manual"
+# means --llm-url settled it and detection is skipped entirely.
+LLM_MODE="auto"
+LLM_ENDPOINT=""
+LLM_PROVIDER=""
 COMPOSE_FILE=""
 COMPOSE_ARGS=()
 HAS_OVERRIDE=0
@@ -30,51 +31,62 @@ MERGED_JSON=""
 CHECK_FAILED=0
 CHECK_ROWS=()
 
+# Servers we know how to recognise, probed in this order. Each entry is
+# port|name|path — the path is what distinguishes "something is listening on
+# 1234" from "LM Studio is listening on 1234".
+KNOWN_PROVIDERS=(
+  "11434|Ollama|/api/tags"
+  "1234|LM Studio|/v1/models"
+  "8080|llama.cpp|/v1/models"
+  "8000|vLLM|/v1/models"
+)
+
 HEALTH_URL="http://localhost:9000/api/health/services"
 SETUP_URL="http://localhost:9000/api/setup/status"
 
 parse_args() {
   while [ $# -gt 0 ]; do
     case "$1" in
-      --backend) BACKEND="${2:-}"; shift 2 ;;
-      --backend=*) BACKEND="${1#*=}"; shift ;;
       --yes|-y) ASSUME_YES=1; shift ;;
       --check-only) CHECK_ONLY=1; shift ;;
       --no-launch) NO_LAUNCH=1; shift ;;
-      --ollama-url) OLLAMA_ENDPOINT="${2:-}"; OLLAMA_MODE="external"; shift 2 ;;
-      --ollama-url=*) OLLAMA_ENDPOINT="${1#*=}"; OLLAMA_MODE="external"; shift ;;
+      --llm-url|--ollama-url) LLM_ENDPOINT="${2:-}"; LLM_MODE="manual"; shift 2 ;;
+      --llm-url=*|--ollama-url=*) LLM_ENDPOINT="${1#*=}"; LLM_MODE="manual"; shift ;;
+      # Accepted and ignored: the stack no longer needs a GPU, so there is no
+      # backend to pick. Warn rather than exit 1 — scripts and docs from before
+      # this change shouldn't hard-fail on an argument that is simply moot now.
+      --backend) echo "⚠ --backend is no longer used (the stack needs no GPU) — ignoring '${2:-}'"; shift 2 ;;
+      --backend=*) echo "⚠ --backend is no longer used (the stack needs no GPU) — ignoring '${1#*=}'"; shift ;;
       -h|--help)
-        echo "Usage: ./install.sh [--backend nvidia|amd|cpu] [--ollama-url URL]"
-        echo "                    [--yes] [--check-only] [--no-launch]"
+        echo "Usage: ./install.sh [--llm-url URL] [--yes] [--check-only] [--no-launch]"
         echo ""
-        echo "  --ollama-url URL   Point Harvis at an Ollama you already run and skip"
-        echo "                     the bundled server (~9.7 GB smaller install)."
-        echo "                     From inside a container 'localhost' is the container,"
-        echo "                     not your machine — use host.docker.internal or a LAN IP:"
-        echo "                       ./install.sh --ollama-url http://host.docker.internal:11434"
+        echo "  With no arguments, this looks for a model server already running on"
+        echo "  this machine (Ollama, LM Studio, llama.cpp, vLLM) and uses it."
+        echo ""
+        echo "  --llm-url URL   Skip detection and use this OpenAI-compatible server."
+        echo "                  From inside a container 'localhost' is the container,"
+        echo "                  not your machine — use host.docker.internal or a LAN IP:"
+        echo "                    ./install.sh --llm-url http://host.docker.internal:11434"
         exit 0 ;;
       *) echo "Unknown arg: $1"; exit 1 ;;
     esac
   done
-  case "$BACKEND" in
-    ""|nvidia|amd|cpu) : ;;
-    *) echo "✗ --backend must be nvidia|amd|cpu (got '$BACKEND')"; exit 1 ;;
-  esac
-  if [ "$OLLAMA_MODE" = "external" ]; then
-    case "$OLLAMA_ENDPOINT" in
+  if [ "$LLM_MODE" = "manual" ]; then
+    case "$LLM_ENDPOINT" in
       http://*|https://*) : ;;
-      "") echo "✗ --ollama-url needs a URL, e.g. http://host.docker.internal:11434"; exit 1 ;;
-      *)  echo "✗ --ollama-url must start with http:// or https:// (got '$OLLAMA_ENDPOINT')"; exit 1 ;;
+      "") echo "✗ --llm-url needs a URL, e.g. http://host.docker.internal:11434"; exit 1 ;;
+      *)  echo "✗ --llm-url must start with http:// or https:// (got '$LLM_ENDPOINT')"; exit 1 ;;
     esac
     # localhost inside the backend container is the CONTAINER, not the host. This
-    # is the single most likely way a BYO install fails, and it fails at first
-    # chat rather than at install time — so refuse it here where it's obvious.
-    case "$OLLAMA_ENDPOINT" in
+    # is the single most likely way this fails, and it fails at first chat rather
+    # than at install time — so refuse it here where it's obvious.
+    case "$LLM_ENDPOINT" in
       *://localhost*|*://127.0.0.1*)
-        echo "✗ '$OLLAMA_ENDPOINT' points at the container itself, not your machine."
+        echo "✗ '$LLM_ENDPOINT' points at the container itself, not your machine."
         echo "  Use http://host.docker.internal:11434, or this box's LAN IP."
         exit 1 ;;
     esac
+    LLM_PROVIDER="the server you specified"
   fi
 }
 
@@ -86,7 +98,7 @@ add_row() { # status name detail  (status: PASS|FAIL|WARN|SKIP; FAIL flips exit 
 
 print_check_table() {
   echo ""
-  echo "Preflight checks (backend: ${BACKEND})"
+  echo "Preflight checks"
   local row
   for row in "${CHECK_ROWS[@]}"; do echo "  $row"; done
   echo ""
@@ -108,95 +120,56 @@ check_prereqs() {
   fi
 }
 
-# ── Backend detection / choice ──────────────────────────────────────────────
-detect_backend() {
-  DETECTED="cpu"
-  if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
-    DETECTED="nvidia"
-  elif [ -e /dev/kfd ] || command -v rocminfo >/dev/null 2>&1; then
-    DETECTED="amd"
-  fi
-  echo "• Detected backend: ${DETECTED}"
-  case "$(uname -s)" in
-    Darwin) echo "  Note: on macOS, Docker can't use the Mac GPU — this picks CPU. For Metal speed,"
-            echo "        run Ollama NATIVELY and set OLLAMA_URL=http://host.docker.internal:11434." ;;
-  esac
+# ── Model-server detection ──────────────────────────────────────────────────
+port_listening() { # /dev/tcp probe: succeeds iff something accepts on 127.0.0.1:$1
+  ( exec 3<>"/dev/tcp/127.0.0.1/$1" ) 2>/dev/null
 }
 
-choose_backend() {
-  if [ -n "$BACKEND" ]; then return 0; fi
-  if [ "$CHECK_ONLY" -eq 1 ] || [ "$ASSUME_YES" -eq 1 ]; then
-    BACKEND="$DETECTED"
+# Probe from THIS shell (127.0.0.1) but record the URL a CONTAINER will use
+# (host.docker.internal). Those are the same listener seen from two sides, and
+# conflating them is the classic way a working install can't reach its model.
+detect_provider() {
+  if [ "$LLM_MODE" = "manual" ]; then
+    add_row PASS "model server" "using ${LLM_ENDPOINT} (--llm-url)"
     return 0
   fi
-  echo ""
-  echo "Choose your inference backend:"
-  echo "  1) nvidia   NVIDIA GPU + nvidia-container-toolkit (fastest)"
-  echo "  2) amd      AMD GPU via ROCm — accelerates Ollama; TTS/STT stay CPU"
-  echo "  3) cpu      No GPU — runs anywhere, much slower"
-  read -rp "Backend [${DETECTED}]: " choice || true
-  choice="${choice:-$DETECTED}"
-  case "$choice" in
-    1|nvidia) BACKEND=nvidia ;;
-    2|amd)    BACKEND=amd ;;
-    3|cpu)    BACKEND=cpu ;;
-    *) echo "✗ Unknown choice '$choice'"; exit 1 ;;
-  esac
-}
-
-# ── Bundled Ollama vs one you already run ───────────────────────────────────
-# Orthogonal to BACKEND: this only decides where INFERENCE happens. Whisper STT
-# and TTS still run inside the backend container, so a BYO install on an NVIDIA
-# box still wants the nvidia backend.
-choose_ollama() {
-  # An explicit --ollama-url already settled it.
-  if [ "$OLLAMA_MODE" = "external" ]; then return 0; fi
-  if [ "$CHECK_ONLY" -eq 1 ] || [ "$ASSUME_YES" -eq 1 ]; then return 0; fi
-  echo ""
-  echo "Ollama — Harvis can run one for you, or use one you already have:"
-  echo "  1) bundled    Run Ollama in Docker as part of the stack (default)"
-  echo "  2) existing   Point Harvis at an Ollama you already run (~9.7 GB smaller)"
-  read -rp "Ollama [bundled]: " oc || true
-  case "${oc:-bundled}" in
-    1|bundled|"") return 0 ;;
-    2|existing)   : ;;
-    *) echo "✗ Unknown choice '$oc'"; exit 1 ;;
-  esac
-  echo ""
-  echo "  Enter the URL the BACKEND CONTAINER will use — not what your browser uses."
-  echo "  'localhost' inside a container means the container itself, so:"
-  echo "    Ollama on this machine   → http://host.docker.internal:11434"
-  echo "    Ollama on another box    → http://<its-lan-ip>:11434"
-  local url
-  read -rp "  Ollama URL [http://host.docker.internal:11434]: " url || true
-  url="${url:-http://host.docker.internal:11434}"
-  case "$url" in
-    *://localhost*|*://127.0.0.1*)
-      echo "✗ '$url' points at the container itself, not your machine."
-      echo "  Use http://host.docker.internal:11434, or this box's LAN IP."
-      exit 1 ;;
-    http://*|https://*) : ;;
-    *) echo "✗ URL must start with http:// or https:// (got '$url')"; exit 1 ;;
-  esac
-  OLLAMA_MODE="external"
-  OLLAMA_ENDPOINT="$url"
+  local entry port name path body count
+  for entry in "${KNOWN_PROVIDERS[@]}"; do
+    IFS='|' read -r port name path <<<"$entry"
+    port_listening "$port" || continue
+    if ! command -v curl >/dev/null 2>&1; then
+      # No curl to confirm what it is, but something is listening on a port we
+      # know. Say exactly that rather than claiming a positive identification.
+      LLM_ENDPOINT="http://host.docker.internal:${port}"
+      LLM_PROVIDER="${name}"
+      add_row WARN "model server" "port ${port} is open but curl is missing — assuming ${name}"
+      return 0
+    fi
+    body="$(curl -s -m 4 "http://127.0.0.1:${port}${path}" 2>/dev/null || true)"
+    [ -n "$body" ] || continue
+    LLM_ENDPOINT="http://host.docker.internal:${port}"
+    LLM_PROVIDER="$name"
+    count="$(printf '%s' "$body" | grep -o '"id"\|"name"' | wc -l | tr -d ' ')"
+    if [ "${count:-0}" -gt 0 ]; then
+      add_row PASS "model server" "${name} on :${port}, ${count} model(s)"
+    else
+      add_row WARN "model server" "${name} on :${port} but 0 models — chat fails until you load one"
+    fi
+    return 0
+  done
+  # Not an error. The stack comes up, the UI loads, and it reports that no
+  # provider was found — which is a far better first run than refusing to start.
+  add_row WARN "model server" "none found on :11434 :1234 :8080 :8000 — connect one later in Settings"
 }
 
 # ── Compose file selection ──────────────────────────────────────────────────
+# One compose file. The nvidia/amd/cpu overlays are gone: with no bundled model
+# server and a torch-free backend, nothing in the default set wants a GPU, so
+# there was nothing left for them to override.
 select_compose_files() {
-  case "$BACKEND" in
-    nvidia) COMPOSE_FILE="docker-compose.yaml" ;;
-    amd)    COMPOSE_FILE="docker-compose.yaml:docker-compose.amd.yml" ;;
-    cpu)    COMPOSE_FILE="docker-compose.yaml:docker-compose.cpu.yml" ;;
-  esac
-  # After the hardware overlay (it gates the bundled ollama off entirely, so it
-  # must outrank the overlay that tunes that same service) and before the local
-  # override below, which still wins over everything.
-  if [ "$OLLAMA_MODE" = "external" ]; then
-    COMPOSE_FILE="${COMPOSE_FILE}:docker-compose.byo-ollama.yml"
-  fi
+  COMPOSE_FILE="docker-compose.yaml"
   # Compose auto-loads docker-compose.override.yml ONLY when COMPOSE_FILE is unset.
-  # The moment we set it above, a developer's gitignored override silently stops
+  # The moment we set it, a developer's gitignored override silently stops
   # applying — and the symptom (dead host services, untuned GPU) looks nothing like
   # the cause. Re-add it explicitly, last so it still wins. Clean installs don't
   # have the file, so their behaviour is unchanged.
@@ -211,12 +184,9 @@ select_compose_files() {
   for f in $COMPOSE_FILE; do COMPOSE_ARGS+=(-f "$f"); done
 }
 
-# ── Compose merge gate (behavioral, NOT version-parsed) ─────────────────────
-# The cpu/amd overrides rely on the `!reset` YAML tag to clear the base file's
-# nvidia device reservations. Old Compose releases silently IGNORE the tag and
-# keep the reservation — `up` then fails on machines with no nvidia runtime.
-# Version-string parsing can't catch this reliably (5.x is current), so render
-# the actual merge and assert on the result instead.
+# ── Compose merge gate ──────────────────────────────────────────────────────
+# Renders the actual merge and reports the default service set — which is also
+# the `up -d` set, since compose only emits services whose profiles are active.
 check_compose_merge() {
   MERGED_JSON="$(mktemp)"
   local errs; errs="$(mktemp)"
@@ -233,72 +203,23 @@ check_compose_merge() {
     return 0
   fi
   rm -f "$errs"
+  local svcs count
+  svcs="$("${envprefix[@]}" docker compose "${COMPOSE_ARGS[@]}" config --services 2>/dev/null || true)"
+  count="$(printf '%s\n' "$svcs" | grep -c . || true)"
+  add_row PASS "compose merge" "${count} service(s) in the default set"
+  # A GPU device reservation in the default set is the one thing that makes
+  # `up -d` fail outright on a host without the nvidia container runtime — which
+  # would undo the whole point of this installer. Assert it, don't assume it.
   local nv
   nv="$(grep -c '"driver": *"nvidia"' "$MERGED_JSON" || true)"
-  case "$BACKEND" in
-    nvidia)
-      if [ "$nv" -gt 0 ]; then
-        add_row PASS "compose merge" "nvidia profile keeps ${nv} GPU device reservation(s)"
-      else
-        add_row FAIL "compose merge" "nvidia profile lost its GPU device reservations"
-      fi ;;
-    amd|cpu)
-      if [ "$nv" -eq 0 ]; then
-        add_row PASS "compose merge" "${BACKEND} profile: 0 nvidia device reservations (\`!reset\` honoured)"
-      else
-        add_row FAIL "compose merge" "${nv} nvidia reservation(s) survived the ${BACKEND} merge — your Compose ignores \`!reset\` (fixed in ≥ 2.19); upgrade Compose"
-      fi ;;
-  esac
-  # BYO mode is only real if the bundled server actually dropped out of the merge.
-  # Ask compose for the service list rather than pattern-matching the JSON — the
-  # string "ollama" appears in env vars and image tags either way.
-  if [ "$OLLAMA_MODE" = "external" ]; then
-    local svcs
-    svcs="$("${envprefix[@]}" docker compose "${COMPOSE_ARGS[@]}" config --services 2>/dev/null || true)"
-    if printf '%s\n' "$svcs" | grep -qx 'ollama'; then
-      add_row FAIL "byo ollama" "bundled ollama service is still in the merge — is docker-compose.byo-ollama.yml present?"
-    else
-      add_row PASS "byo ollama" "bundled server gated off; backend will use ${OLLAMA_ENDPOINT}"
-    fi
-  fi
-}
-
-# ── BYO endpoint reachability (soft — you may start Ollama later) ───────────
-check_ollama_endpoint() {
-  [ "$OLLAMA_MODE" = "external" ] || return 0
-  # host.docker.internal resolves inside containers, not in this shell. Probing
-  # 127.0.0.1 instead tests the same listener for the common "Ollama on this
-  # machine" case — say so in the row rather than implying we tested the real name.
-  local probe="$OLLAMA_ENDPOINT" note=""
-  case "$OLLAMA_ENDPOINT" in
-    *host.docker.internal*)
-      probe="${OLLAMA_ENDPOINT/host.docker.internal/127.0.0.1}"
-      note=" (probed 127.0.0.1 from this shell; containers reach it as host.docker.internal)" ;;
-  esac
-  if ! command -v curl >/dev/null 2>&1; then
-    add_row SKIP "ollama endpoint" "curl not found — cannot probe ${OLLAMA_ENDPOINT}"
-    return 0
-  fi
-  local tags
-  tags="$(curl -s -m 6 "${probe%/}/api/tags" 2>/dev/null || true)"
-  if [ -z "$tags" ]; then
-    add_row WARN "ollama endpoint" "no answer from ${OLLAMA_ENDPOINT}${note} — start it before using chat"
-    return 0
-  fi
-  local count
-  count="$(printf '%s' "$tags" | grep -o '"name"' | wc -l | tr -d ' ')"
-  if [ "${count:-0}" -gt 0 ]; then
-    add_row PASS "ollama endpoint" "${OLLAMA_ENDPOINT} reachable, ${count} model(s)${note}"
+  if [ "$nv" -eq 0 ]; then
+    add_row PASS "gpu independence" "0 GPU device reservations — starts on any host"
   else
-    add_row WARN "ollama endpoint" "${OLLAMA_ENDPOINT} reachable but has 0 models — chat will fail until you pull one${note}"
+    add_row FAIL "gpu independence" "${nv} nvidia device reservation(s) in the default set — this will fail on a host without the nvidia container runtime"
   fi
 }
 
 # ── Host port preflight ─────────────────────────────────────────────────────
-port_listening() { # /dev/tcp probe: succeeds iff something accepts on 127.0.0.1:$1
-  ( exec 3<>"/dev/tcp/127.0.0.1/$1" ) 2>/dev/null
-}
-
 check_ports() {
   if [ ! -s "${MERGED_JSON:-}" ]; then
     add_row SKIP "host ports" "skipped (compose merge unavailable)"
@@ -345,10 +266,8 @@ check_resources() {
   disk_kb="$(df -Pk . 2>/dev/null | awk 'NR==2{print $4}')"
   if [ -n "${disk_kb:-}" ]; then
     local disk_gib=$((disk_kb / 1024 / 1024))
-    if [ "$disk_gib" -lt 20 ]; then
-      # No download-size estimate: it depends on backend images + which models you
-      # pull, and a made-up number would just be a differently-shaped lie.
-      add_row WARN disk "${disk_gib} GiB free — Docker images + models may not fit (exact size not estimated)"
+    if [ "$disk_gib" -lt 10 ]; then
+      add_row WARN disk "${disk_gib} GiB free — the images alone need roughly 7 GiB"
     else
       add_row PASS disk "${disk_gib} GiB free"
     fi
@@ -369,34 +288,42 @@ ensure_env_secret() { # $1 = key, $2 = value, $3 = human label
   fi
 }
 
+drop_env_key() { # $1 = key — remove every assignment of it from .env
+  if grep -q "^$1=" .env; then
+    tmp="$(mktemp)"; grep -v "^$1=" .env > "$tmp"; mv "$tmp" .env
+  fi
+}
+
 write_env() {
   touch .env
-  # COMPOSE_FILE — docker compose auto-reads this, so `docker compose up` uses the
-  # right files. Rewrite only when the value actually changed, so a same-backend
-  # re-run leaves .env byte-identical.
-  if ! grep -qxF "COMPOSE_FILE=${COMPOSE_FILE}" .env; then
-    if grep -q '^COMPOSE_FILE=' .env; then
-      tmp="$(mktemp)"; grep -v '^COMPOSE_FILE=' .env > "$tmp"; mv "$tmp" .env
+  # COMPOSE_FILE is only needed to re-add a local override, since setting it is
+  # what suppresses compose's own auto-load. Otherwise strip it: an .env from
+  # before the overlays were deleted still pins docker-compose.cpu.yml, and a
+  # stale pin makes EVERY `docker compose` command fail on a missing file.
+  if [ "$HAS_OVERRIDE" -eq 1 ]; then
+    if ! grep -qxF "COMPOSE_FILE=${COMPOSE_FILE}" .env; then
+      drop_env_key COMPOSE_FILE
+      printf 'COMPOSE_FILE=%s\n' "$COMPOSE_FILE" >> .env
     fi
-    printf 'COMPOSE_FILE=%s\n' "$COMPOSE_FILE" >> .env
+  elif grep -q '^COMPOSE_FILE=' .env; then
+    drop_env_key COMPOSE_FILE
+    echo "✓ Removed a stale COMPOSE_FILE pin (the backend overlays no longer exist)"
   fi
-  # OLLAMA_URL — every Ollama call site in the stack reads it, defaulting to the
-  # bundled server. Same rewrite-only-on-change rule as COMPOSE_FILE.
-  if [ "$OLLAMA_MODE" = "external" ]; then
-    if ! grep -qxF "OLLAMA_URL=${OLLAMA_ENDPOINT}" .env; then
-      if grep -q '^OLLAMA_URL=' .env; then
-        tmp="$(mktemp)"; grep -v '^OLLAMA_URL=' .env > "$tmp"; mv "$tmp" .env
-      fi
-      printf 'OLLAMA_URL=%s\n' "$OLLAMA_ENDPOINT" >> .env
+  # HARVIS_LLM_BASE_URL — the canonical name every service resolves against,
+  # with OLLAMA_URL kept as a lower-priority fallback for existing deployments.
+  # Written only when we actually know where the server is; with none found, the
+  # compose default applies and Harvis reports no provider rather than guessing.
+  if [ -n "$LLM_ENDPOINT" ]; then
+    if ! grep -qxF "HARVIS_LLM_BASE_URL=${LLM_ENDPOINT}" .env; then
+      drop_env_key HARVIS_LLM_BASE_URL
+      printf 'HARVIS_LLM_BASE_URL=%s\n' "$LLM_ENDPOINT" >> .env
     fi
-  else
-    # Switching back to bundled with a leftover BYO value would send every request
-    # to an endpoint that is no longer the intent — but the value may equally be
-    # something you set by hand, so say it rather than silently deleting it.
-    stale="$(grep '^OLLAMA_URL=' .env | head -1 | cut -d= -f2-)"
-    if [ -n "${stale:-}" ] && [ "$stale" != "http://ollama:11434" ]; then
-      echo "⚠ .env already sets OLLAMA_URL=${stale}, which overrides the bundled server"
-      echo "  this install just configured. Remove that line to use the bundled Ollama."
+    # A leftover OLLAMA_URL is shadowed by the line above, not obeyed — but it
+    # will confuse the next person who reads this file, so say it's inert.
+    stale="$(grep '^OLLAMA_URL=' .env | head -1 | cut -d= -f2- || true)"
+    if [ -n "${stale:-}" ] && [ "$stale" != "$LLM_ENDPOINT" ]; then
+      echo "⚠ .env still sets OLLAMA_URL=${stale}; HARVIS_LLM_BASE_URL overrides it."
+      echo "  Remove that line unless you set it deliberately."
     fi
   fi
   ensure_env_secret JWT_SECRET "$(rand_hex 32)" "a JWT_SECRET"
@@ -416,7 +343,11 @@ write_env() {
   # OPENCLAW_GATEWAY_TOKEN — SHARED across backend/openclaw/harvis-mcp; a running
   # stack authenticated with the old value breaks if this ever regenerates.
   ensure_env_secret OPENCLAW_GATEWAY_TOKEN "$(rand_hex 32)" "an OPENCLAW_GATEWAY_TOKEN"
-  echo "✓ Wrote .env  (COMPOSE_FILE=${COMPOSE_FILE})"
+  if [ -n "$LLM_ENDPOINT" ]; then
+    echo "✓ Wrote .env  (HARVIS_LLM_BASE_URL=${LLM_ENDPOINT})"
+  else
+    echo "✓ Wrote .env  (no model server set — connect one from Settings after first login)"
+  fi
   [ "$HAS_OVERRIDE" -eq 1 ] && echo "  ↳ including your local docker-compose.override.yml" || true
 }
 
@@ -446,49 +377,23 @@ print_setup_code() {
 
 # Modest default for stranger boxes (incl. 8 GB GPUs). Larger models can be pulled later.
 DEFAULT_OLLAMA_MODEL="${HARVIS_DEFAULT_OLLAMA_MODEL:-llama3.2:3b}"
-# Honest ballpark only — exact size depends on quant/tag and Ollama's registry.
-DEFAULT_OLLAMA_MODEL_SIZE_NOTE="~2 GB download (approx; exact size is not computed here)"
 
-offer_model_pull() {
-  # BYO: the server isn't ours to pull into, and `docker exec harvis-ollama`
-  # doesn't exist in this mode. The endpoint preflight already reported its model
-  # count, so point at the machine that owns it instead of guessing.
-  if [ "$OLLAMA_MODE" = "external" ]; then
-    echo ""
-    echo "  Models come from your own Ollama at ${OLLAMA_ENDPOINT}."
-    echo "  Pull one there, e.g.:  ollama pull ${DEFAULT_OLLAMA_MODEL}"
-    return 0
-  fi
-  # Skip if Ollama already has at least one model — don't nag a working box.
-  local tags count
-  tags="$(curl -s -m 8 http://localhost:11434/api/tags 2>/dev/null || true)"
-  if [ -n "$tags" ]; then
-    count="$(printf '%s' "$tags" | grep -o '"name"' | wc -l | tr -d ' ')"
-    if [ "${count:-0}" -gt 0 ]; then
-      echo "  Ollama already has ${count} model(s) — skipping pull offer."
-      return 0
-    fi
-  fi
+report_models() {
+  # The model server belongs to the host, not to this stack — there is no
+  # container to `docker exec` into and nothing here can pull on its behalf.
+  # So: point at the machine that owns it, and say what to run there.
   echo ""
-  echo "No Ollama models detected. Chat will fail until you pull one."
-  echo "  Suggested default: ${DEFAULT_OLLAMA_MODEL}  (${DEFAULT_OLLAMA_MODEL_SIZE_NOTE})"
-  echo "  Override with HARVIS_DEFAULT_OLLAMA_MODEL=… before running install.sh."
-  local pull
-  if [ "$ASSUME_YES" -eq 1 ]; then
-    # Non-interactive: do NOT auto-download multi-GB blobs without an explicit opt-in.
-    echo "  (--yes: not pulling automatically. Run:  docker exec harvis-ollama ollama pull ${DEFAULT_OLLAMA_MODEL})"
+  if [ -z "$LLM_ENDPOINT" ]; then
+    echo "  No model server was found on this machine, so chat has nothing to talk to yet."
+    echo "  Start one and re-run ./install.sh, or set it from Settings → Integrations."
+    echo "  The quickest option:  ollama serve   (then: ollama pull ${DEFAULT_OLLAMA_MODEL})"
     return 0
   fi
-  read -rp "Pull ${DEFAULT_OLLAMA_MODEL} now? [y/N]: " pull || true
-  if [[ ! "${pull:-N}" =~ ^[Yy]$ ]]; then
-    echo "  Skipped. Later:  docker exec harvis-ollama ollama pull ${DEFAULT_OLLAMA_MODEL}"
-    return 0
-  fi
-  if ! docker exec harvis-ollama ollama pull "$DEFAULT_OLLAMA_MODEL"; then
-    echo "  ✗ Pull failed — check \`docker logs harvis-ollama\` and try again manually."
-    return 0
-  fi
-  echo "  ✓ Model ready: ${DEFAULT_OLLAMA_MODEL}"
+  echo "  Models come from ${LLM_PROVIDER:-your server} at ${LLM_ENDPOINT}."
+  case "$LLM_PROVIDER" in
+    Ollama) echo "  Pull one there, e.g.:  ollama pull ${DEFAULT_OLLAMA_MODEL}" ;;
+    *)      echo "  Load a model there, then pick it in Harvis." ;;
+  esac
 }
 
 poll_health() {
@@ -538,7 +443,7 @@ poll_health() {
     echo ""
     echo "  Auth cookie: HARVIS_COOKIE_SECURE defaults to false (localhost/LAN HTTP)."
     echo "  Behind HTTPS, set HARVIS_COOKIE_SECURE=true in .env and recreate the backend."
-    offer_model_pull
+    report_models
     return 0
   fi
   echo ""
@@ -554,18 +459,14 @@ poll_health() {
 
 launch() {
   echo ""
-  echo "Backend selected: ${BACKEND}"
-  case "$BACKEND" in
-    amd) echo "  Note: AMD accelerates Ollama (chat/agents); voice (TTS + Whisper STT) runs on CPU." ;;
-    cpu) echo "  Note: everything runs on CPU — inference is slower and voice (TTS/STT) may lag." ;;
-  esac
-  if [ "$OLLAMA_MODE" = "external" ]; then
-    echo "Ollama: your own at ${OLLAMA_ENDPOINT} (bundled server not started)"
-    echo "  The backend still uses this machine's ${BACKEND} backend for Whisper STT and TTS."
+  if [ -n "$LLM_ENDPOINT" ]; then
+    echo "Model server: ${LLM_PROVIDER:-configured} at ${LLM_ENDPOINT}"
+  else
+    echo "Model server: none detected — Harvis will start and report no provider."
   fi
   if [ "$NO_LAUNCH" -eq 1 ]; then
     echo ""
-    echo "When ready, run:  docker compose up --build -d   (.env selects the ${BACKEND} backend)"
+    echo "When ready, run:  docker compose up --build -d"
     return 0
   fi
   local run
@@ -575,7 +476,7 @@ launch() {
     poll_health
   else
     echo ""
-    echo "When ready, run:  docker compose up --build -d   (.env selects the ${BACKEND} backend)"
+    echo "When ready, run:  docker compose up --build -d"
   fi
 }
 
@@ -588,12 +489,9 @@ main() {
     print_check_table
     exit 1
   fi
-  detect_backend
-  choose_backend
-  choose_ollama
+  detect_provider
   select_compose_files
   check_compose_merge
-  check_ollama_endpoint
   check_ports
   check_resources
   print_check_table

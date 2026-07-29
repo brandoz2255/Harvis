@@ -14,8 +14,8 @@
 #
 # Build:
 #   docker build -t harvis-backend:core -f python_back_end/Dockerfile.core python_back_end
-# Run (CPU stack):
-#   docker compose -f docker-compose.yaml -f docker-compose.cpu.yml up -d backend
+# Run:
+#   docker compose up -d backend    # this IS the backend image now — no overlay needed
 
 # ---------- Builder: compile any source wheels ----------
 FROM python:3.12-slim AS builder
