@@ -23,7 +23,10 @@ services:
   #
   #     docker compose --profile cookbook up -d
   llmfit:
-    image: ghcr.io/alexsjones/llmfit:latest
+    # Pinned. `latest` on an upstream we do not control means a `docker compose
+    # pull` can swap the cookbook backend under a working install with no diff
+    # to point at. 0.9.30 is what this integration was written against.
+    image: ghcr.io/alexsjones/llmfit:0.9.30@sha256:465a5197257a3d34a22a52b1e4ea5aecefc1973788c0f6a0a8fd5a4f93c7f93c
     runtime: nvidia
     profiles: ["cookbook"]
     container_name: harvis-llmfit
@@ -81,7 +84,7 @@ services:
 
   # Artifact Volume Permission Setup (runs as root to set proper permissions)
   artifact-init:
-    image: busybox:latest
+    image: busybox:1.37.0@sha256:b3255e7dfbcd10cb367af0d409747d511aeb66dfac98cf30e97e87e4207dd76f
     container_name: harvis-artifact-init
     user: root
     command: >
@@ -640,7 +643,10 @@ services:
 
   # Nginx Reverse Proxy
   nginx:
-    image: nginx:alpine
+    # No `user:` on purpose. The upstream image starts its master as root to
+    # read the config and then drops every worker to the unprivileged `nginx`
+    # user itself; setting `user:` here would break that and gain nothing.
+    image: nginx:1.29.6-alpine@sha256:f46cb72c7df02710e693e863a983ac42f6a9579058a59a35f1ae36c9958e4ce0
     container_name: nginx-proxy
     restart: unless-stopped
     ports:
@@ -738,7 +744,10 @@ services:
 
   # PostgreSQL Database with pgvector
   pgsql:
-    image: pgvector/pgvector:pg15
+    # Digest-pinned. "pg15" floats across every 15.x patch release, and this is
+    # the container holding all user data — a silent minor-version swap on a
+    # `compose pull` is the one image where that matters most.
+    image: pgvector/pgvector:pg15@sha256:7f5681e45237acdf546cf7cdc0dfc0ed7752ede857fda6e54f6ea21b936f8742
     container_name: pgsql-db
     restart: unless-stopped
     environment:
@@ -782,7 +791,7 @@ services:
 
   # DB schema init — runs once per stack start (idempotent CREATE IF NOT EXISTS)
   openclaw-db-init:
-    image: postgres:15-alpine
+    image: postgres:15-alpine@sha256:fceb6f86328c36f2438fae3b851b0cc57c4a7e69a58c866d9ce24281f2cf0c9c
     container_name: harvis-openclaw-db-init
     profiles: ["engines"]
     restart: "no"
@@ -838,7 +847,10 @@ services:
     build:
       context: .
       dockerfile: openclaw-browser/Dockerfile
-    image: dulc3/openclaw-browser:latest
+    # Digest-only: this image publishes no version tag and no version label, so
+    # a digest is the only thing that identifies it. Re-pin deliberately when
+    # you want a newer OpenClaw browser build.
+    image: dulc3/openclaw-browser@sha256:584a24f8715223fc76d14cb6b8c8eab449c9fd48b9456d6bdfe39ab5b1a426c1
     # Registry-style tag but we build it locally — force build so a bare
     # `docker compose up -d` doesn't try to pull it.
     pull_policy: build
@@ -966,7 +978,7 @@ services:
   # ═══════════════════════════════════════════════════════════════════════════
 
   surrealdb:
-    image: surrealdb/surrealdb:v2
+    image: surrealdb/surrealdb:v2@sha256:d653f6c8a89e81f865ee31cd2f587c50f50ace922175e04150b1e385d2f86011
     container_name: surrealdb
     profiles: ["notebooks"]
     restart: unless-stopped
@@ -985,7 +997,9 @@ services:
     # mapping explicitly; without it host.docker.internal does not resolve.
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    image: lfnovo/open_notebook:v1-latest
+    # v1-latest is a moving tag — same class of problem as :latest, one major
+    # version narrower. Digest-pinned; the tag stays in the name for readability.
+    image: lfnovo/open_notebook:v1-latest@sha256:65e10ee94f8ce5a9e4e1db9a17316246960b236b6278edf75a965be52e9e882c
     container_name: open-notebook
     profiles: ["notebooks"]
     restart: unless-stopped
@@ -1191,7 +1205,9 @@ services:
   # ═══════════════════════════════════════════════════════════════════════════
 
   stt:
-    image: "${HARVIS_STT_IMAGE:-ghcr.io/speaches-ai/speaches:latest-cpu}"
+    # Default pinned by digest (upstream tags only the Ubuntu base version, not
+    # the app). HARVIS_STT_IMAGE still overrides it for anyone tracking latest.
+    image: "${HARVIS_STT_IMAGE:-ghcr.io/speaches-ai/speaches:latest-cpu@sha256:21e3df06d842fb7802ab470dd77c25f0e8c0d22950e8d8c6ae886e851af53ef8}"
     container_name: harvis-stt
     profiles: ["voice-fallback"]
     restart: unless-stopped
