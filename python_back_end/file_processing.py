@@ -129,17 +129,27 @@ def convert_file_to_images(file_data: str, file_type: str, max_pages: int = None
 
 def _pdf_to_images(file_bytes: io.BytesIO, max_pages: int) -> List[Tuple[str, str]]:
     """
-    Convert PDF pages to images using PyMuPDF (fitz).
+    Rasterize PDF pages to PNG images using pypdfium2.
 
     Returns list of (base64_image, mime_type) tuples.
     """
+    # pypdfium2, not pypdf. These do different jobs and are not
+    # interchangeable: pypdf parses and manipulates PDF structure (it is what
+    # _extract_from_pdf above uses, and it has no renderer at all), while this
+    # function needs actual rasterization for the vision models. pypdfium2
+    # wraps Chromium's PDFium and is BSD-3-Clause/Apache-2.0, which is why it
+    # replaced PyMuPDF here — PyMuPDF is AGPL-3.0, and it was the only
+    # copyleft dependency in the core image. It is also 8.6 MB installed
+    # against PyMuPDF's 66.5 MB.
+    #
+    # scale=2.0 reproduces the previous fitz.Matrix(2.0, 2.0) exactly: a
+    # US-Letter page (612x792 pt) renders to 1224x1584 px under both.
     images = []
 
     try:
-        import fitz  # PyMuPDF
+        import pypdfium2 as pdfium
 
-        # Open PDF from bytes
-        pdf_document = fitz.open(stream=file_bytes.read(), filetype="pdf")
+        pdf_document = pdfium.PdfDocument(file_bytes.read())
         total_pages = len(pdf_document)
         pages_to_convert = min(total_pages, max_pages)
 
@@ -149,12 +159,12 @@ def _pdf_to_images(file_bytes: io.BytesIO, max_pages: int) -> List[Tuple[str, st
             page = pdf_document[page_num]
 
             # Render page to image (2x zoom for better quality)
-            mat = fitz.Matrix(2.0, 2.0)
-            pix = page.get_pixmap(matrix=mat)
+            pil_image = page.render(scale=2.0).to_pil()
 
             # Convert to PNG bytes
-            img_bytes = pix.tobytes("png")
-            img_base64 = base64.b64encode(img_bytes).decode('utf-8')
+            img_buffer = io.BytesIO()
+            pil_image.save(img_buffer, format="PNG")
+            img_base64 = base64.b64encode(img_buffer.getvalue()).decode('utf-8')
 
             images.append((img_base64, "image/png"))
             logger.debug(f"Converted PDF page {page_num + 1}/{pages_to_convert}")
@@ -164,7 +174,7 @@ def _pdf_to_images(file_bytes: io.BytesIO, max_pages: int) -> List[Tuple[str, st
         return images
 
     except ImportError:
-        logger.error("PyMuPDF (fitz) is not installed. Install with: pip install PyMuPDF")
+        logger.error("pypdfium2 is not installed. Install with: pip install pypdfium2")
         # Fallback: try pdf2image
         return _pdf_to_images_fallback(file_bytes, max_pages)
     except Exception as e:
@@ -207,7 +217,12 @@ def _pdf_to_images_fallback(file_bytes: io.BytesIO, max_pages: int) -> List[Tupl
         return images
 
     except ImportError:
-        logger.error("Neither PyMuPDF nor pdf2image is installed for PDF conversion")
+        # Note this path is unreachable in a shipped image and always has been:
+        # pdf2image is in no requirements file, and it needs the poppler-utils
+        # binaries, which neither Dockerfile installs. It is kept because it
+        # costs nothing and is a real escape hatch for a host install, but do
+        # not mistake it for a working fallback in the container.
+        logger.error("Neither pypdfium2 nor pdf2image is installed for PDF conversion")
         return []
     except Exception as e:
         logger.error(f"PDF to image fallback error: {e}")
