@@ -183,45 +183,49 @@ services:
       SSH_AUTH_SOCK: "${SSH_AUTH_SOCK:-}"
       # Automations: the cron tick loop fires scheduled agent runs when true.
       HARVIS_CRON_ENABLED: "${HARVIS_CRON_ENABLED:-true}"
-      # ── RECOMMENDED VOICE-FIRST PRESET ────────────────────────────────────
-      # One profile and four settings. No PyTorch, no CUDA, ~1 GB of image and
-      # ~630 MB of ONNX models in a volume:
-      #     COMPOSE_PROFILES=voice
-      #     HARVIS_STT_PROVIDER=sidecar
-      #     HARVIS_STT_URL=http://voice-onnx:8000/v1
-      #     HARVIS_TTS_PROVIDER=sidecar
-      #     HARVIS_TTS_URL=http://voice-onnx:8000/v1
-      # `voice` is deliberately just voice-onnx. The torch-bearing services live
-      # elsewhere so the preset can't drag them in by accident:
-      #     advanced-voice   tts-service (RVC, ~20 GB) + model-downloader
-      #     voice-fallback   stt (Speaches) — the ONNX benchmark's reference
+      # ── VOICE, OUT OF THE BOX ─────────────────────────────────────────────
+      # Speech points at the voice-onnx sidecar by DEFAULT. It has to: `local`
+      # means in-process Whisper and Piper, and this image is built from
+      # Dockerfile.core, which carries neither torch nor piper. A `local`
+      # default here would leave a voice-first product with no voice — the
+      # providers do report that honestly instead of crashing, but "helpful
+      # error message" is not the shipped experience.
+      #
+      # voice-onnx is ~1 GB of image plus ~630 MB of ONNX models in a volume,
+      # with no PyTorch and no CUDA. It starts with the default set.
+      #
       # Browser Kokoro stays the preferred path for ordinary chat playback and
       # needs no provider setting; voice-onnx also mirrors its weights so that
       # path works offline.
+      #
+      # The torch-bearing alternatives live behind profiles so nothing drags
+      # them in by accident:
+      #     advanced-voice   tts-service (RVC, ~20 GB) + model-downloader
+      #     voice-fallback   stt (Speaches) — the ONNX benchmark's reference
       # ──────────────────────────────────────────────────────────────────────
       # Speech-to-text provider (python_back_end/transcription.py). Declared here
       # or a .env setting never reaches the container — the same forwarding trap
       # DEEP_RESEARCH_MODEL hit. Values:
-      #   local    in-process Whisper (default; needs torch inside this image)
-      #   sidecar  any OpenAI-compatible /audio/transcriptions endpoint:
-      #            HARVIS_STT_URL=http://voice-onnx:8000/v1   (--profile voice)
+      #   sidecar  any OpenAI-compatible /audio/transcriptions endpoint (default):
+      #            HARVIS_STT_URL=http://voice-onnx:8000/v1   (the default set)
       #            HARVIS_STT_URL=http://stt:8000/v1  (--profile voice-fallback)
+      #   local    in-process Whisper — needs torch, which Dockerfile.core omits
       #   browser  the client transcribes; the server refuses audio uploads (503)
       #   disabled no speech input at all
-      HARVIS_STT_PROVIDER: "${HARVIS_STT_PROVIDER:-local}"
-      HARVIS_STT_URL: "${HARVIS_STT_URL:-}"
+      HARVIS_STT_PROVIDER: "${HARVIS_STT_PROVIDER:-sidecar}"
+      HARVIS_STT_URL: "${HARVIS_STT_URL:-http://voice-onnx:8000/v1}"
       HARVIS_STT_MODEL: "${HARVIS_STT_MODEL:-}"
       HARVIS_STT_API_KEY: "${HARVIS_STT_API_KEY:-}"
       HARVIS_STT_LANGUAGE: "${HARVIS_STT_LANGUAGE:-}"
       # Text-to-speech provider (python_back_end/synthesis.py). Same four values,
       # same reason they are declared here rather than left to .env:
-      #   local    in-process Piper, falling back to HARVIS_TTS_FALLBACK
-      #   sidecar  OpenAI-compatible /audio/speech, e.g. the ONNX voice service:
-      #            HARVIS_TTS_URL=http://voice-onnx:8000/v1
+      #   sidecar  OpenAI-compatible /audio/speech, e.g. the ONNX voice service
+      #            (default): HARVIS_TTS_URL=http://voice-onnx:8000/v1
+      #   local    in-process Piper — not installed in Dockerfile.core
       #   browser  the client speaks (browser Kokoro); the server refuses (503)
       #   disabled no speech output at all
-      HARVIS_TTS_PROVIDER: "${HARVIS_TTS_PROVIDER:-local}"
-      HARVIS_TTS_URL: "${HARVIS_TTS_URL:-}"
+      HARVIS_TTS_PROVIDER: "${HARVIS_TTS_PROVIDER:-sidecar}"
+      HARVIS_TTS_URL: "${HARVIS_TTS_URL:-http://voice-onnx:8000/v1}"
       HARVIS_TTS_MODEL: "${HARVIS_TTS_MODEL:-}"
       HARVIS_TTS_VOICE: "${HARVIS_TTS_VOICE:-af_heart}"
       HARVIS_TTS_SPEED: "${HARVIS_TTS_SPEED:-1.0}"
@@ -1059,9 +1063,11 @@ services:
   # Built here rather than pulled: the alternative was an unvetted community
   # image, and this one is small enough to own.
   #
-  #     COMPOSE_PROFILES=voice
-  #     HARVIS_STT_PROVIDER=sidecar
-  #     HARVIS_STT_URL=http://voice-onnx:8000/v1
+  # In the DEFAULT set, not behind a profile. It used to sit behind
+  # `profiles: ["voice"]`, which meant a plain `up -d` started no speech service
+  # at all — and once the backend moved to the torch-free Dockerfile.core, the
+  # in-process fallback it was hiding behind stopped existing too. The backend's
+  # HARVIS_STT_URL / HARVIS_TTS_URL default straight here.
   #
   # Models are NOT in the image. On first use it downloads whisper-tiny.en,
   # silero VAD and Kokoro v1.0 (~630 MB total) into the voice-models volume,
@@ -1079,7 +1085,6 @@ services:
     image: harvis-voice-onnx:local
     pull_policy: build
     container_name: harvis-voice-onnx
-    profiles: ["voice"]
     restart: unless-stopped
     environment:
       VOICE_ASR_MODEL: "${VOICE_ASR_MODEL:-whisper-tiny.en}"
@@ -1374,7 +1379,7 @@ volumes:
   pgsql_data:
   ml-models-cache:
   stt-cache:            # `voice` profile: the STT sidecar's HF cache (uid 1000, not 1001)
-  voice-models:         # `voice` profile: voice-onnx's ASR/VAD/Kokoro bundles (uid 1001)
+  voice-models:         # voice-onnx's ASR/VAD/Kokoro bundles, ~630 MB (uid 1001)
   embedding-data:
   artifact_data:
   surrealdb_data:

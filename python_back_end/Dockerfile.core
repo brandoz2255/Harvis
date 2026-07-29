@@ -6,11 +6,12 @@
 # 6-GB-plus pytorch/CUDA base.
 #
 # What it can't do: run Whisper or the TTS engines *in this process*. Speech
-# happens in the browser (Kokoro/WebSpeech) or in the `stt` sidecar
-# (`docker compose --profile voice`, HARVIS_STT_PROVIDER=sidecar). Everything
-# else — chat, RAG, research, documents, workspaces, the whole API surface —
-# is unchanged: main.py imports the null-torch shim from model_manager, so the
-# GPU bookkeeping degrades to a no-op instead of an ImportError.
+# happens in the browser (Kokoro/WebSpeech) or in the `voice-onnx` sidecar,
+# which is in the default service set and is what HARVIS_STT_PROVIDER /
+# HARVIS_TTS_PROVIDER point at by default. Everything else — chat, RAG,
+# research, documents, workspaces, the whole API surface — is unchanged:
+# main.py imports the null-torch shim from model_manager, so the GPU
+# bookkeeping degrades to a no-op instead of an ImportError.
 #
 # Build:
 #   docker build -t harvis-backend:core -f python_back_end/Dockerfile.core python_back_end
