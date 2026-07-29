@@ -64,8 +64,10 @@ services:
         chown -R 1001:1001 /models-cache &&
         echo 'Model cache permissions fixed'
     environment:
+      # One cache root — see the longer note on the backend service. This is the
+      # writer that filled the volume, so it is the one that was creating both
+      # huggingface/hub/models--* and huggingface/models--* for the same repo.
       HF_HOME: "/models-cache/huggingface"
-      TRANSFORMERS_CACHE: "/models-cache/huggingface"
       WHISPER_CACHE: "/models-cache/whisper"
       PYTHONUNBUFFERED: "1"
       # TTS Model Download Configuration
@@ -246,8 +248,21 @@ services:
       HARVIS_TTS_FORMAT: "${HARVIS_TTS_FORMAT:-wav}"
       HARVIS_TTS_API_KEY: "${HARVIS_TTS_API_KEY:-}"
       BACKEND_URL: "http://backend:8000"
+      # HF_HOME is the only cache root, on purpose. Setting TRANSFORMERS_CACHE
+      # alongside it looks redundant and is actually a duplicator: HF_HOME means
+      # "$HF_HOME/hub/models--<repo>", TRANSFORMERS_CACHE means
+      # "$TRANSFORMERS_CACHE/models--<repo>" with no hub/ level. Point both at
+      # the same directory and each library writes to a DIFFERENT subtree of it,
+      # so the same repo lands twice. Measured on this dev box before removing
+      # it: Qwen3-TTS-0.6B cached at both huggingface/hub/models--… (651 MB) and
+      # huggingface/models--… (2.3 GB), same for all-MiniLM-L6-v2.
+      # TRANSFORMERS_CACHE is also deprecated upstream (warns since transformers
+      # 4.36, gone in v5), so there is nothing to keep it for.
+      #
+      # Existing installs: the orphaned top-level huggingface/models--* dirs are
+      # not deleted by this change — nothing reads them any more, and anything
+      # still needed re-downloads under hub/. Reclaim manually when convenient.
       HF_HOME: "/models-cache/huggingface"
-      TRANSFORMERS_CACHE: "/models-cache/huggingface"
       WHISPER_CACHE: "/models-cache/whisper"
       UVICORN_WORKERS: "1"
       ENVIRONMENT: "production"

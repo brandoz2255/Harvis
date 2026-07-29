@@ -56,8 +56,6 @@ spec:
             # Ensure init container uses same cache paths
             - name: HF_HOME
               value: "/models-cache/huggingface"
-            - name: TRANSFORMERS_CACHE
-              value: "/models-cache/huggingface"
             - name: WHISPER_CACHE
               value: "/models-cache/whisper"
             # TTS Model Download Configuration
@@ -155,8 +153,6 @@ spec:
               value: "http://harvis-ai-merged-backend:8000"
             # Model cache configuration - HF_HOME is preferred by transformers library
             - name: HF_HOME
-              value: "/models-cache/huggingface"
-            - name: TRANSFORMERS_CACHE
               value: "/models-cache/huggingface"
             - name: WHISPER_CACHE
               value: "/models-cache/whisper"

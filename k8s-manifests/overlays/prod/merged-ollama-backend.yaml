@@ -87,8 +87,6 @@ spec:
               value: "http://harvis-ai-merged-backend:8000"
             - name: HF_HOME
               value: "/models-cache/huggingface"
-            - name: TRANSFORMERS_CACHE
-              value: "/models-cache/huggingface"
             - name: WHISPER_CACHE
               value: "/models-cache/whisper"
             - name: TMPDIR

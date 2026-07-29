@@ -29,7 +29,16 @@ def setup_cache_directories():
     os.makedirs(WHISPER_CACHE_DIR, exist_ok=True)
     os.makedirs(HUGGINGFACE_CACHE_DIR, exist_ok=True)
 
-    os.environ["TRANSFORMERS_CACHE"] = HUGGINGFACE_CACHE_DIR
+    # HF_HOME only. This line used to set TRANSFORMERS_CACHE to the same
+    # directory, which is not a synonym: HF_HOME caches repos under
+    # "$HF_HOME/hub/models--<repo>", TRANSFORMERS_CACHE under
+    # "$TRANSFORMERS_CACHE/models--<repo>" with no hub/ level. Pointed at one
+    # directory, the two conventions write the same repo into two subtrees of
+    # it — measured on a dev box as Qwen3-TTS-0.6B present under both. This
+    # process is the writer that filled the volume, so this is where the
+    # duplication actually came from. TRANSFORMERS_CACHE is deprecated upstream
+    # as well (warns since transformers 4.36, removed in v5).
+    os.environ["HF_HOME"] = HUGGINGFACE_CACHE_DIR
     os.environ["WHISPER_CACHE"] = WHISPER_CACHE_DIR
 
     logger.info(f"✅ Whisper cache: {WHISPER_CACHE_DIR}")

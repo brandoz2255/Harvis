@@ -423,8 +423,12 @@ def load_tts_model(force_cpu=None):
             logger.info(f"🔊 Loading TTS model on device: {tts_device}")
 
             # LOG CACHE CONFIGURATION
+            # Diagnostic log only. HF_HOME first now that it is the one cache
+            # root we set; TRANSFORMERS_CACHE stays as a fallback so a host that
+            # still exports the deprecated variable gets a truthful path here
+            # rather than a directory nothing wrote to.
             hf_cache = os.environ.get(
-                "TRANSFORMERS_CACHE", os.environ.get("HF_HOME", "~/.cache/huggingface")
+                "HF_HOME", os.environ.get("TRANSFORMERS_CACHE", "~/.cache/huggingface")
             )
             hf_cache_expanded = os.path.expanduser(hf_cache)
             logger.info(f"📁 HuggingFace cache directory: {hf_cache_expanded}")

@@ -48,8 +48,6 @@ spec:
           env:
             - name: HF_HOME
               value: "/models-cache/huggingface"
-            - name: TRANSFORMERS_CACHE
-              value: "/models-cache/huggingface"
             - name: WHISPER_CACHE
               value: "/models-cache/whisper"
           volumeMounts:
@@ -89,8 +87,6 @@ spec:
               value: "http://harvis-ai-backend-workstation-svc:8000"
             # Model cache configuration
             - name: HF_HOME
-              value: "/models-cache/huggingface"
-            - name: TRANSFORMERS_CACHE
               value: "/models-cache/huggingface"
             - name: WHISPER_CACHE
               value: "/models-cache/whisper"

@@ -163,8 +163,12 @@ RUN mkdir -p /data/artifacts \
 USER appuser
 
 # Environment variables
+# HF_HOME, not TRANSFORMERS_CACHE. compose/k8s now override only HF_HOME, so
+# leaving the deprecated variable baked in here would quietly survive as a
+# SECOND cache root pointing somewhere else entirely — exactly the duplication
+# the env cleanup removed.
 ENV PYTHONPATH=/app \
-  TRANSFORMERS_CACHE=/home/appuser/.cache/huggingface \
+  HF_HOME=/home/appuser/.cache/huggingface \
   HOME=/home/appuser
 
 EXPOSE 8000

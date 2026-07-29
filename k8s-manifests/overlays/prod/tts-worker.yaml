@@ -32,8 +32,6 @@ spec:
           env:
             - name: HF_HOME
               value: "/models-cache/huggingface"
-            - name: TRANSFORMERS_CACHE
-              value: "/models-cache/huggingface"
             - name: WHISPER_CACHE
               value: "/models-cache/whisper"
             - name: DOWNLOAD_QWEN_TTS
@@ -66,8 +64,6 @@ spec:
                   name: harvis-ai-backend-secret
                   key: database-url
             - name: HF_HOME
-              value: "/models-cache/huggingface"
-            - name: TRANSFORMERS_CACHE
               value: "/models-cache/huggingface"
             - name: WHISPER_CACHE
               value: "/models-cache/whisper"

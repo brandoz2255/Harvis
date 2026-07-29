@@ -46,7 +46,6 @@ services:
         echo '✅ Model cache permissions fixed'
     environment:
       HF_HOME: "/models-cache/huggingface"
-      TRANSFORMERS_CACHE: "/models-cache/huggingface"
       WHISPER_CACHE: "/models-cache/whisper"
       PYTHONUNBUFFERED: "1"
       DOWNLOAD_QWEN_TTS: "true"
@@ -85,7 +84,6 @@ services:
       OLLAMA_URL: "http://ollama:11434"
       BACKEND_URL: "http://backend:8000"
       HF_HOME: "/models-cache/huggingface"
-      TRANSFORMERS_CACHE: "/models-cache/huggingface"
       WHISPER_CACHE: "/models-cache/whisper"
       UVICORN_WORKERS: "4"
       ENVIRONMENT: "production"
