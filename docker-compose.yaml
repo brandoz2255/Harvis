@@ -110,8 +110,22 @@ services:
       dockerfile: Dockerfile.core
     container_name: harvis-backend
     restart: unless-stopped
+    # The GID that owns /var/run/docker.sock on the HOST. appuser (1001) is not
+    # in it by default, and without this the socket mount below is present but
+    # unreadable.
+    #
+    # This was hardcoded to 984 — the docker group on ONE developer's machine.
+    # Debian and Ubuntu usually land on 998 or 999, Fedora on 1001, and Docker
+    # Desktop presents it as 0. So on every other host the backend came up
+    # healthy with a socket it could not open, and the four features that need
+    # it (isolated runner, repo sandboxes, vibecode containers, integrations
+    # status) reported "docker client unavailable" with nothing obviously wrong.
+    #
+    # install.sh reads the real GID off the socket and writes HARVIS_DOCKER_GID
+    # into .env. 984 stays the fallback so existing installs are unaffected.
+    #     stat -c '%g' /var/run/docker.sock
     group_add:
-      - "984"  # Host docker socket GID - gives appuser access to /var/run/docker.sock
+      - "${HARVIS_DOCKER_GID:-984}"
     ports:
       - "8000:8000"
     environment:
@@ -384,6 +398,27 @@ services:
       - ml-models-cache:/models-cache
       - embedding-data:/app/embedding
       - /tmp:/tmp
+      # ⚠ HOST ROOT. Anything that can create a container with an arbitrary bind
+      # mount can read and write the whole host filesystem as root. This mount
+      # is deliberate and load-bearing — four shipped features are built on it:
+      #
+      #   workspace/terminal_container.py  the isolated per-session runner
+      #   owui_compat/repo_sandbox.py      dev-server preview boxes
+      #   vibecoding/containers.py         vibecode session containers
+      #   owui_compat/integrations_status.py  container status for the UI
+      #
+      # Worth being precise about the first one, because the intuition runs
+      # backwards: the isolated runner is what *mitigates* this. Build Space
+      # Phase 3 moved the AI's `exec` / `run_tests` out of the backend process
+      # and into a socket-less sibling container on a network no Harvis service
+      # rides. Un-mounting the socket would not harden the backend — it would
+      # delete the sandbox and send exec back into the process that holds host
+      # root. A docker-socket-proxy does not help either: the runner needs
+      # container-create with binds, which is the host-root primitive itself.
+      #
+      # So the boundary is: trust the backend, or run without Build Space. There
+      # is no third option short of a Jobs runtime (see workspace/harvis_readiness.py,
+      # which already reports this honestly for the k8s lanes).
       - /var/run/docker.sock:/var/run/docker.sock
       - ./python_back_end/main.py:/app/main.py:ro
       - ./python_back_end/setup_flow.py:/app/setup_flow.py:ro

@@ -70,6 +70,12 @@ psycopg-pool>=3.1.0
 pgvector>=0.2.0
 docker>=7.0.0
 defusedxml>=0.7.0
+# Host metrics. Undeclared until now: it rode in as a transitive of the pytorch
+# base image, so `import psutil` worked without anyone listing it, and moving to
+# a slim base is what surfaced that. It is a hard requirement of the MCP server
+# (mcp/server/tools/os_ops/{sys_info,processes}.py import it at module scope, so
+# the process exits on boot without it) and of main.py's research-stats endpoint.
+psutil>=5.9.0
 
 # Advanced research system dependencies
 requests-cache>=1.0.0

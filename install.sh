@@ -30,6 +30,8 @@ HAS_OVERRIDE=0
 MERGED_JSON=""
 CHECK_FAILED=0
 CHECK_ROWS=()
+# GID that owns /var/run/docker.sock on THIS host. Empty until detected.
+DOCKER_GID=""
 
 # Servers we know how to recognise, probed in this order. Each entry is
 # port|name|path — the path is what distinguishes "something is listening on
@@ -117,6 +119,39 @@ check_prereqs() {
   else
     add_row FAIL "docker compose" "v2 plugin ('docker compose') not found"
     return 1
+  fi
+}
+
+# ── Docker socket group ─────────────────────────────────────────────────────
+# The backend mounts /var/run/docker.sock and runs as appuser (uid 1001), which
+# is in no host group by default. `group_add` is what lets it open the socket,
+# and the GID it needs is a property of the HOST, not of the image: Debian and
+# Ubuntu usually land on 998 or 999, Fedora on 1001, this dev box on 984.
+#
+# Getting it wrong is silent. The container is healthy, the socket is mounted,
+# and every feature built on it — the isolated runner, repo sandboxes, vibecode
+# containers, integrations status — reports "docker client unavailable" with
+# nothing else to go on. So read the real value and write it down.
+detect_docker_gid() {
+  if [ ! -S /var/run/docker.sock ]; then
+    add_row WARN "docker socket" "/var/run/docker.sock not found — Build Space sandboxes will be unavailable"
+    return 0
+  fi
+  DOCKER_GID="$(stat -c '%g' /var/run/docker.sock 2>/dev/null || stat -f '%g' /var/run/docker.sock 2>/dev/null || true)"
+  case "${DOCKER_GID:-}" in
+    ''|*[!0-9]*)
+      DOCKER_GID=""
+      add_row WARN "docker socket" "could not read its group — leaving the compose default in place"
+      return 0 ;;
+  esac
+  if [ "$DOCKER_GID" = "0" ]; then
+    # Docker Desktop (macOS, and Windows via WSL2) presents the socket as
+    # root:root. group_add: "0" is what actually works there, and it is not the
+    # privilege escalation it looks like — mounting this socket at all already
+    # grants host root, which is documented at the mount in docker-compose.yaml.
+    add_row WARN "docker socket" "owned by root (Docker Desktop) — using group 0"
+  else
+    add_row PASS "docker socket" "group ${DOCKER_GID}"
   fi
 }
 
@@ -326,6 +361,18 @@ write_env() {
       echo "  Remove that line unless you set it deliberately."
     fi
   fi
+  # HARVIS_DOCKER_GID — the host's docker-socket group, read in detect_docker_gid.
+  # Always rewritten rather than preserved: unlike a secret, a stale value here is
+  # worse than none (the socket silently stops opening after a Docker reinstall
+  # renumbers the group). With no socket, leave it unset so compose's default
+  # applies and .env doesn't claim knowledge we don't have.
+  if [ -n "$DOCKER_GID" ]; then
+    if ! grep -qxF "HARVIS_DOCKER_GID=${DOCKER_GID}" .env; then
+      drop_env_key HARVIS_DOCKER_GID
+      printf 'HARVIS_DOCKER_GID=%s\n' "$DOCKER_GID" >> .env
+      echo "✓ Set HARVIS_DOCKER_GID=${DOCKER_GID} (host docker socket group)"
+    fi
+  fi
   ensure_env_secret JWT_SECRET "$(rand_hex 32)" "a JWT_SECRET"
   # FERNET_KEY — encrypts stored GitHub OAuth tokens. Compose defaults it to empty
   # and the backend only logs a warning, so without this GitHub sign-in fails in a
@@ -489,6 +536,7 @@ main() {
     print_check_table
     exit 1
   fi
+  detect_docker_gid
   detect_provider
   select_compose_files
   check_compose_merge
