@@ -173,6 +173,15 @@ ENV PYTHONPATH=/app \
 
 EXPOSE 8000
 
+# OCI metadata, last so the per-commit VCS_REF does not invalidate the very
+# expensive CUDA and wheel layers above it.
+ARG VCS_REF=unknown
+LABEL org.opencontainers.image.source="https://github.com/brandoz2255/Harvis" \
+  org.opencontainers.image.licenses="MIT" \
+  org.opencontainers.image.revision="${VCS_REF}" \
+  org.opencontainers.image.title="harvis-backend-gpu" \
+  org.opencontainers.image.description="Harvis backend with the PyTorch CUDA stack — model-downloader and the tts profile, not the default backend"
+
 # Set entrypoint to our script
 ENTRYPOINT ["/app/entrypoint.sh"]
 

@@ -65,5 +65,14 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD curl -fsS http://localhost:8000/health || exit 1
 
+# OCI metadata, last so the per-commit VCS_REF does not invalidate the layers
+# above it.
+ARG VCS_REF=unknown
+LABEL org.opencontainers.image.source="https://github.com/brandoz2255/Harvis" \
+  org.opencontainers.image.licenses="MIT" \
+  org.opencontainers.image.revision="${VCS_REF}" \
+  org.opencontainers.image.title="harvis-voice-onnx" \
+  org.opencontainers.image.description="ONNX speech sidecar — Whisper STT and Kokoro TTS, no torch"
+
 ENTRYPOINT ["/srv/entrypoint.sh"]
 CMD ["app"]

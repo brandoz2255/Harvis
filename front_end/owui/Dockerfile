@@ -216,5 +216,18 @@ CMD [ "bash", "start.sh"]
 # This stage carries the output and nothing else. busybox (not scratch) because
 # the compose command runs `sh -c ... cp -a`, and it is already pulled for
 # `artifact-init`, so its layers cost nothing extra.
-FROM busybox:latest AS artifact
+# Pinned, and pinned to the SAME tag as artifact-init in docker-compose.yaml —
+# a floating `latest` here would eventually resolve to a different busybox than
+# the one already pulled, so the "its layers cost nothing extra" claim above
+# would quietly stop being true.
+FROM busybox:1.37.0 AS artifact
 COPY --from=build /app/build /app/build
+
+# OCI metadata, last so the per-commit VCS_REF does not invalidate the npm
+# install and build layers above it.
+ARG VCS_REF=unknown
+LABEL org.opencontainers.image.source="https://github.com/brandoz2255/Harvis" \
+  org.opencontainers.image.licenses="MIT" \
+  org.opencontainers.image.revision="${VCS_REF}" \
+  org.opencontainers.image.title="harvis-owui-builder" \
+  org.opencontainers.image.description="Compiled SvelteKit frontend, delivered to a bind mount by the owui-builder service"

@@ -45,6 +45,29 @@ FROM python:3.12-slim
 # libpango/harfbuzz weasyprint's text shaping — PDF artifacts fail without it
 # libglib/libgomp  transitive loaders for the above
 # curl             the compose healthcheck
+#
+# This is the image's largest layer at 535 MB, so it attracts trim proposals.
+# Both obvious ones were measured and both are worse than leaving it alone:
+#
+#   Gate tesseract behind a build arg. Sounds like ~200 MB; it is 60 MB
+#   measured (518.6 -> 458.3 MB for the whole layer, of which the tesseract
+#   packages themselves are 22.9 MB). It also costs a live feature —
+#   notebooks/ingestion.py:236 shells out to this binary to OCR ingested
+#   images. Not worth 60 MB.
+#
+#   Purge the video-display stack. ffmpeg is 401 MB of the 518, and 175 MB of
+#   THAT is libllvm19 + mesa, dragged in by ffmpeg -> libsdl2/libplacebo ->
+#   libgbm/libglx-mesa -> mesa-libgallium -> libllvm19, none of which a
+#   headless backend uses. Tempting, and it does not work: ffmpeg links
+#   libSDL2 directly, so purging it leaves `ffmpeg -version` dying on a
+#   missing shared object. Verified by doing it. The only route to that 175 MB
+#   is a statically linked third-party ffmpeg, which trades a Debian-signed
+#   package for a binary blob — a supply-chain decision, not a cleanup.
+#
+# Unrelated but worth knowing while you are here: screen_analyzer.py and
+# screen_share_server.py import pytesseract, which is in no requirements file
+# and has never been installed. That code is already dead; it is not what
+# keeps tesseract here.
 RUN apt-get update && apt-get install -y --no-install-recommends \
   ffmpeg tesseract-ocr tesseract-ocr-eng \
   libmagic1 libsndfile1 \
@@ -120,6 +143,18 @@ ENV PYTHONPATH=/app \
   HARVIS_STT_PROVIDER=browser
 
 EXPOSE 8000
+
+# OCI metadata. Deliberately the last layer: VCS_REF changes on every commit,
+# and an ARG invalidates every layer BELOW it, so putting this any earlier
+# would turn each rebuild into a full reinstall of the 535 MB apt layer and the
+# 921 MB wheel layer. Compose passes VCS_REF through as ${HARVIS_VCS_REF},
+# which is unset locally (hence "unknown") and set by CI.
+ARG VCS_REF=unknown
+LABEL org.opencontainers.image.source="https://github.com/brandoz2255/Harvis" \
+  org.opencontainers.image.licenses="MIT" \
+  org.opencontainers.image.revision="${VCS_REF}" \
+  org.opencontainers.image.title="harvis-backend" \
+  org.opencontainers.image.description="Harvis orchestrator API — torch-free core image"
 
 ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["app"]

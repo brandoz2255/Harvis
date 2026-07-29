@@ -50,6 +50,11 @@ services:
     build:
       context: ./python_back_end
       dockerfile: Dockerfile
+      args:
+        # Stamped into org.opencontainers.image.revision. Unset locally, so a
+        # developer build is honestly labelled "unknown" rather than carrying a
+        # stale sha; CI exports HARVIS_VCS_REF and gets the real one.
+        VCS_REF: ${HARVIS_VCS_REF:-unknown}
     container_name: harvis-model-downloader
     # Downloads the torch-side weights — Whisper, Chatterbox, Qwen3-TTS — for
     # the in-process/RVC voice path. The ONNX Voice-First preset needs none of
@@ -113,6 +118,11 @@ services:
     build:
       context: ./python_back_end
       dockerfile: Dockerfile.core
+      args:
+        # Stamped into org.opencontainers.image.revision. Unset locally, so a
+        # developer build is honestly labelled "unknown" rather than carrying a
+        # stale sha; CI exports HARVIS_VCS_REF and gets the real one.
+        VCS_REF: ${HARVIS_VCS_REF:-unknown}
     container_name: harvis-backend
     restart: unless-stopped
     # The GID that owns /var/run/docker.sock on the HOST. appuser (1001) is not
@@ -550,6 +560,11 @@ services:
     build:
       context: ./browser_runner
       dockerfile: Dockerfile
+      args:
+        # Stamped into org.opencontainers.image.revision. Unset locally, so a
+        # developer build is honestly labelled "unknown" rather than carrying a
+        # stale sha; CI exports HARVIS_VCS_REF and gets the real one.
+        VCS_REF: ${HARVIS_VCS_REF:-unknown}
     container_name: harvis-browser-runner
     restart: unless-stopped
     networks:
@@ -620,6 +635,11 @@ services:
       # `artifact` = busybox + the compiled output only. Targeting `build`
       # tagged the whole Node build stage (5.25 GB) to ship ~263 MB.
       target: artifact
+      args:
+        # Stamped into org.opencontainers.image.revision. Unset locally, so a
+        # developer build is honestly labelled "unknown" rather than carrying a
+        # stale sha; CI exports HARVIS_VCS_REF and gets the real one.
+        VCS_REF: ${HARVIS_VCS_REF:-unknown}
     image: harvis-owui-builder:local
     # Local build tag — tell Compose to build it, not pull it (a bare
     # `docker compose up -d` without --build otherwise fails: pull access denied).
@@ -1040,6 +1060,11 @@ services:
     build:
       context: ./python_back_end
       dockerfile: Dockerfile.core
+      args:
+        # Stamped into org.opencontainers.image.revision. Unset locally, so a
+        # developer build is honestly labelled "unknown" rather than carrying a
+        # stale sha; CI exports HARVIS_VCS_REF and gets the real one.
+        VCS_REF: ${HARVIS_VCS_REF:-unknown}
     container_name: harvis-mcp
     restart: unless-stopped
     entrypoint: ["uvicorn", "mcp.server.app:app", "--host", "0.0.0.0", "--port", "8010"]
@@ -1146,6 +1171,11 @@ services:
     build:
       context: ./services/voice-onnx
       dockerfile: Dockerfile
+      args:
+        # Stamped into org.opencontainers.image.revision. Unset locally, so a
+        # developer build is honestly labelled "unknown" rather than carrying a
+        # stale sha; CI exports HARVIS_VCS_REF and gets the real one.
+        VCS_REF: ${HARVIS_VCS_REF:-unknown}
     image: harvis-voice-onnx:local
     pull_policy: build
     container_name: harvis-voice-onnx
