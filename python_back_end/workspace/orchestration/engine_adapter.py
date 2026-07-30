@@ -48,6 +48,44 @@ _CONTAINERS = {
     "hermes-agent": os.getenv("HARVIS_HERMES_AGENT_CONTAINER", "harvis-hermes-agent"),
 }
 _CLOUD_ENGINES = {"codex", "claude-code", "kimi-code"}
+# The compose SERVICE that provides each engine's sidecar. Not derivable from the engine
+# name: `kimi-code` has no service of its own — it runs inside the `claude-code` sidecar
+# (see _CONTAINERS above), so telling an operator to `up -d kimi-code` sends them after a
+# service that does not exist. All of these live behind the `engines` profile, which a
+# default install deliberately leaves out.
+_ENGINE_SERVICE = {
+    "opencode": "opencode",
+    "codex": "codex",
+    "claude-code": "claude-code",
+    "kimi-code": "claude-code",
+    "hermes-agent": "hermes-agent",
+}
+
+
+def _engine_install_hint(engine: str, container: str) -> str:
+    """The exact command that makes `engine` runnable, naming the real service."""
+    svc = _ENGINE_SERVICE.get(engine, engine)
+    # "isn't running" would be wrong on a fresh clone: engine services BUILD their image
+    # rather than pulling one, so the first `up -d` is a build (~1 GB, a couple of minutes),
+    # not a start. Saying "running" sends the operator looking for a stopped container.
+    return (
+        f"The {container} sidecar isn't available on this Harvis. Engines ship as an opt-in "
+        f"pack: run `docker compose --profile engines up -d {svc}` from the Harvis repo root, "
+        f"on the Docker host — the first run builds the image, so allow a couple of minutes."
+    )
+
+
+def _missing_sidecar(stderr_lines: list[str], container: str) -> bool:
+    """Did `docker exec` fail because the sidecar container isn't there?
+
+    This has to be sniffed out of stderr rather than caught as an exception: the docker
+    CLI itself launches fine, so create_subprocess_exec succeeds. Docker then prints
+    "Error response from daemon: No such container: <name>" and exits 125 with an EMPTY
+    stdout — which reads to a naive stream loop exactly like a model that had nothing
+    to say.
+    """
+    blob = " ".join(stderr_lines[-10:]).lower()
+    return "no such container" in blob or f"no such container: {container}".lower() in blob
 # Engines whose stdout is PLAIN TEXT (not JSON) — the loop maps each line to a `log`
 # event and uses the output tail as the final summary; the git diff is the authority.
 _TEXT_ENGINES = {"hermes-agent"}
@@ -58,7 +96,14 @@ _CODEX_DEFAULT_MODEL = os.getenv("HARVIS_CODEX_DEFAULT_MODEL", "")
 _CLAUDE_DEFAULT_MODEL = os.getenv("HARVIS_CLAUDE_DEFAULT_MODEL", "")
 # Phase E4B Hermes Agent: local-Ollama provider + per-user profile homes (memory/SOUL).
 _HERMES_HOMES_ROOT = os.getenv("HARVIS_HERMES_HOMES_ROOT", "/data/hermes-homes")
-_HERMES_OLLAMA_URL = os.getenv("HARVIS_HERMES_OLLAMA_URL", "http://ollama:11434/v1")
+_HERMES_OLLAMA_URL = os.getenv("HARVIS_HERMES_OLLAMA_URL") or (
+    (
+        os.getenv("HARVIS_LLM_BASE_URL")
+        or os.getenv("OLLAMA_URL")
+        or "http://host.docker.internal:11434"
+    ).rstrip("/")
+    + "/v1"
+)
 # E4B's own default model (decoupled from E4-native's HARVIS_HERMES_DEFAULT_MODEL): the
 # Hermes Agent app runs any local Ollama model — a capable coder (qwen3:4b) is the default.
 _HERMES_DEFAULT_MODEL = os.getenv("HARVIS_HERMES_AGENT_DEFAULT_MODEL", "qwen3:4b")
@@ -266,10 +311,14 @@ def _map_claude_line(obj, root_ev):
                 yield root_ev("tool_result", {"output": str(txt)[:2000], "success": not block.get("is_error")})
     elif etype == "result":
         # Final wrap-up; the loop emits `done` separately. Surface the result text as a token.
-        if obj.get("subtype") == "success" and obj.get("result"):
-            yield root_ev("token", {"content": str(obj["result"])})
-        elif obj.get("is_error"):
+        # `is_error` is checked FIRST because `subtype` lies: a 401 comes back as
+        # {"subtype":"success","is_error":true,"api_error_status":401,"result":"Failed to
+        # authenticate…"}. Testing subtype first sent that straight down the success path and
+        # rendered the auth failure as the model's answer.
+        if obj.get("is_error"):
             yield root_ev("log", {"message": "Claude: " + str(obj.get("result") or obj.get("subtype") or "error")[:300]})
+        elif obj.get("subtype") == "success" and obj.get("result"):
+            yield root_ev("token", {"content": str(obj["result"])})
     # system/init → drop
 
 
@@ -467,6 +516,11 @@ async def run_external_engine_adapter(
 
     proc: asyncio.subprocess.Process | None = None
     stderr_buf: list[str] = []
+    # See the note in run_claude_chat_workspace: a rejected credential is reported on STDOUT
+    # as a result line, leaving stderr empty, so stderr alone can't tell a failed run apart
+    # from a successful one that touched no files.
+    cli_error: str = ""
+    cli_error_status: int = 0
     tool_calls = 0
     usage_p = 0  # captured input tokens (cloud engines: the result line's `usage`) — for the meter
     usage_c = 0  # captured output tokens
@@ -494,7 +548,7 @@ async def run_external_engine_adapter(
         except Exception as exc:
             yield root_ev("error", {
                 "message": f"Could not start the {label} engine: {exc}",
-                "fix_hint": f"Is the {container} sidecar running? `docker compose up -d {engine}`.",
+                "fix_hint": _engine_install_hint(engine, container),
             })
             return
 
@@ -526,6 +580,12 @@ async def run_external_engine_adapter(
             _u = _extract_usage(engine, obj)
             if _u:
                 usage_p, usage_c = _u
+            if obj.get("type") == "result" and obj.get("is_error"):
+                cli_error = str(obj.get("result") or "").strip()
+                try:
+                    cli_error_status = int(obj.get("api_error_status") or 0)
+                except Exception:
+                    cli_error_status = 0
             try:
                 for ev in mapper(obj, root_ev):
                     if ev.type == "tool_call":
@@ -586,9 +646,36 @@ async def run_external_engine_adapter(
     if timed_out:
         yield root_ev("error", {"message": f"{label} timed out after {_TIMEOUT_S}s.", "fix_hint": "Try a smaller task."})
         return
-    if n == 0 and stderr_buf:
+    # `n == 0` alone can't distinguish the three ways a run ends with nothing changed:
+    # the engine ran and had nothing to do (fine), the sidecar was never there (install gap),
+    # or the credential was rejected (auth gap). Gating on stderr only caught the second —
+    # a 401 arrives on STDOUT as a result line, so stderr is empty and the run used to fall
+    # through to `done — 0 file(s) changed`. The exit code separates them.
+    # A non-zero exit is only FATAL when nothing came of the run. If the engine changed files
+    # before dying, the diff is real and already saved — dropping it to show an error would
+    # lose the user's work, so that case surfaces as a warning alongside the normal result.
+    rc = proc.returncode if proc is not None else None
+    if rc not in (0, None) and n > 0 and not cli_error:
+        yield root_ev("log", {
+            "message": f"{label} exited with code {rc} after changing {n} file(s) — "
+                       f"review the diff before applying."
+        })
+    elif cli_error or rc not in (0, None) or (n == 0 and stderr_buf):
+        if _missing_sidecar(stderr_buf, container):
+            yield root_ev("error", {
+                "message": f"{label} isn't installed on this Harvis.",
+                "fix_hint": _engine_install_hint(engine, container),
+            })
+            return
+        if cli_error_status in (401, 403):
+            yield root_ev("error", {
+                "message": f"{label} rejected the credential: {cli_error[:300]}",
+                "fix_hint": f"Re-verify the {label} credential in Integrations.",
+            })
+            return
+        detail = cli_error or (stderr_buf[-1] if stderr_buf else f"exit code {rc}")
         yield root_ev("error", {
-            "message": f"{label} made no changes. " + (stderr_buf[-1][:300] if stderr_buf else ""),
+            "message": f"{label} made no changes. {detail[:300]}",
             "fix_hint": "Check the engine is connected/authenticated and the task is actionable.",
         })
         return
@@ -728,6 +815,10 @@ async def run_claude_chat_workspace(
     tool_calls = 0
     timed_out = False
     stderr_buf: list[str] = []
+    # The CLI's own verdict on the run, read off its `result` line. Kept separately from the
+    # exit code because it carries WHY (an HTTP status, a message) where rc only carries THAT.
+    cli_error: str = ""
+    cli_error_status: int = 0
 
     async def _drain(p) -> None:
         try:
@@ -770,6 +861,12 @@ async def run_claude_chat_workspace(
             except Exception:
                 yield root_ev("log", {"message": line[:400]})
                 continue
+            if obj.get("type") == "result" and obj.get("is_error"):
+                cli_error = str(obj.get("result") or "").strip()
+                try:
+                    cli_error_status = int(obj.get("api_error_status") or 0)
+                except Exception:
+                    cli_error_status = 0
             try:
                 for ev in _map_claude_line(obj, root_ev):
                     if ev.type == "tool_call":
@@ -820,6 +917,48 @@ async def run_claude_chat_workspace(
         yield root_ev("error", {"message": f"{label} timed out after {_TIMEOUT_S}s.",
                                 "fix_hint": "Try a narrower task."})
         return
+
     summary = " ".join(p for p in final_text_parts if p).strip()
-    summary = (summary[:2000] if summary else "") or (stderr_buf[-1][:300] if stderr_buf else f"{label} finished.")
+
+    # A failed CLI is an ERROR, not a `done` whose summary is the failure. Two real runs proved
+    # how many ways this leaks through, so the gate is the exit code — the one signal that
+    # doesn't lie — and never the stream's shape:
+    #
+    #   * sidecar absent: `docker exec` exits non-zero with EMPTY stdout, so the read loop ends
+    #     on its first iteration, indistinguishable from a model with nothing to say. The old
+    #     code then used stderr as a fallback summary, which is how the docker daemon's
+    #     "No such container: harvis-claude-code" got rendered under a green tick.
+    #   * bad credential: the CLI exits 1 but DOES print text — "Failed to authenticate.
+    #     API Error: 401" — on a result line marked {"subtype":"success","is_error":true}.
+    #     A guard that only fires when the output is empty sails straight past this one.
+    #
+    # Hence: rc != 0 fails the run, full stop. Any text produced is reported as partial rather
+    # than dropped, and `cli_error` supplies the reason when the CLI named one.
+    rc = proc.returncode if proc is not None else None
+    if cli_error or rc not in (0, None):
+        if _missing_sidecar(stderr_buf, container):
+            yield root_ev("error", {
+                "message": f"{label} isn't installed on this Harvis.",
+                "fix_hint": _engine_install_hint(engine, container),
+            })
+        elif cli_error_status in (401, 403):
+            yield root_ev("error", {
+                "message": f"{label} rejected the credential: {cli_error[:300]}",
+                "fix_hint": (
+                    "Re-verify your Kimi Code Console key in Integrations — a Moonshot "
+                    "platform key won't work here, it must be a Kimi Code membership key."
+                    if is_kimi else
+                    "Re-verify your Claude subscription or API key in Integrations."
+                ),
+            })
+        else:
+            detail = cli_error or (stderr_buf[-1] if stderr_buf else f"exit code {rc}")
+            yield root_ev("error", {
+                "message": f"{label} failed to run: {detail[:300]}",
+                "fix_hint": f"Check the {container} sidecar's logs: `docker logs {container}`.",
+                **({"partial_output": summary[:2000]} if summary else {}),
+            })
+        return
+
+    summary = (summary[:2000] if summary else "") or f"{label} finished."
     yield root_ev("done", {"summary": summary})
