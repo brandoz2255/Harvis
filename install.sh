@@ -312,7 +312,9 @@ check_ports() {
     return 0
   fi
   local ports project own_ports p conflicts=() checked=0
-  ports="$(grep -o '"published": *"[0-9]*"' "$MERGED_JSON" | grep -o '[0-9]*' | sort -un)"
+  # `|| true`: a compose file that publishes nothing makes grep exit 1, which
+  # under `set -euo pipefail` would kill the installer here with no message.
+  ports="$(grep -o '"published": *"[0-9]*"' "$MERGED_JSON" | grep -o '[0-9]*' | sort -un || true)"
   project="${COMPOSE_PROJECT_NAME:-$(basename "$PWD" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]//g')}"
   # Ports already published by THIS compose project are a re-run, not a conflict.
   own_ports="$(docker ps --filter "label=com.docker.compose.project=${project}" \
@@ -381,7 +383,9 @@ ensure_env_secret() { # $1 = key, $2 = value, $3 = human label
 
 drop_env_key() { # $1 = key — remove every assignment of it from .env
   if grep -q "^$1=" .env; then
-    tmp="$(mktemp)"; grep -v "^$1=" .env > "$tmp"; mv "$tmp" .env
+    # `|| true`: if that key is the ONLY line in .env, grep -v emits nothing and
+    # exits 1, which under `set -e` would end the installer mid-rewrite.
+    tmp="$(mktemp)"; grep -v "^$1=" .env > "$tmp" || true; mv "$tmp" .env
   fi
 }
 
@@ -481,10 +485,15 @@ print_setup_code() {
   # The setup code must never land in captured output (tee'd logs, CI transcripts),
   # so it is written to the terminal directly; with no terminal, point at .env.
   local code_line="HARVIS_SETUP_CODE is in .env — view it with:  grep '^HARVIS_SETUP_CODE=' .env"
+  local code=""
+  # `|| true`: no such key in .env means grep exits 1, and under `set -e` that
+  # would end the installer on its very last useful line.
+  code="$(grep '^HARVIS_SETUP_CODE=' .env | head -1 | cut -d= -f2- || true)"
+  if [ -z "$code" ]; then
+    echo "  No HARVIS_SETUP_CODE found in .env — the first signup will ask for one."
   # `-w /dev/tty` only checks permission bits; actually opening it is the real
   # "do we have a controlling terminal" probe.
-  if ( : > /dev/tty ) 2>/dev/null; then
-    code="$(grep '^HARVIS_SETUP_CODE=' .env | head -1 | cut -d= -f2-)"
+  elif ( : > /dev/tty ) 2>/dev/null; then
     printf '  First-admin setup code: %s\n' "$code" > /dev/tty
     echo "  (setup code printed to your terminal only — it is also in .env)"
   else
@@ -601,9 +610,26 @@ poll_health() {
   # one field we need without anchoring to the whole body (a second key was
   # added later, and an anchored match silently yields empty → a false
   # "unreachable" claim right after a 200).
-  local setup_body needs
-  setup_body="$(curl -s -m 8 "$SETUP_URL" 2>/dev/null)"
-  needs="$(printf '%s' "$setup_body" | grep -o '"needs_setup" *: *\(true\|false\)' | grep -o 'true\|false' | head -1)"
+  #
+  # Both `|| true`s below are load-bearing under `set -euo pipefail`. grep exits 1
+  # when it matches nothing, pipefail promotes that to the pipeline, and a failing
+  # command substitution in an assignment ends the script — so on a fresh install
+  # this printed "✓ Harvis is up" and then died silently with status 1, never
+  # reaching the `*)` branch written for exactly this case and never printing the
+  # setup code the first signup needs. Measured on a clean VM: backend container
+  # started 03:00:34, installer exited 03:00:40.
+  #
+  # That timing is the other half of it. The poll above breaks out the moment the
+  # health blockers clear, which can be seconds after the backend starts — early
+  # enough that this endpoint is not serving yet. So retry briefly instead of
+  # treating the first empty answer as the final one.
+  local setup_body="" needs="" attempt
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    setup_body="$(curl -s -m 8 "$SETUP_URL" 2>/dev/null || true)"
+    needs="$(printf '%s' "$setup_body" | grep -o '"needs_setup" *: *\(true\|false\)' | grep -o 'true\|false' | head -1 || true)"
+    [ -n "$needs" ] && break
+    sleep 2
+  done
   case "$needs" in
     true)  print_setup_code ;;
     false) echo "  Instance already has an admin — no setup code needed." ;;
