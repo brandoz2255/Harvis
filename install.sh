@@ -32,6 +32,10 @@ CHECK_FAILED=0
 CHECK_ROWS=()
 # GID that owns /var/run/docker.sock on THIS host. Empty until detected.
 DOCKER_GID=""
+# Container runtime for the services that can use a GPU (today: llmfit). Empty
+# means plain runc — the portable default. Set to "nvidia" only when this host
+# actually has that runtime registered with dockerd.
+GPU_RUNTIME=""
 
 # Servers we know how to recognise, probed in this order. Each entry is
 # port|name|path — the path is what distinguishes "something is listening on
@@ -45,6 +49,10 @@ KNOWN_PROVIDERS=(
 
 HEALTH_URL="http://localhost:9000/api/health/services"
 SETUP_URL="http://localhost:9000/api/setup/status"
+# The health report lists the model provider under this key. That server is the
+# user's own (plug-and-play via HARVIS_LLM_BASE_URL), not a container of this
+# stack — it being absent or down is information, never install failure.
+PROVIDER_HEALTH_KEY="model_provider"
 
 parse_args() {
   while [ $# -gt 0 ]; do
@@ -63,7 +71,8 @@ parse_args() {
         echo "Usage: ./install.sh [--llm-url URL] [--yes] [--check-only] [--no-launch]"
         echo ""
         echo "  With no arguments, this looks for a model server already running on"
-        echo "  this machine (Ollama, LM Studio, llama.cpp, vLLM) and uses it."
+        echo "  this machine (Ollama, LM Studio, llama.cpp, vLLM), uses it, and then"
+        echo "  builds and starts the stack. --no-launch stops after writing .env."
         echo ""
         echo "  --llm-url URL   Skip detection and use this OpenAI-compatible server."
         echo "                  From inside a container 'localhost' is the container,"
@@ -155,6 +164,25 @@ detect_docker_gid() {
   fi
 }
 
+# ── GPU runtime ─────────────────────────────────────────────────────────────
+# llmfit (the model ranker) reads whatever hardware it can see. Under plain runc
+# it still enumerates GPUs off the PCI bus and ranks the catalogue; the nvidia
+# runtime only adds CUDA-reported VRAM, which sharpens the ranking. So this is a
+# nice-to-have, never a requirement — asking dockerd is the only honest way to
+# tell, since a driver on the host says nothing about the CONTAINER runtime.
+detect_gpu_runtime() {
+  local runtimes
+  runtimes="$(docker info --format '{{json .Runtimes}}' 2>/dev/null || true)"
+  case "$runtimes" in
+    *'"nvidia"'*)
+      GPU_RUNTIME="nvidia"
+      add_row PASS "gpu runtime" "nvidia runtime present — llmfit will read CUDA VRAM" ;;
+    *)
+      GPU_RUNTIME=""
+      add_row PASS "gpu runtime" "runc (no nvidia runtime) — llmfit reads the PCI bus instead" ;;
+  esac
+}
+
 # ── Model-server detection ──────────────────────────────────────────────────
 port_listening() { # /dev/tcp probe: succeeds iff something accepts on 127.0.0.1:$1
   ( exec 3<>"/dev/tcp/127.0.0.1/$1" ) 2>/dev/null
@@ -182,9 +210,20 @@ detect_provider() {
     fi
     body="$(curl -s -m 4 "http://127.0.0.1:${port}${path}" 2>/dev/null || true)"
     [ -n "$body" ] || continue
+    # A reply is not an identification. Harvis's own backend publishes :8000 and
+    # answers /v1/models with {"detail":"Not Found"} — accepting any non-empty
+    # body made the installer point Harvis at itself. Demand the shape of a model
+    # list: `models` (Ollama) or `data` (OpenAI-compatible). Anything else is
+    # some other program on a port we happen to know, so keep looking.
+    case "$body" in
+      *'"models"'*|*'"data"'*) : ;;
+      *) continue ;;
+    esac
     LLM_ENDPOINT="http://host.docker.internal:${port}"
     LLM_PROVIDER="$name"
-    count="$(printf '%s' "$body" | grep -o '"id"\|"name"' | wc -l | tr -d ' ')"
+    # `|| true` is load-bearing: pipefail is on, and grep exits 1 on no match —
+    # which is the ordinary "reachable but no models loaded" case, not a failure.
+    count="$(printf '%s' "$body" | grep -o '"id"\|"name"' | wc -l | tr -d ' ' || true)"
     if [ "${count:-0}" -gt 0 ]; then
       add_row PASS "model server" "${name} on :${port}, ${count} model(s)"
     else
@@ -227,9 +266,13 @@ check_compose_merge() {
   local errs; errs="$(mktemp)"
   # JWT_SECRET is ${JWT_SECRET:?} in the compose file, which aborts `config`
   # itself when unset — feed a dummy for rendering only if .env doesn't have one.
-  local -a envprefix=()
+  # Render with the runtime we just detected rather than whatever .env happens to
+  # hold — write_env runs AFTER this, so on a first install .env doesn't have the
+  # key yet, and on a re-run a stale value would render a merge that isn't the
+  # one `up -d` gets. A real environment variable outranks the .env file.
+  local -a envprefix=(env "HARVIS_GPU_RUNTIME=${GPU_RUNTIME:-runc}")
   if [ -z "${JWT_SECRET:-}" ] && ! grep -q '^JWT_SECRET=' .env 2>/dev/null; then
-    envprefix=(env JWT_SECRET=preflight-only-dummy)
+    envprefix+=(JWT_SECRET=preflight-only-dummy)
   fi
   if ! "${envprefix[@]}" docker compose "${COMPOSE_ARGS[@]}" config --format json \
       >"$MERGED_JSON" 2>"$errs"; then
@@ -242,15 +285,23 @@ check_compose_merge() {
   svcs="$("${envprefix[@]}" docker compose "${COMPOSE_ARGS[@]}" config --services 2>/dev/null || true)"
   count="$(printf '%s\n' "$svcs" | grep -c . || true)"
   add_row PASS "compose merge" "${count} service(s) in the default set"
-  # A GPU device reservation in the default set is the one thing that makes
-  # `up -d` fail outright on a host without the nvidia container runtime — which
-  # would undo the whole point of this installer. Assert it, don't assume it.
-  local nv
+  # Demanding a GPU is what makes `up -d` fail outright on a host that has none,
+  # which would undo the whole point of this installer. Assert it, don't assume
+  # it. Two separate ways to demand one: a device reservation, and `runtime:`.
+  # Reservations are never acceptable here (nothing in the default set needs one).
+  # A rendered nvidia runtime is fine — but only on a host that actually has it,
+  # which is why this reads the merge produced with the detected value above.
+  local nv rt
   nv="$(grep -c '"driver": *"nvidia"' "$MERGED_JSON" || true)"
-  if [ "$nv" -eq 0 ]; then
-    add_row PASS "gpu independence" "0 GPU device reservations — starts on any host"
-  else
+  rt="$(grep -c '"runtime": *"nvidia"' "$MERGED_JSON" || true)"
+  if [ "$nv" -ne 0 ]; then
     add_row FAIL "gpu independence" "${nv} nvidia device reservation(s) in the default set — this will fail on a host without the nvidia container runtime"
+  elif [ "$rt" -ne 0 ] && [ -z "$GPU_RUNTIME" ]; then
+    add_row FAIL "gpu independence" "${rt} service(s) render runtime:nvidia but this host has no nvidia runtime — they would fail to create"
+  elif [ "$rt" -ne 0 ]; then
+    add_row PASS "gpu independence" "no device reservations; ${rt} service(s) opt into the nvidia runtime this host has"
+  else
+    add_row PASS "gpu independence" "0 GPU device reservations — starts on any host"
   fi
 }
 
@@ -288,7 +339,12 @@ check_resources() {
     [ "$mem_kb" -eq 0 ] && mem_kb=""
   fi
   if [ -n "$mem_kb" ]; then
-    local mem_gib=$((mem_kb / 1024 / 1024))
+    # MemTotal sits below the nominal size (the kernel and firmware reserve some
+    # of it), so truncating division calls an 8 GB machine "7 GiB" and trips the
+    # warning on hardware that is fine. Round to the NEAREST GiB instead: the
+    # printed figure then matches the RAM the user knows they bought, and the
+    # threshold compares against that same honest number.
+    local mem_gib=$(( (mem_kb + 524288) / 1048576 ))
     if [ "$mem_gib" -lt 8 ]; then
       add_row WARN memory "${mem_gib} GiB detected — under 8 GiB the full stack is unlikely to fit"
     else
@@ -373,6 +429,20 @@ write_env() {
       echo "✓ Set HARVIS_DOCKER_GID=${DOCKER_GID} (host docker socket group)"
     fi
   fi
+  # HARVIS_GPU_RUNTIME — same reasoning as HARVIS_DOCKER_GID: always rewritten,
+  # and dropped outright when this host has no nvidia runtime. A stale "nvidia"
+  # here (card removed, runtime uninstalled, .env copied between machines) makes
+  # llmfit fail at container-create rather than fall back, so absent beats wrong.
+  if [ -n "$GPU_RUNTIME" ]; then
+    if ! grep -qxF "HARVIS_GPU_RUNTIME=${GPU_RUNTIME}" .env; then
+      drop_env_key HARVIS_GPU_RUNTIME
+      printf 'HARVIS_GPU_RUNTIME=%s\n' "$GPU_RUNTIME" >> .env
+      echo "✓ Set HARVIS_GPU_RUNTIME=${GPU_RUNTIME} (llmfit reads CUDA VRAM)"
+    fi
+  elif grep -q '^HARVIS_GPU_RUNTIME=' .env; then
+    drop_env_key HARVIS_GPU_RUNTIME
+    echo "✓ Removed a stale HARVIS_GPU_RUNTIME pin (this host has no nvidia runtime)"
+  fi
   ensure_env_secret JWT_SECRET "$(rand_hex 32)" "a JWT_SECRET"
   # FERNET_KEY — encrypts stored GitHub OAuth tokens. Compose defaults it to empty
   # and the backend only logs a warning, so without this GitHub sign-in fails in a
@@ -422,25 +492,75 @@ print_setup_code() {
   fi
 }
 
-# Modest default for stranger boxes (incl. 8 GB GPUs). Larger models can be pulled later.
-DEFAULT_OLLAMA_MODEL="${HARVIS_DEFAULT_OLLAMA_MODEL:-llama3.2:3b}"
-
 report_models() {
   # The model server belongs to the host, not to this stack — there is no
   # container to `docker exec` into and nothing here can pull on its behalf.
   # So: point at the machine that owns it, and say what to run there.
+  #
+  # Deliberately names no model. This script knows nothing about your hardware,
+  # and a hardcoded suggestion is a guess dressed as advice; the setup wizard
+  # asks llmfit (running in the default set) to rank real candidates for THIS
+  # machine, which is a better answer than any constant could be.
   echo ""
   if [ -z "$LLM_ENDPOINT" ]; then
     echo "  No model server was found on this machine, so chat has nothing to talk to yet."
-    echo "  Start one and re-run ./install.sh, or set it from Settings → Integrations."
-    echo "  The quickest option:  ollama serve   (then: ollama pull ${DEFAULT_OLLAMA_MODEL})"
+    echo "  Two ways forward, both offered in the setup wizard on first login:"
+    echo "    • connect a cloud provider with an API key, or"
+    echo "    • start a local server (ollama serve, LM Studio, llama.cpp, vLLM) and re-run this."
     return 0
   fi
   echo "  Models come from ${LLM_PROVIDER:-your server} at ${LLM_ENDPOINT}."
   case "$LLM_PROVIDER" in
-    Ollama) echo "  Pull one there, e.g.:  ollama pull ${DEFAULT_OLLAMA_MODEL}" ;;
+    Ollama) echo "  It has none loaded yet — the setup wizard ranks what this machine can run." ;;
     *)      echo "  Load a model there, then pick it in Harvis." ;;
   esac
+}
+
+# Names in the health report that are genuinely wrong: not up, not merely
+# absent because their compose profile is off, and not the model provider.
+health_blockers() { # $1 = /api/health/services body
+  printf '%s' "$1" \
+    | grep -oE '"[a-z0-9_-]+":\{"status":"[a-z_]+"' \
+    | sed 's/^"//; s/":{"status":"/ /; s/"$//' \
+    | awk '$2!="up" && $2!="not_installed" && $2!="not_configured"{print $1}' \
+    | grep -vxF "$PROVIDER_HEALTH_KEY" || true
+}
+
+# The status table the user sees, built from the ACTUAL default service set —
+# not from the backend's capability report, which names the external provider
+# alongside real containers. `ps` without -a hides exited containers, and two
+# services (artifact-init, owui-builder) are one-shot jobs that SHOULD exit 0,
+# so read states with -a and judge exited containers by their exit code.
+# Failed services land in STACK_DOWN for the caller to act on.
+STACK_DOWN=""
+check_stack_containers() {
+  STACK_DOWN=""
+  local expected states svc line state code
+  expected="$(docker compose config --services 2>/dev/null || true)"
+  [ -n "$expected" ] || return 0  # can't render the set — don't invent a verdict
+  states="$(docker compose ps -a --format '{{.Service}} {{.State}} {{.ExitCode}}' 2>/dev/null || true)"
+  echo "Service status (docker compose ps):"
+  for svc in $expected; do
+    line="$(printf '%s\n' "$states" | awk -v s="$svc" '$1==s{print; exit}')"
+    state="$(printf '%s' "$line" | awk '{print $2}')"
+    code="$(printf '%s' "$line" | awk '{print $3}')"
+    case "$state" in
+      running) printf '  ✓ %-16s up\n' "$svc" ;;
+      exited)
+        if [ "${code:-1}" = "0" ]; then
+          printf '  ✓ %-16s completed (one-shot)\n' "$svc"
+        else
+          printf '  ✗ %-16s exited (%s)\n' "$svc" "${code:-?}"
+          STACK_DOWN="${STACK_DOWN} ${svc}"
+        fi ;;
+      "")
+        printf '  ✗ %-16s no container\n' "$svc"
+        STACK_DOWN="${STACK_DOWN} ${svc}" ;;
+      *)
+        printf '  ✗ %-16s %s\n' "$svc" "$state"
+        STACK_DOWN="${STACK_DOWN} ${svc}" ;;
+    esac
+  done
 }
 
 poll_health() {
@@ -451,57 +571,68 @@ poll_health() {
     body="$(curl -s -m 8 "$HEALTH_URL" 2>/dev/null || true)"
     overall="$(printf '%s' "$body" | sed -n 's/^{"status":"\([a-z]*\)".*/\1/p')"
     [ "$overall" = "healthy" ] && break
+    # "degraded" with nothing wrong but the model provider IS the healthy state
+    # of a no-provider install — waiting the full 180s won't change it.
+    if [ -n "$body" ] && [ -z "$(health_blockers "$body")" ]; then break; fi
     sleep 5
   done
   echo ""
-  if [ -n "$body" ]; then
-    echo "Service status (from /api/health/services):"
-    printf '%s' "$body" \
-      | grep -oE '"[a-z0-9-]+":\{"status":"[a-z]+"' \
-      | sed 's/":{"status":"/ /; s/"//g' \
-      | while read -r name state; do
-          case "$state" in
-            up) printf '  ✓ %-16s up\n' "$name" ;;
-            *)  printf '  ✗ %-16s %s\n' "$name" "$state" ;;
-          esac
-        done
+  check_stack_containers
+  if [ -z "$body" ]; then
+    echo ""
+    echo "✗ No response from ${HEALTH_URL} after 180s — nginx (or the backend behind it) never came up."
+    echo "  Inspect with:  docker compose ps"
+    echo "                 docker compose logs --tail=100 backend nginx pgsql"
+    return 1
   fi
-  if [ "$overall" = "healthy" ]; then
+  local blockers
+  blockers="$(health_blockers "$body" | tr '\n' ' ')"
+  if [ -n "${blockers% }" ] || [ -n "$STACK_DOWN" ]; then
     echo ""
-    echo "✓ Harvis is up → http://localhost:9000"
-    # The endpoint returns {"needs_setup":..,"setup_complete":..} — extract the
-    # one field we need without anchoring to the whole body (a second key was
-    # added later, and an anchored match silently yields empty → a false
-    # "unreachable" claim right after a 200).
-    local setup_body needs
-    setup_body="$(curl -s -m 8 "$SETUP_URL" 2>/dev/null)"
-    needs="$(printf '%s' "$setup_body" | grep -o '"needs_setup" *: *\(true\|false\)' | grep -o 'true\|false' | head -1)"
-    case "$needs" in
-      true)  print_setup_code ;;
-      false) echo "  Instance already has an admin — no setup code needed." ;;
-      *)     if [ -z "$setup_body" ]; then
-               echo "  Could not reach ${SETUP_URL} — if this is a fresh install, the first"
-               echo "  signup will ask for the setup code from .env (HARVIS_SETUP_CODE)."
-             else
-               echo "  ${SETUP_URL} answered but its state was unrecognised — if this is a"
-               echo "  fresh install, the first signup will ask for the setup code from .env."
-             fi ;;
-    esac
-    echo ""
-    echo "  Auth cookie: HARVIS_COOKIE_SECURE defaults to false (localhost/LAN HTTP)."
-    echo "  Behind HTTPS, set HARVIS_COOKIE_SECURE=true in .env and recreate the backend."
-    report_models
-    return 0
+    [ -n "${blockers% }" ] && echo "✗ The backend reports trouble with: ${blockers% }"
+    [ -n "$STACK_DOWN" ] && echo "✗ Container(s) not running:${STACK_DOWN}"
+    echo "  Inspect with:  docker compose ps"
+    echo "                 docker compose logs --tail=100 backend nginx pgsql"
+    return 1
   fi
   echo ""
-  if [ -z "$body" ]; then
-    echo "✗ No response from ${HEALTH_URL} after 180s — nginx (or the backend behind it) never came up."
-  else
-    echo "✗ Stack did not reach 'healthy' within 180s — see per-service status above."
+  echo "✓ Harvis is up → http://localhost:9000"
+  # The endpoint returns {"needs_setup":..,"setup_complete":..} — extract the
+  # one field we need without anchoring to the whole body (a second key was
+  # added later, and an anchored match silently yields empty → a false
+  # "unreachable" claim right after a 200).
+  local setup_body needs
+  setup_body="$(curl -s -m 8 "$SETUP_URL" 2>/dev/null)"
+  needs="$(printf '%s' "$setup_body" | grep -o '"needs_setup" *: *\(true\|false\)' | grep -o 'true\|false' | head -1)"
+  case "$needs" in
+    true)  print_setup_code ;;
+    false) echo "  Instance already has an admin — no setup code needed." ;;
+    *)     if [ -z "$setup_body" ]; then
+             echo "  Could not reach ${SETUP_URL} — if this is a fresh install, the first"
+             echo "  signup will ask for the setup code from .env (HARVIS_SETUP_CODE)."
+           else
+             echo "  ${SETUP_URL} answered but its state was unrecognised — if this is a"
+             echo "  fresh install, the first signup will ask for the setup code from .env."
+           fi ;;
+  esac
+  echo ""
+  echo "  Auth cookie: HARVIS_COOKIE_SECURE defaults to false (localhost/LAN HTTP)."
+  echo "  Behind HTTPS, set HARVIS_COOKIE_SECURE=true in .env and recreate the backend."
+  # Provider status is informational, never pass/fail: with none configured,
+  # report_models below says what to do. Configured-but-unreachable gets its own
+  # pointer, because chat will fail until that server answers — but the install
+  # itself still succeeded.
+  if [ -n "$LLM_ENDPOINT" ]; then
+    local provider_state
+    provider_state="$(printf '%s' "$body" | sed -n "s/.*\"${PROVIDER_HEALTH_KEY}\":{\"status\":\"\([a-z_]*\)\".*/\1/p")"
+    if [ -n "$provider_state" ] && [ "$provider_state" != "up" ]; then
+      echo ""
+      echo "  ⚠ ${LLM_ENDPOINT} is configured but the backend cannot reach it yet (${provider_state})."
+      echo "    Chat has nothing to talk to until that server answers."
+    fi
   fi
-  echo "  Inspect with:  docker compose ps"
-  echo "                 docker compose logs --tail=100 backend nginx pgsql"
-  return 1
+  report_models
+  return 0
 }
 
 launch() {
@@ -516,14 +647,17 @@ launch() {
     echo "When ready, run:  docker compose up --build -d"
     return 0
   fi
+  # Launching IS the point of running this — "one command, no questions asked".
+  # So a bare Enter (and a non-interactive stdin, where read fails and leaves
+  # $run empty) builds and starts. --no-launch above, or answering n, opts out.
   local run
-  if [ "$ASSUME_YES" -eq 1 ]; then run="y"; else read -rp "Build and start the stack now? [y/N]: " run || true; fi
-  if [[ "${run:-N}" =~ ^[Yy]$ ]]; then
-    docker compose up --build -d
-    poll_health
-  else
+  if [ "$ASSUME_YES" -eq 1 ]; then run="y"; else read -rp "Build and start the stack now? [Y/n]: " run || true; fi
+  if [[ "${run:-Y}" =~ ^[Nn]$ ]]; then
     echo ""
     echo "When ready, run:  docker compose up --build -d"
+  else
+    docker compose up --build -d
+    poll_health
   fi
 }
 
@@ -537,6 +671,7 @@ main() {
     exit 1
   fi
   detect_docker_gid
+  detect_gpu_runtime
   detect_provider
   select_compose_files
   check_compose_merge

@@ -37,7 +37,18 @@ def _tick(ready: bool, reason: str, probe: str, skipped: bool = False) -> dict[s
 # HARVIS_ENABLED_PROFILES. Without that we cannot tell "the operator turned this
 # off" from "it crashed", and the safe reading is the former: calling a correct
 # install degraded teaches people to ignore the health page.
-_SERVICE_PROFILE = {"openclaw": "engines", "tts": "voice", "tts-service": "voice"}
+_SERVICE_PROFILE = {
+    "openclaw": "engines",
+    "tts": "voice",
+    "tts-service": "voice",
+    # Notebooks ships as an opt-in pack. Without these entries a CORRECT default
+    # install reported Notebooks as broken (nginx 502s /onb because the upstream
+    # container does not exist) instead of "not installed" — the exact failure the
+    # docstring above warns about, one capability later.
+    "notebooks": "notebooks",
+    "open-notebook-ui": "notebooks",
+    "document-worker": "notebooks",
+}
 
 
 def enabled_profiles() -> set[str]:
@@ -125,6 +136,50 @@ async def _probe_tts() -> dict[str, Any]:
         return _tick(False, str(exc)[:200], probe)
 
 
+# The Harvis notebooks lane: our own Next.js UI (basePath /onb) talking to this
+# backend's onb_compat router. Deliberately NOT the lfnovo `open-notebook` +
+# `surrealdb` pair further down the compose file — that is a separate product on
+# its own database, and conflating the two is how the install cost got quoted as
+# ~2.7 GB of images nobody on this lane needs.
+_NOTEBOOKS_PROFILE = "notebooks"
+_NOTEBOOKS_SERVICES = ("open-notebook-ui", "document-worker")
+# Measured with `docker images`, not read off a comment: open-notebook-ui 278 MB
+# + document-worker 1.41 GB. (The compose comment above document-worker claims
+# "~200MB" — it is wrong by 7x and should be corrected separately.)
+_NOTEBOOKS_DOWNLOAD_MB = 1690
+_NOTEBOOKS_ENABLE_COMMAND = "docker compose --profile notebooks up -d"
+
+
+def _notebooks_ui_url() -> str:
+    return os.getenv("ONB_UI_URL", "http://open-notebook-ui:8502").rstrip("/")
+
+
+async def _probe_notebooks() -> dict[str, Any]:
+    """Is the notebooks UI container answering?
+
+    Probes ``/onb`` and not ``/`` — the app is served under that basePath, so the
+    root legitimately 404s on a perfectly healthy container.
+    """
+    probe = f"GET {_notebooks_ui_url()}/onb"
+    try:
+        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as hc:
+            r = await hc.get(f"{_notebooks_ui_url()}/onb")
+        if r.status_code < 400:
+            return _tick(True, f"HTTP {r.status_code}", probe)
+        return _tick(False, f"HTTP {r.status_code}", probe)
+    except Exception as exc:
+        # Observation loses to nothing here, but a failed probe is ambiguous:
+        # the container may be absent (profile off) or crashed (profile on).
+        # HARVIS_ENABLED_PROFILES is the only signal that separates them, and it
+        # is empty on installs that predate it — so an unset env reads as "not
+        # installed", matching the openclaw/tts convention above.
+        if not service_expected("open-notebook-ui"):
+            return _tick(
+                False, _not_installed_reason("open-notebook-ui"), probe, skipped=True
+            )
+        return _tick(False, str(exc)[:200], probe)
+
+
 def _probe_artifacts() -> dict[str, Any]:
     probe = "write+read+unlink sentinel in ARTIFACT_STORAGE_DIR"
     root = _artifact_dir()
@@ -194,12 +249,14 @@ def create_setup_router(
         ollama = await _probe_ollama()
         openclaw = await _probe_openclaw()
         tts = await _probe_tts()
+        notebooks = await _probe_notebooks()
         artifacts = _probe_artifacts()
         ticks = {
             "database": db,
             "ollama": ollama,
             "openclaw": openclaw,
             "tts": tts,
+            "notebooks": notebooks,
             "artifacts": artifacts,
         }
         # A skipped tick is neither ready nor a failure — it is a capability the
@@ -212,14 +269,28 @@ def create_setup_router(
         body: TestModelBody,
         _user=Depends(require_admin),
     ):
-        """Direct Ollama /api/chat with a tiny predict — proves the model loads."""
-        probe = "POST {OLLAMA_URL}/api/chat options.num_predict=8"
+        """Direct Ollama /api/chat with a small predict — proves the model loads.
+
+        The budget is 512, not the 8 it used to be. Reasoning models spend their
+        token budget on a separate ``thinking`` channel before emitting a single
+        character of ``content``: measured on qwen3:0.6b, num_predict=8 and 64
+        both stop with done_reason="length" and content="" while thinking is
+        mid-sentence, and only at 256 does "OK" arrive. Eight tokens therefore
+        reported "empty generation" — the wizard's last step calling a perfectly
+        working model broken — and qwen3 is exactly what a modest machine gets
+        steered toward. 512 leaves headroom for a slower thinker; the surrounding
+        120 s timeout, not the token cap, is what bounds this probe.
+        """
+        probe = "POST {OLLAMA_URL}/api/chat options.num_predict=512"
+        # OLLAMA_URL is normalised to HARVIS_LLM_BASE_URL by main.py at import
+        # time (see the canonical-base-URL block there), so this reads the
+        # resolved provider address; the literal default is a dead fallback.
         url = os.getenv("OLLAMA_URL", "http://ollama:11434").rstrip("/")
         payload = {
             "model": body.model,
             "stream": False,
             "messages": [{"role": "user", "content": "Reply with exactly: OK"}],
-            "options": {"num_predict": 8},
+            "options": {"num_predict": 512},
         }
         try:
             async with httpx.AsyncClient(timeout=_MODEL_TIMEOUT) as hc:
@@ -241,6 +312,21 @@ def create_setup_router(
             if not text:
                 text = str(data.get("response") or "").strip()
             if not text:
+                # A bigger reasoner can still burn the whole budget thinking. That
+                # is not a broken model — it loaded and generated — so report it
+                # as ready and say plainly which channel answered, rather than
+                # failing the wizard on a token cap.
+                thinking = ""
+                if isinstance(msg, dict):
+                    thinking = str(msg.get("thinking") or "").strip()
+                if thinking:
+                    return {
+                        "ready": True,
+                        "reason": "ok (reasoning output only — the model ran out of "
+                        "tokens while thinking, which still proves it loaded)",
+                        "probe": probe,
+                        "text": thinking[:500],
+                    }
                 return {
                     "ready": False,
                     "reason": "empty generation",
@@ -318,5 +404,39 @@ def create_setup_router(
                 """
             )
         return {"ok": True, "setup_complete": True}
+
+    @router.get("/api/capabilities/notebooks")
+    async def capability_notebooks(_user=Depends(get_current_user)):
+        """Is the Notebooks pack installed, and if not, how does one install it?
+
+        ``get_current_user`` rather than ``require_admin``: the Notebooks page is
+        an ordinary-user surface, and it needs this answer to tell "not installed"
+        apart from "broken" before it mounts the iframe. Nothing here is
+        privileged — it is a health probe plus a documented compose command.
+        """
+        tick = await _probe_notebooks()
+        if tick["ready"]:
+            state = "running"
+        elif tick["skipped"]:
+            state = "not_installed"
+        else:
+            state = "unreachable"
+        return {
+            "id": "notebooks",
+            "state": state,
+            "reason": tick["reason"],
+            "probe": tick["probe"],
+            "profile": _NOTEBOOKS_PROFILE,
+            "services": list(_NOTEBOOKS_SERVICES),
+            "download_mb": _NOTEBOOKS_DOWNLOAD_MB,
+            "enable": {
+                "command": _NOTEBOOKS_ENABLE_COMMAND,
+                # The backend cannot run this itself: harvis-backend has the docker
+                # CLI but no compose plugin, and the repo root is not bind-mounted.
+                # Handing the operator the exact command is the honest option —
+                # better than a button that pretends and fails.
+                "run_from": "the Harvis repo root, on the Docker host",
+            },
+        }
 
     return router
