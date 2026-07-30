@@ -28,7 +28,34 @@ export type SetupStatus = {
 	setup_complete?: boolean;
 };
 
-export type SetupTick = { ready: boolean; reason: string; probe: string };
+/** One engine row inside the `engines` tick — the credential half and the sidecar half. */
+export type SetupEngine = {
+	id: string;
+	label: string;
+	service: string;
+	container: string;
+	state:
+		| 'ready'
+		| 'unverified'
+		| 'needs_sidecar'
+		| 'no_credential'
+		| 'not_installed'
+		| 'unreachable';
+	detail: string;
+	has_key: boolean;
+	verified: boolean;
+	can_probe: boolean;
+	sidecar?: boolean | null;
+};
+
+/** `skipped` = a capability the operator did not install: neither ready nor broken. */
+export type SetupTick = {
+	ready: boolean;
+	reason: string;
+	probe: string;
+	skipped?: boolean;
+	engines?: SetupEngine[];
+};
 
 export async function getSetupStatus(): Promise<SetupStatus> {
 	const res = await fetch(`${base}/api/setup/status`, { credentials: 'include' });

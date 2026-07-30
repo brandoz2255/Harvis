@@ -15,6 +15,7 @@
 
 	import { createPicker, getAuthToken } from '$lib/utils/google-drive-picker';
 	import { pickAndDownloadFile } from '$lib/utils/onedrive-file-picker';
+	import { describeMediaError, micUnavailableReason } from '$lib/utils/audio';
 	import { KokoroWorker } from '$lib/workers/KokoroWorker';
 
 	const dispatch = createEventDispatcher();
@@ -307,6 +308,11 @@
 	};
 	const startDictation = async () => {
 		showMicMenu = false;
+		const unavailable = micUnavailableReason();
+		if (unavailable) {
+			toast.error($i18n.t(unavailable.key, unavailable.values ?? {}));
+			return;
+		}
 		try {
 			const s = await navigator.mediaDevices.getUserMedia({
 				audio: selectedMicId ? { deviceId: { exact: selectedMicId } } : true
@@ -315,8 +321,9 @@
 				recording = true;
 				s.getTracks().forEach((t) => t.stop());
 			}
-		} catch {
-			toast.error($i18n.t('Permission denied when accessing microphone'));
+		} catch (err) {
+			const info = describeMediaError(err);
+			toast.error($i18n.t(info.key, info.values ?? {}));
 		}
 	};
 
@@ -2359,7 +2366,15 @@
 
 																return;
 															}
-															// check if user has access to getUserMedia
+															// Voice mode needs a live mic. Check the API exists BEFORE calling it:
+															// on a plain-HTTP LAN origin `navigator.mediaDevices` is undefined, and
+															// the old catch-all reported that as a denied permission.
+															const unavailable = micUnavailableReason();
+															if (unavailable) {
+																toast.error($i18n.t(unavailable.key, unavailable.values ?? {}));
+
+																return;
+															}
 															try {
 																let stream = await navigator.mediaDevices.getUserMedia({
 																	audio: true
@@ -2389,10 +2404,8 @@
 																showCallOverlay.set(true);
 																showControls.set(true);
 															} catch (err) {
-																// If the user denies the permission or an error occurs, show an error message
-																toast.error(
-																	$i18n.t('Permission denied when accessing media devices')
-																);
+																const info = describeMediaError(err);
+																toast.error($i18n.t(info.key, info.values ?? {}));
 															}
 														}}
 														aria-label={$i18n.t('Voice mode')}

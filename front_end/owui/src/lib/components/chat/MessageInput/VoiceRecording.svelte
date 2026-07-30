@@ -3,6 +3,7 @@
 	import { tick, getContext, onMount, onDestroy } from 'svelte';
 	import { config, settings } from '$lib/stores';
 	import { blobToFile, calculateSHA256, extractCurlyBraceWords } from '$lib/utils';
+	import { describeMediaError } from '$lib/utils/audio';
 
 	import { transcribeAudio } from '$lib/apis/audio';
 	import XMark from '$lib/components/icons/XMark.svelte';
@@ -236,7 +237,8 @@
 			}
 		} catch (err) {
 			console.error('Error accessing media devices.', err);
-			toast.error($i18n.t('Error accessing media devices.'));
+			const info = describeMediaError(err);
+			toast.error($i18n.t(info.key, info.values ?? {}));
 			loading = false;
 			recording = false;
 			return;

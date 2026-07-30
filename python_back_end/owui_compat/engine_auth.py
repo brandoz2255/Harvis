@@ -284,16 +284,48 @@ def register_engine_auth_routes(router: APIRouter, get_current_user: Callable) -
             raise HTTPException(status_code=503, detail="Database not ready")
         from main import encrypt_api_key
         enc = encrypt_api_key(key)
-        # Save resets verified_at (must re-verify after a credential/mode change).
+        # Save resets verified_at — a CHANGED credential or mode must re-prove itself.
+        #
+        # But "unchanged" is not a change, and treating it as one was a real bug: the
+        # setup wizard called verify (which stores verified_at=NOW() on success) and
+        # then save, so a key the vendor had just accepted landed in the table as
+        # unverified, with an empty last_error because this statement clears that too.
+        # Everything downstream gates on verified_at — cloud_chat_model_entries skips
+        # the provider's catalog and user_has_verified_engine() says no — so a good key
+        # produced zero chat models and an engine Build refused to run, with nothing
+        # anywhere naming the cause. Re-saving the identical secret in the identical
+        # mode now keeps the verification it already earned; anything else still resets.
+        keep_verified = False
+        row = await _engine_auth_row(pool, int(user.id), engine)
+        if row and row["verified_at"] is not None and (row["auth_mode"] or "api_key") == auth_mode:
+            try:
+                from main import decrypt_api_key
+
+                keep_verified = decrypt_api_key(row["api_key_encrypted"]) == key
+            except Exception:
+                keep_verified = False
         async with pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO user_engine_auth (user_id, engine, api_key_encrypted, auth_mode, verified_at, last_error, updated_at) "
-                "VALUES ($1, $2, $3, $4, NULL, NULL, NOW()) "
-                "ON CONFLICT (user_id, engine) DO UPDATE SET api_key_encrypted=EXCLUDED.api_key_encrypted, "
-                "auth_mode=EXCLUDED.auth_mode, verified_at=NULL, last_error=NULL, updated_at=NOW()",
-                int(user.id), engine, enc, auth_mode,
-            )
-        return {"engine": engine, "api_key_saved": True, "auth_mode": auth_mode, "verified_at": None}
+            if keep_verified:
+                await conn.execute(
+                    "UPDATE user_engine_auth SET api_key_encrypted=$3, auth_mode=$4, "
+                    "last_error=NULL, updated_at=NOW() WHERE user_id=$1 AND engine=$2",
+                    int(user.id), engine, enc, auth_mode,
+                )
+            else:
+                await conn.execute(
+                    "INSERT INTO user_engine_auth (user_id, engine, api_key_encrypted, auth_mode, verified_at, last_error, updated_at) "
+                    "VALUES ($1, $2, $3, $4, NULL, NULL, NOW()) "
+                    "ON CONFLICT (user_id, engine) DO UPDATE SET api_key_encrypted=EXCLUDED.api_key_encrypted, "
+                    "auth_mode=EXCLUDED.auth_mode, verified_at=NULL, last_error=NULL, updated_at=NOW()",
+                    int(user.id), engine, enc, auth_mode,
+                )
+        verified_at = row["verified_at"].isoformat() if keep_verified and row else None
+        return {
+            "engine": engine,
+            "api_key_saved": True,
+            "auth_mode": auth_mode,
+            "verified_at": verified_at,
+        }
 
     @router.post("/api/owui/engine-auth/{engine}/verify")
     async def engine_auth_verify(engine: str, request: Request, user=Depends(get_current_user)):

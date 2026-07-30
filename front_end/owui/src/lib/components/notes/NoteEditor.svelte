@@ -24,6 +24,7 @@
 	import { PaneGroup, Pane, PaneResizer } from 'paneforge';
 
 	import { compressImage, copyToClipboard, splitStream, convertHeicToJpeg } from '$lib/utils';
+	import { describeMediaError, micUnavailableReason } from '$lib/utils/audio';
 	import { WEBUI_API_BASE_URL, WEBUI_BASE_URL } from '$lib/constants';
 	import { getFileById, uploadFile } from '$lib/apis/files';
 	import { chatCompletion, generateOpenAIChatCompletion } from '$lib/apis/openai';
@@ -1356,17 +1357,13 @@ Provide the enhanced notes in markdown format. Use markdown syntax for headings,
 						onRecord={async () => {
 							displayMediaRecord = false;
 
+							const unavailable = micUnavailableReason();
+							if (unavailable) {
+								toast.error($i18n.t(unavailable.key, unavailable.values ?? {}));
+								return;
+							}
 							try {
-								let stream = await navigator.mediaDevices
-									.getUserMedia({ audio: true })
-									.catch(function (err) {
-										toast.error(
-											$i18n.t(`Permission denied when accessing microphone: {{error}}`, {
-												error: err
-											})
-										);
-										return null;
-									});
+								let stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
 								if (stream) {
 									recording = true;
@@ -1374,8 +1371,9 @@ Provide the enhanced notes in markdown format. Use markdown syntax for headings,
 									tracks.forEach((track) => track.stop());
 								}
 								stream = null;
-							} catch {
-								toast.error($i18n.t('Permission denied when accessing microphone'));
+							} catch (err) {
+								const info = describeMediaError(err);
+								toast.error($i18n.t(info.key, info.values ?? {}));
 							}
 						}}
 						onCaptureAudio={async () => {

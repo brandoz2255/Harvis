@@ -11,6 +11,7 @@
 	import MicSolid from '$lib/components/icons/MicSolid.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import VoiceRecording from '$lib/components/chat/MessageInput/VoiceRecording.svelte';
+	import { describeMediaError, micUnavailableReason } from '$lib/utils/audio';
 	export let show = false;
 
 	let name = $i18n.t('Untitled');
@@ -99,17 +100,13 @@
 								class=" p-2 bg-gray-50 text-gray-700 dark:bg-gray-700 dark:text-white transition rounded-full"
 								type="button"
 								on:click={async () => {
+									const unavailable = micUnavailableReason();
+									if (unavailable) {
+										toast.error($i18n.t(unavailable.key, unavailable.values ?? {}));
+										return;
+									}
 									try {
-										let stream = await navigator.mediaDevices
-											.getUserMedia({ audio: true })
-											.catch(function (err) {
-												toast.error(
-													$i18n.t(`Permission denied when accessing microphone: {{error}}`, {
-														error: err
-													})
-												);
-												return null;
-											});
+										let stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
 										if (stream) {
 											voiceInput = true;
@@ -117,8 +114,9 @@
 											tracks.forEach((track) => track.stop());
 										}
 										stream = null;
-									} catch {
-										toast.error($i18n.t('Permission denied when accessing microphone'));
+									} catch (err) {
+										const info = describeMediaError(err);
+										toast.error($i18n.t(info.key, info.values ?? {}));
 									}
 								}}
 							>

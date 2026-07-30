@@ -19,6 +19,8 @@
 	import ToolDock from './ToolDock.svelte';
 	import { methodFor } from './method';
 	import { surfaceFor } from './surfaces';
+	import { describeMediaError, micUnavailableReason } from '$lib/utils/audio';
+	import { toast } from 'svelte-sonner';
 
 	const i18n: any = getContext('i18n');
 
@@ -182,6 +184,11 @@
 			mediaRecorder?.stop();
 			return;
 		}
+		const unavailable = micUnavailableReason();
+		if (unavailable) {
+			toast.error($i18n.t(unavailable.key, unavailable.values ?? {}));
+			return;
+		}
 		try {
 			const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 			audioChunks = [];
@@ -212,8 +219,10 @@
 			};
 			mediaRecorder.start();
 			recording = true;
-		} catch {
-			/* mic permission denied / unsupported */
+		} catch (err) {
+			const info = describeMediaError(err);
+			toast.error($i18n.t(info.key, info.values ?? {}));
+			recording = false;
 		}
 	};
 

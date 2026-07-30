@@ -1,5 +1,152 @@
 # Recent Changes and Fixes Documentation
 
+## Date: 2026-07-29 — First-run setup: the wizard stopped lying, and the mic says what's actually wrong
+
+Two reports, one theme. The setup wizard and the chat composer both had places where a working
+thing was reported as broken, or a broken thing as fine. Everything below was fixed and verified
+against the live stack on VM 102 (192.168.20.98), the fresh-install rig.
+
+### 1. The wizard would not advance after a Kimi Code key was connected
+
+**Symptom:** paste a valid Kimi Code membership key, see "connected", then the Continue button
+still reads *Skip for now* and step 1 never turns green.
+
+**Root cause:** `connectKey` verified the key and *then* saved it. `POST /api/owui/engine-auth/{engine}`
+resets `verified_at` on every save, on the reasonable theory that a changed credential must re-prove
+itself. But re-saving the *same* secret is not a change, so a key Kimi had just accepted landed in
+`user_engine_auth` as unverified — and everything downstream gates on that timestamp
+(`cloud_chat_model_entries` skips the provider's catalog, `user_has_verified_engine()` says no). Zero
+chat models, an engine Build refuses to run, and nothing anywhere naming the cause.
+
+**Fix:** two halves.
+- `owui_compat/engine_auth.py` — a save that carries the *identical* secret in the *identical* mode
+  now keeps the verification it already earned. Anything else still resets.
+- `routes/setup/+page.svelte` — `connectKey` saves first, then verifies, which is the order the
+  Integrations ConnectionPanel already used.
+
+### 2. Engine readiness replaced the OpenClaw checkbox in Verify
+
+`setup_flow._probe_engines` now reports one row per auth-bearing engine (`kimi-code`, `claude-code`,
+`codex`) plus OpenClaw, each with a state and a reason a person can act on: `ready`,
+`no_credential`, `unverified`, `needs_sidecar`, `not_installed`. The verdict is deliberately
+asymmetric — **verified-but-no-sidecar is neutral, not a fault**, because a key that works with the
+container not yet started is a `docker compose --profile engines up -d claude-code` away, and the
+tick prints exactly that command. Each engine with a stored credential gets a **Test key** button
+(`POST …/verify` with no body → the backend decrypts the saved key and calls the vendor), so the
+operator can prove a credential live instead of trusting a row.
+
+### 3. Ollama is not required, and the wizard now says so
+
+If any cloud provider is connected, the missing local model server becomes a neutral skipped tick
+reading *"optional, since you have a cloud provider connected"* — instead of a red ✗ that called a
+deliberately cloud-only install broken. Same reasoning as #2: a skipped tick is neither ready nor
+failed, and `overall` counts only the non-skipped ones.
+
+### 4. The wizard's last step tested every model against Ollama — including cloud models
+
+**Found during this pass, not reported.** `POST /api/setup/test-model` always did
+`POST {OLLAMA_URL}/api/chat`. The wizard offers whatever `/api/models` returned, so on a cloud-only
+install — a connected key and no local server, which is the entire point of the plug-and-play
+default — *every* id in that list is provider-prefixed. Sending `kimi-code/kimi-for-coding` to a
+nonexistent Ollama made the final step of setup report a working configuration as broken.
+
+**Fix:** `setup_flow.py` branches on `is_cloud_chat_model()` and routes provider-backed models
+through `proxy_cloud_chat` — the same facade the chat UI uses — returning the identical
+`{ready, reason, probe, text}` contract. The local branch also names the address it could not reach
+instead of surfacing httpx's bare *"All connection attempts failed"*, which read as a model fault.
+
+Verified live, all three shapes:
+
+| Model | Result |
+|---|---|
+| `kimi-code/kimi-for-coding` | `ready: True`, text `"OK"` — real round-trip to `api.kimi.com/coding` |
+| `anthropic/claude-sonnet-5` (no credential) | `ready: False` — "Connect Claude in Integrations…" |
+| `llama3.1:8b` (no Ollama) | `ready: False` — "no local model server answered at http://host.docker.internal:11434" |
+
+### 5. "Permission denied when accessing media devices" was never a permission problem
+
+**Symptom:** clicking the composer's Voice-mode button showed *"Permission denied when accessing
+media devices"* instead of opening the voice sidebar.
+
+**Root cause:** browsers expose `navigator.mediaDevices` **only in a secure context** — HTTPS, or
+`localhost` / `127.0.0.1`. `nginx.conf` has exactly one `listen 80;` and zero `ssl_certificate`
+lines, so on a LAN origin like `http://192.168.20.98:9000` the property is simply `undefined`. Every
+mic call throws a `TypeError` *before* any permission prompt can appear, and a single catch-all
+converted that into a denial. Nothing was denied; the API does not exist on that origin. The
+message sent the operator to audit browser settings that were never involved.
+
+**Fix:** one shared helper in `lib/utils/audio.ts` —
+
+- `micUnavailableReason()` — pre-flight: returns why the mic cannot be opened *at all* (insecure
+  context, naming the actual origin; or no API), or `null` when it should work.
+- `describeMediaError(err)` — maps a `getUserMedia` rejection by `err.name`:
+  `NotAllowedError`/`SecurityError` → blocked for this site, allow it from the address bar;
+  `NotFoundError` → no microphone, check Settings → Audio; `NotReadableError` → in use by another
+  app; `AbortError` → interrupted.
+
+Both return `{key, values}` so callers keep i18n. Applied at **all 7 call sites** across 6
+components, one of which (`AdaptiveSpaceShell.toggleMic`) had been swallowing the error entirely —
+clicking the mic there did nothing at all. 8 new `en-US` keys.
+
+**Still true and not a code fix:** Harvis has no HTTPS path, so voice cannot work from a second
+machine no matter what the message says. It works when browsing `http://localhost:9000` on the
+machine running Docker. A self-signed cert or Chrome's
+`--unsafely-treat-insecure-origin-as-secure` is the unblock; that's a product decision, not a bug.
+
+### Every setup option, exercised
+
+All four credential stores reject a junk key honestly (junk-key probe against the live vendors, no
+DB writes — verification precedes storage on both paths):
+
+| Provider | Store | Result |
+|---|---|---|
+| `moonshot` | `user_api_keys` | rejected on both consoles, names the `.ai`/`.cn` split |
+| `kimi-code` | `user_engine_auth` | rejected, points at kimi.com/coding vs platform.moonshot |
+| `claude-code` | `user_engine_auth` | "Anthropic rejected the key (HTTP 401)" |
+| `codex` | `user_engine_auth` | "OpenAI rejected the key (HTTP 401)" |
+| `openai-compatible` | none | no credential store by design — prints the `VLLM_URL=…` line to copy |
+
+Exposure step exercised both ways: the response is explicit that `cookie_secure` is
+process-only (`cookie_secure_durable: false`) and `enable_signup` still needs
+`HARVIS_OWUI_ENABLE_SIGNUP` in `.env`. `instance_settings` was left exactly as found.
+
+**Not exercised:** the model step's `pull` state needs a reachable Ollama, and VM 102 has none by
+design. Admin-claim (step 0) is single-use and already spent on that rig.
+
+### Measured footprint (VM 102, after install + this deploy)
+
+| | |
+|---|---|
+| Images (9, deduped) | **5.218 GB** |
+| Volumes (7) | 0.590 GB — voice-models 522 MB, pgsql 68 MB |
+| Repo checkout (incl. `.git` 119 MB + owui `build/` 264 MB) | 0.472 GB |
+| **On-disk total** | **≈6.28 GB** — under the 7 GB finish line |
+| Build cache | 9.79 GB, 7.61 GB reclaimable — **not counted above, and nobody's counting it** |
+
+`docker builder prune -f` reclaims the 7.61 GB. Whether a fresh install should do that
+automatically is still an open call.
+
+### Files modified
+
+| File | Change |
+|---|---|
+| `python_back_end/setup_flow.py` | engine readiness probe; optional-Ollama tick; cloud-aware `test-model`; honest connect-failure reason |
+| `python_back_end/owui_compat/engine_auth.py` | unchanged-secret re-save keeps `verified_at` |
+| `front_end/owui/src/routes/setup/+page.svelte` | save-then-verify; engine rows + Test key; TTS/Ollama copy |
+| `front_end/owui/src/lib/apis/setup/index.ts` | `SetupEngine` type, expanded `SetupTick` |
+| `front_end/owui/src/lib/utils/audio.ts` | `micUnavailableReason()` + `describeMediaError()` |
+| `.../chat/MessageInput.svelte` | Voice-mode button + `startDictation` |
+| `.../chat/MessageInput/VoiceRecording.svelte` | `startRecording` catch |
+| `.../channel/MessageInput.svelte` | voice-input button |
+| `.../notes/NoteEditor.svelte` | RecordMenu `onRecord` |
+| `.../workspace/Knowledge/KnowledgeBase/AddTextContentModal.svelte` | voice-input button |
+| `.../agent-studio/adaptive/AdaptiveSpaceShell.svelte` | `toggleMic` — was silently swallowing |
+| `front_end/owui/src/lib/i18n/locales/en-US/translation.json` | 8 keys |
+
+**Status:** all fixed, deployed to VM 102, and verified live.
+
+---
+
 ## Date: 2026-07-25 — Notebook chat 404 / "no sources", missing podcast tables, nav de-dup
 
 Batch of five issues relayed from the Windows/rig session

@@ -170,10 +170,19 @@
 	let enableSignup = false;
 	let savingPrefs = false;
 
-	// Verify
+	// Verify. Raw tick keys are backend field names; these are what a person reads.
+	const TICK_LABELS: Record<string, string> = {
+		database: 'Database',
+		ollama: 'Local model server',
+		engines: 'Agent engine',
+		speech: 'Voice (speech in/out)',
+		notebooks: 'Notebooks',
+		artifacts: 'Artifact storage'
+	};
 	let ticks: Record<string, SetupTick> = {};
 	let overall = false;
 	let verifying = false;
+	let probingEngine = '';
 	let testText = '';
 	let testingModel = false;
 	let completing = false;
@@ -322,12 +331,17 @@
 				ok = res.ok;
 				error = res.error || '';
 			} else {
-				const verified = await verifyEngineKey(provider.id, apiKey.trim());
-				if (!verified.ok) {
-					error = verified.error || $i18n.t('The provider rejected that key.');
+				// Save FIRST, then verify — the same order ConnectionPanel uses. Reversing
+				// them silently un-verifies a key the vendor just accepted, because the save
+				// endpoint resets verified_at, and everything downstream (the chat catalog,
+				// the Build engine gate) is gated on that timestamp.
+				const saved = await saveEngineKey(provider.id, apiKey.trim());
+				if (!saved.ok) {
+					error = $i18n.t('Could not store that key.');
 				} else {
-					ok = (await saveEngineKey(provider.id, apiKey.trim())).ok;
-					if (!ok) error = $i18n.t('Verified, but saving failed.');
+					const verified = await verifyEngineKey(provider.id, apiKey.trim());
+					ok = verified.ok;
+					if (!ok) error = verified.error || $i18n.t('The provider rejected that key.');
 				}
 			}
 			if (!ok) {
@@ -440,6 +454,23 @@
 			toast.error(`${e}`);
 		} finally {
 			verifying = false;
+		}
+	};
+
+	// Re-verify a credential that is ALREADY stored: POST verify with no body makes
+	// the backend decrypt the saved key and call the vendor with it. That is what
+	// "probe my key" means here — a live round-trip, not a re-read of the row.
+	const probeEngine = async (id: string, label: string) => {
+		probingEngine = id;
+		try {
+			const res = await verifyEngineKey(id);
+			if (res.ok) toast.success($i18n.t('{{p}} answered — credential is good.', { p: label }));
+			else toast.error(res.error || $i18n.t('{{p}} rejected the stored credential.', { p: label }));
+			await runVerify();
+		} catch (e) {
+			toast.error(`${e}`);
+		} finally {
+			probingEngine = '';
 		}
 	};
 
@@ -978,23 +1009,66 @@
 					{#if Object.keys(ticks).length}
 						<ul class="space-y-2 text-sm">
 							{#each Object.entries(ticks) as [name, t]}
+								<!-- A skipped tick is a capability that was never installed. It used to
+								     render with the same red ✗ as a genuine failure, which made a
+								     correct default install look broken. Neutral grey, dash glyph. -->
 								<li
 									class="rounded-lg border px-3 py-2 {t.ready
 										? 'border-emerald-600/40'
-										: 'border-red-500/40'}"
+										: t.skipped
+											? 'border-gray-300 dark:border-gray-700'
+											: 'border-red-500/40'}"
 								>
-									<div class="font-medium">
-										{t.ready ? '✓' : '✗'}
-										{name}
+									<div class="font-medium {t.skipped ? 'text-gray-500' : ''}">
+										{t.ready ? '✓' : t.skipped ? '–' : '✗'}
+										{TICK_LABELS[name] || name}
+										{#if t.skipped}<span class="text-xs font-normal"
+												>· {$i18n.t('not installed')}</span
+											>{/if}
 									</div>
 									<div class="text-xs text-gray-500">{t.reason}</div>
+									{#if t.engines?.length}
+										<ul class="mt-2 space-y-1">
+											{#each t.engines as e}
+												<li class="flex items-start gap-2 text-xs">
+													<span
+														class={e.state === 'ready'
+															? 'text-emerald-600'
+															: e.state === 'no_credential' || e.state === 'not_installed'
+																? 'text-gray-400'
+																: 'text-amber-600'}
+													>
+														{e.state === 'ready'
+															? '✓'
+															: e.state === 'no_credential' || e.state === 'not_installed'
+																? '–'
+																: '!'}
+													</span>
+													<span class="flex-1">
+														<span class="font-medium">{e.label}</span>
+														<span class="text-gray-500"> — {e.detail}</span>
+													</span>
+													{#if e.can_probe}
+														<button
+															type="button"
+															class="shrink-0 rounded-full border border-gray-300 dark:border-gray-600 px-2 py-0.5 disabled:opacity-50"
+															disabled={!!probingEngine}
+															on:click={() => probeEngine(e.id, e.label)}
+														>
+															{probingEngine === e.id ? $i18n.t('Testing…') : $i18n.t('Test key')}
+														</button>
+													{/if}
+												</li>
+											{/each}
+										</ul>
+									{/if}
 									<div class="text-[11px] text-gray-400 mt-0.5">{t.probe}</div>
 								</li>
 							{/each}
 						</ul>
 						<p class="text-xs text-gray-500">
 							{overall
-								? $i18n.t('All ticks ready.')
+								? $i18n.t('Everything installed is ready.')
 								: $i18n.t('Some ticks failed — fix them or continue knowing what is down.')}
 						</p>
 					{/if}

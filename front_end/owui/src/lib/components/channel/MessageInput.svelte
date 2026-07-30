@@ -20,6 +20,7 @@
 		getWeekday,
 		extractCurlyBraceWords
 	} from '$lib/utils';
+	import { describeMediaError, micUnavailableReason } from '$lib/utils/audio';
 
 	import { getSessionUser } from '$lib/apis/auths';
 
@@ -1020,20 +1021,15 @@
 												class=" text-gray-600 dark:text-gray-300 hover:text-gray-700 dark:hover:text-gray-200 transition rounded-full p-1.5 mr-0.5 self-center"
 												type="button"
 												on:click={async () => {
+													const unavailable = micUnavailableReason();
+													if (unavailable) {
+														toast.error($i18n.t(unavailable.key, unavailable.values ?? {}));
+														return;
+													}
 													try {
-														let stream = await navigator.mediaDevices
-															.getUserMedia({ audio: true })
-															.catch(function (err) {
-																toast.error(
-																	$i18n.t(
-																		`Permission denied when accessing microphone: {{error}}`,
-																		{
-																			error: err
-																		}
-																	)
-																);
-																return null;
-															});
+														let stream = await navigator.mediaDevices.getUserMedia({
+															audio: true
+														});
 
 														if (stream) {
 															recording = true;
@@ -1041,8 +1037,9 @@
 															tracks.forEach((track) => track.stop());
 														}
 														stream = null;
-													} catch {
-														toast.error($i18n.t('Permission denied when accessing microphone'));
+													} catch (err) {
+														const info = describeMediaError(err);
+														toast.error($i18n.t(info.key, info.values ?? {}));
 													}
 												}}
 												aria-label="Voice Input"
