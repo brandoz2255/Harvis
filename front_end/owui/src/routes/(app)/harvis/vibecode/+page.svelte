@@ -785,8 +785,24 @@
 		selectedModel = '';
 	}
 
+	// The engine's default, but only if this box actually has it. Every entry in
+	// ENGINE_DEFAULT_MODEL names a specific tag, and a named tag is exactly what goes missing on a
+	// machine that never pulled it / never connected that provider's key — which is how the meter
+	// used to advertise `llama3.1:8b` on installs that had no such model. Restricted to the
+	// engine's own providers so a Claude session can't fall through to a local model's Free
+	// pricing and a 24k window.
+	$: engineFallbackModelId = (() => {
+		const pinned = ENGINE_DEFAULT_MODEL[selectedEngine] || '';
+		if (pinned && modelOptions.some((m: any) => m.id === pinned)) return pinned;
+		const owners = ENGINE_MODEL_OWNERS[selectedEngine] || [];
+		const owned = (m: any) => {
+			const o = (m?.owned_by || 'ollama').toString().toLowerCase();
+			return owners.some((w) => o.startsWith(w));
+		};
+		return modelOptions.find(owned)?.id || '';
+	})();
 	// Meter reads window + price from: the picked model → the last turn's → the engine default.
-	$: meterModelId = selectedModel || lastUsage?.model_name || ENGINE_DEFAULT_MODEL[selectedEngine] || '';
+	$: meterModelId = selectedModel || lastUsage?.model_name || engineFallbackModelId;
 	$: meterEntry = ($models || []).find((m: any) => m?.id === meterModelId);
 	$: meterModelMeta = (meterEntry?.info?.meta as any) || {};
 	$: priceIn = Number(meterModelMeta.price_in || 0); // USD / million input tokens
@@ -803,8 +819,12 @@
 	$: ctxUsed = (lastUsage?.prompt_tokens || 0) + (liveOn ? liveCompletionTokens : 0);
 	$: ctxPct = ctxWindow ? Math.min(100, Math.round((ctxUsed / ctxWindow) * 100)) : 0;
 	$: ctxAvail = Math.max(0, ctxWindow - ctxUsed);
-	$: usageModel = meterModelId || lastUsage?.model_name || 'llama3.1:8b';
-	$: displayModel = meterEntry?.name || selectedModel || usageModel;
+	// Was `meterModelId || lastUsage?.model_name || 'llama3.1:8b'` via an intermediate `usageModel`
+	// — but meterModelId already folds in lastUsage.model_name, so the middle term was dead and the
+	// literal was the ONLY thing that term ever contributed. Empty is the honest value when no
+	// model is picked, no turn has landed, and nothing is installed; the call sites below render a
+	// placeholder for it instead of naming a model that isn't there.
+	$: displayModel = meterEntry?.name || selectedModel || meterModelId;
 	$: liveSessionTokens = sessionTokens + (liveOn ? liveCompletionTokens : 0);
 	$: liveCost = sessionCost + (liveOn ? (liveCompletionTokens * priceOut) / 1e6 : 0);
 
@@ -2352,7 +2372,7 @@
 								on:click={toggleModelMenu}
 								title={$i18n.t('Model')}
 							>
-								<span class="truncate">{displayModel}</span>
+								<span class="truncate">{displayModel || $i18n.t('Select model')}</span>
 								<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="size-3 shrink-0"><path d="M6 9l6 6 6-6" stroke-linecap="round" /></svg>
 							</button>
 							{#if showModelMenu}
@@ -2365,7 +2385,10 @@
 										{#each g.models as m}
 											<button class="w-full flex items-center justify-between gap-2 text-left px-3 py-1.5 hover:bg-gray-100 dark:hover:bg-gray-850" on:click={() => pickModel(m.id)}>
 												<span class="truncate">{m.name || m.id}</span>
-												{#if displayModel === m.id}<span class="shrink-0 text-blue-500">✓</span>{/if}
+												<!-- compare the model ID, not displayModel: that holds a display NAME
+												     (meterEntry.name), and the list below renders `m.name || m.id`, so for
+												     every model whose name differs from its id the tick never appeared. -->
+												{#if meterModelId === m.id}<span class="shrink-0 text-blue-500">✓</span>{/if}
 											</button>
 										{/each}
 									{/each}
@@ -2409,7 +2432,7 @@
 											{#if isFreeModel}{$i18n.t('Free · local')}{:else}{fmtCost(liveCost)}{#if isSubscriptionModel} <span class="text-gray-400">· {$i18n.t('at API rates')}</span>{/if}{/if}
 										</span>
 									</div>
-									<div class="flex justify-between text-gray-500"><span>{$i18n.t('Model')}</span><span class="truncate ml-2 text-gray-700 dark:text-gray-300">{displayModel}</span></div>
+									<div class="flex justify-between text-gray-500"><span>{$i18n.t('Model')}</span><span class="truncate ml-2 text-gray-700 dark:text-gray-300">{displayModel || $i18n.t('None selected')}</span></div>
 								</div>
 							{/if}
 						</div>

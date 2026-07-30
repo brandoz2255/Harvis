@@ -172,6 +172,22 @@ async def run_vibecode_turn(
         _persona_override_from = model_name or "(none)"
         model_name = os.getenv("HARVIS_HERMES_DEFAULT_MODEL", "hermes3:3b")
 
+    # No model selected → resolve against what this box actually has installed.
+    #
+    # There used to be a literal `model_name or "llama3.1:8b"` at the dispatch below AND
+    # again at the usage-persist. On this dev box that tag happens to be pulled so it
+    # worked; on a fresh clone that never pulled it, every unselected turn 404'd, and the
+    # composer's meter recorded a model that had never run. Resolving ONCE here — before
+    # root_ev captures it — is also what keeps the run events, the dispatch and the
+    # persisted row from disagreeing about which model ran.
+    if not model_name:
+        try:
+            from plugins.models.resolver import resolve_default_local_model
+            model_name = await resolve_default_local_model(pool=pool, user_id=user_id) or ""
+        except Exception:
+            logger.exception("vibecode: local model resolution failed")
+            model_name = ""
+
     # Ensure the turn run row exists, tag it source='vibecode' (keeps it out of
     # generic history), and carry repo_path (for later Create-PR resolution).
     await _db_create_run(pool, parent_workspace_id, user_id, sess, task_brief)
@@ -204,6 +220,19 @@ async def run_vibecode_turn(
         yield root_ev("error", {
             "message": "VibeCode session has no workspace.",
             "fix_hint": "The session's working clone is missing — recreate the session.",
+        })
+        return
+
+    # The resolver returns nothing only when the provider has zero models AND there is no
+    # env override AND no saved pick. Say that, rather than dispatching an empty model name
+    # and letting it surface as an opaque 404 from the provider.
+    if not model_name:
+        yield root_ev("error", {
+            "message": "No model is available to run this turn.",
+            "fix_hint": (
+                "Pick a model in the composer, or pull one into your local model server "
+                "(e.g. `ollama pull qwen3:4b`). Nothing is installed and no default is set."
+            ),
         })
         return
 
@@ -271,7 +300,7 @@ async def run_vibecode_turn(
             parent_run_id=run_id,
             label=label,
             task=task_brief,
-            model_name=model_name or "llama3.1:8b",
+            model_name=model_name,
             workspace_path=workspace_path,
             system_prompt=sys_prompt,
             permission_mode=gate_mode,
@@ -343,7 +372,7 @@ async def run_vibecode_turn(
                 turn_usage.get("prompt_tokens"),
                 turn_usage.get("completion_tokens"),
                 turn_usage.get("context_window"),
-                model_name or "llama3.1:8b",
+                model_name,
             )
     except Exception as exc:
         logger.warning("vibecode: token usage persist failed: %s", exc)

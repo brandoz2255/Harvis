@@ -51,6 +51,58 @@ _MIN_AGENTS = max(1, int(os.getenv("HARVIS_ORCH_MIN_AGENTS", "3")))
 _MAX_AGENTS = max(_MIN_AGENTS, int(os.getenv("HARVIS_ORCH_MAX_AGENTS", "10")))
 
 
+async def _installed(candidates: list[str]) -> list[str]:
+    """`candidates` filtered to the tags the provider actually serves, order preserved.
+
+    Both lists above are *defaults naming specific tags* — the fresh-clone problem in one
+    line. `llama3.1:8b` is pulled on the dev box, so a 3-agent orchestrated run worked here
+    and spawned three sub-agents against 404s on any machine that never pulled it; the
+    planner loop below has the same shape, where an uninstalled pin just burns a round-trip
+    per model and then reports "LLM unavailable". Filtering costs one /api/tags call per
+    plan — a model-selection path, not a per-token one.
+
+    An EMPTY tag list means the provider was unreachable, not that every candidate is bad,
+    so the candidates are returned untouched rather than all discarded on a transient
+    outage. That is the same rule the shared resolver applies.
+    """
+    if not candidates:
+        return []
+    try:
+        from plugins.models.resolver import list_ollama_models
+        available = await list_ollama_models(ollama_url=_OLLAMA_URL)
+    except Exception:
+        logger.exception("orchestrator planner: model list failed")
+        return list(candidates)
+    if not available:
+        return list(candidates)
+    keep = [m for m in candidates if m in available]
+    dropped = [m for m in candidates if m not in available]
+    if dropped:
+        logger.info(
+            "orchestrator planner: dropping %d uninstalled model(s) from the pool: %s",
+            len(dropped), ", ".join(dropped),
+        )
+    return keep
+
+
+async def _effective_pool(model_pool: list[str] | None) -> list[str]:
+    """The pool to round-robin: caller's pool → env/default pool → whatever is installed.
+
+    Returns [] only when the provider has nothing at all, which the dispatch reports as
+    "no model available" rather than naming a tag nobody has.
+    """
+    pool = await _installed([m for m in (model_pool or []) if m] or _POOL)
+    if pool:
+        return pool
+    try:
+        from plugins.models.resolver import resolve_default_local_model
+        picked = await resolve_default_local_model(ollama_url=_OLLAMA_URL)
+    except Exception:
+        logger.exception("orchestrator planner: pool resolution failed")
+        picked = None
+    return [picked] if picked else []
+
+
 def _label_from_name(name: str) -> str:
     """'login-endpoint' → 'Login endpoint' for the agent table's name column."""
     s = re.sub(r"[-_]+", " ", (name or "").strip()).strip()
@@ -70,10 +122,17 @@ def _assign_models(
     # uniform → ALL agents on ONE model: the caller's model_name (the session's model),
     # falling back to the first pool model only if none was supplied. Otherwise round-robin
     # a pool: the user's CUSTOM pool (Customize, opt-in) when supplied, else the env default.
+    #
+    # `model_pool=[]` and `model_pool=None` mean DIFFERENT things and must stay distinct:
+    # None is "caller expressed no preference" → use the env default; an empty list is
+    # _effective_pool saying "the provider serves nothing", and falling back to _POOL there
+    # would put the uninstalled default tags straight back into the plan. Empty pool → empty
+    # model names, which the dispatch reports as "no model available".
+    pool = _POOL if model_pool is None else [m for m in model_pool if m]
     if uniform_model:
-        m = model_name or _POOL[0]
-        return [m] * n
-    pool = [m for m in (model_pool or []) if m] or _POOL
+        return [model_name or (pool[0] if pool else "")] * n
+    if not pool:
+        return [""] * n
     return [pool[i % len(pool)] for i in range(n)]
 
 
@@ -202,13 +261,22 @@ async def plan_agents(
     Customize pool) is round-robined across the agents when supplied + not uniform.
     `subagents` (Customize → Sub-agents, enabled defs) adds a specialist roster the
     planner assigns steps to by description; unmatched steps keep the generic profile."""
+    # Resolve the pool ONCE per plan, against what the provider actually serves, and pass
+    # that everywhere below — so the LLM path and the keyword fallback can't disagree about
+    # which models the sub-agents get.
+    pool = await _effective_pool(model_pool)
+
     brief = (task_brief or "").strip()
     if not brief:
-        return _fallback_plan(task_brief, model_name, uniform_model, model_pool)
+        return _fallback_plan(task_brief, model_name, uniform_model, pool)
 
     # concat (NOT .format — the prompt has literal { } JSON)
     prompt = _PROMPT + _roster_section(subagents) + "Task: " + brief[:1500]
-    for model in _PLANNER_MODELS:
+    # Pinned planner models that aren't installed can only waste a request each and then
+    # hand the whole plan to the keyword split; the pool is the honest second choice since
+    # it is already known-installed.
+    planner_models = await _installed(_PLANNER_MODELS) or pool
+    for model in planner_models:
         try:
             async with _httpx.AsyncClient(timeout=90.0) as c:
                 r = await c.post(
@@ -241,10 +309,10 @@ async def plan_agents(
                 "orchestrator planner: model=%s produced %d task-delegated agent(s): %s",
                 model, len(agents), ", ".join(a.get("name", "?") for a in agents),
             )
-            return _build_plan(agents, model_name, uniform_model, model_pool, subagents)
+            return _build_plan(agents, model_name, uniform_model, pool, subagents)
         except Exception as exc:
             logger.debug("orchestrator planner model %s failed: %s", model, exc)
             continue
 
     logger.info("orchestrator planner: LLM unavailable — falling back to keyword split")
-    return _fallback_plan(task_brief, model_name, uniform_model, model_pool)
+    return _fallback_plan(task_brief, model_name, uniform_model, pool)

@@ -232,7 +232,18 @@ async def run_review_conversation(
     sess = session_id or f"ws-{parent_workspace_id}"
     run_id = parent_workspace_id
     started = time.monotonic()
-    model = model_name or "llama3.1:8b"
+    # Same rule as session_turn: no selection → whatever is actually installed, never a
+    # literal. A reviewer dispatched against an unpulled tag fails the whole review lane,
+    # and because agreement requires EVERY reviewer to approve, that reads as "the
+    # reviewers never agreed" rather than "the model does not exist."
+    model = model_name or ""
+    if not model:
+        try:
+            from plugins.models.resolver import resolve_default_local_model
+            model = await resolve_default_local_model(pool=pool, user_id=user_id) or ""
+        except Exception:
+            logger.exception("review: local model resolution failed")
+            model = ""
 
     # ── Reviewer roster ──────────────────────────────────────────────────────────
     # Default = the one built-in reviewer (zero behavior change). If the caller passed custom
@@ -303,6 +314,19 @@ async def run_review_conversation(
         yield root_ev("error", {
             "message": "Review needs the session workspace, but it is missing.",
             "fix_hint": "Recreate the session, run a turn, then start the review again.",
+        })
+        return
+
+    # Nothing installed and no pick — hand it to a human instead of letting every
+    # reviewer fail and reporting that as a withheld approval.
+    if not model:
+        await set_review_status(pool, vibecode_session_id, "needs_human")
+        yield root_ev("error", {
+            "message": "No model is available to run the review.",
+            "fix_hint": (
+                "Pick a model in the composer, or pull one into your local model server "
+                "(e.g. `ollama pull qwen3:4b`), then start the review again."
+            ),
         })
         return
 
