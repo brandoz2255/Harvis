@@ -2170,7 +2170,11 @@
 				copyToClipboard(message.content);
 			}
 
-			if ($settings.responseAutoPlayback && !$showCallOverlay) {
+			// `?? true` — this is the REAL default: a user who never opens Settings → Audio never
+			// persists the key, so a bare `$settings.responseAutoPlayback` left TTS silent on every
+			// fresh install even though the server was ready to speak. Settings/Audio.svelte reads
+			// the same default so the toggle reflects what actually happens.
+			if (($settings.responseAutoPlayback ?? true) && !$showCallOverlay) {
 				await tick();
 				document.getElementById(`speak-button-${message.id}`)?.click();
 			}

@@ -19,7 +19,7 @@
 	// Audio
 	let conversationMode = false;
 	let speechAutoSend = false;
-	let responseAutoPlayback = false;
+	let responseAutoPlayback = true; // ON by default — see the onMount read below
 	let nonLocalVoices = false;
 
 	let STTEngine = '';
@@ -139,7 +139,12 @@
 		voiceMode = $settings.audio?.tts?.mode ?? 'natural';
 		conversationMode = $settings.conversationMode ?? false;
 		speechAutoSend = $settings.speechAutoSend ?? false;
-		responseAutoPlayback = $settings.responseAutoPlayback ?? false;
+		// Harvis ships voice-first: `voice-onnx` is in the default service set and
+		// config.audio.tts.engine is non-empty out of the box, so a reply can be spoken with no
+		// setup at all. Default this ON so it actually is — `?? false` meant every new user had to
+		// find this panel before TTS did anything. Same default as the read site in Chat.svelte;
+		// change both together or the toggle shows a state the chat doesn't act on.
+		responseAutoPlayback = $settings.responseAutoPlayback ?? true;
 
 		STTEngine = $settings?.audio?.stt?.engine ?? '';
 		STTLanguage = $settings?.audio?.stt?.language ?? '';
