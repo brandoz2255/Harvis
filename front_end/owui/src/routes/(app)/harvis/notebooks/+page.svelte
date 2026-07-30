@@ -22,8 +22,13 @@
 	//   /onb-api/notebooks (backend facade — also validates the Harvis JWT)
 	//   /onb               (the embedded Next app behind nginx)
 	// 'checking' is bounded (probe timeout below), never an indefinite spinner.
+	//
+	// 'not-installed' is a fourth outcome and NOT an error: Notebooks ships behind
+	// the opt-in `notebooks` compose profile, so a correct default install has no
+	// open-notebook-ui container and nginx 502s /onb. Calling that "unreachable"
+	// blamed the operator for a choice the project made for them.
 	type ErrorKind = 'auth' | 'backend' | 'app' | 'frame-timeout';
-	let status: 'checking' | 'ready' | 'error' = 'checking';
+	let status: 'checking' | 'ready' | 'error' | 'not-installed' = 'checking';
 	let errorKind: ErrorKind | null = null;
 	let errorDetail = '';
 	let frameLoaded = false;
@@ -32,6 +37,28 @@
 
 	const PROBE_TIMEOUT_MS = 8000;
 	const FRAME_TIMEOUT_MS = 20000;
+	const INSTALL_POLL_MS = 6000;
+
+	type Capability = {
+		state: string;
+		reason?: string;
+		profile?: string;
+		services?: string[];
+		download_mb?: number;
+		enable?: { command?: string; run_from?: string };
+	};
+	let capability: Capability | null = null;
+	let installTimer: ReturnType<typeof setTimeout> | null = null;
+	let copied = false;
+
+	// Server-supplied, not hardcoded here: the backend measured it and owns the
+	// compose command, so this page can't drift from what actually installs.
+	$: downloadLabel = capability?.download_mb
+		? capability.download_mb >= 1024
+			? `${(capability.download_mb / 1024).toFixed(1)} GB`
+			: `${capability.download_mb} MB`
+		: '';
+	$: enableCommand = capability?.enable?.command ?? 'docker compose --profile notebooks up -d';
 
 	const probe = async (
 		url: string,
@@ -61,6 +88,38 @@
 		}
 	};
 
+	const clearInstallTimer = () => {
+		if (installTimer) {
+			clearTimeout(installTimer);
+			installTimer = null;
+		}
+	};
+
+	// Asked only when /onb fails — a healthy lane never pays for this round-trip.
+	const fetchCapability = async (token: string): Promise<Capability | null> => {
+		try {
+			const r = await fetch('/api/capabilities/notebooks', {
+				headers: { Authorization: `Bearer ${token}` },
+				credentials: 'include',
+				cache: 'no-store'
+			});
+			if (!r.ok) return null;
+			return (await r.json()) as Capability;
+		} catch (_) {
+			return null;
+		}
+	};
+
+	const copyCommand = async () => {
+		try {
+			await navigator.clipboard.writeText(enableCommand);
+			copied = true;
+			setTimeout(() => (copied = false), 1600);
+		} catch (_) {
+			copied = false;
+		}
+	};
+
 	const onFrameLoad = () => {
 		frameLoaded = true;
 		clearFrameTimer();
@@ -82,10 +141,15 @@
 
 	const check = async () => {
 		const seq = ++probeSeq;
-		status = 'checking';
+		// Only the not-installed branch re-arms the poll, so clearing here means a
+		// lane that recovers (or breaks differently) stops polling on its own.
+		clearInstallTimer();
 		errorKind = null;
 		errorDetail = '';
 		clearFrameTimer();
+		// Don't flash the spinner over the install panel while polling behind it —
+		// the panel says what it's waiting for and stays put until it succeeds.
+		if (status !== 'not-installed') status = 'checking';
 
 		const token = localStorage.getItem('token');
 		if (!token) {
@@ -118,6 +182,19 @@
 			return;
 		}
 		if (!app.ok) {
+			// Ask the backend whether this is a missing capability or a broken one
+			// before blaming anything. It probes open-notebook-ui directly, so it
+			// can tell "container absent" from "container erroring".
+			const cap = await fetchCapability(token);
+			if (seq !== probeSeq) return;
+			if (cap?.state === 'not_installed') {
+				capability = cap;
+				status = 'not-installed';
+				// Auto-flip: once the operator runs the command the services answer
+				// and the next poll drops straight into the iframe below — no reload.
+				installTimer = setTimeout(check, INSTALL_POLL_MS);
+				return;
+			}
 			status = 'error';
 			errorKind = 'app';
 			errorDetail = app.timedOut
@@ -137,7 +214,10 @@
 	};
 
 	onMount(check);
-	onDestroy(clearFrameTimer);
+	onDestroy(() => {
+		clearFrameTimer();
+		clearInstallTimer();
+	});
 
 	const ERROR_TITLES: Record<ErrorKind, string> = {
 		auth: 'Sign-in required',
@@ -176,6 +256,99 @@
 					<path d="M21 12a9 9 0 1 1-6.219-8.56" />
 				</svg>
 				<span>{$i18n.t('Checking Open Notebook…')}</span>
+			</div>
+		</div>
+	{:else if status === 'not-installed'}
+		<!-- Not an error state: the pack is opt-in and simply hasn't been pulled. -->
+		<div class="w-full h-full flex items-center justify-center px-6">
+			<div
+				class="max-w-lg w-full rounded-2xl border border-gray-100 dark:border-gray-850 bg-gray-50 dark:bg-gray-900 px-6 py-7"
+			>
+				<div
+					class="mx-auto mb-3 flex size-10 items-center justify-center rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-400"
+				>
+					<svg
+						xmlns="http://www.w3.org/2000/svg"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="1.8"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						class="size-5"
+					>
+						<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+						<path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+					</svg>
+				</div>
+				<div class="text-center text-sm font-medium text-gray-800 dark:text-gray-100">
+					{$i18n.t('Notebooks is not installed yet')}
+				</div>
+				<div class="mt-1.5 text-center text-xs text-gray-500 dark:text-gray-400">
+					{$i18n.t(
+						'Notebooks turns your sources into notes, summaries and podcasts. It is an optional pack, so a default Harvis install leaves it out to stay small.'
+					)}
+					{#if downloadLabel}
+						<span class="whitespace-nowrap"
+							>{$i18n.t('Adds about')} {downloadLabel} {$i18n.t('of images.')}</span
+						>
+					{/if}
+				</div>
+
+				<div class="mt-4">
+					<div
+						class="text-[0.65rem] font-medium uppercase tracking-wide text-gray-400 dark:text-gray-500"
+					>
+						{$i18n.t('Run this')}{#if capability?.enable?.run_from}
+							&nbsp;{$i18n.t('from')} {capability.enable.run_from}{/if}
+					</div>
+					<div
+						class="mt-1.5 flex items-center gap-2 rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-950 px-3 py-2"
+					>
+						<code
+							class="flex-1 overflow-x-auto whitespace-pre text-xs text-gray-800 dark:text-gray-200"
+							>{enableCommand}</code
+						>
+						<button
+							type="button"
+							on:click={copyCommand}
+							class="shrink-0 rounded-md border border-gray-200 dark:border-gray-800 px-2 py-1 text-[0.7rem] font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-850 transition"
+						>
+							{copied ? $i18n.t('Copied') : $i18n.t('Copy')}
+						</button>
+					</div>
+					{#if capability?.services?.length}
+						<div class="mt-1.5 text-[0.7rem] text-gray-400 dark:text-gray-500">
+							{$i18n.t('Starts')}: {capability.services.join(', ')}
+						</div>
+					{/if}
+				</div>
+
+				<div
+					class="mt-4 flex items-center justify-center gap-2 text-xs text-gray-500 dark:text-gray-400"
+				>
+					<svg
+						xmlns="http://www.w3.org/2000/svg"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="1.8"
+						stroke-linecap="round"
+						class="size-3.5 animate-spin"
+					>
+						<path d="M21 12a9 9 0 1 1-6.219-8.56" />
+					</svg>
+					<span>{$i18n.t('Watching — this page opens Notebooks as soon as it answers.')}</span>
+				</div>
+				<div class="mt-3 flex items-center justify-center">
+					<button
+						type="button"
+						on:click={check}
+						class="rounded-lg bg-blue-600 hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-600 px-3.5 py-1.5 text-xs font-medium text-white transition"
+					>
+						{$i18n.t('Check now')}
+					</button>
+				</div>
 			</div>
 		</div>
 	{:else if status === 'error' && errorKind}
