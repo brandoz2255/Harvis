@@ -1,5 +1,3 @@
-version: "3.9"
-
 # Pin the compose project name so `docker compose up -d` from ANY checkout
 # (main or a git worktree) targets the SAME containers, networks, and — the
 # critical part — the same `harvis_*` named data volumes. Without this, running
@@ -14,34 +12,35 @@ services:
   # this container is the "main-host" cookbook node (reached by the backend as
   # http://llmfit:8787 on the shared network).
   #
-  # Profiled, not default: `runtime: nvidia` makes this the one service that
-  # cannot start on a host without the NVIDIA container runtime, and after the
-  # bundled Ollama left it was the last such service in the default set. Its
-  # whole job — "which model fits my GPU" — belongs to the local-model-management
-  # workflow that went with it. /api/cookbook/* reports the node offline rather
-  # than failing when it isn't running.
+  # Default, not profiled. It used to be profile-gated because `runtime: nvidia`
+  # made it the one service that cannot start without the NVIDIA container
+  # runtime — the same failure the `backend` service hit (see its comment below).
+  # That premise was wrong: measured 2026-07-28, llmfit 0.9.30 under plain runc
+  # starts, serves, enumerates hardware off the PCI bus, and ranks its catalogue
+  # — on a GPU box it found an AMD iGPU and an NVIDIA card with no passthrough at
+  # all, and on a GPU-less QEMU VM it reported CPU/RAM and still ranked 3,195
+  # models. GPU passthrough only sharpens the reading (CUDA VRAM comes back null
+  # without it), so it is now opt-in via HARVIS_GPU_RUNTIME rather than a hard
+  # requirement that costs every CPU host the whole cookbook.
   #
-  #     docker compose --profile cookbook up -d
+  # On a host with the NVIDIA container runtime, install.sh writes
+  # HARVIS_GPU_RUNTIME=nvidia into .env; NVIDIA_VISIBLE_DEVICES below then
+  # exposes the card. Anywhere else it stays `runc` and llmfit reads what it can.
+  # Deliberately no `deploy.resources.reservations.devices` block: a device
+  # reservation naming the nvidia driver fails at container-create on a host
+  # without it, which is precisely the portability trap being removed here.
   llmfit:
     # Pinned. `latest` on an upstream we do not control means a `docker compose
     # pull` can swap the cookbook backend under a working install with no diff
     # to point at. 0.9.30 is what this integration was written against.
     image: ghcr.io/alexsjones/llmfit:0.9.30@sha256:465a5197257a3d34a22a52b1e4ea5aecefc1973788c0f6a0a8fd5a4f93c7f93c
-    runtime: nvidia
-    profiles: ["cookbook"]
+    runtime: ${HARVIS_GPU_RUNTIME:-runc}
     container_name: harvis-llmfit
     restart: unless-stopped
     command: ["serve", "--host", "0.0.0.0", "--port", "8787"]
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: utility,compute
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
     networks:
       - ollama-n8n-network
 
@@ -715,7 +714,9 @@ services:
 
   # Document Generation Worker (Async Job Processor)
   # Handles PDF, DOCX, XLSX, PPTX generation in background
-  # Uses lightweight image (~200MB) - no GPU/ML dependencies needed
+  # No GPU/ML dependencies, but NOT lightweight: measured 1.41 GB via `docker images`,
+  # which makes it the expensive half of the `notebooks` pack (open-notebook-ui is only
+  # 278 MB). The old "~200MB" claim here was off by 7x and understated the pack's cost.
   document-worker:
     # Reaches an LLM server running on the HOST (the default is the operator's
     # own Ollama/LM Studio/llama.cpp/vLLM on 127.0.0.1). Linux needs this
@@ -997,10 +998,17 @@ services:
   # Open Notebook Services
   # ═══════════════════════════════════════════════════════════════════════════
 
+  # `notebooks-upstream`, NOT `notebooks`: this pair is the official lfnovo app on
+  # its own SurrealDB — a separate product from the Harvis notebooks lane
+  # (open-notebook-ui + document-worker), which nginx routes /onb to and which
+  # never reads this database. Sharing one profile meant `--profile notebooks up`
+  # pulled 2.67 GB of images the Harvis UI does not use, and made the pack look
+  # 2.6x more expensive than it is. Nothing in the Harvis lane depends on either
+  # service, so the split is inert for it.
   surrealdb:
     image: surrealdb/surrealdb:v2@sha256:d653f6c8a89e81f865ee31cd2f587c50f50ace922175e04150b1e385d2f86011
     container_name: surrealdb
-    profiles: ["notebooks"]
+    profiles: ["notebooks-upstream"]
     restart: unless-stopped
     command: start --log info --user root --pass root rocksdb:/mydata/mydatabase.db
     environment:
@@ -1021,7 +1029,8 @@ services:
     # version narrower. Digest-pinned; the tag stays in the name for readability.
     image: lfnovo/open_notebook:v1-latest@sha256:65e10ee94f8ce5a9e4e1db9a17316246960b236b6278edf75a965be52e9e882c
     container_name: open-notebook
-    profiles: ["notebooks"]
+    # See the surrealdb note above — upstream lane, opt in separately.
+    profiles: ["notebooks-upstream"]
     restart: unless-stopped
     ports:
       - "8502:8502"
