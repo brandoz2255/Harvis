@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import requests
 import re
 from typing import Dict, Any, List, Optional, Tuple
@@ -10,6 +11,12 @@ import time
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+DEFAULT_OLLAMA_URL = (
+    os.getenv("HARVIS_LLM_BASE_URL")
+    or os.getenv("OLLAMA_URL")
+    or "http://host.docker.internal:11434"
+).rstrip("/")
 
 @dataclass
 class ModelCapability:
@@ -25,7 +32,7 @@ class ModelCapability:
 class OllamaN8NOptimizer:
     """Dynamic optimizer for n8n automation generation with Ollama models"""
     
-    def __init__(self, ollama_url: str = "http://ollama:11434"):
+    def __init__(self, ollama_url: str = DEFAULT_OLLAMA_URL):
         self.ollama_url = ollama_url
         self.model_cache = {}
         self.performance_history = {}

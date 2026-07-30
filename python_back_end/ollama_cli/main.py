@@ -1,9 +1,15 @@
 
+import os
+
 import requests
 import json
 import argparse
 
-OLLAMA_URL = "http://ollama:11434"
+OLLAMA_URL = (
+    os.getenv("HARVIS_LLM_BASE_URL")
+    or os.getenv("OLLAMA_URL")
+    or "http://host.docker.internal:11434"
+).rstrip("/")
 DEFAULT_MODEL = "mistral"
 
 def get_available_models():

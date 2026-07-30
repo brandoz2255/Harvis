@@ -34,7 +34,12 @@ _DEFAULT_NODES: Dict[str, Dict[str, str]] = {
         "role": "main",
         # llmfit runs as a compose service on this host (see docker-compose `llmfit`).
         "llmfit": os.getenv("COOKBOOK_MAINHOST_LLMFIT", "http://llmfit:8787"),
-        "ollama": os.getenv("COOKBOOK_MAINHOST_OLLAMA", os.getenv("OLLAMA_URL", "http://ollama:11434")),
+        "ollama": (
+            os.getenv("COOKBOOK_MAINHOST_OLLAMA")
+            or os.getenv("HARVIS_LLM_BASE_URL")
+            or os.getenv("OLLAMA_URL")
+            or "http://host.docker.internal:11434"
+        ),
     },
     # Subhosts (extra LAN machines each running `llmfit serve`) are OPT-IN — add
     # them via COOKBOOK_NODES (JSON) or COOKBOOK_<NAME>_<LLMFIT|OLLAMA> env vars.

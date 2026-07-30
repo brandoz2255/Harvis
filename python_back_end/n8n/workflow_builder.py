@@ -4,6 +4,7 @@ n8n Workflow Builder
 Creates n8n workflow configurations from templates and AI-generated requirements.
 """
 
+import os
 import uuid
 import logging
 from typing import Dict, List, Optional, Any, Tuple
@@ -13,6 +14,14 @@ from .models import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Default base URL baked into generated Ollama nodes. n8n runs on the same
+# Docker network as the backend, so the same provider address works for both.
+OLLAMA_BASE_URL = (
+    os.getenv("HARVIS_LLM_BASE_URL")
+    or os.getenv("OLLAMA_URL")
+    or "http://host.docker.internal:11434"
+).rstrip("/")
 
 
 class WorkflowBuilder:
@@ -349,7 +358,7 @@ class WorkflowBuilder:
                 "type": "@n8n/n8n-nodes-langchain.lmOllama",
                 "parameters": {
                     "model": parameters.get("model", "mistral"),
-                    "baseURL": parameters.get("base_url", "http://ollama:11434"),
+                    "baseURL": parameters.get("base_url", OLLAMA_BASE_URL),
                     "temperature": parameters.get("temperature", 0.7),
                     "maxTokens": parameters.get("max_tokens", 2000)
                 }
@@ -359,7 +368,7 @@ class WorkflowBuilder:
                 "type": "@n8n/n8n-nodes-langchain.lmOllama",
                 "parameters": {
                     "model": parameters.get("model", "mistral"),
-                    "baseURL": "http://ollama:11434",
+                    "baseURL": OLLAMA_BASE_URL,
                     "temperature": 0.8,
                     "maxTokens": 2000
                 }

@@ -29,6 +29,30 @@ try:
     load_dotenv()
 except ImportError:
     pass  # Will log after logger is set up
+
+# ─── Canonical model-provider base URL (plug-and-play) ─────────────────────────
+# The bundled `ollama` compose service is gone (phase A5): the user brings their
+# own OpenAI-compatible server and compose passes its address as
+# HARVIS_LLM_BASE_URL, with OLLAMA_URL kept as a legacy alias. Dozens of modules
+# still read os.getenv("OLLAMA_URL", "http://ollama:11434") at import time —
+# normalising the environment HERE, before any of them import, makes
+# HARVIS_LLM_BASE_URL the canonical source everywhere at once and retires the
+# dead `ollama` hostname. host.docker.internal resolves from inside the
+# container via extra_hosts (["host.docker.internal:host-gateway"]).
+_LLM_DEFAULT_BASE_URL = "http://host.docker.internal:11434"
+HARVIS_LLM_BASE_URL = (
+    os.getenv("HARVIS_LLM_BASE_URL") or os.getenv("OLLAMA_URL") or _LLM_DEFAULT_BASE_URL
+).rstrip("/")
+os.environ["HARVIS_LLM_BASE_URL"] = HARVIS_LLM_BASE_URL
+os.environ["OLLAMA_URL"] = HARVIS_LLM_BASE_URL
+# "Explicitly configured" cannot be read off env presence: compose always sets
+# OLLAMA_URL, defaulting it to _LLM_DEFAULT_BASE_URL when .env names no provider.
+# So the honest split is: pointing anywhere OTHER than the default guess means
+# the operator configured a provider; the default guess itself means "nothing
+# configured, probing the conventional host port". /api/ollama-models and
+# /api/health/services use this to tell "provider down" from "no provider".
+LLM_PROVIDER_EXPLICITLY_CONFIGURED = HARVIS_LLM_BASE_URL != _LLM_DEFAULT_BASE_URL
+
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -596,9 +620,22 @@ async def lifespan(app: FastAPI):
                 _core_schema_path = os.path.join(
                     os.path.dirname(__file__), "all_schemas_safe.sql"
                 )
-                with open(_core_schema_path, "r") as _csf:
-                    await conn.execute(_csf.read())
-                logger.info("✅ Core schema ensured (all_schemas_safe.sql)")
+                # Guarded so a core-schema hiccup cannot silently skip EVERY
+                # block below it (the 010-015 sweep included) — that failure
+                # mode is exactly how `relation "cron_jobs" does not exist`
+                # loops on a box where this file failed once at boot. On a
+                # fresh volume initdb already ran this same file, so continuing
+                # past a failure here is safe, not optimistic.
+                try:
+                    with open(_core_schema_path, "r") as _csf:
+                        await conn.execute(_csf.read())
+                    logger.info("✅ Core schema ensured (all_schemas_safe.sql)")
+                except Exception as _core_err:  # noqa: BLE001
+                    logger.error(
+                        "❌ Core schema (all_schemas_safe.sql) did not apply "
+                        "(continuing to migrations): %s",
+                        _core_err,
+                    )
 
                 # Migrations 010-015 create tables (user_openclaw_config, cron_jobs,
                 # user_memory, mcp_servers, messaging_platforms, user_soul) that no
@@ -632,7 +669,18 @@ async def lifespan(app: FastAPI):
                         with open(_mig_path, "r") as _mf:
                             await conn.execute(_mf.read())
                     except FileNotFoundError:
-                        pass
+                        # A missing file here means the deploy did not ship
+                        # migrations/ (image built from a partial context, or a
+                        # k8s mount list that names files individually). The
+                        # old silent `pass` made that indistinguishable from
+                        # success — and the table it should have created then
+                        # fails at USE time (cron_jobs et al.), far from the
+                        # cause. Loud, every boot, on purpose.
+                        logger.warning(
+                            "Migration file missing — table(s) it creates will "
+                            "not exist: %s",
+                            _mig_path,
+                        )
                     except Exception as _mig_err:  # noqa: BLE001
                         logger.warning(
                             "Migration %s did not apply cleanly (continuing): %s",
@@ -1189,7 +1237,7 @@ async def list_models(
 
     formatted_models = []
 
-    # Fetch from local Ollama (Docker service at http://ollama:11434)
+    # Fetch from the configured provider's native Ollama API
     try:
         ollama_base = LOCAL_OLLAMA_BASE_URL
         if "/v1" in ollama_base:
@@ -1225,7 +1273,7 @@ async def list_models(
 
     # Fetch from llama-server (local GPU via llama.cpp)
     try:
-        llama_url = os.getenv("LLAMA_URL", "http://localhost:8080/v1")
+        llama_url = os.getenv("LLAMA_URL", "http://host.docker.internal:8080/v1")
         async with httpx.AsyncClient() as client:
             resp = await client.get(f"{llama_url}/models", timeout=5.0)
 
@@ -1251,7 +1299,7 @@ async def list_models(
 
     # Fetch from vLLM (fast local inference)
     try:
-        vllm_url = os.getenv("VLLM_URL", "http://localhost:8001/v1")
+        vllm_url = os.getenv("VLLM_URL", "http://host.docker.internal:8001/v1")
         async with httpx.AsyncClient() as client:
             resp = await client.get(f"{vllm_url}/models", timeout=5.0)
 
@@ -1657,13 +1705,17 @@ logger.info("Using device: %s", "cuda" if device == 0 else "cpu")
 
 # ─── Config --------------------------------------------------------------------
 
-# vLLM (qwen3.5:9b, fast agentic) is the primary local inference backend.
-# OLLAMA_URL is kept as the env var name for backwards compatibility;
-# in the merged pod it points to vLLM at port 8001.
-LOCAL_OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:8001/v1")
-VLLM_URL = os.getenv("VLLM_URL", "http://localhost:8001/v1")  # vLLM — fast, qwen3.5
+# The canonical provider base URL, resolved once at the top of this module
+# (HARVIS_LLM_BASE_URL → OLLAMA_URL → http://host.docker.internal:11434).
+# In the merged k8s pod OLLAMA_URL points at vLLM on :8001/v1 and that still
+# flows through here unchanged — the shim only supplies the default.
+LOCAL_OLLAMA_URL = HARVIS_LLM_BASE_URL
+# Secondary probe slots for host-run OpenAI-compatible servers. localhost here
+# would be the CONTAINER's loopback, which can never reach a host-run server —
+# host.docker.internal is the host (extra_hosts maps it to the gateway).
+VLLM_URL = os.getenv("VLLM_URL", "http://host.docker.internal:8001/v1")  # vLLM
 LLAMA_URL = os.getenv(
-    "LLAMA_URL", "http://localhost:8080/v1"
+    "LLAMA_URL", "http://host.docker.internal:8080/v1"
 )  # llama-server — devstral long-ctx
 API_KEY = os.getenv("OLLAMA_API_KEY", "key")
 DEFAULT_MODEL = "qwen3.5-27b"
@@ -1677,13 +1729,16 @@ EXTERNAL_OLLAMA_API_KEY = os.getenv("EXTERNAL_OLLAMA_API_KEY", "")
 # Only models discovered from the external endpoint will be added here
 EXTERNAL_MODELS_CACHE = set()
 
-# Models discovered from the local Ollama Docker service (http://ollama:11434)
+# Models discovered from the native Ollama API of the configured provider.
 # Used to route chat requests to the native Ollama API instead of vLLM/llama-server
 LOCAL_OLLAMA_MODELS_CACHE = set()
-# OLLAMA_NATIVE_URL points to the actual Ollama Docker service (not vLLM/llama-server).
-# OLLAMA_URL is already used by LOCAL_OLLAMA_URL above (pointing to vLLM), so we use
-# a separate env var to avoid conflicts.
-LOCAL_OLLAMA_BASE_URL = os.getenv("OLLAMA_NATIVE_URL", "http://ollama:11434").rstrip("/")
+# OLLAMA_NATIVE_URL still wins when set (deploys where OLLAMA_URL points at a
+# vLLM /v1 endpoint and native Ollama lives elsewhere). Otherwise fall back to
+# the canonical base URL — the old `http://ollama:11434` default named a compose
+# service that no longer exists and could never resolve.
+LOCAL_OLLAMA_BASE_URL = (
+    os.getenv("OLLAMA_NATIVE_URL") or HARVIS_LLM_BASE_URL
+).rstrip("/")
 
 # ─── Model List Cache (for /api/models endpoint) ─────────────────────────────────
 import time
@@ -2424,7 +2479,19 @@ async def health_check():
 
 @app.get("/api/health/services", tags=["health"])
 async def health_services():
-    """Check reachability of all backend services (ollama, pgsql, openclaw, browser-runner)."""
+    """Check reachability of backend services (model provider, pgsql, openclaw,
+    browser-runner, tts-service).
+
+    The model provider is NOT a compose service any more (plug-and-play: the
+    user brings their own server, reached via HARVIS_LLM_BASE_URL). It is
+    reported under the key "model_provider" with its own states so a correct
+    no-provider install does not read as degraded:
+      • up              — provider answered
+      • not_configured  — base URL is still the default guess and nothing
+                          answered there; healthy, just no provider yet
+      • down            — an explicitly configured provider is unreachable;
+                          this DOES degrade overall
+    """
     results: dict = {}
     overall = "healthy"
 
@@ -2456,11 +2523,47 @@ async def health_services():
                 results[name] = {"status": "down", "error": str(exc)[:200]}
                 overall = "degraded"
 
-    # Ollama — use the raw Ollama API, not the vLLM-style /v1 path
-    _ollama_base = os.getenv("OLLAMA_URL", "http://ollama:11434").rstrip("/")
+    # Model provider — the user's own server, not a compose service. Use the
+    # raw Ollama API, not the vLLM-style /v1 path.
+    _ollama_base = HARVIS_LLM_BASE_URL
     # Strip /v1 suffix if present — /api/tags lives on the root Ollama port
     if _ollama_base.endswith("/v1"):
         _ollama_base = _ollama_base[:-3]
+
+    async def _check_model_provider():
+        nonlocal overall
+        url = f"{_ollama_base}/api/tags"
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
+                r = await client.get(url)
+            if r.status_code < 400:
+                results["model_provider"] = {
+                    "status": "up", "code": r.status_code, "url": _ollama_base,
+                }
+            else:
+                results["model_provider"] = {
+                    "status": "degraded", "code": r.status_code, "url": _ollama_base,
+                }
+                overall = "degraded"
+        except Exception as exc:
+            if LLM_PROVIDER_EXPLICITLY_CONFIGURED:
+                # The operator pointed us at a server and it does not answer —
+                # a real fault.
+                results["model_provider"] = {
+                    "status": "down", "url": _ollama_base,
+                    "error": str(exc)[:200],
+                }
+                overall = "degraded"
+            else:
+                # Supported no-provider install: nothing configured, nothing on
+                # the conventional host port. Healthy — just no models yet.
+                results["model_provider"] = {
+                    "status": "not_configured", "url": _ollama_base,
+                    "reason": (
+                        "no model provider configured — set HARVIS_LLM_BASE_URL "
+                        "or start a server on the host's port 11434"
+                    ),
+                }
 
     # OpenClaw — HTTP health endpoint (WS gateway also serves /health over HTTP)
     _openclaw_ws = os.getenv("OPENCLAW_URL", "ws://openclaw:18789")
@@ -2469,7 +2572,7 @@ async def health_services():
     _tts_base = os.getenv("TTS_SERVICE_URL", "http://tts-service:8001").rstrip("/")
 
     await asyncio.gather(
-        _check("ollama", f"{_ollama_base}/api/tags"),
+        _check_model_provider(),
         _check("openclaw", f"{_openclaw_http}/health"),
         _check("browser-runner", "http://browser-runner:8765/health", timeout=8.0),
         _check("tts-service", f"{_tts_base}/health"),
@@ -3125,7 +3228,7 @@ async def get_openclaw_config(
             # Return default config for new users
             return OpenClawConfigResponse(
                 id=0,
-                provider_url="http://ollama:11434",
+                provider_url=HARVIS_LLM_BASE_URL,
                 model_id="qwen2.5-coder:32b",
                 provider_type="ollama",
                 is_active=True,
@@ -7105,12 +7208,24 @@ logger.info("Models will be loaded on demand for optimal memory management")
 @app.get("/api/ollama-models", tags=["models"])
 async def get_ollama_models():
     """
-    Fetches the list of available models from vLLM, llama-server, and (optionally)
-    the external Ollama endpoint.  Both local backends expose OpenAI /v1/models.
+    Fetches the list of available models from the configured provider (native
+    Ollama API), vLLM, llama-server, and (optionally) the external Ollama
+    endpoint.  Both local backends expose OpenAI /v1/models.
+
+    When models are found the response stays a bare JSON array of names — the
+    shape every existing caller parses.  When NOTHING answered, this returns
+    HTTP 200 with an honest object instead of a 503:
+        {"models": [], "provider_available": false, "reason": ..., "probed": [...]}
+    so a box with no provider renders "no model provider configured" rather
+    than an error, while a CONFIGURED provider being down stays distinguishable
+    via the reason + per-probe errors.
     """
     ollama_model_names = []
+    # Per-backend probe ledger, returned when everything came up empty so the
+    # caller (and the operator reading the response) can see what was tried.
+    probed: list[dict] = []
 
-    # Fetch from local Ollama (Docker service at http://ollama:11434)
+    # Fetch from the configured provider's native Ollama API
     try:
         ollama_base = LOCAL_OLLAMA_BASE_URL
         if "/v1" in ollama_base:
@@ -7127,10 +7242,22 @@ async def get_ollama_models():
             for name in local_ollama:
                 LOCAL_OLLAMA_MODELS_CACHE.add(name)
             logger.info(f"Available models from local Ollama: {local_ollama}")
+            probed.append(
+                {"provider": "ollama", "url": ollama_tags_url, "ok": True,
+                 "models": len(local_ollama)}
+            )
         else:
             logger.warning(f"Local Ollama returned status {response.status_code}")
+            probed.append(
+                {"provider": "ollama", "url": ollama_tags_url, "ok": False,
+                 "error": f"HTTP {response.status_code}"}
+            )
     except requests.exceptions.RequestException as e:
         logger.warning(f"Could not connect to local Ollama: {e}")
+        probed.append(
+            {"provider": "ollama", "url": ollama_tags_url, "ok": False,
+             "error": str(e)[:200]}
+        )
 
     # Fetch from vLLM (qwen3.5:9b)
     try:
@@ -7142,10 +7269,20 @@ async def get_ollama_models():
             local_models = [m["id"] for m in models if m["id"] not in ollama_model_names]
             ollama_model_names.extend(local_models)
             logger.info(f"Available models from vLLM: {local_models}")
+            probed.append(
+                {"provider": "vllm", "url": url, "ok": True, "models": len(local_models)}
+            )
         else:
             logger.warning(f"vLLM returned status {response.status_code}")
+            probed.append(
+                {"provider": "vllm", "url": url, "ok": False,
+                 "error": f"HTTP {response.status_code}"}
+            )
     except requests.exceptions.RequestException as e:
         logger.warning(f"Could not connect to vLLM: {e}")
+        probed.append(
+            {"provider": "vllm", "url": url, "ok": False, "error": str(e)[:200]}
+        )
 
     # Fetch from llama-server (devstral-24b)
     try:
@@ -7159,10 +7296,21 @@ async def get_ollama_models():
             ]
             ollama_model_names.extend(llama_models)
             logger.info(f"Available models from llama-server: {llama_models}")
+            probed.append(
+                {"provider": "llama-server", "url": url, "ok": True,
+                 "models": len(llama_models)}
+            )
         else:
             logger.warning(f"llama-server returned status {response.status_code}")
+            probed.append(
+                {"provider": "llama-server", "url": url, "ok": False,
+                 "error": f"HTTP {response.status_code}"}
+            )
     except requests.exceptions.RequestException as e:
         logger.warning(f"Could not connect to llama-server: {e}")
+        probed.append(
+            {"provider": "llama-server", "url": url, "ok": False, "error": str(e)[:200]}
+        )
 
     # Fetch from external Ollama (if configured — for large cloud-hosted models)
     if EXTERNAL_OLLAMA_URL and EXTERNAL_OLLAMA_API_KEY:
@@ -7200,23 +7348,58 @@ async def get_ollama_models():
                     f"Available models from external Ollama: {external_model_names}"
                 )
                 logger.info(f"Updated EXTERNAL_MODELS_CACHE: {EXTERNAL_MODELS_CACHE}")
+                probed.append(
+                    {"provider": "external-ollama", "url": ext_url, "ok": True,
+                     "models": len(external_model_names)}
+                )
             else:
                 logger.warning(
                     f"External Ollama returned status {ext_response.status_code}. Content: {ext_response.text[:200]}"
                 )
+                probed.append(
+                    {"provider": "external-ollama", "url": ext_url, "ok": False,
+                     "error": f"HTTP {ext_response.status_code}"}
+                )
         except requests.exceptions.RequestException as e:
             logger.warning(f"Could not connect to external Ollama: {e}")
             # Do NOT fallback to hardcoded list since we want dynamic discovery only
+            probed.append(
+                {"provider": "external-ollama", "url": ext_url, "ok": False,
+                 "error": str(e)[:200]}
+            )
 
     # Add Gemini if configured
     if is_gemini_configured():
         ollama_model_names.insert(0, "gemini-1.5-flash")
 
     if not ollama_model_names:
-        raise HTTPException(
-            status_code=503,
-            detail="Could not connect to vLLM, llama-server, or external Ollama",
-        )
+        # HTTP 200, honestly empty — a box with no provider is a SUPPORTED state
+        # (plug-and-play install), not a server error. A 503 here made the
+        # frontend render an error where "no model provider configured" belongs.
+        # The two empty cases stay distinguishable:
+        #   • operator pointed HARVIS_LLM_BASE_URL/OLLAMA_URL somewhere → that
+        #     provider is configured but unreachable/empty (a real fault);
+        #   • base URL is still the default guess → nothing was configured.
+        # `probed` carries the per-backend errors either way.
+        if LLM_PROVIDER_EXPLICITLY_CONFIGURED or (
+            EXTERNAL_OLLAMA_URL and EXTERNAL_OLLAMA_API_KEY
+        ):
+            reason = (
+                f"configured model provider at {HARVIS_LLM_BASE_URL} is unreachable "
+                "or reports no models — check that the server is running and the "
+                "URL is correct"
+            )
+        else:
+            reason = (
+                "no model provider configured — start an Ollama/vLLM/llama-server "
+                "instance and set HARVIS_LLM_BASE_URL (or OLLAMA_URL) to its address"
+            )
+        return {
+            "models": [],
+            "provider_available": False,
+            "reason": reason,
+            "probed": probed,
+        }
 
     return ollama_model_names
 

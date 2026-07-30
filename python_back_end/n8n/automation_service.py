@@ -24,7 +24,11 @@ logger = logging.getLogger(__name__)
 # ─── Ollama Configuration with Cloud/Local Fallback ──────────────────────────
 import os
 CLOUD_OLLAMA_URL = "https://harvis.example.com/ollama"
-LOCAL_OLLAMA_URL = "http://ollama:11434"
+LOCAL_OLLAMA_URL = (
+    os.getenv("HARVIS_LLM_BASE_URL")
+    or os.getenv("OLLAMA_URL")
+    or "http://host.docker.internal:11434"
+).rstrip("/")
 API_KEY = os.getenv("OLLAMA_API_KEY", "key")
 
 def make_ollama_request(endpoint, payload, timeout=90):
@@ -126,7 +130,7 @@ class N8nAutomationService:
     """
     
     def __init__(self, n8n_client: N8nClient, workflow_builder: WorkflowBuilder, 
-                 storage: N8nStorage, ollama_url: str = "http://ollama:11434"):
+                 storage: N8nStorage, ollama_url: str = LOCAL_OLLAMA_URL):
         """
         Initialize automation service
         

@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 from typing import Dict, Any, List, Optional, Tuple
 from ollama_n8n_optimizer import OllamaN8NOptimizer
 from enhanced_vector_optimizer import EnhancedVectorOptimizer
@@ -8,11 +9,17 @@ import time
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+DEFAULT_OLLAMA_URL = (
+    os.getenv("HARVIS_LLM_BASE_URL")
+    or os.getenv("OLLAMA_URL")
+    or "http://host.docker.internal:11434"
+).rstrip("/")
+
 class N8NAutomationSystem:
     """Complete n8n automation generation system with dynamic optimization"""
-    
-    def __init__(self, 
-                 ollama_url: str = "http://ollama:11434",
+
+    def __init__(self,
+                 ollama_url: str = DEFAULT_OLLAMA_URL,
                  db_conn_string: str = "postgresql://pguser:pgpassword@pgsql-db:5432/database"):
         
         self.ollama_optimizer = OllamaN8NOptimizer(ollama_url)
