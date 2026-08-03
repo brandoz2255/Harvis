@@ -38,6 +38,11 @@ import threading
 import time
 from dataclasses import dataclass, field
 
+# For MAX_CONCURRENT only, so the CPU allotment and the slot count can never disagree.
+# admission imports nothing from here, so this is not a cycle.
+import admission
+import pool as worker_pool
+
 # The deadline is the innermost of three. It must stay strictly below fab_cad's
 # httpx timeout (30 s), which stays below nginx's — each layer gives up after the
 # layer it depends on, never before. deadline + grace = 23 s worst case.
@@ -49,6 +54,67 @@ _POLL_S = 0.05
 _WORKER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "worker_main.py")
 
 _PID_DIR = re.compile(r"^\d+$")
+
+# Thread-pool env vars, set from the size of a build's CPU allotment. Affinity alone
+# already caps what a pool can *use*; these stop it from creating threads it will never
+# run, which is 30 of the 47 a single 8x8 brick used to spawn.
+_THREAD_VARS = (
+    "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS", "TBB_NUM_THREADS", "VECLIB_MAXIMUM_THREADS",
+)
+
+_slice_lock = threading.Lock()
+_slice_turn = 0
+
+
+def cpu_quota() -> float:
+    """CPUs the container may actually use, read from the cgroup rather than guessed.
+
+    ``os.cpu_count()`` and ``sched_getaffinity`` both report the *host's* CPUs — 16 on
+    this box — while ``cpus: 2.0`` in Compose is a cgroup bandwidth limit the process
+    cannot see. Everything downstream that sizes a thread pool believes the larger
+    number, which is the whole reason :func:`cpu_slice` exists.
+    """
+    for path, parse in (
+        ("/sys/fs/cgroup/cpu.max", lambda t: t.split()),                       # v2
+        ("/sys/fs/cgroup/cpu/cpu.cfs_quota_us", None),                         # v1
+    ):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read().strip()
+        except OSError:
+            continue
+        try:
+            if parse is not None:
+                quota, period = parse(text)
+                if quota != "max":
+                    return max(1.0, float(quota) / float(period))
+            else:
+                with open("/sys/fs/cgroup/cpu/cpu.cfs_period_us", encoding="utf-8") as fh:
+                    period = float(fh.read().strip())
+                if float(text) > 0 and period > 0:
+                    return max(1.0, float(text) / period)
+        except (ValueError, OSError):
+            continue
+    return float(len(os.sched_getaffinity(0)) or 1)
+
+
+def cpu_slice(concurrency: int) -> list[int]:
+    """The CPUs one build gets: the quota divided by the concurrency cap, rotating so
+    two simultaneous builds land on *different* CPUs instead of the same one.
+
+    Sized from the cap rather than from how many builds are running right now, because a
+    build that started alone must not have to give CPUs back when the next one arrives —
+    there is no mechanism to take them, and the pool it built is already sized.
+    """
+    global _slice_turn
+    allowed = sorted(os.sched_getaffinity(0)) or [0]
+    per = max(1, min(len(allowed), int(cpu_quota() // max(1, concurrency))))
+    with _slice_lock:
+        turn = _slice_turn
+        _slice_turn += 1
+    start = (turn * per) % len(allowed)
+    return [allowed[(start + i) % len(allowed)] for i in range(per)]
 
 
 class BuildTimeout(RuntimeError):
@@ -120,7 +186,7 @@ def group_members(pgid: int, include_zombies: bool = False) -> list[int]:
     return out
 
 
-def _child_env() -> dict[str, str]:
+def _child_env(cpus: list[int] | None = None) -> dict[str, str]:
     """An allowlist, not a copy. The child needs almost nothing, and the rootfs is
     read-only: HOME points at the tmpfs that holds the ezdxf font cache, and
     PYTHONDONTWRITEBYTECODE keeps the interpreter from trying to write ``.pyc``
@@ -129,6 +195,10 @@ def _child_env() -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if k in keep}
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["PYTHONUNBUFFERED"] = "1"
+    if cpus:
+        env["CAD_CPU_AFFINITY"] = ",".join(str(c) for c in cpus)
+        for var in _THREAD_VARS:
+            env[var] = str(len(cpus))
     return env
 
 
@@ -163,6 +233,10 @@ class BuildOutcome:
     duration_ms: int
     stl_path: str
     step_path: str | None
+    # format -> path, for every file the child actually wrote. `stl_path` and
+    # `step_path` stay because the server's frozen response is built from them; this
+    # is how a caller reaches the Gate 2 formats without that response changing shape.
+    artifacts: dict[str, str] = field(default_factory=dict)
 
 
 _registry: dict[str, BuildHandle] = {}
@@ -228,6 +302,7 @@ def run_build(
     params: dict,
     *,
     step: bool = True,
+    formats: list[str] | tuple[str, ...] | None = None,
     deadline_s: float = DEADLINE_S,
     grace_s: float = GRACE_S,
     build_id: str | None = None,
@@ -251,39 +326,69 @@ def run_build(
         with _registry_lock:
             _registry[build_id] = handle
 
+    leased = None
+    lease_reusable = True
     started = time.monotonic()
     try:
+        job = {"recipe": recipe, "params": params, "step": bool(step)}
+        if formats is not None:
+            job["formats"] = list(formats)
         with open(os.path.join(workdir, "job.json"), "w", encoding="utf-8") as fh:
-            json.dump({"recipe": recipe, "params": params, "step": bool(step)}, fh)
+            json.dump(job, fh)
 
-        log_path = os.path.join(workdir, "worker.log")
-        # Redirected to a file rather than a pipe. A pipe nobody drains blocks the
-        # child at 64 KB, and the parent cannot drain it while it is also enforcing
-        # the deadline. Unbounded in principle; bounded in practice by the 512 MB
-        # /tmp tmpfs, and caught afterwards by the caller's workdir-size check.
-        with open(log_path, "wb") as log:
-            proc = subprocess.Popen(
-                [sys.executable, entrypoint, workdir],
-                cwd=os.path.dirname(entrypoint) or "/app",
-                env=_child_env(),
-                stdin=subprocess.DEVNULL,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,   # its own process group — the whole point
-                close_fds=True,
-            )
-        with handle._lock:
-            handle.proc = proc
+        # A warm worker only for the production entrypoint. The kill-path tests pass
+        # their own script, and a pooled process cannot run one — so `entrypoint` is
+        # both the test seam and the switch back to a cold spawn.
+        pool = worker_pool.get_pool() if entrypoint == _WORKER else None
+        if pool is not None:
+            leased = pool.checkout()
+
+        result_path = os.path.join(workdir, "result.json")
+        if leased is not None:
+            proc = leased.proc
+            with handle._lock:
+                handle.proc = proc
+            leased.submit(workdir)
+        else:
+            cpus = cpu_slice(admission.MAX_CONCURRENT)
+            log_path = os.path.join(workdir, "worker.log")
+            # Redirected to a file rather than a pipe. A pipe nobody drains blocks the
+            # child at 64 KB, and the parent cannot drain it while it is also enforcing
+            # the deadline. Unbounded in principle; bounded in practice by the 512 MB
+            # /tmp tmpfs, and caught afterwards by the caller's workdir-size check.
+            with open(log_path, "wb") as log:
+                proc = subprocess.Popen(
+                    [sys.executable, entrypoint, workdir],
+                    cwd=os.path.dirname(entrypoint) or "/app",
+                    env=_child_env(cpus),
+                    stdin=subprocess.DEVNULL,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,   # its own process group — the whole point
+                    close_fds=True,
+                )
+            with handle._lock:
+                handle.proc = proc
 
         deadline_at = started + deadline_s
         timed_out = False
         cancelled = False
         while True:
-            try:
-                proc.wait(timeout=_POLL_S)
-                break
-            except subprocess.TimeoutExpired:
-                pass
+            if leased is not None:
+                # A warm worker does not exit when the build ends, so "the process
+                # finished" is not the signal any more. The result file is, and it is
+                # written through os.replace — so it appears whole or not at all.
+                if os.path.exists(result_path):
+                    break
+                if proc.poll() is not None:
+                    break       # the worker died mid-build; handled below as usual
+                time.sleep(_POLL_S)
+            else:
+                try:
+                    proc.wait(timeout=_POLL_S)
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
             if handle.cancelled:
                 cancelled = True
                 break
@@ -299,6 +404,10 @@ def run_build(
             cancelled = True
 
         if cancelled or timed_out:
+            # A killed worker never goes back on the free list: a process SIGKILLed
+            # part-way through a boolean operation is not something to hand the next
+            # caller. The pool replaces it, so the cap is restored, not shrunk.
+            lease_reusable = False
             survivors = _terminate_group(proc, grace_s)
             if survivors:
                 raise BuildFailed(
@@ -334,21 +443,48 @@ def run_build(
                 str(result.get("message") or "the geometry engine failed"),
             )
 
+        # Trust the child's own list of what it wrote, then confirm each file is there.
+        # A format it reported but did not leave behind is dropped rather than handed
+        # to the caller as a path that opens to nothing.
+        written = result.get("formats") or (["stl", "step"] if step else ["stl"])
+        artifacts = {}
+        for fmt in written:
+            path = os.path.join(workdir, f"part.{fmt}")
+            if os.path.exists(path):
+                artifacts[fmt] = path
+
         stl_path = os.path.join(workdir, "part.stl")
-        step_path = os.path.join(workdir, "part.step") if step else None
         yield BuildOutcome(
             workdir=workdir,
             result=result,
             duration_ms=duration_ms,
             stl_path=stl_path,
-            step_path=step_path if step_path and os.path.exists(step_path) else None,
+            step_path=artifacts.get("step") if step else None,
+            artifacts=artifacts,
         )
+    except BaseException:
+        # Any exit that is not a clean build — including a failure the child reported
+        # structurally — leaves the worker's state unproven. Cheaper to replace it
+        # than to reason about what a half-finished boolean left behind.
+        lease_reusable = False
+        raise
     finally:
         if build_id:
             with _registry_lock:
                 _registry.pop(build_id, None)
-        proc = handle.proc
-        if proc is not None and proc.poll() is None:
-            # Reached only if the caller's own body raised while the child ran.
-            _terminate_group(proc, grace_s)
+        if leased is not None:
+            # Released before the workdir is removed but after the caller has read
+            # the artifacts: the worker is idle from the moment it wrote result.json,
+            # and holding the lease through the caller's body is what keeps two
+            # builds from ever sharing one interpreter.
+            live_pool = worker_pool.get_pool()
+            if live_pool is not None:
+                live_pool.release(leased, reusable=lease_reusable)
+            else:
+                worker_pool.retire(leased)   # pool shut down while we held the lease
+        else:
+            proc = handle.proc
+            if proc is not None and proc.poll() is None:
+                # Reached only if the caller's own body raised while the child ran.
+                _terminate_group(proc, grace_s)
         shutil.rmtree(workdir, ignore_errors=True)

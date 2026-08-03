@@ -29,7 +29,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 WORKDIR /app
-COPY recipes.py server.py validation.py runner.py worker_main.py admission.py /app/
+COPY recipes.py server.py validation.py runner.py worker_main.py admission.py \
+     exporters.py pool.py /app/
 COPY tests /app/tests
 
 # Non-root

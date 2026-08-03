@@ -18,7 +18,18 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-RECIPE = "helmet_hanger_v1"
+# The recipe the Adaptive Space lane builds. It stays the default rather than becoming
+# a required argument because that lane's criteria (`crit_arm_length_mm` and friends)
+# only describe a hanger — but since Gate 2 there is a second recipe, so `execute()`
+# takes the name and validates it instead of hardcoding one.
+DEFAULT_RECIPE = "helmet_hanger_v1"
+RECIPE = DEFAULT_RECIPE  # retained: existing callers import this name
+
+# Recipes this client will ask for. A local allowlist, not a mirror of the sidecar's:
+# the sidecar's own allowlist is the one that must hold, and duplicating it here means
+# a typo costs a rejected call instead of a network round trip and a 400.
+KNOWN_RECIPES = ("helmet_hanger_v1", "studded_brick_v1")
+
 _TRUTHY = {"1", "true", "yes", "on"}
 
 
@@ -143,6 +154,7 @@ async def execute(
     want_step: bool = True,
     timeout: float = 30.0,
     build_id: str | None = None,
+    recipe: str = DEFAULT_RECIPE,
 ) -> dict:
     """Call the sidecar; return {meta, stl_bytes, step_bytes|None}.
 
@@ -156,6 +168,8 @@ async def execute(
     outlast the one it depends on — a client that gives up first learns nothing and
     leaves the work running.
     """
+    if recipe not in KNOWN_RECIPES:
+        raise CadError("unknown_recipe", f"unknown recipe: {recipe}")
     _reject_non_finite(params)
     build_id = build_id or uuid.uuid4().hex
     try:
@@ -163,7 +177,7 @@ async def execute(
             r = await client.post(
                 f"{_cad_url()}/cad/execute",
                 json={
-                    "recipe": RECIPE,
+                    "recipe": recipe,
                     "params": params,
                     "step": want_step,
                     "build_id": build_id,

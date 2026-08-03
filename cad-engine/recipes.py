@@ -17,11 +17,21 @@ clamp.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 
 from build123d import (
-    BuildPart, Locations, Box, Cylinder, Axis, Mode, fillet, export_stl, export_step,
+    BuildPart, Locations, Box, Cylinder, Axis, Mode, fillet,
 )
+
+import exporters
+
+# Bumped when the meaning of a recipe's parameters changes, not when its geometry is
+# refactored. It is mixed into :func:`canonical_source_hash`, so a bump invalidates
+# every stored hash — which is the point: two builds that agree on the numbers but
+# disagree on what the numbers mean are not the same build.
+SCHEMA_VERSION = "0.1"
 
 
 class ParamError(ValueError):
@@ -60,7 +70,35 @@ PARAM_SPEC: dict[str, dict[str, tuple[str, float, float, float]]] = {
         "screw_d_mm":  ("float", 4, 1, 20),
         "screw_count": ("int", 2, 0, 6),
     },
+    # A generic interlocking studded building brick: a hollow rectangular shell with
+    # a grid of studs on top and interlocking tubes underneath. Every dimension is a
+    # parameter with a default chosen for this recipe, not copied from any
+    # manufacturer's specification, and the recipe is named for what it is.
+    "studded_brick_v1": {
+        "studs_x":      ("int", 4, 1, 16),
+        "studs_y":      ("int", 2, 1, 16),
+        "pitch_mm":     ("float", 10, 4, 40),
+        "body_h_mm":    ("float", 10, 3, 60),
+        "wall_t_mm":    ("float", 1.6, 0.8, 6),
+        "stud_d_mm":    ("float", 5, 1, 30),
+        "stud_h_mm":    ("float", 2, 0.5, 10),
+        "clearance_mm": ("float", 0.1, 0, 1),
+    },
 }
+
+# How many disjoint solids a correct build of each recipe produces. Read by the
+# server instead of the hardcoded 1 it used through Gate 1B: the count is a property
+# of the recipe, and the moment a recipe legitimately returns two bodies, a
+# hardcoded 1 turns a correct build into a 500.
+RECIPE_SOLIDS = {
+    "helmet_hanger_v1": 1,
+    "studded_brick_v1": 1,
+}
+
+# Underside tube diameter as a fraction of the stud pitch. Not a parameter: it is
+# fixed by the interlock geometry (the tube has to be gripped by four studs), and
+# exposing it would let a caller ask for a tube that cannot touch any of them.
+_TUBE_RATIO = 0.8
 
 # Cost is expressed in default-hanger units: the stock part is 1.0 by construction.
 #
@@ -71,9 +109,44 @@ PARAM_SPEC: dict[str, dict[str, tuple[str, float, float, float]]] = {
 # backstop, and saying otherwise would be a safety claim the numbers don't support.
 #
 # It earns its place at Gate 2, where the studded brick's stud count multiplies
-# boolean operations without any single parameter looking unreasonable. Recalibrate
-# the cap there against measured builds.
+# boolean operations without any single parameter looking unreasonable.
 MAX_COST = 150.0
+
+# ...and Gate 2 also showed that one shared number cannot do the job, for the reason
+# the comment above `_UNIT_AREA_MM2` already states: a cost of 1.0 means "as expensive
+# as THIS recipe's default", so the same number buys wildly different amounts of work.
+# The hanger's worst legal request scores 48.7 and builds in 0.040 s. The brick reaches
+# 23.9 at 15.88 s and 31.2 at never — measured through the real HTTP path with each
+# build pinned to its CPU slice:
+#
+#     grid    cost   solo wall   peak child RSS
+#     10x10   12.2      7.30 s        663 MiB
+#     12x12   17.6      8.60 s        831 MiB
+#     14x14   23.9     15.88 s       1056 MiB
+#     16x16   31.2   killed at the 20 s deadline, having produced nothing
+#
+# A single 150.0 admitted every one of those, including the one that cannot finish —
+# and a cap that admits unfinishable work is not a cap. It burns a concurrency slot for
+# the full 20 s and answers with a timeout, where the whole point is an immediate,
+# honest refusal.
+#
+# 20.0 is the last brick value that keeps every admitted request finishable: it takes
+# 12x12 (8.60 s solo; 10.8 s and 8.3 s for two at once, both inside the deadline) and
+# refuses 14x14, whose 15.88 s leaves nothing for a loaded host. Memory is not what
+# sets it — two concurrent 12x12 builds peaked the container at 1557 MiB against the
+# 2 GiB limit, and `memory.events` has never once recorded an OOM (`max 0, oom 0`).
+#
+# A recipe absent from here falls back to MAX_COST, which stays the unreachable
+# backstop it has always been for the hanger.
+MAX_COST_BY_RECIPE = {
+    "studded_brick_v1": 20.0,
+}
+
+
+def cost_cap(recipe: str) -> float:
+    """The complexity ceiling for one recipe. Per-recipe because cost is normalized
+    per-recipe; sharing one number across both would price the brick in hanger units."""
+    return MAX_COST_BY_RECIPE.get(recipe, MAX_COST)
 
 
 def _finite(recipe: str, name: str, value, spec: tuple[str, float, float, float]) -> float | int:
@@ -111,6 +184,46 @@ def _finite(recipe: str, name: str, value, spec: tuple[str, float, float, float]
     return min(max(f, lo), hi)
 
 
+def _check_studded_brick_v1(p: dict) -> None:
+    """Reject brick parameter *combinations* that no per-parameter range can catch.
+
+    Each bound in :data:`PARAM_SPEC` is individually reasonable; several of them
+    together are not. A 4 mm pitch with a 30 mm stud diameter passes every range check
+    and asks OpenCascade to fuse 256 mutually-overlapping cylinders into a shell they
+    are all larger than. That is the class of request Gate 0 measured the cost of, so
+    it is refused here — cheaply, before a process is spawned — rather than left to
+    the deadline.
+    """
+    nx, ny = p["studs_x"], p["studs_y"]
+    pitch, body_h, wall = p["pitch_mm"], p["body_h_mm"], p["wall_t_mm"]
+    stud_d, clr = p["stud_d_mm"], p["clearance_mm"]
+
+    def bad(msg: str):
+        raise ParamError("incompatible_params", msg)
+
+    if stud_d + 2 * clr >= pitch:
+        bad(f"stud_d_mm + 2×clearance_mm ({stud_d + 2 * clr:g}) must be less than "
+            f"pitch_mm ({pitch:g}), or adjacent studs merge")
+    if body_h <= wall + 1:
+        bad(f"body_h_mm ({body_h:g}) must exceed wall_t_mm + 1 ({wall + 1:g}), "
+            "or there is no cavity under the roof")
+    if 2 * wall + 2 * clr + 1 >= pitch * min(nx, ny):
+        bad(f"wall_t_mm ({wall:g}) is too thick for a {nx}×{ny} brick at "
+            f"pitch_mm {pitch:g} — the walls would meet in the middle")
+    if nx > 1 and ny > 1:
+        # Tubes exist only on a grid; a 1×N brick has no interlock feature at all,
+        # which is honest rather than a silent omission — it also has nothing to grip.
+        if wall + clr >= 0.6 * pitch:
+            bad(f"wall_t_mm + clearance_mm ({wall + clr:g}) leaves no room for the "
+                f"interlock tubes at pitch_mm {pitch:g}")
+        if _TUBE_RATIO * pitch - stud_d - 2 * clr < 0.8:
+            bad(f"stud_d_mm ({stud_d:g}) is too large at pitch_mm {pitch:g}: the "
+                "interlock tube wall would be under 0.8 mm")
+
+
+_CROSS_CHECKS = {"studded_brick_v1": _check_studded_brick_v1}
+
+
 def resolve_params(recipe: str, params: dict | None) -> dict:
     """Validated, defaulted, in-range parameters for a recipe. Unknown names are an
     error, not a shrug: silently ignoring them meant a caller could ask for
@@ -127,10 +240,44 @@ def resolve_params(recipe: str, params: dict | None) -> dict:
             f"unknown parameter(s) for {recipe}: {', '.join(unknown[:8])}",
         )
 
-    return {name: _finite(recipe, name, params.get(name), s) for name, s in spec.items()}
+    resolved = {name: _finite(recipe, name, params.get(name), s) for name, s in spec.items()}
+
+    check = _CROSS_CHECKS.get(recipe)
+    if check is not None:
+        check(resolved)
+    return resolved
 
 
-def _area_proxy_mm2(p: dict) -> float:
+def canonical_source_hash(recipe: str, resolved: dict) -> str:
+    """SHA-256 over the normalized (schema version + recipe name + sorted parameters).
+
+    This is the identity Gate 3's ``cad_revisions`` compares on, and it exists because
+    the obvious alternative — hashing the exported bytes — was measured to be wrong.
+    STEP embeds ``FILE_NAME(…,'2026-08-03T05:55:27',…)``, a wall-clock timestamp at
+    one-second resolution, so two identical builds either side of a second boundary
+    produce different files; 3MF is a ZIP and differed across two writes inside the
+    same second. A byte-identity gate would have passed in CI and failed in production
+    on a slow build.
+
+    Hashing the *input* has the property we actually want: it answers "is this the same
+    build?" without building anything, and it cannot drift with the exporter.
+    """
+    params = {}
+    for name in sorted(resolved):
+        v = resolved[name]
+        if isinstance(v, float):
+            # -0.0 and 0.0 are equal but serialise differently, and a clamp at a lower
+            # bound of 0 can produce either.
+            v = 0.0 if v == 0 else float(v)
+        params[name] = v
+    payload = json.dumps(
+        {"schema_version": SCHEMA_VERSION, "recipe": recipe, "params": params},
+        sort_keys=True, separators=(",", ":"), allow_nan=False,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _hanger_area_mm2(p: dict) -> float:
     """Summed face area of the recipe's primitives — the quantity that actually
     drives tessellation, and therefore triangle count, artifact size and time.
 
@@ -149,24 +296,63 @@ def _area_proxy_mm2(p: dict) -> float:
     return plate + arm + lip + screws
 
 
+def _brick_area_mm2(p: dict) -> float:
+    """Same idea for the brick, and here the count terms carry the weight.
+
+    The hanger's cost moves with its dimensions. The brick's moves with how many
+    features it has: a 16×16 grid is 256 stud fusions and 225 tube pairs, and none of
+    the individual parameters looks unreasonable while asking for them. Studs and
+    tubes are therefore counted, not approximated by the shell they sit on.
+    """
+    nx, ny = p["studs_x"], p["studs_y"]
+    pitch, body_h, wall = p["pitch_mm"], p["body_h_mm"], p["wall_t_mm"]
+    stud_d, stud_h, clr = p["stud_d_mm"], p["stud_h_mm"], p["clearance_mm"]
+
+    length = nx * pitch - 2 * clr
+    width = ny * pitch - 2 * clr
+    outer = 2 * length * width + 2 * body_h * (length + width)
+
+    inner_l, inner_w = length - 2 * wall, width - 2 * wall
+    inner_h = body_h - wall
+    cavity = inner_l * inner_w + 2 * inner_h * (inner_l + inner_w)
+
+    studs = nx * ny * (math.pi * stud_d * stud_h + math.pi * stud_d ** 2 / 4)
+
+    tubes = 0.0
+    if nx > 1 and ny > 1:
+        bore_d = stud_d + 2 * clr
+        tubes = (nx - 1) * (ny - 1) * math.pi * (_TUBE_RATIO * pitch + bore_d) * inner_h
+
+    return outer + cavity + studs + tubes
+
+
+_AREA_PROXY = {
+    "helmet_hanger_v1": _hanger_area_mm2,
+    "studded_brick_v1": _brick_area_mm2,
+}
+
+
 def _defaults(recipe: str) -> dict:
     return {name: spec[1] for name, spec in PARAM_SPEC[recipe].items()}
 
 
-# The unit of cost: the stock hanger, derived from the spec rather than pasted in as
-# a constant, so changing a default can't silently rescale every stored estimate.
-# Measured B-Rep area of that part is 9237.80 mm²; the proxy reads ~9782.8 because it
-# ignores the boolean overlaps and the root fillet. Fine for a ratio.
-_UNIT_AREA_MM2 = {r: _area_proxy_mm2(_defaults(r)) for r in PARAM_SPEC}
+# The unit of cost: each recipe's own stock part, derived from the spec rather than
+# pasted in as a constant, so changing a default can't silently rescale every stored
+# estimate. Measured B-Rep area of the stock hanger is 9237.80 mm²; the proxy reads
+# ~9782.8 because it ignores the boolean overlaps and the root fillet. Fine for a
+# ratio — and note that a cost of 1.0 means "as expensive as this recipe's default",
+# not "as expensive as a hanger". The cap is shared, the units are not.
+_UNIT_AREA_MM2 = {r: _AREA_PROXY[r](_defaults(r)) for r in PARAM_SPEC}
 
 
 def estimate_cost(recipe: str, resolved: dict) -> float:
     """Static complexity estimate, computed from already-validated parameters and
     charged BEFORE geometry starts. Cheap arithmetic only — if this needed to build
     anything to decide, it would not be admission control."""
+    proxy = _AREA_PROXY.get(recipe)
     unit = _UNIT_AREA_MM2.get(recipe)
-    if unit:
-        return round(_area_proxy_mm2(resolved) / unit, 3)
+    if proxy and unit:
+        return round(proxy(resolved) / unit, 3)
     return 1.0
 
 
@@ -213,7 +399,76 @@ def helmet_hanger_v1(p: dict):
     return part
 
 
-RECIPES = {"helmet_hanger_v1": helmet_hanger_v1}
+def studded_brick_v1(p: dict):
+    """A generic interlocking studded building brick.
+
+    A hollow rectangular shell, closed on top, with an ``studs_x × studs_y`` grid of
+    cylindrical studs on the roof and a matching grid of hollow tubes underneath that
+    grip the studs of the brick below. Centred on the origin; Z is up.
+
+    Two geometry choices worth stating, because both were failure modes before they
+    were choices:
+
+    * The tubes are built ``wall_t/2`` **taller** than the cavity, so they interpenetrate
+      the roof instead of meeting it face-to-face. A coplanar fuse is exactly where
+      OCCT produces a technically-valid shape with a seam the mesher then tessellates
+      into open edges — and :func:`validation.verdict` would reject that as
+      not-watertight rather than let it through.
+    * Tubes exist only when both counts exceed one. A 1×N brick has nothing to grip
+      and gets no underside feature at all. That is a real limitation of this recipe,
+      not an oversight: real bar-shaped bricks use a different interlock, and inventing
+      one here would be geometry nobody has checked.
+
+    Expects parameters already through :func:`resolve_params`, which is also where the
+    combinations this function cannot survive are refused.
+    """
+    nx, ny = int(p["studs_x"]), int(p["studs_y"])
+    pitch = p["pitch_mm"]
+    body_h = p["body_h_mm"]
+    wall = p["wall_t_mm"]
+    stud_d = p["stud_d_mm"]
+    stud_h = p["stud_h_mm"]
+    clr = p["clearance_mm"]
+
+    length = nx * pitch - 2 * clr
+    width = ny * pitch - 2 * clr
+    cavity_h = body_h - wall
+    tube_d = _TUBE_RATIO * pitch
+    bore_d = stud_d + 2 * clr
+
+    with BuildPart() as bp:
+        Box(length, width, body_h)
+        # hollow the underside, leaving the four side walls and a roof of `wall`
+        with Locations((0, 0, -wall / 2)):
+            Box(length - 2 * wall, width - 2 * wall, cavity_h, mode=Mode.SUBTRACT)
+
+        studs = [
+            ((i - (nx - 1) / 2) * pitch, (j - (ny - 1) / 2) * pitch, body_h / 2 + stud_h / 2)
+            for i in range(nx) for j in range(ny)
+        ]
+        with Locations(*studs):
+            Cylinder(radius=stud_d / 2, height=stud_h)
+
+        if nx > 1 and ny > 1:
+            # tube centres sit on the diagonals between four studs
+            mids = [
+                ((i + 0.5 - (nx - 1) / 2) * pitch, (j + 0.5 - (ny - 1) / 2) * pitch, -wall / 4)
+                for i in range(nx - 1) for j in range(ny - 1)
+            ]
+            with Locations(*mids):
+                Cylinder(radius=tube_d / 2, height=cavity_h + wall / 2)
+            # the bore is blind: it stops at the roof underside, which is an existing
+            # face of the part, so the cut adds no new plane.
+            with Locations(*[(x, y, -wall) for x, y, _z in mids]):
+                Cylinder(radius=bore_d / 2, height=body_h, mode=Mode.SUBTRACT)
+
+    return bp.part
+
+
+RECIPES = {
+    "helmet_hanger_v1": helmet_hanger_v1,
+    "studded_brick_v1": studded_brick_v1,
+}
 
 
 def build(recipe: str, resolved: dict):
@@ -224,28 +479,37 @@ def build(recipe: str, resolved: dict):
     return fn(resolved)
 
 
-def export(part, recipe: str, stl_path: str, step_path: str | None = None) -> dict:
-    """Write the artifacts and return the frozen ``meta`` shape. Kept byte-for-byte
-    compatible with what the backend already consumes — Gate 3 adds a v2 endpoint
-    rather than changing this."""
-    export_stl(part, stl_path)
-    if step_path:
+def export(part, recipe: str, targets: dict[str, str], *, seed: str = "") -> tuple[dict, list[str]]:
+    """Write the requested artifacts; return the frozen ``meta`` shape and the list of
+    formats that actually landed.
+
+    ``meta`` keeps exactly the four keys the backend already consumes — including
+    ``step``, which stays a bare boolean rather than becoming a list, because
+    ``/cad/execute`` is frozen and Gate 3 is where the response shape changes.
+
+    A format that fails to write is dropped from the returned list rather than raising.
+    STEP behaved this way before Gate 2 and the reason generalises: a GLB the viewer
+    cannot have is a degraded result, not a failed build, and the caller learns which
+    formats it got instead of being told the part does not exist. STL is the exception
+    — it is the mesh every downstream check reads, so its failure is the build's.
+    """
+    written: list[str] = []
+    for fmt, path in targets.items():
+        if fmt == "stl":
+            exporters.write(fmt, part, path, seed=seed)
+            written.append(fmt)
+            continue
         try:
-            export_step(part, step_path)
+            exporters.write(fmt, part, path, seed=seed)
+            written.append(fmt)
         except Exception:
-            step_path = None
+            pass
+
     bb = part.bounding_box()
-    return {
+    meta = {
         "recipe": recipe,
         "bbox_mm": [round(bb.size.X, 2), round(bb.size.Y, 2), round(bb.size.Z, 2)],
         "volume_mm3": round(part.volume, 1),
-        "step": bool(step_path),
+        "step": "step" in written,
     }
-
-
-def run(recipe: str, params: dict, stl_path: str, step_path: str | None = None) -> dict:
-    """Validate -> build -> export in one call. Retained for callers that do not need
-    the intermediate part; the server uses the three steps separately so it can run
-    admission control and validation between them."""
-    resolved = resolve_params(recipe, params)
-    return export(build(recipe, resolved), recipe, stl_path, step_path)
+    return meta, written

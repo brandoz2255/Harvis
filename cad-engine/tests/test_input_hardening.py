@@ -79,7 +79,10 @@ def message_of(resp) -> str:
 def test_health_still_answers():
     r = client.get("/health")
     assert r.status_code == 200
-    assert r.json()["recipes"] == ["helmet_hanger_v1"]
+    # Membership, not equality. Gate 2 added a second recipe and an equality assertion
+    # here would fail on every future one — testing the size of the registry rather than
+    # the thing this test is for, which is that the hardened worker still answers.
+    assert "helmet_hanger_v1" in r.json()["recipes"]
 
 
 @pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])

@@ -38,6 +38,7 @@ otherwise would repeat the mistake Gate 1B exists to correct.
 from __future__ import annotations
 
 import base64
+import contextlib
 import logging
 import math
 import os
@@ -50,12 +51,46 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 import admission
+import exporters
+import pool as worker_pool
 import recipes
 import runner
 import validation
 
 log = logging.getLogger("cad-engine")
-app = FastAPI(title="Harvis CAD engine")
+
+
+@contextlib.asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    """Start the warm workers with the server, and stop them with it.
+
+    One worker per concurrency slot, each pinned to the CPU slice a build on that
+    slot would have got anyway — ``cpu_slice`` rotates, so asking for
+    ``MAX_CONCURRENT`` of them hands out disjoint slices rather than stacking every
+    worker on the same CPU.
+
+    Sizing it to the admission cap is what keeps the pool from changing any
+    behaviour except latency: admission control already refuses the N+1th build with
+    a 429, so a pool of N can never be the thing that makes a caller wait. If it is
+    ever empty anyway — a worker being replaced — ``runner`` falls back to the cold
+    spawn, which is exactly what every build did before this existed.
+
+    Shutdown is in a ``finally`` because a worker outliving the server is a leaked
+    process, and this container's whole point is that geometry cannot outlive its
+    supervisor.
+    """
+    worker_pool.init(
+        admission.MAX_CONCURRENT,
+        [runner.cpu_slice(admission.MAX_CONCURRENT)
+         for _ in range(admission.MAX_CONCURRENT)],
+    )
+    try:
+        yield
+    finally:
+        worker_pool.shutdown()
+
+
+app = FastAPI(title="Harvis CAD engine", lifespan=_lifespan)
 
 # ---------------------------------------------------------------------------
 # Limits. Every one of these is a refusal, never a silent truncation.
@@ -65,6 +100,12 @@ MAX_PARAMS = 32
 MAX_TRIANGLES = 400_000             # ~20 MB of binary STL
 MAX_ARTIFACT_BYTES = 32 * 1024 * 1024
 MAX_WORKDIR_BYTES = 96 * 1024 * 1024
+
+# What this endpoint asks the worker for, and it is not a parameter. The response
+# carries exactly `stl_b64` and `step_b64`; a caller who could request GLB would get a
+# 200 with no way to receive it. Gate 3's /cad/v2/build is where formats become the
+# caller's choice, because that is where the response can carry them.
+_EXECUTE_FORMATS = ("stl", "step")
 
 
 def _strict_number(v: Any) -> float:
@@ -146,17 +187,26 @@ except Exception:  # pragma: no cover — a packaging accident must not break /h
 def health():
     """Deliberately answers from the parent's own state only.
 
-    It reports what it can observe cheaply and truthfully. The plan also lists a
-    ``formats`` key; that belongs to Gate 2/3, when GLB and 3MF are actually
-    exported. Advertising them now would be a claim about capability we do not have.
+    The two format keys are separate on purpose. ``formats`` is what ``/cad/execute``
+    actually returns and has not changed; ``formats_available`` is what the geometry
+    worker can now write, which since Gate 2 includes GLB and 3MF. Collapsing them into
+    one list would advertise, on the endpoint that cannot deliver them, a capability
+    that only Gate 3's ``/cad/v2/build`` will expose.
     """
     return {
         "ok": True,
         "recipes": list(recipes.RECIPES.keys()),
+        "formats": list(_EXECUTE_FORMATS),
+        "formats_available": list(exporters.FORMATS),
+        "schema_version": recipes.SCHEMA_VERSION,
         "active_builds": admission.active(),
         "max_concurrent": admission.MAX_CONCURRENT,
         "deadline_s": runner.DEADLINE_S,
         "build123d_version": _BUILD123D_VERSION,
+        # Honest about which lane is actually serving builds. `null` means warm
+        # workers are off (or failed to start) and every build pays the 1.42 s OCP
+        # import — correct, just slower, and worth being able to see from outside.
+        "worker_pool": (p.stats() if (p := worker_pool.get_pool()) is not None else None),
     }
 
 
@@ -198,10 +248,11 @@ def execute(req: ExecReq):
         raise _err(400, e.code, e.message)
 
     cost = recipes.estimate_cost(req.recipe, resolved)
-    if cost > recipes.MAX_COST:
+    cap = recipes.cost_cap(req.recipe)
+    if cost > cap:
         raise _err(
             400, "too_complex",
-            f"estimated complexity {cost} exceeds the cap of {recipes.MAX_COST}",
+            f"estimated complexity {cost} exceeds the cap of {cap}",
         )
 
     # A slot is taken BEFORE the child is spawned, so a saturated engine costs a
@@ -236,8 +287,9 @@ def _run_and_encode(req: ExecReq, resolved: dict, cost: float, build_id: str) ->
     The workdir is created and destroyed by :func:`runner.run_build`; leaving this
     function by any path — return, cap breach, or a kill — removes it.
     """
+    formats = list(_EXECUTE_FORMATS) if req.step else ["stl"]
     with runner.run_build(
-        req.recipe, resolved, step=req.step, build_id=build_id
+        req.recipe, resolved, step=req.step, formats=formats, build_id=build_id
     ) as outcome:
         result = outcome.result
         meta = result["meta"]
@@ -256,7 +308,11 @@ def _run_and_encode(req: ExecReq, resolved: dict, cost: float, build_id: str) ->
             raise _err(500, "output_too_large",
                        f"mesh has {tri} triangles, over the cap of {MAX_TRIANGLES}")
 
-        ok, problems = validation.verdict(metrics, mesh, expected_solids=1)
+        # The expected solid count is a property of the recipe. It was hardcoded to 1
+        # through Gate 1B, which was true of the only recipe there was; leaving it that
+        # way would turn the first legitimately two-bodied recipe into a 500.
+        expected = recipes.RECIPE_SOLIDS.get(req.recipe, 1)
+        ok, problems = validation.verdict(metrics, mesh, expected_solids=expected)
         if not ok:
             # A bad solid must not be indistinguishable from a good one. The problem
             # strings are names and numbers — no paths, no argv, no host names.
@@ -293,5 +349,12 @@ def _run_and_encode(req: ExecReq, resolved: dict, cost: float, build_id: str) ->
                 "estimated_cost": cost,
                 "duration_ms": outcome.duration_ms,
                 "peak_rss_bytes": result.get("peak_rss_bytes"),
+                # Gate 2 identities. `source_hash` is what Gate 3's cad_revisions
+                # compares on; `mesh_signature` is what proves two builds of the same
+                # input produced the same shape. Neither is a hash of the files —
+                # STEP embeds a wall-clock timestamp and 3MF is a ZIP, so byte
+                # identity was measured to be the wrong test.
+                "source_hash": result.get("source_hash"),
+                "mesh_signature": result.get("mesh_signature"),
             },
         }

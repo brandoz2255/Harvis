@@ -18,6 +18,7 @@ printable; printable is not strong. Keep those three statements separate.
 """
 from __future__ import annotations
 
+import hashlib
 import struct
 
 from OCP.BRepCheck import BRepCheck_Analyzer
@@ -121,6 +122,49 @@ def mesh_report(stl_path: str) -> dict:
         # manifold is the weaker property: no edge shared by three or more
         "manifold": over_shared == 0 and count > 0,
     }
+
+
+def mesh_signature(stl_path: str) -> str | None:
+    """A hash of the *geometry* an STL describes, independent of how it was encoded.
+
+    Two builds of the same input can differ byte-for-byte and still be the same shape:
+    float32 round-off moves coincident vertices in the last bits, and nothing fixes the
+    order triangles are written in. This normalizes both — vertices quantised to the
+    micron, each triangle rotated so its smallest vertex leads (which preserves winding,
+    so a flipped normal is still a difference), then the whole set sorted — and hashes
+    the result.
+
+    Returns ``None`` when the file is not the binary STL layout we write, for the same
+    reason :func:`mesh_report` returns ``parsed: False``: an honest "unknown" beats a
+    fabricated verdict, and a caller comparing two ``None``s must not read that as a
+    match.
+    """
+    with open(stl_path, "rb") as fh:
+        blob = fh.read()
+    if len(blob) < 84:
+        return None
+    count = struct.unpack("<I", blob[80:84])[0]
+    if len(blob) != 84 + 50 * count:
+        return None
+
+    tris: list[tuple[tuple[int, int, int], ...]] = []
+    for i in range(count):
+        off = 84 + 50 * i + 12  # the per-facet normal is derived, not independent data
+        vx = struct.unpack_from("<9f", blob, off)
+        v = (
+            (_quant(vx[0]), _quant(vx[1]), _quant(vx[2])),
+            (_quant(vx[3]), _quant(vx[4]), _quant(vx[5])),
+            (_quant(vx[6]), _quant(vx[7]), _quant(vx[8])),
+        )
+        k = v.index(min(v))
+        tris.append((v[k], v[(k + 1) % 3], v[(k + 2) % 3]))
+
+    tris.sort()
+    h = hashlib.sha256()
+    for tri in tris:
+        for vert in tri:
+            h.update(struct.pack("<3q", *vert))
+    return h.hexdigest()
 
 
 def verdict(metrics: dict, mesh: dict, expected_solids: int = 1) -> tuple[bool, list[str]]:
