@@ -14,10 +14,23 @@ RUN pip install --no-cache-dir \
     "build123d==0.9.1" \
     "fastapi>=0.110,<1" \
     "uvicorn>=0.29,<1" \
-    "pydantic>=2,<3"
+    "pydantic>=2,<3" \
+    "httpx>=0.27,<1" \
+    "pytest>=8,<9"
+
+# httpx + pytest add ~10 MB to a 418 MB profile-gated image, and they buy the
+# ability to run the input-hardening suite against the EXACT pinned OCP build that
+# serves traffic. A separate test image would exercise a different geometry kernel,
+# which is the one thing those tests exist to pin down.
+
+# The container runs with a read-only root filesystem (see docker-compose.yaml), so
+# never attempt to write bytecode next to the source. Scratch goes to the tmpfs /tmp.
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
 WORKDIR /app
-COPY recipes.py server.py /app/
+COPY recipes.py server.py validation.py runner.py worker_main.py admission.py /app/
+COPY tests /app/tests
 
 # Non-root
 RUN useradd -m -u 1001 appuser && chown -R appuser /app

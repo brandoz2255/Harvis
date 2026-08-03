@@ -1461,8 +1461,48 @@ services:
     # Dedicated INTERNAL network shared only with the backend. The sidecar has no
     # auth and no host port; keeping it off the shared ollama-n8n-network means the
     # internet-capable / prompt-injectable OpenClaw pod cannot reach it laterally.
+    # Precisely: `internal: true` blocks EXTERNAL egress. Sibling containers on
+    # cad-internal can still reach it, so the safety here rests on having no secret,
+    # no docker socket and no bind mount — not on being unreachable.
     networks:
       - cad-internal
+    environment:
+      # Gate 1B. The deadline is the INNERMOST of three: it must stay below
+      # fab_cad's httpx timeout (30 s), which stays below nginx's. deadline + grace
+      # = 23 s worst case. Raising it past 27 s makes the client give up first,
+      # which is the exact dishonesty Gate 1B removed.
+      CAD_BUILD_DEADLINE_S: "${CAD_BUILD_DEADLINE_S:-20}"
+      CAD_BUILD_GRACE_S: "${CAD_BUILD_GRACE_S:-3}"
+      # 2 × the measured ~460 MiB peak sits under mem_limit with room for the
+      # parent, and the container only has 2.0 CPUs. Gate 2's brick benchmark is
+      # what should revisit this, not a guess.
+      CAD_MAX_CONCURRENT_BUILDS: "${CAD_MAX_CONCURRENT_BUILDS:-2}"
+    # Resource limits, top-level and NOT under `deploy:` — this is plain Compose,
+    # where `deploy.resources` is silently ignored outside Swarm. Verify what the
+    # daemon actually applied, never the YAML:
+    #   docker inspect harvis-cad --format '{{json .HostConfig}}'
+    # Baseline before this block existed: Memory 0, NanoCpus 0, PidsLimit null,
+    # ReadonlyRootfs false, CapDrop null, SecurityOpt null — nothing at all.
+    user: "1001:1001"
+    read_only: true
+    tmpfs:
+      # Geometry scratch. noexec because nothing in a CAD build has any business
+      # being executed out of the scratch dir.
+      - /tmp:rw,noexec,nosuid,nodev,size=512m,mode=1777
+      # ezdxf (pulled in by build123d) writes a font cache at import time and logs a
+      # warning on every start without it. Small, throwaway, and it keeps the rootfs
+      # read-only rather than trading isolation for a quiet log.
+      - /home/appuser/.cache:rw,noexec,nosuid,nodev,size=32m,uid=1001,gid=1001
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    # Measured peak RSS is ~387 MiB for the worst request the clamps permit, so 2g is
+    # deliberate headroom rather than a tight fit. Note what this does NOT solve: the
+    # known runaway is CPU-bound with flat memory, so mem_limit never fires on it.
+    # Since Gate 1B that runaway is bounded by CAD_BUILD_DEADLINE_S above instead.
+    mem_limit: 2g
+    cpus: 2.0
+    stop_grace_period: 10s
 
 networks:
   ollama-n8n-network:
