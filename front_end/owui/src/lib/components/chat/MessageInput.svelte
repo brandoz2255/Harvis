@@ -94,6 +94,7 @@
 	import VoiceRecording from './MessageInput/VoiceRecording.svelte';
 
 	import ToolServersModal from './ToolServersModal.svelte';
+	import ChatUsageMeter from './ChatUsageMeter.svelte';
 
 	import RichTextInput from '../common/RichTextInput.svelte';
 	import Tooltip from '../common/Tooltip.svelte';
@@ -1874,6 +1875,19 @@
 											chatInputElement?.setText(next);
 											setTimeout(() => chatInputElement?.focus(), 0);
 										}}
+										onCreateCad={() => {
+											// Same deterministic-marker idea as Create Image, and the same
+											// trailing-space caveat. What follows the marker is a RECIPE name,
+											// not a description: the local lane builds registered parametric
+											// recipes, and the backend answers with the list when it can't
+											// match one rather than guessing at the nearest shape.
+											const marker = '🧊 create cad ';
+											const cur = (prompt || '').trim();
+											const next = cur ? `${marker}${cur}` : marker;
+											prompt = next;
+											chatInputElement?.setText(next);
+											setTimeout(() => chatInputElement?.focus(), 0);
+										}}
 										{onUpload}
 										onClose={async () => {
 											await tick();
@@ -2210,6 +2224,16 @@
 								</div>
 
 								<div class="self-end flex space-x-1 mr-1 shrink-0 gap-[0.5px]">
+									<!-- Token + cost meter, the same one the Build area shows. Renders itself
+									     away until the first reply carries usage, so a fresh chat is unchanged.
+									     Hidden below sm: the composer's right cluster is already tight there. -->
+									<div class="hidden sm:flex items-center">
+										<ChatUsageMeter
+											{history}
+											{generating}
+											modelId={atSelectedModel?.id ?? selectedModels?.[0] ?? ''}
+										/>
+									</div>
 									{#if isActive && prompt === '' && files.length === 0}
 										<div class=" flex items-center">
 											<Tooltip content={$i18n.t('Stop')}>

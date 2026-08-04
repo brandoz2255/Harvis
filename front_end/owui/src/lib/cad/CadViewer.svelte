@@ -214,7 +214,11 @@
 		if (!container || !renderer) return;
 		const w = container.clientWidth;
 		const h = container.clientHeight;
-		renderer.setSize(w, h, false);
+		// updateStyle must stay on: nothing else gives the canvas a CSS size, so
+		// skipping it leaves the element at its intrinsic buffer size and the
+		// overflow-hidden container crops to the top-left — a centred part then
+		// renders low and to the right.
+		renderer.setSize(w, h);
 		camera.aspect = w / Math.max(1, h);
 		camera.updateProjectionMatrix();
 		render();

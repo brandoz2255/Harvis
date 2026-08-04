@@ -89,6 +89,29 @@ export type CadCapability = {
 	>;
 };
 
+/** One operation the recipe's CadIR document declares, in execution order.
+ *
+ *  `selectable` is false on every feature today, and that is an answer rather than a
+ *  placeholder: the Gate 5a spike proved a clicked face *can* be traced back to its
+ *  `op_id` (one glTF primitive per B-Rep face, in face order), but nothing emits the
+ *  selection manifest yet. The UI says so instead of implying a click will work. */
+export type CadFeature = {
+	op_id: string;
+	op: string;
+	mode: string;
+	when: string | null;
+	optional: boolean;
+	selectable: boolean;
+};
+
+export type CadRecipeSource = {
+	schema_version: string;
+	recipe: string;
+	units: string;
+	document: Record<string, any>;
+	features: CadFeature[];
+};
+
 // The lane speaks one error shape on both hops: {detail: {error_code, message}}.
 export class CadApiError extends Error {
 	status: number;
@@ -136,6 +159,17 @@ export const getCadCapability = async (): Promise<CadCapability | null> => {
 		return null;
 	}
 };
+
+/** A recipe's CadIR document and the operations it declares.
+ *  Fetched lazily — only when a tab that shows it is opened — because these documents
+ *  are an order of magnitude larger than the parameter surface the capability probe
+ *  already carries on every mount. */
+export const getCadRecipeSource = async (recipe: string): Promise<CadRecipeSource> =>
+	await parse(
+		await fetch(`${BASE}/recipes/${encodeURIComponent(recipe)}/source`, {
+			headers: authHeaders()
+		})
+	);
 
 export const listCadProjects = async (): Promise<CadProject[]> => {
 	const res = await fetch(`${BASE}/projects`, { headers: authHeaders() });

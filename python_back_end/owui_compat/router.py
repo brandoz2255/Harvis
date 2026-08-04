@@ -255,7 +255,15 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
     @router.post("/api/chat/completions")
     async def owui_chat_completions(request: Request, user=Depends(get_current_user)):
         owui_body = await request.json()
-        # Image generation first ("+ → Create Image" flag, or "generate an image
+        # CAD first — it is the narrowest detector of the three (an explicit
+        # "🧊 create cad <recipe>" marker, never natural language), so it can only
+        # ever claim a turn that was unambiguously meant for it.
+        from .cad_bridge import maybe_handle_cad_build
+
+        cad = await maybe_handle_cad_build(request, owui_body, user)
+        if cad is not None:
+            return cad
+        # Image generation next ("+ → Create Image" flag, or "generate an image
         # of X" NL): launches a gated txt2img workspace run + returns the same
         # run-card marker. Falls through when it's not an image request.
         from .image_bridge import maybe_handle_image_generation

@@ -251,6 +251,32 @@ def register_cad_routes(router: APIRouter, get_current_user: Callable) -> None:
                 logger.warning("cad usage read failed", exc_info=True)
         return out
 
+    @router.get("/api/cad/recipes/{recipe}/source", dependencies=gate)
+    async def recipe_source(recipe: str, user=Depends(get_current_user)):
+        """A recipe's CadIR document and the features it declares.
+
+        Proxied rather than mirrored: a second copy of these documents in the backend
+        would be a second thing to keep in step with the engine that actually runs
+        them, and the first time it drifted the Source tab would be showing a part
+        nobody built. The recipe name is checked against the backend's own allowlist
+        before the hop, so an arbitrary string never reaches the engine's path.
+        """
+        if recipe not in fab_cad.KNOWN_RECIPES:
+            raise HTTPException(status_code=404, detail="Not Found")
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                r = await client.get(f"{fab_cad._cad_url()}/cad/recipes/{recipe}/source")
+        except Exception:
+            logger.info("cad recipe source fetch failed", exc_info=True)
+            raise _err(503, "engine_unreachable",
+                       "the CAD engine did not answer")
+        if r.status_code == 404:
+            raise HTTPException(status_code=404, detail="Not Found")
+        if r.status_code != 200:
+            raise _err(502, "engine_error", "the CAD engine returned an error")
+        return r.json()
+
     # ------------------------------------------------------------------
     # Projects and revisions
     # ------------------------------------------------------------------

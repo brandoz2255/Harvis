@@ -54,6 +54,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 import admission
+import cadir
 import exporters
 import pool as worker_pool
 import recipes
@@ -263,6 +264,60 @@ def list_recipes():
             for name, spec in recipes.PARAM_SPEC.items()
             if name in recipes.RECIPES
         },
+    }
+
+
+@app.get("/cad/recipes/{name}/source")
+def recipe_source(name: str):
+    """The recipe's CadIR document — the canonical parametric source for a part.
+
+    Read-only, and deliberately not the execution path: ``/cad/execute`` and
+    ``/cad/v2/build`` still run :mod:`recipes`, exactly as ``cadir.templates`` says.
+    This route publishes what the part *is* so the studio can show it and list the
+    features it declares; it does not change what runs.
+
+    Separate from ``/cad/recipes`` rather than folded into it because the parameter
+    surface is fetched on every capability probe and these documents are an order of
+    magnitude larger. A tab nobody opened should not cost bytes on every mount.
+    """
+    doc = cadir.TEMPLATES.get(name)
+    if doc is None or name not in recipes.RECIPES:
+        # Same answer for "no such recipe" and "that recipe has no CadIR yet": from
+        # the caller's side there is nothing to show either way.
+        raise _err(404, "unknown_recipe", f"no CadIR source for recipe: {name}")
+
+    # Parsed, not returned raw. It costs microseconds and it means this route cannot
+    # publish a document the interpreter would reject — a Source tab showing something
+    # unbuildable is worse than one showing nothing.
+    try:
+        cadir.parse(doc)
+    except Exception as e:
+        log.error("CadIR template %s does not parse: %s", name, type(e).__name__)
+        raise _err(500, "invalid_template", "that template is not a valid CadIR document")
+
+    return {
+        "schema_version": cadir.SCHEMA_VERSION,
+        "recipe": name,
+        "units": doc.get("units", "mm"),
+        "document": doc,
+        # Every operation the document declares, in execution order. This is the
+        # feature list — `op_id` is the author-stable name the Gate 5a spike concluded
+        # a clicked face can be traced back to.
+        #
+        # `selectable` is false across the board and that is the honest answer, not a
+        # placeholder: the spike proved the mapping is *possible* (one glTF primitive
+        # per B-Rep face, in face order) but nothing emits a selection manifest yet.
+        "features": [
+            {
+                "op_id": op.get("op_id") or f"{op.get('op')}#{i}",
+                "op": op.get("op"),
+                "mode": op.get("mode", "add"),
+                "when": op.get("when"),
+                "optional": bool(op.get("optional")),
+                "selectable": False,
+            }
+            for i, op in enumerate(doc.get("operations") or [])
+        ],
     }
 
 

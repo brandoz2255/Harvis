@@ -20,6 +20,7 @@
 	import ToolCallDisplay from '$lib/components/common/ToolCallDisplay.svelte';
 	import WorkspaceRunCard from '$lib/components/chat/Messages/WorkspaceRunCard.svelte';
 	import ResearchRunCard from '$lib/components/chat/Messages/ResearchRunCard.svelte';
+	import CadResultCard from '$lib/components/chat/Messages/CadResultCard.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import Download from '$lib/components/icons/Download.svelte';
 	import ConsecutiveDetailsGroup from './ConsecutiveDetailsGroup.svelte';
@@ -438,6 +439,13 @@
 		{:else if token?.attributes?.type === 'research_run'}
 			<!-- Harvis Deep Research card (consumes /api/research/stream/{id}) -->
 			<ResearchRunCard id={`${id}-${tokenIdx}-rr`} attributes={token.attributes} />
+		{:else if token?.attributes?.type === 'cad_build'}
+			<!-- Harvis local CAD build card (polls /api/cad/builds/{id}) -->
+			<CadResultCard
+				id={`${id}-${tokenIdx}-cad`}
+				attributes={token.attributes}
+				className="w-full"
+			/>
 		{:else if token?.attributes?.type === 'tool_calls'}
 			<!-- Tool calls have dedicated handling with ToolCallDisplay component -->
 			<ToolCallDisplay

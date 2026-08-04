@@ -14,6 +14,10 @@
 	// Parameter bounds come from `/api/cad/capability`, which reads them from the
 	// engine. There is no copy of them in this file: a slider that disagreed with the
 	// engine would offer values the engine refuses.
+	//
+	// This component is host-independent — it lives in `$lib/cad`, not under
+	// ChatControls, because the CAD workspace is a place of its own (`/harvis/cad`)
+	// and chat is only one of the things that can point at it.
 	import { getContext, onMount, onDestroy } from 'svelte';
 	import { toast } from 'svelte-sonner';
 
@@ -26,6 +30,7 @@
 		downloadCadArtifact,
 		getCadCapability,
 		getCadProject,
+		getCadRecipeSource,
 		listCadProjects,
 		pollCadBuild,
 		restoreCadRevision,
@@ -33,10 +38,21 @@
 		type CadCapability,
 		type CadFormat,
 		type CadProject,
+		type CadRecipeSource,
 		type CadRevision
 	} from '$lib/apis/cad';
 
 	const i18n: any = getContext('i18n');
+
+	/** Open this project on mount instead of the most recently updated one. This is
+	 *  what makes `/harvis/cad/{id}` a real deep link rather than a decorative URL. An
+	 *  id the caller does not own 404s in `getCadProject`, so a guessed id leaks
+	 *  nothing — the route layer, not this component, is what enforces that. */
+	export let initialProjectId = '';
+
+	/** Viewport height in pixels. The chat rail is narrow and short; the dedicated
+	 *  route has a whole page, and 300px there wastes most of it. */
+	export let viewerHeight = 300;
 
 	const FORMATS: CadFormat[] = ['stl', 'step', 'glb', '3mf'];
 
@@ -44,7 +60,25 @@
 	let projects: CadProject[] = [];
 	let project: CadProject | null = null;
 	let selectedRevisionId = '';
-	let tab: 'parameters' | 'versions' = 'parameters';
+
+	type Tab = 'parameters' | 'features' | 'inspect' | 'validate' | 'versions' | 'source' | 'files';
+	const TABS: [Tab, string][] = [
+		['parameters', 'Parameters'],
+		['features', 'Features'],
+		['inspect', 'Inspect'],
+		['validate', 'Validate'],
+		['versions', 'Versions'],
+		['source', 'Source'],
+		['files', 'Files']
+	];
+	let tab: Tab = 'parameters';
+
+	// The CadIR document behind a recipe, fetched once per recipe and only when a tab
+	// that shows it is opened. Keyed by recipe name because that is what the document
+	// belongs to — every revision built from `studded_brick_v1` shows the same one.
+	let recipeSources: Record<string, CadRecipeSource> = {};
+	let sourceLoading = false;
+	let sourceError = '';
 
 	let loading = true;
 	let busy = false;
@@ -73,11 +107,34 @@
 			capability?.recipe_params?.[selectedRevision.recipe_name]?.parameters) ||
 		[];
 	$: measurements = (latestBuild?.validation ?? null) as Record<string, any> | null;
+	// The triangle-level report is nested under `mesh`, and `parsed: false` is a real
+	// state: the engine refuses to give a watertight/manifold verdict on a file it could
+	// not read, and this panel must not turn that silence into a pass.
+	$: mesh = (measurements?.mesh ?? null) as Record<string, any> | null;
+	$: recipeName = selectedRevision?.recipe_name ?? '';
+	$: recipeSource = recipeName ? (recipeSources[recipeName] ?? null) : null;
+
+	// Fetch the CadIR document the first time a tab that needs it is opened. Guarded on
+	// both the cache and the in-flight flag so re-running this statement — which Svelte
+	// does on every `tab` or revision change — cannot start a second request.
+	$: if (
+		(tab === 'features' || tab === 'source') &&
+		recipeName &&
+		!recipeSources[recipeName] &&
+		!sourceLoading
+	) {
+		loadRecipeSource(recipeName);
+	}
 
 	const fmt = (n: number | null | undefined, digits = 1) =>
 		typeof n === 'number' && isFinite(n) ? n.toFixed(digits) : '—';
 
 	const mb = (n: number) => `${(n / 1024 / 1024).toFixed(1)} MB`;
+
+	/** Artifact sizes, unlike the storage quota, are usually kilobytes — a GLB of a
+	 *  bracket is a few KB, and `mb()` renders every one of them as "0.0 MB". */
+	const size = (n: number) =>
+		n >= 1024 * 1024 ? mb(n) : n >= 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} B`;
 
 	const statusTone = (s?: string) =>
 		s === 'succeeded'
@@ -100,6 +157,21 @@
 			next[p.name] = typeof v === 'number' ? v : p.default;
 		}
 		params = next;
+	};
+
+	const loadRecipeSource = async (recipe: string) => {
+		sourceLoading = true;
+		sourceError = '';
+		try {
+			const doc = await getCadRecipeSource(recipe);
+			recipeSources = { ...recipeSources, [recipe]: doc };
+		} catch (e: any) {
+			// Shown in place rather than raised as a toast: the rest of the studio still
+			// works, and a part whose source cannot be read is a fact about one tab.
+			sourceError = e?.message ?? `${e}`;
+		} finally {
+			sourceLoading = false;
+		}
 	};
 
 	const loadCapability = async () => {
@@ -183,7 +255,12 @@
 			// Revision 1 exists with no geometry — the store creates projects without a
 			// build on purpose. Build it straight away; a part that opens on an empty
 			// viewport reads as broken.
-			await buildFrom(opened?.revisions?.[0] ?? null, {});
+			//
+			// `params` and not `{}`: openProject has just seeded it from the engine's
+			// declared defaults, and sending them makes the revision record what it was
+			// actually built with. An empty map builds the identical part but leaves a row
+			// that cannot say which values produced it.
+			await buildFrom(opened?.revisions?.[0] ?? null, params);
 		} catch (e: any) {
 			toast.error(e?.message ?? `${e}`);
 		} finally {
@@ -250,7 +327,11 @@
 		await loadCapability();
 		if (capability?.enabled) {
 			await loadProjects();
-			if (projects.length) await openProject(projects[0].id);
+			// A deep link wins over "the most recent one" even when the id is not in the
+			// list — the list is this user's projects, and openProject is what decides
+			// whether the id is theirs.
+			const target = initialProjectId || projects[0]?.id;
+			if (target) await openProject(target);
 		}
 		loading = false;
 	});
@@ -280,6 +361,11 @@
 			>
 				{#if !projects.length}
 					<option value="">{$i18n.t('No parts yet')}</option>
+				{:else if !project}
+					<!-- Nothing open, but parts exist — a deep link that 404'd lands here.
+					     Without this the select's value matches no option and the browser
+					     renders an empty box, which reads as "you have no parts". -->
+					<option value="">{$i18n.t('Select a part')}</option>
 				{/if}
 				{#each projects as p}
 					<option value={p.id}>{p.title}</option>
@@ -335,7 +421,7 @@
 				<CadViewer
 					url={viewUrl}
 					format={viewable?.format === 'stl' ? 'stl' : 'glb'}
-					height={300}
+					height={viewerHeight}
 				/>
 
 				{#if latestBuild?.status === 'failed'}
@@ -355,22 +441,27 @@
 						<span>{$i18n.t('Volume')}: {fmt(measurements.volume_mm3, 0)} mm³</span>
 						<span>{$i18n.t('Solids')}: {measurements.solid_count ?? '—'}</span>
 						<span
-							>{$i18n.t('Watertight')}: {measurements.mesh_watertight === true
+							>{$i18n.t('Watertight')}: {mesh?.watertight === true
 								? $i18n.t('yes')
-								: measurements.mesh_watertight === false
+								: mesh?.watertight === false
 									? $i18n.t('no')
 									: '—'}</span
 						>
 					</div>
 				{/if}
 
-				<div class="flex gap-1 border-b border-gray-100 dark:border-gray-850">
-					{#each [['parameters', 'Parameters'], ['versions', 'Versions']] as [t, label]}
+				<!-- Seven tabs is more than fits a narrow rail, which is part of why the
+				     studio moved to its own route. It scrolls rather than wrapping so the
+				     strip stays one line at any width. -->
+				<div
+					class="flex gap-1 border-b border-gray-100 dark:border-gray-850 overflow-x-auto scrollbar-none"
+				>
+					{#each TABS as [t, label]}
 						<button
-							class="px-2.5 py-1 text-xs rounded-t-lg transition {tab === t
+							class="px-2.5 py-1 text-xs rounded-t-lg transition shrink-0 {tab === t
 								? 'font-medium text-gray-900 dark:text-white border-b-2 border-gray-900 dark:border-white'
 								: 'text-gray-500 dark:text-gray-400'}"
-							on:click={() => (tab = t as any)}>{$i18n.t(label)}</button
+							on:click={() => (tab = t)}>{$i18n.t(label)}</button
 						>
 					{/each}
 				</div>
@@ -416,7 +507,7 @@
 							</div>
 						</div>
 					{/if}
-				{:else}
+				{:else if tab === 'versions'}
 					<div class="flex flex-col gap-1">
 						{#each revisions as rev}
 							<div
@@ -453,9 +544,259 @@
 							</div>
 						{/each}
 					</div>
+				{:else if tab === 'features'}
+					{#if sourceLoading}
+						<div class="text-xs text-gray-500 dark:text-gray-400">{$i18n.t('Loading…')}</div>
+					{:else if sourceError}
+						<div class="text-xs text-amber-600 dark:text-amber-400">{sourceError}</div>
+					{:else if !recipeSource}
+						<div class="text-xs text-gray-500 dark:text-gray-400">
+							{$i18n.t('This part has no feature list — it was not built from a template.')}
+						</div>
+					{:else}
+						<div class="flex flex-col gap-1">
+							{#each recipeSource.features as f}
+								<div
+									class="flex items-baseline gap-2 px-2 py-1.5 rounded-lg text-xs bg-gray-50 dark:bg-gray-900"
+								>
+									<span class="font-medium text-gray-800 dark:text-gray-100">{f.op_id}</span>
+									<span class="text-[11px] text-gray-500 dark:text-gray-400">{f.op}</span>
+									{#if f.mode && f.mode !== 'add'}
+										<span class="text-[11px] text-gray-500 dark:text-gray-400">· {f.mode}</span>
+									{/if}
+									{#if f.when}
+										<span class="text-[11px] text-gray-400 dark:text-gray-500 truncate"
+											>· {$i18n.t('when')} {f.when}</span
+										>
+									{/if}
+								</div>
+							{/each}
+						</div>
+						<!-- Said plainly rather than left to be discovered by clicking. The spike
+						     behind Gate 5 showed the mapping is possible — one glTF primitive per
+						     B-Rep face — but nothing emits the manifest yet, so every feature here
+						     reports selectable: false and the viewport selects whole bodies. -->
+						<div class="text-[11px] text-gray-400 dark:text-gray-500">
+							{$i18n.t(
+								'Selecting an individual face in the viewport is not available yet — selection is whole-body.'
+							)}
+						</div>
+					{/if}
+				{:else if tab === 'inspect'}
+					{#if !measurements}
+						<div class="text-xs text-gray-500 dark:text-gray-400">
+							{$i18n.t('Nothing to measure — this revision has not been built.')}
+						</div>
+					{:else}
+						<!-- Every number here was measured by the engine off the built solid.
+						     None of it is predicted, and none of it comes from the model. -->
+						<div class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
+							<span class="text-gray-500 dark:text-gray-400">{$i18n.t('Bounding box')}</span>
+							<span class="tabular-nums"
+								>{fmt(measurements.bbox_mm?.x, 2)} × {fmt(measurements.bbox_mm?.y, 2)} × {fmt(
+									measurements.bbox_mm?.z,
+									2
+								)} mm</span
+							>
+							<span class="text-gray-500 dark:text-gray-400">{$i18n.t('Volume')}</span>
+							<span class="tabular-nums">{fmt(measurements.volume_mm3, 1)} mm³</span>
+							<span class="text-gray-500 dark:text-gray-400">{$i18n.t('Surface area')}</span>
+							<span class="tabular-nums">{fmt(measurements.surface_area_mm2, 1)} mm²</span>
+							<span class="text-gray-500 dark:text-gray-400">{$i18n.t('Center of mass')}</span>
+							<span class="tabular-nums"
+								>{fmt(measurements.center_of_mass_mm?.x, 2)}, {fmt(
+									measurements.center_of_mass_mm?.y,
+									2
+								)}, {fmt(measurements.center_of_mass_mm?.z, 2)} mm</span
+							>
+							<span class="text-gray-500 dark:text-gray-400">{$i18n.t('Solids')}</span>
+							<span class="tabular-nums">{measurements.solid_count ?? '—'}</span>
+							<span class="text-gray-500 dark:text-gray-400">{$i18n.t('Triangles')}</span>
+							<span class="tabular-nums">{mesh?.triangle_count ?? '—'}</span>
+							<span class="text-gray-500 dark:text-gray-400">{$i18n.t('Build time')}</span>
+							<span class="tabular-nums">{fmt(measurements.duration_ms, 0)} ms</span>
+							{#if measurements.peak_rss_bytes}
+								<span class="text-gray-500 dark:text-gray-400">{$i18n.t('Peak memory')}</span>
+								<span class="tabular-nums">{mb(measurements.peak_rss_bytes)}</span>
+							{/if}
+						</div>
+						<!-- The two identities Gate 2 settled on. `source_hash` is what two
+						     revisions are compared on; `mesh_signature` is what proves two builds
+						     of the same input produced the same shape. Neither is a file hash —
+						     STEP embeds a wall-clock timestamp and 3MF is a ZIP. -->
+						{#if measurements.source_hash || measurements.mesh_signature}
+							<div class="flex flex-col gap-0.5 text-[11px] text-gray-400 dark:text-gray-500">
+								{#if measurements.source_hash}
+									<span class="font-mono truncate"
+										>{$i18n.t('source')} {measurements.source_hash}</span
+									>
+								{/if}
+								{#if measurements.mesh_signature}
+									<span class="font-mono truncate"
+										>{$i18n.t('shape')} {measurements.mesh_signature}</span
+									>
+								{/if}
+							</div>
+						{/if}
+					{/if}
+				{:else if tab === 'validate'}
+					{#if !measurements}
+						<div class="text-xs text-gray-500 dark:text-gray-400">
+							{$i18n.t('Nothing to check — this revision has not been built.')}
+						</div>
+					{:else}
+						{@const expected =
+							(recipeName && capability.recipe_params?.[recipeName]?.expected_solids) ?? null}
+						<div class="flex flex-col gap-1 text-xs">
+							<div class="flex items-center gap-2">
+								<span
+									class={measurements.brep_valid
+										? 'text-green-600 dark:text-green-400'
+										: 'text-red-500 dark:text-red-400'}
+									>{measurements.brep_valid ? '✓' : '✕'}</span
+								>
+								<span
+									>{$i18n.t('B-Rep valid')}{measurements.brep_valid
+										? ''
+										: ` — ${$i18n.t('the solid failed OpenCascade’s validity check')}`}</span
+								>
+							</div>
+							<div class="flex items-center gap-2">
+								<span
+									class={expected === null || measurements.solid_count === expected
+										? 'text-green-600 dark:text-green-400'
+										: 'text-amber-600 dark:text-amber-400'}
+									>{expected === null || measurements.solid_count === expected ? '✓' : '!'}</span
+								>
+								<span
+									>{$i18n.t('Solids')}: {measurements.solid_count}{expected === null
+										? ''
+										: ` / ${expected} ${$i18n.t('expected')}`}</span
+								>
+							</div>
+							{#if mesh?.parsed === false}
+								<!-- The engine declined to give a verdict because it could not read the
+								     exported mesh. That is not a pass, and it must not look like one. -->
+								<div class="flex items-center gap-2 text-amber-600 dark:text-amber-400">
+									<span>?</span>
+									<span
+										>{$i18n.t('Mesh not checked')}{mesh.reason ? ` — ${mesh.reason}` : ''}</span
+									>
+								</div>
+							{:else if mesh}
+								<div class="flex items-center gap-2">
+									<span
+										class={mesh.watertight
+											? 'text-green-600 dark:text-green-400'
+											: 'text-amber-600 dark:text-amber-400'}>{mesh.watertight ? '✓' : '!'}</span
+									>
+									<span
+										>{$i18n.t('Watertight')}{mesh.watertight
+											? ''
+											: ` — ${mesh.open_edges} ${$i18n.t('open edges')}`}</span
+									>
+								</div>
+								<div class="flex items-center gap-2">
+									<span
+										class={mesh.manifold
+											? 'text-green-600 dark:text-green-400'
+											: 'text-amber-600 dark:text-amber-400'}>{mesh.manifold ? '✓' : '!'}</span
+									>
+									<span
+										>{$i18n.t('Manifold')}{mesh.manifold
+											? ''
+											: ` — ${mesh.non_manifold_edges} ${$i18n.t('edges shared by three or more triangles')}`}</span
+									>
+								</div>
+								{#if mesh.degenerate_triangles}
+									<div class="flex items-center gap-2 text-amber-600 dark:text-amber-400">
+										<span>!</span>
+										<span
+											>{mesh.degenerate_triangles}
+											{$i18n.t('degenerate triangles')}</span
+										>
+									</div>
+								{/if}
+							{/if}
+						</div>
+						<!-- Three separate statements, never merged. -->
+						<div class="text-[11px] text-gray-400 dark:text-gray-500">
+							{$i18n.t(
+								'These checks say the geometry is well-formed. They do not say the part is printable, strong, or safe.'
+							)}
+						</div>
+					{/if}
+				{:else if tab === 'source'}
+					{#if sourceLoading}
+						<div class="text-xs text-gray-500 dark:text-gray-400">{$i18n.t('Loading…')}</div>
+					{:else if sourceError}
+						<div class="text-xs text-amber-600 dark:text-amber-400">{sourceError}</div>
+					{:else if !recipeSource}
+						<div class="text-xs text-gray-500 dark:text-gray-400">
+							{$i18n.t('This part has no source document — it was not built from a template.')}
+						</div>
+					{:else}
+						<div class="flex flex-col gap-2">
+							<div class="text-[11px] text-gray-500 dark:text-gray-400">
+								{recipeSource.recipe} · CadIR {recipeSource.schema_version} · {recipeSource.units}
+							</div>
+							{#if selectedRevision && Object.keys(selectedRevision.parameters ?? {}).length}
+								<!-- The document is shared by every revision of this recipe; these are
+								     the values THIS revision resolved it with. -->
+								<div class="grid grid-cols-[auto_1fr] gap-x-3 text-[11px]">
+									{#each Object.entries(selectedRevision.parameters ?? {}) as [k, v]}
+										<span class="text-gray-500 dark:text-gray-400">{k}</span>
+										<span class="tabular-nums">{v}</span>
+									{/each}
+								</div>
+							{:else}
+								<!-- Revisions built before the studio started sending resolved defaults
+								     recorded an empty map. Naming the values used would be a guess; an
+								     empty map means exactly "the defaults in the document below". -->
+								<div class="text-[11px] text-gray-500 dark:text-gray-400">
+									{$i18n.t(
+										'This revision recorded no explicit values — it was built with the defaults below.'
+									)}
+								</div>
+							{/if}
+							<pre
+								class="text-[11px] font-mono whitespace-pre overflow-x-auto p-2 rounded-lg bg-gray-50 dark:bg-gray-900">{JSON.stringify(
+									recipeSource.document,
+									null,
+									2
+								)}</pre>
+						</div>
+					{/if}
+				{:else if tab === 'files'}
+					{#if !artifacts.length}
+						<div class="text-xs text-gray-500 dark:text-gray-400">
+							{$i18n.t('No files — this revision has not been built.')}
+						</div>
+					{:else}
+						<div class="flex flex-col gap-1">
+							{#each artifacts as a}
+								<div
+									class="flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs hover:bg-gray-50 dark:hover:bg-gray-900"
+								>
+									<span class="font-medium w-12 shrink-0">{a.format.toUpperCase()}</span>
+									<span class="text-gray-500 dark:text-gray-400 tabular-nums shrink-0"
+										>{size(a.size_bytes)}</span
+									>
+									<span
+										class="text-[11px] font-mono text-gray-400 dark:text-gray-500 truncate flex-1"
+										title={a.sha256}>{a.sha256.slice(0, 16)}…</span
+									>
+									<button
+										class="text-[11px] px-2 py-0.5 rounded-md border border-gray-200 dark:border-gray-800 text-gray-600 dark:text-gray-300 shrink-0"
+										on:click={() => download(a)}>{$i18n.t('Download')}</button
+									>
+								</div>
+							{/each}
+						</div>
+					{/if}
 				{/if}
 
-				{#if artifacts.length}
+				{#if artifacts.length && tab !== 'files'}
 					<div class="flex flex-wrap items-center gap-1 pt-1">
 						<span class="text-[11px] text-gray-500 dark:text-gray-400 mr-1"
 							>{$i18n.t('Export')}</span

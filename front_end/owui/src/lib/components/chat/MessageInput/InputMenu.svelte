@@ -30,6 +30,7 @@
 	import GlobeAlt from '$lib/components/icons/GlobeAlt.svelte';
 	import Search from '$lib/components/icons/Search.svelte';
 	import Photo from '$lib/components/icons/Photo.svelte';
+	import Cube from '$lib/components/icons/Cube.svelte';
 
 	const i18n = getContext('i18n');
 
@@ -46,6 +47,7 @@
 	export let uploadOneDriveHandler: Function;
 
 	export let onCreateImage: Function;
+	export let onCreateCad: Function;
 
 	export let onUpload: Function;
 	export let onClose: Function;
@@ -188,6 +190,21 @@
 					>
 						<Photo />
 						<div class="line-clamp-1">{$i18n.t('Create Image')}</div>
+					</button>
+
+					<!-- Always shown, same reasoning as Create Image: the backend answers
+					     honestly when the CAD lane is off or the recipe is unknown, which
+					     is more useful than a menu item that quietly disappears. -->
+					<button
+						class="flex w-full gap-2 items-center px-3 py-1.5 text-sm select-none cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50 rounded-xl"
+						type="button"
+						on:click={() => {
+							onCreateCad();
+							show = false;
+						}}
+					>
+						<Cube className="size-4" />
+						<div class="line-clamp-1">{$i18n.t('Create 3D / CAD')}</div>
 					</button>
 
 					<!-- Connectors — submenu with saved connections (quick toggles) + manage/browse. -->
