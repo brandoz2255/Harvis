@@ -8,7 +8,8 @@ sidecar, and hands back the STL/STEP bytes + geometry metadata. No CAD runs here
 """
 from __future__ import annotations
 
-import base64
+import hashlib
+import json
 import logging
 import math
 import os
@@ -17,6 +18,11 @@ import uuid
 import httpx
 
 log = logging.getLogger(__name__)
+
+# What this client will read off the wire in one response, independent of what the
+# engine says it is sending. The engine caps itself at the same number; this one
+# exists because a client that trusts a server's self-imposed limit has no limit.
+MAX_RESPONSE_BYTES = 96 * 1024 * 1024
 
 # The recipe the Adaptive Space lane builds. It stays the default rather than becoming
 # a required argument because that lane's criteria (`crit_arm_length_mm` and friends)
@@ -29,6 +35,9 @@ RECIPE = DEFAULT_RECIPE  # retained: existing callers import this name
 # the sidecar's own allowlist is the one that must hold, and duplicating it here means
 # a typo costs a rejected call instead of a network round trip and a 400.
 KNOWN_RECIPES = ("helmet_hanger_v1", "studded_brick_v1")
+
+# Formats this client will ask /cad/v2/build for, for the same reason as above.
+KNOWN_FORMATS = ("stl", "step", "glb", "3mf")
 
 _TRUTHY = {"1", "true", "yes", "on"}
 
@@ -139,6 +148,77 @@ def _reject_non_finite(params: dict) -> None:
             raise CadError("invalid_param", f"{k} must be a finite number")
 
 
+def _parse_multipart(content_type: str, body: bytes) -> tuple[dict, dict[str, bytes]]:
+    """Read ``/cad/v2/build``'s response: one JSON part named ``result``, then one
+    file part per format, named by the format.
+
+    Deliberately strict and deliberately small. A general-purpose multipart reader
+    handles nested bodies, transfer encodings and header continuations that this hop
+    never produces — surface we would be maintaining for nothing. Both ends of this
+    wire are ours, so anything not in the shape below is a bug or an impostor, and
+    either way the right answer is to refuse rather than to cope.
+    """
+    marker = "boundary="
+    if not content_type.startswith("multipart/form-data;") or marker not in content_type:
+        raise CadError("bad_response", "the CAD engine did not answer with multipart")
+    sep = b"--" + content_type.split(marker, 1)[1].strip().encode()
+
+    if not body.startswith(sep + b"\r\n") or not body.endswith(sep + b"--\r\n"):
+        raise CadError("bad_response", "the CAD engine's response was truncated")
+
+    parts: dict[str, bytes] = {}
+    for chunk in body[: -len(sep) - 4].split(sep + b"\r\n"):
+        if not chunk:
+            continue
+        head, found, payload = chunk.partition(b"\r\n\r\n")
+        if not found or not payload.endswith(b"\r\n"):
+            raise CadError("bad_response", "a response part was malformed")
+        name = None
+        for line in head.decode("utf-8", "replace").split("\r\n"):
+            key, _, value = line.partition(":")
+            if key.strip().lower() == "content-disposition" and 'name="' in value:
+                name = value.split('name="', 1)[1].split('"', 1)[0]
+        if not name or name in parts:
+            raise CadError("bad_response", "a response part was unnamed or repeated")
+        parts[name] = payload[:-2]
+
+    raw = parts.pop("result", None)
+    if raw is None:
+        raise CadError("bad_response", "the CAD engine sent no result part")
+    try:
+        result = json.loads(raw)
+    except ValueError:
+        raise CadError("bad_response", "the CAD engine's result part was not JSON")
+    if not isinstance(result, dict):
+        raise CadError("bad_response", "the CAD engine's result part was not an object")
+    return result, parts
+
+
+def _verify_artifacts(result: dict, files: dict[str, bytes]) -> None:
+    """Cross-check the bytes against what the result part says they are.
+
+    Not paranoia about the network — this is the same hash Gate 3 stores in
+    ``cad_artifacts.sha256`` and re-checks on read. Computing it here, from the
+    bytes that will actually be written, is what makes that stored value mean
+    something; taking the engine's word for it would store a hash of bytes nobody
+    ever verified.
+    """
+    refs = {}
+    for ref in result.get("artifacts") or []:
+        if isinstance(ref, dict) and isinstance(ref.get("format"), str):
+            refs[ref["format"]] = ref
+
+    if set(refs) != set(files):
+        raise CadError("bad_response",
+                       "the CAD engine's artifact list did not match the files sent")
+    for fmt, blob in files.items():
+        ref = refs[fmt]
+        if ref.get("size_bytes") != len(blob):
+            raise CadError("bad_response", f"the {fmt} artifact was the wrong length")
+        if ref.get("sha256") != hashlib.sha256(blob).hexdigest():
+            raise CadError("bad_response", f"the {fmt} artifact failed its checksum")
+
+
 async def cancel(build_id: str, timeout: float = 5.0) -> bool:
     """Best-effort stop for a build this process started. Never raises."""
     try:
@@ -155,12 +235,20 @@ async def execute(
     timeout: float = 30.0,
     build_id: str | None = None,
     recipe: str = DEFAULT_RECIPE,
+    formats: list[str] | tuple[str, ...] | None = None,
 ) -> dict:
-    """Call the sidecar; return {meta, stl_bytes, step_bytes|None}.
+    """Call the sidecar; return {meta, artifacts, stl_bytes, step_bytes|None, ...}.
 
     Raises :class:`CadError` on any failure, carrying the sidecar's structured code
     so the caller can tell "you asked for something impossible" apart from "the
     engine is down".
+
+    Talks to ``/cad/v2/build``, which sends the artifacts as bytes. The frozen
+    ``/cad/execute`` is still there and still correct; it base64s every file, which
+    costs a third of the largest payload in the system on a hop where nothing needs
+    the encoding. ``stl_bytes`` and ``step_bytes`` stay in the returned dict because
+    the Adaptive Space route reads them by name — ``artifacts`` is how a caller
+    reaches GLB or 3MF.
 
     Three nested deadlines, innermost first: the sidecar kills the build's process
     group at ``CAD_BUILD_DEADLINE_S`` + grace (20 s + 3 s by default), this client
@@ -171,15 +259,23 @@ async def execute(
     if recipe not in KNOWN_RECIPES:
         raise CadError("unknown_recipe", f"unknown recipe: {recipe}")
     _reject_non_finite(params)
+
+    if formats is None:
+        wanted = ["stl", "step"] if want_step else ["stl"]
+    else:
+        wanted = [f for f in formats if f in KNOWN_FORMATS]
+        if not wanted:
+            raise CadError("unknown_format", "no supported format was requested")
+
     build_id = build_id or uuid.uuid4().hex
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             r = await client.post(
-                f"{_cad_url()}/cad/execute",
+                f"{_cad_url()}/cad/v2/build",
                 json={
                     "recipe": recipe,
                     "params": params,
-                    "step": want_step,
+                    "formats": wanted,
                     "build_id": build_id,
                 },
             )
@@ -207,15 +303,27 @@ async def execute(
             pass
         raise CadError(code, message, status=r.status_code)
 
-    data = r.json()
-    stl = base64.b64decode(data["stl_b64"]) if data.get("stl_b64") else b""
-    step = base64.b64decode(data["step_b64"]) if data.get("step_b64") else None
+    if len(r.content) > MAX_RESPONSE_BYTES:
+        raise CadError("response_too_large",
+                       f"the CAD engine sent {len(r.content)} bytes")
+
+    data, files = _parse_multipart(r.headers.get("content-type", ""), r.content)
+    _verify_artifacts(data, files)
+
     return {
         "meta": data.get("meta", {}),
-        "stl_bytes": stl,
-        "step_bytes": step,
+        # format -> bytes, every file the caller asked for.
+        "artifacts": files,
+        # Named accessors for the two the Adaptive Space route writes to disk. `stl`
+        # is absent only if the caller excluded it, so this is `.get`, not `[...]`.
+        "stl_bytes": files.get("stl", b""),
+        "step_bytes": files.get("step"),
         # Additive since Gate 1A: the sidecar now reports B-Rep validity, solid count
         # and a watertight-mesh verdict instead of only bbox + volume.
         "validation": data.get("validation") or {},
         "params": data.get("params") or {},
+        # The hashes Gate 3's cad_artifacts rows are built from — already verified
+        # against the bytes above, so a caller can store them without re-hashing.
+        "artifact_refs": data.get("artifacts") or [],
+        "build_id": data.get("build_id") or build_id,
     }

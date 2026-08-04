@@ -39,15 +39,18 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import hashlib
+import json
 import logging
 import math
 import os
+import secrets
 import uuid
 from typing import Annotated, Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 import admission
@@ -101,11 +104,17 @@ MAX_TRIANGLES = 400_000             # ~20 MB of binary STL
 MAX_ARTIFACT_BYTES = 32 * 1024 * 1024
 MAX_WORKDIR_BYTES = 96 * 1024 * 1024
 
-# What this endpoint asks the worker for, and it is not a parameter. The response
+# What /cad/execute asks the worker for, and it is not a parameter. That response
 # carries exactly `stl_b64` and `step_b64`; a caller who could request GLB would get a
-# 200 with no way to receive it. Gate 3's /cad/v2/build is where formats become the
-# caller's choice, because that is where the response can carry them.
+# 200 with no way to receive it. /cad/v2/build is where formats became the caller's
+# choice, because that is where the response can carry them.
 _EXECUTE_FORMATS = ("stl", "step")
+
+# Every artifact in one v2 response, together. Each file is already capped at
+# MAX_ARTIFACT_BYTES and the workdir at MAX_WORKDIR_BYTES, but v2 reads the files into
+# memory to frame them, so the sum is what this process actually holds — and four
+# formats each just under the per-file cap would be 128 MB against a 2 GB container.
+MAX_RESPONSE_BYTES = MAX_WORKDIR_BYTES
 
 
 def _strict_number(v: Any) -> float:
@@ -138,6 +147,25 @@ class ExecReq(BaseModel):
     # callers keep working under extra="forbid" — they simply cannot cancel. There
     # is no cad_builds table until Gate 3, so the registry is in-memory and a build
     # id means nothing once the request that owns it returns.
+    build_id: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+class BuildV2Req(BaseModel):
+    """What ``/cad/v2/build`` accepts. A superset of :class:`ExecReq` in capability,
+    and a separate model rather than optional fields on that one so the frozen
+    endpoint's schema cannot drift while this one grows."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    recipe: str = Field(min_length=1, max_length=64)
+    params: dict[ParamName, Number] = Field(default_factory=dict, max_length=MAX_PARAMS)
+    formats: list[str] = Field(default_factory=lambda: list(exporters.DEFAULT_FORMATS),
+                               min_length=1, max_length=len(exporters.FORMATS))
+    # A caller may ask for LESS time than the engine's own deadline, never more.
+    # The nested-timeout layering (engine < client < nginx) only holds while the
+    # innermost deadline is the shortest, so an unclamped field here would let a
+    # request quietly invert it and strand work nobody is still waiting for.
+    deadline_s: float | None = Field(default=None, gt=0, le=runner.DEADLINE_S)
     build_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
@@ -236,6 +264,44 @@ def _dir_bytes(path: str) -> int:
     return total
 
 
+def _enforce_output_caps(outcome, recipe: str, metrics: dict, mesh: dict) -> None:
+    """Judge what the child actually wrote. The child measures; it never decides.
+
+    Shared by both build endpoints on purpose. When these lived inside the v1
+    response builder, adding v2 meant either duplicating them — and duplicated
+    limits drift until one endpoint is the lenient one — or leaving v2 uncapped.
+    """
+    used = _dir_bytes(outcome.workdir)
+    if used > MAX_WORKDIR_BYTES:
+        raise _err(500, "output_too_large",
+                   f"scratch output {used} bytes exceeds {MAX_WORKDIR_BYTES}")
+
+    tri = mesh.get("triangle_count") or 0
+    if tri > MAX_TRIANGLES:
+        raise _err(500, "output_too_large",
+                   f"mesh has {tri} triangles, over the cap of {MAX_TRIANGLES}")
+
+    # The expected solid count is a property of the recipe. It was hardcoded to 1
+    # through Gate 1B, which was true of the only recipe there was; leaving it that
+    # way would turn the first legitimately two-bodied recipe into a 500.
+    expected = recipes.RECIPE_SOLIDS.get(recipe, 1)
+    ok, problems = validation.verdict(metrics, mesh, expected_solids=expected)
+    if not ok:
+        # A bad solid must not be indistinguishable from a good one. The problem
+        # strings are names and numbers — no paths, no argv, no host names.
+        raise _err(500, "validation_failed", "; ".join(problems))
+
+
+def _read_capped(path: str, label: str) -> bytes:
+    """Read one artifact, refusing rather than truncating if it is over the cap."""
+    size = os.path.getsize(path)
+    if size > MAX_ARTIFACT_BYTES:
+        raise _err(500, "output_too_large",
+                   f"{label} is {size} bytes, over the cap of {MAX_ARTIFACT_BYTES}")
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
 @app.post("/cad/execute")
 def execute(req: ExecReq):
     if req.recipe not in recipes.RECIPES:
@@ -296,43 +362,13 @@ def _run_and_encode(req: ExecReq, resolved: dict, cost: float, build_id: str) ->
         metrics = result["metrics"]
         mesh = result["mesh"]
 
-        # Caps are enforced here, in the parent, on what the child actually wrote.
-        # The child measures; it does not get to decide what is acceptable.
-        used = _dir_bytes(outcome.workdir)
-        if used > MAX_WORKDIR_BYTES:
-            raise _err(500, "output_too_large",
-                       f"scratch output {used} bytes exceeds {MAX_WORKDIR_BYTES}")
+        _enforce_output_caps(outcome, req.recipe, metrics, mesh)
 
-        tri = mesh.get("triangle_count") or 0
-        if tri > MAX_TRIANGLES:
-            raise _err(500, "output_too_large",
-                       f"mesh has {tri} triangles, over the cap of {MAX_TRIANGLES}")
-
-        # The expected solid count is a property of the recipe. It was hardcoded to 1
-        # through Gate 1B, which was true of the only recipe there was; leaving it that
-        # way would turn the first legitimately two-bodied recipe into a 500.
-        expected = recipes.RECIPE_SOLIDS.get(req.recipe, 1)
-        ok, problems = validation.verdict(metrics, mesh, expected_solids=expected)
-        if not ok:
-            # A bad solid must not be indistinguishable from a good one. The problem
-            # strings are names and numbers — no paths, no argv, no host names.
-            raise _err(500, "validation_failed", "; ".join(problems))
-
-        stl_bytes = os.path.getsize(outcome.stl_path)
-        if stl_bytes > MAX_ARTIFACT_BYTES:
-            raise _err(500, "output_too_large",
-                       f"STL is {stl_bytes} bytes, over the cap of {MAX_ARTIFACT_BYTES}")
-        with open(outcome.stl_path, "rb") as fh:
-            stl_b64 = base64.b64encode(fh.read()).decode("ascii")
-
+        stl_b64 = base64.b64encode(_read_capped(outcome.stl_path, "STL")).decode("ascii")
         step_b64 = None
         if outcome.step_path:
-            step_bytes = os.path.getsize(outcome.step_path)
-            if step_bytes > MAX_ARTIFACT_BYTES:
-                raise _err(500, "output_too_large",
-                           f"STEP is {step_bytes} bytes, over the cap of {MAX_ARTIFACT_BYTES}")
-            with open(outcome.step_path, "rb") as fh:
-                step_b64 = base64.b64encode(fh.read()).decode("ascii")
+            step_b64 = base64.b64encode(
+                _read_capped(outcome.step_path, "STEP")).decode("ascii")
 
         # `meta`, `stl_b64` and `step_b64` keep the exact shape the backend already
         # consumes (frozen in the Gate 0 baseline). `validation` and `params` are
@@ -358,3 +394,166 @@ def _run_and_encode(req: ExecReq, resolved: dict, cost: float, build_id: str) ->
                 "mesh_signature": result.get("mesh_signature"),
             },
         }
+
+
+# ---------------------------------------------------------------------------
+# /cad/v2/build — the endpoint Gate 3 persists from.
+#
+# Two things v1 cannot do, and both are why this exists rather than v1 growing
+# fields: the caller chooses formats, and the artifacts come back as bytes instead
+# of base64. Base64 costs +33% on a hop that already carries the largest thing in
+# the system; a 20 MB STL becomes 27 MB of JSON that then has to be parsed as one
+# string before a single byte can be written to disk.
+#
+# v1 stays exactly as it is. It is the contract the Adaptive Space lane runs on,
+# and freezing it is what lets this one change shape freely.
+# ---------------------------------------------------------------------------
+
+def _multipart(result: dict, artifacts: list[tuple[str, str, bytes]]) -> Response:
+    """Frame the result and the raw artifacts as one ``multipart/form-data`` body.
+
+    Each part is named by its format, so the client keys off ``name=`` and never has
+    to parse a filename. The boundary is random per response because a boundary that
+    appeared in the payload would silently split a file in half — with 32 bytes of
+    ``secrets`` entropy that is not a risk worth a scan of every artifact.
+    """
+    boundary = secrets.token_hex(16)
+    sep = f"--{boundary}".encode()
+    chunks: list[bytes] = [
+        sep, b"\r\n",
+        b'Content-Disposition: form-data; name="result"\r\n',
+        b"Content-Type: application/json\r\n\r\n",
+        json.dumps(result).encode("utf-8"), b"\r\n",
+    ]
+    for fmt, media, blob in artifacts:
+        chunks += [
+            sep, b"\r\n",
+            f'Content-Disposition: form-data; name="{fmt}"; filename="part.{fmt}"\r\n'
+            .encode(),
+            f"Content-Type: {media}\r\n".encode(),
+            f"Content-Length: {len(blob)}\r\n\r\n".encode(),
+            blob, b"\r\n",
+        ]
+    chunks += [f"--{boundary}--\r\n".encode()]
+    return Response(
+        content=b"".join(chunks),
+        media_type=f"multipart/form-data; boundary={boundary}",
+        # The bytes are geometry, never markup, but this response is the one that
+        # carries attacker-influenced *sizes* and reaches a browser-adjacent client.
+        headers={"X-Content-Type-Options": "nosniff"},
+    )
+
+
+@app.post("/cad/v2/build")
+def build_v2(req: BuildV2Req):
+    if req.recipe not in recipes.RECIPES:
+        raise _err(400, "unknown_recipe", f"unknown recipe: {req.recipe}")
+
+    # Deduplicated, order preserved. Asking for stl twice is a caller bug, not a
+    # reason to export twice — and STL is always built because the mesh report and
+    # the mesh signature are computed from it.
+    seen: dict[str, None] = {}
+    for fmt in req.formats:
+        if fmt not in exporters.FORMATS:
+            raise _err(400, "unknown_format",
+                       f"unknown format: {fmt} (have {', '.join(exporters.FORMATS)})")
+        seen[fmt] = None
+    wanted = list(seen)
+    formats = wanted if "stl" in seen else ["stl", *wanted]
+
+    try:
+        resolved = recipes.resolve_params(req.recipe, req.params or {})
+    except recipes.ParamError as e:
+        raise _err(400, e.code, e.message)
+
+    cost = recipes.estimate_cost(req.recipe, resolved)
+    cap = recipes.cost_cap(req.recipe)
+    if cost > cap:
+        raise _err(400, "too_complex",
+                   f"estimated complexity {cost} exceeds the cap of {cap}")
+
+    build_id = req.build_id or uuid.uuid4().hex
+    try:
+        with admission.slot():
+            return _build_and_frame(req, resolved, formats, wanted, cost, build_id)
+    except admission.QueueFull as e:
+        raise _err(429, "queue_full", str(e))
+    except runner.BuildTimeout as e:
+        log.warning("build %s hit the deadline for recipe=%s", build_id, req.recipe)
+        raise _err(504, "build_timeout", str(e))
+    except runner.BuildCancelled:
+        raise _err(409, "build_cancelled", "the build was cancelled")
+    except runner.BuildFailed as e:
+        status = 400 if e.code in ("unknown_param", "param_out_of_range") else 500
+        raise _err(status, e.code, e.message)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("unhandled failure for recipe=%s", req.recipe)
+        raise _err(500, "internal_error", f"unexpected failure ({type(e).__name__})")
+
+
+def _build_and_frame(req: BuildV2Req, resolved: dict, formats: list[str],
+                     wanted: list[str], cost: float, build_id: str) -> Response:
+    """Read every artifact inside the workdir's lifetime, then frame them.
+
+    Reading into memory rather than streaming from disk is deliberate: the workdir
+    dies with the ``with`` block, and a streaming response would still be reading
+    from it after that. Bounded by MAX_RESPONSE_BYTES, which is why that cap exists.
+    """
+    with runner.run_build(
+        req.recipe, resolved,
+        step="step" in formats, formats=formats,
+        deadline_s=req.deadline_s or runner.DEADLINE_S,
+        build_id=build_id,
+    ) as outcome:
+        result = outcome.result
+        metrics = result["metrics"]
+        mesh = result["mesh"]
+        _enforce_output_caps(outcome, req.recipe, metrics, mesh)
+
+        blobs: list[tuple[str, str, bytes]] = []
+        refs: list[dict] = []
+        total = 0
+        for fmt in wanted:
+            path = outcome.artifacts.get(fmt)
+            if not path or not os.path.exists(path):
+                # The child was asked for it and did not write it. Silence here would
+                # persist a revision whose artifact row has no bytes behind it.
+                raise _err(500, "missing_artifact",
+                           f"the worker did not produce the requested {fmt}")
+            blob = _read_capped(path, fmt.upper())
+            total += len(blob)
+            if total > MAX_RESPONSE_BYTES:
+                raise _err(500, "output_too_large",
+                           f"artifacts total {total} bytes, over the cap of "
+                           f"{MAX_RESPONSE_BYTES}")
+            media = exporters.MEDIA_TYPES.get(fmt, "application/octet-stream")
+            blobs.append((fmt, media, blob))
+            refs.append({
+                "format": fmt,
+                "media_type": media,
+                "size_bytes": len(blob),
+                # Of the bytes as sent. cad_artifacts stores this and re-checks it on
+                # read, which detects corruption in the store — it is never a rebuild
+                # test, because STEP embeds a timestamp and 3MF is a ZIP.
+                "sha256": hashlib.sha256(blob).hexdigest(),
+            })
+
+        return _multipart({
+            "ok": True,
+            "build_id": build_id,
+            "recipe": req.recipe,
+            "meta": result["meta"],
+            "params": result.get("params", resolved),
+            "artifacts": refs,
+            "validation": {
+                **metrics,
+                "mesh": mesh,
+                "estimated_cost": cost,
+                "duration_ms": outcome.duration_ms,
+                "peak_rss_bytes": result.get("peak_rss_bytes"),
+                "source_hash": result.get("source_hash"),
+                "mesh_signature": result.get("mesh_signature"),
+            },
+        }, blobs)

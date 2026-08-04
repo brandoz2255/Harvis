@@ -803,6 +803,7 @@ async def lifespan(app: FastAPI):
                     CREATE_OWUI_SUBAGENTS_SQL,
                     CREATE_OWUI_USER_SETTINGS_SQL,
                     CREATE_OWUI_ORCH_POOL_SQL,
+                    CAD_SCHEMA_SQL,
                 )
 
                 await conn.execute(CREATE_OWUI_CHATS_SQL)
@@ -814,6 +815,14 @@ async def lifespan(app: FastAPI):
                 await conn.execute(CREATE_OWUI_SUBAGENTS_SQL)
                 await conn.execute(CREATE_OWUI_USER_SETTINGS_SQL)
                 await conn.execute(CREATE_OWUI_ORCH_POOL_SQL)
+
+                # Gate 3: the local CAD lane's store — projects, immutable revisions,
+                # build attempts, artifact metadata. Runs unconditionally, unlike the
+                # routes: the flag decides whether the lane is reachable, not whether
+                # the tables that already hold a user's parts exist. Ordered after
+                # all_schemas_safe.sql above, which is what creates users(id).
+                for stmt in CAD_SCHEMA_SQL:
+                    await conn.execute(stmt)
 
                 # P5 orchestration: agent-run columns on workspace_runs + the
                 # workspace_artifacts table (idempotent ALTER/CREATE; workspace_runs

@@ -728,6 +728,11 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
     register_integrations_status_routes(router, get_current_user)
     register_integration_logs_routes(router, get_current_user)
     register_adaptive_space_routes(router, get_current_user)
+    # Gate 3. Registered unconditionally; every route inside is gated on
+    # HARVIS_ADAPTIVE_CAD_ENABLED at request time, so flipping the flag does not need
+    # a code path that only exists at import.
+    from .cad_router import register_cad_routes
+    register_cad_routes(router, get_current_user)
     register_capabilities_routes(router, get_current_user)
     register_engine_auth_routes(router, get_current_user)
     from .hermes_connect import register_hermes_connect_routes

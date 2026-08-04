@@ -23,6 +23,7 @@ from .skills import CREATE_OWUI_SKILLS_SQL
 from .subagents import CREATE_OWUI_SUBAGENTS_SQL
 from .user_settings import CREATE_OWUI_USER_SETTINGS_SQL
 from .orchestration_pool import CREATE_OWUI_ORCH_POOL_SQL
+from .cad_store import CAD_SCHEMA_SQL
 from .router import OwuiDeps, create_owui_router
 
 __all__ = [
@@ -37,4 +38,7 @@ __all__ = [
     "CREATE_OWUI_SUBAGENTS_SQL",
     "CREATE_OWUI_USER_SETTINGS_SQL",
     "CREATE_OWUI_ORCH_POOL_SQL",
+    # A tuple, not one constant: four statements, so a failure names the table that
+    # failed instead of "the CAD schema".
+    "CAD_SCHEMA_SQL",
 ]
