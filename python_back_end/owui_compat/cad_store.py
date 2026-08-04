@@ -392,6 +392,44 @@ async def usage_bytes(pool, user_id: int, project_id: str | None = None) -> int:
         return int(await conn.fetchval(sql, *args) or 0)
 
 
+async def latest_builds_by_revision(pool, project_id: str, user_id: int) -> dict:
+    """The most recent build of every revision in one project, keyed by revision id.
+
+    Gate 3 handed the client a build id only in the ``202`` that created it, so a
+    reloaded page had no way to find the geometry of a revision it had not just
+    built. One query for the whole project rather than a route per revision: the
+    panel needs every revision's state to draw its version list at all, and N+1
+    round trips to draw one list is not a design.
+
+    The most recent build is returned whatever its status. A revision whose last
+    build failed has to read as failed, not as the older success it superseded.
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT DISTINCT ON (b.revision_id) b.* FROM cad_builds b "
+            "JOIN cad_revisions r ON r.id = b.revision_id "
+            "JOIN cad_projects p ON p.id = r.project_id "
+            "WHERE r.project_id=$1 AND p.user_id=$2 "
+            "ORDER BY b.revision_id, b.created_at DESC",
+            uuid.UUID(str(project_id)), int(user_id),
+        )
+        if not rows:
+            return {}
+        arts = await conn.fetch(
+            "SELECT * FROM cad_artifacts WHERE build_id = ANY($1::uuid[]) ORDER BY format",
+            [r["id"] for r in rows],
+        )
+    by_build: dict = {}
+    for a in arts:
+        by_build.setdefault(str(a["build_id"]), []).append(_row_artifact(a))
+    out: dict = {}
+    for r in rows:
+        b = _row_build(r)
+        b["artifacts"] = by_build.get(b["id"], [])
+        out[str(r["revision_id"])] = b
+    return out
+
+
 async def latest_measurements(pool, revision_id: str) -> dict | None:
     """The validation report of a revision's most recent succeeded build, or ``None``.
 

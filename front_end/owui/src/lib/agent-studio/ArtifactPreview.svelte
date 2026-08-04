@@ -1,5 +1,6 @@
 <script lang="ts">
 	import Markdown from '$lib/components/chat/Messages/Markdown.svelte';
+	import CadViewer from '$lib/components/chat/ChatControls/CadViewer.svelte';
 
 	// File-type router for an agent-produced artifact. Renders ONLY what the agent wrote.
 	//   html  → live sandboxed iframe        markdown → rendered
@@ -30,7 +31,9 @@
 								? 'csv'
 								: ext === 'json'
 									? 'json'
-									: 'code';
+									: ['stl', 'glb', 'gltf', '3mf', 'step', 'stp'].includes(ext)
+										? 'mesh'
+										: 'code';
 
 	// SVG is model-generated → render via a data-URL <img> (img-loaded SVG never runs scripts).
 	$: svgSrc = kind === 'svg' ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(content)}` : '';
@@ -58,6 +61,14 @@
 		return rows;
 	}
 	$: csvRows = kind === 'csv' ? parseCsv(content, ext === 'tsv' ? '\t' : ',') : [];
+
+	// three 0.169 ships GLTF and STL loaders; there is no STEP loader at all, and the
+	// 3MF one is not wired into CadViewer. Those two formats say so instead of
+	// pretending to preview.
+	$: meshFormat = (ext === 'stl' ? 'stl' : ext === 'glb' || ext === 'gltf' ? 'glb' : '') as
+		| 'stl'
+		| 'glb'
+		| '';
 
 	$: prettyJson = (() => {
 		if (kind !== 'json') return '';
@@ -136,6 +147,21 @@
 			</tbody>
 		</table>
 	</div>
+{:else if kind === 'mesh'}
+	{#if rawUrl && meshFormat}
+		<div class="rounded-lg border border-gray-100 dark:border-gray-850 overflow-hidden">
+			<CadViewer url={rawUrl} format={meshFormat} height={fill ? 480 : 320} />
+		</div>
+	{:else if rawUrl}
+		<div class="text-xs text-gray-400 p-4 rounded-lg border border-gray-100 dark:border-gray-850">
+			{ext.toUpperCase()} has no in-browser viewer — download the file to open it in a CAD or slicing
+			application.
+		</div>
+	{:else}
+		<div class="text-xs text-gray-400 p-4 rounded-lg border border-gray-100 dark:border-gray-850">
+			3D preview unavailable — the artifact bytes are not reachable.
+		</div>
+	{/if}
 {:else if kind === 'json'}
 	<pre
 		class="text-[11px] leading-relaxed overflow-auto bg-gray-50 dark:bg-gray-850 rounded-lg p-2.5 {fill

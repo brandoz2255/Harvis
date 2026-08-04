@@ -216,16 +216,29 @@ def register_cad_routes(router: APIRouter, get_current_user: Callable) -> None:
             import httpx
             async with httpx.AsyncClient(timeout=3.0) as client:
                 r = await client.get(f"{fab_cad._cad_url()}/health")
-            out["engine_reachable"] = r.status_code == 200
-            if out["engine_reachable"]:
-                body = r.json()
-                if isinstance(body, dict):
-                    out["engine"] = {
-                        k: body.get(k) for k in
-                        ("recipes", "formats", "build123d_version", "ocp_version",
-                         "queue_depth", "active_builds", "pool")
-                        if k in body
-                    }
+                out["engine_reachable"] = r.status_code == 200
+                if out["engine_reachable"]:
+                    body = r.json()
+                    if isinstance(body, dict):
+                        out["engine"] = {
+                            k: body.get(k) for k in
+                            ("recipes", "formats", "build123d_version", "ocp_version",
+                             "queue_depth", "active_builds", "pool")
+                            if k in body
+                        }
+                    # Parameter bounds come from the engine, never from a copy in the
+                    # frontend: these are the same numbers that reject a build, and a
+                    # slider whose range disagrees with them offers values the engine
+                    # refuses. A failure here leaves the key absent — the panel then
+                    # says it cannot offer parameters rather than inventing a range.
+                    try:
+                        rr = await client.get(f"{fab_cad._cad_url()}/cad/recipes")
+                        if rr.status_code == 200:
+                            spec = rr.json()
+                            if isinstance(spec, dict) and isinstance(spec.get("recipes"), dict):
+                                out["recipe_params"] = spec["recipes"]
+                    except Exception:
+                        logger.info("cad recipe spec probe failed", exc_info=True)
         except Exception:
             logger.info("cad capability probe failed", exc_info=True)
 
@@ -267,8 +280,16 @@ def register_cad_routes(router: APIRouter, get_current_user: Callable) -> None:
                            user=Depends(get_current_user)):
         pool = _pool(request)
         project = await _project_or_404(pool, project_id, int(user.id))
-        project["revisions"] = await cad_store.list_revisions(
+        revisions = await cad_store.list_revisions(pool, project_id, int(user.id))
+        # Each revision carries its most recent build, so a page that was reloaded can
+        # find geometry for a revision it did not build itself. Without it the client
+        # only ever knows the build id it was handed by a 202, and a refresh shows an
+        # empty viewport for parts that are sitting on disk.
+        latest = await cad_store.latest_builds_by_revision(
             pool, project_id, int(user.id))
+        for rev in revisions:
+            rev["latest_build"] = latest.get(rev["id"])
+        project["revisions"] = revisions
         return project
 
     async def _project_or_404(pool, project_id: str, user_id: int) -> dict:

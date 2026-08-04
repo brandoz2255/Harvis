@@ -9,6 +9,7 @@
 		| 'global-map'
 		| 'brain'
 		| 'run'
+		| 'cad'
 		| 'research' = 'overview';
 </script>
 
@@ -57,6 +58,8 @@
 	import Cookbook from '$lib/agent-studio/Cookbook.svelte';
 	import RunView from '$lib/agent-studio/RunView.svelte';
 	import ResearchPanel from '$lib/agent-studio/ResearchPanel.svelte';
+	import CadStudioPanel from './ChatControls/CadStudioPanel.svelte';
+	import { getCadCapability } from '$lib/apis/cad';
 
 	const i18n = getContext('i18n');
 
@@ -119,6 +122,24 @@
 	// Sources rides the same gate as Artifacts.
 	$: if (!showStudioTabs && activeTab === 'sources') activeTab = 'overview';
 
+	// CAD Studio. The tab appears only when the server says the lane is on — a
+	// capability the operator switched off must not leave a tab that 404s on every
+	// action. The plan also wanted a project attached before the tab shows; nothing
+	// attaches one until Gate 6, and gating on that today would hide the only surface
+	// that can create the first project, so the panel offers creation itself.
+	//
+	// The redirect waits for the probe: bouncing a restored 'cad' tab to Overview
+	// before the answer arrives would look like the tab does not exist.
+	let showCadTab = false;
+	let cadProbed = false;
+	if (typeof window !== 'undefined') {
+		getCadCapability()
+			.then((c) => (showCadTab = !!c?.enabled))
+			.catch(() => (showCadTab = false))
+			.finally(() => (cadProbed = true));
+	}
+	$: if (cadProbed && !showCadTab && activeTab === 'cad') activeTab = 'overview';
+
 	// The in-chat WorkspaceRunCard requests the Activity tab via this store.
 	$: if ($workspaceControlsTab) {
 		activeTab = $workspaceControlsTab as typeof activeTab;
@@ -129,7 +150,7 @@
 	$: if (!showFilesTab && activeTab === 'files') activeTab = 'overview';
 
 	// Auto-close only if there's genuinely nothing to show.
-	$: if (!showOverviewTab && !showFilesTab && !showStudioTabs) {
+	$: if (!showOverviewTab && !showFilesTab && !showStudioTabs && !showCadTab) {
 		showControls.set(false);
 	}
 
@@ -390,6 +411,17 @@
 										{$i18n.t('Sources')}
 									</button>
 								{/if}
+								{#if showCadTab}
+									<button
+										class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
+										'cad'
+											? 'bg-gray-100 dark:bg-gray-800 font-medium text-gray-900 dark:text-white'
+											: 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'}"
+										on:click={() => (activeTab = 'cad')}
+									>
+										{$i18n.t('CAD')}
+									</button>
+								{/if}
 							</div>
 							<button
 								class="p-1 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition text-gray-500 dark:text-gray-400"
@@ -410,7 +442,7 @@
 						</div>
 
 						<div
-							class="flex-1 min-h-0 {activeTab === 'view'
+							class="flex-1 min-h-0 {activeTab === 'view' || activeTab === 'cad'
 								? 'h-full'
 								: activeTab === 'overview'
 									? 'overflow-y-auto px-3 pt-1'
@@ -422,6 +454,8 @@
 								<ArtifactsPanel {history} />
 							{:else if activeTab === 'sources'}
 								<SourcesPanel {history} />
+							{:else if activeTab === 'cad'}
+								<CadStudioPanel />
 							{:else if activeTab === 'view'}
 								<Overview
 									{history}
@@ -564,6 +598,17 @@
 											{$i18n.t('Sources')}
 										</button>
 									{/if}
+									{#if showCadTab}
+										<button
+											class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
+											'cad'
+												? 'bg-gray-100 dark:bg-gray-800 font-medium text-gray-900 dark:text-white'
+												: 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'}"
+											on:click={() => (activeTab = 'cad')}
+										>
+											{$i18n.t('CAD')}
+										</button>
+									{/if}
 								</div>
 								<button
 									class="p-1 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition text-gray-500 dark:text-gray-400"
@@ -584,7 +629,7 @@
 							</div>
 
 							<div
-								class="flex-1 min-h-0 {activeTab === 'view'
+								class="flex-1 min-h-0 {activeTab === 'view' || activeTab === 'cad'
 									? 'h-full'
 									: activeTab === 'overview'
 										? 'overflow-y-auto px-3 pt-1'
@@ -596,6 +641,8 @@
 									<ArtifactsPanel {history} />
 								{:else if activeTab === 'sources'}
 									<SourcesPanel {history} />
+								{:else if activeTab === 'cad'}
+									<CadStudioPanel />
 								{:else if activeTab === 'view'}
 									<Overview
 										{history}

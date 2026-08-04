@@ -238,6 +238,34 @@ def health():
     }
 
 
+@app.get("/cad/recipes")
+def list_recipes():
+    """Every recipe's parameter surface — name, kind, default, and range.
+
+    Gate 4's Parameters panel needs bounds to draw a slider at all, and the only
+    truthful source for them is :data:`recipes.PARAM_SPEC`, which is also what
+    rejects an out-of-range build. A second copy in the frontend would be a second
+    thing to keep in step, and the first time it drifted the UI would offer a value
+    the engine refuses.
+    """
+    return {
+        "schema_version": recipes.SCHEMA_VERSION,
+        "units": "mm",
+        "recipes": {
+            name: {
+                "parameters": [
+                    {"name": p, "kind": kind, "default": default, "min": lo, "max": hi}
+                    for p, (kind, default, lo, hi) in spec.items()
+                ],
+                "expected_solids": recipes.RECIPE_SOLIDS.get(name),
+                "cost_cap": recipes.cost_cap(name),
+            }
+            for name, spec in recipes.PARAM_SPEC.items()
+            if name in recipes.RECIPES
+        },
+    }
+
+
 @app.post("/cad/cancel/{build_id}")
 def cancel(build_id: str):
     """Stop a build the caller named via ``build_id``.
