@@ -220,10 +220,16 @@ def register_cad_routes(router: APIRouter, get_current_user: Callable) -> None:
                 if out["engine_reachable"]:
                     body = r.json()
                     if isinstance(body, dict):
+                        # Keys are copied by name, so this list has to match what
+                        # /health actually emits. It did not: `queue_depth` and `pool`
+                        # have never existed in that payload, while `max_concurrent`,
+                        # `deadline_s` and `worker_pool` — the three numbers an
+                        # operator most wants — were being dropped on the floor.
                         out["engine"] = {
                             k: body.get(k) for k in
-                            ("recipes", "formats", "build123d_version", "ocp_version",
-                             "queue_depth", "active_builds", "pool")
+                            ("recipes", "formats", "formats_available", "schema_version",
+                             "build123d_version", "ocp_version", "active_builds",
+                             "max_concurrent", "deadline_s", "worker_pool")
                             if k in body
                         }
                     # Parameter bounds come from the engine, never from a copy in the

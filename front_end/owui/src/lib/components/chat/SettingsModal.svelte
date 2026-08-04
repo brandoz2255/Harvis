@@ -34,6 +34,8 @@
 	// (list → Add dropdown → in-panel detail) — the agent-studio route keeps
 	// its own SkillsPanel (governance sync UI) untouched.
 	import SkillsManager from './Settings/Skills/SkillsManager.svelte';
+	import Cad from './Settings/Cad.svelte';
+	import { getCadCapability } from '$lib/apis/cad';
 	import ConnectorsPanel from '$lib/agent-studio/customize/ConnectorsPanel.svelte';
 
 	const i18n = getContext('i18n');
@@ -511,11 +513,38 @@
 				'capabilities',
 				'customize'
 			]
+		},
+		{
+			id: 'cad',
+			title: 'CAD',
+			keywords: [
+				'cad',
+				'3d',
+				'3d print',
+				'model',
+				'modelling',
+				'modeling',
+				'parametric',
+				'solid',
+				'geometry',
+				'step',
+				'stl',
+				'glb',
+				'3mf',
+				'mesh',
+				'part',
+				'fabrication',
+				'millimetres',
+				'millimeters'
+			]
 		}
 	];
 
 	let availableSettings = [];
 	let filteredSettings = [];
+
+	// Probed once in onMount; until it answers the CAD tab stays hidden.
+	let cadEnabled = false;
 
 	let search = '';
 	let searchDebounceTimeout;
@@ -531,6 +560,10 @@
 
 			if (tab.id === 'interface') {
 				return $user?.role === 'admin' || ($user?.permissions?.settings?.interface ?? true);
+			}
+
+			if (tab.id === 'cad') {
+				return cadEnabled;
 			}
 
 			return true;
@@ -626,6 +659,18 @@
 			availableSettings = getAvailableSettings();
 			setFilteredSettings();
 		});
+
+		// CAD is optional and ships off, so its tab has to earn its place: the probe
+		// hits the same server-side flag every /api/cad route enforces. A failed or
+		// absent capability leaves the tab hidden — a settings page for a feature
+		// that isn't installed is worse than no page at all.
+		getCadCapability()
+			.then((c) => {
+				cadEnabled = !!c?.enabled;
+				availableSettings = getAvailableSettings();
+				setFilteredSettings();
+			})
+			.catch(() => {});
 	});
 </script>
 
@@ -856,6 +901,32 @@
 								</div>
 								<div class=" self-center">{$i18n.t('Connectors')}</div>
 							</button>
+						{:else if tabId === 'cad'}
+							<button
+								role="tab"
+								aria-controls="tab-cad"
+								aria-selected={selectedTab === 'cad'}
+								class={tabClass('cad')}
+								on:click={() => {
+									selectedTab = 'cad';
+								}}
+							>
+								<div class=" self-center mr-2">
+									<svg
+										xmlns="http://www.w3.org/2000/svg"
+										viewBox="0 0 24 24"
+										fill="none"
+										stroke="currentColor"
+										stroke-width="1.75"
+										stroke-linecap="round"
+										stroke-linejoin="round"
+										class="size-[18px]"
+									>
+										<path d="M12 2.5 20.5 7v10L12 21.5 3.5 17V7L12 2.5zM3.5 7l8.5 4.6L20.5 7M12 11.6v9.9" />
+									</svg>
+								</div>
+								<div class=" self-center">{$i18n.t('CAD')}</div>
+							</button>
 						{/if}
 					{/each}
 					{/if}
@@ -931,7 +1002,10 @@
 				{:else if selectedTab === 'skills'}
 					<SkillsManager token={localStorage.token} />
 				{:else if selectedTab === 'connectors'}
-					<ConnectorsPanel token={localStorage.token} />
+					<!-- dock: the condensed row-list layout, sized for the Settings column -->
+					<ConnectorsPanel token={localStorage.token} mode="dock" />
+				{:else if selectedTab === 'cad'}
+					<Cad />
 				{:else if selectedTab === 'about'}
 					<About />
 				{/if}

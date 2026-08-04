@@ -89,6 +89,7 @@
 	import { getSuggestionRenderer } from '../common/RichTextInput/suggestions';
 
 	import InputMenu from './MessageInput/InputMenu.svelte';
+	import CadContextChip from './MessageInput/CadContextChip.svelte';
 	import Search from '$lib/components/icons/Search.svelte';
 	import DeepResearchModal from './MessageInput/DeepResearchModal.svelte';
 	import VoiceRecording from './MessageInput/VoiceRecording.svelte';
@@ -793,6 +794,21 @@
 			// Handle any errors (e.g., user cancels screen sharing)
 			console.error('Error capturing screen:', error);
 		}
+	};
+
+	// Shared by the "+ → Create → 3D / CAD" item and by the composer's intent
+	// suggestion, so both produce exactly the same marker the backend keys on.
+	// Same deterministic-marker idea as Create Image, and the same trailing-space
+	// caveat. What follows the marker is a RECIPE name, not a description: the local
+	// lane builds registered parametric recipes, and the backend answers with the
+	// list when it can't match one rather than guessing at the nearest shape.
+	const insertCadMarker = () => {
+		const marker = '🧊 create cad ';
+		const cur = (prompt || '').trim();
+		const next = cur ? `${marker}${cur}` : marker;
+		prompt = next;
+		chatInputElement?.setText(next);
+		setTimeout(() => chatInputElement?.focus(), 0);
 	};
 
 	const uploadFileHandler = async (file, process = true, itemData = {}) => {
@@ -1525,6 +1541,8 @@
 								</div>
 							{/if}
 
+							<CadContextChip {prompt} onInsertMarker={insertCadMarker} />
+
 							{#if files.length > 0}
 								<div
 									class="mx-2 mt-2.5 pb-1.5 flex items-center flex-wrap gap-2"
@@ -1875,19 +1893,7 @@
 											chatInputElement?.setText(next);
 											setTimeout(() => chatInputElement?.focus(), 0);
 										}}
-										onCreateCad={() => {
-											// Same deterministic-marker idea as Create Image, and the same
-											// trailing-space caveat. What follows the marker is a RECIPE name,
-											// not a description: the local lane builds registered parametric
-											// recipes, and the backend answers with the list when it can't
-											// match one rather than guessing at the nearest shape.
-											const marker = '🧊 create cad ';
-											const cur = (prompt || '').trim();
-											const next = cur ? `${marker}${cur}` : marker;
-											prompt = next;
-											chatInputElement?.setText(next);
-											setTimeout(() => chatInputElement?.focus(), 0);
-										}}
+										onCreateCad={insertCadMarker}
 										{onUpload}
 										onClose={async () => {
 											await tick();
