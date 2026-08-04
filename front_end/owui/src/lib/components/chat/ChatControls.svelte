@@ -58,7 +58,8 @@
 	import Cookbook from '$lib/agent-studio/Cookbook.svelte';
 	import RunView from '$lib/agent-studio/RunView.svelte';
 	import ResearchPanel from '$lib/agent-studio/ResearchPanel.svelte';
-	import CadStudioPanel from './ChatControls/CadStudioPanel.svelte';
+	import CadStudioPanel from '$lib/cad/CadStudioPanel.svelte';
+	import CadTabLauncher from '$lib/cad/CadTabLauncher.svelte';
 	import { getCadCapability } from '$lib/apis/cad';
 
 	const i18n = getContext('i18n');
@@ -130,6 +131,14 @@
 	//
 	// The redirect waits for the probe: bouncing a restored 'cad' tab to Overview
 	// before the answer arrives would look like the tab does not exist.
+	//
+	// Gate 6: the full workspace moved to `/harvis/cad`, and this tab is a launcher
+	// pointing at it. Flip this to `false` to put the whole panel back in the rail —
+	// the component is unchanged and still mounted below — which is the one-line
+	// revert if the route turns out worse. Once the route is verified, delete the
+	// 'cad' arm entirely rather than leaving a dead switch.
+	const CAD_TAB_IS_LAUNCHER_ONLY = true;
+
 	let showCadTab = false;
 	let cadProbed = false;
 	if (typeof window !== 'undefined') {
@@ -455,7 +464,11 @@
 							{:else if activeTab === 'sources'}
 								<SourcesPanel {history} />
 							{:else if activeTab === 'cad'}
-								<CadStudioPanel />
+								{#if CAD_TAB_IS_LAUNCHER_ONLY}
+									<CadTabLauncher />
+								{:else}
+									<CadStudioPanel />
+								{/if}
 							{:else if activeTab === 'view'}
 								<Overview
 									{history}
@@ -642,7 +655,11 @@
 								{:else if activeTab === 'sources'}
 									<SourcesPanel {history} />
 								{:else if activeTab === 'cad'}
-									<CadStudioPanel />
+									{#if CAD_TAB_IS_LAUNCHER_ONLY}
+										<CadTabLauncher />
+									{:else}
+										<CadStudioPanel />
+									{/if}
 								{:else if activeTab === 'view'}
 									<Overview
 										{history}

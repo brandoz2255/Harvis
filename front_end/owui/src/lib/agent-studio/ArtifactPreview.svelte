@@ -1,6 +1,6 @@
 <script lang="ts">
 	import Markdown from '$lib/components/chat/Messages/Markdown.svelte';
-	import CadViewer from '$lib/components/chat/ChatControls/CadViewer.svelte';
+	import CadViewer from '$lib/cad/CadViewer.svelte';
 
 	// File-type router for an agent-produced artifact. Renders ONLY what the agent wrote.
 	//   html  → live sandboxed iframe        markdown → rendered
