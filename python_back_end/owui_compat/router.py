@@ -211,6 +211,15 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
                 invalidate_models_cache(getattr(user, "id", None))
             except Exception:
                 logger.warning("owui /api/models refresh: cloud cache reset failed", exc_info=True)
+            try:
+                # …and the per-host Ollama probe (10s TTL), which sits underneath the native
+                # cache. Without this an explicit refresh could clear the outer cache and then
+                # rebuild it from a stale probe, so a rig that just came back would still read
+                # as unreachable.
+                from . import ollama_hosts
+                ollama_hosts.invalidate()
+            except Exception:
+                logger.warning("owui /api/models refresh: host probe reset failed", exc_info=True)
         native = await deps.list_models(request, user)
         data = harvis_models_to_owui(native)
         # Phase E4B: surface the Hermes-Agent chat model when its engine flag is on AND a Hermes
@@ -347,9 +356,9 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
         model = os.getenv("HARVIS_TITLE_MODEL", "llama3.1:8b")
         ollama_url = os.getenv("OLLAMA_URL", "http://ollama:11434")
         prompt = (
-            "You name chat conversations. Reply with ONLY a concise, descriptive "
-            "title of 3-5 words — no quotes, no 'Title:' prefix, no trailing "
-            "punctuation. Summarize what the conversation is about.\n\n"
+            "Generate a concise title for this conversation. Use 3-6 words. "
+            "Capture the main task or topic. No quotes. No punctuation at the end. "
+            "Reply with the title only — no 'Title:' prefix, no explanation.\n\n"
             "Conversation:\n" + transcript[:4000] + "\n\nTitle:"
         )
         title = fallback
@@ -592,6 +601,21 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
             raise HTTPException(status_code=404, detail="Chat not found")
         return chat
 
+    @router.post("/api/v1/chats/{chat_id}/clone")
+    async def owui_chat_clone(chat_id: str, request: Request, user=Depends(get_current_user)):
+        # Backs the "Branch" action under every response. The frontend posts
+        # {title: "Clone of {{TITLE}}"} and navigates to the returned id.
+        pool = _require_pool(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        title = (body or {}).get("title") if isinstance(body, dict) else None
+        chat = await persistence.clone_chat(pool, user.id, chat_id, title)
+        if chat is None:
+            raise HTTPException(status_code=404, detail="Chat not found")
+        return chat
+
     @router.post("/api/v1/chats/{chat_id}/pin")
     async def owui_chat_toggle_pin(chat_id: str, request: Request, user=Depends(get_current_user)):
         pool = _require_pool(request)
@@ -754,6 +778,8 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
     from .chat_files import register_chat_file_routes
     register_chat_file_routes(router, get_current_user)
     register_subagent_routes(router, get_current_user)
+    from .evaluations import register_evaluation_routes
+    register_evaluation_routes(router, get_current_user)
 
     @router.get("/api/v1/chats/{chat_id}")
     async def owui_chat_get(chat_id: str, request: Request, user=Depends(get_current_user)):
