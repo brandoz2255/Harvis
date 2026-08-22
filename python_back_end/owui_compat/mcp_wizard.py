@@ -94,6 +94,7 @@ _INTERNAL_HOSTS = {"ollama", "pgsql", "pgsql-db", "backend", "frontend", "opencl
 #    client-side and saves through the EXISTING /api/owui/mcp/connections. ──
 from .mcp_catalog import MCP_CATALOG as MCP_TEMPLATES  # noqa: E402
 from .mcp_catalog import MCP_CATEGORIES  # noqa: E402
+from .mcp_catalog import MCP_PLUGINS, MCP_SECTIONS  # noqa: E402
 
 
 # ── SSRF guard ──────────────────────────────────────────────────────────────
@@ -251,6 +252,61 @@ async def _sync_sources(pool, uid: int) -> tuple[list, list]:
     return list(skills), list(conns)
 
 
+# Engines that could consume the connectors/skills a user saves in Harvis.
+# ONLY OpenClaw has a write target today: the sync merges `mcpServers` into
+# openclaw.json (and SKILL.md files into the skills mount). The sidecar CLI
+# engines read their OWN MCP config and nothing in Harvis writes it, so a UI
+# claiming "synced to every engine" would be making a false claim. Each engine
+# reports what is actually true for it instead.
+_CLI_ENGINE_LABELS = {
+    "claude-code": "Claude Code",
+    "kimi-code": "Kimi Code",
+    "codex": "Codex",
+}
+
+
+def _engine_targets(target_file: Path, sdir: Optional[Path]) -> list[dict]:
+    """Per-engine publish state — status is ``ready`` / ``blocked`` / ``unsupported``."""
+    enabled = _sync_enabled()
+    if enabled:
+        note = (
+            "Connections are merged into openclaw.json. Restart harvis-openclaw "
+            "after an apply for them to take effect."
+        )
+        if sdir is None:
+            note += " Skill files are skipped — HARVIS_OPENCLAW_SKILLS_DIR is not set."
+    else:
+        note = (
+            f"Applying is turned off on this server. Set {SYNC_FLAG_ENV}=1 in the "
+            "backend environment to allow writing to the OpenClaw mounts."
+        )
+    engines = [
+        {
+            "id": "openclaw",
+            "label": "OpenClaw",
+            "status": "ready" if enabled else "blocked",
+            "target": str(target_file),
+            "writes": ["mcpServers"] + (["skills"] if sdir else []),
+            "note": note,
+        }
+    ]
+    engines.extend(
+        {
+            "id": eid,
+            "label": label,
+            "status": "unsupported",
+            "target": None,
+            "writes": [],
+            "note": (
+                f"{label} reads its own MCP config. Harvis has no writer for it yet, "
+                "so saved connectors do not reach this engine."
+            ),
+        }
+        for eid, label in _CLI_ENGINE_LABELS.items()
+    )
+    return engines
+
+
 def _build_preview(skills, conns, mask: bool = True, require_verdict: bool = True) -> dict:
     cs = _config_set()
     candidates = _config_file_candidates()
@@ -301,6 +357,7 @@ def _build_preview(skills, conns, mask: bool = True, require_verdict: bool = Tru
         "flag": SYNC_FLAG_ENV,
         "enabled": _sync_enabled(),
         "config_set": cs,
+        "engines": _engine_targets(target_file, sdir),
         "skipped_unverified": skipped_unverified,
         "skills": {
             "target_dir": str(sdir) if sdir else None,
@@ -333,10 +390,18 @@ def register_mcp_wizard_routes(router: APIRouter, get_current_user: Callable) ->
 
     # ── templates ─────────────────────────────────────────────────────────
     # Full marketplace catalog (category/blurb/transport/needs_secret included);
-    # `categories` is additive — existing wizard callers only read `templates`.
+    # everything past `templates` is additive — existing wizard callers read only
+    # that key. `plugins` is the whole storefront (installable + directory) and
+    # `sections` its display order; see mcp_catalog.py for what `connect` means
+    # and why remote_oauth entries link out instead of offering a Connect button.
     @router.get("/api/owui/mcp/templates")
     async def mcp_templates(user=Depends(get_current_user)):
-        return {"templates": MCP_TEMPLATES, "categories": MCP_CATEGORIES}
+        return {
+            "templates": MCP_TEMPLATES,
+            "categories": MCP_CATEGORIES,
+            "plugins": MCP_PLUGINS,
+            "sections": MCP_SECTIONS,
+        }
 
     # ── official MCP registry (metadata-only browse) ──────────────────────
     # Proxies registry.modelcontextprotocol.io so the browser never talks to
