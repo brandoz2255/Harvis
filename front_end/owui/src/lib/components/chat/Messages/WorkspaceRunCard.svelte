@@ -1,7 +1,13 @@
 <script lang="ts">
-	import { onMount, onDestroy, getContext, afterUpdate } from 'svelte';
+	import { onMount, onDestroy, getContext } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { showControls, workspaceControlsTab, dockedRunId } from '$lib/stores';
+	import {
+		showControls,
+		workspaceControlsTab,
+		dockedRunId,
+		models,
+		workspaceRunMetrics
+	} from '$lib/stores';
 	import { WEBUI_BASE_URL } from '$lib/constants';
 	import {
 		createWorkspaceStream,
@@ -11,12 +17,18 @@
 	import Markdown from './Markdown.svelte';
 	import HarvisClawMascot from '$lib/components/common/HarvisClawMascot.svelte';
 	import BrandGlyph from '$lib/integrations/BrandGlyph.svelte';
-	import RunArtifacts from '$lib/agent-studio/RunArtifacts.svelte';
-	import RunProgressCard from '$lib/agent-studio/RunProgressCard.svelte';
+	import RunFileCards from './RunFileCards.svelte';
 	import WorkflowInspector from '$lib/agent-studio/WorkflowInspector.svelte';
+	import {
+		buildRunActivity,
+		projectTerminalRuns
+	} from '$lib/agent-studio/runEventProjection';
+	import RunActivitySummary from './RunActivitySummary.svelte';
+	import TerminalRunCard from './TerminalRunCard.svelte';
 	import { getRunArtifacts } from '$lib/apis/agent-runs';
 	import { saveRunAsSkill } from '$lib/apis/skills';
 	import { toast } from 'svelte-sonner';
+	import { trailingText } from '$lib/utils/trailingText';
 
 	const i18n: any = getContext('i18n');
 
@@ -86,8 +98,6 @@
 		| 'error'
 		| 'cancelled';
 	let phase: Phase = needsApproval ? 'awaiting' : 'connecting';
-	let currentStep = 'Connecting…';
-	let recent: { ok: boolean; text: string }[] = [];
 	let toolCount = 0;
 	let summary = '';
 	let analysis = ''; // Build Result Narrator: full written analysis (Build-like runs)
@@ -99,28 +109,115 @@
 	// model-generated. changedFiles drives the inline artifact.
 	let agents: { label: string; summary: string; ok: boolean; durationMs: number }[] = [];
 	let changedFiles: string[] = [];
+	// Token accounting. The runner reports these after every model call (a `usage`
+	// event) and again on agent_end, so the meter moves while the run is going instead
+	// of appearing only once it is over.
+	let usage: {
+		prompt: number;
+		completion: number;
+		total: number;
+		contextWindow: number;
+		durationMs: number;
+		model: string;
+	} | null = null;
 
-	// ── Live thought stream: a chronological feed of what the agent is doing. ──
-	// think = the model's streamed reasoning/output (token events, accumulated);
-	// tool  = a tool call (running → ok/fail, with args + output);
-	// log   = a narrative line ("💬 …" the model emitted before acting).
-	type Step =
-		| { kind: 'think'; text: string }
-		| { kind: 'log'; text: string }
-		| { kind: 'tool'; tool: string; args: string; status: 'running' | 'ok' | 'fail'; output: string };
-	let steps: Step[] = [];
 	let executor = ''; // "OpenClaw" — proves who's actually executing the task
 	let execModel = ''; // the model behind it
-	let feedEl: HTMLElement | null = null;
+	let liveFile: { path: string; content: string; lang: string } | null = null;
 
-	// ── Progress timeline (RunProgressCard) ──
-	// rawEvents = the unfolded event stream the stage machine reads (pure → reload
-	// replay reconstructs the same final timeline). lastEventAt + nowTick detect a
-	// stall (no events for a while while still running).
+	const extLang = (path: string) => {
+		const ext = (path.split('.').pop() || '').toLowerCase();
+		const map: Record<string, string> = {
+			py: 'python',
+			js: 'javascript',
+			ts: 'typescript',
+			sh: 'bash',
+			md: 'markdown',
+			html: 'html',
+			css: 'css',
+			json: 'json'
+		};
+		return map[ext] || ext || 'text';
+	};
+
+	// The first five names are the Claude Code CLI's. The last three are Harvis's OWN
+	// workspace tools — and their absence here is why a run on the Harvis agent lane
+	// (every local model and every free cloud provider) wrote a real file and showed
+	// the user nothing: the preview was watching for tool names that lane never emits.
+	const _WRITE_TOOLS = [
+		'write',
+		'file_write',
+		'edit',
+		'multiedit',
+		'notebookedit',
+		'edit_file',
+		'str_replace',
+		'apply_patch'
+	];
+
+	const maybeLiveFile = (tool?: string, args?: unknown) => {
+		const name = (tool || '').toLowerCase();
+		if (!_WRITE_TOOLS.includes(name)) return;
+		const a = args && typeof args === 'object' ? (args as Record<string, unknown>) : {};
+		const path = String(a.file_path || a.path || a.file || '').trim();
+		// `new_str` is str_replace/apply_patch's replacement text; the rest are the
+		// whole-file spellings.
+		const content = String(a.content || a.new_string || a.new_str || a.contents || '');
+		if (!path || !content) return;
+		liveFile = { path, content, lang: extLang(path) };
+	};
+
+	const takeUsage = (evt: any) => {
+		if (!(evt?.prompt_tokens || evt?.completion_tokens || evt?.total_tokens)) return;
+		const prompt = Number(evt.prompt_tokens) || 0;
+		const completion = Number(evt.completion_tokens) || 0;
+		usage = {
+			prompt,
+			completion,
+			total: Number(evt.total_tokens) || prompt + completion,
+			contextWindow: Number(evt.context_window) || 0,
+			durationMs: Number(evt.duration_ms) || 0,
+			model: String(evt.model || usage?.model || '')
+		};
+	};
+
+	// ── Inline activity + terminal projection ──
+	// rawEvents = the unfolded event stream the projectors read (pure → reload
+	// replay reconstructs the same final timeline).
 	let rawEvents: WorkspaceEvent[] = [];
 	let lastEventAt = Date.now();
 	let nowTick = Date.now();
-	let artifactCount: number | null = null; // file-output artifacts, set on finish
+	$: terminalRuns = projectTerminalRuns(rawEvents, workspaceId || id || 'workspace');
+	$: runActivity = buildRunActivity(rawEvents, phase, workspaceId || id || 'workspace');
+
+	// Terminal output can arrive in very small chunks. Fold it into the view at a
+	// bounded cadence instead of invalidating the whole chat tree for every fragment.
+	const TERMINAL_FLUSH_MS = 75;
+	let pendingTerminalEvents: WorkspaceEvent[] = [];
+	let terminalFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+	const flushTerminalEvents = () => {
+		if (terminalFlushTimer) {
+			clearTimeout(terminalFlushTimer);
+			terminalFlushTimer = null;
+		}
+		if (!pendingTerminalEvents.length) return;
+		rawEvents = [...rawEvents, ...pendingTerminalEvents];
+		pendingTerminalEvents = [];
+	};
+
+	const recordEvent = (evt: WorkspaceEvent) => {
+		if (evt.type === 'terminal_output') {
+			pendingTerminalEvents.push(evt);
+			if (!terminalFlushTimer) {
+				terminalFlushTimer = setTimeout(flushTerminalEvents, TERMINAL_FLUSH_MS);
+			}
+			return;
+		}
+		// Preserve event order: output queued before a result must paint first.
+		flushTerminalEvents();
+		rawEvents = [...rawEvents, evt];
+	};
 
 	let controller: AbortController | null = null;
 	let timer: ReturnType<typeof setInterval> | null = null;
@@ -144,56 +241,94 @@
 	})();
 
 	$: running = phase === 'connecting' || phase === 'thinking' || phase === 'executing';
-	// Quiet connection while still running → surface a "Retry stream" affordance so a
-	// stalled SSE never looks frozen. nowTick ticks every 1s (see startTimerAndStream).
 	$: stalled = running && nowTick - lastEventAt > 20000;
 	// Orchestrated runs are the ones whose sub-agents emit a parent_run_id-tagged
 	// agent_end → that's the gate for the rich completion block (single-agent runs
 	// never populate `agents`, so they keep the plain summary path).
 	$: isOrchestrated = agents.length > 0;
+	// An agent's finish() summary and the Build Result Narrator's analysis are often the
+	// same sentence. Showing both prints the answer twice, which reads as two different
+	// answers you have to reconcile — the same trap the duplicate token rows fell into.
+	const _norm = (s: string) => (s ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+	$: _narrativeNorm = _norm(narrative);
+	$: agentPosts = agents.filter((a) => _norm(a.summary) !== _narrativeNorm);
 	// Live wall-clock (elapsed); on a reloaded finished run elapsed is 0, so fall
 	// back to the longest sub-agent runtime (replay-safe, from agent_end).
 	$: doneDuration = elapsed > 0 ? elapsed : Math.max(0, ...agents.map((a) => a.durationMs));
 
-	// Map raw tool names → human phrases (mirrors chat_bridge._humanize_tool_call).
-	const PHRASES: Record<string, string> = {
-		exec: 'Running a command…',
-		run_code: 'Running code…',
-		read: 'Reading a file…',
-		file_fetch: 'Reading a file…',
-		write: 'Writing a file…',
-		file_write: 'Writing a file…',
-		edit: 'Editing a file…',
-		dir_list: 'Scanning the project…',
-		dir_fetch: 'Scanning the project…',
-		web_search: 'Searching the web…',
-		web_fetch: 'Reading a web page…',
-		browser: 'Browsing…',
-		local_rag: 'Searching knowledge…',
-		memory_search: 'Recalling memory…'
-	};
-	const phrase = (tool?: string) =>
-		(tool && PHRASES[tool]) || (tool ? `Using ${tool}…` : 'Working…');
+	// The window the model ACTUALLY has. The runner fills context_window from
+	// HARVIS_OLLAMA_NUM_CTX, which is right for a local tag and badly wrong for a cloud
+	// model — it reported 24,576 for a Gemini model with a million-token window, so the
+	// occupancy figure was off by a factor of forty. The catalogue is already loaded for
+	// the model picker, so prefer its number and keep the run's own as the fallback.
+	$: realContextWindow = (() => {
+		const fromCatalog = Number(
+			($models ?? []).find((m: any) => m?.id === usage?.model)?.info?.meta?.context_length || 0
+		);
+		return fromCatalog || usage?.contextWindow || 0;
+	})();
+
+	const compact = (n: number) =>
+		n >= 1_000_000
+			? `${(n / 1_000_000).toFixed(n < 10_000_000 ? 1 : 0)}M`
+			: n >= 1000
+				? `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`
+				: String(n);
+
+	// Throughput is completion tokens over the run's wall clock. That includes tool time
+	// and the model's thinking, which is exactly what the user waited through — dividing
+	// by generation time alone would quote a number nobody experienced.
+	$: tokensPerSecond =
+		usage && usage.durationMs > 0 ? (usage.completion / (usage.durationMs / 1000)) : 0;
+	$: contextPct =
+		usage && realContextWindow > 0
+			? Math.min(100, (usage.prompt / realContextWindow) * 100)
+			: 0;
+
+	// Hand the run's numbers to the assistant message that hosts this card. Its own
+	// chat stream closed seconds after the run started and carried no usage at all,
+	// which is why the footer under a finished workspace run showed dashes.
+	$: if (workspaceId && usage) {
+		const snapshot = {
+			context_tokens: { value: usage.prompt, quality: 'confirmed', source: 'provider', scope: 'model_request' },
+			output_tokens: { value: usage.completion, quality: 'confirmed', source: 'provider', scope: 'run' },
+			...(usage.durationMs > 0
+				? {
+						wall_ms: { value: usage.durationMs, quality: 'measured', source: 'harvis' },
+						// Throughput over the whole run, tool time included — the same number
+						// this card shows, so the two never disagree.
+						generation_ms: { value: usage.durationMs, quality: 'measured', source: 'harvis' }
+					}
+				: {})
+		};
+		workspaceRunMetrics.update((m) => ({ ...m, [workspaceId]: snapshot }));
+	}
+
+	// A run this tab watched live gets typed out; a run being replayed from the event
+	// log on page load already happened, so it shows whole.
+	let sawRunning = false;
+	$: if (running) sawRunning = true;
+
+	// The written result and the file the agent is writing both arrive in whole chunks.
+	// Trailing them is what makes the card read as something being written rather than
+	// something being pasted.
+	const typedNarrative = trailingText();
+	const typedFile = trailingText(70);
+	$: narrative = analysis || summary || '';
+	$: typedNarrative.feed(narrative, true, !sawRunning);
+	$: typedFile.feed(liveFile?.content ?? '', !running, !sawRunning);
+	onDestroy(() => {
+		typedNarrative.stop();
+		typedFile.stop();
+	});
 
 	const fmt = (ms: number) => {
 		const s = Math.floor(ms / 1000);
 		return s < 60 ? `${s}s` : `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 	};
 
-	// Attach clean text to the most recent tool step's output.
-	const attachToolOutput = (text: string) => {
-		for (let i = steps.length - 1; i >= 0; i--) {
-			const s = steps[i];
-			if (s.kind === 'tool') {
-				s.output = (s.output ? s.output + '\n' + text : text).trim().slice(0, 400);
-				steps = steps;
-				return true;
-			}
-		}
-		return false;
-	};
-
-	// Parse executor/model from system logs, surface narrative, skip the noise.
+	// Parse executor/model from system logs without exposing internal reasoning or
+	// duplicating tool output (the terminal cards consume terminal_output directly).
 	const noteLog = (msg: string) => {
 		// A lane can fall back mid-run (e.g. the Kimi lane with no Moonshot key drops to
 		// local Ollama). The marker chip still says "Kimi" at that point, so correct it —
@@ -212,22 +347,13 @@
 			execModel = lm[1].trim();
 			return;
 		}
-		// "[exec] <output>" carries the CLEAN tool output → attach it to the tool step
-		// (the raw tool_result envelope is uglier, so we prefer this).
-		const toolOut = msg.match(/^\[[a-z_]+\]\s*([\s\S]+)$/i);
-		if (toolOut) {
-			attachToolOutput(toolOut[1]);
-			return;
-		}
-		if (/model loading|Agent started|Task dispatched|Agent finished/i.test(msg)) {
-			return;
-		}
-		steps = [...steps, { kind: 'log', text: msg.replace(/^💬\s*/, '').slice(0, 200) }];
+		// Public activity is derived from typed events below. Raw log narration can
+		// contain private model reasoning, so it is intentionally not rendered.
 	};
 
 	const handle = (evt: WorkspaceEvent) => {
 		// Feed the progress timeline (every event, incl. replayed ones on reload).
-		rawEvents = [...rawEvents, evt];
+		recordEvent(evt);
 		lastEventAt = Date.now();
 		if (evt.model) execModel = evt.model;
 		switch (evt.type) {
@@ -235,17 +361,7 @@
 				if (phase === 'connecting' || phase === 'thinking') phase = 'thinking';
 				break;
 			case 'token': {
-				// Accumulate streamed reasoning/output into the live "thinking" bubble.
-				const c = evt.content ?? '';
-				if (!c) break;
 				if (phase === 'connecting') phase = 'thinking';
-				const last = steps[steps.length - 1];
-				if (last && last.kind === 'think') {
-					last.text += c;
-					steps = steps;
-				} else {
-					steps = [...steps, { kind: 'think', text: c }];
-				}
 				break;
 			}
 			case 'log':
@@ -254,34 +370,31 @@
 			case 'tool_call':
 				phase = 'executing';
 				toolCount += 1;
-				steps = [
-					...steps,
-					{
-						kind: 'tool',
-						tool: evt.tool ?? '',
-						args: evt.args ? JSON.stringify(evt.args).replace(/^[{]|[}]$/g, '').slice(0, 120) : '',
-						status: 'running',
-						output: ''
-					}
-				];
+				maybeLiveFile(evt.tool, evt.args);
 				break;
 			case 'tool_result':
-				// Mark the most recent running tool step done + attach its output.
-				for (let i = steps.length - 1; i >= 0; i--) {
-					const s = steps[i];
-					if (s.kind === 'tool' && s.status === 'running') {
-						s.status = evt.success === false ? 'fail' : 'ok';
-						// Prefer the clean "[exec] …" log output; fall back to the raw envelope.
-						if (!s.output && evt.output) s.output = String(evt.output).trim().slice(0, 240);
-						steps = steps;
-						break;
-					}
+				break;
+			case 'stream_end':
+				if (running) {
+					phase = 'error';
+					errorMessage = 'Activity stream ended before the workspace reported completion.';
+					fixHint = 'Reconnect to restore the persisted run timeline.';
+					// Close any queued/running projected commands instead of leaving
+					// terminal cards permanently active after the SSE sentinel.
+					recordEvent({ type: 'error', message: errorMessage });
 				}
+				break;
+			case 'usage':
+				// Mid-run token report, one per model call. Same fields as agent_end.
+				takeUsage(evt);
 				break;
 			case 'agent_end': {
 				// Only orchestrated sub-agents (the native runner) carry parent_run_id
 				// AND their own finish() summary; OpenClaw's root agent_end has neither,
 				// so single-agent runs fall through to the plain summary path.
+				// Read usage before the parent_run_id gate below — a single-agent run is
+				// still a sub-agent, and its numbers are the run's numbers.
+				takeUsage(evt);
 				if (!evt.parent_run_id) break;
 				agents = [
 					...agents,
@@ -337,6 +450,7 @@
 			if (e?.name !== 'AbortError' && phase !== 'done') {
 				phase = 'error';
 				errorMessage = String(e?.message ?? e);
+				recordEvent({ type: 'error', message: errorMessage });
 			}
 		} finally {
 			if (timer) {
@@ -353,7 +467,7 @@
 		controller?.abort();
 		if (running) {
 			phase = 'cancelled';
-			currentStep = 'Cancelling…';
+			recordEvent({ type: 'cancelled' });
 		}
 		try {
 			await fetch(`${WEBUI_BASE_URL}/api/workspace/cancel/${workspaceId}`, {
@@ -381,7 +495,6 @@
 	// run actually produced a renderable file.
 	let hasPreview = false;
 	let _checkedPreview = false;
-	let _autoPopped = false;
 	let _wasRunning = false;
 	// Renderable OUTPUT types worth auto-surfacing — NOT source code (.py/.ts/.js etc.).
 	const _PREVIEWABLE = /\.(html?|pdf|png|jpe?g|gif|webp|svg|markdown|md|csv)$/i;
@@ -390,15 +503,10 @@
 	const checkPreview = async () => {
 		try {
 			const arts = await getRunArtifacts(workspaceId);
-			// Count FILE outputs (not diffs/summaries) → drives the progress card's
-			// "Output ready" vs "No file output" stage. 0 = a clean, non-stuck end state.
-			artifactCount = (arts ?? []).filter((a) => a.artifact_type === 'file').length;
 			hasPreview = (arts ?? []).some(
 				(a) => a.artifact_type === 'file' && _PREVIEWABLE.test(a.path || '')
 			);
-		} catch (_) {
-			artifactCount = 0;
-		}
+		} catch (_) {}
 	};
 	$: if (phase === 'done' && workspaceId && !_checkedPreview) {
 		_checkedPreview = true;
@@ -409,12 +517,6 @@
 		workspaceControlsTab.set('activity');
 		showControls.set(true);
 	};
-	// Auto-pop: when a run that finished LIVE in this session produced a renderable output, open the
-	// Artifacts dock once. Gated on _wasRunning so replayed/historical done-runs don't pop on load.
-	$: if (hasPreview && phase === 'done' && _wasRunning && !_autoPopped) {
-		_autoPopped = true;
-		previewRun();
-	}
 
 	// Phase F: distill THIS finished run into a DRAFT skill (disabled + unaudited — it
 	// won't apply in chat until the user audits it to 'supported' in Customize → Skills).
@@ -443,13 +545,14 @@
 		consume();
 	};
 
-	// "Retry stream" — drop the current (stalled) connection and re-attach. The backend
-	// replays all persisted events from the DB, so the feed + timeline rebuild from
-	// scratch and then continue live. Used by the progress card's stall affordance.
+	// Drop a quiet connection and replay the persisted event stream. The event
+	// projector rebuilds the same cards and stable fallback ids from that replay.
 	const retryStream = () => {
 		controller?.abort();
+		if (terminalFlushTimer) clearTimeout(terminalFlushTimer);
+		terminalFlushTimer = null;
+		pendingTerminalEvents = [];
 		rawEvents = [];
-		steps = [];
 		toolCount = 0;
 		agents = [];
 		executor = '';
@@ -460,7 +563,6 @@
 
 	const approve = async () => {
 		phase = 'connecting';
-		currentStep = 'Starting…';
 		try {
 			const r = await fetch(`${WEBUI_BASE_URL}/api/owui/workspace/${workspaceId}/approve`, {
 				method: 'POST',
@@ -498,23 +600,13 @@
 	onDestroy(() => {
 		controller?.abort();
 		if (timer) clearInterval(timer);
-	});
-
-	// Keep the live feed pinned to the newest line while the task runs.
-	afterUpdate(() => {
-		if (running && feedEl) feedEl.scrollTop = feedEl.scrollHeight;
+		if (terminalFlushTimer) clearTimeout(terminalFlushTimer);
 	});
 </script>
 
 <div
-	class="{className} relative my-2 rounded-2xl border border-gray-100 dark:border-gray-850 bg-gray-50 dark:bg-gray-900 px-3.5 py-3 text-sm"
+	class="{className} relative my-2 min-w-0 max-w-full overflow-hidden rounded-2xl border border-gray-100 bg-gray-50 px-3.5 py-3 text-sm dark:border-gray-850 dark:bg-gray-900"
 >
-	{#if running}
-		<!-- "alive" pulse — a running task must not look identical to a finished/dead one -->
-		<div
-			class="pointer-events-none absolute inset-0 rounded-2xl ring-2 ring-blue-400/60 animate-pulse"
-		></div>
-	{/if}
 	<div class="flex items-center gap-2">
 		<HarvisClawMascot
 			size={40}
@@ -523,12 +615,7 @@
 			className="shrink-0 -my-1.5"
 		/>
 		{#if running}
-			<span class="relative flex size-2.5">
-				<span
-					class="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-60"
-				></span>
-				<span class="relative inline-flex rounded-full size-2.5 bg-blue-500"></span>
-			</span>
+			<span class="inline-flex size-2.5 rounded-full bg-blue-500"></span>
 		{:else if phase === 'done'}
 			<span class="text-blue-500 font-semibold">✓</span>
 		{:else if phase === 'error'}
@@ -549,21 +636,13 @@
 			<div class="ml-auto flex items-center gap-1.5 min-w-0">
 				{#if engineLabel}
 					<span
-						class="shrink-0 flex items-center gap-1 max-w-[170px] text-[10px] px-1.5 py-0.5 rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-300 font-medium"
+						class="shrink-0 flex items-center gap-1 max-w-[170px] text-xs px-1.5 py-0.5 rounded-md bg-blue-500/10 text-blue-600 dark:text-blue-300 font-medium"
 						title={engineLabel + (execModel ? ' · ' + execModel : '')}
 					>
 						<BrandGlyph name={engineBrand} className="size-3 shrink-0" />
 						<span class="truncate"
 							>{engineLabel}{#if execModel} · {execModel}{/if}</span
 						>
-					</span>
-				{/if}
-				{#if launchMode}
-					<span
-						class="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 font-medium"
-						title={'Launch mode: ' + launchMode}
-					>
-						{launchMode}
 					</span>
 				{/if}
 				<span class="shrink-0 text-xs text-gray-400 tabular-nums">
@@ -574,23 +653,16 @@
 		{/if}
 	</div>
 
-	<!-- Digestible progress timeline — always present (running AND done) so the card
-	     never looks frozen while the workspace/artifacts catch up. -->
+	<!-- Cursor-style compact activity sentence. It advances only from real typed
+	     events and expands into the complete public tool history on demand. -->
 	{#if phase !== 'awaiting'}
-		<div class="mt-2">
-			<RunProgressCard
-				events={rawEvents}
-				{phase}
-				{engineLabel}
-				modelLabel={execModel}
-				elapsedMs={elapsed}
-				{errorMessage}
-				{artifactCount}
-				{stalled}
-				onRetry={retryStream}
-				onOpenArtifacts={previewRun}
+		<RunActivitySummary activity={runActivity} {phase} {stalled} onRetry={retryStream} />
+		{#each terminalRuns as terminalRun, terminalIndex (terminalRun.id)}
+			<TerminalRunCard
+				run={terminalRun}
+				autoCompact={terminalIndex < terminalRuns.length - 1}
 			/>
-		</div>
+		{/each}
 	{/if}
 
 	{#if phase === 'error'}
@@ -606,76 +678,86 @@
 			<div class="mt-1 text-xs text-gray-500 line-clamp-3">{taskBrief}</div>
 		{/if}
 	{:else}
-		<!-- LIVE THOUGHT STREAM (running) — stays visible on done so you can audit the work -->
-		{#if steps.length}
-			<div bind:this={feedEl} class="mt-2 max-h-72 overflow-y-auto space-y-1 pr-1 -mr-1">
-				{#each steps as s}
-					{#if s.kind === 'think'}
-						<div class="text-xs text-gray-500 dark:text-gray-400 whitespace-pre-wrap leading-relaxed">{s.text}</div>
-					{:else if s.kind === 'log'}
-						<div class="flex items-start gap-1.5 text-xs text-gray-500 dark:text-gray-400">
-							<span class="text-gray-400 shrink-0">·</span><span>{s.text}</span>
-						</div>
-					{:else if s.kind === 'tool'}
-						<div class="rounded-lg bg-gray-100/70 dark:bg-gray-850/50 px-2 py-1">
-							<div class="flex items-center gap-1.5 text-xs">
-								{#if s.status === 'running'}
-									<span class="inline-block size-3 rounded-full border-2 border-blue-500/40 border-t-blue-500 animate-spin shrink-0"></span>
-								{:else if s.status === 'ok'}
-									<span class="text-blue-500 shrink-0">✓</span>
-								{:else}
-									<span class="text-red-500 shrink-0">✗</span>
-								{/if}
-								<span class="font-medium text-gray-700 dark:text-gray-200 shrink-0">{phrase(s.tool)}</span>
-								{#if s.args}<span class="text-gray-400 truncate font-mono text-[10px]">{s.args}</span>{/if}
-							</div>
-							{#if s.output}
-								<div class="mt-0.5 text-[11px] text-gray-500 dark:text-gray-400 font-mono whitespace-pre-wrap line-clamp-4">{s.output}</div>
-							{/if}
-						</div>
-					{/if}
-				{/each}
+		<!-- Live file content is concrete workspace output, not model chain-of-thought.
+		     It is the run TYPING: the box only exists while the run does. Once it ends the
+		     file becomes a pill below, which is a thing you can open — a finished run should
+		     hand you the file, not leave you scrolling inside a fixed-height code panel. -->
+		{#if liveFile && running}
+			<div
+				class="mt-2 overflow-hidden rounded-lg border border-gray-200/80 dark:border-white/10 lms-codeblock"
+			>
+				<div
+					class="flex items-center justify-between px-3 py-1 text-[11px] font-mono uppercase tracking-wide text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-[#1a1a1a] border-b border-gray-200/80 dark:border-white/10"
+				>
+					<span class="truncate">{liveFile.path}</span>
+					<span class="normal-case tracking-normal text-blue-500">{$i18n.t('typing…')}</span>
+				</div>
+				<pre
+					class="hljs lms-code-pre p-3.5 px-4 overflow-x-auto max-h-64 text-[13px] leading-6 bg-gray-50 dark:bg-[#1e1e1e] mb-0 whitespace-pre-wrap">{$typedFile}<span
+						class="lms-caret"
+						aria-hidden="true"
+					/></pre>
 			</div>
 		{/if}
-		<!-- The vague "Connecting…" fallback was removed: the RunProgressCard above is now
-		     the live, human-readable status while the run works. -->
+		<!-- Tool details and Bash output live in the activity summary + terminal cards above. -->
 
-		{#if phase === 'done' && analysis}
-			<!-- Build Result Narrator: the full written analysis IS the assistant message in the
-			     main chat. The raw diff/logs stay in this card's View / Open-run affordances. -->
-			<div
-				class="mt-2 pt-2 border-t border-gray-100 dark:border-gray-850 markdown-prose markdown-prose-sm text-sm text-gray-700 dark:text-gray-200"
-			>
-				<Markdown id={`ws-analysis-${workspaceId}`} content={analysis} />
-			</div>
-		{:else if phase === 'done' && isOrchestrated}
-			<!-- Completion moment (orchestrated): deterministic stats + STITCHED per-agent
-			     finish() summaries + the primary artifact rendered inline. Nothing generated. -->
+		{#if phase === 'done'}
+			<!-- One completion block, not three competing ones. The written result, the files
+			     the run produced and its token numbers are separate facts about the same run;
+			     the branch that showed the analysis used to shadow the other two, so exactly
+			     the runs that wrote a file were the ones that never showed it. -->
 			<div class="mt-2 pt-2 border-t border-gray-100 dark:border-gray-850 space-y-2">
-				<div class="text-xs font-medium text-gray-600 dark:text-gray-300 tabular-nums">
-					{$i18n.t('Done')} · {agents.length}
-					{agents.length === 1 ? $i18n.t('agent') : $i18n.t('agents')} · {toolCount}
-					{toolCount === 1 ? $i18n.t('tool call') : $i18n.t('tool calls')}{#if doneDuration > 0} ·
-						{fmt(doneDuration)}{/if}
-				</div>
-				<div class="space-y-0.5">
-					{#each agents as a}
-						<div class="flex items-start gap-1.5 text-xs leading-relaxed">
-							<span class="shrink-0 mt-px {a.ok ? 'text-blue-500' : 'text-red-500'}"
-								>{a.ok ? '✓' : '✗'}</span
-							>
-							<span class="font-medium text-gray-700 dark:text-gray-200 shrink-0">{a.label}:</span>
-							<span class="text-gray-500 dark:text-gray-400 break-words min-w-0">{a.summary}</span>
+				{#if isOrchestrated}
+					<!-- Per-agent finish() summaries. Nothing generated. The elapsed time and the
+					     tool count used to be repeated here; they are already in the header two
+					     inches above, and a card that says the same number twice reads as two
+					     different numbers you have to reconcile. -->
+					{#if agentPosts.length > 1}
+						<div class="text-xs font-medium text-gray-600 dark:text-gray-300 tabular-nums">
+							{agentPosts.length}
+							{$i18n.t('agents')}
 						</div>
-					{/each}
-				</div>
-				{#if changedFiles.length}
-					<RunArtifacts wsId={workspaceId} mode="all" />
+					{/if}
+					<div class="space-y-4">
+						{#each agentPosts as a, i}
+							<div class="min-w-0">
+								<!-- Who is speaking, then what they said. This used to be one 12px row —
+								     "✓ Harvis Agent: <the entire answer>" in gray-500, raw text, no
+								     markdown. The agent's finish() summary IS its reply to the reader,
+								     so it gets the same `markdown-prose` every other assistant message
+								     in this chat gets; only the attribution line stays compact. -->
+								<div class="flex items-center gap-1.5 mb-1">
+									<span class="shrink-0 {a.ok ? 'text-blue-500' : 'text-red-500'}"
+										>{a.ok ? '✓' : '✗'}</span
+									>
+									<span class="text-sm font-medium text-gray-700 dark:text-gray-200"
+										>{a.label}</span
+									>
+								</div>
+								<div class="markdown-prose">
+									<Markdown id={`ws-agent-${workspaceId}-${i}`} content={a.summary} />
+								</div>
+							</div>
+						{/each}
+					</div>
 				{/if}
-			</div>
-		{:else if phase === 'done' && summary}
-			<div class="mt-2 pt-2 border-t border-gray-100 dark:border-gray-850 markdown-prose markdown-prose-sm text-sm text-gray-700 dark:text-gray-200">
-				<Markdown id={`ws-summary-${workspaceId}`} content={summary} />
+
+				{#if $typedNarrative}
+					<!-- Build Result Narrator, or the agent's own closing summary when there is
+					     no narrator. Typed out rather than pasted in.
+
+					     This is the agent talking to the reader, so it gets the SAME typography as
+					     any other assistant message — plain `markdown-prose`. The `-sm` variant it
+					     used to carry zeroes every margin (prose-p:my-0, prose-li:-my-0), which
+					     turned a perfectly good markdown answer into one unbroken block that read
+					     as unformatted next to the rest of the chat. -->
+					<div class="markdown-prose">
+						<Markdown id={`ws-narrative-${workspaceId}`} content={$typedNarrative} />
+					</div>
+				{/if}
+
+				<RunFileCards wsId={workspaceId} done={phase === 'done'} revealOnFinish={_wasRunning} />
+
 			</div>
 		{/if}
 	{/if}
