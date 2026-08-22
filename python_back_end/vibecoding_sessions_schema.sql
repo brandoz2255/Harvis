@@ -49,11 +49,16 @@ BEGIN
 END;
 $$ language 'plpgsql';
 
--- Apply triggers to tables
+-- Apply triggers to tables.
+-- DROP-then-CREATE, because a bare CREATE TRIGGER errors with "already exists"
+-- on the second run. This file is applied at every boot now, so it has to be
+-- re-runnable; the same DROP IF EXISTS pattern migrations 010-015 already use.
+DROP TRIGGER IF EXISTS update_vibecoding_sessions_updated_at ON vibecoding_sessions;
 CREATE TRIGGER update_vibecoding_sessions_updated_at 
     BEFORE UPDATE ON vibecoding_sessions 
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
+DROP TRIGGER IF EXISTS update_user_prefs_updated_at ON user_prefs;
 CREATE TRIGGER update_user_prefs_updated_at 
     BEFORE UPDATE ON user_prefs 
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();

@@ -139,7 +139,7 @@ artifact_storage = ArtifactStorage()
 # Build manager will be initialized in lifespan with db pool
 artifact_build_manager = None
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import soundfile as sf
 
 # The entrypoint importing torch at module scope is what made a torch-free
@@ -313,7 +313,11 @@ async def get_current_user(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
 ):
-    logger.info(f"get_current_user called with credentials: {credentials}")
+    # Presence, never the token. This used to log the whole
+    # HTTPAuthorizationCredentials object, so every authenticated request wrote a
+    # live bearer token into the container log — replayable by anyone who can read
+    # `docker logs` or whatever ships them, for the rest of its lifetime.
+    logger.info("get_current_user: bearer header %s", "present" if credentials else "absent")
     token = request.cookies.get("access_token")
     if token is None and credentials is not None:
         token = credentials.credentials
@@ -330,7 +334,8 @@ async def get_current_user(
 
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        logger.info(f"JWT payload: {payload}")
+        # Claim names only — the payload itself can carry more than the subject.
+        logger.debug("JWT payload claims: %s", sorted(payload))
         user_id_str: str = payload.get("sub")
         if user_id_str is None:
             raise credentials_exception
@@ -566,6 +571,10 @@ HARVIS_VOICE_PATH = os.path.abspath(
 # ─── Database Connection Pool -------------------------------------------------
 
 
+class _VibeSchemaPresent(Exception):
+    """Not an error — the table is already there, so skip applying its DDL."""
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: create connection pool
@@ -688,6 +697,49 @@ async def lifespan(app: FastAPI):
                             _mig_err,
                         )
                 logger.info("✅ Idempotent migrations 010-015 ensured")
+
+                # vibecoding_sessions. The /api/vibecode/sessions* routes are
+                # mounted on every boot and every one of them queries this table,
+                # but nothing created it: migration 001 only ALTERs a table it
+                # assumes already exists, and the file that does CREATE it
+                # (vibecoding_sessions_schema.sql) has exactly one caller —
+                # init_vibecode_db.py, which no startup path, entrypoint or
+                # compose command ever runs. On this database the table is simply
+                # absent, so opening a VibeCode session 500s. Applied here, beside
+                # the other idempotent SQL, so a fresh clone and an old volume
+                # both end up with it.
+                # Heal-if-absent, not run-every-boot: this file is baked into the
+                # image rather than bind-mounted, so an older copy without the
+                # DROP TRIGGER guards will still be on disk in existing containers
+                # and re-running it there fails on "trigger already exists". Gating
+                # on the table means correctness never depends on which copy of the
+                # SQL the container happens to hold.
+                _vibe_schema_path = os.path.join(
+                    os.path.dirname(__file__), "vibecoding_sessions_schema.sql"
+                )
+                try:
+                    if await conn.fetchval(
+                        "SELECT to_regclass('public.vibecoding_sessions')"
+                    ):
+                        logger.info("✅ vibecoding_sessions already present")
+                        raise _VibeSchemaPresent
+                    with open(_vibe_schema_path, "r") as _vsf:
+                        await conn.execute(_vsf.read())
+                    logger.info("✅ vibecoding_sessions schema created")
+                except _VibeSchemaPresent:
+                    pass
+                except FileNotFoundError:
+                    logger.warning(
+                        "vibecoding_sessions_schema.sql missing — VibeCode "
+                        "session endpoints will fail: %s",
+                        _vibe_schema_path,
+                    )
+                except Exception as _vibe_err:  # noqa: BLE001
+                    logger.warning(
+                        "vibecoding_sessions schema did not apply cleanly "
+                        "(continuing): %s",
+                        _vibe_err,
+                    )
 
                 # Instance-level key/value settings (admin_user_id, …).
                 await conn.execute(
@@ -1727,7 +1779,65 @@ LLAMA_URL = os.getenv(
     "LLAMA_URL", "http://host.docker.internal:8080/v1"
 )  # llama-server — devstral long-ctx
 API_KEY = os.getenv("OLLAMA_API_KEY", "key")
-DEFAULT_MODEL = "qwen3.5-27b"
+# No model name is hardcoded here. "qwen3.5-27b" used to be, and that tag exists on
+# nobody's machine — including this one — so every request that fell back to the default
+# asked the provider for a model it did not have. The default is now whatever the
+# deployment actually serves, discovered from /api/tags at first use.
+#
+#   HARVIS_DEFAULT_MODEL   pin one explicitly (any provider, any tag)
+#   unset                  first model the configured provider reports
+#   no provider yet        "" — the caller must name a model, and the error says so
+DEFAULT_MODEL = os.getenv("HARVIS_DEFAULT_MODEL", "").strip()
+_RESOLVED_DEFAULT_MODEL: Optional[str] = DEFAULT_MODEL or None
+_DEFAULT_MODEL_PROBED = False
+
+
+def resolve_default_model() -> str:
+    """The model to use when the caller named none.
+
+    Resolution order: explicit pin, then the provider's own first tag, then "".
+    Probed once and cached; a deployment that pulls its first model after boot picks it
+    up on the next cache clear (``/api/models/clear-cache``), not on every request.
+    """
+    global _RESOLVED_DEFAULT_MODEL, _DEFAULT_MODEL_PROBED
+    if _RESOLVED_DEFAULT_MODEL:
+        return _RESOLVED_DEFAULT_MODEL
+    if _DEFAULT_MODEL_PROBED:
+        return ""
+    _DEFAULT_MODEL_PROBED = True
+    import httpx  # imported per-function throughout this module, not at top level
+
+    # Whatever the local cache already learned beats an HTTP round-trip.
+    if LOCAL_OLLAMA_MODELS_CACHE:
+        _RESOLVED_DEFAULT_MODEL = sorted(LOCAL_OLLAMA_MODELS_CACHE)[0]
+        return _RESOLVED_DEFAULT_MODEL
+    base = HARVIS_LLM_BASE_URL[:-3] if HARVIS_LLM_BASE_URL.endswith("/v1") else HARVIS_LLM_BASE_URL
+    for url, pick in (
+        (f"{base}/api/tags", lambda d: [m.get("name") for m in (d.get("models") or [])]),
+        (f"{base}/v1/models", lambda d: [m.get("id") for m in (d.get("data") or [])]),
+    ):
+        try:
+            with httpx.Client(timeout=httpx.Timeout(3.0)) as client:
+                r = client.get(url)
+            if r.status_code >= 400:
+                continue
+            names = [n for n in pick(r.json()) if n]
+            if names:
+                _RESOLVED_DEFAULT_MODEL = names[0]
+                logger.info("default model resolved from %s: %s", url, _RESOLVED_DEFAULT_MODEL)
+                return _RESOLVED_DEFAULT_MODEL
+        except Exception:
+            continue
+    logger.warning(
+        "No default model: the provider at %s reported none. Requests must name a model, "
+        "or set HARVIS_DEFAULT_MODEL.", base,
+    )
+    return ""
+
+
+def _default_model_field() -> str:
+    """Pydantic default_factory — runs per request, so it can't bake in a boot-time guess."""
+    return resolve_default_model()
 
 # External Ollama endpoint (for large models hosted elsewhere)
 # NOTE: Set to empty string by default - external routing only when explicitly configured
@@ -1972,7 +2082,7 @@ async def stream_ollama_chunks(endpoint, payload, timeout=3600):
     # ── 3. Local backend: vLLM or llama-server (OpenAI SSE format) ────────────────
     # Translate Ollama /api/chat payload → OpenAI /v1/chat/completions payload
     openai_payload = {
-        "model": model_name or DEFAULT_MODEL,
+        "model": model_name or resolve_default_model(),
         "messages": payload.get("messages", []),
         "stream": True,
         "temperature": payload.get("options", {}).get("temperature", 0.7),
@@ -2272,7 +2382,7 @@ OLLAMA_URL = get_ollama_url()
 class ChatRequest(BaseModel):
     message: str
     history: List[Dict[str, Any]] = []
-    model: str = DEFAULT_MODEL
+    model: str = Field(default_factory=_default_model_field)
     session_id: Optional[str] = None  # Chat session ID for history persistence
     audio_prompt: Optional[str] = None  # overrides HARVIS_VOICE_PATH if provided
     attachments: Optional[List[Dict[str, Any]]] = None  # List of file attachments
@@ -2290,7 +2400,7 @@ class ChatRequest(BaseModel):
 class ResearchChatRequest(BaseModel):
     message: str
     history: List[Dict[str, Any]] = []
-    model: str = DEFAULT_MODEL
+    model: str = Field(default_factory=_default_model_field)
     session_id: Optional[str] = None  # Chat session ID for history persistence
     enableWebSearch: bool = True
     live_web: bool = False  # When True, route research through OpenClaw with unrestricted web access
@@ -2319,13 +2429,13 @@ class SynthesizeSpeechRequest(BaseModel):
 
 class AnalyzeAndRespondRequest(BaseModel):
     image: str  # base-64 image (data-URI or raw)
-    model: str = DEFAULT_MODEL
+    model: str = Field(default_factory=_default_model_field)
     system_prompt: Optional[str] = None
 
 
 class ScreenAnalysisWithTTSRequest(BaseModel):
     image: str  # base-64 image (data-URI or raw)
-    model: str = DEFAULT_MODEL
+    model: str = Field(default_factory=_default_model_field)
     system_prompt: Optional[str] = None
     audio_prompt: Optional[str] = None
     exaggeration: float = 0.5
@@ -2351,7 +2461,7 @@ class VisionChatRequest(BaseModel):
 
 
 class VoiceTranscribeRequest(BaseModel):
-    model: str = DEFAULT_MODEL
+    model: str = Field(default_factory=_default_model_field)
 
 
 class RunCommandRequest(BaseModel):
@@ -6333,7 +6443,7 @@ async def analyze_screen_with_tts(req: ScreenAnalysisWithTTSRequest):
 @app.post("/api/mic-chat", tags=["voice"])
 async def mic_chat(
     file: UploadFile = File(...),
-    model: str = Form(DEFAULT_MODEL),
+    model: str = Form(""),
     session_id: Optional[str] = Form(None),
     research_mode: str = Form("false"),
     low_vram: bool = Form(True),
@@ -6344,6 +6454,9 @@ async def mic_chat(
     Voice chat endpoint - transcribes audio and generates AI response with TTS.
     Returns JSON response (not SSE streaming) for simpler frontend handling.
     """
+    # The form default is empty, not a guessed tag — resolve it against what this
+    # deployment actually serves.
+    model = model or resolve_default_model()
     tmp_path = None
 
     try:
@@ -7127,12 +7240,12 @@ async def research_chat(
 
 class FactCheckRequest(BaseModel):
     claim: str
-    model: str = DEFAULT_MODEL
+    model: str = Field(default_factory=_default_model_field)
 
 
 class ComparativeResearchRequest(BaseModel):
     topics: List[str]
-    model: str = DEFAULT_MODEL
+    model: str = Field(default_factory=_default_model_field)
 
 
 class WebSearchRequest(BaseModel):
