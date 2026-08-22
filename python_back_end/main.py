@@ -998,6 +998,27 @@ async def lifespan(app: FastAPI):
         chat_history_manager = ChatHistoryManager(db_pool)
         logger.info("✅ ChatHistoryManager initialized")
 
+        # Attachment ownership (Gate 8A). `vision_to_code/attachments.py` resolves an
+        # upload id straight to bytes and hands them to a model or writes them into an
+        # agent's working tree, so it must be able to ask who owns one. It deliberately
+        # holds no database handle — giving one to the module that also parses untrusted
+        # files is the wrong trade — so the app registers the single query it needs.
+        # Unregistered, that store refuses every id rather than serving it unchecked.
+        try:
+            from vision_to_code.attachments import set_owui_owner_lookup
+
+            async def _owui_owner_of(file_id: str):
+                async with app.state.pg_pool.acquire() as conn:
+                    row = await conn.fetchrow(
+                        "SELECT user_id FROM owui_files WHERE id=$1", file_id
+                    )
+                return int(row["user_id"]) if row else None
+
+            set_owui_owner_lookup(_owui_owner_of)
+            logger.info("✅ Attachment ownership lookup registered")
+        except Exception as _exc:  # noqa: BLE001
+            logger.warning("attachment ownership lookup NOT registered: %s", _exc)
+
         # Initialize ArtifactBuildManager for website/app builds
         global artifact_build_manager
         try:
